@@ -1,0 +1,645 @@
+{
+  "arguments": {
+    "keys_checked": 137,
+    "failures": []
+  },
+  "plural_selector_parity": {
+    "plural_keys": [
+      "tui.small.draft.attachment_count",
+      "tui.small.ask_queue.question_waiting",
+      "tui.small.ask_queue.question_timed_out",
+      "tui.small.copy_picker.more_lines",
+      "tui.small.wake_panel.monitors_need_attention",
+      "tui.small.wake_panel.monitors_armed",
+      "tui.small.network_panel.member_count",
+      "tui.small.wake_panel.scheduled_count",
+      "tui.small.settings_view.hop_count",
+      "tui.small.command_picker.projects",
+      "tui.small.command_picker.entries"
+    ],
+    "rows": [
+      {
+        "key": "tui.small.draft.attachment_count",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.ask_queue.question_waiting",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.ask_queue.question_timed_out",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.copy_picker.more_lines",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.wake_panel.monitors_need_attention",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.wake_panel.monitors_armed",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.network_panel.member_count",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.wake_panel.scheduled_count",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.settings_view.hop_count",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.command_picker.projects",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      },
+      {
+        "key": "tui.small.command_picker.entries",
+        "en": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh": [
+          [
+            "other"
+          ]
+        ]
+      }
+    ],
+    "failures": []
+  },
+  "technical_tokens": {
+    "hard_token_failures": [],
+    "soft_uppercase_differences_reviewed": [],
+    "note": "Only backtick spans, flags, angle tokens, URLs, paths and percent tokens are hard. Upper-case prose acronyms were reviewed by hand; none is an identifier that must survive."
+  },
+  "direction_punctuation": {
+    "applicable": false,
+    "reason": "zh-CN is left-to-right; RTL punctuation, bidi controls and embedded-Latin direction checks are not applicable.",
+    "failures": []
+  },
+  "encoding": {
+    "non_nfc": [],
+    "bidi_controls": []
+  },
+  "numbers": {
+    "failures": []
+  },
+  "render": {
+    "keys_checked": 137,
+    "failures": []
+  },
+  "plural_render_samples": [
+    {
+      "key": "tui.small.draft.attachment_count",
+      "n": 0,
+      "params": {
+        "images": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "（<shown>张图片）",
+      "error": null
+    },
+    {
+      "key": "tui.small.draft.attachment_count",
+      "n": 1,
+      "params": {
+        "images": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "（<shown>张图片）",
+      "error": null
+    },
+    {
+      "key": "tui.small.draft.attachment_count",
+      "n": 2,
+      "params": {
+        "images": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "（<shown>张图片）",
+      "error": null
+    },
+    {
+      "key": "tui.small.draft.attachment_count",
+      "n": 21,
+      "params": {
+        "images": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "（<shown>张图片）",
+      "error": null
+    },
+    {
+      "key": "tui.small.ask_queue.question_waiting",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个问题等待回答",
+      "error": null
+    },
+    {
+      "key": "tui.small.ask_queue.question_waiting",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个问题等待回答",
+      "error": null
+    },
+    {
+      "key": "tui.small.ask_queue.question_waiting",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个问题等待回答",
+      "error": null
+    },
+    {
+      "key": "tui.small.ask_queue.question_waiting",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个问题等待回答",
+      "error": null
+    },
+    {
+      "key": "tui.small.ask_queue.question_timed_out",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个问题已超时",
+      "error": null
+    },
+    {
+      "key": "tui.small.ask_queue.question_timed_out",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个问题已超时",
+      "error": null
+    },
+    {
+      "key": "tui.small.ask_queue.question_timed_out",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个问题已超时",
+      "error": null
+    },
+    {
+      "key": "tui.small.ask_queue.question_timed_out",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个问题已超时",
+      "error": null
+    },
+    {
+      "key": "tui.small.copy_picker.more_lines",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "…… 另有<shown>行",
+      "error": null
+    },
+    {
+      "key": "tui.small.copy_picker.more_lines",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "…… 另有<shown>行",
+      "error": null
+    },
+    {
+      "key": "tui.small.copy_picker.more_lines",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "…… 另有<shown>行",
+      "error": null
+    },
+    {
+      "key": "tui.small.copy_picker.more_lines",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "…… 另有<shown>行",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.monitors_need_attention",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>",
+        "total": "<total>"
+      },
+      "rendered": "<shown>/<total>项需要关注",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.monitors_need_attention",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>",
+        "total": "<total>"
+      },
+      "rendered": "<shown>/<total>项需要关注",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.monitors_need_attention",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>",
+        "total": "<total>"
+      },
+      "rendered": "<shown>/<total>项需要关注",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.monitors_need_attention",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>",
+        "total": "<total>"
+      },
+      "rendered": "<shown>/<total>项需要关注",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.monitors_armed",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个监控已启用",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.monitors_armed",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个监控已启用",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.monitors_armed",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个监控已启用",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.monitors_armed",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个监控已启用",
+      "error": null
+    },
+    {
+      "key": "tui.small.network_panel.member_count",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>名成员",
+      "error": null
+    },
+    {
+      "key": "tui.small.network_panel.member_count",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>名成员",
+      "error": null
+    },
+    {
+      "key": "tui.small.network_panel.member_count",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>名成员",
+      "error": null
+    },
+    {
+      "key": "tui.small.network_panel.member_count",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>名成员",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.scheduled_count",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>项已定时",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.scheduled_count",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>项已定时",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.scheduled_count",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>项已定时",
+      "error": null
+    },
+    {
+      "key": "tui.small.wake_panel.scheduled_count",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>项已定时",
+      "error": null
+    },
+    {
+      "key": "tui.small.settings_view.hop_count",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "  <shown>跳",
+      "error": null
+    },
+    {
+      "key": "tui.small.settings_view.hop_count",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "  <shown>跳",
+      "error": null
+    },
+    {
+      "key": "tui.small.settings_view.hop_count",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "  <shown>跳",
+      "error": null
+    },
+    {
+      "key": "tui.small.settings_view.hop_count",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "  <shown>跳",
+      "error": null
+    },
+    {
+      "key": "tui.small.command_picker.projects",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个项目",
+      "error": null
+    },
+    {
+      "key": "tui.small.command_picker.projects",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个项目",
+      "error": null
+    },
+    {
+      "key": "tui.small.command_picker.projects",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个项目",
+      "error": null
+    },
+    {
+      "key": "tui.small.command_picker.projects",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个项目",
+      "error": null
+    },
+    {
+      "key": "tui.small.command_picker.entries",
+      "n": 0,
+      "params": {
+        "count": "0",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个条目",
+      "error": null
+    },
+    {
+      "key": "tui.small.command_picker.entries",
+      "n": 1,
+      "params": {
+        "count": "1",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个条目",
+      "error": null
+    },
+    {
+      "key": "tui.small.command_picker.entries",
+      "n": 2,
+      "params": {
+        "count": "2",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个条目",
+      "error": null
+    },
+    {
+      "key": "tui.small.command_picker.entries",
+      "n": 21,
+      "params": {
+        "count": "21",
+        "shown": "<shown>"
+      },
+      "rendered": "<shown>个条目",
+      "error": null
+    }
+  ]
+}

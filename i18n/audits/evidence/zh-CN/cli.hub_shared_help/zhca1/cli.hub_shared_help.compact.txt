@@ -1,0 +1,4 @@
+cli.hub_shared_help.publish_allow_internal_ops	Consent to the internal-operations allowance for an organization publish (requires --org; shows the consent text interactively)	同意组织发布中的内部运营信息许可（需要--org；交互式显示同意文本）
+cli.hub_shared_help.publish_json	Machine-readable preview output; it carries the reference values and the single-use commit pin, so treat it as sensitive	机器可读的预览输出；包含引用值和一次性commit固定值，需作为敏感信息处理
+cli.hub_shared_help.sync_dry_run	Show what would change; write no agent rows	显示将发生的更改，不写入智能体记录
+cli.hub_shared_help.sync_json	Emit the report as JSON	以JSON输出报告

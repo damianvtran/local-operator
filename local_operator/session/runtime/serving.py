@@ -1220,6 +1220,11 @@ class ServingSessionHandle(SessionHandle):
             session._publish_session_started = (
                 self._publish_session_started
             )  # Discovery/attachment does not authorize replacing a headless deny
+        if hasattr(session, "_publish_turn_admitted"):
+            # The pipeline calls this while its shared restart fence is held and
+            # ``_turn_lock`` makes this predicate true, so admission is durable
+            # before an exclusive relay restart can re-read the registry.
+            session._publish_turn_admitted = self._publish_busy
         # gate with a parked interactive gate. Exec opts into that separately.
         #: Why the most recent admitted turn failed, for a headless caller that
         #: has no front end reading the projection. See the drain's handler.

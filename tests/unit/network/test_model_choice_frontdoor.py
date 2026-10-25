@@ -81,6 +81,20 @@ def _server(root: Path) -> relay.RelayServer:
     )
 
 
+def _hold_api_key(root: Path, provider: str) -> None:
+    """Give a success control a synthetic login in the peer's real auth store."""
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    try:
+        auth.upsert_credential(
+            provider,
+            {"type": "api_key", "source": "login", "key": "synthetic-fixture-only"},
+        )
+    finally:
+        auth.close()
+
+
 def _warmed_server(root: Path) -> relay.RelayServer:
     """A server whose spawn/engage/prompt are stubbed: the create REPLY is the subject."""
     server = _server(root)
@@ -174,6 +188,7 @@ def test_a_full_choice_still_reaches_the_runtime_and_keeps_the_silent_success(ro
     the stub's success) is reported verbatim.
     """
     identity.mint(root, name="cloud-node-1")
+    _hold_api_key(root, "anthropic")
     asked: list[dict[str, Any]] = []
     server = _warmed_server(root)
 
@@ -199,6 +214,7 @@ def test_a_promptless_create_names_the_reason_on_its_cold_reply(root: Path) -> N
     sentence — the model is applied when the runtime arrives.
     """
     identity.mint(root, name="cloud-node-1")
+    _hold_api_key(root, "anthropic")
     server = _warmed_server(root)
 
     cold = server._op_session_create(  # noqa: SLF001

@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "audit_kind": "independent_translation_audit",
+  "locale": "zh-CN",
+  "namespace": "tui.palette",
+  "round": 1,
+  "audit_date": "2026-10-24",
+  "key_count": 7,
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "0c7aebe462e8",
+    "model": "deepseek/deepseek-flash",
+    "audit_date": "2026-10-24",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Session metadata for 0c7aebe462e8 reports the served model deepseek/deepseek-flash; no fallback was observed during this audit.",
+    "tooling": "Read-only: local_operator.i18n.runtime.render_message for ICU rendering, audit.py in this bundle for mechanics; no catalogue or source file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.palette.json",
+      "sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.palette.context.json",
+      "sha256": "edd5a12c66ec852e65e9afb4eee92f1b9436a3a148683b8d756a002b68ff06f7"
+    },
+    "target": {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.palette.json",
+      "sha256": "bcb2dffd6eedfe6acf7af781312c12f15488ff9f09d5d1b3e6b03a7ff3ad76da"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.palette/zh24a1/audit.log",
+      "sha256": "d63bef84ced756c4f1237efae50695849dce740cdd8a5e5f3cbdc9179250dedb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.palette/zh24a1/mechanical-raw.json",
+      "sha256": "4c0cabc5bedcb57a10265ff2708d04b29fc2f48ad27ab4113158d91c81bfd8eb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.palette/zh24a1/runtime-mechanical.json",
+      "sha256": "e6a48e200bbaee0ed594969da046a72a0fa5abcf21800fdda0b77672e87267ac"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.palette/zh24a1/pseudo-evidence.json",
+      "sha256": "d16afe93f584e8be24320d7810fc96142aba4051f6dc239bb0780375ef78f8a7"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.palette/zh24a1/report.md",
+      "sha256": "501672f513fc9f62890097fd8413b7ed5253ecfeda667b71fa6063efd4666eb1"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.palette/zh24a1/tui.palette.pairs.txt",
+      "sha256": "fcf3d7e5b95259cf21a05c77762654a2fbd27bc4dfd1ba3bc90da1a374c0703d"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.palette/zh24a1/tui.palette.compact.txt",
+      "sha256": "d8c2c91e6704e14d1896377ab8d9280d521d3ea2768cc3b6547dd1a1ae02d6a2"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.palette/zh24a1/audit.py.txt",
+      "sha256": "afb9612c98953ebad359a24b10d7a8cdd93ccea95add1ee6c5d2cd3e2c1e3e43"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "verdict": "clean",
+    "findings_total": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "finding_ids": [],
+    "unresolved_blocker_major_count": 0
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report; audit.log is the executed command transcript for this namespace; mechanical-raw.json, runtime-mechanical.json and pseudo-evidence.json are the machine output. String-level audit only: no native terminal, relay SPA or rendered-frame pass is claimed."
+}

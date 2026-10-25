@@ -1,0 +1,20 @@
+$ git -C /Users/damian/local-operator/.worktrees/zh-cn-core rev-parse HEAD
+d9f70f622d9f0f1600c667cfe918571a408e3cb6
+# Transcript of the zh24r2 re-audit at this revision. audit.py.txt and fix-verify.py.txt are preserved byte-identically; the commands below are their reproduction form.
+$ python3 i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24r2/audit.py.txt --ns cli.exec_remote_help --out i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24r2
+namespace=cli.exec_remote_help keys=11 revision=d9f70f622d9f0f1600c667cfe918571a408e3cb6
+key_parity: missing=0 extra=0 order_identical=True
+nfc=0 control=0 bidi=0 zero_width=0 fullwidth_latin_digits=0 cjk_latin_space=0
+icu_arguments: mismatches=0; plural_structure_errors=0
+technical_tokens_missing=0
+width: keys_with_budget=0 over_budget=0
+render: plural_samples=0 static_samples=11 failures=0 plural_keys=0 select_keys=0
+$ python3 i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24r2/fix-verify.py.txt cli.exec_remote_help i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24r2
+namespace=cli.exec_remote_help changed_keys=1 matches=True args_equal=True renders_ok=True over_budget=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+$ sha256sum (en, context, target)
+c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e  local_operator/i18n/catalogues/en/cli.exec_remote_help.json
+fd6bbdfcac16ece10813da5ee3b7499cede367e26343b67415d8295112f13b8f  local_operator/i18n/catalogues/en/cli.exec_remote_help.context.json
+f0483c81945cd26e9219474d8696164379e17545e9ecb1e15d16e1f30ba589bb  local_operator/i18n/catalogues/zh-CN/cli.exec_remote_help.json

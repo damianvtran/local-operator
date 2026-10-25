@@ -550,6 +550,54 @@ def test_tool_rows_gate_on_what_the_session_actually_holds() -> None:
     assert [row.name for row in rows] == ["send"]
 
 
+def test_the_secret_roster_row_describes_only_this_machines_store() -> None:
+    """The existing local tool is recommendable, with no remote-store ambiguity."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.secret_tool import build_secret_tool
+
+    tool = build_secret_tool(ToolContext())
+    assert tool is not None
+
+    rows = session_factory._tool_roster_rows([tool])
+
+    assert [(row.kind, row.name, row.resource_url) for row in rows] == [
+        ("tool", "secret", "tool://secret")
+    ]
+    assert rows[0].description == (
+        "Store and use secrets in this machine's encrypted store (`lop secret`)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_credential_intent_recommends_secret_without_echoing_its_value() -> None:
+    """Drive the real roster/request/render path with a synthetic credential canary."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.secret_tool import build_secret_tool
+
+    tool = build_secret_tool(ToolContext())
+    assert tool is not None
+    row = session_factory._tool_roster_rows([tool])[0]
+    classifier = _FakeClassifier(_Recommendation(resources=(row,)))
+    hooks = _hooks(classifier=classifier)
+    hooks.tool_roster = (row,)
+    secret_value = "synthetic-local-credential-value-do-not-echo"
+
+    block = await session_factory._select_knowledge_block(
+        hooks,
+        f"Save this credential locally for future sessions: {secret_value}",
+        task_id="local-credential-intent",
+    )
+
+    assert len(classifier.requests) == 1
+    request = classifier.requests[0]
+    assert row in request.candidates
+    recommendation_text = "\n".join(candidate.description for candidate in request.candidates)
+    assert "this machine's encrypted store" in recommendation_text
+    assert "- tool://secret" in block
+    assert secret_value not in recommendation_text
+    assert secret_value not in block
+
+
 def test_the_generate_image_row_is_appended_last_and_membership_gated(
     monkeypatch,
 ) -> None:

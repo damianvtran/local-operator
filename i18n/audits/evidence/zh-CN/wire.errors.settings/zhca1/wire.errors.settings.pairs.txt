@@ -1,0 +1,15 @@
+# wire.errors.settings — sampled en/zh pairs for attestation zhca1
+# 3/12 keys; all >120 chars and all plurals included
+
+## wire.errors.settings.inline_credentials  [63 chars]
+EN: Use an endpoint without inline credentials or query parameters.
+ZH: 使用不含内嵌凭据或查询参数的endpoint。
+
+## wire.errors.settings.system_prompt_retrieve_failed  [39 chars]
+EN: Error retrieving system prompt: {error}
+ZH: 获取系统提示词失败：{error}
+
+## wire.errors.settings.system_prompt_update_failed  [37 chars]
+EN: Error updating system prompt: {error}
+ZH: 更新系统提示词失败：{error}
+

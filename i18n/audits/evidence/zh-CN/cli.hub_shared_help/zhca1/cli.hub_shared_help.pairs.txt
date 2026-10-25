@@ -1,0 +1,19 @@
+# cli.hub_shared_help — sampled en/zh pairs for attestation zhca1
+# 4/12 keys; all >120 chars and all plurals included
+
+## cli.hub_shared_help.publish_allow_internal_ops  [127 chars, LONG>120]
+EN: Consent to the internal-operations allowance for an organization publish (requires --org; shows the consent text interactively)
+ZH: 同意组织发布中的内部运营信息许可（需要--org；交互式显示同意文本）
+
+## cli.hub_shared_help.publish_json  [120 chars]
+EN: Machine-readable preview output; it carries the reference values and the single-use commit pin, so treat it as sensitive
+ZH: 机器可读的预览输出；包含引用值和一次性commit固定值，需作为敏感信息处理
+
+## cli.hub_shared_help.sync_dry_run  [43 chars]
+EN: Show what would change; write no agent rows
+ZH: 显示将发生的更改，不写入智能体记录
+
+## cli.hub_shared_help.sync_json  [23 chars]
+EN: Emit the report as JSON
+ZH: 以JSON输出报告
+

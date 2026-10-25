@@ -1,0 +1,31 @@
+# tui.transcript — sampled en/zh pairs for attestation zhca1
+# 7/17 keys; all >120 chars and all plurals included
+
+## tui.transcript.ask.not_provided  [12 chars]
+EN: not provided
+ZH: 未提供
+
+## tui.transcript.attach.receipt  [58 chars, PLURAL]
+EN: ↑ {count, plural, one {# image} other {# images}} attached
+ZH: ↑ 已附加 {count, plural, other {# 张图像}}
+
+## tui.transcript.catchup.missed  [59 chars, PLURAL]
+EN: {count, plural, one {# missed wake} other {# missed wakes}}
+ZH: {count, plural, other {# 次错过的唤醒}}
+
+## tui.transcript.group.actions  [61 chars, PLURAL]
+EN: {count, plural, one {{label} action} other {{label} actions}}
+ZH: {count, plural, other {{label}项操作}}
+
+## tui.transcript.group.reply_requested  [78 chars, PLURAL]
+EN: {count, plural, one {{label} reply requested} other {{label} reply requested}}
+ZH: {count, plural, other {{label}项回复请求}}
+
+## tui.transcript.group.steered  [62 chars, PLURAL]
+EN: {count, plural, one {{label} steered} other {{label} steered}}
+ZH: {count, plural, other {{label}项引导}}
+
+## tui.transcript.queued.older  [29 chars]
+EN: · queued for the next runtime
+ZH: · 已排队，等待下次运行时
+

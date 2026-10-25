@@ -470,9 +470,9 @@ def enumerate_candidates(config: Path, *, network_id: str = "") -> list[dict[str
     read — the caller sends an empty offer and records WHY.
     """
     from local_operator.network.credentials.types import (
-        DEVICE_BOUND_PROVIDERS,
         credential_key_for_mcp,
         credential_key_for_secret,
+        is_device_bound_provider,
     )
 
     rows: list[dict[str, Any]] = []
@@ -480,7 +480,7 @@ def enumerate_candidates(config: Path, *, network_id: str = "") -> list[dict[str
     by_provider: dict[str, list[Any]] = {}
     for credential in _strict_provider_rows(config):
         provider = str(getattr(credential, "provider", "") or "")
-        if not provider or provider == "mcp-oauth" or provider in DEVICE_BOUND_PROVIDERS:
+        if not provider or provider == "mcp-oauth" or is_device_bound_provider(provider):
             continue
         by_provider.setdefault(provider, []).append(credential)
     for provider in sorted(by_provider):

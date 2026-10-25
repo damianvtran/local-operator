@@ -1,0 +1,7 @@
+{
+  "cli.install_help.install": "管理本地安装代次（稳定`lop`运行时的布局）",
+  "cli.install_help.prune": "删除没有任何运行实例使用的安装代次",
+  "cli.install_help.keep": "保留多少个未被引用的代次（默认：%(default)s；不小于0）。活动或已保存会话引用的代次，以及`current`指向的代次，均不会被移除",
+  "cli.install_help.migrate": "将此安装复制到代次布局，并让`current`指向它",
+  "cli.install_help.status": "显示安装布局：指针、代次以及新启动的`lop`将加载的内容"
+}

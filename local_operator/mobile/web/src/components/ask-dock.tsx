@@ -33,6 +33,7 @@
  */
 import { cn } from "../lib/cn";
 import { dockAsk, outstandingAsks, questionTally } from "../lib/asks";
+import { messageRuntime } from "../store";
 import type { PendingAsk } from "../types";
 
 export function AskDock({
@@ -59,12 +60,8 @@ export function AskDock({
 	const { waiting, lapsed } = questionTally(rows);
 	const quiet = waiting === 0;
 	const label = quiet
-		? lapsed === 1
-			? "1 question timed out"
-			: `${lapsed} questions timed out`
-		: waiting === 1
-			? "1 question waiting"
-			: `${waiting} questions waiting`;
+		? messageRuntime.t("relay.asks.dock.timed_out", { count: lapsed })
+		: messageRuntime.t("relay.asks.dock.waiting", { count: waiting });
 	const preview = String(head?.questions?.[0]?.question ?? "").trim();
 
 	return (

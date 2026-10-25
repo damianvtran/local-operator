@@ -453,7 +453,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # it exists to avoid a bypass, not to be a second file browser.
     "read_public_copy": 121,
     "read_variable": 67,
-    "secret": 184,
+    "secret": 186,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
     "send": 779,

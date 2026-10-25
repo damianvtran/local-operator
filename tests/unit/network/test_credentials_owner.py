@@ -426,8 +426,9 @@ def test_a_revoked_holder_stops_being_served(owner: Any, idp: RotatingIdP) -> No
     assert idp.posts == []
 
 
+@pytest.mark.parametrize("provider", ["kimi", "kimi-wechat"])
 def test_a_device_bound_provider_is_refused_by_name(
-    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch
+    owner: Any, idp: RotatingIdP, provider: str
 ) -> None:
     """Kimi is refused before authorisation is even consulted (finding 7).
 
@@ -435,10 +436,48 @@ def test_a_device_bound_provider_is_refused_by_name(
     grant presents the owner's token with ITS OWN fingerprint, which is a different
     device using that token — the case the design itself calls never.
     """
-    detail = _ask_grant(owner, BORROWER_DEVICE, key="kimi", provider="kimi")
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=provider, provider=provider)
     assert detail["code"] == "device_bound"
     assert "bound to the device that made them" in detail["message"]
     assert idp.posts == []
+
+
+@pytest.mark.parametrize("provider", ["kimi", "kimi-wechat"])
+def test_an_authorized_device_bound_alias_is_never_served(
+    owner: Any, idp: RotatingIdP, provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact legacy escape: a holder exists and the same nonportable row is asked.
+
+    The legacy placement document simulates a grant admitted before the alias
+    gate existed. The serve-side predicate must refuse it before reading or
+    returning its bearer, independently of declare/grant admission.
+    """
+    from local_operator.network.credentials import types
+
+    monkeypatch.setattr(
+        owner.broker,
+        "_entry",
+        lambda key: placement_mod.CredentialPlacementEntry(
+            key=key,
+            provider="kimi",
+            kind="oauth-rotating",
+            owner_device=OWNER_DEVICE,
+            holders=[types.Holder(device=BORROWER_DEVICE)],
+        ),
+    )
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=provider, provider=provider)
+    assert detail["code"] == "device_bound"
+    assert "access_token" not in detail
+    assert idp.posts == []
+
+
+def test_an_authorized_ordinary_provider_still_serves_its_bearer(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    grant = _ask_grant(owner, BORROWER_DEVICE, provider=STUB_PROVIDER)
+    assert grant["kind"] == "grant"
+    assert grant["access_token"] == "access-1"
+    assert idp.posts, "the ordinary provider retained its previous mint path"
 
 
 def test_a_forced_refresh_from_a_non_admin_is_refused(owner: Any, idp: RotatingIdP) -> None:
@@ -2034,3 +2073,17 @@ def test_a_grant_for_a_quota_blocked_family_says_quota_blocked(
         owner, BORROWER_DEVICE, key="mesh-empty", provider="mesh-empty", session="sess-3"
     )
     assert empty["code"] == "no_local_credential", empty
+
+
+def test_a_borrow_reaching_a_closed_broker_is_refused_as_unavailable(owner: Any) -> None:
+    """R1-2: the teardown race is a named refusal, not a handler that reads as a bug.
+
+    A slow-op handler can already hold the broker when the relay's stop hook closes
+    its loop. The closed latch refuses to restart (that is the leak fix); this is
+    the answer the peer must see — ``unavailable`` with the reason — rather than the
+    generic ``internal`` / ``RuntimeError`` a bare closed-loop error used to become.
+    """
+    owner.broker._loop.close()
+    detail = _ask_grant(owner, BORROWER_DEVICE)
+    assert detail["code"] == "unavailable", detail
+    assert "shutting down" in str(detail.get("message") or ""), detail

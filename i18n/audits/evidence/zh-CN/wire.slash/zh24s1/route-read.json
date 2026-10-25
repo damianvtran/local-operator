@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "key": "wire.slash.credential",
+  "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.json",
+  "reader": "/Users/damian/.local/share/lop/current/tools/local-operator/bin/python",
+  "reader_version": "0.89.0",
+  "reader_generation": "/Users/damian/.local/share/lop/generations/20261024T204324Z-0.89.0",
+  "tool": "read_public_copy",
+  "tool_module": "local_operator.tools.public_copy.execute_read_public_copy",
+  "policy_document": "docs/security/redaction-policy.md",
+  "policy_correction_commit": "6bfac3fccb558b6aaed2ffe3fc22e1e711526ee6",
+  "policy_correction_subject": "fix(redaction): own the policy and add a public-copy read path (#2796)",
+  "served": "committed HEAD blob of the zh-CN wire.slash catalogue",
+  "cwd": "/Users/damian/local-operator/.worktrees/zh-cn-core",
+  "session_dir": "/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/session",
+  "audit_log": "/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config/audit/public-copy-reads.jsonl",
+  "audit_log_sha256": "97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980",
+  "audit_log_bundle_copy": "route-read-log.jsonl",
+  "digest": "0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd",
+  "chars": 48,
+  "reads_recorded": 3,
+  "statement": "The previously withheld key was read through the sanctioned public-copy route after the redaction-policy correction. This is a fresh independent audit of the current bytes, not an upgrade or relabel of the old failed row."
+}

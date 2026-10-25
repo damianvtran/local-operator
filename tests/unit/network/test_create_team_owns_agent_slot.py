@@ -44,6 +44,7 @@ import pytest
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.network import identity, relay, types
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+from tests.unit.network.test_model_choice_frontdoor import _hold_api_key
 
 # The flag-level fact leads, then the SESSION's sentence verbatim, then the shell
 # remedy the composer APPENDS after it (design round 1, D5) — the exact
@@ -593,6 +594,8 @@ def test_the_dropped_model_sentence_names_the_pin_owner_not_the_profile(root: Pa
     _mint(root)
     _make_agent(root, "auditor", tags=["role"], model="m-1", hosting="openai")
     _make_agent(root, "my-chat", tags=[], model="m-2", hosting="anthropic")
+    _hold_api_key(root, "openai")
+    _hold_api_key(root, "anthropic")
     server = _warmed_server(root)
 
     both = server._op_session_create(
@@ -647,6 +650,7 @@ def test_a_row_named_like_the_profile_reads_as_the_profiles_pin(root: Path) -> N
     """
     _mint(root)
     _make_agent(root, "reviewer", tags=[], model="m-legacy", hosting="anthropic")
+    _hold_api_key(root, "anthropic")
     server = _warmed_server(root)
 
     detail = server._op_session_create(

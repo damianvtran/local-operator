@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.network import approvals
 from local_operator.network import cli as net_cli
 from tests.unit.network.test_approvals_store import _make_key
 
@@ -30,6 +31,7 @@ REQUEST_ARGS: dict[str, Any] = {
     "device": "",
     "fingerprint": "",
     "host_key_fp": "SHA256:abc",
+    "advertise_host": "",
     "network": "",
     "role": "drive",
     "credential_ref": "",
@@ -107,6 +109,19 @@ def test_request_answers_the_frozen_card_shape(
     row = listed["approvals"][0]
     assert set(row) >= {"approval_id", "state", "device", "what", "requested_by", "expires_at"}
     assert row["approval_id"] == payload["approval_id"]
+
+
+def test_an_advertise_host_is_carried_in_the_signed_card(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The approved target, not a runner-side setting, carries the cloud address."""
+    _make_key(root)
+    without = _request(root, capsys)
+    payload = _request(root, capsys, advertise_host="8.8.8.8:4097")
+
+    assert "advertise_host" not in without["device"]
+    assert payload["device"]["advertise_host"] == "8.8.8.8:4097"
+    assert approvals.request_digest(payload) != approvals.request_digest(without)
 
 
 def test_a_request_without_a_host_key_fp_observes_and_records_one(

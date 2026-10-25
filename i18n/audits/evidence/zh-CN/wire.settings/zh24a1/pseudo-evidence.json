@@ -1,0 +1,79 @@
+{
+  "method": "zh-CN fit probe: Chinese renders in 2-cell CJK glyphs and is normally shorter than English, so no RTL-style synthetic stretch is meaningful. measured_cells is the authoritative cell count (East Asian Wide/Fullwidth = 2, combining marks = 0). A +25% growth scenario models a future longer phrasing for the same key; it is reported but not treated as a failure. This is a synthetic fit probe, not a rendered TUI screenshot.",
+  "argument_parity_errors": [],
+  "plural_render_count": 0,
+  "plural_render_errors": [],
+  "width_rows": [
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.help",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 58,
+      "measured_cells": 40,
+      "en_cells": 57,
+      "growth_25pct_cells": 50,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "mode": "static",
+      "maxCells": 29,
+      "measured_cells": 16,
+      "en_cells": 23,
+      "growth_25pct_cells": 20,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.settings.session_compression.title",
+      "mode": "static",
+      "maxCells": 34,
+      "measured_cells": 8,
+      "en_cells": 22,
+      "growth_25pct_cells": 10,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.settings.session_compression_after_days.label",
+      "mode": "static",
+      "maxCells": 29,
+      "measured_cells": 18,
+      "en_cells": 23,
+      "growth_25pct_cells": 23,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.label",
+      "mode": "static",
+      "maxCells": 29,
+      "measured_cells": 14,
+      "en_cells": 24,
+      "growth_25pct_cells": 18,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "mode": "static",
+      "maxCells": 12,
+      "measured_cells": 6,
+      "en_cells": 10,
+      "growth_25pct_cells": 8,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "mode": "static",
+      "maxCells": 29,
+      "measured_cells": 18,
+      "en_cells": 27,
+      "growth_25pct_cells": 23,
+      "fits": true,
+      "growth_fits": true
+    }
+  ],
+  "static_or_reserved_over_budget": []
+}

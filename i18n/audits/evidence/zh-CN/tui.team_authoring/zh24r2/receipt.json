@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "tui.team_authoring",
+  "record": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/record.json",
+  "supersedes": [
+    "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24a1/record.json"
+  ],
+  "provenance": "Bundle receipt for independent re-audit zh24r2 written 2026-10-24 by translation-auditor (lopdev team), session b1d9d628481a, served model deepseek/deepseek-flash; this manifest is not another audit.",
+  "hashes": {
+    "audit.log": "c921a56867dc653e409c0d4bbb55b34b3094130e1066b83fa6279fa00be59a9c",
+    "audit.py.txt": "8c396c384520289bed2de98ff0119346a2c96c39b2ddfab0407e6aebf5dc3611",
+    "tui.team_authoring.compact.txt": "d6d8224a50e95b1d31d84c110c1e1023f4d086420e6ddd1979ffe1034070cf63",
+    "tui.team_authoring.pairs.txt": "bdba7e882288fdf005c45d5d9e0045096e31277cf36e640dce38e784aa6c1a0a",
+    "fix-verification.json": "a7fa64b5d85713351a42a1d75a0fec7614dcfb9655cdec8210552ea7a62c0073",
+    "fix-verify.py.txt": "8d0df4677ddd17c018738ef0282f6fb4ab419d531edbfcfe5def843b0d29bf02",
+    "mechanical-raw.json": "8e204fb29592191c76748e4c9a6a2b974ede9d44a7174b05cc3a60aba9ce6594",
+    "pseudo-evidence.json": "2f466d8ce51bf9a685a7e4c623b3eebd1d375ba462e6589cd61639044948d79f",
+    "report.md": "f6d1995110fc55bfb48f227115b18d015e3d3cc55430e4b2ab7e333947215770",
+    "runtime-mechanical.json": "47def802bf29f9be031e3f4d65d927b5799d19f1c71e8a10664bcc65ce7d46ab"
+  }
+}

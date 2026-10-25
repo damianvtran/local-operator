@@ -67,6 +67,7 @@ uses). No probing, no second gating convention.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -82,6 +83,7 @@ from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 from local_operator.harness.types import (
     AgentTool,
     Content,
+    ImageContent,
     TextContent,
     ToolContext,
     ToolResult,
@@ -117,6 +119,17 @@ CONVERSATION_PAGE_MAX = 100
 #: and taken from the member row by the server; this one is what another
 #: member sees until the channel's members relabel it.
 CHANNEL_CREATE_DEFAULT_LABEL = "agent"
+
+#: The most images ONE channel_history call puts into context. A 100-message
+#: page could otherwise carry 400 images (each up to 1 MiB after bounding) —
+#: a context bill no single read should run up. The rest are named in text
+#: so the agent can page a narrower window to see them.
+HISTORY_IMAGES_MAX = 8
+
+#: Private outcome key for the fetched images. Popped by ``_execute`` before
+#: the outcome becomes ``ToolResult.details`` — details persist with the
+#: transcript row, and image bytes must exist only in the content blocks.
+_IMAGES_KEY = "_images"
 
 #: Local claim lifetime for ``ack working`` — generous enough for a CoS turn,
 #: short enough that a crashed session's claim frees itself.
@@ -654,10 +667,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # Bodies are external content even when the sender is a teammate's
         # agent: the same untrusted wrap as take_up. Unadmitted messages carry
         # ``body: null`` — metadata only — and stay that way (no local cache).
+        images = await _history_images(runtime, channel_id, result, endpoint_id)
         return {
             "ok": True,
             "state": "ok",
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            _IMAGES_KEY: images,
         }
 
     if params.op == "channel_thread":
@@ -684,10 +699,23 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error(f"could not read the thread: {failure}", code="thread_failed")
         # Same untrusted wrap as channel_history: a reply body is external
         # content, and an unadmitted one is already null from the server.
+        # Images too (R1-02): the channel timeline excludes replies, so this
+        # is the ONLY read through which a reply's admitted images can reach
+        # the agent — same caption, same fresh context fetch, same budget.
+        thread_rows: list[Any] = []
+        if isinstance(result, dict):
+            root = result.get("root")
+            if isinstance(root, dict):
+                thread_rows.append(root)
+            replies = result.get("replies")
+            if isinstance(replies, list):
+                thread_rows.extend(replies)
+        images = await _history_images(runtime, channel_id, {"messages": thread_rows}, endpoint_id)
         return {
             "ok": True,
             "state": "ok",
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            _IMAGES_KEY: images,
         }
 
     # The decide/unknown refusals above run before the gates; this later return
@@ -697,6 +725,125 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         f"unknown bridge op {params.op!r}",
         code="invalid_request",
     )
+
+
+def _screener_sees_images(runtime: BridgeRuntime) -> bool:
+    """Whether this machine's screening model accepts images (the connector's rule)."""
+
+    from .connector.conversation import _screener_sees_images as sees
+
+    try:
+        return sees(Path(runtime.config_dir))
+    except Exception:  # noqa: BLE001 — unknown reads as "no vision", never a crash
+        return False
+
+
+def _image_provenance(channel_id: str, message: dict[str, Any], lines: list[str]) -> str:
+    """The caption leading one message's images: clause first, then provenance.
+
+    Every image is sender-controlled content exactly like a body — a picture
+    can carry instructions as easily as text — so the ONE untrusted clause
+    leads it, and the provenance (who, where, which attachment, how big) lets
+    the agent say what it is looking at. No hashes and no filenames.
+    """
+
+    raw_sender = message.get("sender")
+    sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
+    label = str(sender.get("display_label") or "member").replace("\n", " ")[:200]
+    kind = str(sender.get("kind") or "unknown")[:16]
+    head = (
+        f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+        f"Images from message {message.get('id')} in {channel_id} "
+        f"(seq {message.get('seq')}) from {label} ({kind}):"
+    )
+    return "\n".join([head, *lines])
+
+
+async def _history_images(
+    runtime: BridgeRuntime, channel_id: str, page: Any, endpoint_id: str
+) -> list[tuple[str, list[tuple[bytes, str]]]]:
+    """Per admitted message with images: ``(caption, [(bytes, mime), ...])``.
+
+    WHY A FRESH FETCH. The hub lists attachment descriptors to an agent only
+    after an ``allow`` bound to the message's ``attachments_hash``, and serves
+    ``purpose=context`` bytes under that same predicate (decision D1). These
+    bytes are fetched HERE, at read time, every time: never from the
+    connector's screening fetch, never cached in the team-bridge store,
+    sqlite, disk or a log. A refusal (text-only allow, reject, expired) is a
+    line in the caption, never a silent gap.
+    """
+
+    from .attachments import (
+        AttachmentRejected,
+        parse_descriptors,
+        verify_and_bound,
+        withheld_marker,
+    )
+
+    if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+        return []
+    out: list[tuple[str, list[tuple[bytes, str]]]] = []
+    budget = HISTORY_IMAGES_MAX
+    for message in page["messages"]:
+        if not isinstance(message, dict) or not isinstance(message.get("id"), str):
+            continue
+        descriptors = parse_descriptors(message.get("attachments"))
+        count = message.get("attachment_count")
+        if not descriptors:
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                # Images exist but were not admitted to this agent's context
+                # (screened text-only, rejected, or pending). When the text
+                # WAS admitted and this machine's screener has no vision, say
+                # exactly that (D5) — it is the one cause the user can fix.
+                noun = "attachment" if count == 1 else "attachments"
+                marker = f"[{count} image {noun} withheld: not admitted by screening]"
+                if message.get("body") is not None and not _screener_sees_images(runtime):
+                    marker = withheld_marker(count)
+                out.append((_image_provenance(channel_id, message, [marker]), []))
+            elif descriptors is None:
+                out.append(
+                    (
+                        _image_provenance(
+                            channel_id, message, ["[images withheld: could not be verified]"]
+                        ),
+                        [],
+                    )
+                )
+            continue
+        lines: list[str] = []
+        blocks: list[tuple[bytes, str]] = []
+        for index, descriptor in enumerate(descriptors, start=1):
+            meta = (
+                f"{index}. attachment {descriptor.id}: {descriptor.mime} "
+                f"{descriptor.width}x{descriptor.height}, {descriptor.size} bytes"
+            )
+            if not descriptor.fetchable:
+                lines.append(f"{meta} — [image expired]")
+                continue
+            if budget <= 0:
+                lines.append(f"{meta} — [not shown: image limit per read reached; page narrower]")
+                continue
+            try:
+                data, _mime = await runtime.client.fetch_attachment(
+                    channel_id,
+                    message["id"],
+                    descriptor.id,
+                    tenant_id=runtime.tenant_id,
+                    endpoint_id=endpoint_id,
+                    purpose="context",
+                )
+                verified = await verify_and_bound(data, descriptor)
+            except AttachmentRejected:
+                lines.append(f"{meta} — [image withheld: could not be verified]")
+                continue
+            except Exception:  # noqa: BLE001 — BridgeRefusal/unreachable: a line, not a crash
+                lines.append(f"{meta} — [image withheld: not available to this agent]")
+                continue
+            budget -= 1
+            lines.append(meta)
+            blocks.append((verified.private_payload(), verified.wire_mime))
+        out.append((_image_provenance(channel_id, message, lines), blocks))
+    return out
 
 
 def build_bridge_tool(context: ToolContext) -> AgentTool | None:
@@ -717,6 +864,8 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         context: ToolContext,
     ) -> ToolResult:
         outcome = await execute_bridge(runtime, args)
+        # Bytes never ride ``details`` (persisted with the transcript row).
+        images = outcome.pop(_IMAGES_KEY, None) or []
         if outcome.get("ok"):
             peer_receipt = args.get("op") in ("send", "reply")
             if peer_receipt:
@@ -756,9 +905,19 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                     # receipt's JSON block, which must parse on its own.
                     blocks.append(TextContent(text=f"[bridge guidance — advisory]\n{note}"))
                 else:
-                    blocks = [
-                        TextContent(text=f"{content}\n\n[bridge guidance — advisory]\n{note}")
-                    ]
+                    content = f"{content}\n\n[bridge guidance — advisory]\n{note}"
+                    blocks = [TextContent(text=content)]
+            # Caption-then-image, the shape every image tool result uses
+            # (``tools.builtin._image``): a text-only consumer still reads what
+            # each image is, and a session whose model cannot take images has
+            # each block replaced by the harness's own omission notice
+            # (``session._without_images``) while the caption remains.
+            for caption, pictures in images:
+                blocks.append(TextContent(text=caption))
+                blocks.extend(
+                    ImageContent(data=base64.b64encode(data).decode("ascii"), mime_type=mime)
+                    for data, mime in pictures
+                )
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="bridge",

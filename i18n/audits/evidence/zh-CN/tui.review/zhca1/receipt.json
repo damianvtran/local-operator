@@ -1,0 +1,19 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "locale": "zh-CN",
+ "namespace": "tui.review",
+ "record": "i18n/audits/evidence/zh-CN/tui.review/zhca1/attestation.json",
+ "provenance": "Attestation bundle assembled by translation-auditor (lopdev team), session d9e49690d15d, actual model deepseek/deepseek-flash; the prior audit provenance is named inside attestation.json.",
+ "hashes": {
+  "attestation.json": "46da8f7c2a2818b4612a83d669a37db104ab79d2161c5d1ce0a3d586c7f8841d",
+  "audit.log": "2b600523dbf3bce7e512fb941804a19a87fddbe7e053ec74e9d85e8b63ba370e",
+  "mechanical-raw.json": "39c2952a984a9cf047064f2637994eee846feb3bf8e65fcae4e2e1de3311401c",
+  "pseudo-evidence.json": "0f69f6b575015c234e11d8fdce455bbad8d5eb1bc0915b5253a35a00864b0a11",
+  "record.json": "7f6f8ed6c923a829bc8007e5c593fef0f06de3530c7208f89a96c745498dc6b3",
+  "report.md": "0bf296a3093857febc8e0da7026408d5048b64e344c1630b2136839163c8a209",
+  "runtime-mechanical.json": "a9c03f825e5887580bfd0a4e5da9aab6c559f424682383ac82b14987119cddea",
+  "tui.review.compact.txt": "d06b4426a2fd55b3faaf169f6841e361c382ccb8c3b9738a7da0d6dc4b2360d8",
+  "tui.review.pairs.txt": "0207271178313851661dd85bc3d34027486df6f9a82045ae32c48689a16d8a49"
+ }
+}

@@ -1,0 +1,6 @@
+tui.projects_edit.binding_cancel	Cancel	取消
+tui.projects_edit.confirm_remove	remove milestone ''{name}''? · y remove · n keep	移除里程碑“{name}”？ · y移除 · n保留
+tui.projects_edit.hint_add_milestone	add milestone	添加里程碑
+tui.projects_edit.prompt_name_label	milestone	里程碑
+tui.projects_edit.refusal_project_gone_milestone	''{name}'' is no longer in the store — the milestone was not changed	“{name}”已不在存储中 — 里程碑未更改
+tui.projects_edit.saved	saved	已保存

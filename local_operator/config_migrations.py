@@ -67,12 +67,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from local_operator import advisories
 from local_operator.config_writer import serialized_config_path_write
 
 logger = logging.getLogger(__name__)
@@ -475,18 +475,12 @@ def report_config_key_shrink(
             "restore from the newest config.yml.pre-cleanup-migration.* or "
             "config.yml.bak-* and it will be read again."
         )
-        # ONE channel per surface (review round 1, n3). The CLI configures logging
-        # so its handler already writes WARNING to stderr; printing as well showed
-        # every operator the same paragraph twice. The TUI owns the terminal, so it
-        # gets the plain line and only a DEBUG record; the daemon gets neither.
-        if surface == "daemon":
-            logger.debug("%s", message)
-            return missing
-        if surface == "tui":
-            logger.debug("%s", message)
-            print(message, file=sys.stderr)
-            return missing
-        logger.warning("%s", message)
+        # ONE channel per surface. A CLI run records the advisory; the handler
+        # renders it only on a terminal (2026-10-24: it filled the desktop
+        # update modal's diagnosis head and hid the updater's own cause). The
+        # TUI owns the terminal and the daemon has no person watching, so both
+        # keep the record and claim no console line.
+        advisories.emit(message, logger=logger, surface=surface)
         return missing
     if record and current and current_set != set(previous):
         # Additions (the cleanup migration's own keys, a new release's defaults)

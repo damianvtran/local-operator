@@ -1,0 +1,19 @@
+{
+  "cli.wake_help.wake": "检查定时唤醒及其触发监督者",
+  "cli.wake_help.status": "显示是否已安装监督者，以及接下来会触发什么",
+  "cli.wake_help.json": "机器可读输出",
+  "cli.wake_help.status_install": "立即安装监督者，而非等待下次定时任务",
+  "cli.wake_help.status_uninstall": "移除监督者；之后定时唤醒仅在会话打开时触发",
+  "cli.wake_help.install": "立即安装或修复监督者（重启过期或已停止的监督者）",
+  "cli.wake_help.list": "此机器上的所有定时唤醒，按最早触发优先排序",
+  "cli.wake_help.create": "为会话设置定时唤醒（按需安装监督者）",
+  "cli.wake_help.create_session": "要唤醒的会话ID",
+  "cli.wake_help.create_when": "触发时间：时长（“in 2m”、“45s”）或时刻（“at 09:30”）",
+  "cli.wake_help.create_message": "触发时发送的自提示词（最多{max}个字符）",
+  "cli.wake_help.create_every": "首次触发后每隔DURATION重复（“5m”、“1h”、“8h30m”）",
+  "cli.wake_help.create_until": "在此时间之后停止重复（“in 7d”、“at 09:30”）",
+  "cli.wake_help.create_limit": "触发N次后停止重复",
+  "cli.wake_help.create_notify": "唤醒轮次完成时通知（默认静默：脚本设置遵循约定；出错的轮次无论如何都会通知）",
+  "cli.wake_help.serve": "在前台运行监督者（LaunchAgent运行的程序）",
+  "cli.wake_help.serve_once": "立即触发所有已到期任务，然后退出"
+}

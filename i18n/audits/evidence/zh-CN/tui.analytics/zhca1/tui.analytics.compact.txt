@@ -1,0 +1,28 @@
+tui.analytics.empty.hint	Analytics accrue as sessions make provider calls. Come back after a few turns.	会话调用提供商后会累积统计数据。进行几轮后再来查看。
+tui.analytics.hint.none.full	esc back	esc返回
+tui.analytics.input.meta	≈ estimated split of context tokens	≈ 上下文token分布估算
+tui.analytics.input.title	Where input went	输入去向
+tui.analytics.legend.cost	+ lower bound (some calls unpriced)   $— no published price	+ 费用下限（部分调用无定价）   $— 无公开价格
+tui.analytics.search.by_provider	By provider	按提供商
+tui.analytics.search.counted_read	{count, plural, one {{shown} read} other {{shown} reads}}	{count, plural, other {{shown}次读取}}
+tui.analytics.search.counted_search	{count, plural, one {{shown} search} other {{shown} searches}}	{count, plural, other {{shown}次搜索}}
+tui.analytics.search.incl_free_read	{count, plural, one {incl. {shown} free read} other {incl. {shown} free reads}}	{count, plural, other {含{shown}次免费读取}}
+tui.analytics.search.incl_free_search	{count, plural, one {incl. {shown} free search} other {incl. {shown} free searches}}	{count, plural, other {含{shown}次免费搜索}}
+tui.analytics.search.incl_money_search	incl. {money} search	含{money}搜索费用
+tui.analytics.search.incl_unpriced_read	{count, plural, one {incl. {shown} unpriced read} other {incl. {shown} unpriced reads}}	{count, plural, other {含{shown}次无定价读取}}
+tui.analytics.search.incl_unpriced_search	{count, plural, one {incl. {shown} unpriced search} other {incl. {shown} unpriced searches}}	{count, plural, other {含{shown}次无定价搜索}}
+tui.analytics.search.note	Read from this process's live search ledger, not from disk. A resumed conversation restores its recorded searches into it; sessions that are not open here are not counted.	数据来自此进程的实时搜索台账，而非磁盘。恢复会话时，其已记录的搜索会恢复到此台账；未在此处打开的会话不计入。
+tui.analytics.search.note_join	{note} · {read_note}	{note} · {read_note}
+tui.analytics.search.note_read_full	{count, plural, one {{shown} read} other {{shown} reads}} · no published price	{count, plural, other {{shown}次读取}} · 无公开价格
+tui.analytics.search.note_read_partial	{count, plural, one {{shown} read} other {{shown} reads}} · {unpriced} unpriced	{count, plural, other {{shown}次读取}} · {unpriced}次无定价
+tui.analytics.search.note_read_unpriced	{count, plural, one {{shown} read} other {{shown} reads}} · unpriced	{count, plural, other {{shown}次读取}} · 无定价
+tui.analytics.search.note_search_full	{count, plural, one {{shown} search} other {{shown} searches}} · no published price	{count, plural, other {{shown}次搜索}} · 无公开价格
+tui.analytics.search.note_search_partial	{count, plural, one {{shown} search} other {{shown} searches}} · {unpriced} unpriced	{count, plural, other {{shown}次搜索}} · {unpriced}次无定价
+tui.analytics.search.note_search_unpriced	{count, plural, one {{shown} search} other {{shown} searches}} · unpriced	{count, plural, other {{shown}次搜索}} · 无定价
+tui.analytics.search.row_session	This session	此会话
+tui.analytics.search.share_short	{counted} · {share} of search	{counted} · 搜索占比{share}
+tui.analytics.table.calls	{value} calls	{value}次调用
+tui.analytics.table.subagent_suffix	{count, plural, one {+{shown} subagent} other {+{shown} subagents}}	{count, plural, other {+{shown}个子智能体}}
+tui.analytics.totals.calls_meta	{count} calls	{count}次调用
+tui.analytics.totals.days_with_usage	{count, plural, one {{shown} day} other {{shown} days}} with usage	有用量的{count, plural, other {{shown}天}}
+tui.analytics.totals.subagent_meta	totals include subagents	总量包含子智能体

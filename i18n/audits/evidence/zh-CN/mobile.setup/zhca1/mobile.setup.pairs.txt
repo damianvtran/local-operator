@@ -1,0 +1,91 @@
+# mobile.setup — sampled en/zh pairs for attestation zhca1
+# 22/76 keys; all >120 chars and all plurals included
+
+## mobile.setup.billing_not_activated  [57 chars]
+EN: Billing: the current subscription still needs activation.
+ZH: 计费：当前订阅仍需激活。
+
+## mobile.setup.billing_unconfirmed  [124 chars, LONG>120]
+EN: Billing: activation was requested but its outcome is unconfirmed. Check the account before retrying; do not assume rollback.
+ZH: 计费：已请求激活，但结果尚未确认。重试前先检查账户；不要假定已回滚。
+
+## mobile.setup.cloudflared  [189 chars, LONG>120]
+EN: Install cloudflared 2025.4.0 or newer using your package manager (macOS: brew install cloudflared), then rerun lop tunnel setup. An agent may run the installation with normal tool approval.
+ZH: 使用包管理器安装cloudflared 2025.4.0或更新版本（macOS：brew install cloudflared），然后重新运行lop tunnel setup。智能体可在获得常规工具审批后执行安装。
+
+## mobile.setup.cloudflared_tui  [146 chars, LONG>120]
+EN: Ask your agent to install cloudflared 2025.4.0 or newer through the supported package manager with normal approval, then run /mobile enable again.
+ZH: 让智能体通过受支持的包管理器，在获得常规审批后安装cloudflared 2025.4.0或更新版本，然后再次运行/mobile enable。
+
+## mobile.setup.consent  [188 chars, LONG>120]
+EN: Activating sets up this Radient account’s tunnel subscription at USD {amount}/month, reserves your phone address, and installs/starts the background connector. It does not purchase credit.
+ZH: 激活将为此Radient账户开通月费为USD {amount}的隧道订阅，预留手机地址，并安装和启动后台连接器。此操作不会购买点数。
+
+## mobile.setup.corrupt_intent  [165 chars, LONG>120]
+EN: The saved phone setup request is invalid. Leave create.json unchanged and ask your agent to recover the original request before retrying. No setup changes were made.
+ZH: 已保存的手机设置请求无效。保持create.json不变，让智能体恢复原始请求后再重试。未作任何设置更改。
+
+## mobile.setup.failed  [133 chars, LONG>120]
+EN: Setup did not finish. Check lop tunnel setup --json, then retry with the current account/quote. Completed steps have not been undone.
+ZH: 设置未完成。检查lop tunnel setup --json，然后使用当前账户和报价重试。已完成的步骤未被撤销。
+
+## mobile.setup.in_progress  [76 chars]
+EN: Phone access setup is already in progress; check its status before retrying.
+ZH: 手机访问设置已在进行；重试前先检查状态。
+
+## mobile.setup.login_tui  [53 chars]
+EN: Sign in with /login radient, then run /mobile status.
+ZH: 使用/login radient登录，然后运行/mobile status。
+
+## mobile.setup.mobile_bundle  [127 chars, LONG>120]
+EN: Prepare the phone interface first with lop mobile install (normal tool approval), then retry setup. No setup changes were made.
+ZH: 先使用lop mobile install准备手机界面（需常规工具审批），然后重试设置。未作任何设置更改。
+
+## mobile.setup.mobile_bundle_tui  [141 chars, LONG>120]
+EN: Ask your agent to prepare the phone interface with an approved lop mobile install, then run /mobile enable again. No setup changes were made.
+ZH: 让智能体通过已获审批的lop mobile install准备手机界面，然后再次运行/mobile enable。未作任何设置更改。
+
+## mobile.setup.quote_changed  [163 chars, LONG>120]
+EN: The current price is USD {current}/month, not the USD {accepted} you accepted. Your submitted amount was not accepted; check the current quote before trying again.
+ZH: 当前月费为USD {current}，并非你接受的USD {accepted}。提交的金额未被接受；重试前先检查当前报价。
+
+## mobile.setup.stage_billing  [23 chars]
+EN: subscription activation
+ZH: 订阅激活
+
+## mobile.setup.stage_reservation  [25 chars]
+EN: phone-address reservation
+ZH: 手机地址预留
+
+## mobile.setup.stopped  [95 chars]
+EN: Remote access was deliberately stopped. Use lop tunnel start only when you intend to resume it.
+ZH: 远程访问已被主动停止。仅在确定要恢复时使用lop tunnel start。
+
+## mobile.setup.supervisor_tui  [191 chars, LONG>120]
+EN: Background setup is unavailable on this computer. Ask your agent to prepare a supported user service or run the connector in a terminal, then check /mobile status. No setup changes were made.
+ZH: 此电脑不支持后台设置。让智能体准备受支持的用户服务，或在终端中运行连接器，然后检查/mobile status。未作任何设置更改。
+
+## mobile.setup.title_account  [41 chars]
+EN: Phone access could not check your account
+ZH: 手机访问无法检查账户
+
+## mobile.setup.title_balance  [33 chars]
+EN: Phone access needs account credit
+ZH: 手机访问需要账户点数
+
+## mobile.setup.title_login  [36 chars]
+EN: Phone access needs a Radient sign-in
+ZH: 手机访问需要登录Radient
+
+## mobile.setup.unexpected_failure  [114 chars]
+EN: Phone access could not finish. Check /mobile status for the current blocker; completed steps have not been undone.
+ZH: 手机访问未能完成设置。检查/mobile status，了解当前阻碍；已完成的步骤未被撤销。
+
+## mobile.setup.usage  [90 chars]
+EN: Use /mobile status or enable [monthly price] [--credential-id <id>], billing, start, stop.
+ZH: 使用/mobile status或enable [月费] [--credential-id <id>]、billing、start、stop。
+
+## mobile.setup.verification  [132 chars, LONG>120]
+EN: The connection is not yet confirmed. Run lop tunnel setup --json to check the cloud route, connector, and protected phone interface.
+ZH: 连接尚未确认。运行lop tunnel setup --json，检查云端路由、连接器和受保护的手机界面。
+

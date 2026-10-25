@@ -52,6 +52,7 @@ import os
 import tempfile
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple, TypeVar
 
@@ -162,12 +163,21 @@ def record_path(pid: int, root: Path | None = None, dirname: str = RUN_DIRNAME) 
 
 def publish(record: DiscoveryRecord, root: Path | None = None, dirname: str = RUN_DIRNAME) -> Path:
     """Write (or refresh) a process's record, staged so scanners see either
-    the old file or the new one, never a half-written one."""
-    directory = ensure_run_dir(root, dirname)
-    record.heartbeat_at = time.time()
-    target = directory / f"{record.pid}.json"
-    _staged_write(target, record.to_json(), prefix=f".{record.pid}.")
-    return target
+    the old file or the new one, never a half-written one.
+
+    A busy record is also a turn-admission edge. Share the relay-restart fence
+    for this write so an exclusive member restart cannot read idle and then call
+    its supervisor while this publication lands between those two steps.
+    """
+    from local_operator.session.runtime import restart_fence
+
+    admission = restart_fence.shared(root) if getattr(record, "busy", False) else nullcontext()
+    with admission:
+        directory = ensure_run_dir(root, dirname)
+        record.heartbeat_at = time.time()
+        target = directory / f"{record.pid}.json"
+        _staged_write(target, record.to_json(), prefix=f".{record.pid}.")
+        return target
 
 
 def _staged_write(target: Path, payload: Any, *, prefix: str) -> None:

@@ -256,3 +256,10 @@ def test_the_device_bound_exclusion_does_not_move(root: Path) -> None:
     with pytest.raises(MeshRefusal) as caught:
         document.declare("kimi", owner_device=OWNER, provider="kimi", by=OWNER)
     assert caught.value.code == "device_bound"
+
+    # A login flavour of the same device-bound storage row is not a new offer.
+    _seed(root, "kimi-wechat", {"key": "sk-kimi-wechat", "type": "api_key"})
+    assert all(item["key"] not in {"kimi", "kimi-wechat"} for item in offers_mod.build_items(root))
+    with pytest.raises(MeshRefusal) as caught_alias:
+        document.declare("kimi-wechat", owner_device=OWNER, provider="kimi-wechat", by=OWNER)
+    assert caught_alias.value.code == "device_bound"

@@ -1,0 +1,160 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "audit_kind": "independent_translation_reaudit",
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "round": 2,
+  "audit_date": "2026-10-24",
+  "key_count": 818,
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "fix_commit_under_review": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "supersedes": [
+    {
+      "audit_id": "zh24a1",
+      "record": "i18n/audits/evidence/zh-CN/wire.settings/zh24a1/record.json",
+      "pre_fix_target_sha256_prefix": "d0df5e3e6975",
+      "reason": "Names pre-fix target bytes; superseded by this current-byte record."
+    },
+    {
+      "audit_id": "zhca1",
+      "record": "i18n/audits/evidence/zh-CN/wire.settings/zhca1/record.json",
+      "pre_fix_target_sha256_prefix": "d0df5e3e6975",
+      "reason": "Carried-namespace attestation at the same pre-fix target; superseded by this current-byte record."
+    }
+  ],
+  "supersedes_statement": "This record supersedes the pre-fix audit record(s) listed in `supersedes` for wire.settings: they name target bytes `d0df5e3e6975…` and earlier, which are no longer current after cb716031e3. All verdicts and hashes here are derived from revision d9f70f622d.",
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "b1d9d628481a",
+    "model": "deepseek/deepseek-flash",
+    "audit_date": "2026-10-24",
+    "independent_from_translator_session": true,
+    "independent_from_implementer": true,
+    "actual_model_source": "Session header for b1d9d628481a reports the served model deepseek/deepseek-flash; no fallback was observed during this audit.",
+    "tooling": "Read-only: local_operator.i18n.runtime.render_message for ICU rendering, audit.py and fix-verify.py in this bundle for mechanics; no catalogue, ledger, allowance, shipped or hold file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "sha256": "77fde8865dadc3fc322ccd07a86c16277ad0a02bf44e79e89b686fa37d6807d5"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision."
+  },
+  "changed_keys": [
+    "wire.settings.bash_shell.help",
+    "wire.settings.bash_shell.help.windows",
+    "wire.settings.subagents_model_choice.help"
+  ],
+  "fix_verification": {
+    "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/fix-verification.json",
+    "changed_key_count": 3,
+    "all_values_match_proposal": true,
+    "all_argument_sets_equal": true,
+    "all_renders_ok": true,
+    "over_budget": []
+  },
+  "current_report_verdict": {
+    "status": "passed-with-minor-findings",
+    "verdict": "clean-with-findings",
+    "findings_total": 1,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1,
+    "finding_ids": [
+      "ZH24R2-02"
+    ],
+    "unresolved_blocker_major_count": 0
+  },
+  "ledger_entry_candidate": {
+    "locale": "zh-CN",
+    "namespace": "wire.settings",
+    "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+    "translator": {
+      "agent": null,
+      "model": null,
+      "date": null
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-24",
+      "result": "passed-with-minor-findings",
+      "findings": 1
+    },
+    "status": "passed-with-minor-findings",
+    "note": "zh-CN core held-candidate wave 2026-10-24, round 2 at current bytes. Evidence: i18n/audits/evidence/zh-CN/wire.settings/zh24r2/record.json. All 3 applied fix(es) verified against the pre-fix proposal; one pre-existing nit recorded; blocker/major 0. Auditor independent of translator and implementer; current-byte round."
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report; audit.log is the executed command transcript for this namespace; fix-verification.json, mechanical-raw.json, runtime-mechanical.json and pseudo-evidence.json are machine output. String-level audit only: no native terminal, relay SPA or rendered-frame pass is claimed.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/audit.log",
+      "sha256": "2b0bf099461cc861a38883bdce40a264a239ab63368328c2305d4e4661378e8c"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/audit.py.txt",
+      "sha256": "8c396c384520289bed2de98ff0119346a2c96c39b2ddfab0407e6aebf5dc3611"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/wire.settings.compact.txt",
+      "sha256": "81174dfad69e4692b3e1c01cbdb92f979490769598559dbdb921a101f741a40f"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/wire.settings.pairs.txt",
+      "sha256": "0121da24fd108b163046b189915c0a95f7a063cb0a0fa451bb3cc279f9ba3f6e"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/fix-verification.json",
+      "sha256": "8142aa9b829ea335bec080b7ea950d1dbb1672e9fc9bfe250d6a98bb755c015f"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/fix-verify.py.txt",
+      "sha256": "8d0df4677ddd17c018738ef0282f6fb4ab419d531edbfcfe5def843b0d29bf02"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/mechanical-raw.json",
+      "sha256": "e749260d832a6bca7e62f4368cce686105b6ee406f55188f37d5cd3b2f3ae2b5"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/pseudo-evidence.json",
+      "sha256": "f7f746045bc6060b87900cf62c5112ad688ca675beadc469bd2ee5b4fe14bbfd"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/report.md",
+      "sha256": "f79d8b05eda5d1d86d29db2ee53a05ec46e917d6a62040d6836b05364feee563"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24r2/runtime-mechanical.json",
+      "sha256": "ac2478d1a930739115ebdb400f77e745740260da80cd1623e43c4cd3521e4766"
+    }
+  ]
+}

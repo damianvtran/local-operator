@@ -1542,7 +1542,13 @@ git -C ~/local-operator update-ref refs/heads/main origin/main
 #    Then tag + GitHub Release on the bump's merge commit. --target creates
 #    the tag on that exact SHA; the publish workflow triggers on the release.
 $EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # public copy only; no authoring/checklist section
-gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
+
+# Resolve the target in its OWN command, print it, and check it is the bump's
+# merge commit you expect -- then pass the literal SHA. Do not embed the
+# substitution in the release command: see "Branch-moving commands".
+git -C ~/local-operator fetch --tags origin main
+git -C ~/local-operator rev-parse origin/main          # copy this SHA after checking it
+gh release create vX.Y.Z --target <the SHA you just checked> \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
 # 5. Install and verify — REQUIRED: the release is not complete until this
@@ -1663,8 +1669,8 @@ unchanged, advance the clone's own `main` first.
 ### A green run is a function of the tree it was computed against
 
 **The tag target is the bump's MERGE commit** — which is what "Mechanics, in
-order" step 4 already does with
-`--target "$(git -C ~/local-operator rev-parse origin/main)"`, once the bump
+order" step 4 already does: resolve `origin/main` in its own command, check it is
+the bump's merge commit, then pass that literal SHA to `--target`, once the bump
 has merged and `origin/main` has been fetched. **Never the bump
 branch's own head**, which is a different SHA and is not what ships.
 
@@ -2327,6 +2333,85 @@ of its own — a heap cap on node (`--max-old-space-size`), a worker count sized
 available memory — and run in its own process group, because the guard can only end
 a group it owns. Do not hand-roll an unbounded runner when the repo already has a
 bounded one (the pytest worker cap above is the pattern).
+
+## Branch-moving commands: one target, one invocation
+
+Anything that moves a ref — `git push`, `git update-ref`, `git tag -f`,
+`gh pr merge`, `gh release create` — is issued as **one command with one literal
+target**: the PR number, the ref name, the SHA or the tag written out in the
+invocation, and the resulting state read back afterwards.
+
+Never assemble such a command inside a loop, alongside unrelated commands in one
+batch, or from a target another step computed by substitution (`--target
+"$(...)"`, `$PR`, `$SHA`). A batch that is malformed should fail to parse; it
+must not resolve to a plausible-looking target.
+
+**Resolving a value is not the same as deriving it in place.** The release
+procedure needs `~/.local-operator`'s new head, and the release instructions
+above require it. Resolve it in its own command, print it, check it against
+what you expect, and then put the literal value in the merge and release
+commands. Three visible steps — freeze, verify, use — satisfy this rule; one
+embedded `$(...)` does not, because nobody sees the value until it has already
+been acted on.
+
+This rule exists because of a real near-miss. On 2026-10-24 (local; 2026-10-25 UTC) a
+malformed multi-command batch fired `gh pr merge --squash` at an unrelated,
+unreviewed pull request. Nothing merged: the repository's required-review
+control refused it, exactly as designed. But that control was the only thing
+between the mistake and an unreviewed merge — `--admin`, used routinely here for
+PRs that *have* passed review, would have completed it. The rule is about not
+needing that control to catch a typo.
+
+It applies to every automated lane, not just interactive work. The release rules
+above still govern *who* takes a window and *what* the window contains; this
+governs *how* each of those steps is issued.
+
+## Status reads: name the ref you read
+
+Anything that reports **state** — whether a PR is open or merged, what a
+branch contains, which revision is deployed or checked out — reads a **ref**,
+never a working checkout: `git show origin/main:<path>`, a `gh`/API read, or
+a worktree cut from `origin/main`. A working tree is authoritative about
+exactly one thing, the uncommitted work in it. Everything else it says is
+about *that checkout* — the commit it has checked out, plus whatever edits
+sit beside it — not about the repository.
+
+**Name the ref in the answer.** `#2908 merged on origin/main @ 3a3a30ce` cannot
+be quoted into a wrong decision without the reader seeing where it came from;
+`#2908 merged` can, and afterwards nobody can tell which tree produced it. Give
+the commit you read, not the branch you believe you are on.
+
+**Nothing fails when it is wrong.** `git status`, `git log` and `git show
+HEAD:…` describe the checked-out commit; `grep`, `cat` and `ls` never consult
+it, reading instead whatever is on disk — that commit plus any uncommitted
+work, another agent's half-written draft included. Nothing announces that the
+checkout is old: `git status` names the detached state only in its header
+(`HEAD detached at <sha>`, `## HEAD (no branch)` under `-sb`), `git log` prints
+each commit's `Date:`, and `--decorate` shows `(HEAD -> main)` on a branch
+against `(HEAD, main)` detached. What none of them report is **how far behind
+`origin/main` the checkout is**: that takes a fetch and an explicit
+`git rev-list --count HEAD..origin/main`, because `git status` compares only
+against the local tracking ref — the stale-tracking-ref hazard "Read the
+committed ref, not the working tree" already covers — and a detached head has
+no upstream to compare with at all.
+
+**Measured, not hypothetical.** A lane working on the i18n strings read a
+`~/local-operator-ui` checkout detached since 2026-10-22 and 472 commits behind
+`origin/main`, clean, and reported an issue as open that had already merged. The
+same checkout corrupted a programme census twice. The cost is not a crash; it is
+a confident wrong answer, indistinguishable from a correct one until someone
+checks.
+
+**When you catch it, re-derive rather than quietly correct the number.** Read
+the claim again from the ref, report the corrected value with the ref and commit
+you read it from, and say the earlier figure came from a checkout. A quiet fix
+leaves the next reader unable to tell which of the two numbers was measured.
+
+This is the read-side sibling of "Branch-moving commands: one target, one
+invocation" above: that rule makes the target a command acts on visible, this
+one makes the ref a claim came from visible. The content question — does the
+repository contain this? — is the same hazard, covered by "Read the committed
+ref, not the working tree" under *Environment*.
 
 ## Who may merge: two tiers
 

@@ -1,0 +1,11 @@
+{
+  "cli.services_help.services": "将此机器的非运行时服务（serve守护进程和受监督的守护进程）切换至当前构建，不停止任何运行中的对话",
+  "cli.services_help.services_description": "local_operator在此机器上运行的所有非对话服务。“服务”指`lop serve`守护进程或受监督的LaunchAgent，包括mobile中继、browser桥接、隧道和wakes智能体。运行时，即承载对话的进程，绝不会被停止：'restart'原地重载serve守护进程，保留其pid和套接字。",
+  "cli.services_help.status": "报告每个非运行时服务、其提供服务的构建，以及当前安装的构建",
+  "cli.services_help.status_description": "只读。显示当前安装的构建，以及每个`lop serve`守护进程实际提供服务的构建，完整呈现比较双方，因为此机器常见的偏差是同版本重建，仅凭版本号无法发现守护进程落后。",
+  "cli.services_help.restart": "将所有服务切换至当前构建（绝不停止运行时）",
+  "cli.services_help.wait": "等待已请求的守护进程以新构建恢复的时间（默认：{wait_seconds}秒；必须为正值）。未能恢复的守护进程会被报告，并继续以原加载的构建提供服务，下次运行`lop services restart`时重试。",
+  "cli.services_help.reclaim": "结束有记录但未在其地址提供服务的`lop serve`守护进程（绝不结束正在提供服务的进程）",
+  "cli.services_help.reclaim_description": "确认进程是本产品的serve守护进程，且不是在其记录地址提供服务的那个进程后，请求由pid指定的一个serve守护进程退出，超时则从SIGTERM升级至SIGKILL。`lop services status`列出适用的守护进程。此操作绝不自动执行：守护进程可能监督会话运行时，仅凭记录无法证明后继进程已准备好接替。",
+  "cli.services_help.pid": "守护进程的pid，须与`lop services status`输出完全一致"
+}

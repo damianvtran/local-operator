@@ -1,0 +1,171 @@
+{
+ "namespace": "tui.app",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. 46 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round.",
+ "hash_equality": {
+  "source_sha256_prior_row": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+  "source_sha256_held_candidate": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+  "source_sha256_current": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "e1f79b11108e0179e4b0a9e6b8a7c273931fd322ddc9e483d54042f45567b490",
+  "target_sha256_current": "e1f79b11108e0179e4b0a9e6b8a7c273931fd322ddc9e483d54042f45567b490",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 46,
+  "zh_count": 46,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 46,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 22,
+   "medium_40_80": 18,
+   "long_80_120": 3,
+   "over_120": 3
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 4,
+   "medium_40_80": 3,
+   "long_80_120": 1,
+   "over_120": 3
+  },
+  "all_over_120": [
+   "tui.app.help.notify_note",
+   "tui.app.help.notify_note_more",
+   "tui.app.stop_all.will_be_stopped"
+  ],
+  "all_plurals": [
+   "tui.app.config.effect_new",
+   "tui.app.config.needs_relaunch",
+   "tui.app.parked.monitors",
+   "tui.app.parked.wakes",
+   "tui.app.skills.led_by",
+   "tui.app.stop_all.will_be_stopped"
+  ],
+  "keys_sampled": 15,
+  "fraction_of_namespace": 0.3261,
+  "selected": [
+   "tui.app.aida.extras_used",
+   "tui.app.aida.next_checkin",
+   "tui.app.config.effect_new",
+   "tui.app.config.needs_relaunch",
+   "tui.app.help.model_saved_note",
+   "tui.app.help.notify_note",
+   "tui.app.help.notify_note_more",
+   "tui.app.help.title_note",
+   "tui.app.parked.monitors",
+   "tui.app.parked.wakes",
+   "tui.app.providers.none",
+   "tui.app.providers.stale_named",
+   "tui.app.skills.led_by",
+   "tui.app.stop_all.repeat_hint",
+   "tui.app.stop_all.will_be_stopped"
+  ]
+ },
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+ "cur_src": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+ "old_tgt": "e1f79b11108e0179e4b0a9e6b8a7c273931fd322ddc9e483d54042f45567b490",
+ "new_tgt": "e1f79b11108e0179e4b0a9e6b8a7c273931fd322ddc9e483d54042f45567b490",
+ "attest_sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 22,
+   "medium_40_80": 18,
+   "long_80_120": 3,
+   "over_120": 3
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 4,
+   "medium_40_80": 3,
+   "long_80_120": 1,
+   "over_120": 3
+  },
+  "all_over_120": [
+   "tui.app.help.notify_note",
+   "tui.app.help.notify_note_more",
+   "tui.app.stop_all.will_be_stopped"
+  ],
+  "all_plurals": [
+   "tui.app.config.effect_new",
+   "tui.app.config.needs_relaunch",
+   "tui.app.parked.monitors",
+   "tui.app.parked.wakes",
+   "tui.app.skills.led_by",
+   "tui.app.stop_all.will_be_stopped"
+  ],
+  "keys_sampled": 15,
+  "fraction_of_namespace": 0.3261,
+  "selected": [
+   "tui.app.aida.extras_used",
+   "tui.app.aida.next_checkin",
+   "tui.app.config.effect_new",
+   "tui.app.config.needs_relaunch",
+   "tui.app.help.model_saved_note",
+   "tui.app.help.notify_note",
+   "tui.app.help.notify_note_more",
+   "tui.app.help.title_note",
+   "tui.app.parked.monitors",
+   "tui.app.parked.wakes",
+   "tui.app.providers.none",
+   "tui.app.providers.stale_named",
+   "tui.app.skills.led_by",
+   "tui.app.stop_all.repeat_hint",
+   "tui.app.stop_all.will_be_stopped"
+  ]
+ },
+ "attest_verdict": "carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

@@ -30,6 +30,7 @@ covered separately, and QA drives the whole thing across real processes.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import time
 from typing import Any
 
@@ -151,6 +152,60 @@ def _borrower_client(mesh: Any) -> MeshCredentialClient:
 def _audit(server: relay.RelayServer, event: str) -> list[dict[str, Any]]:
     server.audit.flush()
     return [row for row in server.audit.tail(500) if row.get("event") == event]
+
+
+def test_an_mcp_borrow_follows_an_owner_rotation_over_both_relay_legs(mesh: Any) -> None:
+    """A holder re-borrows the owner's current MCP token; no refresh copy exists.
+
+    Both relay legs and the real client/store APIs are in the path. The rotation
+    is persisted through ``McpTokenStorage`` itself, and only synthetic values
+    are used.
+    """
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+    from local_operator.providers.auth_store import AuthStore
+
+    url = "https://mcp.rotation.test/mcp"
+    key = f"mcp:{url}"
+    auth = AuthStore(config_dir=mesh.a.root)
+    try:
+        storage = McpTokenStorage(url, auth)
+        asyncio.run(
+            storage.set_tokens(
+                OAuthToken.model_validate(
+                    {
+                        "access_token": "synthetic-access-one",
+                        "refresh_token": "synthetic-refresh-one",
+                        "expires_in": 3600,
+                    }
+                )
+            )
+        )
+        assert _lop_network("credential", "share", key, "--with", mesh.b.identity.name) == 0
+        assert key in _pull(mesh).get("changed", [])
+        client = _borrower_client(mesh)
+
+        first = client.request_grant_sync(key, provider="mcp-oauth")
+        assert isinstance(first, Grant), first
+        assert first.access_token == "synthetic-access-one"
+
+        assert storage.store_refresh_result(
+            OAuthToken.model_validate(
+                {
+                    "access_token": "synthetic-access-two",
+                    "refresh_token": "synthetic-refresh-two",
+                    "expires_in": 3600,
+                }
+            ),
+            **{"presented_refresh_token": "synthetic-refresh-one"},
+        )
+        second = client.request_grant_sync(key, provider="mcp-oauth")
+        assert isinstance(second, Grant), second
+        assert second.access_token == "synthetic-access-two"
+        assert second.grant_id != first.grant_id
+    finally:
+        auth.close()
 
 
 def test_a_share_reaches_the_borrower_and_a_borrow_is_served_over_the_link(

@@ -1,0 +1,190 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "audit_kind": "independent_carried_namespace_attestation",
+ "locale": "zh-CN",
+ "namespace": "tui.import",
+ "audit_date": "2026-10-24",
+ "verdict": "carried",
+ "verdict_reason": "Carried: the current English source sha256 equals the held-candidate ledger row's source_sha256 and the held candidate's committed English bytes; the current target sha256 equals the held candidate's committed target bytes (the ledger row does not record a target hash). Key set and order match English, every ICU message parses with English's argument tuples, and the stratified semantic sample found no blocker or major finding.",
+ "attested_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+ "held_candidate_revision": "ebb70df3a887aa7e9b448560e0546c2cf817b133",
+ "change_since_held_candidate": null,
+ "prior_audit": {
+  "ledger_path": "i18n/ledger.json",
+  "status": "passed",
+  "auditor": {
+   "agent": "i18n-auditor",
+   "model": "anthropic/claude-sonnet-5-5",
+   "date": "2026-10-19",
+   "result": "passed",
+   "findings": 0
+  },
+  "translator": {
+   "agent": "i18n-translator",
+   "model": "openai/gpt-6.1-sol",
+   "date": "2026-10-19"
+  },
+  "note": "zh-CN core held-candidate wave 2026-10-19. 87 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round."
+ },
+ "hash_equality_proof": {
+  "source": {
+   "prior_ledger_row_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+   "held_candidate_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+   "current_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+   "equal": true
+  },
+  "target": {
+   "prior_ledger_row_sha256": null,
+   "held_candidate_sha256": "1020564406e7807119d0fb10c7a5bb6e626ad451e8740774fbd4f77f412bf8e6",
+   "current_sha256": "1020564406e7807119d0fb10c7a5bb6e626ad451e8740774fbd4f77f412bf8e6",
+   "equal": true,
+   "note": "The held-candidate ledger row schema records source_sha256 only. Target equality is therefore proven against the held candidate's committed zh-CN catalogue bytes at ebb70df3a887aa7e9b448560e0546c2cf817b133."
+  },
+  "context_sidecar": {
+   "path": "local_operator/i18n/catalogues/en/tui.import.context.json",
+   "held_candidate_sha256": null,
+   "current_sha256": null,
+   "equal": true
+  },
+  "policy_unchanged_since_held_candidate": true,
+  "policy": {
+   "glossary": {
+    "path": "i18n/glossary.md",
+    "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd",
+    "held_candidate_sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+   },
+   "style_guide": {
+    "path": "i18n/style-guides/zh-CN.md",
+    "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+    "held_candidate_sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+   }
+  },
+  "whole_file_target_bytes_equal_held_candidate": true
+ },
+ "key_set_and_order": {
+  "en_key_count": 87,
+  "zh_key_count": 87,
+  "set_equal": true,
+  "order_equal": true,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 87,
+  "parse_errors": [],
+  "argument_set_mismatches": [],
+  "plural_category_failures": [],
+  "plural_note": "zh-CN uses the 'other' category only; every plural keeps an 'other' branch and English's argument tuple."
+ },
+ "technical_tokens": {
+  "patterns": [
+   "angle_token",
+   "ansi_escape",
+   "backtick_span",
+   "home_or_absolute_path",
+   "long_flag",
+   "percent_token",
+   "url_scheme"
+  ],
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder.",
+  "note": "Flags, backticks, angle tokens, ANSI escapes, URLs, paths and %-tokens are compared literally; kept-English identifiers are checked against the style-guide list; ALL-CAPS emphasis is not a placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width": {
+  "declared_max_cells_keys": [],
+  "over_budget": [],
+  "note": "Cells counted as 2 for East Asian W/F, 1 for ASCII, 0 for combining marks."
+ },
+ "sample_review": {
+  "method": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "keys_read": 24,
+  "fraction_of_namespace": 0.2759,
+  "buckets": {
+   "short_lt40": 62,
+   "medium_40_80": 16,
+   "long_80_120": 5,
+   "over_120": 4
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 10,
+   "medium_40_80": 3,
+   "long_80_120": 1,
+   "over_120": 4
+  },
+  "all_over_120_read": [
+   "tui.import.metadata_only_explain",
+   "tui.import.preview_summary",
+   "tui.import.result_summary",
+   "tui.import.session_meta"
+  ],
+  "all_plurals_read": [
+   "tui.import.pending_count",
+   "tui.import.preview_memory",
+   "tui.import.preview_narrow",
+   "tui.import.preview_narrow_metadata",
+   "tui.import.preview_summary",
+   "tui.import.preview_warnings",
+   "tui.import.result_detail",
+   "tui.import.result_summary",
+   "tui.import.result_warnings",
+   "tui.import.session_meta",
+   "tui.import.source_row"
+  ],
+  "keys_selected": [
+   "tui.import.all_none",
+   "tui.import.empty_sessions",
+   "tui.import.error_busy",
+   "tui.import.error_no_job",
+   "tui.import.error_source",
+   "tui.import.hint_cancel",
+   "tui.import.hint_import",
+   "tui.import.job_status",
+   "tui.import.metadata_only_explain",
+   "tui.import.outcome_failed",
+   "tui.import.outcome_imported",
+   "tui.import.pending_count",
+   "tui.import.phase_session",
+   "tui.import.preview_memory",
+   "tui.import.preview_narrow",
+   "tui.import.preview_narrow_metadata",
+   "tui.import.preview_summary",
+   "tui.import.preview_warnings",
+   "tui.import.progress_header",
+   "tui.import.result_detail",
+   "tui.import.result_summary",
+   "tui.import.result_warnings",
+   "tui.import.session_meta",
+   "tui.import.source_row"
+  ],
+  "findings": []
+ },
+ "findings": [],
+ "finding_counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "evidence_files": [
+  "attestation.json",
+  "record.json",
+  "report.md",
+  "audit.log",
+  "mechanical-raw.json",
+  "runtime-mechanical.json",
+  "pseudo-evidence.json",
+  "tui.import.pairs.txt",
+  "tui.import.compact.txt",
+  "receipt.json"
+ ],
+ "not_claimed": "No native TUI, relay, desktop, rendered-fit or design sign-off is claimed. This record attests byte carry and a sampled semantic read; it does not re-translate or re-audit the namespace from scratch."
+}

@@ -1,0 +1,381 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.remote_compute",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "generated_utc": "2026-10-25T00:45:59Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 43,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "wire.remote_compute.alone",
+      "zh_render": "--remote-status和--remote-cancel是独立命令：单独运行其中一个，不要与--remote或其他运行选项一起使用。",
+      "en_render": "--remote-status and --remote-cancel are commands of their own: run one on its own, without --remote or other run options.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.api_override",
+      "zh_render": "由于设置了LOP_REMOTE_COMPUTE_API_URL，远程计算正将你的Radient登录信息和请求发送到<host>，而不是默认的Radient API。除非你控制该主机，否则取消设置该变量。",
+      "en_render": "Remote compute is sending your Radient login and requests to <host> instead of the default Radient API, because LOP_REMOTE_COMPUTE_API_URL is set. Unset it unless you control that host.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.api_override_invalid",
+      "zh_render": "LOP_REMOTE_COMPUTE_API_URL必须是https:// URL，或仅限127.0.0.1、::1或localhost上的http://；不得包含用户信息、查询或片段，不得含空白、控制字符或非ASCII字符，也不得使用百分号编码；远程计算未启动。",
+      "en_render": "LOP_REMOTE_COMPUTE_API_URL must be an https:// URL, or http:// on 127.0.0.1, ::1 or localhost, with no userinfo, query or fragment, no whitespace, control or non-ASCII characters and no percent-encoding; remote compute did not start.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.bad_repo",
+      "zh_render": "由于本次运行从远端克隆仓库，--repo必须是https://或ssh:// URL，或git@host:path形式的地址；不能使用本地路径。",
+      "en_render": "Because this run clones the repository from the far end, --repo must be an https:// or ssh:// URL, or a git@host:path address; a local path cannot be used.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.bad_sha",
+      "zh_render": "--sha值必须是完整的40字符提交SHA：分支名或缩写哈希可能解析成另一个提交，而不是本次运行提交时指定的那个提交。",
+      "en_render": "The --sha value must be a full 40-character commit SHA: a branch name or an abbreviated hash could resolve to a different commit than the one this run was submitted for.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.cancelled",
+      "zh_render": "远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3已取消。",
+      "en_render": "Remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 is cancelled.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.conflict",
+      "zh_render": "该幂等键已用于不同的请求体。用--idempotency-key传入新键。",
+      "en_render": "That idempotency key was already used with a different request body. Pass a new one with --idempotency-key.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.detached",
+      "zh_render": "已提交远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3。\n网络（Radient已确认）：net_01J8Z3K4M5N6P7Q8R9S0\n幂等键：01J8Z3K4M5N6P7Q8R9S0T1U2V3\n查看进度：lop exec --remote-status 01J8Z3K4M5N6P7Q8R9S0T1U2V3\n取消运行：lop exec --remote-cancel 01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+      "en_render": "Remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 submitted.\nnetwork (confirmed by Radient): net_01J8Z3K4M5N6P7Q8R9S0\nIdempotency key: 01J8Z3K4M5N6P7Q8R9S0T1U2V3\nFollow it: lop exec --remote-status 01J8Z3K4M5N6P7Q8R9S0T1U2V3\nCancel it: lop exec --remote-cancel 01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.disabled",
+      "zh_render": "远程计算已关闭。用`lop config edit remote_compute.enabled true`开启，然后重新运行此命令。",
+      "en_render": "Remote compute is off. Turn it on with `lop config edit remote_compute.enabled true`, then run this again.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.failed",
+      "zh_render": "远程计算失败：permission denied",
+      "en_render": "remote compute failed: permission denied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.finished_cancelled",
+      "zh_render": "远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3已结束：已取消。",
+      "en_render": "Remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 finished: cancelled.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.finished_charged",
+      "zh_render": "已计费：$0.12",
+      "en_render": "charged: $0.12",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.finished_exit_code",
+      "zh_render": "退出码：1",
+      "en_render": "exit code: 1",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.finished_expired",
+      "zh_render": "远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3已结束：已过期，即在完成前到达了截止时间。",
+      "en_render": "Remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 finished: expired, so it reached its deadline before it was done.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.finished_failed",
+      "zh_render": "远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3已结束：失败。",
+      "en_render": "Remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 finished: failed.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.finished_succeeded",
+      "zh_render": "远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3已结束：成功。",
+      "en_render": "Remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 finished: succeeded.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.finished_unknown",
+      "zh_render": "远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3已不再运行，但Radient未报告此构建能够识别的结果。",
+      "en_render": "Remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 is no longer running, but Radient reported no outcome this build can read.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.interrupted",
+      "zh_render": "已停止监视运行01J8Z3K4M5N6P7Q8R9S0T1U2V3；它仍在远程运行。取消命令：lop exec --remote-cancel 01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+      "en_render": "Stopped watching run 01J8Z3K4M5N6P7Q8R9S0T1U2V3; it is still running remotely. Cancel it with: lop exec --remote-cancel 01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.invalid_request",
+      "zh_render": "Radient以无效为由拒绝了该请求。这是本客户端的缺陷，不是重输一遍就能解决的问题。",
+      "en_render": "Radient rejected the request as invalid. That is a bug in this client, not something to retype.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.key_empty",
+      "zh_render": "空的--idempotency-key会被拒绝，而不会替换为新键：省略该选项以生成新键，或传入你正在重试的那次运行的键。",
+      "en_render": "An empty --idempotency-key is refused rather than replaced with a fresh key: leave the flag out to mint one, or pass the key of the run you are retrying.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.key_not_printable",
+      "zh_render": "幂等键必须是可打印ASCII：仅限字母、数字和标点，不能含重音字符、制表符或换行符。",
+      "en_render": "The idempotency key must be printable ASCII: letters, digits and punctuation only, with no accents, tabs or newlines.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.key_too_long",
+      "zh_render": "幂等键超过4,096字节，服务器会拒绝：传入不超过4,096字节的键。",
+      "en_render": "The idempotency key is longer than 4,096 bytes, which the server refuses: pass a key of at most 4,096 bytes.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.local_only",
+      "zh_render": "--size仅适用于本地运行，因此不能与--remote一起使用。",
+      "en_render": "--size only makes sense for a local run, so it cannot be combined with --remote.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.needs_prompt",
+      "zh_render": "--remote需要提示词：将任务作为唯一的位置参数传入。",
+      "en_render": "--remote needs a prompt: pass the task as the one positional argument.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.needs_repo",
+      "zh_render": "--remote需要--repo <url>和--sha <commit>：此运行从不上传本地文件，因此需指定要检出的仓库和提交。",
+      "en_render": "--remote needs --repo <url> and --sha <commit>: this run never uploads local files, so name the repository and commit to check out.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.network_mismatch",
+      "zh_render": "Radient返回的运行来自另一个网络，或未带网络ID，因此无法将其报告为本网络的运行。",
+      "en_render": "Radient answered with a run from another network, or without a network id, so it cannot be reported as a run of this network.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.no_capacity",
+      "zh_render": "Radient当前没有远程计算容量；稍后重试。",
+      "en_render": "Radient has no remote-compute capacity right now; try again later.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.no_credit",
+      "zh_render": "此账户在Radient没有计算额度，因此该运行未被接纳。",
+      "en_render": "Radient has no compute credit for this account, so the run was not admitted.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.only_with",
+      "zh_render": "--size仅在配合--remote时适用。",
+      "en_render": "--size only applies with --remote.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.preview_not_enabled",
+      "zh_render": "此Radient账户尚未启用远程计算（预览）。",
+      "en_render": "Remote compute is not enabled for this Radient account yet (preview).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.replayed",
+      "zh_render": "该幂等键匹配到较早的一次提交，因此这是远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3，未创建新运行。",
+      "en_render": "The idempotency key matched an earlier submission, so this is remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 and no new run was created.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.retrying",
+      "zh_render": "Radient报告此运行出错并正在重试，因此本次监视继续。",
+      "en_render": "Radient reported an error for this run and retries it, so this watch continues.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.run_identity_mismatch",
+      "zh_render": "Radient返回的是远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3，而不是所请求的运行01J8Z3K4M5N6P7Q8R9S0T1U2V4，因此无法将此响应报告为该运行的状态。",
+      "en_render": "Radient answered for remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3, not the run 01J8Z3K4M5N6P7Q8R9S0T1U2V4 that was asked for, so this response cannot be reported as that run's state.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.status_line",
+      "zh_render": "状态：running",
+      "en_render": "status: running",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.status_network_matched",
+      "zh_render": "已核对网络：此运行位于net_01J8Z3K4M5N6P7Q8R9S0，即本设备的网络。",
+      "en_render": "network checked: this run is in net_01J8Z3K4M5N6P7Q8R9S0, this device's network.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.status_network_mismatch",
+      "zh_render": "已核对网络：此运行位于net_01J8Z3K4M5N6P7Q8R9S0，这不是本设备的网络。",
+      "en_render": "network checked: this run is in net_01J8Z3K4M5N6P7Q8R9S0, which is not this device's network.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.status_network_unconfirmed",
+      "zh_render": "网络未确认：本设备无法判断此运行属于哪个网络。",
+      "en_render": "network unconfirmed: this device cannot tell which network this run belongs to.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.status_unknown",
+      "zh_render": "状态：running（此构建不认识的状态；仍在监视）",
+      "en_render": "status: running (not a status this build knows; still watching)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.still_running",
+      "zh_render": "运行01J8Z3K4M5N6P7Q8R9S0T1U2V3已超过Radient为其报告的2小时上限，但仍在运行，因此本命令已停止监视。查看命令：lop exec --remote-status 01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+      "en_render": "Run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 is still running past the 2-hour limit Radient reported for it, so this command stopped watching. Check it with: lop exec --remote-status 01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.submitted",
+      "zh_render": "已提交远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3。\n网络（Radient已确认）：net_01J8Z3K4M5N6P7Q8R9S0",
+      "en_render": "Remote run 01J8Z3K4M5N6P7Q8R9S0T1U2V3 submitted.\nnetwork (confirmed by Radient): net_01J8Z3K4M5N6P7Q8R9S0",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.unknown_run",
+      "zh_render": "所选登录名下，Radient没有这样的远程运行。",
+      "en_render": "Radient has no such remote run for the selected login.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.unreachable",
+      "zh_render": "无法连接到Radient；检查网络后重试。",
+      "en_render": "Radient could not be reached; check the network and try again.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.remote_compute.unreadable_envelope",
+      "zh_render": "Radient的响应格式已更改，此lop构建无法读取。用`lop-update`更新lop后重试。",
+      "en_render": "Radient's response format has changed, and this lop build cannot read it. Update lop with `lop-update` and try again.",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]*[\\w/-]",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

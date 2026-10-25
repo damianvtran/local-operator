@@ -1,0 +1,115 @@
+{
+ "schema": 1,
+ "audit_id": "zha25a1",
+ "audit_id_assigned_by": "implementation session, 2026-10-25 — no audit id was issued when the audit ran; the id exists so the bundle path can be cited from the ledger",
+ "audit_kind": "independent_current_byte_namespace_audit",
+ "locale": "zh-CN",
+ "namespace": "relay.asks",
+ "audit_date": "2026-10-25",
+ "audited_revision": null,
+ "audited_revision_note": "The audit did not record a git revision; the bytes it audited are identified by the hashes in input_hashes. They were restored at ab44bbb04a and became tracked there; the attestation commit is 58102b3ae3cd0062e4f2dfee89f4b150bf330b68. The restored catalogue has not changed since ab44bbb04a.",
+ "attestation_revision": "58102b3ae3cd0062e4f2dfee89f4b150bf330b68",
+ "key_count": {
+  "en": 77,
+  "target": 77
+ },
+ "verdict": "passed",
+ "verdict_reason": "Restored bytes audited at round 1: 77/77 keys, 0 placeholder mismatches, 4 plural keys all other-only and rendering '#', no bidi controls, no English leakage except the intentional mode token 'ask'. 4 MINOR + 1 NIT, 0 blocker, 0 major, so the row attests.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session": "not recorded in the ledger row (the auditing session id was not preserved)",
+  "model": "deepseek/deepseek-flash",
+  "actual_model_source": "the auditing session's own header, as recorded in the ledger row",
+  "date": "2026-10-25",
+  "independence": "Independent agent: it read no prior findings before forming its own view. No second pass was run for this namespace (round 1 only), and the auditor recorded that it is not a native Chinese reader."
+ },
+ "translator": {
+  "agent": "i18n-translator",
+  "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+  "date": "unrecorded"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.asks.json",
+   "sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+   "matches_ledger_source_sha256": true
+  },
+  "en_context_sidecar": {
+   "path": "local_operator/i18n/catalogues/en/relay.asks.context.json",
+   "sha256": "af782cea8a1156b8e0612739254ffec7a807cf8bd53deaed3b6b28e6d61366f2",
+   "note": "hash of the sidecar at the attestation revision, i.e. over the audited bytes"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/zh-CN/relay.asks.json",
+   "sha256": "915fef75f0c939a5dcc0c31eb5637e8ef85c253279002eb6f1d118bf180783ea",
+   "matches_current_working_tree": true
+  }
+ },
+ "artifacts": [
+  "report.md",
+  "mechanical-recheck.log",
+  "recheck.py.txt",
+  "receipt.json"
+ ],
+ "audit_log": {
+  "path": null,
+  "state": "absent",
+  "reason": "No command output was captured during the in-session audit; its mechanical figures were reported in prose in the ledger row. This bundle records the absence instead of reconstructing a log that never existed."
+ },
+ "mechanical_recheck": {
+  "path": "mechanical-recheck.log",
+  "run_by": "implementation session (not the auditor; not independent evidence)",
+  "run_at": "2026-10-25",
+  "revision": "58102b3ae3cd0062e4f2dfee89f4b150bf330b68",
+  "note": "A replay of the mechanical checks the ledger row reports, against the same git revision, so the claims can be re-derived from the audited bytes. It does not stand in for the audit's own log."
+ },
+ "findings": [
+  {
+   "id": "Q1",
+   "severity": "minor",
+   "text": "sheet.title_plain '提问' — the same defect class the other six locales were fixed for on 2026-10-20 (their rows record 'demandes'/'consultas'/'पूछताछ'/'запросы'/'yêu cầu'/'درخواستیں' as section nouns distinct from the question word); 提问 is the question-asking verb, so the sheet that also holds approvals and secrets is named with the question word. Not major: rows inside carry their own kind labels and the dock badge is unchanged. Recommend '请求' (already used in card.request_needs_answer) in the next copy pass."
+  },
+  {
+   "id": "Q2",
+   "severity": "minor",
+   "text": "pending.kind_approval '需要审批' / kind_secret '需要机密信息'. 需要审批 is accurate and is the vocabulary gate.body/notice_auto already use; the weak point is '机密信息' for a secret value, since zh has no recorded credentials/secret rendering (glossary §2 note 6 leaves the zh cell '—'). The card's masked field and card.secret_notice carry the meaning."
+  },
+  {
+   "id": "Q3",
+   "severity": "minor",
+   "text": "card.decline and pending.deny both render '拒绝'. They never co-occur (decline sits beside 'send answer' on the ask card, deny beside 'approve' on the approval card) and five of seven locales collapse them identically (fr 'refuser', hi 'अस्वीकार करें', vi 'từ chối', ur 'انکار کریں'); the English pair is a register distinction, not a functional one, and both refuse."
+  },
+  {
+   "id": "Q4",
+   "severity": "minor",
+   "text": "gate.unpaired_after '模式从不需要配对。' extends the bold 'ask' label with 模式 (necessary in Chinese) but joins without a connective; rendered it reads '将审批保持在 ask 模式从不需要配对。' — understandable, slightly run-on, no meaning loss."
+  },
+  {
+   "id": "Q6",
+   "severity": "nit",
+   "text": "dock.waiting / dock.timed_out / title_waiting write '# 个…' with a space while title_lapsed writes '{count}个…' without one — pick one convention."
+  },
+  {
+   "id": "Q5",
+   "severity": "rejected",
+   "text": "sheet.loading '……' — REJECTED, not a defect: the zh style guide mandates '…… (two marks)' and 62 other zh catalogue strings already use it (tui.library.loading, relay.session.past.loading, mobile.setup.checking), while the six single-'…' strings are all inside comma-separated Latin lists; the sidecar's 'The ellipsis is U+2026' pins the character class, not a count."
+  }
+ ],
+ "noted_outside_scope": [
+  "The ledger row's comment on Q1 notes '请求' is already used in card.request_needs_answer, so the recommended fix reuses existing copy rather than adding a term."
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "blocker": 0,
+  "major": 0,
+  "minor": 4,
+  "nit": 1,
+  "rejected": 1,
+  "findings_total": 5
+ },
+ "limitations": [
+  "The auditor stated it is not a native Chinese reader; the findings above are the round-1 audit's, and the minor items ride the next zh copy pass rather than forcing another round.",
+  "This is a round-1 audit of the restored bytes, not a carried re-audit."
+ ]
+}

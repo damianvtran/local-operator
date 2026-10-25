@@ -1,0 +1,155 @@
+{
+ "namespace": "cli.global_help",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. 17 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round.",
+ "hash_equality": {
+  "source_sha256_prior_row": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+  "source_sha256_held_candidate": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+  "source_sha256_current": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "432b0a321f314fff0b66799cc01f0a4e78c013937405a53d694a618bb1e014ea",
+  "target_sha256_current": "432b0a321f314fff0b66799cc01f0a4e78c013937405a53d694a618bb1e014ea",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 17,
+  "zh_count": 17,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 17,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 3,
+   "medium_40_80": 6,
+   "long_80_120": 1,
+   "over_120": 7
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 1,
+   "medium_40_80": 1,
+   "long_80_120": 1,
+   "over_120": 7
+  },
+  "all_over_120": [
+   "cli.global_help.agent",
+   "cli.global_help.description",
+   "cli.global_help.hosting",
+   "cli.global_help.model",
+   "cli.global_help.resume",
+   "cli.global_help.train",
+   "cli.global_help.yolo_conditional"
+  ],
+  "all_plurals": [],
+  "keys_sampled": 10,
+  "fraction_of_namespace": 0.5882,
+  "selected": [
+   "cli.global_help.agent",
+   "cli.global_help.debug",
+   "cli.global_help.description",
+   "cli.global_help.hosting",
+   "cli.global_help.model",
+   "cli.global_help.resume",
+   "cli.global_help.run_in",
+   "cli.global_help.train",
+   "cli.global_help.tui",
+   "cli.global_help.yolo_conditional"
+  ]
+ },
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+ "cur_src": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+ "old_tgt": "432b0a321f314fff0b66799cc01f0a4e78c013937405a53d694a618bb1e014ea",
+ "new_tgt": "432b0a321f314fff0b66799cc01f0a4e78c013937405a53d694a618bb1e014ea",
+ "attest_sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 3,
+   "medium_40_80": 6,
+   "long_80_120": 1,
+   "over_120": 7
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 1,
+   "medium_40_80": 1,
+   "long_80_120": 1,
+   "over_120": 7
+  },
+  "all_over_120": [
+   "cli.global_help.agent",
+   "cli.global_help.description",
+   "cli.global_help.hosting",
+   "cli.global_help.model",
+   "cli.global_help.resume",
+   "cli.global_help.train",
+   "cli.global_help.yolo_conditional"
+  ],
+  "all_plurals": [],
+  "keys_sampled": 10,
+  "fraction_of_namespace": 0.5882,
+  "selected": [
+   "cli.global_help.agent",
+   "cli.global_help.debug",
+   "cli.global_help.description",
+   "cli.global_help.hosting",
+   "cli.global_help.model",
+   "cli.global_help.resume",
+   "cli.global_help.run_in",
+   "cli.global_help.train",
+   "cli.global_help.tui",
+   "cli.global_help.yolo_conditional"
+  ]
+ },
+ "attest_verdict": "carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

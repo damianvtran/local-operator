@@ -1,0 +1,20 @@
+tui.library.ask_prompt_digest	Tell me about this asset: {name} (asset {id}) — {kind}. What is it, and how might I use it?	介绍一下这个资源：{name}（资源{id}）— {kind}。它是什么，我可以如何使用？
+tui.library.ask_seeded	The composer is ready with a question about {name}.	输入框已填入关于{name}的问题。
+tui.library.asset_count	{count, plural, one {# asset} other {# assets}}	{count, plural, other {#个资源}}
+tui.library.detail_meta	{kind} · {origin} · {size} · {when}	{kind} · {origin} · {size} · {when}
+tui.library.detail_no_description	no description	无描述
+tui.library.detail_organized	organized {when}	整理于{when}
+tui.library.detail_sources	{count, plural, one {# conversation} other {# conversations}}	{count, plural, other {#个会话}}
+tui.library.detail_unorganized	not organized	未整理
+tui.library.form_description_placeholder	what this asset is for	此资源的用途
+tui.library.hint_cancel	cancel	取消
+tui.library.hint_move	move	移动
+tui.library.hint_open	open	打开
+tui.library.librarian_no_launcher	Opening the Librarian needs a session-capable launcher — see the CLI.	打开Librarian需要支持会话的启动器 — 参见CLI。
+tui.library.librarian_status	Librarian: {state}	Librarian：{state}
+tui.library.loading	Reading the library…	正在读取资料库……
+tui.library.no_matches_body	Clear a filter or the search to see the whole library.	清除筛选条件或搜索内容以查看整个资料库。
+tui.library.no_matches_title	Nothing matches	无匹配项
+tui.library.notice_open_missing	{name} is no longer on disk.	{name}已不在磁盘上。
+tui.library.sort_type	type	类型
+tui.library.status_highlighted	Highlighted	已突出显示

@@ -1,0 +1,29 @@
+{
+  "scope_kind": "full_namespace",
+  "namespace": "wire.slash",
+  "locale": "zh-CN",
+  "audit_id": "zh24s1",
+  "revision_audited": "f286318c89053e5e00cbb7823f6f29cd6a06d205",
+  "catalogue_bytes_introduced_at": "4840abdeb650a44db3bd9b1f564b24b6546c099a",
+  "catalogue_attested_at": "00b3446cf3df78805988e25862133419a235e181",
+  "namespace_total_keys": 52,
+  "keys_read": 52,
+  "delta_key_count": 0,
+  "delta_keys": [],
+  "key_set_parity": true,
+  "order_parity": true,
+  "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+  "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+  "target_sha256": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+  "target_blob_sha1": "96198518bd7ec811904760f7e83770f230b275ce",
+  "finding_keys": [
+    "wire.slash.agent",
+    "wire.slash.highlights",
+    "wire.slash.team",
+    "wire.slash.context",
+    "wire.slash.failovers",
+    "wire.slash.hub",
+    "wire.slash.stop"
+  ],
+  "verdict": "clean_with_followups"
+}

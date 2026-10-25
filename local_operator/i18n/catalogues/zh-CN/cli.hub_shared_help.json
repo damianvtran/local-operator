@@ -1,0 +1,14 @@
+{
+  "cli.hub_shared_help.publish_yes": "跳过确认提示；不接受未解析的值（需使用--accept-unresolved）",
+  "cli.hub_shared_help.publish_preview_only": "运行预览并打印差异，不发布（若会泛化任何内容，则退出码为2）",
+  "cli.hub_shared_help.publish_json": "机器可读的预览输出；包含引用值和一次性commit固定值，需作为敏感信息处理",
+  "cli.hub_shared_help.publish_accept_unresolved": "确认预览无法分类的每个值，并原样发布",
+  "cli.hub_shared_help.publish_allow_internal_ops": "同意组织发布中的内部运营信息许可（需要--org；交互式显示同意文本）",
+  "cli.hub_shared_help.sync_check": "仅报告可用内容，不作更改",
+  "cli.hub_shared_help.sync_prefer": "解决冲突：对于双方均修改的部分，保留本地内容或采用hub内容",
+  "cli.hub_shared_help.sync_accept_unknown_baseline": "基线未知时应用：接纳hub新增内容，不移除任何本地内容",
+  "cli.hub_shared_help.sync_replace": "丢弃本地副本，改用hub副本（回显丢弃内容；需要--yes）",
+  "cli.hub_shared_help.sync_yes": "确认--replace",
+  "cli.hub_shared_help.sync_dry_run": "显示将发生的更改，不写入智能体记录",
+  "cli.hub_shared_help.sync_json": "以JSON输出报告"
+}

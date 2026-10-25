@@ -1,0 +1,19 @@
+# relay.session — sampled en/zh pairs for attestation zhca1
+# 4/17 keys; all >120 chars and all plurals included
+
+## relay.session.list.empty_hint  [48 chars]
+EN: start one below, or from the TUI on your machine
+ZH: 在下方新建会话，或在电脑上的TUI中开始
+
+## relay.session.model.loading  [8 chars]
+EN: loading…
+ZH: 正在加载……
+
+## relay.session.past.back  [4 chars]
+EN: back
+ZH: 返回
+
+## relay.session.view.empty_title  [15 chars]
+EN: no messages yet
+ZH: 暂无消息
+

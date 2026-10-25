@@ -18,6 +18,7 @@ Two properties are pinned here rather than only observed in the link tests:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -262,6 +263,111 @@ def test_git_row_keeps_the_placeholder_for_values_this_device_lacks(
 
 
 # ---------------------------------------------------------------------------
+# repository working copy — real git metadata, never a mocked filesystem seam
+# ---------------------------------------------------------------------------
+
+
+_REPOSITORY_URL = "https://github.com/damianvtran/local-operator"
+
+
+def _init_checkout(path: Path) -> None:
+    """Make a real checkout; an empty `.git` lookalike is not a valid fixture."""
+    subprocess.run(
+        ["git", "init", "--quiet", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _repository_row(path: Path, *, home: Path) -> dict[str, Any]:
+    fact = readiness.repository_fact(
+        home,
+        repository={"path": str(path), "url": _REPOSITORY_URL},
+    )
+    return readiness.repository_row(_member(), _facts(repository=fact), peer_label="cloud-node-1")
+
+
+def test_repository_default_is_derived_from_installed_project(tmp_path: Path) -> None:
+    """No request identity means the package's identity, never this machine's cwd."""
+    fact = readiness.repository_fact(home=tmp_path)
+
+    assert fact == {
+        "path": str(tmp_path / "local-operator"),
+        "url": _REPOSITORY_URL,
+        "state": "missing",
+    }
+
+
+def test_repository_checkout_is_ok_and_names_the_path(tmp_path: Path) -> None:
+    path = tmp_path / "checkout"
+    _init_checkout(path)
+
+    row = _repository_row(path, home=tmp_path)
+
+    assert row["ok"] is True
+    assert row.get("code", "") == ""
+    assert row["detail"] == (
+        f"cloud-node-1 has a git checkout at {path}: offloaded work has a working copy there"
+    )
+    assert row["observed"] == {"path": str(path), "state": "checkout"}
+    assert row["remedies"] == []
+
+
+def test_repository_missing_is_an_honest_warning_with_the_clone_remedy(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "missing"
+    before = sorted(tmp_path.rglob("*"))
+
+    row = _repository_row(path, home=tmp_path)
+
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_NO_REPOSITORY
+    assert row["detail"] == (
+        f"cloud-node-1 has no working copy at {path}: offloaded work for that repository "
+        "cannot edit or test it there"
+    )
+    assert row["remedies"] == [
+        f"on cloud-node-1, run `git clone {_REPOSITORY_URL} {path}`, then re-check"
+    ]
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN
+    assert readiness.onboarding_failures([row]) == []
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+def test_repository_plain_directory_is_distinguishable_from_a_missing_checkout(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "not-a-checkout"
+    path.mkdir()
+
+    row = _repository_row(path, home=tmp_path)
+
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_NOT_GIT_CHECKOUT
+    assert row["code"] != readiness.CODE_NO_REPOSITORY
+    assert row["detail"] == (
+        f"{path} on cloud-node-1 exists but is not a git checkout: offloaded work "
+        "does not have the repository's working copy there"
+    )
+    assert row["observed"]["state"] == "not_git_checkout"
+    assert f"git clone {_REPOSITORY_URL} {path}" in row["remedies"][0]
+
+
+def test_repository_row_is_inserted_after_git_identity_only() -> None:
+    assert readiness.PEER_SIDE_CHECKS == (
+        readiness.CAPABILITY_OPERATOR_AUTHORITY,
+        readiness.CAPABILITY_GIT,
+        readiness.CAPABILITY_REPOSITORY,
+        readiness.CAPABILITY_MCP_SERVERS,
+        readiness.CAPABILITY_MODEL_CREDENTIAL,
+        readiness.CAPABILITY_TOOLING,
+        readiness.CAPABILITY_RESILIENCE,
+    )
+
+
+# ---------------------------------------------------------------------------
 # (d)+(f) the user-scope MCP surface
 # ---------------------------------------------------------------------------
 
@@ -363,6 +469,321 @@ def test_a_missing_store_is_read_without_creating_one(
     assert not (ambient / "auth.db").exists()
 
 
+def _root_file_snapshot(root: Path) -> dict[str, tuple[int, int, str]]:
+    import hashlib
+
+    return {
+        path.name: (
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in root.iterdir()
+        if path.is_file()
+    }
+
+
+def _seed_mcp_row(root: Path, url: str) -> Any:
+    import asyncio
+
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    storage = McpTokenStorage(url, auth)
+    asyncio.run(
+        storage.set_tokens(
+            OAuthToken.model_validate(
+                {"access_token": "ready-fixture-access", "refresh_token": "ready-fixture-refresh"}
+            )
+        )
+    )
+    return auth
+
+
+def test_ready_reads_a_populated_closed_store_without_side_effects(tmp_path: Path) -> None:
+    """A quiescent DB stays accurate without schema/WAL writes (QA round 1, Q-1)."""
+    url = "https://mcp.notion.com/mcp"
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
+        encoding="utf-8",
+    )
+    auth = _seed_mcp_row(tmp_path, url)
+    auth.upsert_credential("openai", {"type": "oauth", "access": "ready-fixture-provider"})
+    auth.close()
+    before = _root_file_snapshot(tmp_path)
+    root_mtime = tmp_path.stat().st_mtime_ns
+
+    fact = viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login(url) is True
+    finally:
+        viewer.close()
+    fact = readiness.collect_peer_facts(tmp_path)["mcp"]
+
+    server = fact["servers"][0]
+    assert server["has_row"] is True
+    assert server["auth_diagnostics"]["sharing_mode"] == "finite_only"
+    assert readiness.has_local_provider_credential(tmp_path, "openai", read_only=True) is True
+    assert _root_file_snapshot(tmp_path) == before
+    assert tmp_path.stat().st_mtime_ns == root_mtime
+
+
+def test_ready_reports_an_open_wal_as_unavailable_not_empty_or_stale(tmp_path: Path) -> None:
+    """Immutable reads cannot see a live WAL; say UNKNOWN, never invent empty."""
+    url = "https://mcp.notion.com/mcp"
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
+        encoding="utf-8",
+    )
+    auth = _seed_mcp_row(tmp_path, url)
+    try:
+        assert auth.read_only_sidecar_present(), "the fixture needs an uncheckpointed WAL"
+        before = _root_file_snapshot(tmp_path)
+        root_mtime = tmp_path.stat().st_mtime_ns
+
+        fact = viewer = readiness.ViewerFacts(tmp_path)
+        try:
+            assert viewer.holds_mcp_login(url) is None
+        finally:
+            viewer.close()
+        fact = readiness.collect_peer_facts(tmp_path)["mcp"]
+
+        server = fact["servers"][0]
+        assert server["has_row"] is None
+        assert server["auth_diagnostics"]["access_state"] == "unknown"
+        assert server["auth_diagnostics"]["sharing_mode"] == "unavailable"
+        assert _root_file_snapshot(tmp_path) == before
+        assert tmp_path.stat().st_mtime_ns == root_mtime
+    finally:
+        auth.close()
+
+
+# This is the verdict specification, not a set of examples chosen to fit the code.
+# ``member`` means placement.owner_device == the checked peer's device id.
+_CREDENTIAL_TRUTH_TABLE = {
+    ("self", "healthy"): (True, ""),
+    ("self", "absent"): (False, readiness.CODE_NO_CREDENTIAL),
+    ("self", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("self", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("member", "healthy"): (True, ""),
+    ("member", "absent"): (False, readiness.CODE_UNKNOWN),
+    ("member", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("member", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("viewer", "healthy"): (True, ""),
+    ("viewer", "absent"): (True, ""),
+    ("viewer", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("viewer", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("third", "healthy"): (True, ""),
+    ("third", "absent"): (True, ""),
+    ("third", "corrupt"): (False, readiness.CODE_UNKNOWN),
+    ("third", "open_wal"): (False, readiness.CODE_UNKNOWN),
+}
+
+
+def _truth_fixture(
+    root: Path, placement_shape: str, store_state: str, *, observation: bool = False
+) -> Any:
+    """Build one real store/placement cell; return the writer the cell keeps open."""
+    from local_operator.network import store
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.credentials.types import credential_key_for_mcp
+    from tests.unit.mcp.test_credential_status import NETWORK, URL, _record
+
+    root.mkdir()
+    store.save(_record(), root)
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+    (root / "config.yml").write_text(
+        'version: "0.0.0"\nvalues:\n  hosting: openai\n  model_name: gpt-5\n',
+        encoding="utf-8",
+    )
+    mcp_key = credential_key_for_mcp(URL)
+    if placement_shape != "self":
+        owner = {"member": PEER, "viewer": VIEWER, "third": THIRD}[placement_shape]
+        owner_name = {"member": "holder", "viewer": "viewer", "third": "third-box"}[placement_shape]
+        with placement_mod.mutate(NETWORK, root, self_device=owner) as document:
+            for key, provider, kind in (
+                ("openai", "openai", "oauth-rotating"),
+                (mcp_key, URL, "mcp-rotating"),
+            ):
+                document.declare(
+                    key,
+                    owner_device=owner,
+                    owner_device_name=owner_name,
+                    provider=provider,
+                    kind=kind,
+                    by=owner,
+                )
+                # The member-owned cell deliberately includes the owner among
+                # holders: that is the shape whose generic borrow branch used
+                # to hide the owner's own absent store.
+                document.grant(key, PEER, scope="session", by=owner)
+        if observation:
+            observations = PlacementState(NETWORK, root=root)
+            for key in ("openai", mcp_key):
+                observations.observe(
+                    key,
+                    "owner_offline",
+                    reason="no answer",
+                    owner_device=owner,
+                    retry_after_ms=15_000,
+                )
+            observations.save()
+
+    auth = None
+    if store_state in {"healthy", "open_wal"}:
+        auth = _seed_mcp_row(root, URL)
+        auth.upsert_credential("openai", {"type": "oauth", "access": "ready-openai-fixture"})
+        if store_state == "healthy":
+            auth.close()
+            auth = None
+        else:
+            assert auth.read_only_sidecar_present()
+    elif store_state == "corrupt":
+        (root / "auth.db").write_bytes(b"not a database")
+    else:
+        assert store_state == "absent"
+    return auth
+
+
+def _truth_viewer(placement_shape: str) -> _FakeViewer:
+    placement = {}
+    if placement_shape != "self":
+        owner = {"member": PEER, "viewer": VIEWER, "third": THIRD}[placement_shape]
+        placement = {
+            "owner_device": owner,
+            "owner_device_name": "owner",
+            "holders": [{"device": PEER, "scope": "session"}],
+        }
+    return _FakeViewer(device_id=VIEWER, rows=[], holds_mcp=False, placement=placement)
+
+
+@pytest.mark.parametrize(
+    ("placement_shape", "store_state", "ok", "code"),
+    [
+        (shape, state, expected_ok, expected_code)
+        for (shape, state), (expected_ok, expected_code) in _CREDENTIAL_TRUTH_TABLE.items()
+    ],
+)
+def test_credential_verdict_truth_table(
+    tmp_path: Path, placement_shape: str, store_state: str, ok: bool, code: str
+) -> None:
+    """Every placement/store cell reaches its specified FINAL rendered verdict."""
+    root = tmp_path / "cfg"
+    auth = _truth_fixture(root, placement_shape, store_state)
+    try:
+        facts = readiness.collect_peer_facts(root)
+        expected_fact = {"healthy": True, "absent": False}.get(store_state)
+        assert facts["has_local"] is expected_fact
+        assert facts["mcp"]["servers"][0]["has_row"] is expected_fact
+        viewer = _truth_viewer(placement_shape)
+        member = _member()
+        rows = (
+            readiness.model_credential_row(member, facts, viewer=viewer, peer_label="holder"),
+            readiness.mcp_credential_rows(member, facts, viewer=viewer, peer_label="holder")[0],
+        )
+        for row in rows:
+            assert row["ok"] is ok, (placement_shape, store_state, row)
+            assert row.get("code", "") == code, (placement_shape, store_state, row)
+            rendered = readiness.render_check_lines([row])
+            assert row["detail"] in rendered[0]
+            assert len(rendered) == 1 + (0 if row["ok"] else len(row["remedies"]))
+    finally:
+        if auth is not None:
+            auth.close()
+
+
+@pytest.mark.parametrize("placement_shape", ["member", "viewer", "third"])
+@pytest.mark.parametrize("store_state", ["healthy", "absent", "corrupt", "open_wal"])
+def test_observation_failure_precedes_store_uncertainty(
+    tmp_path: Path, placement_shape: str, store_state: str
+) -> None:
+    """A real observation failure outranks uncertainty, never a positive own row."""
+    root = tmp_path / "cfg"
+    auth = _truth_fixture(root, placement_shape, store_state, observation=True)
+    try:
+        facts = readiness.collect_peer_facts(root)
+        row = readiness.model_credential_row(
+            _member(),
+            facts,
+            viewer=_truth_viewer(placement_shape),
+            peer_label="holder",
+        )
+        if store_state == "healthy":
+            assert row["ok"] is True
+            assert row["detail"] == "holder serves openai from its own login"
+        else:
+            assert row["ok"] is False
+            assert row["code"] == readiness.CODE_OBSERVED_FAILURE
+            assert "not reachable" in row["detail"]
+        rendered = readiness.render_check_lines([row])
+        assert row["detail"] in rendered[0]
+    finally:
+        if auth is not None:
+            auth.close()
+
+
+@pytest.mark.parametrize("viewer_state", ["corrupt", "open_wal"])
+def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) -> None:
+    """A viewer store that cannot be read must not get a sign-in-first remedy."""
+    from tests.unit.mcp.test_credential_status import URL
+
+    peer_root = tmp_path / "peer"
+    viewer_root = tmp_path / "viewer"
+    peer_root.mkdir()
+    viewer_root.mkdir()
+    (peer_root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+    auth = None
+    if viewer_state == "open_wal":
+        auth = _seed_mcp_row(viewer_root, URL)
+        assert auth.read_only_sidecar_present()
+    else:
+        (viewer_root / "auth.db").write_bytes(b"not a database")
+    viewer = None
+    try:
+        facts = readiness.collect_peer_facts(peer_root)
+        assert facts["mcp"]["servers"][0]["has_row"] is False
+        viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
+        row = readiness.mcp_credential_rows(_member(), facts, viewer=viewer, peer_label="holder")[0]
+        viewer.close()
+        viewer = None
+
+        assert row["ok"] is False
+        assert row["code"] == readiness.CODE_UNKNOWN
+        assert "this device's credential store could not be read" in row["detail"]
+        rendered = readiness.render_check_lines([row])
+        assert row["detail"] in rendered[0]
+        assert "sign in here first" not in "\n".join(rendered)
+
+        if viewer_state == "open_wal":
+            assert auth is not None
+            auth.close()
+            auth = None
+            control_viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
+            try:
+                control = readiness.mcp_credential_rows(
+                    _member(), facts, viewer=control_viewer, peer_label="holder"
+                )[0]
+            finally:
+                control_viewer.close()
+            assert control["code"] == readiness.CODE_NOT_SHARED
+            assert "does not share it" in control["detail"]
+    finally:
+        if viewer is not None:
+            viewer.close()
+        if auth is not None:
+            auth.close()
+
+
 def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
     """An ``auth.db`` that exists but cannot be opened is "could not be read",
     never a crash (convergence round 2, MAJOR class): every open keeps
@@ -377,9 +798,14 @@ def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (tmp_path / "auth.db").write_bytes(b"not a database")
-    fact = readiness.mcp_servers_fact(tmp_path)
+    fact = viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login("https://mcp.notion.com/mcp") is None
+    finally:
+        viewer.close()
+    fact = readiness.collect_peer_facts(tmp_path)["mcp"]
     assert fact["servers"][0]["has_row"] is None
-    assert readiness.has_local_provider_credential(tmp_path, "openai") is None
+    assert readiness.has_local_provider_credential(tmp_path, "openai", read_only=True) is None
     viewer = readiness.ViewerFacts(tmp_path)
     try:
         assert viewer.holds_mcp_login("https://mcp.notion.com/mcp") is None
@@ -569,6 +995,168 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
     assert by_server["soft"]["detail"].startswith("if the `soft` server needs a sign-in")
     for row in by_server.values():
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
+
+
+def test_mcp_owner_expiry_names_the_owner_in_the_row_and_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The peer's last broker refusal is evidence about the OWNER, not itself.
+
+    Drive the normal fact collector against real placement/evidence documents,
+    then compose the row exactly as ``ready`` does. No token material is needed
+    for this attribution check.
+    """
+    from local_operator.network import store
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+    from tests.unit.mcp.test_credential_status import NETWORK
+    from tests.unit.mcp.test_credential_status import PEER as OWNER
+    from tests.unit.mcp.test_credential_status import SELF, URL, _place, _record
+
+    root = tmp_path / "cfg"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    store.save(_record(), root)
+    _place(root)
+    mcp_state.record(
+        NETWORK,
+        credential_key_for_mcp(URL),
+        state="expired",
+        code="interactive_required",
+        owner_device=OWNER,
+        owner_name="macbook",
+        root=root,
+    )
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+
+    fact = readiness.mcp_servers_fact(root)
+    evidence = fact["servers"][0]["auth_evidence"]
+    assert evidence["code"] == "interactive_required"
+    viewer = _FakeViewer(
+        device_id=OWNER,
+        placement={
+            "owner_device": OWNER,
+            "owner_device_name": "macbook",
+            "holders": [{"device": SELF, "scope": "session"}],
+        },
+    )
+    rows = readiness.mcp_credential_rows(
+        SimpleNamespace(device_id=SELF, name="holder"),
+        _facts(mcp=fact),
+        viewer=viewer,
+        peer_label="holder",
+    )
+
+    assert rows[0]["ok"] is False
+    assert rows[0]["code"] == readiness.CODE_OBSERVED_FAILURE
+    assert "macbook: sign in again" in rows[0]["detail"]
+    assert "holder's stored login" not in rows[0]["detail"]
+    assert rows[0]["remedies"] == ["sign in again on macbook"]
+
+
+def test_mcp_newer_local_expiry_outranks_older_owner_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real local grant supersedes an older owner refusal (review round 1, F-1)."""
+    import asyncio
+
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import TOKENS_OBTAINED_AT_KEY, McpTokenStorage
+    from local_operator.network import store
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.types import credential_key_for_mcp
+    from local_operator.providers.auth_store import AuthStore
+    from tests.unit.mcp.test_credential_status import NETWORK
+    from tests.unit.mcp.test_credential_status import PEER as OWNER
+    from tests.unit.mcp.test_credential_status import SELF, URL, _place, _record
+
+    root = tmp_path / "cfg"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    store.save(_record(), root)
+    _place(root)
+    key = credential_key_for_mcp(URL)
+    mcp_state.record(
+        NETWORK,
+        key,
+        state="expired",
+        code="interactive_required",
+        owner_device=OWNER,
+        owner_name="macbook",
+        root=root,
+    )
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+    auth = AuthStore(config_dir=root)
+    try:
+        storage = McpTokenStorage(URL, auth)
+        # The interactive writer is the real local-grant seam. An access-only
+        # grant with a zero-second lifetime is present but definitely expired;
+        # no refresh or broker call is needed to construct this state.
+        for lifetime in (3600, 0):
+            asyncio.run(
+                storage.set_tokens(
+                    OAuthToken.model_validate(
+                        {"access_token": "local-fixture-access", "expires_in": lifetime}
+                    )
+                )
+            )
+        local_row = auth.list_credentials("mcp-oauth")[0]
+        assert mcp_state.load(NETWORK, root)[key]["at"] < local_row.data[TOKENS_OBTAINED_AT_KEY]
+        fact = readiness.mcp_servers_fact(root)
+        diagnostics = fact["servers"][0]["auth_diagnostics"]
+        assert diagnostics["access_state"] == "expired"
+        assert diagnostics["sharing_mode"] == "unavailable"
+        assert diagnostics["refresh_presence"] == "absent"
+        viewer = _FakeViewer(
+            device_id=OWNER,
+            placement={
+                "owner_device": OWNER,
+                "owner_device_name": "macbook",
+                "holders": [{"device": SELF, "scope": "session"}],
+            },
+        )
+        rows = readiness.mcp_credential_rows(
+            SimpleNamespace(device_id=SELF, name="holder"),
+            _facts(mcp=fact),
+            viewer=viewer,
+            peer_label="holder",
+        )
+
+        assert rows[0]["code"] == "local_grant_unavailable"
+        assert "holder's stored login" in rows[0]["detail"]
+        assert rows[0]["remedies"] == ["sign in again on holder"]
+        assert diagnostics["grant_chain_at"] > mcp_state.load(NETWORK, root)[key]["at"]
+    finally:
+        auth.close()
+
+
+def test_mcp_local_expiry_names_the_peer_in_the_row_and_remedy() -> None:
+    """With no owner-expiry evidence, a local dead row remains a local repair."""
+    server = {
+        "name": "local",
+        "url": "https://local.example.test/mcp",
+        "transport": "http",
+        "has_row": True,
+        "has_placement": False,
+        "auth_diagnostics": {"sharing_mode": "unavailable", "access_state": "expired"},
+    }
+    rows = readiness.mcp_credential_rows(
+        _member(),
+        _facts(mcp={"servers": [server]}),
+        viewer=_FakeViewer(),
+        peer_label="cloud-node-1",
+    )
+
+    assert rows[0]["code"] == "local_grant_unavailable"
+    assert "cloud-node-1's stored login" in rows[0]["detail"]
+    assert rows[0]["remedies"] == ["sign in again on cloud-node-1"]
 
 
 def test_stdio_reference_rows_answer_from_the_peers_ref_states() -> None:
@@ -1288,8 +1876,8 @@ def test_model_credential_row_resolves_no_default_first() -> None:
             True,
             "not verified from here",
         ),
-        ({}, {"rows": ["row"]}, False, "share it"),
-        ({}, {"rows": []}, False, "sign in to openai here"),
+        ({}, {"rows": ["row"]}, False, "--model <provider>/<model-id>"),
+        ({}, {"rows": []}, False, "sign in to openai on cloud-node-1"),
     ],
     ids=["own-login", "borrowed-here", "borrowed-third", "signed-in-here", "neither"],
 )
@@ -1303,6 +1891,148 @@ def test_model_credential_verdicts(
     assert row["ok"] is ok, row
     haystack = row["detail"] + " ".join(row["remedies"])
     assert needle in haystack, row
+
+
+def _composed_model_credential_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    *,
+    peer_holds: bool = False,
+) -> dict[str, Any]:
+    """Compose one model row from real network, placement and AuthStore state."""
+    from local_operator.network import identity, relay, store, types
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.providers.auth_store import AuthStore
+
+    viewer_root = tmp_path / "viewer"
+    peer_root = tmp_path / "peer"
+    viewer_root.mkdir()
+    peer_root.mkdir()
+    ident = identity.mint(viewer_root, name="viewer")
+    server = relay.RelayServer(
+        root=viewer_root,
+        identity=ident,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+    )
+    peer_ident = identity.mint(peer_root, name="cloud-node-1")
+    record = types.NetworkRecord(
+        network_id=store.new_network_id(),
+        name="readiness-test",
+        created_by=ident.device_id,
+        self_device_id=ident.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    relay.admit(
+        record,
+        device_id=ident.device_id,
+        public_key=ident.public_key,
+        name=ident.name,
+        role="admin",
+        added_by=ident.device_id,
+        added_via="self",
+        persist=False,
+    )
+    relay.admit(
+        record,
+        device_id=peer_ident.device_id,
+        public_key=peer_ident.public_key,
+        name=peer_ident.name,
+        role="drive",
+        added_by=ident.device_id,
+        persist=False,
+    )
+    store.save(record, viewer_root)
+    # Placement lookup enumerates the peer's network records before reading the
+    # credential document, so replicate the membership record to its real root.
+    store.save(record, peer_root)
+
+    # The viewer owns the provider login in every cell. The peer's own store is
+    # empty for the failure cells and populated for the healthy control.
+    for root, holds in ((viewer_root, True), (peer_root, peer_holds)):
+        auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+        try:
+            if holds:
+                auth.upsert_credential(provider, {"type": "api_key", "key": "test-only"})
+        finally:
+            auth.close()
+    with placement_mod.mutate(
+        record.network_id, peer_root, self_device=peer_ident.device_id
+    ) as document:
+        document.declare(
+            provider,
+            owner_device=ident.device_id,
+            owner_device_name=ident.name,
+            provider=provider,
+            by=ident.device_id,
+        )
+
+    monkeypatch.setattr(
+        readiness,
+        "default_model_fact",
+        lambda _root: {
+            "hosting": provider,
+            "model_name": "synthetic-model",
+            "resolved": True,
+            "reason": "",
+        },
+    )
+    facts = readiness.collect_peer_facts(peer_root, home=peer_root)
+    link = SimpleNamespace(peer_build={}, capabilities={wire.PEER_READINESS_V1})
+    monkeypatch.setattr(readiness, "_reachability_rows", lambda *_args, **_kwargs: ([], link))
+    monkeypatch.setattr(readiness, "_ask_readiness", lambda *_args, **_kwargs: (facts, ""))
+
+    payload = readiness.compose(server)
+    return next(
+        row
+        for row in payload["checks"]
+        if row.get("capability") == readiness.CAPABILITY_MODEL_CREDENTIAL
+    )
+
+
+@pytest.mark.parametrize("provider", ["radient", "radient-key", "synthetic-provider"])
+def test_model_credential_failure_offers_model_choice_never_sharing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    row = _composed_model_credential_row(tmp_path, monkeypatch, provider)
+
+    assert row["ok"] is False and row["code"] == readiness.CODE_NOT_SHARED
+    assert row["detail"] == (
+        f"{provider} is shared in this network, but cloud-node-1 is not among its "
+        "holders: a borrow there would be refused"
+    )
+    assert row["remedies"] == [
+        "create with --model <provider>/<model-id> naming a provider cloud-node-1 " "holds instead"
+    ]
+    assert row["source"] == readiness.SOURCE_PEER
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    assert rendered.splitlines() == [
+        f"FAIL readiness model_credential cloud-node-1: {provider} is shared in this "
+        "network, but cloud-node-1 is not among its holders: a borrow there would be refused",
+        "    - create with --model <provider>/<model-id> naming a provider cloud-node-1 "
+        "holds instead",
+    ]
+    assert "credential share" not in rendered
+    assert "share it with" not in rendered
+    assert "as a holder" not in rendered
+    assert "synthetic-provider/" not in rendered
+
+
+def test_model_credential_healthy_peer_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _composed_model_credential_row(
+        tmp_path, monkeypatch, "synthetic-provider", peer_holds=True
+    )
+
+    assert row["ok"] is True
+    assert row["detail"] == "cloud-node-1 serves synthetic-provider from its own login"
+    assert row["remedies"] == []
+    assert readiness.render_check_lines([row]) == [
+        "ok  readiness model_credential cloud-node-1: "
+        "cloud-node-1 serves synthetic-provider from its own login"
+    ]
 
 
 def test_a_share_that_has_not_been_pulled_is_not_denied() -> None:

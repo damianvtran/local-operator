@@ -112,7 +112,7 @@ def owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         auth.close()
 
 
-def _resolve(owner: Any) -> Any:
+def _resolve(owner: Any, *, by: str = BORROWER) -> Any:
     return asyncio.run(
         owner.broker._resolve_mcp(  # noqa: SLF001 — the owner's own resolve, as the broker calls it
             key=owner.key,
@@ -120,9 +120,52 @@ def _resolve(owner: Any) -> Any:
             for_session="sess-1",
             force=False,
             holder_scope="session",
-            by=BORROWER,
+            by=by,
         )
     )
+
+
+def test_a_holder_borrows_the_current_token_after_an_owner_rotation(owner: Any) -> None:
+    """A rotating MCP login has no holder-side refresh copy to repair.
+
+    The owner persists the refresh through the real token-storage API, and the
+    next owner resolve lends that current access token. An unrelated device
+    remains refused: borrowing the new generation must not widen the grant.
+    """
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+
+    storage = McpTokenStorage(SERVER_URL, owner.auth)
+    asyncio.run(
+        storage.set_tokens(
+            OAuthToken(
+                access_token="synthetic-access-one",
+                refresh_token="synthetic-refresh-one",
+                expires_in=3600,
+            )
+        )
+    )
+    first = _resolve(owner)
+    assert isinstance(first, Grant), first
+    assert first.access_token == "synthetic-access-one"
+
+    assert storage.store_refresh_result(
+        OAuthToken(
+            access_token="synthetic-access-two",
+            refresh_token="synthetic-refresh-two",
+            expires_in=3600,
+        ),
+        presented_refresh_token="synthetic-refresh-one",
+    )
+    second = _resolve(owner)
+    assert isinstance(second, Grant), second
+    assert second.access_token == "synthetic-access-two"
+    assert second.grant_id != first.grant_id
+
+    refused = _resolve(owner, by="d_" + "4" * 32)
+    assert isinstance(refused, BrokerError), refused
+    assert refused.code == "not_a_holder"
 
 
 def test_an_expired_mcp_token_is_refused_with_the_repair_sentence(owner: Any) -> None:

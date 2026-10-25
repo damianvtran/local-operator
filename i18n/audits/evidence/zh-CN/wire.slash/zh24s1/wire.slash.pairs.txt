@@ -1,0 +1,213 @@
+# zh-CN wire.slash — EN / context / ZH pairs (audit f286318c89)
+# en=b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202
+# context=32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215
+# target=a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11
+
+### wire.slash.accounts
+EN : List stored credentials
+ZH : 列出已保存的凭据
+
+### wire.slash.agent
+EN : List agents, switch an agent's class, or speak to this session as one
+ZH : 列出智能体、切换其类别，或让本会话以智能体身份回复
+
+### wire.slash.aida
+EN : Open your chief of staff, or send her a request
+ZH : 打开幕僚长会话，或向她发送请求
+
+### wire.slash.analytics
+EN : Aggregated token-consumption analytics across all sessions
+ZH : 跨所有会话的token用量汇总统计
+
+### wire.slash.approvals
+EN : Show or set tool approval mode for this session
+ZH : 查看或设置本会话的工具审批模式
+
+### wire.slash.archive
+EN : Hide from the lists, still resumable by id
+ZH : 从列表中隐藏，仍可按id继续
+
+### wire.slash.btw
+EN : Ask a side question off the record (esc closes it)
+ZH : 提个题外问题，不留记录（esc关闭）
+
+### wire.slash.clear
+EN : Clear the transcript (history is untouched)
+ZH : 清空会话记录（历史不受影响）
+
+### wire.slash.compact
+EN : Compact the context now
+ZH : 立即压缩上下文
+
+### wire.slash.context
+EN : Show prompt, tool-schema and message token usage
+ZH : 显示提示词、工具定义与消息的token用量
+
+### wire.slash.copy
+EN : Copy an agent message or code block
+ZH : 复制智能体消息或代码块
+
+### wire.slash.credential
+EN : Type or paste a secret after a space; masked
+ZH : 空格后输入或粘贴密钥；显示为掩码
+
+### wire.slash.delete
+EN : Delete this conversation for good; asks to confirm
+ZH : 永久删除此对话；会要求确认
+
+### wire.slash.effort
+EN : Show or set reasoning effort (shift+tab cycles)
+ZH : 查看或设置推理强度（shift+tab循环切换）
+
+### wire.slash.exit
+EN : Quit the app
+ZH : 退出应用
+
+### wire.slash.failovers
+EN : Show the model failover cascade and what is serving
+ZH : 查看模型回退顺序和当前使用的模型
+
+### wire.slash.fast
+EN : Toggle faster output at premium pricing
+ZH : 切换更快的输出，按溢价计费
+
+### wire.slash.fork
+EN : Branch this chat; --switch here, --window elsewhere; <message> starts work
+ZH : 分叉此对话；--switch在此，--window在别处；<message>开始工作
+
+### wire.slash.goal
+EN : Set the goal and start work; /goal --clear clears it
+ZH : 设定目标并开始工作；/goal --clear清除目标
+
+### wire.slash.help
+EN : List all commands
+ZH : 列出所有命令
+
+### wire.slash.highlights
+EN : Cancel, retry or steer the highlights under an answer
+ZH : 取消、重试或调整回答下方的补充内容
+
+### wire.slash.hub
+EN : Open Hub links — per-link subscribe and auto-push policy
+CTX: {"note": "Opens Hub links: per-link subscribe and auto-push policy. No ICU arguments; no placeholders. The key lands ahead of the /hub registry entry; non-en locales carry this en text until the delta translation.", "role": "command description line in /help and the completion picker", "tone": "terse imperative"}
+ZH : 打开Hub链接，设置各链接的subscribe和auto-push策略
+
+### wire.slash.info
+EN : Install, version, and running sessions on this machine
+ZH : 安装、版本及本机运行中的会话
+
+### wire.slash.keys
+EN : Show the keyboard legend
+ZH : 显示按键说明
+
+### wire.slash.language
+EN : Show or set the UI language; auto follows the system
+ZH : 查看或设置界面语言；auto跟随系统
+
+### wire.slash.links
+EN : Open a link from this conversation in a browser
+ZH : 在浏览器中打开此对话中的链接
+
+### wire.slash.login
+EN : Authenticate a provider
+ZH : 登录提供商
+
+### wire.slash.logout
+EN : Remove stored provider credentials
+ZH : 移除已保存的提供商凭据
+
+### wire.slash.loop
+EN : Loop toward a goal: /loop <goal>, <n>; --stop cancels
+ZH : 朝目标循环：/loop <goal>, <n>；--stop取消
+
+### wire.slash.mcp
+EN : List MCP servers; add/remove one, or manage an OAuth grant
+ZH : 列出MCP服务器；用add/remove增删，或管理OAuth授权
+
+### wire.slash.mobile
+EN : Radient phone access: status, enable, stop, billing
+ZH : Radient手机访问：status, enable, stop, billing
+
+### wire.slash.model
+EN : Switch model; /model default saves it for new sessions
+ZH : 切换模型；/model default保存为新会话的默认模型
+
+### wire.slash.move
+EN : Change this session's working directory
+ZH : 更改此会话的工作目录
+
+### wire.slash.network
+EN : Networks, peers, and this device's mesh state
+ZH : 网络、对等设备及本设备的mesh状态
+
+### wire.slash.new
+EN : Start a new conversation
+ZH : 开始新对话
+
+### wire.slash.notifications
+EN : Unread completions; read marks them read
+ZH : 未读的完成通知；read标记为已读
+
+### wire.slash.project
+EN : Track workstreams: list, show, new, delete, link, unlink
+ZH : 跟踪工作流：list, show, new, delete, link, unlink
+
+### wire.slash.provider
+EN : List providers and their login/usage state
+ZH : 列出提供商及其登录/用量状态
+
+### wire.slash.reload
+EN : Relaunch this conversation on the current install
+ZH : 用当前安装的版本重启此对话
+
+### wire.slash.rename
+EN : Name this conversation, or /title --refresh
+ZH : 命名此对话，或/title --refresh
+
+### wire.slash.resume
+EN : Pick a past conversation to resume, or resume one (id)
+ZH : 选择历史对话继续，或指定会话继续(id)
+
+### wire.slash.search
+EN : Configure web search providers and load balancing
+ZH : 配置网页搜索提供商与负载均衡
+
+### wire.slash.session
+EN : Usage, cost, diagnostics; --copy copies the session ID
+ZH : 用量、费用、诊断；--copy复制会话ID
+
+### wire.slash.settings
+EN : Change every setting on one page
+ZH : 在一页中更改所有设置
+
+### wire.slash.sidebar
+EN : Show or hide conversations; 'focus' keys the list
+ZH : 显示或隐藏对话；'focus'启用列表键盘模式
+
+### wire.slash.skills
+EN : List loaded skills
+ZH : 列出已加载的技能
+
+### wire.slash.stop
+EN : End this session, another by name/pid, or all — /resume reopens it
+ZH : 结束本会话、按名称/pid指定的会话或全部 — /resume可重新打开
+
+### wire.slash.team
+EN : List teams, chart a team's org, or send a request to a team's manager
+ZH : 列出团队、查看团队组织图，或向其负责人发送请求
+
+### wire.slash.theme
+EN : Switch color theme; arrows preview live
+ZH : 切换配色主题；方向键实时预览
+
+### wire.slash.unarchive
+EN : Show this conversation in the lists again
+ZH : 在列表中重新显示此对话
+
+### wire.slash.update
+EN : Install the latest version from PyPI and relaunch
+ZH : 从PyPI安装最新版并重启
+
+### wire.slash.usage
+EN : Show provider usage quota
+ZH : 显示提供商用量配额

@@ -5696,7 +5696,10 @@ SETTINGS: tuple[Setting, ...] = (
         # explicit true is this machine's opt-in. The literal is pinned to
         # ``DEFAULT_TEAM_BRIDGE_ENABLED`` by ``_consumer_defaults()`` in
         # tests/unit/test_settings_io.py; the server half (eligibility, consent,
-        # launch) still decides whether anything can run.
+        # launch) still decides whether anything can run. Under a served
+        # ``bridge_consent_v2`` an ABSENT key reads ON for the status discipline
+        # and status route only (``TeamBridgeSettings.enabled_given``); this
+        # registry default and every offline fence stay OFF.
         default=False,
         help=_t(_ws.team_bridge_enabled_help()),
     ),

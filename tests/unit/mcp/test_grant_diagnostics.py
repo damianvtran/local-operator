@@ -130,6 +130,7 @@ async def test_sdk_callback_attributes_native_and_rotation_preserves_event(
         assert metadata["native_event_at"] == auth._chain_stamp_of(row.data)
         snapshot = auth.mcp_grant_diagnostics(URL, store)
         assert snapshot["provenance"] == "native"
+        assert snapshot["grant_chain_at"] == metadata["native_event_at"]
         assert snapshot["scopes_known"] is scope
         assert snapshot["identity_verified"] is False
         assert snapshot["sharing_mode"] == "finite_only"
@@ -265,6 +266,7 @@ async def test_snapshot_is_one_lookup_material_free_and_readiness_offers_are_tru
             "sharing_mode",
             "refresh_presence",
             "expiry_known",
+            "grant_chain_at",
             "scopes_known",
             "access_state",
         }
@@ -304,6 +306,9 @@ async def test_snapshot_is_one_lookup_material_free_and_readiness_offers_are_tru
         store.upsert_credential(
             auth.MCP_OAUTH_PROVIDER, {k: v for k, v in data.items() if k != "type"}
         )
+        # The readiness path deliberately reports an open WAL as unknown; close
+        # the writer so this cell checks the expired row, not that separate arm.
+        store.close()
         facts = readiness.collect_peer_facts(tmp_path)
         rows = readiness.mcp_credential_rows(
             _member(), facts, viewer=_FakeViewer(), peer_label="synthetic-peer"

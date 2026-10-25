@@ -438,6 +438,7 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         "mcp-defs-v1": "net_mcp_defs",
         "memory-sync-v1": "net_memory",
         "mesh-update-v1": "net_update",
+        wire.MESH_RESTART_V1: "net_restart",
         "peer-journal-source-v1": "net_session_history",
     }
     pure_features = {

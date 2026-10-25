@@ -1,0 +1,43 @@
+# relay.shell — sampled en/zh pairs for attestation zhca1
+# 10/44 keys; all >120 chars and all plurals included
+
+## relay.shell.usage.blocked  [17 chars]
+EN: Spend unavailable
+ZH: 无法消费
+
+## relay.shell.usage.cached  [47 chars]
+EN: Cached usage. No provider refresh is requested.
+ZH: 缓存用量。不会请求提供商刷新。
+
+## relay.shell.usage.remaining_percent  [29 chars]
+EN: {value, number, percent} left
+ZH: 剩余{value, number, percent}
+
+## relay.shell.usage.stale  [19 chars]
+EN: May be out of date.
+ZH: 可能已过时。
+
+## relay.shell.usage.unit_credits  [45 chars, PLURAL]
+EN: {count, plural, one {credit} other {credits}}
+ZH: {count, plural, other {点数}}
+
+## relay.shell.usage.unit_requests  [47 chars, PLURAL]
+EN: {count, plural, one {request} other {requests}}
+ZH: {count, plural, other {次请求}}
+
+## relay.shell.usage.unit_tokens  [43 chars, PLURAL]
+EN: {count, plural, one {token} other {tokens}}
+ZH: {count, plural, other {token}}
+
+## relay.shell.usage.used_unknown_unit  [20 chars]
+EN: {value, number} used
+ZH: 已用{value, number}
+
+## relay.shell.usage.window_lifetime  [8 chars]
+EN: Lifetime
+ZH: 累计
+
+## relay.shell.usage.window_month  [7 chars]
+EN: Monthly
+ZH: 每月
+

@@ -1,0 +1,15 @@
+# cli.hub_help — sampled en/zh pairs for attestation zhca1
+# 3/12 keys; all >120 chars and all plurals included
+
+## cli.hub_help.link_set_auto_push  [45 chars]
+EN: Unattended outbound publication for this link
+ZH: 此链接的无人值守出站发布
+
+## cli.hub_help.link_set_confirm_public_egress  [63 chars]
+EN: Explicit consent to publish authored changes to a PUBLIC origin
+ZH: 显式同意将创作的更改发布到公开（PUBLIC）来源
+
+## cli.hub_help.status_json  [30 chars]
+EN: Emit the desktop route payload
+ZH: 输出桌面端路由载荷
+

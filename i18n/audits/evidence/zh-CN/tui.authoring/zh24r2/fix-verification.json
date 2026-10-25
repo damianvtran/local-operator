@@ -1,0 +1,160 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "tui.authoring",
+  "fix_commit": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "source_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "method": "Read-only comparison of the pre-fix target at cb716031e3^, the current target at HEAD, and the exact proposed text parsed from the pre-fix zh24a1 report. ICU arguments and plural selectors are parsed by the repo's own runtime; width is measured in display cells with representative values.",
+  "changed_key_count": 5,
+  "all_values_match_proposal": true,
+  "all_values_changed": true,
+  "all_argument_sets_equal": true,
+  "all_renders_ok": true,
+  "over_budget": [],
+  "rows": [
+    {
+      "key": "tui.authoring.notice_read_only",
+      "pre_fix": "只读：本次会话的运行时位于另一台设备，此处无法修改配置。",
+      "current": "只读：本次会话的运行时位于另一台设备，此处无法修改配置档。",
+      "proposed_by_pre_fix_audit": "只读：本次会话的运行时位于另一台设备，此处无法修改配置档。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "fe4a7a3d1e22337bdc475d214a6f55dd4607ba39dbce894fc75c22be6a6b09bc",
+      "current_sha256": "16d3e8f89d59845ac6087548ba9e74e1312c9b384670676b12fa65dd7cc1d9ee",
+      "en_arguments": [],
+      "zh_arguments": [],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "只读：本次会话的运行时位于另一台设备，此处无法修改配置档。",
+      "render_error": null,
+      "rendered_cells": 58,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "tui.authoring.promote_mixed_plan",
+      "pre_fix": "将替换账户中的现有定义：{replaced}（以本会话的副本）。同时复制{created}。添加`yes`以替换并复制 — 尚未做任何更改。",
+      "current": "将用本会话的副本替换账户中的现有定义：{replaced}。这还会复制{created}。在命令末尾加上`yes`，即可替换并复制 — 尚未做任何更改。",
+      "proposed_by_pre_fix_audit": "将用本会话的副本替换账户中的现有定义：{replaced}。这还会复制{created}。在命令末尾加上`yes`，即可替换并复制 — 尚未做任何更改。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "0f6aa08e5fb24389f8b4e4fa46d8faf94dfb124149396e503a118f52aacbfd96",
+      "current_sha256": "2aa7aad368bd7fe083bc4148ee98436d9b85204411c58ff2f7b842884bf08ef2",
+      "en_arguments": [
+        [
+          "replaced",
+          "simple"
+        ],
+        [
+          "created",
+          "simple"
+        ]
+      ],
+      "zh_arguments": [
+        [
+          "replaced",
+          "simple"
+        ],
+        [
+          "created",
+          "simple"
+        ]
+      ],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "将用本会话的副本替换账户中的现有定义：<replaced>。这还会复制<created>。在命令末尾加上`yes`，即可替换并复制 — 尚未做任何更改。",
+      "render_error": null,
+      "rendered_cells": 125,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "tui.authoring.promote_plan",
+      "pre_fix": "添加`yes`以将{names}复制到你的账户 — 尚未做任何更改。",
+      "current": "在命令末尾加上`yes`，即可将{names}复制到你的账户 — 尚未做任何更改。",
+      "proposed_by_pre_fix_audit": "在命令末尾加上`yes`，即可将{names}复制到你的账户 — 尚未做任何更改。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "afe6a17649f74acd368bc4cab6bb718dc814b0191084abfcb7adaf61170e4087",
+      "current_sha256": "74bda27cf516094833303ac4bebdebc00632d9c846db8d202faacd8ba41aea82",
+      "en_arguments": [
+        [
+          "names",
+          "simple"
+        ]
+      ],
+      "zh_arguments": [
+        [
+          "names",
+          "simple"
+        ]
+      ],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "在命令末尾加上`yes`，即可将<names>复制到你的账户 — 尚未做任何更改。",
+      "render_error": null,
+      "rendered_cells": 67,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "tui.authoring.promote_replace_plan",
+      "pre_fix": "替换账户中的现有定义：{names}（以本会话的副本）。添加`yes`以替换 — 尚未做任何更改。",
+      "current": "将用本会话的副本替换账户中的现有定义：{names}。在命令末尾加上`yes`，即可替换 — 尚未做任何更改。",
+      "proposed_by_pre_fix_audit": "将用本会话的副本替换账户中的现有定义：{names}。在命令末尾加上`yes`，即可替换 — 尚未做任何更改。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "b54c932db2bd63e2a27a5d089904c41d7ec4cc5fc48b4f97785483563ecfe242",
+      "current_sha256": "1bb4dfd7b72c2f7053f31365b29eb3ec984f9d55c1959f622037590def61aef1",
+      "en_arguments": [
+        [
+          "names",
+          "simple"
+        ]
+      ],
+      "zh_arguments": [
+        [
+          "names",
+          "simple"
+        ]
+      ],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "将用本会话的副本替换账户中的现有定义：<names>。在命令末尾加上`yes`，即可替换 — 尚未做任何更改。",
+      "render_error": null,
+      "rendered_cells": 95,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "tui.authoring.revision_changed",
+      "pre_fix": "其他人已修改此配置，重新打开后再编辑。",
+      "current": "其他人已修改此配置档，重新打开后再编辑。",
+      "proposed_by_pre_fix_audit": "其他人已修改此配置档，重新打开后再编辑。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "3e175586f4a3884dad2d450f90779ea11dc18b53035a059891e0dedc78031436",
+      "current_sha256": "8878b096432d3d7367b3bc52db99cf4a8790ea24d25a66ced6b52131905cbe07",
+      "en_arguments": [],
+      "zh_arguments": [],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "其他人已修改此配置档，重新打开后再编辑。",
+      "render_error": null,
+      "rendered_cells": 40,
+      "maxCells": null,
+      "over_budget": null
+    }
+  ]
+}

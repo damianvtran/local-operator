@@ -2367,14 +2367,15 @@ def test_a_scratch_advisory_stays_bounded_on_a_narrow_frame() -> None:
     assert rows[-1].startswith("… "), rows
 
 
-#: The five shipped ``[scratch]`` sentence SHAPES, each built by its own shipped
+#: The six shipped ``[scratch]`` sentence SHAPES, each built by its own shipped
 #: builder — the four audit arms (``_pad_budget_line``'s two, and
-#: ``scratchpad_refusal``'s two) and the pre-existing nudge. Built here, never
-#: hand-typed (review round 2, R2-2), so a rewrite that moves an opening turns
+#: ``scratchpad_refusal``'s two), the soft write crossing, and the pre-existing
+#: nudge. Built here, never hand-typed (review round 2, R2-2), so a rewrite that
+#: moves an opening turns
 #: the two tests below red until the card's own leads move with it.
 def _shipped_advisory_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
-    """The five shapes against real fixtures; the budget and cap arms run on a
-    patched-down threshold (a test-scale pad cannot reach 256 MiB), which
+    """The six shapes against real fixtures; the budget, cap and crossing arms
+    run on a patched-down threshold (a test-scale pad cannot reach 256 MiB), which
     changes the numbers in the sentence, never its lead. The segment and suffix
     arms come from ``_bash_pad_write_check`` — the audit entry that composes
     the line the tool result actually carries — on the same command texts the
@@ -2390,6 +2391,16 @@ def _shipped_advisory_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(scratchpad_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 100)
     budget = builtin_mod._pad_budget_line(pad)
+
+    # A NEW file excludes nothing: the allocated bulk file is 50% of this cap and
+    # the payload takes the real builder to exactly 75%, independent of block size.
+    pad_held = (pad / "bulk.dat").stat().st_blocks * 512
+    assert pad_held > 0
+    monkeypatch.setattr(scratchpad_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", pad_held * 2)
+    crossing = scratchpad_mod.check_scratchpad_write(
+        pad / "crossing.md", pad, "scratchpad://crossing.md", pad_held // 2
+    )
+    assert crossing is not None
 
     monkeypatch.setattr(scratchpad_mod, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 1 << 30)
     (pad / "e2").write_bytes(b"")
@@ -2421,6 +2432,7 @@ def _shipped_advisory_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     for name, line in (
         ("budget", budget),
         ("cap", cap),
+        ("crossing", crossing),
         ("segment", segment),
         ("suffix", suffix),
         ("nudge", nudge),
@@ -2433,9 +2445,9 @@ def _shipped_advisory_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_every_shipped_advisory_shape_wraps_and_rides_the_advisory_ink(
     tmp_path, monkeypatch
 ) -> None:
-    """R2-2's recognition half, from the REAL builders: the four audit arms and
-    the pre-existing nudge — the five shipped sentence shapes — must each still
-    wrap whole and ride ``tool.live.advisory`` after the leads were narrowed to
+    """R2-2's recognition half, from the REAL builders: the four audit arms,
+    the soft write crossing and the pre-existing nudge — the six shipped shapes —
+    must each still wrap whole and ride ``tool.live.advisory`` after the leads were narrowed to
     the sentences' own openings. The four arms render as design round 2
     approved them; the narrowing changed whom the carve-out RECOGNISES, never
     how it paints the harness's own lines."""
@@ -2458,6 +2470,10 @@ def test_every_shipped_advisory_shape_wraps_and_rides_the_advisory_ink(
         full_wrap = wrap_cells(line, 80 - 2 - OUTPUT_INDENT)
         assert rows == full_wrap, (name, rows, full_wrap)
         assert len(rows) > 1, (name, rows)  # every shipped shape exceeds one row at 80
+        if name == "crossing":
+            # The canonical 80-column card measure is 76 cells: the soft line gets
+            # two rows, never the old copy's third (design round 1, D4).
+            assert len(rows) == 2, (cell_len(line), rows)
         assert all(not row.rstrip().endswith("…") for row in rows), (name, rows)
         assert _style_at(content, "[scratch]") == bindings.style("tool.live.advisory"), name
 

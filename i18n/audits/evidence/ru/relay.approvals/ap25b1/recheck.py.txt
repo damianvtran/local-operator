@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Mechanical recheck of the relay.approvals five-key clause split.
+
+Reads the composed sentence per locale (before + session_clause + between +
+default_clause + after, joined with single U+0020 as the component does) and
+reports the facts a translation review must rest on:
+
+  * key parity and ICU placeholder parity against en
+  * the retired `gate.body_scope` key is gone, five clause keys exist
+  * no leading/trailing space, no doubled space in any piece
+  * exactly which characters the component inserts at each seam, with the
+    codepoint and the punctuation on each side
+  * space-before-punctuation violations for locales whose style guide forbids
+    them (es/ru/vi/ur), and the fr U+202F rule
+  * Han-character adjacency: a component-inserted space between two Han
+    characters (zh-CN), which Chinese typography does not use
+  * the en five pieces recompose to the pre-split single key byte-for-byte
+
+Read-only. Run from the worktree root with the repo venv on PYTHONPATH when
+`local_operator.i18n.catalogues` is needed; this script only uses json+git so
+plain python3 works.
+
+Usage: python3 i18n-recheck.py <repo-root>
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+LOCALES = ["fr", "es", "vi", "zh-CN", "ru", "hi", "ur"]
+KEYS = ["before", "session_clause", "between", "default_clause", "after"]
+BOLD = {"session_clause", "default_clause"}
+NS = "relay.approvals"
+
+# Locales whose style guide forbids a space before ; : ! ? (es/ru/vi), or
+# requires U+202F there (fr). ur uses ؛ and takes no space either.
+NO_SPACE_BEFORE = {"es", "ru", "vi", "ur"}
+
+
+def han(ch: str) -> bool:
+    o = ord(ch)
+    return (
+        0x4E00 <= o <= 0x9FFF
+        or 0x3400 <= o <= 0x4DBF
+        or 0xF900 <= o <= 0xFAFF
+        or 0x3000 <= o <= 0x303F
+        or 0xFF00 <= o <= 0xFFEF
+    )
+
+
+def compose(parts: dict[str, str]) -> str:
+    """The component's join: each piece separated by exactly one U+0020."""
+    return " ".join(parts[k] for k in KEYS)
+
+
+def main() -> int:
+    root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+    cat = root / "local_operator" / "i18n" / "catalogues"
+    en = json.loads((cat / "en" / f"{NS}.json").read_text(encoding="utf-8"))
+    print(f"namespace: {NS}")
+    print(f"en keys: {len(en)}")
+    print()
+
+    for loc in LOCALES:
+        target = json.loads((cat / loc / f"{NS}.json").read_text(encoding="utf-8"))
+        parts = {k: target[f"{NS}.gate.body_scope.{k}"] for k in KEYS}
+        composed = compose(parts)
+        print(f"=== {loc} ===")
+        print(f"keys: {len(target)}  parity: {set(target) == set(en)}")
+        print(f"retired gate.body_scope present: {f'{NS}.gate.body_scope' in target}")
+        print(f"placeholders identical: {sorted(re.findall(r'{([a-z_]+)', ' '.join(parts.values()))) == sorted(re.findall(r'{([a-z_]+)', en.get(f'{NS}.gate.body_scope.before', '')))}")
+        ws = [
+            k
+            for k, v in parts.items()
+            if v != v.strip() or "  " in v
+        ]
+        print(f"leading/trailing/double spaces: {ws or 'none'}")
+        print("composed (bold marked by **):")
+        marked = " ".join(f"**{parts[k]}**" if k in BOLD else parts[k] for k in KEYS)
+        print(f"  {marked}")
+        print("seams (component-inserted U+0020 at each join):")
+        for left, right in zip(KEYS, KEYS[1:]):
+            lv, rv = parts[left], parts[right]
+            u = ord(lv[-1])
+            v = ord(rv[0])
+            flags = []
+            if rv[0] in ";:!?":
+                flags.append("SPACE-BEFORE-ASCII-PUNCT")
+            if rv[0] in "\u061b\u060c\u061f\u3002\uff1b\uff0c\uff01\uff1f":
+                flags.append("SPACE-BEFORE-FULLWIDTH-PUNCT")
+            if han(lv[-1]) and han(rv[0]):
+                flags.append("SPACE-BETWEEN-HAN")
+            print(
+                f"  {left}->{right}: U+{u:04X}{lv[-1]!r} | U+{v:04X}{rv[0]!r} "
+                f"{' '.join(flags) or 'ok'}"
+            )
+        if loc == "fr":
+            has_narrow = any(c in "\u202f\u00a0" for v in parts.values() for c in v)
+            print(f"fr: U+202F/U+00A0 inside the five pieces: {has_narrow}")
+            guide = (root / "i18n" / "style-guides" / "fr.md").read_text(encoding="utf-8")
+            print(f"fr: guide requires U+202F before ; : ! ?: {'U+202F' in guide}")
+        if loc in NO_SPACE_BEFORE:
+            guide = (root / "i18n" / "style-guides" / f"{loc}.md").read_text(encoding="utf-8")
+            line = next((ln for ln in guide.splitlines() if ("space" in ln.lower() or "spacing" in ln.lower()) and "before" in ln.lower()), "")
+            print(f"{loc}: guide rule: {line.strip()}")
+        print()
+
+    # en recomposes to the pre-split single key byte-for-byte
+    print("=== en recomposition vs pre-split key (75d3966b56) ===")
+    try:
+        old = json.loads(
+            subprocess.run(
+                ["git", "show", f"75d3966b56:local_operator/i18n/catalogues/en/{NS}.json"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+        old_val = old[f"{NS}.gate.body_scope"]
+        en_parts = {k: en[f"{NS}.gate.body_scope.{k}"] for k in KEYS}
+        new_val = compose(en_parts)
+        print(f"identical: {old_val == new_val}")
+        print(f"old: {old_val!r}")
+        print(f"new: {new_val!r}")
+    except subprocess.CalledProcessError as exc:  # pragma: no cover
+        print(f"git show failed: {exc}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -24,6 +24,7 @@
  */
 import { useState } from "react";
 import { cn } from "../lib/cn";
+import { messageRuntime } from "../store";
 import type { TranscriptEntry } from "../types";
 
 const GLYPH: Record<string, string> = {
@@ -83,7 +84,9 @@ export function AskRow({ entry }: { entry: TranscriptEntry }) {
 					) : null}
 					{detail ? (
 						<div className="flex flex-col gap-1">
-							<span className="text-meta text-ink-dim">what the agent was told</span>
+							<span className="text-meta text-ink-dim">
+				{messageRuntime.t("relay.asks.row.told")}
+			</span>
 							<p className="text-body-sm text-ink-muted whitespace-pre-wrap break-words">
 								{detail}
 							</p>

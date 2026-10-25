@@ -1,0 +1,4 @@
+{
+  "cli.logout_help.logout": "退出提供商登录（移除已存储的凭据）",
+  "cli.logout_help.provider": "要退出登录的提供商"
+}

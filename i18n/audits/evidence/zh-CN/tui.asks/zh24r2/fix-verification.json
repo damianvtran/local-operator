@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "tui.asks",
+  "fix_commit": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "source_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "method": "Read-only comparison of the pre-fix target at cb716031e3^, the current target at HEAD, and the exact proposed text parsed from the pre-fix zh24a1 report. ICU arguments and plural selectors are parsed by the repo's own runtime; width is measured in display cells with representative values.",
+  "changed_key_count": 2,
+  "all_values_match_proposal": true,
+  "all_values_changed": true,
+  "all_argument_sets_equal": true,
+  "all_renders_ok": true,
+  "over_budget": [],
+  "rows": [
+    {
+      "key": "tui.asks.context.messages",
+      "pre_fix": "{count, plural, other {提问后你发来#条消息（最后{time}）}}",
+      "current": "{count, plural, other {此问题提出后你发来#条消息（最近{time}）}}",
+      "proposed_by_pre_fix_audit": "{count, plural, other {此问题提出后你发来#条消息（最近{time}）}}",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "af9527578bfd239dc11d56e62e0ad74c9e3f1f4e7cec6126576af0550358e98f",
+      "current_sha256": "358ab2bf282e90cd0f1f13fb9424a41699ef86a020889ca36376eb04f8fb3188",
+      "en_arguments": [
+        [
+          "count",
+          "plural"
+        ],
+        [
+          "time",
+          "simple"
+        ]
+      ],
+      "zh_arguments": [
+        [
+          "count",
+          "plural"
+        ],
+        [
+          "time",
+          "simple"
+        ]
+      ],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [
+        [
+          "one",
+          "other"
+        ]
+      ],
+      "zh_plural_selectors": [
+        [
+          "other"
+        ]
+      ],
+      "rendered": "此问题提出后你发来3条消息（最近19:36）",
+      "render_error": null,
+      "rendered_cells": 38,
+      "maxCells": 78,
+      "over_budget": -40
+    },
+    {
+      "key": "tui.asks.dismiss.moot_note",
+      "pre_fix": "不再等待此问题",
+      "current": "智能体不再等待回答",
+      "proposed_by_pre_fix_audit": "智能体不再等待回答",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "29228d39f69799f64e1a397631324ac32f7dc2a5107675bbffa873115d37cca6",
+      "current_sha256": "d475a90f96dc0bd1cc26700aa22bb41d253dcf3188165134337365bf90d6df77",
+      "en_arguments": [],
+      "zh_arguments": [],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "智能体不再等待回答",
+      "render_error": null,
+      "rendered_cells": 18,
+      "maxCells": 44,
+      "over_budget": -26
+    }
+  ]
+}

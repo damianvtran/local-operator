@@ -167,6 +167,23 @@ def secret_name_from_key(key: str) -> str:
 DEVICE_BOUND_PROVIDERS: frozenset[str] = frozenset({"kimi"})
 
 
+def is_device_bound_provider(provider: str) -> bool:
+    """Whether ``provider`` resolves to a login that must never be brokered.
+
+    A login flavour is not a new credential security domain: ``kimi-wechat``
+    aliases the same non-portable ``kimi`` row, so comparing the requested raw
+    id would let an authorized broker lend exactly what ``kimi`` refuses. The
+    registry import is local because this module is the relay's stdlib-only
+    import boundary; MCP URLs and secret names are not provider ids and never
+    reach that registry.
+    """
+    if not provider or provider.startswith((MCP_KEY_PREFIX, SECRET_KEY_PREFIX)):
+        return False
+    from local_operator.providers.registry import credential_provider_id
+
+    return credential_provider_id(provider) in DEVICE_BOUND_PROVIDERS
+
+
 def device_bound_refusal(provider: str) -> str:
     """The sentence for a device-bound refusal, naming the local remedy."""
     return (

@@ -1,0 +1,83 @@
+{
+ "namespace": "wire.slash",
+ "prior_status": "failed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19",
+  "result": "failed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Preserved 51 values byte-identical to held/i18n-w3-zh-candidate-4773bb87; 1 new key wire.slash.hub. Full audit coverage 51/52: wire.slash.credential is unreadable under ordinary tool-output redaction and was NOT extracted, reread or bypassed; the 51 readable values and the new hub key are clean (0 findings). Namespace WITHHELD at 51/52; status failed until an approved security disposition covers the unreadable value. Independent auditor i18n-auditor openai/gpt-6.1-sol, 2026-10-19.",
+ "hash_equality": {
+  "source_sha256_prior_row": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+  "source_sha256_held_candidate": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+  "source_sha256_current": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+  "target_sha256_current": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 52,
+  "zh_count": 52,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 52,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": null,
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+ "cur_src": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+ "old_tgt": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+ "new_tgt": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+ "attest_verdict": "withheld",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [
+   {
+    "key": "wire.slash.language",
+    "token": "UI"
+   }
+  ],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

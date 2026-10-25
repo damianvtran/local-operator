@@ -1,0 +1,76 @@
+tui.viewer.title
+EN "file viewer"
+ZH "文件查看器"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.description
+EN "View a local text file"
+ZH "查看本地文本文件"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.usage
+EN "Usage: /view <path>"
+ZH "用法：/view <path>"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.loading
+EN "reading…"
+ZH "正在读取……"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.legend
+EN "↑↓←→ · PgUp/PgDn · Home/End\nw wrap · r reload · y copy path · o open externally · esc close"
+ZH "↑↓←→ · PgUp/PgDn · Home/End\nw换行 · r重新加载 · y复制路径 · o外部打开 · esc关闭"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "keyboard hint", "tone": "plain"}
+tui.viewer.truncated
+EN "Preview truncated — limit: 1 MiB / 20,000 lines"
+ZH "预览已截断 — 上限：1 MiB / 20,000行"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.unreadable
+EN "Cannot read this file — missing, unreadable, or outside permitted roots"
+ZH "无法读取此文件 — 文件缺失、不可读，或不在允许的根目录内"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.unsupported
+EN "This file type has no inline preview — open it externally"
+ZH "此文件类型不支持内联预览 — 在外部打开"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.binary
+EN "Cannot preview a binary file"
+ZH "无法预览二进制文件"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.changed
+EN "This file changed since it was listed — list it again before opening"
+ZH "此文件在列出后已更改 — 打开前重新列出"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.copied
+EN "Path copied"
+ZH "路径已复制"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.copy_failed
+EN "Clipboard unavailable — path: {path}"
+ZH "剪贴板不可用 — 路径：{path}"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.open_failed
+EN "Could not open this file externally"
+ZH "无法在外部打开此文件"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.kind_code
+EN "code"
+ZH "代码"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.kind_markdown
+EN "markdown"
+ZH "markdown"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.kind_text
+EN "text"
+ZH "文本"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.header
+EN "{path} · {kind} · {size} B"
+ZH "{path} · {kind} · {size} B"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.wrap_on
+EN "Wrapping on"
+ZH "自动换行：开启"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}
+tui.viewer.wrap_off
+EN "Wrapping off"
+ZH "自动换行：关闭"
+CX {"note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated.", "role": "status text", "tone": "plain"}

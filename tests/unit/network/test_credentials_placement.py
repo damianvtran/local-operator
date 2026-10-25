@@ -256,7 +256,7 @@ def test_the_document_is_written_privately(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", ["kimi"])
+@pytest.mark.parametrize("key", ["kimi", "kimi-wechat"])
 def test_a_device_bound_provider_cannot_be_declared(tmp_path: Path, key: str) -> None:
     """Refused on DECLARE and on GRANT, because either one alone leaves a way in."""
     document = _document(tmp_path)
@@ -271,15 +271,24 @@ def test_a_device_bound_row_already_on_disk_is_refused_at_grant(tmp_path: Path) 
     This is why the check is in two places: a file is durable, and the code that wrote
     it may have been an earlier build.
     """
+    for key, provider in (("kimi", "kimi"), ("kimi-wechat", "kimi")):
+        document = _document(tmp_path)
+        entry = document.entry(key)
+        assert entry is None
+        document.entries[key] = placement_mod.CredentialPlacementEntry(
+            key=key, provider=provider, kind="oauth-rotating", owner_device=OWNER
+        )
+        with pytest.raises(MeshRefusal) as refusal:
+            document.grant(key, OTHER, by=OWNER)
+        assert refusal.value.code == "device_bound"
+
+
+def test_an_ordinary_provider_still_declares_and_grants(tmp_path: Path) -> None:
+    """Alias canonicalisation must not turn authorization into a global deny."""
     document = _document(tmp_path)
-    entry = document.entry("kimi")
-    assert entry is None
-    document.entries["kimi"] = placement_mod.CredentialPlacementEntry(
-        key="kimi", provider="kimi", kind="oauth-rotating", owner_device=OWNER
-    )
-    with pytest.raises(MeshRefusal) as refusal:
-        document.grant("kimi", OTHER, by=OWNER)
-    assert refusal.value.code == "device_bound"
+    document.declare("openai", owner_device=OWNER, provider="openai", by=OWNER)
+    document.grant("openai", OTHER, by=OWNER)
+    assert document.is_holder("openai", OTHER)
 
 
 # ---------------------------------------------------------------------------

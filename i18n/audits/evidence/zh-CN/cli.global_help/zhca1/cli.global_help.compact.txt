@@ -1,0 +1,28 @@
+cli.global_help.agent	Select a legacy named agent (creates it if missing). Without --train, use a separate persisted session; exec --profile attaches a reusable role instead.	选择旧版命名智能体（不存在则创建）。不带--train时，使用独立持久化会话；exec --profile则附加可复用角色。
+cli.global_help.debug	Enable debug mode for verbose output	启用调试模式以输出详细信息
+cli.global_help.description	
+    Local Operator - An environment for agentic AI models to perform tasks on the local device.
+
+    Supports multiple hosting platforms including DeepSeek, OpenAI, Anthropic, Ollama, Kimi
+    and Alibaba. Features include interactive chat, safe code execution,
+    context-aware conversation history, and built-in safety checks.
+
+    Configure your preferred model and hosting platform via command line arguments. Your
+    configuration file is located at ~/.local-operator/config.yml and can be edited directly.
+	
+    Local Operator - 让智能体AI模型在本地设备上执行任务的环境。
+
+    支持DeepSeek、OpenAI、Anthropic、Ollama、Kimi
+    和Alibaba等多种托管平台。提供交互式聊天、安全代码执行、
+    上下文感知对话历史和内置安全检查。
+
+    通过命令行参数配置首选模型和托管平台。
+    配置文件位于~/.local-operator/config.yml，可直接编辑。
+
+cli.global_help.hosting	Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)	使用的托管平台（radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai）
+cli.global_help.model	Model to use (e.g., gpt-6-astra, claude-opus-5-5, deepseek-flash, grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, mistral-medium-latest, anthropic/claude-opus-5.5). Optional: when omitted, the provider's suggested model is used.	使用的模型（如gpt-6-astra, claude-opus-5-5, deepseek-flash, grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, mistral-medium-latest, anthropic/claude-opus-5.5）。可选：省略时使用提供商建议的模型。
+cli.global_help.resume	Resume a previous session by id, replaying its transcript. The id is the one printed when a session is stopped with Ctrl+C twice, and is the directory name under ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent session.	按ID恢复之前的会话并重放会话记录。连续两次按Ctrl+C停止会话时会显示该ID，它也是~/.local-operator/sessions下的目录名。仅传--resume而不指定ID可重新打开最近的会话。
+cli.global_help.run_in	The working directory to run the operator in.  Must be a valid directory.	运行operator的工作目录。  必须是有效目录。
+cli.global_help.train	Use the legacy agent history directory (or an autosave agent) instead of a separate session. Ordinary sessions are also persisted and resumable; --resume takes precedence over this directory selection.	使用旧版智能体历史目录（或自动保存的智能体），而非独立会话。普通会话也会持久化且可恢复；--resume优先于此目录选择。
+cli.global_help.tui	Force the full-screen TUI even when stdout is not a tty (errors clearly if the TUI cannot run without a tty)	即使stdout不是tty也强制使用全屏TUI（无法在没有tty时运行TUI则明确报错）
+cli.global_help.yolo_conditional	Conditional for this verb's peer create: the session starts unattended only when the target device grants this one the `unattended` capability	此操作的对等设备创建有条件限制：仅当目标设备授予本设备`unattended`能力时，会话才以无人值守方式启动

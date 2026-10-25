@@ -1,0 +1,219 @@
+{
+ "namespace": "wire.settings",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "anthropic/claude-sonnet-5-5",
+  "date": "2026-10-19",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. Preserved 752 values byte-identical to held/i18n-w3-zh-candidate-4773bb87; 48 new keys. 3 preserved value(s) corrected after independent audit. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round.",
+ "hash_equality": {
+  "source_sha256_prior_row": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
+  "source_sha256_held_candidate": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
+  "source_sha256_current": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+  "source_equal": false,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "b5bcb8ebfaa674d31b155ed64130f4a7a256c40b2c7833cfa1f901d12c5c8138",
+  "target_sha256_current": "d0df5e3e6975719b39d3e81171b2d9416844a1df8a5498f81f398476eb284b55",
+  "target_equal": false
+ },
+ "key_parity": {
+  "en_count": 818,
+  "zh_count": 818,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 818,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [
+  "wire.settings.aida.title",
+  "wire.settings.aida_cadence_at.placeholder",
+  "wire.settings.aida_name.placeholder",
+  "wire.settings.bash_memory_mode.choice.auto.label",
+  "wire.settings.bash_memory_mode.choice.manual.label",
+  "wire.settings.classification_vendor.choice.auto.label",
+  "wire.settings.classification_vendor.choice.openrouter.label",
+  "wire.settings.classification_vendor.choice.radient.label",
+  "wire.settings.classification_vendor.choice.typesafe.label",
+  "wire.settings.compaction_strategy.choice.auto.label",
+  "wire.settings.compaction_strategy.choice.context_full.label",
+  "wire.settings.compaction_strategy.choice.snapcompact.label",
+  "wire.settings.desktop_launch_command.placeholder",
+  "wire.settings.display_nerd_icons.choice.none.label",
+  "wire.settings.display_time_format.choice.12h.description",
+  "wire.settings.display_time_format.choice.24h.description",
+  "wire.settings.hub.title",
+  "wire.settings.librarian.title",
+  "wire.settings.librarian_cadence_at.placeholder",
+  "wire.settings.librarian_name.placeholder",
+  "wire.settings.model_effort.choice.unset.label",
+  "wire.settings.network_advertise_hosts.placeholder",
+  "wire.settings.network_credentials_github_repositories.placeholder",
+  "wire.settings.network_rollout_on_update.choice.auto.label",
+  "wire.settings.network_rollout_on_update.choice.off.label",
+  "wire.settings.providers_openai_api.choice.chat_completions.label",
+  "wire.settings.providers_openai_api.choice.responses.label",
+  "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+  "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+  "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+  "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+  "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+  "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+  "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+  "wire.settings.providers_openrouter_ignore.placeholder",
+  "wire.settings.providers_openrouter_max_price.placeholder",
+  "wire.settings.providers_openrouter_only.placeholder",
+  "wire.settings.providers_openrouter_order.placeholder",
+  "wire.settings.providers_openrouter_quantizations.placeholder",
+  "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+  "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+  "wire.settings.providers_openrouter_sort.choice.unset.label",
+  "wire.settings.providers_openrouter_zdr.choice.true.label",
+  "wire.settings.providers_openrouter_zdr.choice.unset.label",
+  "wire.settings.shell_environment_exclude.placeholder",
+  "wire.settings.shell_environment_inherit.placeholder",
+  "wire.settings.shell_environment_mode.choice.allowlist.label",
+  "wire.settings.shell_environment_mode.choice.inherit.label",
+  "wire.settings.speech_transcription_cleanup.choice.auto.label",
+  "wire.settings.speech_transcription_cleanup.choice.client.label",
+  "wire.settings.speech_transcription_cleanup.choice.off.label",
+  "wire.settings.speech_transcription_cleanup.choice.provider.label",
+  "wire.settings.speech_voice_expressiveness.choice.high.label",
+  "wire.settings.speech_voice_expressiveness.choice.low.label",
+  "wire.settings.speech_voice_expressiveness.choice.medium.label",
+  "wire.settings.speech_voice_gender.choice.auto.label",
+  "wire.settings.speech_voice_gender.choice.female.label",
+  "wire.settings.speech_voice_gender.choice.male.label",
+  "wire.settings.speech_voice_tone.choice.authoritative.label",
+  "wire.settings.speech_voice_tone.choice.bright.label",
+  "wire.settings.speech_voice_tone.choice.calm.label",
+  "wire.settings.speech_voice_tone.choice.neutral.label",
+  "wire.settings.speech_voice_tone.choice.warm.label",
+  "wire.settings.static_roots.placeholder",
+  "wire.settings.supplements_denyprefixes.placeholder",
+  "wire.settings.tool_approval_mode.choice.ask.label",
+  "wire.settings.tool_approval_mode.choice.auto.label",
+  "wire.settings.web_fetch_render_backend.choice.auto.label",
+  "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+  "wire.settings.web_search_searxng_endpoint.label",
+  "wire.settings.web_search_strategy.choice.ordered.label",
+  "wire.settings.web_search_strategy.choice.round_robin.label"
+ ],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": false,
+ "sample": null,
+ "src_ok": false,
+ "tgt_ok": false,
+ "old_src": "d1bc117e26fd79c55663c7ba1972304509a42370213f90924b0b9dc6ec81f63a",
+ "cur_src": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+ "old_tgt": "b5bcb8ebfaa674d31b155ed64130f4a7a256c40b2c7833cfa1f901d12c5c8138",
+ "new_tgt": "d0df5e3e6975719b39d3e81171b2d9416844a1df8a5498f81f398476eb284b55",
+ "attest_verdict": "not_carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [
+   {
+    "key": "wire.settings.bash_memory_enabled.help",
+    "token": "RAM"
+   },
+   {
+    "key": "wire.settings.display_rail.help",
+    "token": "ANSWER"
+   },
+   {
+    "key": "wire.settings.memory_guard.description",
+    "token": "RAM"
+   },
+   {
+    "key": "wire.settings.providers_openrouter_max_price.help",
+    "token": "USD"
+   },
+   {
+    "key": "wire.settings.shell_environment_inherit.help",
+    "token": "ON"
+   },
+   {
+    "key": "wire.settings.shell_environment_inherit.help",
+    "token": "TOP"
+   }
+  ],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": [
+  {
+   "key": "wire.settings.asks_lapsed_visible_for.help",
+   "maxCells": 58,
+   "zh_cells": 40,
+   "fits": true
+  },
+  {
+   "key": "wire.settings.asks_lapsed_visible_for.label",
+   "maxCells": 29,
+   "zh_cells": 16,
+   "fits": true
+  },
+  {
+   "key": "wire.settings.session_compression.title",
+   "maxCells": 34,
+   "zh_cells": 8,
+   "fits": true
+  },
+  {
+   "key": "wire.settings.session_compression_after_days.label",
+   "maxCells": 29,
+   "zh_cells": 18,
+   "fits": true
+  },
+  {
+   "key": "wire.settings.session_compression_enabled.label",
+   "maxCells": 29,
+   "zh_cells": 14,
+   "fits": true
+  },
+  {
+   "key": "wire.settings.session_scratchpad.title",
+   "maxCells": 12,
+   "zh_cells": 6,
+   "fits": true
+  },
+  {
+   "key": "wire.settings.session_scratchpad_max_bytes.label",
+   "maxCells": 29,
+   "zh_cells": 18,
+   "fits": true
+  }
+ ]
+}

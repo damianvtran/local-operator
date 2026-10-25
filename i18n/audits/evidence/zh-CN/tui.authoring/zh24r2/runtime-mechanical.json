@@ -1,0 +1,423 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.authoring",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "generated_utc": "2026-10-25T00:45:57Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 49,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "tui.authoring.action_class",
+      "zh_render": "自主级别",
+      "en_render": "class",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.class_hint",
+      "zh_render": "proactive可在没有请求时主动开展工作",
+      "en_render": "proactive may initiate work without a request",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.create",
+      "zh_render": "新建智能体",
+      "en_render": "new agent",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.delegate",
+      "zh_render": "委派",
+      "en_render": "delegate",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.description",
+      "zh_render": "使用场景",
+      "en_render": "when to use",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.description_clear_unsupported",
+      "zh_render": "此表单暂不支持清空已有描述。",
+      "en_render": "This form cannot clear an existing description yet.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.discard",
+      "zh_render": "放弃更改？y放弃 · n继续编辑",
+      "en_render": "Discard changes? y discard · n keep editing",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.edit",
+      "zh_render": "编辑智能体 · release-notes",
+      "en_render": "edit agent · release-notes",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.effort",
+      "zh_render": "模型档位",
+      "en_render": "effort tier",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.footer",
+      "zh_render": "/agent new · /agent edit <name> · /agent clear解除绑定",
+      "en_render": "/agent new · /agent edit <name> · /agent clear detaches",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.inherit",
+      "zh_render": "继承",
+      "en_render": "inherit",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.instructions",
+      "zh_render": "指令",
+      "en_render": "instructions",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.instructions_hint",
+      "zh_render": "常驻指引 · Tab跳至下一字段",
+      "en_render": "standing guidance · Tab moves to the next field",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.invalid_effort",
+      "zh_render": "该模型档位未配置。",
+      "en_render": "That effort tier is not configured.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.invalid_name",
+      "zh_render": "名称不能含空格或路径分隔符。",
+      "en_render": "Use a name without spaces or path separators.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.invalid_tools",
+      "zh_render": "工具名用逗号分隔，不能有空项。",
+      "en_render": "Use comma-separated tool names; no empty entries.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.kind",
+      "zh_render": "类型",
+      "en_render": "kind",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.label",
+      "zh_render": "显示名称",
+      "en_render": "label",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.legend",
+      "zh_render": "ctrl+s保存 · tab移动 · esc取消",
+      "en_render": "ctrl+s save · tab move · esc cancel",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.missing",
+      "zh_render": "未安装名为release-notes的角色或专家。",
+      "en_render": "No installed role or specialist named release-notes.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.name",
+      "zh_render": "名称",
+      "en_render": "name",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.no",
+      "zh_render": "否",
+      "en_render": "no",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.no_change",
+      "zh_render": "没有更改需要保存",
+      "en_render": "no changes to save",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.notice_read_only",
+      "zh_render": "只读：本次会话的运行时位于另一台设备，此处无法修改配置档。",
+      "en_render": "Read-only: this conversation's runtime is on another device, so profile changes are not available here.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.proactive",
+      "zh_render": "主动",
+      "en_render": "proactive",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.promote_failed",
+      "zh_render": "无法复制到账户：write failed",
+      "en_render": "could not promote: write failed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.promote_mixed_plan",
+      "zh_render": "将用本会话的副本替换账户中的现有定义：<replaced>。这还会复制<created>。在命令末尾加上`yes`，即可替换并复制 — 尚未做任何更改。",
+      "en_render": "Replace existing account definitions: <replaced> with this conversation's copy. This also copies <created>. Add `yes` to replace and copy — nothing has changed yet.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.promote_plan",
+      "zh_render": "在命令末尾加上`yes`，即可将<names>复制到你的账户 — 尚未做任何更改。",
+      "en_render": "Add `yes` to copy <names> into your account — nothing has changed yet.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.promote_receipt_created",
+      "zh_render": "已将<names>复制到你的账户。",
+      "en_render": "Copied <names> to your account.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.promote_receipt_keeps",
+      "zh_render": "本会话保留自己的副本。",
+      "en_render": "This conversation keeps its own copy.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.promote_receipt_replaced",
+      "zh_render": "已在你的账户中替换：<names>。",
+      "en_render": "Replaced in your account: <names>.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.promote_replace_plan",
+      "zh_render": "将用本会话的副本替换账户中的现有定义：<names>。在命令末尾加上`yes`，即可替换 — 尚未做任何更改。",
+      "en_render": "Replace existing account definitions: <names> with this conversation's copy. Add `yes` to replace — nothing has changed yet.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.promote_usage",
+      "zh_render": "使用<command> <name> [replace] [yes] [as <new name>]。",
+      "en_render": "Use <command> <name> [replace] [yes] [as <new name>].",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.reactive",
+      "zh_render": "被动",
+      "en_render": "reactive",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.registry_missing",
+      "zh_render": "本会话未连接智能体注册表。",
+      "en_render": "No agent registry is attached to this session.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.required_instructions",
+      "zh_render": "指令不能为空。",
+      "en_render": "Instructions are required.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.revision_changed",
+      "zh_render": "其他人已修改此配置档，重新打开后再编辑。",
+      "en_render": "Someone else changed this profile; reopen to edit.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.role",
+      "zh_render": "角色",
+      "en_render": "role",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.save_error",
+      "zh_render": "无法保存：write failed",
+      "en_render": "Could not save: write failed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.saved",
+      "zh_render": "已保存智能体release-notes",
+      "en_render": "saved agent release-notes",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.scope_conversation",
+      "zh_render": "本会话",
+      "en_render": "this conversation",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.seed_not_installed",
+      "zh_render": "编辑前需先安装此内置初始配置。",
+      "en_render": "Install this packaged starter before editing it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.specialist",
+      "zh_render": "专家",
+      "en_render": "specialist",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.specialist_fields",
+      "zh_render": "专家不带tools、effort或delegate字段。",
+      "en_render": "Specialists carry no tools, effort or delegate fields.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.tools",
+      "zh_render": "工具",
+      "en_render": "tools",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.tools_hint",
+      "zh_render": "逗号分隔 · 留空=所有工具",
+      "en_render": "comma-separated · empty = all tools",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.usage_edit",
+      "zh_render": "使用/agent edit <name>。",
+      "en_render": "Use /agent edit <name>.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.usage_new",
+      "zh_render": "使用/agent new，不带额外参数。",
+      "en_render": "Use /agent new with no extra arguments.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.authoring.yes",
+      "zh_render": "是",
+      "en_render": "yes",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]*[\\w/-]",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

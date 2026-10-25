@@ -1,0 +1,263 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "relay.session.tags",
+  "revision": "f7a884b7b73e0b92d2b44ea2020c46b9b0d4843f",
+  "generated_utc": "2026-10-24T23:28:37Z",
+  "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/relay.session.tags.json",
+      "sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/relay.session.tags.context.json",
+      "sha256": "8051bf6e05e0fd4720c8dfbf03094b81eb85b3239b7603c6c817f47cb40714c7"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/relay.session.tags.json",
+      "sha256": "5e8fec4f79c59f9cf6a4d0d1b00b8c27d8603b5af1437d3d5a1ae06a88d75d58"
+    }
+  },
+  "checks": {
+    "key_parity": {
+      "key_count_en": 19,
+      "key_count_zh": 19,
+      "missing": [],
+      "extra": [],
+      "order_identical": true,
+      "order_mismatch": [],
+      "ok": true
+    },
+    "non_nfc": [],
+    "control_chars": [],
+    "bidi_controls": [],
+    "zero_width": [],
+    "fullwidth_latin_or_digits": [],
+    "cjk_latin_space": [],
+    "icu_arguments": {
+      "mismatches": [],
+      "ok": true
+    },
+    "plural_structure": {
+      "rows": [
+        {
+          "key": "relay.session.tags.more",
+          "en_selectors": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh_selectors": [
+            [
+              "other"
+            ]
+          ]
+        }
+      ],
+      "errors": [],
+      "ok": true
+    },
+    "technical_tokens": {
+      "missing": [],
+      "ok": true
+    },
+    "width": {
+      "over_budget": [],
+      "ok": true
+    }
+  },
+  "width_rows": [
+    {
+      "key": "relay.session.tags.action",
+      "maxCells": null,
+      "en_cells": 5,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "over": null,
+      "ratio": 1.2,
+      "zh_wide_cells": 6
+    },
+    {
+      "key": "relay.session.tags.sheet_title",
+      "maxCells": null,
+      "en_cells": 4,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "relay.session.tags.loading",
+      "maxCells": null,
+      "en_cells": 8,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 1.25,
+      "zh_wide_cells": 10
+    },
+    {
+      "key": "relay.session.tags.empty",
+      "maxCells": null,
+      "en_cells": 21,
+      "zh_cells": 12,
+      "zh_rendered_cells": 12,
+      "over": null,
+      "ratio": 0.571,
+      "zh_wide_cells": 12
+    },
+    {
+      "key": "relay.session.tags.empty_hint",
+      "maxCells": null,
+      "en_cells": 45,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.578,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "relay.session.tags.load_error",
+      "maxCells": null,
+      "en_cells": 33,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "over": null,
+      "ratio": 0.545,
+      "zh_wide_cells": 18
+    },
+    {
+      "key": "relay.session.tags.retry",
+      "maxCells": null,
+      "en_cells": 9,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.444,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "relay.session.tags.limit_hint",
+      "maxCells": null,
+      "en_cells": 78,
+      "zh_cells": 52,
+      "zh_rendered_cells": 46,
+      "over": null,
+      "ratio": 0.667,
+      "zh_wide_cells": 48
+    },
+    {
+      "key": "relay.session.tags.primary",
+      "maxCells": null,
+      "en_cells": 7,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "over": null,
+      "ratio": 0.857,
+      "zh_wide_cells": 6
+    },
+    {
+      "key": "relay.session.tags.make_primary",
+      "maxCells": null,
+      "en_cells": 27,
+      "zh_cells": 18,
+      "zh_rendered_cells": 25,
+      "over": null,
+      "ratio": 0.667,
+      "zh_wide_cells": 39
+    },
+    {
+      "key": "relay.session.tags.more",
+      "maxCells": null,
+      "en_cells": 53,
+      "zh_cells": 36,
+      "zh_rendered_cells": 11,
+      "over": null,
+      "ratio": 0.679,
+      "zh_wide_cells": 13
+    },
+    {
+      "key": "relay.session.tags.missing",
+      "maxCells": null,
+      "en_cells": 20,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 0.5,
+      "zh_wide_cells": 10
+    },
+    {
+      "key": "relay.session.tags.saving",
+      "maxCells": null,
+      "en_cells": 7,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 1.429,
+      "zh_wide_cells": 10
+    },
+    {
+      "key": "relay.session.tags.save_error",
+      "maxCells": null,
+      "en_cells": 23,
+      "zh_cells": 12,
+      "zh_rendered_cells": 12,
+      "over": null,
+      "ratio": 0.522,
+      "zh_wide_cells": 12
+    },
+    {
+      "key": "relay.session.tags.remove_all",
+      "maxCells": null,
+      "en_cells": 15,
+      "zh_cells": 12,
+      "zh_rendered_cells": 12,
+      "over": null,
+      "ratio": 0.8,
+      "zh_wide_cells": 12
+    },
+    {
+      "key": "relay.session.tags.remove_all_confirm",
+      "maxCells": null,
+      "en_cells": 16,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": null,
+      "ratio": 0.875,
+      "zh_wide_cells": 14
+    },
+    {
+      "key": "relay.session.tags.cancel",
+      "maxCells": null,
+      "en_cells": 6,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.667,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "relay.session.tags.done",
+      "maxCells": null,
+      "en_cells": 4,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "relay.session.tags.pin_and_tags_hint",
+      "maxCells": null,
+      "en_cells": 37,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.703,
+      "zh_wide_cells": 26
+    }
+  ]
+}

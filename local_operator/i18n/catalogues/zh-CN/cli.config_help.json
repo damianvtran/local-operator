@@ -1,0 +1,11 @@
+{
+  "cli.config_help.config": "管理配置设置",
+  "cli.config_help.open": "在默认编辑器中打开配置文件",
+  "cli.config_help.edit": "编辑配置文件中的指定配置值",
+  "cli.config_help.edit_key": "要更新的配置键（如hosting、model_name、conversation_length、detail_length、max_learnings_history、auto_save_conversation）",
+  "cli.config_help.edit_value": "配置键的新值（根据键自动转换类型）",
+  "cli.config_help.list": "列出可用配置项及其说明",
+  "cli.config_help.create": "创建配置文件",
+  "cli.config_help.instructions": "按顺序显示会话组装的自定义指令文件（仅路径和大小，不显示内容）",
+  "cli.config_help.instructions_description": "按顺序显示会话组装的自定义指令文件，包括各文件贡献的大小，以及是否因重复而折叠、被截断或与之前的来源重叠。仅显示路径和大小，不显示内容。"
+}

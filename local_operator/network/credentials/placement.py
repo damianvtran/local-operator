@@ -48,12 +48,12 @@ from pathlib import Path
 from typing import Any, Iterator, NoReturn, Sequence
 
 from local_operator.network.credentials.types import (
-    DEVICE_BOUND_PROVIDERS,
     CredentialPlacementEntry,
     Holder,
     credential_key_for_mcp,
     credential_key_for_provider,
     credential_key_for_secret,
+    is_device_bound_provider,
     peer_int,
 )
 
@@ -451,12 +451,12 @@ def refuse_device_bound(key: str, provider: str) -> None:
     """Refuse to place a provider whose grants are device-bound.
 
     Called on DECLARE and on GRANT, both, because either one alone leaves a way in:
-    a document written before this rule existed would otherwise still be honoured,
-    and the check is cheap (a set membership on a name).
+    a document written before this rule existed would otherwise still be honoured.
+    Both key and provider are resolved through the one alias-aware predicate.
     """
     from local_operator.network.types import MeshRefusal
 
-    if provider in DEVICE_BOUND_PROVIDERS:
+    if is_device_bound_provider(key) or is_device_bound_provider(provider):
         from local_operator.network.credentials.types import device_bound_refusal
 
         raise MeshRefusal("device_bound", device_bound_refusal(provider))

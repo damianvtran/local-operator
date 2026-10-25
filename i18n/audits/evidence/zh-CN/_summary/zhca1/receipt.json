@@ -1,0 +1,12 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "locale": "zh-CN",
+ "record": "i18n/audits/evidence/zh-CN/_summary/zhca1/audit-summary.json",
+ "provenance": "Summary bundle for the per-namespace attestation records.",
+ "hashes": {
+  "audit-summary.json": "a47cc36c60236b1e4a2dfe843a5e337617836ff6a6d09cc7f9dd35c809f62d25",
+  "audit.log": "dc4d7af72eb491164dca974b41e13b48265a8a65a046c6489778af142b94e141",
+  "report.md": "c0464bd59a10a182f453f8d4bfc9905f3eb67b5e00a89481ee422df368028dfd"
+ }
+}

@@ -16,17 +16,53 @@ these cells ran. The runner is gone by the time anyone reads the log, so the
 evidence has to be written at the failure.
 
 This module records that evidence from inside the xdist worker, before the test
-process unwinds: host memory and swap, load average, the shard's process tree
-and per-process RSS, the cgroup v2 high-water mark, and the failing node id.
-The next measurement -- whether to bound workers or hunt a leak -- needs exactly
-these numbers, and ``memory.peak`` is the one that outlives the moment.
+process unwinds: host memory and swap, load average, the failing worker's own
+resource and kernel ceilings, the shard's process tree and per-process RSS, the
+cgroup v2 high-water mark (and the v1 ceiling where that hierarchy is in use),
+and the failing node id.
+
+WHAT THE FIRST EIGHT DUMPS SETTLED
+----------------------------------
+The dump fired again on main run 40140983105, shard ``test (3.13, 3)``, head
+``a96e13e8d8``: eight dumps, all readable. Every one showed ``MemAvailable``
+11.9-12.1 GiB, ``MemFree`` 9.1 GiB, ``SwapFree`` 3.0 GiB, runner load
+3.66/3.12/1.60, no cgroup v2 memory limits, and a seven-process shard tree at
+about 3.0 GB RSS. The runner was not short of memory. That falsifies the
+capacity explanation -- it is not merely unproven -- and the worker-count
+mitigation drafted against it was withdrawn for that reason, not deferred.
+
+The one remaining class that produces ``ENOMEM`` with 12 GiB free is a
+per-process, kernel or commit ceiling. So the dump now also records, from the
+failing worker itself: ``RLIMIT_AS``/``DATA``/``NPROC``/``STACK``/``NOFILE`` soft
+and hard, the worker's mapping count (``/proc/<pid>/maps`` lines, never the
+lines), ``VmPeak``/``VmSize``/``VmData``/``VmStk``/``VmRSS``, ``Threads``, the
+open descriptor count and the per-UID process count, ``vm.max_map_count`` and
+the ``map_count / max_map_count`` ratio, the namespace task total from
+``/proc/loadavg``, the commit accounting and overcommit policy
+(``CommitLimit``/``Committed_AS``, ``vm.overcommit_memory``/``ratio``), and the
+cgroup v1 memory ceiling beside the v2 files.
+
+Commit accounting is the strongest remaining capacity-shaped explanation: with
+``vm.overcommit_memory=2`` the kernel refuses ``mmap``/``brk`` once
+``Committed_AS`` reaches ``CommitLimit``, and ``MemAvailable`` can still read
+12 GiB while that refusal happens.
+
+WHAT THIS PROBE IS FOR, AND ITS FALSIFIER
+-----------------------------------------
+If the next failure shows every limit permissive and ``map_count`` far below
+``vm.max_map_count``, the ceiling theory is wrong as well, and the hunt moves to
+the spawning call itself -- the code asking the kernel for an allocation, not
+the budget the kernel reports. The dump is evidence for that decision, not a
+claim that any number is currently out of range.
 
 WHAT IT DELIBERATELY DOES NOT DO
 --------------------------------
 It does not retry, reduce a worker count, change a timeout or touch a test.
 It never reads a command line: this dump is uploaded as a public artifact, an
 argument can be a credential, and the process tree only needs pids, ppids, RSS
-and names (the root comes from the worker's parent pid).
+and names (the root comes from the worker's parent pid). It does not emit map
+lines either, only their count: a mapping line carries filesystem paths, and
+this artifact is public.
 
 Nothing is written on a healthy run: the hook is one ``isinstance`` check per
 test report and the directory is created only when an ENOMEM failure actually
@@ -35,13 +71,6 @@ an unusable dump directory disables the instrument instead of raising inside a
 pytest hook. That is the same rule ``tests/shard_stall_watchdog.py`` follows,
 and for the same reason: a diagnostic that can turn a green run red is switched
 off the first time it is wrong.
-
-THE READING THIS SUPPORTS, STATED UP FRONT
------------------------------------------
-If the same cells fail again in a run that shows plenty of ``MemAvailable`` and
-no cgroup pressure at the failure, this capacity explanation is WRONG and the
-response changes to a real-defect hunt. The dump is evidence for that decision,
-not a claim that any number is currently out of range.
 
 WHERE THE FILE LANDS
 --------------------
@@ -76,6 +105,56 @@ MEMINFO_KEYS = ("MemAvailable", "MemFree", "SwapFree", "Cached")
 #: container started -- the number a worker-count decision needs after the fact,
 #: because ``memory.current`` has usually fallen again by the time it is read.
 CGROUP_FILES = ("memory.max", "memory.current", "memory.peak")
+
+#: The worker's resource limits that can refuse an allocation while the host
+#: still has free memory, mapped from the label ``/proc/<pid>/limits`` prints.
+#: ``NOFILE`` fails with ``EMFILE`` rather than ``ENOMEM``, but it is one row on
+#: the same read and an exhausted descriptor table is the other classic
+#: per-process ceiling, so it is recorded beside the rest.
+LIMIT_ROWS = (
+    ("RLIMIT_AS", "Max address space"),
+    ("RLIMIT_DATA", "Max data size"),
+    ("RLIMIT_NPROC", "Max processes"),
+    ("RLIMIT_STACK", "Max stack size"),
+    ("RLIMIT_NOFILE", "Max open files"),
+)
+
+#: ``/proc/<pid>/status`` keys for the address-space, stack and thread
+#: readings. ``VmPeak`` is the high-water mark a ceiling reading is compared
+#: against; ``VmSize``/``VmData``/``VmStk``/``VmRSS`` are the same instant's
+#: current values. ``VmData`` is the one ``RLIMIT_DATA`` actually governs and
+#: ``VmStk`` the one ``RLIMIT_STACK`` governs, so each limit has a paired usage
+#: rather than only the address-space total.
+WORKER_STATUS_KEYS = ("VmPeak", "VmSize", "VmData", "VmStk", "VmRSS", "Threads")
+
+#: Relative to a ``/proc`` root, so the fake tree in the unit tests reads the
+#: same path shape the kernel exposes.
+MAX_MAP_COUNT_PATH = Path("sys") / "vm" / "max_map_count"
+
+#: ``/proc/meminfo`` keys and ``/proc/sys/vm`` files of the commit accounting.
+#: With ``overcommit_memory=2`` the kernel refuses an ``mmap``/``brk`` once
+#: ``Committed_AS`` reaches ``CommitLimit``, while ``MemAvailable`` can still be
+#: high -- the exact shape the eight dumps measured. ``ratio`` only participates
+#: when the policy is strict (2); it is still recorded for every policy.
+COMMIT_MEMINFO_KEYS = ("CommitLimit", "Committed_AS")
+OVERCOMMIT_SYSCTLS = ("overcommit_memory", "overcommit_ratio")
+OVERCOMMIT_POLICIES = {
+    "0": "heuristic overcommit (the kernel guesses)",
+    "1": "always overcommit (no commit limit is enforced)",
+    "2": "strict (refuses once Committed_AS reaches CommitLimit)",
+}
+
+#: cgroup v1 exposes its memory controller one directory below the mount root.
+#: A v1 host has nothing at the v2 paths, so reading both is what keeps a v1
+#: ceiling from being invisible.
+CGROUP_V1_DIR = "memory"
+CGROUP_V1_FILES = ("memory.limit_in_bytes", "memory.usage_in_bytes")
+CGROUP_V1_STAT_KEYS = ("hierarchical_memory_limit", "total_rss")
+
+#: cgroup v1 writes this near-``LONG_MAX`` page count when a group has no
+#: ceiling. Rendering it as ``unlimited`` matches how the v2 block renders
+#: ``max``; a reader must not have to recognize a sentinel to see "no limit".
+CGROUP_V1_UNLIMITED = 9223372036854771712
 
 #: Base for local runs. CI overrides the whole directory through
 #: :data:`ENV_RUN_DIR`; ``TMPDIR`` is the platform-correct scratch root and is
@@ -305,10 +384,13 @@ def build_report(
     lines.append(f"timestamp: {moment.isoformat()} (epoch {moment.timestamp():.3f})")
     lines.extend(_error_lines(nodeid, error))
     lines.extend(_identity_lines(config, current_pid))
+    lines.extend(_ceiling_lines(proc_root, current_pid))
     lines.extend(_meminfo_lines(proc_root))
+    lines.extend(_commit_lines(proc_root))
     lines.extend(_loadavg_lines(proc_root))
     lines.extend(_process_lines(proc_root, current_pid, processes, root_pid))
-    lines.extend(_cgroup_lines(cgroup_root))
+    lines.extend(_cgroup_lines(proc_root, current_pid, cgroup_root))
+    lines.extend(_cgroup_v1_lines(proc_root, current_pid, cgroup_root))
     return "\n".join(lines) + "\n"
 
 
@@ -380,6 +462,307 @@ def _loadavg_lines(proc_root: Path) -> list[str]:
     return lines
 
 
+def _ceiling_lines(proc_root: Path, pid: int) -> list[str]:
+    """The failing worker's own ceilings: rlimits, address space, task counts.
+
+    ``pid`` is the worker that caught the ``OSError`` -- in production the
+    process this hook runs in, whose ``/proc/self`` these files are. Any other
+    process would describe a neighbour, and the ceiling this probe exists to
+    test is the failing worker's. Every read is best-effort: a missing file is
+    stated, never raised, and ``maps`` is counted rather than copied because a
+    mapping line carries filesystem paths into a public artifact.
+    """
+    worker = proc_root / str(pid)
+    lines = ["", f"-- resource limits: failing worker pid {pid} ({worker / 'limits'}) --"]
+    limits_raw, limits_error = _read_text(worker / "limits")
+    if limits_raw is None:
+        lines.append(f"(unavailable: {limits_error})")
+    else:
+        rows = _parse_limit_rows(limits_raw)
+        for rlimit, label in LIMIT_ROWS:
+            row = rows.get(label)
+            if row is None:
+                lines.append(f"{rlimit} ({label}): unavailable: row absent")
+                continue
+            soft, hard, units = row
+            lines.append(f"{rlimit} ({label}): soft={soft} hard={hard} units={units or 'unknown'}")
+
+    lines.extend(["", f"-- address space and threads: failing worker pid {pid} ({worker}) --"])
+    status_raw, status_error = _read_text(worker / "status")
+    if status_raw is None:
+        lines.append(f"(unavailable: {status_error})")
+    else:
+        values = _status_values(status_raw)
+        for key in WORKER_STATUS_KEYS:
+            value = values.get(key)
+            if value is None:
+                lines.append(f"{key}: <missing>")
+            elif key == "Threads":
+                lines.append(f"{key}: {value}")
+            else:
+                lines.append(f"{key}: {_format_kb(value)}")
+
+    lines.extend(["", f"-- mapping and task ceilings: failing worker pid {pid} --"])
+    map_count, maps_error = _count_lines(worker / "maps")
+    if map_count is None:
+        lines.append(f"map_count: unavailable: {maps_error}")
+    else:
+        lines.append(f"map_count: {map_count} ({worker / 'maps'} lines; contents not emitted)")
+    max_path = proc_root / MAX_MAP_COUNT_PATH
+    max_raw, max_error = _read_text(max_path)
+    max_map_count: int | None = None
+    if max_raw is None:
+        lines.append(f"max_map_count: unavailable: {max_error}")
+    else:
+        try:
+            max_map_count = int(max_raw.strip())
+        except ValueError:
+            lines.append(f"max_map_count: {_one_line(max_raw, 80)} (unparsed)")
+        else:
+            lines.append(f"max_map_count: {max_map_count} ({max_path})")
+    if map_count is None or max_map_count is None or max_map_count <= 0:
+        lines.append("map_count / max_map_count: unavailable (a reading is missing)")
+    else:
+        ratio = map_count / max_map_count
+        lines.append(
+            f"map_count / max_map_count: {map_count}/{max_map_count} = "
+            f"{ratio:.4f} ({ratio * 100:.2f}%)"
+        )
+    tasks = _namespace_tasks(proc_root)
+    if tasks is None:
+        lines.append("namespace tasks: unavailable (no parsable /proc/loadavg)")
+    else:
+        runnable, total = tasks
+        lines.append(f"namespace tasks: total={total} runnable={runnable} (/proc/loadavg field 4)")
+
+    fd_count, fd_error = _count_entries(worker / "fd")
+    if fd_count is None:
+        lines.append(f"open file descriptors: unavailable: {fd_error}")
+    else:
+        # Reading /proc/self/fd opens a descriptor on that directory, which
+        # then appears in its own listing; say so rather than silently
+        # reporting one more open file than the worker holds.
+        caveat = " (includes the descriptor this read opened)" if pid == os.getpid() else ""
+        lines.append(f"open file descriptors: {fd_count} ({worker / 'fd'} entries){caveat}")
+
+    uid, uid_count, uid_error = _uid_processes(proc_root, pid)
+    if uid is None:
+        lines.append(f"processes owned by uid: unavailable: {uid_error}")
+    elif uid_count is None:
+        lines.append(f"processes owned by uid {uid}: unavailable: {uid_error}")
+    else:
+        lines.append(
+            f"processes owned by uid {uid}: {uid_count} "
+            f"(/proc/<pid>/status Uid; all {proc_root} entries scanned)"
+        )
+    return lines
+
+
+def _parse_limit_rows(raw: str) -> dict[str, tuple[str, str, str]]:
+    """Parse ``/proc/<pid>/limits`` into ``label -> (soft, hard, units)``.
+
+    Matched by the kernel's own labels rather than by column offsets: the file
+    is column-aligned today, but a value wider than its column collapses the
+    padding, and splitting the whole line on whitespace would then read part of
+    the label as the soft limit. The labels in :data:`LIMIT_ROWS` contain no
+    runs of whitespace, so a prefix match is stable in both layouts.
+    """
+    labels = {label for _, label in LIMIT_ROWS}
+    rows: dict[str, tuple[str, str, str]] = {}
+    for line in raw.splitlines():
+        for label in labels:
+            if not line.startswith(label):
+                continue
+            fields = line[len(label) :].split()
+            if len(fields) >= 2:
+                rows[label] = (fields[0], fields[1], fields[2] if len(fields) > 2 else "")
+            break
+    return rows
+
+
+def _status_values(raw: str) -> dict[str, int]:
+    """The :data:`WORKER_STATUS_KEYS` values present in a status file."""
+    values: dict[str, int] = {}
+    for line in raw.splitlines():
+        key, separator, rest = line.partition(":")
+        if not separator or key not in WORKER_STATUS_KEYS:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            values[key] = int(parts[0])
+        except ValueError:
+            continue
+    return values
+
+
+def _count_lines(path: Path) -> tuple[int | None, str | None]:
+    """Count a file's lines without holding it or its contents.
+
+    ``/proc/<pid>/maps`` emits one mapping per line and each line carries
+    filesystem paths, so only the count is reported. Iterating the handle keeps
+    the peak at one line even when the mapping table is at the ceiling that
+    made this dump run; the whole loop is wrapped like every other read.
+    """
+    try:
+        count = 0
+        with path.open("rb") as handle:
+            for _ in handle:
+                count += 1
+        return count, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _namespace_tasks(proc_root: Path) -> tuple[int, int] | None:
+    """The ``runnable/total`` task counts in field 4 of ``/proc/loadavg``."""
+    raw, _ = _read_text(proc_root / "loadavg")
+    if not raw:
+        return None
+    parts = raw.split()
+    if len(parts) < 4 or "/" not in parts[3]:
+        return None
+    runnable, _, total = parts[3].partition("/")
+    try:
+        return int(runnable), int(total)
+    except ValueError:
+        return None
+
+
+def _commit_lines(proc_root: Path) -> list[str]:
+    """Commit accounting and the overcommit policy, which bound allocations.
+
+    ``overcommit_memory=2`` is the one policy that can refuse an allocation
+    while ``MemAvailable`` is high: the kernel checks ``Committed_AS`` against
+    ``CommitLimit`` instead of free pages. ``CommitLimit`` is ``0 kB`` on
+    kernels that do not track it, so the ratio is stated unavailable rather
+    than divided by zero.
+    """
+    lines = ["", f"-- commit and overcommit ({proc_root}) --"]
+    values: dict[str, int] = {}
+    meminfo_raw, meminfo_error = _read_text(proc_root / "meminfo")
+    if meminfo_raw is None:
+        lines.append(f"commit readings unavailable: {meminfo_error}")
+    else:
+        for line in meminfo_raw.splitlines():
+            key, separator, rest = line.partition(":")
+            if not separator or key not in COMMIT_MEMINFO_KEYS:
+                continue
+            parts = rest.split()
+            if not parts:
+                continue
+            try:
+                values[key] = int(parts[0])
+            except ValueError:
+                continue
+        for key in COMMIT_MEMINFO_KEYS:
+            if key in values:
+                lines.append(f"{key}: {_format_kb(values[key])}")
+            else:
+                lines.append(f"{key}: <missing>")
+
+    limit = values.get("CommitLimit")
+    committed = values.get("Committed_AS")
+    if limit is None or committed is None or limit <= 0:
+        lines.append("Committed_AS / CommitLimit: unavailable (a reading is missing)")
+    else:
+        ratio = committed / limit
+        lines.append(
+            f"Committed_AS / CommitLimit: {committed}/{limit} = "
+            f"{ratio:.4f} ({ratio * 100:.2f}%)"
+        )
+
+    policy: str | None = None
+    for name in OVERCOMMIT_SYSCTLS:
+        path = proc_root / "sys" / "vm" / name
+        raw, read_error = _read_text(path)
+        if raw is None:
+            lines.append(f"vm.{name}: unavailable: {read_error}")
+            continue
+        value = raw.strip()
+        try:
+            int(value)
+        except ValueError:
+            lines.append(f"vm.{name}: {_one_line(value, 80)} (unparsed)")
+            continue
+        lines.append(f"vm.{name}: {value} ({path})")
+        if name == "overcommit_memory":
+            policy = value
+    if policy is not None:
+        description = OVERCOMMIT_POLICIES.get(policy, "unknown policy value")
+        lines.append(f"overcommit policy: {description}")
+    return lines
+
+
+def _count_entries(path: Path) -> tuple[int | None, str | None]:
+    """Count directory entries without reading what they point at.
+
+    ``/proc/<pid>/fd`` holds one symlink per open descriptor, and each target
+    is a path; only the count is reported because this artifact is public.
+    """
+    try:
+        count = 0
+        with os.scandir(path) as entries:
+            for _entry in entries:
+                count += 1
+        return count, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _real_uid(proc_root: Path, pid: int) -> tuple[int | None, str | None]:
+    """The worker's real UID, the one ``RLIMIT_NPROC`` is charged against."""
+    raw, error = _read_text(proc_root / str(pid) / "status")
+    if raw is None:
+        return None, error
+    for line in raw.splitlines():
+        key, separator, rest = line.partition(":")
+        if not separator or key != "Uid":
+            continue
+        parts = rest.split()
+        if not parts:
+            return None, "Uid is empty"
+        try:
+            return int(parts[0]), None
+        except ValueError:
+            return None, "Uid is not an integer"
+    return None, "Uid is absent from status"
+
+
+def _uid_processes(proc_root: Path, pid: int) -> tuple[int | None, int | None, str | None]:
+    """How many processes the worker's real UID owns, across the namespace.
+
+    ``RLIMIT_NPROC`` is charged per real UID, so the namespace task total from
+    ``/proc/loadavg`` is not the number it is compared with. One bounded scan
+    of the pid directories: the same read :func:`read_processes` performs for
+    the process tree, and no field beyond the ``Uid`` line is parsed.
+    """
+    uid, uid_error = _real_uid(proc_root, pid)
+    if uid is None:
+        return None, None, uid_error
+    try:
+        entries = list(proc_root.iterdir())
+    except Exception as exc:
+        return uid, None, f"{type(exc).__name__}: {exc}"
+    count = 0
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        raw, _error = _read_text(entry / "status")
+        if raw is None:
+            continue
+        for line in raw.splitlines():
+            key, separator, rest = line.partition(":")
+            if not separator or key != "Uid":
+                continue
+            parts = rest.split()
+            if parts and parts[0].isdigit() and int(parts[0]) == uid:
+                count += 1
+            break
+    return uid, count, None
+
+
 def _process_lines(
     proc_root: Path,
     pid: int,
@@ -418,15 +801,76 @@ def _process_lines(
     return lines
 
 
-def _cgroup_lines(cgroup_root: Path) -> list[str]:
-    lines = ["", f"-- cgroup v2 memory ({cgroup_root}) --"]
-    found = False
+def _cgroup_relpath(proc_root: Path, pid: int, hierarchy: str) -> tuple[str | None, str | None]:
+    """The memory-controller path from ``/proc/<pid>/cgroup``.
+
+    ``0::<path>`` is the unified (v2) entry; ``<id>:memory:<path>`` is the v1
+    entry whose controller list names ``memory``. The path is relative to that
+    hierarchy's mount point -- the caller joins it under the root it knows --
+    so a container or systemd scope resolves to the group that actually
+    constrains this worker rather than always to the mount root.
+    """
+    source = proc_root / str(pid) / "cgroup"
+    raw, read_error = _read_text(source)
+    if raw is None:
+        return None, f"{source} unreadable: {read_error}"
+    for line in raw.splitlines():
+        fields = line.split(":", 2)
+        if len(fields) != 3:
+            continue
+        hierarchy_id, controllers, path = fields
+        if hierarchy == "v2":
+            if hierarchy_id == "0" and controllers == "":
+                return path or "/", None
+        elif "memory" in controllers.split(","):
+            return path or "/", None
+    return None, f"no {hierarchy} memory entry in {source}"
+
+
+def _cgroup_memory_dir(
+    proc_root: Path, pid: int, root_dir: Path, hierarchy: str
+) -> tuple[Path, str, str | None]:
+    """The most specific existing memory-cgroup directory, and why it was read.
+
+    The process's own cgroup path carries the ceiling a container or scope
+    sets; preferring it is what makes a nested slice visible. The provenance
+    string says which directory was chosen, because a silent fallback to the
+    mount root would hide that the nested one was missing. The third value is
+    the resolution error for the caller to state, or ``None``.
+    """
+    rel, rel_error = _cgroup_relpath(proc_root, pid, hierarchy)
+    if rel is not None:
+        nested = root_dir / rel.lstrip("/")
+        if nested.is_dir():
+            return nested, f"nested {hierarchy} group {rel}", None
+        return root_dir, f"mount root (nested {hierarchy} group {rel} not present)", None
+    return root_dir, "mount root", rel_error
+
+
+def _cgroup_lines(proc_root: Path, pid: int, cgroup_root: Path) -> list[str]:
+    """The cgroup v2 memory files, from this process's own group when present.
+
+    Every file is reported individually: a failed read is ``unavailable:
+    <reason>``, and only a missing hierarchy is reported as an absence.
+    Collapsing a failed read into "no files" would turn the exact case this
+    probe exists to catch -- a ceiling that exists but cannot be read -- into a
+    false negative.
+    """
+    base, provenance, resolution_error = _cgroup_memory_dir(proc_root, pid, cgroup_root, "v2")
+    lines = ["", f"-- cgroup v2 memory ({base}) --"]
+    source = f"cgroup source: {provenance}"
+    if resolution_error is not None:
+        source += f"; {resolution_error}"
+    lines.append(source)
+    if not cgroup_root.exists():
+        lines.append(f"(no cgroup v2 hierarchy at {cgroup_root}; cgroup v1 or none)")
+        return lines
     for name in CGROUP_FILES:
-        path = cgroup_root / name
+        path = base / name
         raw, read_error = _read_text(path)
         if raw is None:
+            lines.append(f"{name}: unavailable: {read_error}")
             continue
-        found = True
         value = raw.strip()
         if name == "memory.max" and value == "max":
             lines.append(f"{name}: max (unlimited)")
@@ -434,11 +878,68 @@ def _cgroup_lines(cgroup_root: Path) -> list[str]:
         try:
             byte_count = int(value)
         except ValueError:
-            lines.append(f"{name}: {_one_line(value, 80)} (unparsed; {read_error or 'raw'})")
+            lines.append(f"{name}: {_one_line(value, 80)} (unparsed)")
             continue
         lines.append(f"{name}: {byte_count} bytes ({_format_mib(byte_count)})")
-    if not found:
-        lines.append("(no cgroup v2 memory.max/memory.current/memory.peak; cgroup v1 or none)")
+    return lines
+
+
+def _cgroup_v1_lines(proc_root: Path, pid: int, cgroup_root: Path) -> list[str]:
+    """The cgroup v1 memory ceiling, beside the v2 files that v1 lacks.
+
+    A v1 host has nothing at the v2 paths, so without this block a v1 ceiling
+    is invisible. The process's own v1 memory path is preferred when present.
+    ``memory.stat``'s ``hierarchical_memory_limit`` and ``total_rss`` are the
+    effective ceiling and current charge of a nested group. A missing or
+    unreadable file is stated per file, never folded into "no files": a
+    permission error on the limit must not read as an absent controller.
+    """
+    root_dir = cgroup_root / CGROUP_V1_DIR
+    base, provenance, resolution_error = _cgroup_memory_dir(proc_root, pid, root_dir, "v1")
+    lines = ["", f"-- cgroup v1 memory ({base}) --"]
+    source = f"cgroup source: {provenance}"
+    if resolution_error is not None:
+        source += f"; {resolution_error}"
+    lines.append(source)
+    if not base.exists():
+        lines.append(f"(no cgroup v1 memory controller at {base}; v2 or none)")
+        return lines
+    for name in CGROUP_V1_FILES:
+        path = base / name
+        raw, read_error = _read_text(path)
+        if raw is None:
+            lines.append(f"{name}: unavailable: {read_error}")
+            continue
+        value = raw.strip()
+        try:
+            byte_count = int(value)
+        except ValueError:
+            lines.append(f"{name}: {_one_line(value, 80)} (unparsed)")
+            continue
+        if name == "memory.limit_in_bytes" and byte_count == CGROUP_V1_UNLIMITED:
+            lines.append(f"{name}: unlimited")
+            continue
+        lines.append(f"{name}: {byte_count} bytes ({_format_mib(byte_count)})")
+    stat_raw, stat_error = _read_text(base / "memory.stat")
+    if stat_raw is None:
+        lines.append(f"memory.stat: unavailable: {stat_error}")
+        return lines
+    stats: dict[str, int] = {}
+    for line in stat_raw.splitlines():
+        key, _, rest = line.partition(" ")
+        if key not in CGROUP_V1_STAT_KEYS or not rest.strip():
+            continue
+        try:
+            stats[key] = int(rest.strip())
+        except ValueError:
+            continue
+    for key in CGROUP_V1_STAT_KEYS:
+        if key not in stats:
+            lines.append(f"memory.stat {key}: <missing>")
+        elif key == "hierarchical_memory_limit" and stats[key] == CGROUP_V1_UNLIMITED:
+            lines.append(f"memory.stat {key}: unlimited")
+        else:
+            lines.append(f"memory.stat {key}: {stats[key]} bytes ({_format_mib(stats[key])})")
     return lines
 
 

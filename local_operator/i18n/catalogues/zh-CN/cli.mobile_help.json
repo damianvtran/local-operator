@@ -1,0 +1,17 @@
+{
+  "cli.mobile_help.mobile": "手机访问：控制此机器上的lop会话",
+  "cli.mobile_help.install": "安装守护进程、密码和LaunchAgent",
+  "cli.mobile_help.status": "守护进程健康状态、访问关卡和活动会话",
+  "cli.mobile_help.daemon_action": "{action, select, start{启动} stop{停止} restart{重启} other{{action}}}守护进程",
+  "cli.mobile_help.logs": "跟踪守护进程和运行时的日志末尾",
+  "cli.mobile_help.logs_lines": "每个文件读取的行数（最多读取两个文件）",
+  "cli.mobile_help.logs_follow": "按名称跟踪，以显示查看期间新建或轮转的日志（绑定描述符的跟踪会漏掉这两种情况）",
+  "cli.mobile_help.password": "显示或轮换门户密码",
+  "cli.mobile_help.devices": "列出此电脑的推送设备，或撤销/恢复某设备",
+  "cli.mobile_help.devices_command": "list（默认）、revoke <device_id>或unrevoke <device_id>",
+  "cli.mobile_help.devices_device_id": "`lop mobile devices`列出的device_id；revoke/unrevoke必填",
+  "cli.mobile_help.devices_port": "mobile守护进程的端口（默认：守护进程自身的默认值）",
+  "cli.mobile_help.uninstall": "移除LaunchAgent",
+  "cli.mobile_help.uninstall_purge": "同时删除密码",
+  "cli.mobile_help.serve": "运行守护进程（前台）"
+}

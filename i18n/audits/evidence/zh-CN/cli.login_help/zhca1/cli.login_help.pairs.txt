@@ -1,0 +1,11 @@
+# cli.login_help — sampled en/zh pairs for attestation zhca1
+# 2/2 keys; all >120 chars and all plurals included
+
+## cli.login_help.login  [39 chars]
+EN: Log in to a provider (OAuth or API key)
+ZH: 登录提供商（OAuth或API密钥）
+
+## cli.login_help.provider  [97 chars]
+EN: Provider to log in to (e.g., openai, anthropic, kimi, xai). Omit to list login-capable providers.
+ZH: 要登录的提供商（如openai、anthropic、kimi、xai）。省略则列出支持登录的提供商。
+

@@ -55,11 +55,22 @@ KEYS_DIR = REPO / "local_operator" / "i18n" / "keys"
 LEDGER = REPO / "i18n" / "ledger.json"
 
 #: Security disposition is independent of per-carried-namespace audit passes.
-#: Chinese's held wire.slash candidate cannot be bypassed by omitting its file
-#: or ledger row and publishing a smaller passed package. Even new passed rows
-#: do not clear the hold: removal requires a separately reviewed, explicit
-#: security disposition. This blocks eligibility, not recognition/formatting.
-SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
+#: A held locale cannot be made eligible by omitting its file or ledger row and
+#: publishing a smaller passed package; removal requires a separately reviewed,
+#: explicit security disposition from the policy owner. This blocks eligibility,
+#: not recognition/formatting.
+#:
+#: EMPTY AS OF 2026-10-24, by the owner's explicit disposition. zh-CN had been
+#: held because ``wire.slash.credential`` was read outside the redaction policy
+#: (docs/security/redaction-policy.md, 2026-10-19). That blocker is resolved at
+#: the source: the policy now names key names as never-secret, and the
+#: sanctioned ``read_public_copy`` route (PR #2877, released in 0.89.0) served
+#: the committed blob with checkout-identity binding and an audit record. The
+#: namespace was then re-audited at its current bytes (evidence:
+#: i18n/audits/evidence/zh-CN/wire.slash/zh24s1/), every carried namespace has a
+#: current-byte passed audit, and i18n/ledger.json carries 81 passed zh-CN rows.
+#: Add a locale back here only with a new reviewed disposition.
+SECURITY_HELD_LOCALES: frozenset[str] = frozenset()
 
 #: Namespaces whose audited shipped-locale copy the relay SPA carries in-process,
 #: as the ``bundled.gen.ts`` map the store registers before any consumer renders.
@@ -77,6 +88,22 @@ SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
 #: ``relay.session.tags`` is the tag slice (LOH-11 C1): the tag line, the
 #: assignment sheet and the list's long-press copy, split out of ``relay.session``
 #: because the catalogues are one small owned namespace per surface.
+#: ``relay.asks`` is the asks/cards slice (the relay's last planned namespace,
+#: RFC §5): the ask card, asks sheet, dock, settled row, pending decision card,
+#: approval-gate sheet and the disclosure that holds panels shut while a
+#: question waits. The tuple is one reviewed line per slice, never a glob.
+#: ``relay.approvals`` is the approvals-policy slice that landed on main while
+#: ``relay.asks`` was in flight (`feat(mobile): offer both approval scopes on
+#: the phone`): the policy state line, the third (global) scope and the mode
+#: change links the pending card carries. It is a namespace of its own rather
+#: than more ``relay.asks`` keys because the asks catalogues are already
+#: carried by every translated locale, and a new key there would be untranslated
+#: in all of them. It was expected to start en-only and ride §2.5 fallback; it
+#: does not, because the programme's rule is that new copy ships translated. It
+#: carries all seven locales, and the day it landed untranslated is the day the
+#: ratchet and the census became mutually unsatisfiable for it (check.py forbade
+#: the debt, the census required it). Recorded here because the next new
+#: namespace will hit the same wall.
 OWNED_SPA_NAMESPACES = (
     "relay.shell",
     "relay.session",
@@ -89,6 +116,8 @@ OWNED_SPA_NAMESPACES = (
     # new key in a namespace a locale has not carried yet GROWS the shrink-only
     # coverage allowance (docs/I18N.md).
     "relay.ask",
+    "relay.approvals",
+    "relay.asks",
 )
 
 GENERATED_HEADER = (

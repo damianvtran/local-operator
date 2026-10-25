@@ -1,0 +1,19 @@
+tui.viewer.title | file viewer | 文件查看器
+tui.viewer.description | View a local text file | 查看本地文本文件
+tui.viewer.usage | Usage: /view <path> | 用法：/view <path>
+tui.viewer.loading | reading… | 正在读取……
+tui.viewer.legend | ↑↓←→ · PgUp/PgDn · Home/End\nw wrap · r reload · y copy path · o open externally · esc close | ↑↓←→ · PgUp/PgDn · Home/End\nw换行 · r重新加载 · y复制路径 · o外部打开 · esc关闭
+tui.viewer.truncated | Preview truncated — limit: 1 MiB / 20,000 lines | 预览已截断 — 上限：1 MiB / 20,000行
+tui.viewer.unreadable | Cannot read this file — missing, unreadable, or outside permitted roots | 无法读取此文件 — 文件缺失、不可读，或不在允许的根目录内
+tui.viewer.unsupported | This file type has no inline preview — open it externally | 此文件类型不支持内联预览 — 在外部打开
+tui.viewer.binary | Cannot preview a binary file | 无法预览二进制文件
+tui.viewer.changed | This file changed since it was listed — list it again before opening | 此文件在列出后已更改 — 打开前重新列出
+tui.viewer.copied | Path copied | 路径已复制
+tui.viewer.copy_failed | Clipboard unavailable — path: {path} | 剪贴板不可用 — 路径：{path}
+tui.viewer.open_failed | Could not open this file externally | 无法在外部打开此文件
+tui.viewer.kind_code | code | 代码
+tui.viewer.kind_markdown | markdown | markdown
+tui.viewer.kind_text | text | 文本
+tui.viewer.header | {path} · {kind} · {size} B | {path} · {kind} · {size} B
+tui.viewer.wrap_on | Wrapping on | 自动换行：开启
+tui.viewer.wrap_off | Wrapping off | 自动换行：关闭

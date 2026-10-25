@@ -1,0 +1,3 @@
+wire.errors.auth.key_not_accepted	This provider does not accept an API key.	此提供商不接受API密钥。
+wire.errors.auth.key_rejected	The provider rejected this API key.	提供商拒绝了此API密钥。
+wire.errors.auth.store_unreadable	The credential store could not be read — the provider census needs it.	无法读取凭据存储——提供商普查需要读取它。

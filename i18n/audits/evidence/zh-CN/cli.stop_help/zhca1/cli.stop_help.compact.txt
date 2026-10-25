@@ -1,0 +1,3 @@
+cli.stop_help.all	stop every session on this machine (prompts on a TTY; --yes to skip)	停止此机器上的所有会话（在TTY上提示；用--yes跳过）
+cli.stop_help.force	escalate past a refusal or a skip: signal a target whose socket cannot confirm identity, one that reports a turn in flight, or one already leaving after a signal — each of those can cut the turn it is in. Not needed for a cooperative mid-turn runtime: the plain stop ends that one promptly, through its socket	越过拒绝或跳过并升级处理：向套接字无法确认身份、报告轮次正在进行或收到信号后已在退出的目标发送信号；这些操作都可能中断其当前轮次。配合响应的轮次中运行时无需此项：普通stop即可通过套接字及时停止它
+cli.stop_help.pid	target by exact pid	按确切pid指定目标

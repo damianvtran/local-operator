@@ -29,11 +29,12 @@ THREE PIECES, all narrow:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Sequence
 
 from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import OwnerSnapshot
@@ -605,7 +606,13 @@ class ScreenModelRunner:
 
         self._job_ref["job"] = job
 
-    def __call__(self, prompt: str, *, default_model: str) -> tuple[str, str | None]:
+    def __call__(
+        self,
+        prompt: str,
+        *,
+        default_model: str,
+        images: "Sequence[tuple[bytes, str]] | None" = None,
+    ) -> tuple[str, str | None]:
         if self._selection.default_model != default_model:
             # Built for a DIFFERENT default than the pipeline screens under:
             # identity cannot be evidenced, so hold.
@@ -616,17 +623,33 @@ class ScreenModelRunner:
             return "", None
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(self.acall(prompt, default_model=default_model))
+            return loop.run_until_complete(
+                self.acall(prompt, default_model=default_model, images=images)
+            )
         finally:
             loop.close()
 
-    async def acall(self, prompt: str, *, default_model: str) -> tuple[str, str | None]:
-        """The PUBLIC async entry: bounded wall time, owned cleanup in finally."""
+    async def acall(
+        self,
+        prompt: str,
+        *,
+        default_model: str,
+        images: "Sequence[tuple[bytes, str]] | None" = None,
+    ) -> tuple[str, str | None]:
+        """The PUBLIC async entry: bounded wall time, owned cleanup in finally.
+
+        ``images`` are ``(bytes, mime)`` pairs from the screen-purpose fetch,
+        already verified and bounded. They share this call's single dispatch,
+        deadline, token cap and budget unit — an image screen is ONE screening,
+        not a second channel.
+        """
 
         try:
             if self._selection.default_model != default_model:
                 return "", None
-            return await asyncio.wait_for(self._drive(prompt), timeout=self._deadline_s)
+            return await asyncio.wait_for(
+                self._drive(prompt, images=images), timeout=self._deadline_s
+            )
         finally:
             # One-shot by contract: owned resources close on EVERY completion
             # — identity hold, deadline, cancel, error, success alike (QA: an
@@ -666,14 +689,40 @@ class ScreenModelRunner:
                 pass
             self._owned_http = None
 
-    async def _drive(self, prompt: str) -> tuple[str, str | None]:
-        from local_operator.harness.types import ChatRequest, Message, TextContent
+    async def _drive(
+        self, prompt: str, *, images: "Sequence[tuple[bytes, str]] | None" = None
+    ) -> tuple[str, str | None]:
+        from local_operator.harness.types import (
+            ChatRequest,
+            ImageContent,
+            Message,
+            TextContent,
+        )
 
+        if images and not bool(getattr(self._selection.spec, "supports_images", False)):
+            # D5, fail closed: a screener that cannot see images must never be
+            # sent them (a provider would strip or 400 them and the verdict
+            # would then cover pixels nobody looked at). The connector screens
+            # text-only for such a model; reaching here means the selection
+            # changed under it, which is a hold, never a text-only allow.
+            raise _ScreeningStreamRefused("images_unsupported")
+        image_blocks = [
+            ImageContent(data=base64.b64encode(data).decode("ascii"), mime_type=mime)
+            for data, mime in (images or ())
+        ]
         request = ChatRequest(
             model=self._selection.spec,
             # ONE fresh user turn: no system blocks, no history, no tools,
-            # no cache lineage, no callbacks — the isolation contract.
-            messages=[Message(role="user", content=[TextContent(text=prompt)])],
+            # no cache lineage, no callbacks — the isolation contract. Images
+            # follow the prompt text inside that same turn (Message.user's
+            # order), so the instructions frame them as data.
+            messages=[
+                (
+                    Message.user(prompt, images=image_blocks)
+                    if image_blocks
+                    else Message(role="user", content=[TextContent(text=prompt)])
+                )
+            ],
             tools=[],
             tool_choice="none",
             isolated=True,

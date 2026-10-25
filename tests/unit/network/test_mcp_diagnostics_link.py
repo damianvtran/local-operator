@@ -46,6 +46,9 @@ async def test_mcp_diagnostics_reach_actual_network_tool_without_claiming_inheri
     )
     with closing(AuthStore(db_path=server_b.root / "auth.db", config_dir=server_b.root)) as store:
         await _sdk_login(store, monkeypatch)
+        # Quiesce the WAL before checking ready's immutable snapshot. The open-WAL
+        # unknown arm has its own focused regression in test_readiness.py.
+        store.close()
         result = await tool.execute_network(
             "synthetic-mcp-ready",
             {"action": "ready", "peer": server_b.identity.name},
@@ -68,11 +71,13 @@ async def test_mcp_diagnostics_reach_actual_network_tool_without_claiming_inheri
         assert "[redacted]" not in json.dumps(item)
         from local_operator.mcp.auth import TOKENS_OBTAINED_AT_KEY, McpTokenStorage
 
+        store = AuthStore(db_path=server_b.root / "auth.db", config_dir=server_b.root)
         storage = McpTokenStorage(URL, store)
         data = dict(store.list_credentials("mcp-oauth")[0].data)
         data["tokens"] = {"access_token": "[redacted]", "token_type": "Bearer", "expires_in": 1}
         data[TOKENS_OBTAINED_AT_KEY] = time.time() - 120
         assert storage._write(data)
+        store.close()
         expired = await tool.execute_network(
             "synthetic-mcp-expired",
             {"action": "ready", "peer": server_b.identity.name},
@@ -84,3 +89,49 @@ async def test_mcp_diagnostics_reach_actual_network_tool_without_claiming_inheri
         row = _capability(expired.details["network"], readiness.CAPABILITY_MCP_CREDENTIAL)
         assert row["ok"] is False and row["code"] == "local_grant_unavailable"
         assert row["observed"]["auth_diagnostics"]["access_state"] == "expired"
+
+    # A later broker refusal is evidence about the OWNER. Publish the same real
+    # placement on both fixture devices, record that refusal on the holder, and
+    # read it back through the actual peer-readiness wire. The stale local row
+    # above must not reassign the owner's repair to the holder.
+    from local_operator.network.credentials import mcp_state, placement
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    key = credential_key_for_mcp(URL)
+    for root in (server_a.root, server_b.root):
+        with placement.mutate(
+            record.network_id, root, self_device=server_a.identity.device_id
+        ) as doc:
+            doc.declare(
+                key,
+                owner_device=server_a.identity.device_id,
+                owner_device_name=server_a.identity.name,
+                provider="mcp-oauth",
+                kind="mcp-rotating",
+                by=server_a.identity.device_id,
+            )
+            doc.grant(
+                key, server_b.identity.device_id, scope="session", by=server_a.identity.device_id
+            )
+    mcp_state.record(
+        record.network_id,
+        key,
+        state="expired",
+        code="interactive_required",
+        owner_device=server_a.identity.device_id,
+        owner_name=server_a.identity.name,
+        root=server_b.root,
+    )
+
+    observed = await tool.execute_network(
+        "synthetic-mcp-owner-expired",
+        {"action": "ready", "peer": server_b.identity.name},
+        None,
+        None,
+        ToolContext(cwd="."),
+    )
+    assert observed.details is not None
+    row = _capability(observed.details["network"], readiness.CAPABILITY_MCP_CREDENTIAL)
+    assert row["ok"] is False and row["code"] == readiness.CODE_OBSERVED_FAILURE
+    assert f"{server_a.identity.name}: sign in again" in row["detail"]
+    assert row["remedies"] == [f"sign in again on {server_a.identity.name}"]

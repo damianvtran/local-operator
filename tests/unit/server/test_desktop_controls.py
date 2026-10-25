@@ -1274,9 +1274,15 @@ async def test_provider_census_carries_the_suggested_model(desktop):
     assert rows["deepseek"]["suggested_model"]["id"] == "deepseek-flash"
     assert rows["ollama"]["suggested_model"] is None
     assert rows["typesafe"]["suggested_model"] is None
-    # Per method, because the route decides the spelling (Kimi).
+    # Per method, because the route decides the spelling (Kimi). Both OAuth
+    # entries (kimi.ai and the WeChat entry) reach the same coding host, so
+    # both spell K3 `k3`; only the API-key method uses the mainland `kimi-k3`.
     kimi = {m["method_id"]: m["suggested_model"]["id"] for m in rows["kimi"]["auth_methods"]}
-    assert kimi == {"kimi": "k3", "kimi:api-key": "kimi-k3"}
+    assert kimi == {
+        "kimi": "k3",
+        "kimi-wechat": "k3",
+        "kimi:api-key": "kimi-k3",
+    }
 
 
 async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):

@@ -1,0 +1,548 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.authoring",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "generated_utc": "2026-10-25T00:45:57Z",
+  "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.authoring.json",
+      "sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.authoring.context.json",
+      "sha256": "df98bba4457c1080b3941e9a24a04a52e360d11d2a07bdda992861c6cb54928c"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.authoring.json",
+      "sha256": "2ead66f9e2daaf713969912ea5debfa3fcc3687321d1ac28a7de12df7d96ec55"
+    }
+  },
+  "checks": {
+    "key_parity": {
+      "key_count_en": 49,
+      "key_count_zh": 49,
+      "missing": [],
+      "extra": [],
+      "order_identical": true,
+      "order_mismatch": [],
+      "ok": true
+    },
+    "non_nfc": [],
+    "control_chars": [],
+    "bidi_controls": [],
+    "zero_width": [],
+    "fullwidth_latin_or_digits": [],
+    "cjk_latin_space": [],
+    "icu_arguments": {
+      "mismatches": [],
+      "ok": true
+    },
+    "plural_structure": {
+      "rows": [],
+      "errors": [],
+      "ok": true
+    },
+    "technical_tokens": {
+      "missing": [],
+      "ok": true
+    },
+    "width": {
+      "over_budget": [],
+      "ok": true
+    }
+  },
+  "width_rows": [
+    {
+      "key": "tui.authoring.action_class",
+      "maxCells": null,
+      "en_cells": 5,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "over": null,
+      "ratio": 1.6,
+      "zh_wide_cells": 8
+    },
+    {
+      "key": "tui.authoring.class_hint",
+      "maxCells": null,
+      "en_cells": 45,
+      "zh_cells": 35,
+      "zh_rendered_cells": 35,
+      "over": null,
+      "ratio": 0.778,
+      "zh_wide_cells": 35
+    },
+    {
+      "key": "tui.authoring.create",
+      "maxCells": null,
+      "en_cells": 9,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 1.111,
+      "zh_wide_cells": 10
+    },
+    {
+      "key": "tui.authoring.delegate",
+      "maxCells": null,
+      "en_cells": 8,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.5,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.description",
+      "maxCells": null,
+      "en_cells": 11,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "over": null,
+      "ratio": 0.727,
+      "zh_wide_cells": 8
+    },
+    {
+      "key": "tui.authoring.description_clear_unsupported",
+      "maxCells": null,
+      "en_cells": 51,
+      "zh_cells": 28,
+      "zh_rendered_cells": 28,
+      "over": null,
+      "ratio": 0.549,
+      "zh_wide_cells": 28
+    },
+    {
+      "key": "tui.authoring.discard",
+      "maxCells": null,
+      "en_cells": 43,
+      "zh_cells": 27,
+      "zh_rendered_cells": 27,
+      "over": null,
+      "ratio": 0.628,
+      "zh_wide_cells": 27
+    },
+    {
+      "key": "tui.authoring.edit",
+      "maxCells": null,
+      "en_cells": 19,
+      "zh_cells": 19,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 40
+    },
+    {
+      "key": "tui.authoring.effort",
+      "maxCells": null,
+      "en_cells": 11,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "over": null,
+      "ratio": 0.727,
+      "zh_wide_cells": 8
+    },
+    {
+      "key": "tui.authoring.footer",
+      "maxCells": null,
+      "en_cells": 55,
+      "zh_cells": 54,
+      "zh_rendered_cells": 54,
+      "over": null,
+      "ratio": 0.982,
+      "zh_wide_cells": 54
+    },
+    {
+      "key": "tui.authoring.inherit",
+      "maxCells": null,
+      "en_cells": 7,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.571,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.instructions",
+      "maxCells": null,
+      "en_cells": 12,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.333,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.instructions_hint",
+      "maxCells": null,
+      "en_cells": 47,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.553,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "tui.authoring.invalid_effort",
+      "maxCells": null,
+      "en_cells": 35,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "over": null,
+      "ratio": 0.514,
+      "zh_wide_cells": 18
+    },
+    {
+      "key": "tui.authoring.invalid_name",
+      "maxCells": null,
+      "en_cells": 45,
+      "zh_cells": 28,
+      "zh_rendered_cells": 28,
+      "over": null,
+      "ratio": 0.622,
+      "zh_wide_cells": 28
+    },
+    {
+      "key": "tui.authoring.invalid_tools",
+      "maxCells": null,
+      "en_cells": 49,
+      "zh_cells": 30,
+      "zh_rendered_cells": 30,
+      "over": null,
+      "ratio": 0.612,
+      "zh_wide_cells": 30
+    },
+    {
+      "key": "tui.authoring.kind",
+      "maxCells": null,
+      "en_cells": 4,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.label",
+      "maxCells": null,
+      "en_cells": 5,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "over": null,
+      "ratio": 1.6,
+      "zh_wide_cells": 8
+    },
+    {
+      "key": "tui.authoring.legend",
+      "maxCells": null,
+      "en_cells": 35,
+      "zh_cells": 30,
+      "zh_rendered_cells": 30,
+      "over": null,
+      "ratio": 0.857,
+      "zh_wide_cells": 30
+    },
+    {
+      "key": "tui.authoring.missing",
+      "maxCells": null,
+      "en_cells": 45,
+      "zh_cells": 30,
+      "zh_rendered_cells": 37,
+      "over": null,
+      "ratio": 0.667,
+      "zh_wide_cells": 51
+    },
+    {
+      "key": "tui.authoring.name",
+      "maxCells": null,
+      "en_cells": 4,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.no",
+      "maxCells": null,
+      "en_cells": 2,
+      "zh_cells": 2,
+      "zh_rendered_cells": 2,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 2
+    },
+    {
+      "key": "tui.authoring.no_change",
+      "maxCells": null,
+      "en_cells": 18,
+      "zh_cells": 16,
+      "zh_rendered_cells": 16,
+      "over": null,
+      "ratio": 0.889,
+      "zh_wide_cells": 16
+    },
+    {
+      "key": "tui.authoring.notice_read_only",
+      "maxCells": null,
+      "en_cells": 103,
+      "zh_cells": 58,
+      "zh_rendered_cells": 58,
+      "over": null,
+      "ratio": 0.563,
+      "zh_wide_cells": 58
+    },
+    {
+      "key": "tui.authoring.proactive",
+      "maxCells": null,
+      "en_cells": 9,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.444,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.promote_failed",
+      "maxCells": null,
+      "en_cells": 27,
+      "zh_cells": 24,
+      "zh_rendered_cells": 28,
+      "over": null,
+      "ratio": 0.889,
+      "zh_wide_cells": 50
+    },
+    {
+      "key": "tui.authoring.promote_mixed_plan",
+      "maxCells": null,
+      "en_cells": 164,
+      "zh_cells": 125,
+      "zh_rendered_cells": 125,
+      "over": null,
+      "ratio": 0.762,
+      "zh_wide_cells": 125
+    },
+    {
+      "key": "tui.authoring.promote_plan",
+      "maxCells": null,
+      "en_cells": 70,
+      "zh_cells": 67,
+      "zh_rendered_cells": 67,
+      "over": null,
+      "ratio": 0.957,
+      "zh_wide_cells": 67
+    },
+    {
+      "key": "tui.authoring.promote_receipt_created",
+      "maxCells": null,
+      "en_cells": 31,
+      "zh_cells": 27,
+      "zh_rendered_cells": 27,
+      "over": null,
+      "ratio": 0.871,
+      "zh_wide_cells": 27
+    },
+    {
+      "key": "tui.authoring.promote_receipt_keeps",
+      "maxCells": null,
+      "en_cells": 37,
+      "zh_cells": 22,
+      "zh_rendered_cells": 22,
+      "over": null,
+      "ratio": 0.595,
+      "zh_wide_cells": 22
+    },
+    {
+      "key": "tui.authoring.promote_receipt_replaced",
+      "maxCells": null,
+      "en_cells": 34,
+      "zh_cells": 29,
+      "zh_rendered_cells": 29,
+      "over": null,
+      "ratio": 0.853,
+      "zh_wide_cells": 29
+    },
+    {
+      "key": "tui.authoring.promote_replace_plan",
+      "maxCells": null,
+      "en_cells": 124,
+      "zh_cells": 95,
+      "zh_rendered_cells": 95,
+      "over": null,
+      "ratio": 0.766,
+      "zh_wide_cells": 95
+    },
+    {
+      "key": "tui.authoring.promote_usage",
+      "maxCells": null,
+      "en_cells": 53,
+      "zh_cells": 54,
+      "zh_rendered_cells": 54,
+      "over": null,
+      "ratio": 1.019,
+      "zh_wide_cells": 54
+    },
+    {
+      "key": "tui.authoring.reactive",
+      "maxCells": null,
+      "en_cells": 8,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.5,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.registry_missing",
+      "maxCells": null,
+      "en_cells": 46,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.565,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "tui.authoring.required_instructions",
+      "maxCells": null,
+      "en_cells": 26,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": null,
+      "ratio": 0.538,
+      "zh_wide_cells": 14
+    },
+    {
+      "key": "tui.authoring.revision_changed",
+      "maxCells": null,
+      "en_cells": 50,
+      "zh_cells": 40,
+      "zh_rendered_cells": 40,
+      "over": null,
+      "ratio": 0.8,
+      "zh_wide_cells": 40
+    },
+    {
+      "key": "tui.authoring.role",
+      "maxCells": null,
+      "en_cells": 4,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.save_error",
+      "maxCells": null,
+      "en_cells": 24,
+      "zh_cells": 18,
+      "zh_rendered_cells": 22,
+      "over": null,
+      "ratio": 0.75,
+      "zh_wide_cells": 44
+    },
+    {
+      "key": "tui.authoring.saved",
+      "maxCells": null,
+      "en_cells": 18,
+      "zh_cells": 18,
+      "zh_rendered_cells": 25,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 39
+    },
+    {
+      "key": "tui.authoring.scope_conversation",
+      "maxCells": null,
+      "en_cells": 17,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "over": null,
+      "ratio": 0.353,
+      "zh_wide_cells": 6
+    },
+    {
+      "key": "tui.authoring.seed_not_installed",
+      "maxCells": null,
+      "en_cells": 48,
+      "zh_cells": 30,
+      "zh_rendered_cells": 30,
+      "over": null,
+      "ratio": 0.625,
+      "zh_wide_cells": 30
+    },
+    {
+      "key": "tui.authoring.specialist",
+      "maxCells": null,
+      "en_cells": 10,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.4,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.specialist_fields",
+      "maxCells": null,
+      "en_cells": 54,
+      "zh_cells": 37,
+      "zh_rendered_cells": 37,
+      "over": null,
+      "ratio": 0.685,
+      "zh_wide_cells": 37
+    },
+    {
+      "key": "tui.authoring.tools",
+      "maxCells": null,
+      "en_cells": 5,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 0.8,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.authoring.tools_hint",
+      "maxCells": null,
+      "en_cells": 35,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.686,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "tui.authoring.usage_edit",
+      "maxCells": null,
+      "en_cells": 23,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 1.043,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "tui.authoring.usage_new",
+      "maxCells": null,
+      "en_cells": 39,
+      "zh_cells": 30,
+      "zh_rendered_cells": 30,
+      "over": null,
+      "ratio": 0.769,
+      "zh_wide_cells": 30
+    },
+    {
+      "key": "tui.authoring.yes",
+      "maxCells": null,
+      "en_cells": 3,
+      "zh_cells": 2,
+      "zh_rendered_cells": 2,
+      "over": null,
+      "ratio": 0.667,
+      "zh_wide_cells": 2
+    }
+  ]
+}

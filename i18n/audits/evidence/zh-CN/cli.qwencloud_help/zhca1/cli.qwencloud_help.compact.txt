@@ -1,0 +1,2 @@
+cli.qwencloud_help.qwencloud_ticket	Store the QwenCloud console session cookie that /usage reads	存储/usage读取的QwenCloud控制台会话cookie
+cli.qwencloud_help.rm	Remove the stored cookie	移除已存储的cookie

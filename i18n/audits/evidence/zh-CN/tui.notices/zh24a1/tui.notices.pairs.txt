@@ -1,0 +1,149 @@
+tui.notices.reasoning_echo_filled
+EN "the provider refused this request for a missing reasoning echo — retrying with the echo filled in at the same effort"
+ZH "提供商因缺少推理回传内容而拒绝了此请求 — 正在补全回传内容并以相同推理强度重试"
+CX {"note": "EN-only context sidecar; emitted when a provider refuses a missing reasoning echo and the loop retries with it filled", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.reasoning_echo_thinking_off
+EN "the provider refused this request for a missing reasoning echo — retrying with thinking disabled"
+ZH "提供商因缺少推理回传内容而拒绝了此请求 — 正在关闭思考后重试"
+CX {"note": "EN-only context sidecar; the retry disables thinking instead of filling the echo", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.budget_exhausted_retry
+EN "model spent its whole output budget thinking and produced nothing — retrying once at effort {effort} (your reasoning effort is unchanged)"
+ZH "模型将全部输出预算用于思考，未产生任何输出 — 正在以推理强度{effort}重试一次（你的推理强度设置不变）"
+CX {"note": "EN-only context sidecar; {effort} is the lowered reasoning rung; the operator's own setting is unchanged", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.budget_exhausted_continue
+EN "the model spent its whole output budget thinking and produced nothing — re-asking it to continue the work"
+ZH "模型将全部输出预算用于思考，未产生任何输出 — 正在重新请求它继续工作"
+CX {"note": "EN-only context sidecar; re-asks without lowering effort", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.budget_exhausted_no_output
+EN "the model spent its whole output budget thinking and produced no visible output ({cause}) — retry, or switch to a model with a larger output budget"
+ZH "模型将全部输出预算用于思考，未产生可见输出（{cause}） — 重试，或切换到输出预算更大的模型"
+CX {"note": "EN-only context sidecar; {cause} names why no visible output arrived", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.output_limit_continuing
+EN "the model hit the output limit — continuing the answer where it stopped"
+ZH "模型已达到输出上限 — 正在从中断处继续回答"
+CX {"note": "EN-only context sidecar; the turn resumes from the cut point", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.output_limit_cut_off
+EN "the model hit the output limit — this answer is cut off, and the rest was never sent — ask again to continue, or narrow the request"
+ZH "模型已达到输出上限 — 此回答已截断，余下内容未发送 — 再次请求以继续，或缩小请求范围"
+CX {"note": "EN-only context sidecar; the remainder was never sent and the operator must ask again", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.output_limit_tool_call
+EN "the model hit the output limit mid tool call — nothing was executed; re-asking it to re-emit the call in smaller pieces"
+ZH "模型在生成工具调用时达到输出上限 — 未执行任何操作；正在请求它分成更小的部分重新生成调用"
+CX {"note": "EN-only context sidecar; the call was cut mid-argument and never executed", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.output_limit_before_call
+EN "the model hit the output limit before the call ran — nothing was executed; re-asking it to re-issue the call as it is"
+ZH "模型在调用运行前达到输出上限 — 未执行任何操作；正在请求它原样重新发出调用"
+CX {"note": "EN-only context sidecar; the call never ran and is re-issued unchanged", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.empty_reply
+EN "the model''s reply arrived empty (no text, no tool calls) — re-asking it for its next action or finish"
+ZH "模型返回了空回复（无文本，也无工具调用） — 正在重新请求它执行下一步或结束"
+CX {"note": "EN-only context sidecar; the reply had neither prose nor tool calls", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.fast_mode_refused
+EN "fast mode: refused by {selector} — {reason}; switched off, serving at standard speed"
+ZH "快速模式：被{selector}拒绝 — {reason}；已关闭，按标准速度提供服务"
+CX {"note": "EN-only context sidecar; the provider refused fast mode and the dial was reset. {selector} names the route that refused, {reason} is its own wording with any trailing full stop stripped — the sentence supplies the punctuation", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.repeated_tool_errors
+EN "Repeated tool errors — requesting a different approach."
+ZH "工具反复报错 — 正在请求改用其他方法。"
+CX {"note": "EN-only context sidecar; the loop asks the model for a different approach", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.kept_going_stopped
+EN "This turn was stopped because it kept being asked to keep going; the pending message was dropped. Reply with what to do next."
+ZH "因反复被要求继续，本轮已停止；待处理消息已丢弃。回复以说明下一步要做什么。"
+CX {"note": "EN-only context sidecar; the continuation limit stopped the turn and dropped the pending message", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.image_unsupported
+EN "{model} does not accept images — the images in this conversation are omitted from its context. Switch to a model that accepts images to see them again."
+ZH "{model}不支持图片 — 此会话中的图片已从其上下文中略去。切换到支持图片的模型后即可重新查看。"
+CX {"note": "EN-only context sidecar; {model} is the selected model label", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.request_too_large_dropped
+EN "The provider refused the request as too large. Some screenshots have been dropped from the context and the size limit tightened — send your message again."
+ZH "提供商因请求过大而拒绝了请求。部分截图已从上下文中移除，大小上限已收紧 — 再次发送消息即可。"
+CX {"note": "EN-only context sidecar; images were dropped and the size limit tightened", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.too_large_run_compact
+EN "This conversation is too large for the provider to accept. Run /compact to summarise it, or start a new conversation."
+ZH "此会话过大，提供商无法接受。运行/compact进行摘要，或开始新会话。"
+CX {"note": "EN-only context sidecar; no images remain to drop; names /compact as the exit", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.too_large_images_removed
+EN "The conversation is too large for this provider even after dropping screenshots, so images have been removed from the context to keep the session working. If it still fails, run /compact or start a new conversation."
+ZH "即使移除截图，此会话对该提供商而言仍然过大，因此已从上下文中移除图片，以保持会话可用。如果仍然失败，运行/compact或开始新会话。"
+CX {"note": "EN-only context sidecar; images were removed after the size refusal", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.image_rejected_history
+EN "The provider rejected an image in this conversation''s history. Images have been dropped from the context so the session keeps working — send your message again."
+ZH "提供商拒绝了此会话历史中的一张图片。图片已从上下文中移除，以保持会话可用 — 再次发送消息即可。"
+CX {"note": "EN-only context sidecar; the provider rejected one image in history", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.stopped_session_held
+EN "Work arriving into this stopped session is being held, not run. The held items are read on the next turn."
+ZH "进入此已停止会话的工作将暂存，不会运行。暂存项会在下一轮读取。"
+CX {"note": "EN-only context sidecar; admission into a stopped session is held", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.auto_continuation_limit
+EN "Auto-continuation limit ({limit}) reached; stopping."
+ZH "已达到自动续接上限（{limit}）；正在停止。"
+CX {"note": "EN-only context sidecar; {limit} is the continuation cap", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.steering_not_saved
+EN "steering command {command_id} was not saved: {reason}; retry with the same command ID"
+ZH "引导命令{command_id}未保存：{reason}；使用相同命令ID重试"
+CX {"note": "EN-only context sidecar; {command_id} and {reason} name the rejected steer", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.unsaved_asides
+EN "{count} aside(s) you added to the conversation"
+ZH "你向会话添加的{count}段题外问答"
+CX {"note": "EN-only context sidecar; plural summary fragment for unsaved asides", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.unsaved_receipts
+EN "{count} shell command record(s)"
+ZH "{count}条shell命令记录"
+CX {"note": "EN-only context sidecar; plural summary fragment for unsaved shell receipts", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.unsaved_records
+EN "{summary} could not be saved before the conversation closed"
+ZH "会话关闭前未能保存{summary}"
+CX {"note": "EN-only context sidecar; {summary} joins the unsaved fragments", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.model_info_incomplete
+EN "Saved model information is incomplete; using {model}. This selection is now saved for future resumes."
+ZH "保存的模型信息不完整；将使用{model}。此选择现已保存，供以后恢复会话时使用。"
+CX {"note": "EN-only context sidecar; {model} is the selected model label", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.model_info_incomplete_headline
+EN "Model selected"
+ZH "已选择模型"
+CX {"note": "EN-only context sidecar; boot-toast headline", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.model_default_changed
+EN "keeping {model}; default changed for new sessions. /model saved adopts it here"
+ZH "保留{model}；默认设置已更改，仅适用于新会话。运行/model saved可在此会话中采用新设置"
+CX {"note": "EN-only context sidecar; {model} is the kept model label", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.model_default_changed_headline
+EN "Model unchanged"
+ZH "模型不变"
+CX {"note": "EN-only context sidecar; boot-toast headline", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.effort_default_changed
+EN "reasoning effort default changed for new sessions ({effort}); /model saved adopts it here"
+ZH "新会话的默认推理强度已更改（{effort}）；运行/model saved可在此会话中采用新设置"
+CX {"note": "EN-only context sidecar; {effort} is the stored default effort", "role": "TUI notice text", "tone": "terse, operator-facing status"}
+
+tui.notices.effort_default_changed_headline
+EN "Effort default changed"
+ZH "默认推理强度已更改"
+CX {"note": "EN-only context sidecar; boot-toast headline", "role": "TUI notice text", "tone": "terse, operator-facing status"}

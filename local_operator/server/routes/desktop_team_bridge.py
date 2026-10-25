@@ -5,6 +5,10 @@ The UI lane's HTTP surfaces over :mod:`local_operator.team_bridge`:
 - ``GET  /v1/desktop/team-bridge/status``    — the eligibility/state read.
 - ``GET  /v1/desktop/team-bridge/settings``  — endpoint, consent record, policies.
 - ``PUT  /v1/desktop/team-bridge/settings``  — state changes (the consented write).
+  ``state="disabled"`` is the one-click **Turn off** of the default-on notice: after
+  the hub accepts it the runtime also persists the sticky local opt-out (see below).
+- ``POST /v1/desktop/team-bridge/onboarding/dismiss`` — mark the one-time
+  "Team Bridge is on for you" notice dismissed on this machine (never returns).
 - ``GET  /v1/desktop/team-bridge/directory`` — the organization's member rows,
   the frozen ``{members:[{account_id,display_label,role,bridge_enabled,
   bridge_state}]}`` shape, for the surface that chooses who an agent may reach.
@@ -23,6 +27,26 @@ server dark (``BRIDGE_ENABLED`` off, RFC §5.5) the upstream answers 503
 ``messaging_unavailable``; the STATUS route renders that as a state
 (``unavailable`` with the refusal), which is the fail-closed behaviour the
 contract asks for, and the other routes carry the §6.5 code through.
+
+DEFAULT-ON CONTRACT (``bridge_consent_v2``, the UI banner "Team Bridge is on for you").
+The enrolment itself is NOT a route: the runtime's status discipline performs it
+(``POST /v1/messaging/enrollment`` upstream) when the hub serves and accepts v2,
+the member is eligible with no endpoint and has not opted out here. These routes
+only expose what the banner needs, all ADDITIVE:
+
+* status ``default_on`` — ``{in_force, notice_pending}``: ``in_force`` the hub
+  serves+accepts v2 for this caller (the opt-out default applies);
+  ``notice_pending`` the one-time notice was not dismissed
+  (``team_bridge.onboarding != "seen"``). The banner shows when the surface is
+  state C, settings ``default_on`` is true and ``notice_pending`` is true.
+* status ``local.enabled`` — the COMPOSED switch: an explicit value wins; an
+  absent key reads ON only while ``in_force`` (``enabled_given``).
+* settings GET ``default_on`` — the endpoint's consent was recorded as
+  ``consented_via == "default_on"`` (the hub's own provenance, passed through
+  untouched in ``endpoint.consent`` as well).
+* the PUT's ``consented_via`` stays ``dialog | settings``: ``default_on`` is
+  server-asserted and a client surface can never claim it (a body carrying it is
+  a 422).
 
 NONE of the routes gate on local ``team_bridge.enabled``: the composed surface
 gate is capability × eligible × enabled and it is the RENDERER's (RFC §5.4), so a
@@ -55,12 +79,13 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.config import ConfigManager
@@ -72,6 +97,7 @@ from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
 from local_operator.team_bridge.types import (
     _CONVERSATION_MESSAGE_ID,
+    ATTACHMENT_ID_PATTERN,
     CONVERSATION_ID_PATTERN,
     is_account_id,
 )
@@ -103,8 +129,107 @@ _MESSAGE_ID = _CONVERSATION_MESSAGE_ID
 #: The wire grammar for a thread root. Same object as ``_MESSAGE_ID`` — one
 #: grammar, two names only because the two call sites read differently.
 CONVERSATION_REPLY_ROOT_PATTERN = _CONVERSATION_MESSAGE_ID.pattern
-# Account guards share the dependency-light is_account_id predicate with reads.
-# A UUID-shaped real account must never be rejected by a legacy acc_-only guard.
+#: Mirrors ``read_context.ACCOUNT_ID_PATTERN``. Spelled here rather than imported
+#: because that module rides the httpx boot path this file must not pull at
+#: module scope; ``test_account_grammar_matches_the_reader`` pins the two equal.
+_ACCOUNT_ID = re.compile(r"^acc_[A-Za-z0-9_-]{1,64}$")
+#: Image attachment ids (``team_bridge.types.ATTACHMENT_ID_PATTERN``), checked
+#: before interpolation exactly like the conversation id above.
+_ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
+#: Spelled here rather than imported from the client: that module rides the
+#: httpx boot path this file must not pull at module scope. Pinned equal to
+#: ``client.ATTACHMENT_MAX_BYTES`` / ``ATTACHMENT_MIME_TYPES`` by a test.
+_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+_ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
+#: ``attachment_ids`` on a send or schedule: the hub's per-message bound and id
+#: grammar, enforced before the request leaves the machine.
+_ATTACHMENT_IDS = Field(default=None, min_length=1, max_length=4)
+
+
+# -- access-log redaction ----------------------------------------------------
+#
+# WHY: uvicorn's access logger writes the REQUEST PATH, and the three attachment
+# routes carry the conversation, message and attachment ids in it. The desktop
+# backend's log captures those lines (QA on local-operator-ui#1314, Q2), and the
+# attachment contract (D9) keeps ids out of logs; the hub already logs these
+# routes by template (``:attachmentid``). This filter rewrites the logged path to
+# the same template form so the two ends agree.
+#
+# Scope: ONLY ``/v1/desktop/team-bridge/conversations/.../attachments...`` paths.
+# Other team-bridge paths (e.g. scheduled ids) are out of this change. The
+# filter sits on the ``uvicorn.access`` LOGGER, not on a handler, so it applies
+# whatever handler config uvicorn or the launcher installs, and dictConfig
+# (which uvicorn runs) leaves logger filters in place. The request itself is
+# untouched — only the record's text changes.
+# The optional trailing ``/`` (review R4-01): Starlette's ``redirect_slashes``
+# answers a slash-suffixed variant with a 307, and that line is access-logged
+# too, so the non-canonical form must template exactly like the canonical one.
+_ATTACHMENT_ROUTE_PATH = re.compile(
+    r"^(?P<prefix>/v1/desktop/team-bridge/conversations/)[^/?#]+"
+    r"(?P<middle>(?:/messages/[^/?#]+)?/attachments)(?P<tail>(?:/[^/?#]+)?)"
+    r"(?P<slash>/?)(?P<query>[?#].*)?$"
+)
+#: A Team Bridge id in a QUERY value. The routes accept only ``tenant_id``, but
+#: a request refused for an extra or unknown parameter is still access-logged
+#: with the query exactly as sent (R4-01), so any id-shaped value there is
+#: templated too rather than trusting the caller to have sent none.
+_BRIDGE_ID_IN_QUERY = re.compile(r"(?:batt|bcmsg|bcv)_[0-9A-Za-z-]+")
+
+
+def _template_attachment_path(path: str) -> str:
+    """``path`` with its id segments replaced by route placeholders.
+
+    The query string is kept for diagnosis, minus any id-shaped value: the
+    routes accept only ``tenant_id``, but a refused request logs its query
+    verbatim, so ids are templated there as well.
+    """
+
+    match = _ATTACHMENT_ROUTE_PATH.match(path)
+    if match is None:
+        return path
+    middle = match["middle"]
+    if middle.startswith("/messages/"):
+        middle = "/messages/:messageid/attachments"
+    tail = "/:attachmentid" if match["tail"] else ""
+    query = _BRIDGE_ID_IN_QUERY.sub(":id", match["query"] or "")
+    return f"{match['prefix']}:conversationid{middle}{tail}{match['slash']}{query}"
+
+
+class _AttachmentPathRedaction(logging.Filter):
+    """Template the attachment routes' ids out of uvicorn access records.
+
+    uvicorn logs ``'%s - "%s %s HTTP/%s" %d'`` with the path as ``args[2]``;
+    only that argument is rewritten so the line keeps its format. A filter
+    must never raise (``Logger.handle`` consults it before any handler's
+    error handling), so anything unexpected passes the record through.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            args = record.args
+            if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+                templated = _template_attachment_path(args[2])
+                if templated != args[2]:
+                    record.args = (*args[:2], templated, *args[3:])
+        except Exception:  # noqa: BLE001 — never break the caller's logging
+            pass
+        return True
+
+
+_ACCESS_LOG_REDACTION = _AttachmentPathRedaction()
+
+
+def install_access_log_redaction() -> None:
+    """Attach the filter to ``uvicorn.access``; idempotent."""
+
+    access = logging.getLogger("uvicorn.access")
+    if _ACCESS_LOG_REDACTION not in access.filters:
+        access.addFilter(_ACCESS_LOG_REDACTION)
+
+
+# Installed when the router is imported, i.e. whenever the app that serves these
+# routes is built — no separate wiring step a launcher could forget.
+install_access_log_redaction()
 
 
 class _Strict(BaseModel):
@@ -492,7 +617,9 @@ async def status(
     """
 
     from local_operator.team_bridge.client import (
+        attachments_capability,
         consent_for_display,
+        default_on_in_force,
         get_status_discipline,
         selected_tenant_id,
         surface_projection,
@@ -524,6 +651,7 @@ async def status(
     watcher.poll_now()
     local = TeamBridgeSettings.from_values(watcher.values)
     consent = consent_for_display(check)
+    in_force = default_on_in_force(check)
     # §5.6's A–G reading, computed ONCE (the same function the availability
     # record uses), so a renderer binds to the backend's policy instead of
     # re-deriving it. The onboarding row also needs the LOCAL dismissal flag:
@@ -561,9 +689,19 @@ async def status(
         "can_receive": projection["can_receive"],
         "can_decide": projection["can_decide"],
         "local": {
-            "enabled": local.enabled,
+            # The COMPOSED switch (see the module docstring): explicit wins, an
+            # absent key follows the served consent. v1-only hubs read exactly
+            # ``local.enabled`` as before.
+            "enabled": local.enabled_given(in_force),
             "onboarding": local.onboarding,
             "session": local.session,
+        },
+        # The default-on banner's inputs (module docstring). Flags only: the
+        # copy belongs to the renderer, and the full v2 text is already in
+        # ``consent.text`` for "Read what this means".
+        "default_on": {
+            "in_force": in_force,
+            "notice_pending": local.onboarding != "seen",
         },
         # The admission-gate receipt (§8, §13.9): screening is an INVARIANT of
         # this client, not a setting — no registered key can turn it off (a
@@ -579,7 +717,12 @@ async def status(
         #: Served-text slots refused on this answer — a surface refreshes
         #: rather than rendering refused or stale bytes (review round 1, R3).
         "texts_rejected": sorted(check.rejected),
-        "status": check.payload,
+        # The raw hub payload, except ``attachments``: that block is the one
+        # field a renderer switches behaviour on (show image affordances, send
+        # ``attachment_ids``), so it passes through the client's ONE capability
+        # reading (review R1-06) — malformed/disabled/no usable type is
+        # removed, never forwarded for the UI to second-guess. Absent = off.
+        "status": _status_with_attachments(check.payload, attachments_capability),
         "consent": (
             {"version": consent[0], "text": consent[1], "source": consent[2]}
             if consent is not None
@@ -647,6 +790,17 @@ async def get_settings(
         _raise_sign_in(exc)
     except BridgeRefusal as exc:
         _raise_bridge(exc)
+    # ADDITIVE: the hub's provenance verdict as a flag, so the banner does not
+    # re-derive it. ``endpoint.consent`` itself passes through untouched.
+    endpoint = payload.get("endpoint") if isinstance(payload, dict) else None
+    consent = endpoint.get("consent") if isinstance(endpoint, dict) else None
+    if isinstance(payload, dict):
+        payload = {
+            **payload,
+            "default_on": (
+                isinstance(consent, dict) and consent.get("consented_via") == "default_on"
+            ),
+        }
     return reply(payload)
 
 
@@ -705,6 +859,31 @@ async def put_settings(
         # the desktop plane's validation register.
         raise HTTPException(422, {"code": "invalid_request", "message": str(exc)}) from None
     return reply(payload)
+
+
+@router.post("/v1/desktop/team-bridge/onboarding/dismiss", response_model=CRUDResponse[Any])
+async def dismiss_onboarding(
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Mark the one-time notice seen on this machine; it never returns.
+
+    The smallest addition that lets the default-on banner be dismissed:
+    ``team_bridge.onboarding`` is internal state with no registry row (so
+    ``settings.edit`` cannot write it) and is client-local by design (RFC
+    §5.3) — no upstream call, no consent change, idempotent. Dismissing the
+    notice does not turn Team Bridge off or on.
+    """
+
+    from local_operator.team_bridge.settings import record_onboarding_seen
+
+    try:
+        record_onboarding_seen(config_manager.config_dir)
+    except Exception:  # noqa: BLE001 - surfaced as a coded 500, never a stack
+        raise HTTPException(
+            500,
+            {"code": "onboarding_not_saved", "message": "could not save the dismissal"},
+        ) from None
+    return reply({"onboarding": "seen"})
 
 
 @router.get("/v1/desktop/team-bridge/directory", response_model=CRUDResponse[Any])
@@ -1111,6 +1290,16 @@ _RFC3339 = re.compile(
 )
 
 
+def _validate_attachment_ids(ids: list[str] | None) -> None:
+    # Same grammar the routes use for path ids: an id that could reshape the
+    # hub's URL never leaves, and a duplicate would silently change the bound
+    # set (and its attachments_hash), so it is refused rather than deduped.
+    if not ids:
+        return
+    if len(set(ids)) != len(ids) or any(_ATTACHMENT_ID.fullmatch(i) is None for i in ids):
+        raise ValueError("attachment_ids must be distinct batt_ ids")
+
+
 def _validate_schedule_time(value: str) -> None:
     # Keep the moving 1-minute/120-day window authoritative on the server, whose
     # clock will also fire the message; only reject malformed wire dates here.
@@ -1129,9 +1318,12 @@ class ScheduledCreateIn(_Strict):
     tenant_id: str = Field(min_length=1, max_length=128)
     conversation_id: str = Field(pattern=CONVERSATION_ID_PATTERN)
     client_ref: str = Field(min_length=1, max_length=128)
-    body: str = Field(min_length=1)
+    #: May be empty only when ``attachment_ids`` carries at least one image
+    #: (an image-only message); the hub applies the same rule.
+    body: str = ""
     send_at: str
     mentions: list[ScheduledMentionIn] = Field(default_factory=list)
+    attachment_ids: list[str] | None = _ATTACHMENT_IDS
     #: Reply in this root message's thread once the schedule fires. SAME
     #: spelling and SAME canonical grammar as ``ConversationSendIn`` — the hub
     #: receives one wire field name, so a scheduled message and an immediate
@@ -1142,21 +1334,36 @@ class ScheduledCreateIn(_Strict):
     @model_validator(mode="after")
     def _date(self) -> "ScheduledCreateIn":
         _validate_schedule_time(self.send_at)
+        _validate_attachment_ids(self.attachment_ids)
+        if not self.body and not self.attachment_ids:
+            raise ValueError("a scheduled message needs body or attachment_ids")
         return self
 
 
 class ScheduledUpdateIn(_Strict):
-    body: str | None = Field(default=None, min_length=1)
+    #: An empty body is accepted here only as part of an image-only edit; the
+    #: hub's PreflightSend decides against the row's resulting attachment set.
+    body: str | None = None
     send_at: str | None = None
+    #: The schedule's COMPLETE replacement image set; ``[]`` removes every
+    #: image (the hub releases them). Omitted = images unchanged.
+    attachment_ids: list[str] | None = Field(default=None, max_length=4)
 
     @model_validator(mode="after")
     def _edit(self) -> "ScheduledUpdateIn":
         if not self.model_fields_set or any(
             getattr(self, name) is None for name in self.model_fields_set
         ):
-            raise ValueError("a schedule edit requires body or send_at")
+            raise ValueError("a schedule edit requires body, send_at or attachment_ids")
         if self.send_at is not None:
             _validate_schedule_time(self.send_at)
+        _validate_attachment_ids(self.attachment_ids)
+        if (
+            self.body == ""
+            and "attachment_ids" in self.model_fields_set
+            and not self.attachment_ids
+        ):
+            raise ValueError("a schedule edit cannot clear both body and images")
         return self
 
 
@@ -1206,7 +1413,13 @@ async def scheduled_create(
     return reply(
         await _conversation_reply(
             _conversation_client(config_manager).scheduled_create(
-                body.model_dump(exclude_unset=True)
+                # ``body`` always travels (possibly "" for an image-only
+                # schedule); everything else only when the caller set it, so a
+                # text-only schedule stays the pre-attachment wire.
+                # ``exclude_none`` too (review R1-04): an explicit
+                # ``attachment_ids: null`` is "no images", and an old hub
+                # refuses the unknown key even when its value is null.
+                {"body": body.body, **body.model_dump(exclude_unset=True, exclude_none=True)}
             )
         )
     )
@@ -1283,12 +1496,23 @@ class ConversationCreateIn(ConversationOwnerIn):
 
 class ConversationSendIn(ConversationOwnerIn):
     client_ref: str = Field(min_length=1, max_length=128)
-    body: str = Field(min_length=1)
+    #: Empty only for an image-only message (``attachment_ids`` non-empty).
+    body: str = ""
     agent_label: str | None = Field(default=None, max_length=64)
+    #: Staged uploads to bind to this message, in display order. Forwarded only
+    #: when present, so a text-only send is the unchanged pre-attachment wire.
+    attachment_ids: list[str] | None = _ATTACHMENT_IDS
     #: Reply in this root message's thread (agent-server threads). Held to the
     #: minted message-id grammar here so a malformed id never reaches the hub;
     #: the hub owns the real rule (same conversation, root not a reply).
     thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
+
+    @model_validator(mode="after")
+    def _content(self) -> "ConversationSendIn":
+        _validate_attachment_ids(self.attachment_ids)
+        if not self.body and not self.attachment_ids:
+            raise ValueError("a message needs body or attachment_ids")
+        return self
 
 
 class ConversationJoinIn(ConversationOwnerIn):
@@ -1775,8 +1999,206 @@ async def send_conversation_message(
                 expected_account_id=body.expected_account_id,
                 agent_label=body.agent_label,
                 thread_root_id=body.thread_root_id,
+                attachment_ids=body.attachment_ids,
             )
         )
+    )
+
+
+def _status_with_attachments(payload: Any, read_capability: Any) -> Any:
+    """``payload`` with ``attachments`` replaced by its normalized reading.
+
+    Copies rather than mutates: the payload is the discipline's cached
+    last-good answer shared by every caller.
+    """
+
+    if not isinstance(payload, dict) or "attachments" not in payload:
+        return payload
+    out = dict(payload)
+    capability = read_capability(payload)
+    if capability is None:
+        out.pop("attachments", None)
+    else:
+        out["attachments"] = capability
+    return out
+
+
+def _attachment_query(request: Request) -> tuple[str | None, str]:
+    """The attachment routes' accepted query names, closed and validated.
+
+    Closed-table like every route here: ``scope`` (and anything else) is
+    refused rather than dropped, and a duplicated name would let the URL parser
+    pick a value differently from the hub.
+
+    ``expected_account_id`` is the CAPTURED-ACCOUNT receipt and it is
+    REQUIRED. These routes once forwarded only the already-resolved ``access``
+    snapshot, so a chip staged under account A could be fetched or deleted
+    while the machine was signed in as B. Optional, the guard would regress the
+    first time a new renderer forgot the parameter — a guard whose reach
+    depends on every caller remembering is not a guard — so an omission is
+    refused HERE, at the route, instead of silently taking the unguarded path.
+    The client compares the receipt against the exact dispatch snapshot before
+    any bytes move.
+    """
+
+    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
+        _raise_read("invalid_request")
+    tenants = request.query_params.getlist("tenant_id")
+    if len(tenants) > 1 or (tenants and (not tenants[0].strip() or len(tenants[0]) > 128)):
+        _raise_read("invalid_request")
+    expected = request.query_params.getlist("expected_account_id")
+    if len(expected) != 1 or not expected[0].strip() or len(expected[0]) > 128:
+        # Absent, repeated or blank all mean "no captured owner", and a route
+        # that proceeds without one cannot enforce its own guard.
+        _raise_read("invalid_request")
+    if not is_account_id(expected[0]):
+        _raise_read("invalid_request")
+    return (tenants[0] if tenants else None), expected[0]
+
+
+def _require_attachment_id(attachment_id: str) -> None:
+    if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+        _raise_read("invalid_request")
+
+
+async def _bounded_upload(request: Request) -> bytes:
+    """Read the raw upload body, refusing past the hub's ceiling.
+
+    Streamed and counted rather than ``await request.body()``: a declared
+    ``Content-Length`` is checked first (cheap refusal), and the running count
+    still stops a chunked or lying sender at the bound, so this loopback route
+    never buffers more than one image. Nothing touches disk; the bytes are
+    forwarded once and dropped with the request.
+    """
+
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > _ATTACHMENT_MAX_BYTES:
+                raise HTTPException(
+                    413, {"code": "attachment_too_large", "message": "The image is too large."}
+                )
+        except ValueError:
+            _raise_read("invalid_request")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > _ATTACHMENT_MAX_BYTES:
+            raise HTTPException(
+                413, {"code": "attachment_too_large", "message": "The image is too large."}
+            )
+        chunks.append(chunk)
+    if not size:
+        raise HTTPException(422, {"code": "attachment_invalid", "message": "The image is empty."})
+    return b"".join(chunks)
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/attachments",
+    response_model=CRUDResponse[Any],
+    status_code=201,
+)
+async def upload_conversation_attachment(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Stage one image for a later send; the hub sniffs, bounds and stores it.
+
+    The body is the raw image (any declared Content-Type is ignored, exactly
+    as the hub ignores it). The answer is the hub's ``{attachment: {...}}``
+    descriptor, passed through; the bytes are never kept here.
+    """
+
+    _require_conversation_id(conversation_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    data = await _bounded_upload(request)
+    client = _conversation_client(config_manager)
+    result = await _conversation_reply(
+        client.upload_attachment(
+            conversation_id,
+            data,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    return CRUDResponse(status=201, message="Attachment staged.", result=result)
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/attachments/{attachment_id}",
+    status_code=204,
+)
+async def delete_conversation_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Discard one staged upload (a composer chip removed before send)."""
+
+    _require_conversation_id(conversation_id)
+    _require_attachment_id(attachment_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    client = _conversation_client(config_manager)
+    await _conversation_reply(
+        client.delete_attachment(
+            conversation_id,
+            attachment_id,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    return Response(status_code=204)
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}"
+    "/attachments/{attachment_id}"
+)
+async def get_conversation_attachment(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One bound image's bytes for the HUMAN reader (the renderer's blob cache).
+
+    No ``endpoint_id``/``purpose`` is accepted: those name an AGENT read, and
+    the agent's screen/context fetches happen inside the runtime, never through
+    this renderer-facing route. Response headers follow the attachment route in
+    ``desktop_sessions`` and the hub: a closed type map (the client already
+    refused anything but png/jpeg), ``nosniff`` so the browser never
+    re-decides the type, a sandboxing CSP for a direct navigation, and
+    ``private, no-store`` so no shared or disk cache keeps a teammate's image.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _require_attachment_id(attachment_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    client = _conversation_client(config_manager)
+    data, mime = await _conversation_reply(
+        client.fetch_attachment(
+            conversation_id,
+            message_id,
+            attachment_id,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    if mime not in _ATTACHMENT_SERVABLE:  # the client refuses first; defence in depth
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
     )
 
 

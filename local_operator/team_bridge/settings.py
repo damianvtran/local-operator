@@ -44,7 +44,26 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: this machine; the server still decides eligibility, consent and launch.
 #: Restoring the ON default belongs to the new-consent-version change, not a
 #: local flip.
+#:
+#: DEFAULT-ON UNDER ``bridge_consent_v2`` DOES NOT CHANGE THIS CONSTANT. The
+#: registry literal and every consumer that reads ``enabled`` from disk (host,
+#: read_context, authority, wake, engagement) keep reading an absent key as OFF,
+#: so a hub that serves only v1 is byte-identical to the hold. The opt-out
+#: default is a COMPOSED gate that needs a fact this module cannot know — the
+#: hub's served consent — and so lives in
+#: :meth:`TeamBridgeSettings.enabled_given`, used by the status discipline (the
+#: only automatic enrolment) and the status route's ``local.enabled``. The
+#: automatic enrolment then WRITES ``team_bridge.enabled = true`` once the owner
+#: and receipt are committed (:func:`record_local_enabled_if_unset`), which is what makes
+#: the offline consumers above agree; an absent key therefore never starts any
+#: send/receive/wake work by itself — it only means "eligible to be enrolled".
 DEFAULT_TEAM_BRIDGE_ENABLED = False
+
+#: The one consent version whose copy discloses the opt-out default. Only a hub
+#: that SERVES it (and lists it as accepted) can turn an absent
+#: ``team_bridge.enabled`` into "eligible to be enrolled". Spelled here, not
+#: imported from ``client``, because ``client`` imports this module.
+DEFAULT_ON_CONSENT_VERSION = "bridge_consent_v2"
 
 #: ``team_bridge.onboarding`` — the one-time dialog's shown-flag (RFC §5.3:
 #: client-local in v1, deliberately never a server row). ``""`` means "not
@@ -61,11 +80,15 @@ ONBOARDING_SEEN = "seen"
 #: that member. PER ACCOUNT on purpose: it was a per-member product rule, so
 #: account A enrolling did not suppress account B on the same machine.
 #:
-#: UNDER THE CONSENT HOLD NOTHING WRITES THIS. No status read may perform a
-#: consent write (#2712's auto-enrollment), and the explicit settings path does
-#: not need a per-account memory because the user's own PUT is the action. The
-#: reader and writer stay so an older build's file still loads and so a future
-#: consent version can reuse the shape; they must never drive auto-consent.
+#: WHO WRITES IT. Under ``bridge_consent_v1`` nothing does (consent hold,
+#: #2712: a status read must never enrol). Under ``bridge_consent_v2`` two
+#: places do, and both mean "never enrol this account from this machine again":
+#: the gated automatic enrolment (``StatusDiscipline._default_enroll``) after the
+#: server created the endpoint, and the one-click turn-off (a successful
+#: ``state=disabled`` write). It is MEMORY that suppresses a repeat, never
+#: authority: no write is ever performed BECAUSE this key says so, and a missing
+#: key never proves anything either (the server's own no-op-when-an-endpoint-
+#: exists rule is the authoritative stickiness).
 DEFAULT_TEAM_BRIDGE_ENROLLMENT: Mapping[str, str] = {}
 DEFAULT_ENROLLMENT_DONE = "done"
 
@@ -149,6 +172,27 @@ class TeamBridgeSettings:
     onboarding: str = DEFAULT_TEAM_BRIDGE_ONBOARDING
     session: str = DEFAULT_TEAM_BRIDGE_SESSION
     default_enrollment: Mapping[str, str] = field(default_factory=dict)
+    #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
+    #: including a hand-edited ``null``, which reads OFF). It is what separates
+    #: "the user said so" from "nobody said anything", the one distinction the
+    #: default-on gate needs: an explicit value always wins over a default.
+    enabled_is_set: bool = False
+
+    def enabled_given(self, default_on_in_force: bool) -> bool:
+        """The composed local switch: explicit value, else the served default.
+
+        An explicit ``true`` or ``false`` (or an unreadable present value, which
+        reads OFF) is returned as is. Only an ABSENT key consults the hub: it
+        reads ON while ``default_on_in_force`` (the hub serves
+        ``bridge_consent_v2`` and lists it as accepted) and OFF otherwise, so a
+        v1-only hub sees exactly what :attr:`enabled` says today. ON here means
+        "eligible to be enrolled", never "authorised": every send, receive and
+        wake path still needs the committed owner and a current receipt.
+        """
+
+        if self.enabled_is_set:
+            return self.enabled
+        return bool(default_on_in_force)
 
     @staticmethod
     def from_config(cm: "ConfigManager") -> "TeamBridgeSettings":
@@ -170,10 +214,12 @@ class TeamBridgeSettings:
 
     @staticmethod
     def _derive(get: Callable[..., Any]) -> "TeamBridgeSettings":
-        """The one place that says how the four keys are typed and defaulted."""
+        """The one place that says how the keys are typed and defaulted."""
 
+        raw_enabled = get(ENABLED_PATH, _MISSING)
         return TeamBridgeSettings(
-            enabled=_enabled(get(ENABLED_PATH, _MISSING)),
+            enabled=_enabled(raw_enabled),
+            enabled_is_set=raw_enabled is not _MISSING,
             onboarding=_onboarding(get(ONBOARDING_PATH, DEFAULT_TEAM_BRIDGE_ONBOARDING)),
             session=_session(get(SESSION_PATH, DEFAULT_TEAM_BRIDGE_SESSION)),
             default_enrollment=_default_enrollment(
@@ -223,3 +269,67 @@ def record_default_enrollment(config_dir: "Path", account_id: str) -> None:
             return
         current[account_id] = DEFAULT_ENROLLMENT_DONE
         settings_io._store(manager, DEFAULT_ENROLLMENT_PATH, current)
+
+
+def _store_internal(config_dir: "Path", path: tuple[str, ...], value: Any) -> None:
+    """Write one internal ``team_bridge.*`` leaf under the config write lock.
+
+    The same guarded, merge-preserving path :func:`record_default_enrollment`
+    uses (see its docstring for the lock, the pre-write readability guard and
+    the function-local imports); kept separate because these writers store a
+    scalar, not a read-merge-write mapping.
+    """
+
+    from local_operator import settings_io
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+    from local_operator.config_writer import config_write_lock
+
+    with config_write_lock(Path(config_dir)):
+        settings_io.require_readable_config_path(Path(config_dir) / CONFIG_FILE_NAME)
+        settings_io._store(ConfigManager(config_dir), path, value)
+
+
+def record_local_enabled(config_dir: "Path", value: bool) -> None:
+    """Persist an EXPLICIT ``team_bridge.enabled`` from the runtime.
+
+    The one-click turn-off (``False``, the sticky local opt-out every fence and
+    the enrolment gate read) writes it after the server answered. The automatic
+    enrolment does NOT use this for ``True``: it must never overwrite an
+    explicit value, see :func:`record_local_enabled_if_unset`. Best-effort by
+    contract at the call sites.
+    """
+
+    if not isinstance(value, bool):
+        raise ValueError("value must be a bool")
+    _store_internal(config_dir, ENABLED_PATH, value)
+
+
+def record_local_enabled_if_unset(config_dir: "Path") -> bool:
+    """Write ``team_bridge.enabled = true`` ONLY while the key is still absent.
+
+    WHY NOT :func:`record_local_enabled`. The automatic enrolment decides to
+    write after an awaited hub round trip; an explicit value (``false`` from a
+    settings edit or the one-click Turn off, or an explicit ``true``) may have
+    landed in that window, and "explicit false always wins" means the default
+    must never overwrite it. The check and the write share ONE config write lock
+    (reentrant with the leaf write), so no writer can slip in between them.
+    Returns whether it wrote. Best-effort at the call site, like its sibling.
+    """
+
+    from local_operator import settings_io
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+    from local_operator.config_writer import config_write_lock
+
+    with config_write_lock(Path(config_dir)):
+        settings_io.require_readable_config_path(Path(config_dir) / CONFIG_FILE_NAME)
+        manager = ConfigManager(config_dir)
+        if TeamBridgeSettings.from_config(manager).enabled_is_set:
+            return False
+        settings_io._store(manager, ENABLED_PATH, True)
+        return True
+
+
+def record_onboarding_seen(config_dir: "Path") -> None:
+    """Mark the one-time notice dismissed on this machine (never un-set here)."""
+
+    _store_internal(config_dir, ONBOARDING_PATH, ONBOARDING_SEEN)

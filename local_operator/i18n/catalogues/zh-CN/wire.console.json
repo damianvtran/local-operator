@@ -1,0 +1,10 @@
+{
+  "wire.console.title": "控制台容量",
+  "wire.console.description": "控制运行中终端的准入。已完成的历史记录不占进程槽位。更改仅影响后续启动，绝不会终止正在运行的工作。",
+  "wire.console.max_live.label": "运行中终端上限",
+  "wire.console.max_live.help": "32–256；默认128。受管内存、终端单元格和可用原生资源可能使实际准入的终端更少。这不限制子进程内存。",
+  "wire.console.max_owner.label": "每个会话的智能体终端数",
+  "wire.console.max_owner.help": "1–32；默认8。各会话共享全局运行额度；已完成的终端不计入。",
+  "wire.console.user_reserved.label": "为用户终端预留的槽位",
+  "wire.console.user_reserved.help": "4–32；默认16，最高不超过运行上限的四分之一。智能体启动不能占用这些槽位。绝不会停止现有工作。"
+}

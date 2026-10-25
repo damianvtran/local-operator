@@ -2597,3 +2597,134 @@ def test_a_live_priced_deepseek_listing_keeps_its_schedule() -> None:
         "a live-priced listing lost (or gained) a schedule: decide which price table "
         "`time_of_use` now describes before relaxing this"
     )
+
+
+# -- Kimi's coding-plan wire: native capability keys ---------------------------
+
+#: One verbatim-trimmed row off ``GET https://api.kimi.com/coding/v1/models``
+#: (read 2026-10-24): the capability statements are Kimi's own, not
+#: OpenRouter's, which is why every field below used to read as unstated.
+_KIMI_ENTRY: dict[str, Any] = {
+    "id": "k3.1-pro",
+    "display_name": "K3.1 Pro",
+    "type": "model",
+    "context_length": 1_048_576,
+    "supports_reasoning": True,
+    "supports_image_in": True,
+    "supports_video_in": True,
+    "supports_dynamic_tools": True,
+    "supports_thinking_type": "only",
+    "think_efforts": {
+        "support": True,
+        "valid_efforts": ["low", "high", "max"],
+        "default_effort": "high",
+    },
+    # The row's second statement of the same ladder, with its default nested
+    # under ``effort`` rather than beside it. ``_row_from_openai_entry`` reads
+    # a TOP-LEVEL ``reasoning.default_effort`` (the aggregator shape), so the
+    # test below pins that this nested one is still not carried.
+    "reasoning": {
+        "type": "only",
+        "effort": {"valid": ["low", "high", "max"], "default": "high"},
+    },
+    "modalities": {"input": ["text", "image", "video"], "output": ["text"]},
+}
+
+
+def test_the_kimi_listing_states_effort_and_image_capabilities_natively() -> None:
+    """``k3.1-pro`` is a DYNAMIC row — no registry twin — so the listing is the
+    only source for its ladder and its image support. Measured before this read:
+    ``build_model_spec("kimi", "k3.1-pro")`` gave ``efforts=()`` and
+    ``supports_images=False``, which hid the effort control and made the harness
+    announce that the model would not accept images while the provider answered
+    an image turn with HTTP 200.
+    """
+    row = discovery._row_from_openai_entry(_KIMI_ENTRY, "kimi")
+
+    assert row is not None
+    assert row.supports_images is True
+    assert row.reasoning is True
+    assert row.reasoning_efforts == ("low", "high", "max")
+    # The listing states ``default_effort: "high"`` in TWO places
+    # (``think_efforts`` and ``reasoning.effort.default``) and carrying either
+    # would be a guess: the vendor doc says ``max``, and repeated measurements
+    # of omission were inconsistent (one sample at the bottom of the ladder,
+    # one between the rungs, one near ``max``), so neither is asserted here.
+    assert row.reasoning_default_effort is None
+
+
+def test_kimi_silence_is_unstated_not_a_denial() -> None:
+    """Three-state discipline: a row that states none of the three keeps ``None``
+    for each, which is what lets ``model.effort``'s table answer and lets the
+    registry's own image row stand."""
+    row = discovery._row_from_openai_entry({"id": "k3.1-pro"}, "kimi")
+
+    assert row is not None
+    assert row.supports_images is None
+    assert row.reasoning is None
+    assert row.reasoning_efforts is None
+    assert row.reasoning_default_effort is None
+
+
+def test_a_stated_kimi_image_denial_survives() -> None:
+    """A stated ``false`` is the provider answering the question, so the merge
+    may not overrule it with the registry's ``True``."""
+    entry = {**_KIMI_ENTRY, "supports_image_in": False, "supports_reasoning": False}
+
+    row = discovery._row_from_openai_entry(entry, "kimi")
+
+    assert row is not None
+    assert row.supports_images is False
+    assert row.reasoning is False
+
+
+def test_kimi_native_keys_are_ignored_on_another_providers_wire() -> None:
+    """The reads are provider-gated on purpose: no other wire in the tree spells
+    capabilities this way, and a future wire that happens to use one of these
+    names need not mean the same thing. Same bytes, different provider: the
+    fields stay unstated and the entry keeps the OpenRouter answer."""
+    row = discovery._row_from_openai_entry(_KIMI_ENTRY, "openrouter")
+
+    assert row is not None
+    assert row.supports_images is None
+    assert row.reasoning is None
+    assert row.reasoning_efforts is None
+
+
+def test_a_cached_kimi_document_from_before_the_native_read_is_refetched(tmp_path) -> None:
+    """The upgrade must not be invisible for a day.
+
+    Version 1 of the Kimi transport wrote rows whose ``supports_images``,
+    ``reasoning`` and ``reasoning_efforts`` were all ``None`` — a perfectly
+    well-shaped document that says "the listing stated nothing". Served as a
+    fresh cache hit for the rest of its 24h TTL, the fix would ship and change
+    nothing: no effort segment, images still stripped, on every install that
+    already had a listing.
+    """
+    stale = tmp_path / "kimi.oauth.listing.json"
+    stale.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {"models": [{"id": "k3", "name": "Kimi K3"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = _StubClient([_Response(200, {"data": [_KIMI_ENTRY]})])
+
+    models, first_status = available_models(
+        "kimi",
+        api_key="oauth-access-token",
+        is_oauth=True,
+        base_url="https://api.kimi.com/coding/v1",
+        client=client,
+        cache_dir=tmp_path,
+    )
+
+    # One pass: the stale document is dropped AND replaced.
+    assert first_status == "ok"
+    assert len(client.calls) == 1
+    by_id = {row.id: row for row in models}
+    assert by_id["k3.1-pro"].reasoning_efforts == ("low", "high", "max")
+    assert json.loads(stale.read_text())["payload"]["capture"] == 2

@@ -43,6 +43,7 @@ from local_operator.harness.types import (
     ChatRequest,
     ImageContent,
     ModelSpec,
+    OneTurnSecretScopeError,
     RenderedStreamError,
     StreamEndEvent,
     StreamEvent,
@@ -51,6 +52,9 @@ from local_operator.harness.types import (
     StreamStartEvent,
     StreamUsageEvent,
     TextContent,
+    one_turn_public_text,
+    one_turn_safe_log_detail,
+    one_turn_scrubbed_text,
 )
 from local_operator.model.effort import (
     EFFORT_ORDER,
@@ -1442,6 +1446,10 @@ def _next_input_refusal_degrade(
     names in ``applied`` are the tokens recorded on the end event and mapped
     to user-facing copy by the harness loop.
     """
+    if request.has_one_turn_secrets:
+        # Input narrowing is a NEW request, not an identical transport retry.
+        # The raw overlay is authorized only for the original safe template.
+        raise OneTurnSecretScopeError("An armed one-turn secret request cannot be degraded.")
     if "screenshots_removed" not in applied:
         stripped = _request_without_images(request)
         if stripped is not None:
@@ -1465,6 +1473,8 @@ def _request_with_degradations(request: ChatRequest, applied: Sequence[str]) -> 
     ladder-order prefixes (its producer appends as rungs run), so a rung that
     no longer applies on the rebuilt request simply keeps the prior state.
     """
+    if applied and request.has_one_turn_secrets:
+        raise OneTurnSecretScopeError("An armed one-turn secret request cannot be degraded.")
     for name in applied:
         if name == "screenshots_removed":
             stripped = _request_without_images(request)
@@ -4005,7 +4015,93 @@ def _stamp_failing_selector(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
     return event.model_copy(update={"failing_selector": spec})
 
 
+def _one_turn_scrub_stream_event(request: ChatRequest, event: StreamEvent) -> StreamEvent:
+    """Sanitize provider-controlled metadata before any public subscriber.
+
+    Content/argument deltas still flow privately to AgentLoop for final assembly.
+    This boundary covers every production provider and retry, so response ids,
+    upstream hosts, usage stamps, and errors cannot bypass the final scrub.
+    """
+    if isinstance(event, StreamStartEvent):
+        return event.model_copy(
+            update={"response_id": one_turn_public_text(request, event.response_id)}
+        )
+    if isinstance(event, StreamUsageEvent):
+        usage = event.usage.model_copy(
+            update={
+                "provider": one_turn_public_text(request, event.usage.provider),
+                "model_id": one_turn_public_text(request, event.usage.model_id),
+            }
+        )
+        return event.model_copy(update={"usage": usage})
+    if isinstance(event, StreamModelEvent):
+        provider = one_turn_public_text(request, event.model.provider)
+        model_id = one_turn_public_text(request, event.model.model_id)
+        if provider is None or model_id is None:
+            # Model identity is required by this lifecycle event. Unknown is a
+            # fixed safe replacement, never a transformed provider identity.
+            provider = provider or "unknown"
+            model_id = model_id or "unknown"
+        return event.model_copy(
+            update={
+                "model": event.model.model_copy(update={"provider": provider, "model_id": model_id})
+            }
+        )
+    if isinstance(event, StreamEndEvent):
+        update: dict[str, Any] = {
+            "provider_payload": None,
+            "served_provider": one_turn_public_text(request, event.served_provider),
+        }
+        if event.usage is not None:
+            update["usage"] = event.usage.model_copy(
+                update={
+                    "provider": one_turn_public_text(request, event.usage.provider),
+                    "model_id": one_turn_public_text(request, event.usage.model_id),
+                }
+            )
+        if event.error is not None:
+            update["error"] = one_turn_scrubbed_text(
+                request,
+                event.error,
+                "Provider detail withheld for one-turn secret request.",
+            )
+        for field in ("attempted_selector", "failing_selector"):
+            selector = getattr(event, field)
+            if selector is not None and (
+                one_turn_public_text(request, selector.provider) is None
+                or one_turn_public_text(request, selector.model_id) is None
+            ):
+                update[field] = None
+        return event.model_copy(update=update)
+    return event
+
+
 async def stream_with_failover(
+    request: ChatRequest,
+    auth: FailoverAuthStore,
+    settings: Mapping[str, Any] | None,
+    client_for: ClientFactory,
+    *,
+    session_id: str | None = None,
+    signal: AbortSignal | None = None,
+    route_state: FailoverRouteState | None = None,
+) -> AsyncIterator[StreamEvent]:
+    """Forward ordinary events unchanged; contain armed metadata at the boundary."""
+    async for event in _stream_with_failover_events(
+        request,
+        auth,
+        settings,
+        client_for,
+        session_id=session_id,
+        signal=signal,
+        route_state=route_state,
+    ):
+        yield (
+            _one_turn_scrub_stream_event(request, event) if request.has_one_turn_secrets else event
+        )
+
+
+async def _stream_with_failover_events(
     request: ChatRequest,
     auth: FailoverAuthStore,
     settings: Mapping[str, Any] | None,
@@ -4180,15 +4276,23 @@ async def stream_with_failover(
         # the failures nobody else can see unattributed.
         _attribute_failure(error, target, primary_selector)
         score = error_report_score(error, primary=primary)
+
+        def diagnostic(error: ProviderError) -> str:
+            # Provider prose can quote the raw request. The loop's later scrub
+            # cannot retract a line already written by credential rotation.
+            if request.has_one_turn_secrets:
+                return one_turn_safe_log_detail(request, error)
+            return error.describe()
+
         if score >= reported_score:
             if reported is not None:
-                logger.warning("superseded by a more diagnostic failure: %s", reported.describe())
+                logger.warning("superseded by a more diagnostic failure: %s", diagnostic(reported))
             reported, reported_score = error, score
         else:
             logger.warning(
                 "%s failed: %s",
                 "requested model" if primary else "fallback selector",
-                error.describe(),
+                diagnostic(error),
             )
 
     # One walk down the cascade, then AT MOST one more. The second sweep exists
@@ -4770,11 +4874,15 @@ async def stream_with_failover(
                     # surfaced with the provider's own words.
                     model_flap_retries += 1
                     logger.warning(
-                        "model routing flap from %s/%s (%s: %s); re-asking in %dms (%d/%d)",
+                        "model routing flap from %s/%s (%s%s); re-asking in %dms (%d/%d)",
                         spec.provider,
                         spec.model_id,
                         exc.status,
-                        exc.message,
+                        (
+                            "; " + one_turn_safe_log_detail(current_request, exc)
+                            if current_request.has_one_turn_secrets
+                            else ": " + exc.message
+                        ),
                         MODEL_FLAP_RETRY_DELAY_MS,
                         model_flap_retries,
                         MAX_MODEL_FLAP_RETRIES,

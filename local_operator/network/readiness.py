@@ -37,6 +37,7 @@ import configparser
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import sys
@@ -66,6 +67,7 @@ READINESS_OP_TIMEOUT_S = 5.0
 CAPABILITY_OPERATOR_AUTHORITY = "operator_authority"
 CAPABILITY_BUILD = "build"
 CAPABILITY_GIT = "git_identity"
+CAPABILITY_REPOSITORY = "repository"
 CAPABILITY_MCP_SERVERS = "mcp_servers"
 CAPABILITY_MODEL_CREDENTIAL = "model_credential"
 CAPABILITY_MCP_CREDENTIAL = "mcp_credential"
@@ -102,6 +104,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
     {
         CAPABILITY_MCP_CREDENTIAL,
         CAPABILITY_MCP_SERVERS,
+        # Read/answer lanes need no checkout, so a missing one is equipment the
+        # report names, not an onboarding failure; repo-editing lanes need it.
+        CAPABILITY_REPOSITORY,
         CAPABILITY_TOOLING,
         # A small node IS onboarded; it is a resilience risk, said with its
         # remedy, and the admission gate (``memory_guard.admission_check``) is
@@ -119,6 +124,7 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
 PEER_SIDE_CHECKS: tuple[str, ...] = (
     CAPABILITY_OPERATOR_AUTHORITY,
     CAPABILITY_GIT,
+    CAPABILITY_REPOSITORY,
     CAPABILITY_MCP_SERVERS,
     CAPABILITY_MODEL_CREDENTIAL,
     CAPABILITY_TOOLING,
@@ -131,6 +137,8 @@ CODE_NOT_INSTALLED = "not_installed"
 CODE_ANCHOR_UNPINNED = "anchor_unpinned"
 CODE_UNUSABLE = "unusable"
 CODE_NO_GIT_IDENTITY = "no_git_identity"
+CODE_NO_REPOSITORY = "no_repository"
+CODE_NOT_GIT_CHECKOUT = "not_git_checkout"
 CODE_NO_MCP_SERVERS = "no_mcp_servers"
 CODE_NOT_CONFIGURED = "not_configured"
 CODE_NOT_ASKED = "not_asked"
@@ -193,8 +201,12 @@ def _safe_text(value: Any, *, limit: int = 300) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _open_store(root: Path) -> Any | None:
+def _open_store(root: Path, *, read_only: bool = False) -> Any | None:
     """An ``AuthStore`` for ``root``, or ``None`` when no database exists yet.
+
+    ``read_only=True`` is the readiness path's no-write mode. Offer/share reads
+    keep the default: they need the live WAL answer even though the historical
+    constructor has side effects, which are outside this readiness fix.
 
     THE GUARD IS THE READ-ONLY PROMISE: ``AuthStore.__init__`` CREATES its
     database (mkdir, a 0600 file, then the schema), so constructing one on a
@@ -212,7 +224,29 @@ def _open_store(root: Path) -> Any | None:
         return None
     from local_operator.providers.auth_store import AuthStore
 
+    if read_only:
+        return AuthStore.open_read_only(database)
     return AuthStore(db_path=database, config_dir=root)
+
+
+def _read_only_store_unavailable(store: Any) -> bool:
+    """Whether an immutable store cannot prove its CURRENT credential contents.
+
+    Corrupt/foreign schemas and a non-empty, uncheckpointed WAL must both read as
+    UNKNOWN. Returning rows (or ``[]``) in either case would fabricate readiness.
+    """
+    if store is None:
+        return False
+    for name in ("read_only_unavailable", "read_only_sidecar_present"):
+        probe = getattr(store, name, None)
+        if not callable(probe):
+            continue
+        try:
+            if probe():
+                return True
+        except Exception:  # noqa: BLE001 — an unreadable probe cannot prove contents
+            return True
+    return False
 
 
 def operator_fact() -> dict[str, Any]:
@@ -326,6 +360,126 @@ def git_identity_fact(home: Path | None = None) -> dict[str, Any]:
             return ""
 
     return {"user_name": value("name"), "user_email": value("email")}
+
+
+def _default_repository_identity(home: Path) -> dict[str, str]:
+    """The installed project's name and clone URL, without a machine-specific path.
+
+    A readiness request may name the repository the session will use. With no
+    such identity, the installed distribution is the one default every peer is
+    guaranteed to share: its package name supplies ``~/<name>`` and its declared
+    project URL supplies the clone source. In particular, the relay's cwd is NOT
+    a fallback — a supervised relay commonly starts in HOME or `/`, so checking
+    there would answer about a directory the session was never going to use.
+    """
+    from importlib.metadata import PackageNotFoundError, distribution
+
+    try:
+        metadata = distribution("local-operator").metadata
+    except (OSError, PackageNotFoundError):
+        return {"path": "", "url": ""}
+    name = str(metadata.get("Name") or "").strip()
+    urls: dict[str, str] = {}
+    for entry in metadata.get_all("Project-URL") or ():
+        label, separator, value = str(entry).partition(",")
+        if separator and value.strip():
+            urls[label.strip().lower()] = value.strip()
+    url = next(
+        (urls[key] for key in ("repository", "source", "homepage") if urls.get(key)),
+        "",
+    )
+    return {"path": str(home / name) if name else "", "url": url}
+
+
+def _checkout_git_dir(path: Path) -> Path | None:
+    """The git directory at ``path``, including a linked worktree's indirection."""
+    marker = path / ".git"
+    try:
+        if marker.is_dir():
+            return marker
+        if not marker.is_file():
+            return None
+        with open(marker, encoding="utf-8") as handle:
+            declaration = handle.read(4096).splitlines()[0]
+        prefix = "gitdir:"
+        if not declaration.startswith(prefix):
+            return None
+        git_dir = Path(declaration[len(prefix) :].strip())
+        return git_dir if git_dir.is_absolute() else path / git_dir
+    except (IndexError, OSError, UnicodeError):
+        return None
+
+
+def _is_git_checkout(path: Path) -> bool:
+    """Whether ``path`` is a worktree root, not merely a directory named like one.
+
+    Read git's own small metadata files rather than spawning a process on every
+    readiness report (the same relay-path constraint as ``git_identity_fact``).
+    A normal checkout has objects/refs below `.git`; a linked worktree reaches
+    them through `commondir`. No clone, fetch, config write or index refresh is
+    possible here.
+    """
+    git_dir = _checkout_git_dir(path)
+    if git_dir is None:
+        return False
+    try:
+        if not (git_dir / "HEAD").is_file():
+            return False
+        common_dir = git_dir
+        common_marker = git_dir / "commondir"
+        if common_marker.is_file():
+            with open(common_marker, encoding="utf-8") as handle:
+                relative = handle.read(4096).strip()
+            if not relative:
+                return False
+            common_dir = Path(relative)
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
+        return (common_dir / "objects").is_dir() and (common_dir / "refs").is_dir()
+    except (OSError, UnicodeError):
+        return False
+
+
+def repository_fact(
+    home: Path | None = None, *, repository: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """The requested working copy's path, clone URL and filesystem state.
+
+    ``repository.path`` is a path ON THE PEER (absolute, ``~/...`` or relative
+    to its home), never the viewer's checkout path. ``repository.url`` alone is
+    also a sufficient identity: its final path component names the peer-side
+    destination. With neither, ``_default_repository_identity`` supplies the
+    installed project's identity. The fact is names and state only.
+    """
+    root = home if home is not None else Path.home()
+    request = repository if isinstance(repository, Mapping) else {}
+    raw_path = str(request.get("path") or "").strip()
+    url = str(request.get("url") or "").strip()
+    default = _default_repository_identity(root)
+    if raw_path in ("", "~"):
+        path_text = default["path"] if not raw_path else str(root)
+    elif raw_path.startswith("~/"):
+        path_text = str(root / raw_path[2:])
+    else:
+        candidate = Path(raw_path).expanduser()
+        path_text = str(candidate if candidate.is_absolute() else root / candidate)
+    if not raw_path and url:
+        # A URL is a repository identity too. Derive its natural destination
+        # instead of pairing it with the package's potentially unrelated name.
+        name = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        path_text = str(root / name) if name else ""
+    if not url and (not raw_path or path_text == default["path"]):
+        url = default["url"]
+    path = Path(path_text) if path_text else None
+    if path is None:
+        state = "unidentified"
+    elif not path.exists():
+        state = "missing"
+    elif not path.is_dir() or not _is_git_checkout(path):
+        state = "not_git_checkout"
+    else:
+        state = "checkout"
+    return {"path": path_text, "url": url, "state": state}
 
 
 #: The command-line tools a lane is expected to find on a device it runs on.
@@ -560,7 +714,7 @@ def _server_refs(
     return rows
 
 
-def mcp_servers_fact(root: Path) -> dict[str, Any]:
+def mcp_servers_fact(root: Path, *, read_only: bool = False) -> dict[str, Any]:
     """The USER-SCOPE MCP servers, their login rows and their credential shapes.
 
     Reads the file the WRITERS target (``<root>/mcp.json``), not the merged
@@ -595,10 +749,15 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — an unreadable file already reads as no servers
         literal_keys = []
     presence: dict[str, bool | None] = {}
+    # One evidence read per network, not per server. These are the same durable,
+    # value-free broker outcomes ``server_states`` already renders: readiness must
+    # not replace an observed owner refusal with a guess from a local row.
+    evidence_by_network: dict[str, dict[str, dict[str, Any]]] = {}
     store = None
     store_unreadable = False
     try:
-        store = _open_store(root)
+        store = _open_store(root) if not read_only else _open_store(root, read_only=True)
+        store_unreadable = read_only and _read_only_store_unavailable(store)
     except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
         store_unreadable = True
     try:
@@ -623,6 +782,7 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
             has_row: bool | None = None
             has_placement = False
             diagnostics: dict[str, Any] | None = None
+            auth_evidence: dict[str, Any] | None = None
             if transport in ("http", "sse") and url:
                 from local_operator.mcp.auth import mcp_grant_diagnostics
 
@@ -636,11 +796,18 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                 # on an explicit act (``lop network credentials``), never on the
                 # provider path, so a peer that has not pulled cannot borrow and
                 # must not be reported as ready to.
+                from local_operator.network.credentials import mcp_state
                 from local_operator.network.credentials.placement import (
                     placement_entries_for,
                 )
 
-                has_placement = placement_entries_for(mcp_url=url, root=root) is not None
+                placed = placement_entries_for(mcp_url=url, root=root)
+                has_placement = placed is not None
+                if placed is not None:
+                    network_id, _entry = placed
+                    if network_id not in evidence_by_network:
+                        evidence_by_network[network_id] = mcp_state.load(network_id, root)
+                    auth_evidence = evidence_by_network[network_id].get(f"mcp:{url}")
             servers.append(
                 {
                     "name": _safe_text(name, limit=120),
@@ -656,6 +823,7 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                         dict(row) for row in literal_keys if str(row.get("server")) == str(name)
                     ],
                     **({"auth_diagnostics": diagnostics} if diagnostics is not None else {}),
+                    **({"auth_evidence": auth_evidence} if auth_evidence else {}),
                 }
             )
     finally:
@@ -777,7 +945,9 @@ def default_model_fact(root: Path) -> dict[str, Any]:
     }
 
 
-def has_local_provider_credential(root: Path, provider: str) -> bool | None:
+def has_local_provider_credential(
+    root: Path, provider: str, *, read_only: bool = False
+) -> bool | None:
     """Whether this device holds a credential row for ``provider``.
 
     Three-valued like ``has_stored_row``: ``None`` is "the store could not be
@@ -788,12 +958,14 @@ def has_local_provider_credential(root: Path, provider: str) -> bool | None:
     if not provider:
         return False
     try:
-        store = _open_store(root)
+        store = _open_store(root) if not read_only else _open_store(root, read_only=True)
     except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
         return None
     if store is None:
         return False
     try:
+        if read_only and _read_only_store_unavailable(store):
+            return None
         return bool(list(store.list_credentials(provider)))
     except Exception:  # noqa: BLE001
         return None
@@ -991,7 +1163,12 @@ def selected_model_row(
 
 
 def collect_peer_facts(
-    root: Path, *, home: Path | None = None, selector: str = "", session_id: str = ""
+    root: Path,
+    *,
+    home: Path | None = None,
+    selector: str = "",
+    session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Everything the viewer needs from THIS device, as facts. Names only."""
     model = default_model_fact(root)
@@ -1010,10 +1187,11 @@ def collect_peer_facts(
         "provider": provider,
         # The provider is the ``provider`` key above; the fact is three-valued
         # (True / False / None = the store could not be read).
-        "has_local": has_local_provider_credential(root, provider),
+        "has_local": has_local_provider_credential(root, provider, read_only=True),
         "credential_placement": placement_fact(provider=provider, root=root),
-        "mcp": mcp_servers_fact(root),
+        "mcp": mcp_servers_fact(root, read_only=True),
         "git": git_identity_fact(home),
+        "repository": repository_fact(home, repository=repository),
         "tooling": tooling_fact(home),
         "operator": operator_fact(),
         "memory": memory_fact(),
@@ -1152,7 +1330,8 @@ class ViewerFacts:
     def _open(self) -> Any:
         if not self._opened:
             try:
-                self._store = _open_store(self.root)
+                self._store = _open_store(self.root, read_only=True)
+                self._store_unreadable = _read_only_store_unavailable(self._store)
             except Exception:  # noqa: BLE001 — unopenable is "could not be read"
                 self._store = None
                 self._store_unreadable = True
@@ -1164,8 +1343,10 @@ class ViewerFacts:
         if not provider:
             return []
         store = self._open()
+        if self._store_unreadable:
+            return None
         if store is None:
-            return None if self._store_unreadable else []
+            return []
         try:
             return list(store.list_credentials(provider))
         except Exception:  # noqa: BLE001
@@ -1173,8 +1354,10 @@ class ViewerFacts:
 
     def holds_mcp_login(self, url: str) -> bool | None:
         store = self._open()
+        if self._store_unreadable:
+            return None
         if store is None:
-            return None if self._store_unreadable else False
+            return False
         return _mcp_row_exists(store, url)
 
     def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
@@ -1609,6 +1792,79 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
     )
 
 
+def repository_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """Does the peer have the working copy an offloaded session would edit?"""
+    fact = facts.get("repository")
+    if not isinstance(fact, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_REPOSITORY,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            source=SOURCE_UNKNOWN,
+        )
+    path = _bounded(fact.get("path") or "", 500)
+    url = _bounded(fact.get("url") or "", 500)
+    state = str(fact.get("state") or "")
+    common = {
+        "device_id": member.device_id,
+        "device_name": peer_label,
+        "capability": CAPABILITY_REPOSITORY,
+        "source": SOURCE_PEER,
+        "observed": {"path": path, "state": state},
+    }
+    if state == "checkout" and path:
+        return _capability_row(
+            **common,
+            ok=True,
+            detail=(
+                f"{peer_label} has a git checkout at {path}: offloaded work has a "
+                "working copy there"
+            ),
+        )
+    if state not in ("missing", "not_git_checkout") or not path:
+        return _capability_row(
+            **common,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "the peer could not identify a repository working copy to check at "
+                f"{path or 'the requested path'}"
+            ),
+            remedies=["re-check with the repository's peer-side path and clone URL"],
+        )
+    missing = state == "missing"
+    detail = (
+        f"{peer_label} has no working copy at {path}: offloaded work for that repository "
+        "cannot edit or test it there"
+        if missing
+        else f"{path} on {peer_label} exists but is not a git checkout: offloaded work "
+        "does not have the repository's working copy there"
+    )
+    if url:
+        command = shlex.join(["git", "clone", url, path])
+        remedy = f"on {peer_label}, run `{command}`, then re-check"
+        if not missing:
+            remedy = (
+                f"on {peer_label}, move the non-checkout directory aside if it holds anything "
+                f"to keep, then run `{command}` and re-check"
+            )
+    else:
+        remedy = (
+            f"on {peer_label}, provide the repository clone URL, then clone it into {path} "
+            "and re-check"
+        )
+    return _capability_row(
+        **common,
+        ok=False,
+        code=CODE_NO_REPOSITORY if missing else CODE_NOT_GIT_CHECKOUT,
+        detail=detail,
+        remedies=[remedy],
+    )
+
+
 def mcp_servers_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
     """(d) Does the peer have any user-scope MCP surface at all?"""
     fact = facts.get("mcp")
@@ -1886,6 +2142,19 @@ def _observation_failure(observation: Mapping[str, Any]) -> str:
     )
 
 
+def _model_choice_remedy(peer_label: str) -> str:
+    """Offer only a remedy supported by the peer's observed credential state.
+
+    Readiness cannot distinguish a deliberately withheld credential from one not
+    shared yet, so it must not re-offer sharing. The peer payload also has no
+    alternative-provider inventory: keep the selector as a placeholder rather
+    than inventing an example the peer may be unable to serve.
+    """
+    return (
+        f"create with --model <provider>/<model-id> naming a provider {peer_label} " "holds instead"
+    )
+
+
 def model_credential_row(
     member: Any,
     facts: Mapping[str, Any],
@@ -1929,8 +2198,8 @@ def model_credential_row(
             detail=sentence,
             remedies=[
                 "set the peer's default (`/model default` in its window, or "
-                "`local-operator config edit model_name <model>` there), then its "
-                "provider needs a login or a share"
+                "`local-operator config edit model_name <model>` there), then sign in "
+                "to its provider on the peer"
             ],
             source=SOURCE_PEER,
         )
@@ -1952,6 +2221,9 @@ def model_credential_row(
     owner = str(placement.get("owner_device") or "")
     peer_is_holder = member.device_id in _holder_names(placement)
     if owner and peer_is_holder:
+        # A real observation failure is more specific than store uncertainty and
+        # must keep its established precedence. A definite local row above still
+        # outranks it: that row is positive proof the peer can serve itself.
         observed_failure = _observation_failure(observation)
         if observed_failure:
             return _capability_row(
@@ -1970,6 +2242,40 @@ def model_credential_row(
                 ],
                 source=SOURCE_PEER,
             )
+    # Placement is only a borrow ROUTE, not proof that the peer's store is
+    # readable. Unknown follows an observed failure but precedes every ok route.
+    if held is None:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "a credential store could not be read (this side or the peer's), so "
+                "whether this provider can be served is not known"
+            ),
+            remedies=[f"check the credential store on {peer_label} and here, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
+    if owner and owner == member.device_id:
+        # The placement says the PEER owns this key, yet no local row was found
+        # on it (``held`` is not True, or this branch was reached first). The
+        # two documents disagree; report the disagreement rather than pick one.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"the placement entry for {provider} names {peer_label} as its owner, but "
+                "no credential row was found there — the two do not agree yet"
+            ),
+            remedies=[f"sign in to {provider} on {peer_label} and re-check"],
+            source=SOURCE_PEER,
+        )
+    if owner and peer_is_holder:
         if owner == viewer.device_id:
             return _capability_row(
                 device_id=member.device_id,
@@ -1993,23 +2299,6 @@ def model_credential_row(
             ),
             source=SOURCE_PEER,
         )
-    if owner and owner == member.device_id:
-        # The placement says the PEER owns this key, yet no local row was found
-        # on it (``held`` is not True, or this branch was reached first). The
-        # two documents disagree; report the disagreement rather than pick one.
-        return _capability_row(
-            device_id=member.device_id,
-            device_name=peer_label,
-            capability=CAPABILITY_MODEL_CREDENTIAL,
-            ok=False,
-            code=CODE_UNKNOWN,
-            detail=(
-                f"the placement entry for {provider} names {peer_label} as its owner, but "
-                "no credential row was found there — the two do not agree yet"
-            ),
-            remedies=[f"sign in to {provider} on {peer_label} and re-check"],
-            source=SOURCE_PEER,
-        )
     if owner and not peer_is_holder:
         return _capability_row(
             device_id=member.device_id,
@@ -2021,13 +2310,7 @@ def model_credential_row(
                 f"{provider} is shared in this network, but {peer_label} is not among its "
                 "holders: a borrow there would be refused"
             ),
-            remedies=[
-                (
-                    f"share it with {peer_label} (run here)"
-                    if owner == viewer.device_id
-                    else f"ask the device that owns {provider} to add {peer_label} as a holder"
-                )
-            ],
+            remedies=[_model_choice_remedy(peer_label)],
             source=SOURCE_PEER,
         )
     mine = viewer.provider_rows(provider)
@@ -2067,10 +2350,10 @@ def model_credential_row(
                 f"this device is signed in to {provider} but does not share it with "
                 f"{peer_label}, so nothing would reach it"
             ),
-            remedies=[f"share it with {peer_label} (run here)"],
+            remedies=[_model_choice_remedy(peer_label)],
             source=SOURCE_LOCAL,
         )
-    if held is None or mine is None:
+    if mine is None:
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -2095,8 +2378,8 @@ def model_credential_row(
             "offloaded work on that model cannot start"
         ),
         remedies=[
-            f"sign in to {provider} here and share it, or sign in on {peer_label} "
-            "to use its own account"
+            f"{_model_choice_remedy(peer_label)}, or sign in to {provider} on "
+            f"{peer_label} to use its own account"
         ],
         source=SOURCE_LOCAL,
     )
@@ -2299,14 +2582,66 @@ def _mcp_credential_row(
 ) -> dict[str, Any]:
     has_row = server.get("has_row")
     diagnostics = server.get("auth_diagnostics")
-    if (
+    local_unavailable = (
         isinstance(diagnostics, Mapping)
         and has_row is True
         and diagnostics.get("sharing_mode") == "unavailable"
-    ):
+    )
+    placement = viewer.placement(mcp_url=url)
+    owner = str(placement.get("owner_device") or "")
+    peer_is_holder = member.device_id in _holder_names(placement)
+    evidence = server.get("auth_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    evidence_owner = str(evidence.get("owner_device") or "")
+    owner_evidence_is_newer = True
+    if local_unavailable:
+        assert isinstance(diagnostics, Mapping)  # narrowed by local_unavailable
+        from local_operator.network.credentials.types import peer_number
+
+        # A local grant is the runtime's first rung. Only a refusal observed
+        # AFTER its current chain began may supersede it; an older refusal, a
+        # tie, or missing timing keeps the repair on this device. Refresh
+        # rotations carry the chain stamp, so this compares grant identity, not
+        # the last metadata write.
+        evidence_at = peer_number(evidence.get("at"), default=0)
+        local_grant_at = peer_number(diagnostics.get("grant_chain_at"), default=0)
+        owner_evidence_is_newer = (
+            evidence_at > 0 and local_grant_at > 0 and evidence_at > local_grant_at
+        )
+    current_owner_evidence = (
+        bool(owner)
+        and peer_is_holder
+        and server.get("has_placement") is True
+        and evidence_owner == owner
+        and owner_evidence_is_newer
+        and (local_unavailable or has_row is False)
+    )
+    if current_owner_evidence and evidence.get("state") == "expired":
+        # This is an OBSERVED owner refusal, not an inference from a copied row
+        # or an expiry stamp. The session warning already names this device; the
+        # readiness detail and its remedy must send the operator to that same one.
+        owner_label = _bounded(evidence.get("owner_name") or "", 120) or _owner_label(
+            placement, fallback=owner
+        )
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_OBSERVED_FAILURE,
+            detail=(
+                f"{owner_label}: sign in again — {peer_label} cannot borrow the login "
+                f"for {name} ({url}) until then"
+            ),
+            remedies=(f"sign in again on {owner_label}",),
+            source=SOURCE_PEER,
+            observed={"server": name, "url": url, "auth_evidence": dict(evidence)},
+        )
+    if local_unavailable:
         # A present but dead/expired-unrefreshable grant cannot satisfy the
-        # existing local-login branch. Do not silently fall through to a
-        # placement: the runtime also prioritizes this local grant.
+        # existing local-login branch. Without current owner-expiry evidence this
+        # is a LOCAL repair, and both sentences must name the same device.
+        assert isinstance(diagnostics, Mapping)  # narrowed by local_unavailable
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -2315,9 +2650,9 @@ def _mcp_credential_row(
             code="local_grant_unavailable",
             detail=(
                 f"{peer_label}'s stored login for {name} ({url}) is unavailable; "
-                "sign in again there"
+                f"sign in again on {peer_label}"
             ),
-            remedies=(mcp_login_remedy(url),),
+            remedies=(f"sign in again on {peer_label}",),
             source=SOURCE_PEER,
             observed={"server": name, "url": url, "auth_diagnostics": dict(diagnostics)},
         )
@@ -2331,9 +2666,41 @@ def _mcp_credential_row(
             source=SOURCE_PEER,
             observed={"server": name, "url": url},
         )
-    placement = viewer.placement(mcp_url=url)
-    owner = str(placement.get("owner_device") or "")
-    peer_is_holder = member.device_id in _holder_names(placement)
+    # As with the provider row, placement cannot substitute for a readable
+    # peer store. Check its tri-state fact before any self-borrow shortcut.
+    if has_row is None:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"{peer_label}'s credential store could not be read, so whether it holds "
+                f"a login for {name} is not known"
+            ),
+            remedies=[f"check the credential store on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+            observed={"server": name, "url": url},
+        )
+    if owner and owner == member.device_id:
+        # An owner cannot issue its promised grant without the local row. This
+        # must precede the generic holder success when the owner is also listed
+        # as a holder; only a positively read row above proves the self-serve.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"the placement entry for {name} names {peer_label} as its owner, but "
+                "no credential row was found there — the two do not agree yet"
+            ),
+            remedies=[f"sign in to {name} on {peer_label}, then re-check"],
+            source=SOURCE_PEER,
+            observed={"server": name, "url": url},
+        )
     if owner and peer_is_holder:
         # THE PULL GAP, per server: this device's own document says the peer is a
         # holder, but the peer's OWN answer says it has no placement entry for
@@ -2407,7 +2774,8 @@ def _mcp_credential_row(
             source=SOURCE_PEER,
             observed={"server": name, "url": url},
         )
-    if viewer.holds_mcp_login(url):
+    mine = viewer.holds_mcp_login(url)
+    if mine:
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -2422,7 +2790,9 @@ def _mcp_credential_row(
             source=SOURCE_LOCAL,
             observed={"server": name, "url": url},
         )
-    if has_row is None:
+    if mine is None:
+        # ``None`` is not an empty viewer store. Keep the no-placement fallback
+        # tri-state too, or an open-WAL/corrupt login gets a sign-in-first remedy.
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -2430,10 +2800,10 @@ def _mcp_credential_row(
             ok=False,
             code=CODE_UNKNOWN,
             detail=(
-                f"{peer_label}'s credential store could not be read, so whether it holds "
-                f"a login for {name} is not known"
+                "this device's credential store could not be read, so whether it holds "
+                f"a login for {name} ({url}) is not known"
             ),
-            remedies=[f"check the credential store on {peer_label}, then re-check"],
+            remedies=["check the credential store on this device, then re-check"],
             source=SOURCE_UNKNOWN,
             observed={"server": name, "url": url},
         )
@@ -3319,6 +3689,7 @@ def _ask_readiness(
     timeout: float = READINESS_OP_TIMEOUT_S,
     selector: str = "",
     session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Ask the peer for its facts. Returns ``(facts, "")`` or ``(None, reason)``."""
     request = {
@@ -3328,6 +3699,10 @@ def _ask_readiness(
     }
     if selector:
         request.update(selector=selector, session_id=session_id)
+    if isinstance(repository, Mapping):
+        request["repository"] = {
+            key: _bounded(repository.get(key) or "", 500) for key in ("path", "url")
+        }
     reply = link.request(request, timeout=timeout)
     if reply is None:
         return None, "the readiness request did not arrive before the bound"
@@ -3348,6 +3723,7 @@ def _peer_checks(
     deadline: float | None,
     selector: str = "",
     session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Every readiness row for ONE member: reachability, then capabilities."""
     peer_label = _label(member)
@@ -3405,13 +3781,19 @@ def _peer_checks(
         READINESS_OP_TIMEOUT_S if remaining is None else min(READINESS_OP_TIMEOUT_S, remaining)
     )
     facts, problem = _ask_readiness(
-        server, link, timeout=timeout, selector=selector, session_id=session_id
+        server,
+        link,
+        timeout=timeout,
+        selector=selector,
+        session_id=session_id,
+        repository=repository,
     )
     if facts is None:
         rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
         return rows
     rows.append(operator_row(member, facts, peer_label=peer_label))
     rows.append(git_row(member, facts, peer_label=peer_label))
+    rows.append(repository_row(member, facts, peer_label=peer_label))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
     selected = facts.get("selected_model_access")
@@ -3436,7 +3818,12 @@ def _peer_checks(
 
 
 def compose(
-    server: "RelayServer", *, peer: str = "", selector: str = "", session_id: str = ""
+    server: "RelayServer",
+    *,
+    peer: str = "",
+    selector: str = "",
+    session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``peer_readiness`` local op's body: the readiness report.
 
@@ -3503,6 +3890,7 @@ def compose(
                         deadline=deadline,
                         selector=selector,
                         session_id=session_id,
+                        repository=repository,
                     )
                 )
     finally:
@@ -3754,6 +4142,9 @@ def make_handler(server: "RelayServer") -> Any:
             server.root,
             selector=_bounded(frame.get("selector") or "", 240),
             session_id=_bounded(frame.get("session_id") or "", 80),
+            repository=(
+                frame.get("repository") if isinstance(frame.get("repository"), Mapping) else None
+            ),
         )
 
     return _handle
@@ -3768,6 +4159,9 @@ def local_handler(server: "RelayServer") -> Any:
             peer=str(frame.get("peer") or ""),
             selector=_bounded(frame.get("selector") or "", 240),
             session_id=_bounded(frame.get("session_id") or "", 80),
+            repository=(
+                frame.get("repository") if isinstance(frame.get("repository"), Mapping) else None
+            ),
         )
 
     return _handle

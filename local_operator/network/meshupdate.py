@@ -524,8 +524,11 @@ def _version_tuple(value: str) -> tuple[int, int, int] | None:
 # ---------------------------------------------------------------------------
 
 
-def busy_sessions(root: Path) -> tuple[int, str]:
+def busy_sessions(root: Path, *, include_names: bool = False) -> tuple[int, str]:
     """``(count, detail)`` for the member's live BUSY sessions — its own registry.
+
+    ``include_names`` is the relay-recovery read: a restart refusal must name the
+    work it protects. The default keeps the update receipt byte-compatible.
 
     THE PREDICATE IS THE FLEET TOOL'S OWN (RU §4.3, note Q1): a live session
     record with ``busy`` set, which is the bit ``RuntimeServer._publish_busy``
@@ -551,7 +554,16 @@ def busy_sessions(root: Path) -> tuple[int, str]:
     busy = [record for record, state in rows if state == "live" and bool(record.busy)]
     if not busy:
         return 0, ""
-    return len(busy), f"{len(busy)} session(s) are busy"
+    detail = f"{len(busy)} session(s) are busy"
+    if include_names:
+        names = []
+        for record in busy[:3]:
+            name = (record.conversation_name or "unnamed session")[:80]
+            names.append(f"{name} ({record.session_id[:80]})")
+        if len(busy) > 3:
+            names.append(f"and {len(busy) - 3} more")
+        detail += ": " + "; ".join(names)
+    return len(busy), detail
 
 
 @contextmanager

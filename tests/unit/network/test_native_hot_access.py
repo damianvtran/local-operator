@@ -418,10 +418,11 @@ def test_selected_readiness_row_does_not_promote_holder_permission(
         assert "    " in rendered  # existing indented remedy register
 
 
-def test_device_bound_and_absent_are_not_effective(tmp_path: Path) -> None:
-    assert effective_access("kimi", root=tmp_path).state == "device_bound"
+@pytest.mark.parametrize("provider", ["kimi", "kimi-wechat"])
+def test_device_bound_and_absent_are_not_effective(tmp_path: Path, provider: str) -> None:
+    assert effective_access(provider, root=tmp_path).state == "device_bound"
     assert effective_access("openai", root=tmp_path).state == "absent"
-    assert not effective_access("kimi", root=tmp_path).usable
+    assert not effective_access(provider, root=tmp_path).usable
 
 
 @pytest.mark.parametrize("provider", ["openai", "meta-muse", "openrouter", "radient"])

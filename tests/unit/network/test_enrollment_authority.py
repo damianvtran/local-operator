@@ -81,6 +81,17 @@ def assert_wrapped(root, aid):
     return raw
 
 
+def test_closed_card_accepts_a_digest_bound_advertise_host(root):
+    card = fields(root)
+    card["device"]["advertise_host"] = "8.8.8.8:4097"
+
+    record = a.create_request(**card, root=root)
+
+    assert record["device"]["advertise_host"] == "8.8.8.8:4097"
+    assert e.commitment(record) == record["request_digest"]
+    e.validate(record, approval_id=record["approval_id"])
+
+
 def test_exact_domains_and_nonrenewing_lookup_first(root, monkeypatch):
     first = create(root)
     aid = first["approval_id"]
@@ -516,12 +527,23 @@ def test_network_only_verify_requires_known_positive_targeted_producer_facts():
                     "code": "not_configured",
                     "detail": "fixture lacks model",
                 },
+                {
+                    "check": "readiness",
+                    "class": "equipment",
+                    "device_id": "d_target",
+                    "ok": False,
+                    "capability": "repository",
+                    "source": "peer",
+                    "code": "no_repository",
+                    "detail": "fixture lacks a working copy",
+                },
             ],
         }
 
     positive = report()
     rows = e.ready_evidence(positive, device_id="d_target", network_id="n_target")
-    assert rows[0]["capability"] == "model_credential" and positive["ok"] is False
+    assert [row["capability"] for row in rows] == ["model_credential", "repository"]
+    assert positive["ok"] is False
     variants = [
         None,
         {},

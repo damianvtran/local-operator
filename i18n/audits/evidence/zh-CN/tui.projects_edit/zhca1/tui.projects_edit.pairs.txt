@@ -1,0 +1,27 @@
+# tui.projects_edit — sampled en/zh pairs for attestation zhca1
+# 6/35 keys; all >120 chars and all plurals included
+
+## tui.projects_edit.binding_cancel  [6 chars]
+EN: Cancel
+ZH: 取消
+
+## tui.projects_edit.confirm_remove  [48 chars]
+EN: remove milestone ''{name}''? · y remove · n keep
+ZH: 移除里程碑“{name}”？ · y移除 · n保留
+
+## tui.projects_edit.hint_add_milestone  [13 chars]
+EN: add milestone
+ZH: 添加里程碑
+
+## tui.projects_edit.prompt_name_label  [9 chars]
+EN: milestone
+ZH: 里程碑
+
+## tui.projects_edit.refusal_project_gone_milestone  [68 chars]
+EN: ''{name}'' is no longer in the store — the milestone was not changed
+ZH: “{name}”已不在存储中 — 里程碑未更改
+
+## tui.projects_edit.saved  [5 chars]
+EN: saved
+ZH: 已保存
+

@@ -1,0 +1,2 @@
+cli.logout_help.logout	Log out of a provider (removes stored credentials)	退出提供商登录（移除已存储的凭据）
+cli.logout_help.provider	Provider to log out of	要退出登录的提供商

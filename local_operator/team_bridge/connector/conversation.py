@@ -33,13 +33,21 @@ import hashlib
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
-from ..client import BridgeRefusal
+from ..attachments import (
+    AttachmentDescriptor,
+    AttachmentRejected,
+    attachments_hash,
+    parse_descriptors,
+    verify_and_bound,
+    withheld_marker,
+)
+from ..client import SCREENING_TEMPLATE_V3_SHA256, BridgeRefusal
 from ..types import ConversationFeedRef
 from .wake import (
     CLAIM_TTL_S,
@@ -72,6 +80,11 @@ class ConversationCardMetadata:
     #: The root this message answers, when it is a thread reply. Carried from
     #: the durable ref's tagged slot; `None` for a channel-level message.
     thread_root_id: str | None = None
+    #: How many images the message carries — a count, never bytes or ids.
+    attachments: int = 0
+    #: The explicit refusal line when those images were NOT admitted (D5),
+    #: so an agent is told images exist rather than silently missing them.
+    attachments_note: str | None = None
 
 
 def build_conversation_card(metadata: ConversationCardMetadata) -> str:
@@ -99,6 +112,18 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         f"message_id: {metadata.message_id}",
         f"conversation_seq: {metadata.conversation_seq}",
     ]
+    if metadata.attachments:
+        # A count and how to see them: images reach the agent only through
+        # channel_history after an allow that screened them (never this card).
+        lines.append(f"attachments: {metadata.attachments} image(s)")
+        if metadata.attachments_note:
+            lines.append(_one_line(metadata.attachments_note))
+        elif metadata.thread_root_id:
+            # The channel timeline EXCLUDES thread replies (hub threads), so
+            # a reply's images are reachable only through its thread (R1-02).
+            lines.append("view: bridge channel_thread with this thread_root_id returns the images")
+        else:
+            lines.append("view: bridge channel_history returns the admitted images")
     if metadata.thread_root_id:
         # Thread context: where the reply lives and how to answer IN it, so an
         # agent coordinating in a thread does not answer at channel level.
@@ -161,14 +186,115 @@ def _screening_item(
     }
 
 
+def _find_message(page: Mapping[str, Any], ref: ConversationFeedRef) -> Mapping[str, Any] | None:
+    """Locate THIS message in one bounded page; never fall back to the pair inbox."""
+
+    messages = page.get("messages")
+    if not isinstance(messages, list):
+        return None
+    for raw in messages:
+        if not isinstance(raw, Mapping):
+            continue
+        if raw.get("id") == ref.message_id:
+            return raw
+    return None
+
+
+def _int_field(value: Any) -> int | None:
+    """A non-negative integer or ``None`` — never a coerced bool/float."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+async def _target_message(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    access: Any,
+) -> Mapping[str, Any] | None:
+    """The message at THIS endpoint's cursor, fetched newest-first and bounded.
+
+    ``before_seq = seq + 1`` makes the target the FIRST row when it exists: the
+    server orders newest-first and returns ``limit`` rows, so the target cannot
+    be pushed out by newer messages (the old ``after_seq`` window could be).
+    The cursor is the feed's own ``conversation_seq`` for this endpoint, never
+    the person-gated human read row.
+    """
+
+    page = await client.conversation_messages(
+        ref.conversation_id,
+        tenant_id=owner.tenant_id,
+        limit=1,
+        before_seq=ref.conversation_seq + 1,
+        endpoint_id=owner.endpoint_id,
+        access=access,
+    )
+    if not isinstance(page, Mapping) or not isinstance(page.get("messages"), list):
+        return None
+    message = _find_message(page, ref)
+    if message is None:
+        return None
+    if _int_field(message.get("seq")) != ref.conversation_seq:
+        return None
+    return message
+
+
+@dataclass(frozen=True)
+class _Fetched:
+    """The classification read: body, its hash, and the bound image set.
+
+    ``attachments`` is ``None`` when the hub's descriptors were malformed
+    (the caller holds) and ``()`` for a text-only message or an older hub.
+    """
+
+    body: str
+    body_hash: str
+    #: The transient classification response: the ONLY carrier of main's
+    #: additive display fields. Never stored — the card builder reads it in
+    #: this call and drops it.
+    display: Mapping[str, Any]
+    attachments: tuple[AttachmentDescriptor, ...] | None = ()
+    attachments_hash: str | None = None
+
+
+async def _body_from_history(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    access: Any,
+) -> _Fetched | None:
+    """Fallback for a server without the classification route (or a 404 route).
+
+    Returns the screened bytes ONLY from the target window; an absent target, a
+    null body (unadmitted) or a missing hash is ``None`` and the caller keeps
+    the hold. It is never a reason to call the message gone.
+    """
+
+    message = await _target_message(client, ref, owner, access)
+    if message is None:
+        return None
+    if message.get("attachment_count") or message.get("attachments"):
+        # An image message must be screened through the classification route
+        # (which carries the binding hash); a history row cannot prove the set.
+        return None
+    body = message.get("body")
+    body_hash = message.get("body_hash")
+    if not isinstance(body, str) or not isinstance(body_hash, str):
+        return None
+    # The legacy fallback never screens images: a history row reaching here is
+    # from a hub without the classification route, which predates attachments.
+    return _Fetched(body=body, body_hash=body_hash, display=message)
+
+
 async def _fetch_body(
     client: Any,
     ref: ConversationFeedRef,
     owner: Any,
     access: Any,
-) -> tuple[str, str, Mapping[str, Any]] | None:
-    """Fetch once through the endpoint/member/consent/joined-seq authority.
-
+) -> _Fetched | None:
+    """The classification fetch, endpoint-addressed, with a legacy fallback.
     A missing route on an old server is a retryable hold, never permission to
     fall back to a person-only conversation GET or to an unadmitted history
     body. Optional display fields travel only in this transient response.
@@ -192,7 +318,20 @@ async def _fetch_body(
     body_hash = fetched.get("body_hash")
     if not isinstance(body, str) or not isinstance(body_hash, str):
         return None
-    return body, body_hash, fetched
+    # Additive (image attachments): an older hub sends neither field and the
+    # message is text-only exactly as before. ``display`` carries main's
+    # transient label mapping alongside the image binding: both are facts of
+    # the SAME authorized read, so one carrier keeps them from drifting apart.
+    served_attachments_hash = fetched.get("attachments_hash")
+    return _Fetched(
+        body=body,
+        body_hash=body_hash,
+        display=fetched,
+        attachments=parse_descriptors(fetched.get("attachments")),
+        attachments_hash=(
+            served_attachments_hash if isinstance(served_attachments_hash, str) else None
+        ),
+    )
 
 
 def _card_metadata(
@@ -360,6 +499,128 @@ async def _deliver_card(
     )
 
 
+_WITHHELD_REASONS = {
+    # D5's exact wording for the vision case; the others name their cause the
+    # same way so an agent is never left guessing why it cannot see an image.
+    "unavailable": "[{n} image {noun} withheld: no longer available]",
+    "unverified": "[{n} image {noun} withheld: could not be verified]",
+}
+
+
+def _withheld_note(count: int, reason: str) -> str:
+    if reason == "no_vision":
+        return withheld_marker(count)
+    noun = "attachment" if count == 1 else "attachments"
+    return _WITHHELD_REASONS[reason].format(n=count, noun=noun)
+
+
+def _screener_sees_images(config_dir: Path) -> bool:
+    """SEAM: whether the configured SCREENING model accepts image input (D5).
+
+    Read from the same canonical selection the screening runner is built from,
+    so the decision to send pixels and the model that receives them cannot
+    disagree. Unknown/unusable selection reads as "no vision": fail closed.
+    """
+
+    from ..model_boundary import resolve_default_selection
+
+    selection = resolve_default_selection(config_dir)
+    if selection is None:
+        return False
+    return bool(getattr(selection.spec, "supports_images", False))
+
+
+async def _screen_images(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    access: Any,
+    descriptors: tuple[AttachmentDescriptor, ...],
+) -> list[Any]:
+    """Fetch each image with ``purpose=screen``, verify and bound it.
+
+    These bytes exist ONLY to be classified: they ride the private carrier into
+    the isolated screening dispatch and are dropped with it. They are never
+    the bytes an agent sees — that is a separate ``purpose=context`` fetch
+    after allow (manager decision D1) — and never written anywhere.
+    Raises :class:`AttachmentRejected` (verification) or ``BridgeRefusal``
+    (transport); the caller maps both to closed codes.
+    """
+
+    from ..screening import screening_image
+
+    images = []
+    for descriptor in descriptors:
+        data, _mime = await client.fetch_attachment(
+            ref.conversation_id,
+            ref.message_id,
+            descriptor.id,
+            tenant_id=owner.tenant_id,
+            endpoint_id=owner.endpoint_id,
+            purpose="screen",
+            access=access,
+        )
+        verified = await verify_and_bound(data, descriptor)
+        images.append(
+            screening_image(
+                descriptor.mime,
+                descriptor.width,
+                descriptor.height,
+                verified.private_payload(),
+                verified.wire_mime,
+            )
+        )
+    return images
+
+
+async def _images_admitted(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    access: Any,
+    descriptors: tuple[AttachmentDescriptor, ...],
+) -> bool:
+    """Whether the hub already admitted THIS image set for this endpoint.
+
+    WHY (review R1-01): after an image allow, the hub closes ``purpose=screen``
+    for the (message, endpoint) for good (decision D1). A retry that re-ran the
+    screen fetch after a failure between admit and card — a lost admit reply, a
+    crash, a refused wake — got that 404 on every attempt and the card never
+    went out. The hub's admission is the authority, so it is asked directly: a
+    ``purpose=context`` read succeeds only under an allow bound to the current
+    ``attachments_hash``. The bytes are discarded unread — the probe proves
+    admission, it never feeds a model — and only a 404 means "not admitted";
+    any other refusal propagates so the handler keeps its bounded hold.
+    """
+
+    try:
+        await client.fetch_attachment(
+            ref.conversation_id,
+            ref.message_id,
+            descriptors[0].id,
+            tenant_id=owner.tenant_id,
+            endpoint_id=owner.endpoint_id,
+            purpose="context",
+            access=access,
+        )
+    except BridgeRefusal as failure:
+        if _is_not_found(failure):
+            return False
+        raise
+    return True
+
+
+def _is_not_found(failure: BridgeRefusal) -> bool:
+    """THE one "the hub has no such fetchable attachment" predicate (R2-05).
+
+    D1 answers every miss with a uniform 404 ``attachment_not_found``; the
+    code is checked too so a proxy that rewrites the status cannot turn a
+    closed route into a retryable failure in one branch and not the other.
+    """
+
+    return failure.http_status == 404 or failure.code == "attachment_not_found"
+
+
 def _clear_terminal_hold(owner: Any, ref: ConversationFeedRef, config_dir: Path) -> None:
     """A terminal outcome retires the durable retry row keyed by this ref."""
 
@@ -438,7 +699,18 @@ async def handle_conversation_available(
             # Missing/old classification route or an unbound response: keep
             # the hold rather than treating a weaker history read as authority.
             return {"action": "hold", "message_id": message_id, "code": "body_unavailable"}
-        body_text, body_hash, display = fetched
+        body_text, body_hash, display = fetched.body, fetched.body_hash, fetched.display
+        if fetched.attachments is None:
+            # Descriptors the hub sent but this build cannot validate: never
+            # screen a guessed subset of the images; keep it retryable.
+            return {"action": "hold", "message_id": message_id, "code": "attachments_malformed"}
+        # Display labels are EPHEMERAL: they come from this authorized read and
+        # are dropped with it (#2856 keeps them out of the durable ref). Built
+        # here, once, because the image block annotates the same object.
+        try:
+            metadata = _card_metadata(owner, ref, display)
+        except ValueError:
+            return {"action": "hold", "message_id": message_id, "code": "sender_malformed"}
         try:
             served_digest = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
         except UnicodeEncodeError:
@@ -453,6 +725,121 @@ async def handle_conversation_available(
                 "code": "body_hash_mismatch",
             }
 
+        # IMAGES. Screened WITH the text only when every image is verified
+        # and the screening model can see them; otherwise the text is
+        # screened alone and the images stay withheld (no attachments_hash
+        # is ever admitted for them), with an explicit line on the card.
+        descriptors = fetched.attachments
+        screened_images: Any = None
+        attachments_note: str | None = None
+        #: Set when a retry finds the verdict already concluded (R1-01):
+        #: ``images_admitted`` / ``text_admitted`` deliver the card,
+        #: ``rejected`` (our receipt says reject) and ``unadmitted`` (no local
+        #: receipt, hub grants no images) deliver the unadmitted card — none
+        #: re-screens.
+        recovery: str | None = None
+        if descriptors:
+            metadata = replace(metadata, attachments=len(descriptors))
+            withheld_reason: str | None = None
+            if not all(d.fetchable for d in descriptors):
+                withheld_reason = "unavailable"
+            elif fetched.attachments_hash != attachments_hash(descriptors):
+                # The set the hub describes is not the set it bound: these
+                # pixels can never be admitted (the image body_hash rule).
+                withheld_reason = "unverified"
+            elif not _screener_sees_images(config_dir):
+                withheld_reason = "no_vision"
+            else:
+                # RETRY AFTER A VERDICT (review R1-01). D1 closes the screen
+                # route for good once this endpoint has ANY terminal verdict,
+                # so a retry after a failure between admit and card (a lost
+                # admit reply, a crash, a refused wake) must never depend on
+                # re-screening. The hub's admission and this machine's own
+                # receipt for these exact body bytes decide what was already
+                # concluded; only a message with neither is screened.
+                prior = store.receipt_for_message(owner, message_id)
+                if prior is not None and prior.get("body_sha256") != served_digest:
+                    prior = None
+                if prior is not None and prior.get("verdict") == "allow":
+                    if await _images_admitted(client, ref, owner, access, descriptors):
+                        recovery = "images_admitted"
+                if recovery is None:
+                    try:
+                        images = await _screen_images(client, ref, owner, access, descriptors)
+                    except AttachmentRejected:
+                        withheld_reason = "unverified"
+                    except BridgeRefusal as failure:
+                        if not _is_not_found(failure):
+                            raise
+                        # Screen closed. That USUALLY means a terminal verdict
+                        # for this endpoint (D1), but the hub answers the same
+                        # uniform not-found when no verdict exists at all — an
+                        # unbound row, missing blob, or a message before this
+                        # member joined (review R3-02). So it is not proof of
+                        # a verdict, only that these pixels cannot be screened.
+                        if prior is None:
+                            # Nothing local to trust (e.g. the store was reset
+                            # after a verdict, or the hub cannot serve the
+                            # bytes). The hub's context predicate is the only
+                            # authority for the images. When it is closed too,
+                            # the card goes out METADATA-ONLY with an explicit
+                            # withheld line (R2-04, R3-01): no body and no
+                            # image, the hub still gates both. The text is
+                            # deliberately NOT screened alone here: if the hub
+                            # already holds a reject or an image allow, a fresh
+                            # text-only admit is a verdict conflict and would
+                            # bring back the hold-until-dropped R2-04 removed;
+                            # and with no verdict at all, a body-less wake is
+                            # the fail-closed outcome (R3-02).
+                            if await _images_admitted(client, ref, owner, access, descriptors):
+                                recovery = "images_admitted"
+                            else:
+                                recovery = "unadmitted"
+                                withheld_reason = "unverified"
+                        elif prior.get("verdict") == "reject":
+                            recovery = "rejected"
+                        else:
+                            # An allow the hub bound text-only: the images
+                            # stay withheld, the card still goes out.
+                            recovery = "text_admitted"
+                            withheld_reason = "unverified"
+                    else:
+                        from ..screening import ScreeningAttachments
+
+                        screened_images = ScreeningAttachments(
+                            attachments_hash=str(fetched.attachments_hash),
+                            images=tuple(images),
+                        )
+            if withheld_reason is not None:
+                attachments_note = _withheld_note(len(descriptors), withheld_reason)
+                metadata = replace(metadata, attachments_note=attachments_note)
+
+        if recovery is not None:
+            detail = await _deliver_card(
+                owner, metadata, session_id=designation, config_dir=config_dir
+            )
+            terminal = True
+            if recovery in ("rejected", "unadmitted"):
+                return {
+                    "action": "delivered_unadmitted",
+                    "message_id": message_id,
+                    "code": (
+                        "screening_bounce" if recovery == "rejected" else "admission_unverified"
+                    ),
+                    "session": designation,
+                    "detail": detail,
+                }
+            return {
+                "action": "delivered",
+                "message_id": message_id,
+                "conversation_id": ref.conversation_id,
+                "conversation_seq": ref.conversation_seq,
+                "mention": ref.mention,
+                "session": designation,
+                "detail": detail,
+                "recovered": recovery,
+            }
+
         item = _screening_item(
             owner=owner,
             conversation_id=ref.conversation_id,
@@ -461,6 +848,8 @@ async def handle_conversation_available(
             body_hash=body_hash,
             sender=sender,
         )
+        if screened_images is not None:
+            item["attachments"] = screened_images
         result = await screen_item(
             owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
@@ -505,10 +894,15 @@ async def handle_conversation_available(
             # S-20's rule, conversation half: never wake from bytes other than
             # the ones the screener saw.
             return {"action": "hold", "message_id": message_id, "code": "body_hash_mismatch"}
-        try:
-            admitted_metadata = _card_metadata(owner, ref, display)
-        except ValueError:
-            return {"action": "hold", "message_id": message_id, "code": "sender_malformed"}
+        admitted_hash: str | None = None
+        if screened_images is not None:
+            if getattr(result, "attachments_hash", None) == screened_images.attachments_hash:
+                admitted_hash = screened_images.attachments_hash
+        if screened_images is not None and admitted_hash is None:
+            # The verdict does not carry the image set we sent: something
+            # between dispatch and here lost the binding. Never admit pixels
+            # on it — hold and re-screen.
+            return {"action": "hold", "message_id": message_id, "code": "attachments_unbound"}
         await client.conversation_admit(
             ref.conversation_id,
             message_id,
@@ -516,6 +910,10 @@ async def handle_conversation_available(
             body_hash=body_hash,
             tenant_id=owner.tenant_id,
             endpoint_id=owner.endpoint_id,
+            # The hub requires the v3 hash with an image allow: it is the only
+            # template whose wrapper presented these images to the screener.
+            attachments_hash=admitted_hash,
+            template_sha256=SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else None,
             access=access,
         )
         # THE ADMISSION POINT (seam design, Revision 5): the hub has accepted
@@ -548,7 +946,7 @@ async def handle_conversation_available(
             return {"action": "hold", "message_id": message_id, "code": recorded}
         detail = await _deliver_card(
             owner,
-            admitted_metadata,
+            metadata,
             session_id=designation,
             config_dir=config_dir,
         )
@@ -561,6 +959,10 @@ async def handle_conversation_available(
             "mention": ref.mention,
             "session": designation,
             "detail": detail,
+            # Which template screened (R1-07): a version string and a public
+            # template hash — never content.
+            "screened_template": getattr(result, "rendered_version", None),
+            "screened_template_sha256": getattr(result, "rendered_template_sha256", None),
         }
     except StoreRefused as failure:
         return {"action": "hold", "message_id": message_id, "code": failure.code}

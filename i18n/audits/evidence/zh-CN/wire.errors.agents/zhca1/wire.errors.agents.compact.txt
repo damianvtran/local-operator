@@ -1,0 +1,8 @@
+wire.errors.agents.agent_not_found	Agent not found	未找到智能体
+wire.errors.agents.agent_not_found_id	Agent with ID {agent_id} not found	未找到ID为{agent_id}的智能体
+wire.errors.agents.error_clearing_conversation	Error clearing agent conversation: {error}	清除智能体会话时出错：{error}
+wire.errors.agents.error_downloading_agent	Error downloading agent from Radient: {error}	从Radient下载智能体时出错：{error}
+wire.errors.agents.error_retrieving_agents	Error retrieving agents: {error}	获取智能体列表时出错：{error}
+wire.errors.agents.error_updating_system_prompt	Error updating agent system prompt: {error}	更新智能体系统提示词时出错：{error}
+wire.errors.agents.team_ownerless_tenant_check	That team does not name an owning organization, so it cannot be verified against {tenant_id}. Check the tenant.	该团队未注明所属组织，因此无法核验其是否属于{tenant_id}。检查租户。
+wire.errors.agents.team_publish_local_failure	This team could not be published from this machine.	无法从本机发布此团队。

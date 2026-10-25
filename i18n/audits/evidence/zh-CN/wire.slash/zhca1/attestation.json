@@ -1,0 +1,133 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "audit_kind": "independent_carried_namespace_attestation",
+ "locale": "zh-CN",
+ "namespace": "wire.slash",
+ "audit_date": "2026-10-24",
+ "verdict": "withheld",
+ "verdict_reason": "WITHHELD: the bytes are carried (source and target hashes equal), but the prior audit row is status=failed: wire.slash.credential was unreadable under ordinary tool-output redaction and the namespace was withheld at 51/52 pending an approved security disposition. An attestation cannot upgrade a failed audit; a fresh audit is required once that disposition exists.",
+ "attested_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+ "held_candidate_revision": "ebb70df3a887aa7e9b448560e0546c2cf817b133",
+ "change_since_held_candidate": null,
+ "prior_audit": {
+  "ledger_path": "i18n/ledger.json",
+  "status": "failed",
+  "auditor": {
+   "agent": "i18n-auditor",
+   "model": "openai/gpt-6.1-sol",
+   "date": "2026-10-19",
+   "result": "failed",
+   "findings": 0
+  },
+  "translator": {
+   "agent": "i18n-translator",
+   "model": "openai/gpt-6.1-sol",
+   "date": "2026-10-19"
+  },
+  "note": "zh-CN core held-candidate wave 2026-10-19. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Preserved 51 values byte-identical to held/i18n-w3-zh-candidate-4773bb87; 1 new key wire.slash.hub. Full audit coverage 51/52: wire.slash.credential is unreadable under ordinary tool-output redaction and was NOT extracted, reread or bypassed; the 51 readable values and the new hub key are clean (0 findings). Namespace WITHHELD at 51/52; status failed until an approved security disposition covers the unreadable value. Independent auditor i18n-auditor openai/gpt-6.1-sol, 2026-10-19."
+ },
+ "hash_equality_proof": {
+  "source": {
+   "prior_ledger_row_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+   "held_candidate_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+   "current_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+   "equal": true
+  },
+  "target": {
+   "prior_ledger_row_sha256": null,
+   "held_candidate_sha256": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+   "current_sha256": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+   "equal": true,
+   "note": "The held-candidate ledger row schema records source_sha256 only. Target equality is therefore proven against the held candidate's committed zh-CN catalogue bytes at ebb70df3a887aa7e9b448560e0546c2cf817b133."
+  },
+  "context_sidecar": {
+   "path": "local_operator/i18n/catalogues/en/wire.slash.context.json",
+   "held_candidate_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+   "current_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+   "equal": true
+  },
+  "policy_unchanged_since_held_candidate": true,
+  "policy": {
+   "glossary": {
+    "path": "i18n/glossary.md",
+    "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd",
+    "held_candidate_sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+   },
+   "style_guide": {
+    "path": "i18n/style-guides/zh-CN.md",
+    "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+    "held_candidate_sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+   }
+  },
+  "whole_file_target_bytes_equal_held_candidate": true
+ },
+ "key_set_and_order": {
+  "en_key_count": 52,
+  "zh_key_count": 52,
+  "set_equal": true,
+  "order_equal": true,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 52,
+  "parse_errors": [],
+  "argument_set_mismatches": [],
+  "plural_category_failures": [],
+  "plural_note": "zh-CN uses the 'other' category only; every plural keeps an 'other' branch and English's argument tuple."
+ },
+ "technical_tokens": {
+  "patterns": [
+   "angle_token",
+   "ansi_escape",
+   "backtick_span",
+   "home_or_absolute_path",
+   "long_flag",
+   "percent_token",
+   "url_scheme"
+  ],
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [
+   {
+    "key": "wire.slash.language",
+    "token": "UI"
+   }
+  ],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder.",
+  "note": "Flags, backticks, angle tokens, ANSI escapes, URLs, paths and %-tokens are compared literally; kept-English identifiers are checked against the style-guide list; ALL-CAPS emphasis is not a placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width": {
+  "declared_max_cells_keys": [],
+  "over_budget": [],
+  "note": "Cells counted as 2 for East Asian W/F, 1 for ASCII, 0 for combining marks."
+ },
+ "sample_review": null,
+ "findings": [],
+ "finding_counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "evidence_files": [
+  "attestation.json",
+  "record.json",
+  "report.md",
+  "audit.log",
+  "mechanical-raw.json",
+  "runtime-mechanical.json",
+  "pseudo-evidence.json",
+  "wire.slash.pairs.txt",
+  "wire.slash.compact.txt",
+  "receipt.json"
+ ],
+ "not_claimed": "No native TUI, relay, desktop, rendered-fit or design sign-off is claimed. This record attests byte carry and a sampled semantic read; it does not re-translate or re-audit the namespace from scratch."
+}

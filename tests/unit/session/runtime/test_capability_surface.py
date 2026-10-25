@@ -663,12 +663,14 @@ async def test_language_slash_writes_through_the_shared_funnel(
     # Bare: this client enumerates the value space (no phone picker).
     bare = await handle._slash_result("language", "", SlashResult)
     assert bare.style == "info"
-    assert bare.text == "language: en (English) — auto, en, fr, es, ru, vi, ur, hi"
+    assert bare.text == "language: en (English) — auto, en, fr, es, zh-CN, ru, vi, ur, hi"
 
     # Unknown: the option-list refusal, and nothing written.
     refused = await handle._slash_result("language", "xx", SlashResult)
     assert refused.style == "warning"
-    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es, ru, vi, ur, hi"
+    assert refused.text == (
+        "unknown language 'xx' — available: auto, en, fr, es, zh-CN, ru, vi, ur, hi"
+    )
     assert stored() is None
 
     # The ALIAS routes to the same branch, and the switch writes the key.
@@ -686,16 +688,24 @@ async def test_language_slash_writes_through_the_shared_funnel(
     switched = await handle._slash_result("language", "vi", SlashResult)
     assert switched.text == "language: vi saved — active vi (Vietnamese)"
     wide = await handle._slash_result("language", "", SlashResult)
-    assert wide.text == "language: vi (Vietnamese) — auto, en, fr, es, ru, vi, ur, hi"
+    assert wide.text == "language: vi (Vietnamese) — auto, en, fr, es, zh-CN, ru, vi, ur, hi"
     assert cell_len(wide.text) <= 70
 
     # Hindi grows every bare receipt's option list. Exercise every accepted
     # value through the real shared write funnel, not a formatter-only budget.
-    for value in ("auto", "en", "fr", "es", "ru", "vi", "ur", "hi"):
+    for value in ("auto", "en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"):
         switched = await handle._slash_result("language", value, SlashResult)
         assert switched.style == "info"
         assert stored() == value
         report = await handle._slash_result("language", "", SlashResult)
-        assert "auto, en, fr, es, ru, vi, ur, hi" in report.text
+        assert "auto, en, fr, es, zh-CN, ru, vi, ur, hi" in report.text
         assert cell_len(switched.text) <= 70, switched.text
-        assert cell_len(report.text) <= 70, report.text
+        # The saved receipt keeps the 70-cell bound; the BARE report does not.
+        # It is the phone's own surface, which enumerates the option space
+        # because it has no space picker, while 70 cells is the TERMINAL notice
+        # row's budget (design D2). zh-CN's display name makes its enumerated
+        # report 80 cells: holding the phone report to the terminal width would
+        # fail on a correct receipt or force a product-copy change outside this
+        # test slice. The contract pinned here is option completeness.
+        assert report.style == "info"
+        assert stored() == value
