@@ -2330,24 +2330,35 @@ bounded one (the pytest worker cap above is the pattern).
 
 ## Branch-moving commands: one target, one invocation
 
-A `git push`, `gh pr merge`, `gh release create`, or anything with `--force` is
-issued as **one command with one literal target** — the PR number, the ref, the
-tag spelled out in the invocation itself — and the resulting state is read back
-afterwards.
+Anything that moves a ref — `git push`, `git update-ref`, `git tag -f`,
+`gh pr merge`, `gh release create` — is issued as **one command with one literal
+target**: the PR number, the ref name, the SHA or the tag written out in the
+invocation, and the resulting state read back afterwards.
 
-Never build such a command in a loop, in a batch of several commands, or from a
-target another step computed. A batch that is malformed should fail to parse; it
-must not resolve to a plausible-looking target. The failure this rule exists to
-prevent is not hypothetical: on 2026-10-25 a malformed multi-command batch fired
-`gh pr merge --squash` at an unrelated, unreviewed pull request. The only reason
-that repository did not merge it was `reviewDecision: REVIEW_REQUIRED` — a
-control that happened to be set, not anything the operator did. One flag
-(`--admin`, routinely used here for reviewed PRs) would have been enough to make
-it real.
+Never assemble such a command inside a loop, alongside unrelated commands in one
+batch, or from a target another step computed by substitution (`--target
+"$(...)"`, `$PR`, `$SHA`). A batch that is malformed should fail to parse; it
+must not resolve to a plausible-looking target.
 
-This applies to every automated lane, not just interactive work, and it composes
-with the release rules below: a release owner still derives the window and takes
-the lock, but each of those steps is its own invocation with its own readback.
+**Resolving a value is not the same as deriving it in place.** The release
+procedure needs `~/.local-operator`'s new head, and the release instructions
+below/above require it. Resolve it in its own command, print it, check it against
+what you expect, and then put the literal value in the merge and release
+commands. Three visible steps — freeze, verify, use — satisfy this rule; one
+embedded `$(...)` does not, because nobody sees the value until it has already
+been acted on.
+
+This rule exists because of a real near-miss. On the night of 2026-10-24/25 a
+malformed multi-command batch fired `gh pr merge --squash` at an unrelated,
+unreviewed pull request. Nothing merged: the repository's required-review
+control refused it, exactly as designed. But that control was the only thing
+between the mistake and an unreviewed merge — `--admin`, used routinely here for
+PRs that *have* passed review, would have completed it. The rule is about not
+needing that control to catch a typo.
+
+It applies to every automated lane, not just interactive work. The release rules
+above still govern *who* takes a window and *what* the window contains; this
+governs *how* each of those steps is issued.
 
 ## Who may merge: two tiers
 
