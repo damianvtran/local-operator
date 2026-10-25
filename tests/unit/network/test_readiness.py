@@ -659,6 +659,7 @@ def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) 
         assert "sign in here first" not in "\n".join(rendered)
 
         if viewer_state == "open_wal":
+            assert auth is not None
             auth.close()
             auth = None
             control_viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
