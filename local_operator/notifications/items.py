@@ -427,7 +427,11 @@ def apply_patch(
     ``skipped: live_ask`` and the ask log is not touched; under ``read`` /
     ``unread`` only its reel-side mark moves. A by-session or all-items write
     acts on notify rows only (asks are read individually, by the id the client
-    rendered).
+    rendered) — but a bulk DISMISS still names every open ask in its scope as
+    ``skipped: live_ask`` (§2.3 "bulk, by-session"): the gesture said "clear
+    this pile", and a client told nothing would leave the operator wondering
+    why the asks are still there. Naming them is all it does; the ask log is
+    never touched.
     """
     store = NotificationStore(config_dir)
     changed: list[str] = []
@@ -469,6 +473,15 @@ def apply_patch(
         )
         changed.extend(result.changed)
         skipped.extend(result.skipped)
+    if ids is None and op in ("dismiss", "undismiss"):
+        skipped.extend(
+            {
+                "id": ask_ref(str(r.get("session_id") or ""), str(r.get("ask_id") or "")),
+                "reason": "live_ask",
+            }
+            for r in open_asks(config_dir)
+            if all_items or str(r.get("session_id") or "") == session_id
+        )
     unread, high_water = store.counts()
     return {
         "changed": changed,

@@ -204,6 +204,27 @@ def test_an_open_ask_is_waiting_and_dismiss_skips_it_as_live(tmp_path: Path) -> 
     assert list_page(tmp_path, state="unread")["waiting"] == []
 
 
+def test_a_bulk_dismiss_names_the_open_asks_it_left_in_scope(tmp_path: Path) -> None:
+    # §2.3 "bulk, by-session": the gesture says "clear this pile", so every
+    # open ask it could not clear is NAMED — and only the ones in its scope.
+    _open_ask(tmp_path)
+    _open_ask(tmp_path, session_id="0ther0000001", ask_id="ask_2")
+    store = _store(tmp_path)
+    store.notify(SID, title="campaign numbers")
+    before = (tmp_path / "asks" / f"{SID}.json").read_bytes()
+    _, high_water = store.counts()
+    by_session = apply_patch(tmp_path, "dismiss", session_id=SID, through_seq=high_water)
+    assert len(by_session["changed"]) == 1
+    assert by_session["skipped"] == [{"id": ask_ref(SID, "ask_1"), "reason": "live_ask"}]
+    everything = apply_patch(tmp_path, "dismiss", all_items=True, through_seq=high_water)
+    assert sorted(entry["id"] for entry in everything["skipped"]) == sorted(
+        [ask_ref(SID, "ask_1"), ask_ref("0ther0000001", "ask_2")]
+    )
+    # A bulk READ moves no ask mark and names none: asks are read by rendered id.
+    assert apply_patch(tmp_path, "read", all_items=True, through_seq=high_water)["skipped"] == []
+    assert (tmp_path / "asks" / f"{SID}.json").read_bytes() == before
+
+
 def test_detail_carries_session_history_and_the_conversations_asks(tmp_path: Path) -> None:
     _open_ask(tmp_path)
     store = _store(tmp_path)
