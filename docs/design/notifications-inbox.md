@@ -1,7 +1,8 @@
 # Notifications inbox
 
-Status: core data plane shipped (lane L1). Banner ladder (L1b), the TUI page
-(L2), the relay (L3), the desktop page (L4) and native (L5/L6) follow.
+Status: core data plane (lane L1), banner ladder and relay wire (L1b) and the
+TUI page (L2) are implemented on stacked branches; the relay screens (L3), the
+desktop page (L4) and native (L5/L6) follow.
 Companions: [`../ATTENTION.md`](../ATTENTION.md) "Inbox items" (rung 0 and
 in-view auto-read), [`../DESKTOP_API.md`](../DESKTOP_API.md) "The Notifications
 inbox" (routes and the feed frame). Section numbers match the architect's
@@ -23,7 +24,7 @@ item must update in place rather than pile up.
 | # | Decision | Where |
 |---|---|---|
 | D1 | The reel shows OPEN asks only ("Waiting on you"); settled asks appear only in an item's detail. | `notifications/items.py` `open_asks`, `detail` |
-| D2 | `/notifications` is the new page; the old completion-receipt listing is `/unread` (`/unread read` clears), behaviour and receipt copy unchanged. Until the TUI page lands (L2) the terminal routes `/notifications` to the same receipt handler. | `slash_commands.py`, `tui/app.py` |
+| D2 | `/notifications` is the new page; the old completion-receipt listing is `/unread` (`/unread read` clears), behaviour unchanged. Its receipt lines now name `/unread`: the old last line said `/notifications read`, which now clears the inbox instead. | `slash_commands.py`, `tui/app.py` |
 | D3 (superseded) | Operator presence addendum: creation is always unread; only item-specific evidence acknowledges it. | `Session._notify_inbox`, `NotificationStore.notify`, `seen` |
 | D10 | Sidebar id `notifications` appended to the wire vocabulary; default layout puts it under Aida and folds Schedules into More; `read_layout` drops ids it does not know instead of discarding the whole layout. | `server/sidebar_layout.py` |
 | D11 | Aida's seed: raise a `notify` for findings the operator must act on. | `agent_seeds/aida.md` |
@@ -184,9 +185,45 @@ read watermark before delivery. Presence remains an advisory signal only.
 ## 7. TUI and 8. Desktop (core side)
 
 The `/notifications` slash row carries `desktop_destination="notifications"`, so
-the desktop navigates instead of sending. The receipt listing is `/unread` (D2);
-until the TUI page lands (L2) the terminal routes `/notifications` to the same
-handler. The sidebar id is appended at the end of the wire vocabulary (D10).
+the desktop navigates instead of sending. The receipt listing is `/unread` (D2).
+The sidebar id is appended at the end of the wire vocabulary (D10).
+
+### 7.1 The TUI page (lane L2)
+
+`/notifications` opens a full-page mode with the `/library` contract (transcript
+hidden, dock greyed, the page owns the keyboard until `esc`). `/notifications
+read` opens it with the mark-all confirm armed, so the typed form and `A` share
+one guard. Code: `tui/widgets/notifications_view.py` (state and keys),
+`tui/notifications_render.py` (cells), `tui/notifications_model.py` (every rule
+about what a gesture touches; no Textual), `tui/notifications_attention.py`
+(rung 3 and in-view reads).
+
+- **Layout.** Under 120 columns the detail replaces the list (`↵` in, `esc` out,
+  the cursor kept, the detail pinned to the row it opened so a row that leaves
+  the Unread filter does not swap the detail under the reader). At 120+ the page
+  splits 55/45 with an `edge` rule and the detail follows the cursor after
+  150 ms. The wide preview never marks anything read; `↵` marks THAT revision.
+- **Keys** are design §8.4's table. `E` dismisses every update in the row's
+  conversation and `A` marks the whole Unread scope; both confirm on one `y/n`
+  line. `z` undoes the last write for 6 s by applying the inverse op to exactly
+  the ids it changed.
+- **Bulk writes.** `enumerate_scope` walks every page under the FIRST page's
+  `high_water` as `through_seq`, keeps the page filters (a filtered gesture
+  never widens), and `write` sends the observed tokens in batches of at most
+  500. A row written after the confirm was armed stays unread.
+- **Asks.** `e` on an open ask says it stays until answered; `a`/`↵` closes the
+  page and opens the existing fleet ask list on that ask.
+- **Sidebar note.** `notifications N` (`unread_count + waiting_unread_count`,
+  the same figure every surface badges) sits on the footer after `asks: N`,
+  hidden at 0, and yields before every other tail fact. It is fed from the
+  existing slow-cadence poll and repainted at once after a page write.
+- **Rung 3.** The running TUI's 1 s attention poll claims unclaimed, unread,
+  undismissed `high` items (`claim_delivery(..., "tui")`), raises them through
+  the existing `detached_notify` (3 per tick, the rest as one digest), and
+  releases a claim whose spawn reported nothing. It stands down while a desktop
+  advertises `update`. The runtime's rung 4 already stands down for a running
+  TUI (`serving._tui_viewer_running`).
+- **In-view reads.** See `../ATTENTION.md` "Inbox items".
 
 ## Not in this lane
 
@@ -199,8 +236,9 @@ handler. The sidebar id is appended at the end of the wire vocabulary (D10).
 - Historical note (superseded): the claim primitive (`claim_delivery`) and the
   `delivered_rev` watermark exist; nothing raises yet, so the completion-banner
   suppression for a run that raised an item banner lands with it.
-- The TUI page, its sidebar note and the `activity` control op that would let an
-  attached terminal satisfy rung 0 (L2). Until then a terminal never does.
+- The `activity` control op that would let an attached terminal satisfy rung 0
+  is not built; under the presence addendum rung 0 no longer creates read, so
+  nothing depends on it.
 - Phone push: blocked on the cloud transport (S7). Off-desk reach in v1 is the
   relay/native inbox and its badge.
 
@@ -215,5 +253,5 @@ retains all pending asks; `waiting_unread_count` drives the ask half of the
 unread badge. See DESKTOP_API for exact request shapes.
 
 Release sequencing: L1 is not independently exposed before shipped read
-surfaces. D-C1 (interim TUI help versus receipt handler) is deferred to L2
-before release, not a claim that this PR contains the new TUI page.
+surfaces. D-C1 (interim TUI help versus receipt handler) is resolved in L2: the
+help line describes the page that ships.
