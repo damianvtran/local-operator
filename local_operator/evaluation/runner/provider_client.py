@@ -2114,7 +2114,7 @@ class _ContextBuilder:
     def messages(self) -> list[Message]:
         return self._messages
 
-    def append_new_turns(self, history: Sequence[EpisodeTurn]) -> None:
+    def append_new_turns(self, history: Sequence[EpisodeTurn], *, read_only: bool = False) -> None:
         """Render every turn not yet in the history, in order.
 
         A turn is rendered in its FINAL form the moment it is appended and is
@@ -2129,7 +2129,7 @@ class _ContextBuilder:
         for index, turn in enumerate(history):
             if index >= self._rendered_turns:
                 previous = history[index - 1] if index > 0 else None
-                self._messages.append(self._render_observation(turn, previous))
+                self._messages.append(self._render_observation(turn, previous, read_only=read_only))
                 self._rendered_turns = index + 1
             if turn.batch is not None and index not in self._closed_turns:
                 self._messages.append(
@@ -2148,7 +2148,9 @@ class _ContextBuilder:
                 )
                 self._closed_turns.add(index)
 
-    def _render_observation(self, turn: EpisodeTurn, previous: EpisodeTurn | None) -> Message:
+    def _render_observation(
+        self, turn: EpisodeTurn, previous: EpisodeTurn | None, *, read_only: bool = False
+    ) -> Message:
         # FRAME PIXELS ARE THE ADAPTER'S, AND THIS METHOD MUST NOT TOUCH THEM.
         # In particular it must never call ``rebound_oversize_image``, however
         # fat a frame looks: the adapter published ``geometry.model_visible``,
@@ -2215,7 +2217,18 @@ class _ContextBuilder:
             # to infer by diffing two base64 image blocks, which no model does
             # reliably. Digests are compared, not pixels: the frames are
             # content-addressed already, so this costs nothing.
-            lines.append(unchanged_frames_note(self._no_change_streak))
+            if read_only:
+                # A fresh read after a DECLARED not-applied batch is not an
+                # action result. Identical pixels are still useful evidence,
+                # but attributing them to the last action (or telling the model
+                # not to repeat it) would contradict the adapter's declaration.
+                self._no_change_streak = 0
+                lines.append(
+                    "The captured screenshot is byte-identical to the previous "
+                    "observation's; this was a read-only capture, not an action result."
+                )
+            else:
+                lines.append(unchanged_frames_note(self._no_change_streak))
         else:
             self._no_change_streak = 0
         lines.extend(["", rendered_text])

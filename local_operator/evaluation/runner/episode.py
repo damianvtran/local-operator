@@ -3420,13 +3420,41 @@ def _refused_before_dispatch(error: BaseException) -> bool:
     return isinstance(error, RpcRemoteError) and error.code == "invalid_state"
 
 
+def _not_applied_failure(error: BaseException) -> bool:
+    """Did the ADAPTER declare that no part of the batch reached the environment?
+
+    Mirrors ``supervisor._declared_not_applied`` and must keep mirroring it:
+    the supervisor keeps the session usable on exactly this shape, and the
+    bridge's re-bind ``observe`` would hit the poison gate on any case the
+    supervisor did not. Both are pinned by lockstep tests.
+
+    WHY IT EXISTS. ``ActionNotAppliedError`` (``adapters/api.py``) crossed the
+    worker as ``phase == "unknown"`` before schema 1.7, so a failure the
+    adapter KNEW applied nothing ("guest action 1 was not attempted; no input
+    was sent") ended the episode as an ambiguous mutation: 10 of 20 OSWorld
+    2.1 offline episodes on arm main16, discarding up to 478 applied steps.
+
+    Like ``_refused_before_dispatch`` it admits the read-only re-bind ONLY;
+    the read-back retry loops keep the committed-only predicate.
+    """
+
+    return (
+        isinstance(error, RpcRemoteError)
+        and error.code == "adapter_error"
+        and error.detail is not None
+        and error.detail.phase == "not_applied"
+    )
+
+
 def _rebindable_failure(error: BaseException) -> bool:
     """The failures for which the ONE read-only re-bind may run.
 
     Either the adapter declared the batch committed and only the read-back was
     lost (``_observation_phase_failure``), or the worker refused before any
-    adapter code ran (``_refused_before_dispatch``). Everything else stays
-    ambiguous, poisons the session and ends the episode exactly as before.
+    adapter code ran (``_refused_before_dispatch``), or the adapter declared
+    that no part of the batch was applied (``_not_applied_failure``).
+    Everything else stays ambiguous, poisons the session and ends the episode
+    exactly as before.
 
     THE ONLY CONSUMER is ``ActionBridge._after_failed_execute``, whose recovery
     is a fresh read-only ``observe``. It must NOT gate ``resume_observation``
@@ -3436,7 +3464,11 @@ def _rebindable_failure(error: BaseException) -> bool:
     keeps the committed-only predicate.
     """
 
-    return _observation_phase_failure(error) or _refused_before_dispatch(error)
+    return (
+        _observation_phase_failure(error)
+        or _refused_before_dispatch(error)
+        or _not_applied_failure(error)
+    )
 
 
 def _failure_layer(error: BaseException) -> Literal["evidence", "adapter", "internal"]:

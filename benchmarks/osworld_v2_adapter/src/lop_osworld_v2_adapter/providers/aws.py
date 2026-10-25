@@ -215,11 +215,21 @@ class GuestExecutionError(RuntimeError):
     and tests; across the worker boundary only the message text travels (the
     ``delivery=`` token in it), because the RPC error envelope has no adapter
     field for it and the harness must stay benchmark-neutral.
+
+    ``nothing_sent`` is True only when THIS ``execute`` call provably sent no
+    input at all: the failing statement is the call's first, and either it was
+    never attempted (the pre-action supervisor check refused it) or every send
+    of it was classified ``DELIVERY_NOT_SENT``. It is scoped to the call, not
+    the batch -- the adapter may split one batch into several calls, so only
+    the adapter can turn this into the batch-level ``ActionNotAppliedError``.
     """
 
-    def __init__(self, message: str, *, delivery: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, delivery: str | None = None, nothing_sent: bool = False
+    ) -> None:
         super().__init__(message)
         self.delivery = delivery
+        self.nothing_sent = nothing_sent
 
 
 def _exit_description(returncode: int) -> str:
@@ -2190,10 +2200,15 @@ class AwsProvider:
                                 guest_loss.STAGE_EXECUTE, "supervisor-exhausted"
                             )
                             cause = self._execute_guest_health_cause()
+                            # Raised BEFORE this statement was compiled or sent,
+                            # so this call sent nothing iff no earlier statement
+                            # of it ran (index 0); a later index follows
+                            # statements that were answered with success.
                             raise GuestExecutionError(
                                 guest_loss.describe_unattempted_action(index)
                                 + "; supervisor recovery budget exhausted; "
-                                f"guest down: {cause}; no transport retry"
+                                f"guest down: {cause}; no transport retry",
+                                nothing_sent=index == 0,
                             )
                     elif recovered.state != "verified_none":
                         raise GuestServerRecovered(
@@ -2308,7 +2323,20 @@ class AwsProvider:
                             message += f"; guest down: {cause}"
                             if attempt == 1:
                                 message += "; no transport retry"
-                        raise GuestExecutionError(message, delivery=verdict.delivery) from None
+                        # ``nothing_sent`` needs BOTH conditions. The retry
+                        # policy re-sends only after a ``not_sent`` verdict
+                        # (``transport_retry_delay``), so a terminal
+                        # ``not_sent`` here means every attempt of this
+                        # statement was unsent; index 0 means no earlier
+                        # statement of this call ran. An ambiguous verdict, or
+                        # any later index, may have applied input.
+                        raise GuestExecutionError(
+                            message,
+                            delivery=verdict.delivery,
+                            nothing_sent=(
+                                index == 0 and verdict.delivery == guest_loss.DELIVERY_NOT_SENT
+                            ),
+                        ) from None
                 else:
                     # The last failed attempt raises above; falling through
                     # would mean the configured budget allowed no initial send.

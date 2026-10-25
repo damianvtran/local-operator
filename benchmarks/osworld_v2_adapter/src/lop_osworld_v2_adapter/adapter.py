@@ -61,6 +61,7 @@ from lop_osworld_v2_adapter.providers.base import (
 from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
     AckResult,
+    ActionNotAppliedError,
     AdapterCapabilities,
     AdapterMetadata,
     AskUserExchangeParams,
@@ -183,6 +184,23 @@ _DEFAULT_INPUTS_ROOT = "~/worktrees/osworld"
 _JUDGE_PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
     "openrouter": ("openai_compatible", "https://openrouter.ai/api/v1"),
 }
+
+
+def _provider_sent_nothing(error: BaseException) -> bool:
+    """Did a provider ``execute`` call PROVE it sent no input?
+
+    Only the AWS provider's ``GuestExecutionError`` carries that proof
+    (``nothing_sent``, set solely for a first statement that was never
+    attempted or was only ever classified ``not_sent``). Any other exception
+    -- an ambiguous delivery, a non-zero guest exit, a bug -- is NOT proof and
+    must keep the ``unknown`` phase. Imported lazily for the fake provider's
+    reason: this module must stay importable without the AWS provider's
+    module in the picture.
+    """
+
+    from lop_osworld_v2_adapter.providers.aws import GuestExecutionError
+
+    return isinstance(error, GuestExecutionError) and error.nothing_sent
 
 
 def _episode_cache_root(artifact_root: Path, episode_id: str) -> Path:
@@ -976,8 +994,28 @@ class OSWorldV2Adapter:
         return supplied
 
     async def observe(self, params: ObserveParams) -> ObservationResult:
-        if self._current_observation is None:
+        current = self._current_observation
+        if current is None:
             raise AdapterStateError("observe before reset_start")
+        if params.episode_id != current.episode_id:
+            raise AdapterStateError("observe belongs to another episode")
+        if params.fresh:
+            if self._provider is None or self._observation_builder is None:
+                raise AdapterStateError("fresh observe before reset_start")
+            # A not-applied recovery must show the ACTUAL screen, not the last
+            # accepted cache: the desktop can move autonomously while input is
+            # refused. Capture only -- no execute/settle/receipt. Build before
+            # publishing either state field so cancellation or a failed capture
+            # leaves the old binding intact; no await separates the publish.
+            raw = await self._provider.observe()
+            output = self._observation_builder.build(
+                raw,
+                task_id=current.task_id,
+                episode_id=current.episode_id,
+                sequence=self._sequence + 1,
+            )
+            self._current_observation = output
+            self._sequence = output.sequence
         return ObservationResult(observation=self._current_observation)
 
     async def probe(self, params: ProbeParams) -> ProbeResult:
@@ -990,8 +1028,8 @@ class OSWorldV2Adapter:
         endpoint the allocation readiness check already trusts, and nothing
         here advances, mutates, or records.
 
-        Unlike ``observe`` -- which answers the LAST ACCEPTED observation from
-        memory and deliberately never touches the guest -- this method's whole
+        Unlike default ``observe`` -- which answers the LAST ACCEPTED observation
+        from memory (``fresh=True`` explicitly opts into capture) -- this method's whole
         value is that it does touch the guest, so its answer can differ from
         the cached one when the control server is gone. State-gated like every
         other RUNNING call: before ``reset_start`` there is no guest to ask,
@@ -1051,6 +1089,22 @@ class OSWorldV2Adapter:
         # would apply the click or the keystroke a second time, so the mutation
         # is skipped and only the read-back below runs. The parent sets this
         # flag solely after we declared the commit via ObservationPhaseError.
+        #
+        # ``sent_input`` is what lets a provider failure be declared NOT
+        # APPLIED. The provider can prove only that ITS call sent nothing
+        # (``GuestExecutionError.nothing_sent``); a batch is delivered as
+        # several calls, so the batch is untouched only if no earlier call
+        # with statements returned. Waits and empty settle calls send no input
+        # and do not count.
+        sent_input = False
+        provider = self._provider
+
+        async def run_guest(payload: list[str], *, settle: bool) -> None:
+            nonlocal sent_input
+            await provider.execute(payload, settle=settle)
+            if payload:
+                sent_input = True
+
         try:
             if not params.resume_observation and runs:
                 if self._action_settle_policy == "paper":
@@ -1062,7 +1116,7 @@ class OSWorldV2Adapter:
                     # not receive the throughput empty-batch fallback below.
                     for kind, payload in paper_runs:
                         if kind == "exec":
-                            await self._provider.execute(cast(list[str], payload), settle=True)
+                            await run_guest(cast(list[str], payload), settle=True)
                         else:
                             await asyncio.sleep(cast(int, payload) / 1000.0)
                             await self._provider.execute([], settle=True)
@@ -1076,9 +1130,7 @@ class OSWorldV2Adapter:
                     )
                     for index, (kind, payload) in enumerate(runs):
                         if kind == "exec":
-                            await self._provider.execute(
-                                cast(list[str], payload), settle=index == last_exec
-                            )
+                            await run_guest(cast(list[str], payload), settle=index == last_exec)
                         else:
                             await asyncio.sleep(cast(int, payload) / 1000.0)
                     if not guest_lines:
@@ -1090,6 +1142,15 @@ class OSWorldV2Adapter:
             # A normal fresh observation below re-establishes the binding; if
             # it fails, the existing observation-phase retry remains in charge.
             pass
+        except Exception as error:
+            if not sent_input and _provider_sent_nothing(error):
+                # The harness contract's NOT-APPLIED declaration: the batch
+                # left the environment exactly as it was, so the parent may
+                # keep the session and let the model re-issue it instead of
+                # ending the episode (ActionNotAppliedError's docstring). The
+                # provider's own message rides along unchanged.
+                raise ActionNotAppliedError(str(error)) from error
+            raise
 
         # PAST THE POINT OF NO RETURN. The guest has moved; from here every
         # failure is a failure to READ, and saying so is what lets the parent

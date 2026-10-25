@@ -99,7 +99,13 @@ class RpcErrorCause(ProtocolModel):
 #: it is not safe to repeat. A worker only ever writes ``observation`` when the
 #: adapter raised ``ObservationPhaseError``; nothing is inferred from an
 #: exception type, a message, or a traceback.
-ErrorPhase: TypeAlias = Literal["unknown", "observation"]
+#:
+#: ``not_applied`` (schema 1.7) is the opposite declaration: NO part of the
+#: batch reached the environment (``ActionNotAppliedError``). It keeps the
+#: session usable for the bridge's read-only re-bind but licenses nothing
+#: else -- in particular never ``resume_observation``, which is for committed
+#: batches only. Written only for ``execute``, only from that declared type.
+ErrorPhase: TypeAlias = Literal["unknown", "observation", "not_applied"]
 
 
 class RpcErrorDetail(ProtocolModel):
