@@ -450,9 +450,9 @@
         "class": null
       },
       {
-        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
         "version": "1.3.1",
-        "instructions_sha256": "a18fde05910d5138744a42aeb19e8bb4fc71dabecc8f2e17ae41d416aba9b3a8",
+        "instructions_sha256": "cf696e0bb97bcd9c1787c22d7acdf2a514991e74e1b7ea44de8eeff26b8abc9a",
         "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
         "tools": null,
         "effort": "default",
@@ -502,9 +502,9 @@
         "class": null
       },
       {
-        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
         "version": "1.3.1",
-        "instructions_sha256": "88e0db5b825634a68c4443fc2782d8436b1150107ad3d021c56bf5c9ca7e6e1a",
+        "instructions_sha256": "89588635efeac6994c8db9ab3d1d2851111169e53fd4e20435bf9de648297159",
         "description": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
         "tools": null,
         "effort": null,
@@ -634,9 +634,9 @@
         "class": null
       },
       {
-        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
         "version": "1.5.4",
-        "instructions_sha256": "df1c873e75af3568893b56195cd918e9c2ccae7f1bb0ffa6405d70b844934537",
+        "instructions_sha256": "8fc969adbc3d2a3ea178739f93d10aa3c92fc04d4075b7ec2315c34c95aa9b11",
         "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
         "tools": null,
         "effort": null,
@@ -1030,9 +1030,9 @@
         "class": null
       },
       {
-        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
         "version": "1.0.1",
-        "instructions_sha256": "424ec4205698228bf0b6796e217c48e25981a39cab12c9c48e747df062514ac1",
+        "instructions_sha256": "6b0dd52b27afb59a27ea179bc9a20dfa20a02e6a40529290091b9a3d6da8079b",
         "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
         "tools": [
           "read",
@@ -1275,9 +1275,9 @@
         "class": null
       },
       {
-        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
         "version": "1.3.6",
-        "instructions_sha256": "d8a52dabce6a04ac46eecbb5c064ff1b14a1811eea7167b59214bfcb6e44e0a1",
+        "instructions_sha256": "36a7713002ca5367e9474532741c32bf9754f5d9356c2829b6f73152429c39de",
         "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
         "tools": [
           "read",
@@ -1456,9 +1456,9 @@
         "class": null
       },
       {
-        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
         "version": "1.3.1",
-        "instructions_sha256": "20ad2928fdb6028e9d8880a0cc24840e66a89cb32969596734e620c4b27b49b0",
+        "instructions_sha256": "7810bcb7ee27efb48bb3755002e3a1d34e3b44a1a6ef6bd9954788660cbd1533",
         "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
         "tools": null,
         "effort": null,
@@ -1558,9 +1558,9 @@
         "class": null
       },
       {
-        "sha": "17757bc5a12edbe050e85ca3b3a0a551d16ab53b",
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
         "version": "1.4.4",
-        "instructions_sha256": "75518af4f438caead761bb0aad8db4f03122891fae9e20bc8dd41a666f8884f7",
+        "instructions_sha256": "b5fcecb025bda69ec92bf80bbadd2dd351a09ea0f287f89264a201341efa9348",
         "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
         "tools": null,
         "effort": null,
