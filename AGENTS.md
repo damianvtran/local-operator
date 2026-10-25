@@ -2348,7 +2348,7 @@ must not resolve to a plausible-looking target.
 
 **Resolving a value is not the same as deriving it in place.** The release
 procedure needs `~/.local-operator`'s new head, and the release instructions
-below/above require it. Resolve it in its own command, print it, check it against
+above require it. Resolve it in its own command, print it, check it against
 what you expect, and then put the literal value in the merge and release
 commands. Three visible steps — freeze, verify, use — satisfy this rule; one
 embedded `$(...)` does not, because nobody sees the value until it has already
