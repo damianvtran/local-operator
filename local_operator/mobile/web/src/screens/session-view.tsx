@@ -1,4 +1,3 @@
-import { useScrollCues } from "../lib/use-scroll-cues";
 /**
  * Session view (`#/s/:sessionId`) — the core screen. Layout contract:
  *
@@ -230,7 +229,16 @@ function Header({
 				‹
 			</button>
 			<div className="min-w-0 flex-1">
-				<span className="block truncate text-heading font-semibold">{projection.conversation_name || "untitled"}</span>
+				{/* THE NAME TRUNCATES, THE FACT DOES NOT (operator finding B): a long
+				    conversation title is cut with an ellipsis here, so the whole string
+				    stays recoverable as the element's `title` and the document title
+				    already carries it. Local truncation with the full value still
+				    reachable is truthful; a name painted in full that pushes the phone
+				    sideways is not. */}
+				<span
+					className="block truncate text-heading font-semibold"
+					title={projection.conversation_name || undefined}
+				>{projection.conversation_name || "untitled"}</span>
 				<SessionSubtitle projection={projection} connected={connected} />
 			</div>
 			{/* THE OVERFLOW. Pin, wide view and approvals all have labelled rows in
@@ -473,7 +481,6 @@ export function SessionScreen({
 	);
 	/* The asks sheet — the EXPANDED half of R7 (§5.0). Client-local interaction
 	   state with no wire meaning, exactly as the design's §5.0 states. */
-	const trayCue = useScrollCues(true);
 	const [asksOpen, setAsksOpen] = useState(false);
 	const [gateOpen, setGateOpen] = useState(false);
 	const [tasksOpen, setTasksOpen] = useState(false);
@@ -857,18 +864,47 @@ export function SessionScreen({
 			    are the same content inside the shared in-flow Sheet, not new lists;
 			    a long task/agent read cannot halve the transcript permanently.
 			    An ended/degraded banner replaces this slot, never overlays history. */}
+			{/* THE BANNER NEVER OWNS THE ONLY DOOR (agent review round 1, C1-1 = QA
+			    Q1-2). This arm used to REPLACE the tray, so an ended or degraded
+			    conversation lost the only setters that open the Tasks and Agents
+			    sheets — its retained history became unreadable without restarting
+			    the runtime. The banner now sits ABOVE the tray and the tray renders
+			    on its own merits in every health state: reading finished work is not
+			    a live action, so it must not depend on liveness. */}
 			{projection.ended ? <EndedSessionStrip sessionId={sessionId} /> : projection.degraded ?
 				<p role="status" className="flex min-h-11 shrink-0 items-center bg-warning-wash px-3 text-meta text-warning">{messageRuntime.t("relay.chrome.session.degraded")}</p>
-			: (needsApproval || (projection.asks?.length ?? 0) > 0 || projection.todos.some(p => p.items.length) || projection.subagents.length) ?
-				<div ref={trayCue} aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="lo-scroll lo-fade-x flex h-11 shrink-0 items-center gap-2 overflow-x-auto px-3">
+			: null}
+			{(needsApproval || (projection.asks?.length ?? 0) > 0 || projection.todos.some(p => p.items.length) || projection.subagents.length) ?
+				/* THE TRAY NEVER SCROLLS SIDEWAYS (operator finding B). It was an
+				   `overflow-x: auto` rail, so the last pill was reachable only by a
+				   swipe most phone users never try. Now: PRIORITY ORDER (approve,
+				   questions, a failing roster, tasks, then a healthy roster) and
+				   COMPACT forms (`2 questions`, `✗ 1`), which measure onto one
+				   44 px line at 320/360/390 in the worst fixture state. `flex-wrap`
+				   is the safety net for a longer translation: a second line costs
+				   44 px of transcript, but hides nothing and adds no tap; `gap-y-3`
+				   keeps the wrapped rows' 44 px hit bands from overlapping. */
+				<div aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-3 px-3 py-1.5">
 					{needsApproval ? <Chip onClick={() => setGateOpen(true)} className="shrink-0 !bg-danger-wash !text-danger" aria-label={messageRuntime.t("relay.chrome.session.tray.approve_label")}>{messageRuntime.t("relay.chrome.session.tray.approve")}</Chip> : null}
-					<AskDock rows={projection.asks} onOpen={openAsks} />
+					<AskDock rows={projection.asks} onOpen={openAsks} compact />
+					{/* AGENTS BEFORE TASKS, and a COMPACT failure marker (design review
+					    round 1, D2). At 360 the failing pill was the last one in the
+					    strip and read `Agents 1/3 · 1` — `failed` clipped flush at the
+					    clip edge, so the one word that says why the roster matters was
+					    the first thing lost. `✗ N` keeps the count and the danger ink
+					    visible in the fewest cells; the full existing sentence is the
+					    pill's accessible name, and the sheet behind it names the failed
+					    child explicitly. No new copy: `✗`, the numeral and the
+					    translated sentence already exist. */}
+					{projection.subagents.length && agentsFailed > 0 ? <Chip className={cn("shrink-0", blocking && agentsFailed === 0 && "!text-ink-dim", agentsFailed > 0 && "!text-danger")} disabled={Boolean(blocking)} aria-expanded={agentsOpen} aria-label={agentsFailed > 0 ? messageRuntime.t("relay.chrome.session.tray.agents_failed", { running: agentsRunning, total: projection.subagents.length, failed: agentsFailed }) : undefined} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setAgentsOpen(true)}>{agentsFailed > 0
+						? <span aria-hidden>✗ {agentsFailed}</span>
+						: messageRuntime.t("relay.chrome.session.tray.agents", { running: agentsRunning, total: projection.subagents.length })}</Chip> : null}
 					{projection.todos.some(p => p.items.length) ? <Chip className={cn("shrink-0", blocking && "!text-ink-dim")} disabled={Boolean(blocking)} aria-expanded={tasksOpen} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setTasksOpen(true)}>{messageRuntime.t("relay.chrome.session.tray.tasks", {
 						done: tasksDone,
 						total: taskItems.length,
 					})}</Chip> : null}
-					{projection.subagents.length ? <Chip className={cn("shrink-0", blocking && agentsFailed === 0 && "!text-ink-dim", agentsFailed > 0 && "!text-danger")} disabled={Boolean(blocking)} aria-expanded={agentsOpen} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setAgentsOpen(true)}>{agentsFailed > 0
-						? messageRuntime.t("relay.chrome.session.tray.agents_failed", { running: agentsRunning, total: projection.subagents.length, failed: agentsFailed })
+					{projection.subagents.length && agentsFailed === 0 ? <Chip className={cn("shrink-0", blocking && agentsFailed === 0 && "!text-ink-dim", agentsFailed > 0 && "!text-danger")} disabled={Boolean(blocking)} aria-expanded={agentsOpen} aria-label={agentsFailed > 0 ? messageRuntime.t("relay.chrome.session.tray.agents_failed", { running: agentsRunning, total: projection.subagents.length, failed: agentsFailed }) : undefined} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setAgentsOpen(true)}>{agentsFailed > 0
+						? <span aria-hidden>✗ {agentsFailed}</span>
 						: messageRuntime.t("relay.chrome.session.tray.agents", { running: agentsRunning, total: projection.subagents.length })}</Chip> : null}
 				</div> : null}
 			<Sheet open={tasksOpen} onClose={() => setTasksOpen(false)} title={messageRuntime.t("relay.chrome.session.tasks_title")}>

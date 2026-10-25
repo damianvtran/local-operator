@@ -37,6 +37,26 @@ def test_long_keyword_signature_wraps_without_losing_required_parameters(i18n_ge
     compile(module, "demo.py", "exec")
 
 
+def test_long_placeholder_free_name_stays_valid_source(i18n_generate) -> None:
+    """The OTHER long-header shape: no placeholders at all (agent review C1-2).
+
+    Wrapping an empty parameter list emitted `def name(\n    ,\n) -> Msg:`, a
+    SyntaxError for a key the generator has always accepted. A function name can
+    be split by no formatter, so this shape must stay parseable — the long-line
+    lint concern cannot justify emitting invalid Python.
+    """
+    import ast
+
+    key = "demo." + "one_" * 24 + "label"
+    module = i18n_generate._render_keys_module("demo", {key: "A fixed label"})
+    tree = ast.parse(module)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    assert function.name == "one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_label"
+    assert not function.args.args and not function.args.kwonlyargs
+    assert function.args.kw_defaults == []
+    compile(module, "demo.py", "exec")
+
+
 @pytest.fixture()
 def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     """A fixture catalogue root + emitted tables wired into the generator."""

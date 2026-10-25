@@ -257,12 +257,16 @@ export function Markdown({ text }: { text: string }) {
 				switch (b.kind) {
 					case "code":
 						return (
-							/* max-w-full keeps the block inside the column; its own
-							   overflow-x scrolls long lines rather than
-							   pushing the chat sideways. */
+							/* WRAPS, NEVER SCROLLS SIDEWAYS (operator finding B): a
+							   transcript has zero horizontal play on a phone. The block
+							   used to keep long lines intact and scroll them inside the
+							   message — a sideways gesture nested in a vertical scroller.
+							   `pre-wrap` keeps indentation and line breaks;
+							   `overflow-wrap: anywhere` breaks a token with no spaces
+							   (a URL, a hash) instead of letting it widen the column. */
 							<pre
 								key={key()}
-								className="lo-scroll max-w-full overflow-x-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre"
+								className="max-w-full rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap [overflow-wrap:anywhere]"
 							>
 								{b.lines.join("\n")}
 							</pre>
@@ -314,11 +318,16 @@ export function Markdown({ text }: { text: string }) {
 						const [header, ...rows] = b.lines;
 						const head = splitTableRow(header);
 						return (
+							/* FITS THE COLUMN, NEVER SCROLLS SIDEWAYS (operator finding
+							   B). `table-fixed` divides the column's width between the
+							   columns instead of sizing them to their longest cell, and
+							   the cells break long words, so a six-column table wraps
+							   inside the message rather than becoming a rail. */
 							<div
 								key={key()}
-								className="lo-scroll max-w-full overflow-x-auto rounded-sm border border-hairline"
+								className="max-w-full rounded-sm border border-hairline"
 							>
-								<table className="w-full border-collapse text-body-sm">
+								<table className="w-full table-fixed border-collapse text-body-sm [overflow-wrap:anywhere]">
 									<thead>
 										<tr className="bg-sunken">
 											{head.map((cell) => (

@@ -199,6 +199,24 @@ describe("Mark all read", () => {
 		expect(vi.mocked(markAllSeen)).not.toHaveBeenCalled();
 	});
 
+	/* THE PER-ROW ACTION IS THE SAME READ (agent review round 1, C1-4 = QA
+	   Q1-3). It used to fall through on a degraded badge — no POST, no receipt,
+	   no error, no close — while the bulk control in the same file stated the
+	   refusal. A pressed control with no outcome is the silence this lane exists
+	   to remove. */
+	it("a per-row Mark read states a degraded read instead of doing nothing", async () => {
+		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
+		vi.mocked(getAttentionUnread).mockResolvedValue({ degraded: ["attention"] });
+		render(<SessionListScreen />);
+
+		fireEvent.click(screen.getByRole("button", { name: "More" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Mark as read" }));
+
+		const alert = await screen.findByRole("alert");
+		expect(alert.textContent).toBe("Could not read what is unread — nothing was cleared. Try again.");
+		expect(vi.mocked(markAllSeen)).not.toHaveBeenCalled();
+	});
+
 	it("surfaces a failed write in the reader's words, naming the recovery", async () => {
 		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
 		vi.mocked(getAttentionUnread).mockResolvedValue(

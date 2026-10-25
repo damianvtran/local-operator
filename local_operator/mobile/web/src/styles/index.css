@@ -669,6 +669,15 @@ html :focus-visible {
 	inset-block: -6px;
 }
 
+/* The two SHORT inline strips (filter chips, status tray) keep the fade as
+   their only "there is more" cue (redesign §7.6 / design review D3). A classic
+   non-overlay bar inside them both doubled that cue and took 6 CSS px out of the
+   strip's own clip box, which is geometry the chips' 44 px target cannot spare.
+   Long scrollers keep `.lo-scroll`'s resting-floor thumb exactly as shipped. */
+.lo-strip-scroll {
+	scrollbar-width: none;
+}
+
 /* The sheet grabber: decorative, at the scrollbar's resting floor (α 0.45) so
    it reads as "this lifts" without becoming the loudest mark on the panel. */
 .lo-grabber {

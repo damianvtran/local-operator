@@ -40,10 +40,17 @@ import type { PendingAsk } from "../types";
 export function AskDock({
 	rows,
 	onOpen,
+	compact = false,
 }: {
 	rows: PendingAsk[] | undefined | null;
 	/** Summon the asks sheet — the answer surface. */
 	onOpen: () => void;
+	/** The session tray's short form (operator finding B): the visible text is
+	    `relay.chrome.session.tray.questions` ("2 questions"), minted for this pill
+	    and already translated, while the accessible name stays the full existing
+	    sentence. The long visible sentence was what pushed the tray past one
+	    phone-width line. A lapsed-only queue keeps its own wording. */
+	compact?: boolean;
 }) {
 	const previewId = useId();
 	const head = dockAsk(rows);
@@ -96,7 +103,9 @@ export function AskDock({
 			>
 				?
 			</span>
-			<span className="shrink-0 text-body-sm text-ink-muted">{label}</span>
+			<span className="shrink-0 text-body-sm text-ink-muted">{compact && !quiet
+				? messageRuntime.t("relay.chrome.session.tray.questions", { count: waiting })
+				: label}</span>
 			{preview ? <span id={previewId} className="sr-only">{preview}</span> : null}
 		</button>
 	);

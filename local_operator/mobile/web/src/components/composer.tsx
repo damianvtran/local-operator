@@ -290,11 +290,18 @@ function SlashSheet({
 function EffortSheet({
 	open,
 	onClose,
+	onBack,
 	pid,
 	projection,
 }: {
 	open: boolean;
 	onClose: () => void;
+	/** Back to the model list this view was opened FROM (UX review round 1, U2).
+	    The effort rungs replace the model rows in the same sheet slot, so without
+	    this the only way back to the model list was to close the sheet and press
+	    the meta button again. Named for its DESTINATION, the drawer's own
+	    convention, using the model sheet's existing title copy. */
+	onBack: () => void;
 	pid: string;
 	projection: SessionProjection;
 }) {
@@ -309,6 +316,14 @@ function EffortSheet({
 	return (
 		<Sheet open={open} onClose={onClose} title="effort">
 			<div className="flex flex-col p-2">
+				<button
+					type="button"
+					onClick={onBack}
+					aria-label={messageRuntime.t("relay.session.model.sheet_title")}
+					className="flex min-h-11 w-11 items-center rounded-sm px-2 text-start text-ink-dim active:bg-surface"
+				>
+					<span aria-hidden>‹</span>
+				</button>
 				{projection.effort_ladder.map((rung) => (
 					<button
 						key={rung}
@@ -398,9 +413,26 @@ const COMPOSER_PLACEHOLDER = "Message…";
    pair of numbers someone keeps in step by hand — the frame and the composer
    cannot disagree about the shell, the input row, the field or the control size. */
 const COMPOSER_SHELL =
-	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-1";
-const COMPOSER_CWD_ROW = "flex min-w-0 flex-1 items-center";
-const COMPOSER_INPUT_ROW = "flex flex-wrap items-center";
+	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-1 pb-2";
+/* THE RIGHT-SIDE CONTROL CLUSTER, one shared constant for the real composer and
+   the first-paint frame (operator finding A). The stop and send discs are 44 px
+   `shrink-0` controls and the row carried no gap: the two circles touched, and
+   the send disc sat flush against the shell's foot, reading as one clipped blob
+   instead of two controls. 2 px is the measured separation required (>= 1-2 px)
+   and it is a `gap`, so it cannot double with any other spacing. `ms-auto` holds
+   the cluster at the inline end of its line now that the meta facts have a line
+   of their own. The shell's `pb-2` gives the controls the same clearance below
+   as `px-2` gives at the sides; neither value shrinks a 44 px target. */
+const COMPOSER_ACTION_CLUSTER = "ms-auto flex shrink-0 items-center gap-0.5";
+/* A fixed 44 px glyph slot. It was `flex-1 min-w-0`, which let the meta line
+   squeeze it to 2 px at 320 while the 44 px chip inside kept its width — the
+   chip then painted over the model button (measured, review round 1b). */
+const COMPOSER_CWD_ROW = "flex shrink-0 items-center";
+/* 2 px between every control in the row (operator finding A): the right-side
+   discs are grouped by `COMPOSER_ACTION_CLUSTER`, and this covers the left pair
+   (attach + workspace glyph) so no two 44 px targets sit flush anywhere in the
+   composer. Column gap only — the field keeps `basis-full`. */
+const COMPOSER_INPUT_ROW = "flex flex-wrap items-center gap-x-0.5";
 const COMPOSER_FIELD_BOX =
 	"order-first flex min-h-11 w-full min-w-0 basis-full items-end px-1 py-1";
 const COMPOSER_FIELD =
@@ -411,7 +443,16 @@ const COMPOSER_ROUND = "flex size-11 shrink-0 items-center justify-center rounde
    59 px lower than the real one, which is exactly the shift this whole frame
    exists to prevent (measured before it was added: field rect
    [64, 812, 262, 24] against the settled [77, 753, 236, 24]). */
-const COMPOSER_CHIP_ROW = "flex min-w-0 flex-1 items-center gap-1";
+/* THE META FACTS GET THEIR OWN LINE (operator finding B, design D1). Measured
+   in the streaming state, the action line holds attach + stop + steer + the
+   workspace glyph, leaving 98 px at 320 and 168 px at 390 for the model and the
+   spend reading together; spend alone needs 96 px and "Claude Opus 5.5 · high"
+   129 px, so on one line the model could never show its version. On its own
+   full-width line it gets the row minus the glyph and the 96 px spend slot. The
+   structure is FIXED (not a width- or content-dependent wrap), so the
+   first-paint frame reserves exactly these lines and a stop button appearing
+   cannot reflow the composer. */
+const COMPOSER_CHIP_ROW = "order-last flex min-w-0 basis-full items-center gap-1";
 const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
 
 /** The composer's box, empty, for the frames before a session's projection.
@@ -459,7 +500,9 @@ export function ComposerFrame() {
 			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={COMPOSER_PLACEHOLDER} className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, "text-ink-disabled")}><PaperclipGlyph /></span>
 			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
-			<span className={cn(COMPOSER_ROUND, "bg-sunken text-ink-disabled")}>↑</span>
+			<div className={COMPOSER_ACTION_CLUSTER}>
+				<span className={cn(COMPOSER_ROUND, "bg-sunken text-ink-disabled")}>↑</span>
+			</div>
 		</div>
 	</div>;
 }
@@ -1447,26 +1490,28 @@ export function Composer({
 					<SessionStatus projection={projection} compact />
 				</div>
 
-				{projection.streaming ? (
+				<div className={COMPOSER_ACTION_CLUSTER}>
+					{projection.streaming ? (
+						<button
+							type="button"
+							onClick={abort}
+							aria-label="stop"
+							className="flex size-11 shrink-0 items-center justify-center rounded-full bg-danger-wash text-danger active:bg-danger-wash"
+						>
+							■
+						</button>
+					) : null}
+
 					<button
 						type="button"
-						onClick={abort}
-						aria-label="stop"
-						className="flex size-11 shrink-0 items-center justify-center rounded-full bg-danger-wash text-danger active:bg-danger-wash"
+						onClick={() => void send(text)}
+						disabled={retryPending || (!text.trim() && images.length === 0) || sending || disabled}
+						aria-label={sending ? "Connecting" : projection.streaming ? "steer" : "send"}
+						className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
 					>
-						■
+						<span aria-hidden>{sending ? "…" : "↑"}</span>
 					</button>
-				) : null}
-
-				<button
-					type="button"
-					onClick={() => void send(text)}
-					disabled={retryPending || (!text.trim() && images.length === 0) || sending || disabled}
-					aria-label={sending ? "Connecting" : projection.streaming ? "steer" : "send"}
-					className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
-				>
-					<span aria-hidden>{sending ? "…" : "↑"}</span>
-				</button>
+				</div>
 			</div>
 
 
@@ -1481,6 +1526,7 @@ export function Composer({
 			<EffortSheet
 				open={effortOpen}
 				onClose={onCloseEffort}
+				onBack={() => { onCloseEffort(); onOpenModels(); }}
 				pid={pid}
 				projection={projection}
 			/>

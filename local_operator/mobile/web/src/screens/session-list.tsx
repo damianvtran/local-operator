@@ -1,4 +1,5 @@
 import { useScrollCues } from "../lib/use-scroll-cues";
+import { usePriorityFit } from "../lib/use-priority-fit";
 /**
  * Session list (`#/`) — the phone's home. One card per live session, kept
  * current by the list SSE; footer row with new session, past sessions,
@@ -817,7 +818,7 @@ export function SessionListScreen() {
 	   never missed. */
 	const [projectsOpen, setProjectsOpen] = useState(false);
 	const listCue = useScrollCues();
-	const filtersCue = useScrollCues(true);
+	const [tagFiltersOpen, setTagFiltersOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const [searchOpen, setSearchOpen] = useState(false);
 	const [drawerOpen, setDrawerOpen] = useState(false);
@@ -1417,6 +1418,17 @@ export function SessionListScreen() {
 		{ id: "settings", icon: "⚙", label: messageRuntime.t("relay.chrome.drawer.settings"), href: "#/settings/account-routing", preference: true },
 	];
 	const tags = Array.from(new Map(sessions.flatMap(row => row.tags ?? []).map(tag => [tag.id, tag])).values());
+	/* THE FILTER STRIP NEVER SCROLLS SIDEWAYS (operator finding B). It was an
+	   `overflow-x: auto` rail, so a tag past the edge was reachable only by a
+	   sideways swipe most phone users never try. All / Needs you / Unread always
+	   show; tags fill what is left of the one 44 px line; the rest sit behind
+	   ONE `+N` chip that opens the full tag list. A tag filter in force is never
+	   hidden — it takes the last visible slot. */
+	const tagFit = usePriorityFit(
+		tagsAvailable ? tags.map(tag => tag.id) : [],
+		tags.some(tag => tag.id === filter) ? filter : null,
+	);
+	const visibleTags = tags.filter(tag => tagFit.visible.includes(tag.id));
 	const needsCount = sessions.filter(row => row.needs_attention || (row.asks_open ?? 0) > 0).length;
 	const sectionClass = "sticky top-0 z-10 truncate bg-canvas px-4 pt-4 pb-1 text-meta font-medium text-ink-dim";
 	return (
@@ -1435,13 +1447,37 @@ export function SessionListScreen() {
 					aria-label={searchOpen ? messageRuntime.t("relay.chrome.list.search_close") : messageRuntime.t("relay.chrome.list.search_open")}
 					onClick={() => { setSearchOpen(!searchOpen); setQuery(""); }}>{searchOpen ? "✕" : "⌕"}</button>
 			</header>
-			{!searchOpen && (rows.length > 0 || !connected) ? <div ref={filtersCue} role="group" aria-label={messageRuntime.t("relay.chrome.list.filter_label")}
-				className="lo-scroll lo-fade-x flex h-10 shrink-0 items-center gap-2 overflow-x-auto px-3">
-				<Chip selected={filter === "all"} aria-pressed={filter === "all"} onClick={() => setFilter("all")}>{messageRuntime.t("relay.chrome.list.filter.all")}</Chip>
-				<Chip selected={filter === "needs"} aria-pressed={filter === "needs"} onClick={() => setFilter("needs")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.needs_you", { count: needsCount })}</Chip>
-				<Chip selected={filter === "unread"} aria-pressed={filter === "unread"} onClick={() => setFilter("unread")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.unread", { count: unreadCount })}</Chip>
-				{tagsAvailable ? tags.map(tag => <Chip key={tag.id} className="shrink-0" selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}>{tag.name}</Chip>) : null}
+			{/* `flex-wrap` is only the safety net for a column too narrow for even
+			    the three fixed filters plus `+N`; the fit keeps it to one line at
+			    phone width from 360 up; at 320 the three fixed filters plus `+N`
+			    need 306 px of a 296 px line and take two (measured). `gap-y-3` is
+			    what keeps a wrapped row's 44 px bands from overlapping: each chip's
+			    `::before` reaches 6 px past its 32 px pill, so rows need 12 px, and
+			    `py-1.5` keeps the first and last rows' bands inside the strip (the
+			    list below otherwise takes the bottom 6 px: measured 38 px). One line
+			    is still exactly 44 px tall (32 + 2 x 6).
+			    `overflow-hidden` is not used: nothing here may be clipped, it must
+			    fit or move behind `+N`. */}
+			{!searchOpen && (rows.length > 0 || !connected) ? <div ref={tagFit.rowRef} role="group" aria-label={messageRuntime.t("relay.chrome.list.filter_label")}
+				className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-3 px-3 py-1.5">
+				<Chip data-fit-fixed selected={filter === "all"} aria-pressed={filter === "all"} onClick={() => setFilter("all")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.all")}</Chip>
+				<Chip data-fit-fixed selected={filter === "needs"} aria-pressed={filter === "needs"} onClick={() => setFilter("needs")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.needs_you", { count: needsCount })}</Chip>
+				<Chip data-fit-fixed selected={filter === "unread"} aria-pressed={filter === "unread"} onClick={() => setFilter("unread")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.unread", { count: unreadCount })}</Chip>
+				{tagsAvailable ? visibleTags.map(tag => <Chip key={tag.id} data-fit-key={tag.id} className="min-w-0 max-w-40 shrink-0" title={tag.name} selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}><span className="truncate">{tag.name}</span></Chip>) : null}
+				{/* ONE TAP TO EVERY TAG. The visible mark is `+N`; its accessible
+				    name is the existing "N more tags" sentence (the tag line's own
+				    `+N` mark, same meaning). The sheet lists EVERY tag, so the
+				    choice is never split between two places. */}
+				{tagsAvailable && tagFit.hidden > 0 ? <Chip data-fit-overflow className="shrink-0" aria-haspopup="dialog" aria-expanded={tagFiltersOpen}
+					aria-label={messageRuntime.t("relay.session.tags.more", { count: tagFit.hidden })} onClick={() => setTagFiltersOpen(true)}>
+					<span aria-hidden>+{tagFit.hidden}</span></Chip> : null}
 			</div> : null}
+			<Sheet open={tagFiltersOpen} onClose={() => setTagFiltersOpen(false)} title={messageRuntime.t("relay.session.tags.sheet_title")}>
+				<div className="flex flex-wrap gap-2 p-3">
+					{tags.map(tag => <Chip key={tag.id} className="min-w-0 max-w-full" selected={filter === tag.id} aria-pressed={filter === tag.id}
+						onClick={() => { setFilter(tag.id); setTagFiltersOpen(false); }}><span className="truncate">{tag.name}</span></Chip>)}
+				</div>
+			</Sheet>
 			<main ref={listCue} onPointerDown={onListPointerDown} onScroll={event => {
 				const y = event.currentTarget.scrollTop;
 				if (Math.abs(y - listScroll.current) > 4) setFabCollapsed(y > 24 && y > listScroll.current);
@@ -1551,8 +1587,27 @@ export function SessionListScreen() {
 						onClick={async () => {
 							try {
 								const badge = await getAttentionUnread();
+								/* A DEGRADED READ IS NOT A CLEARED ROW (agent review round 1,
+								   C1-4 = QA Q1-3), the same rule the bulk control in this file
+								   already applies: the route answers 200 naming the sources it
+								   could not read and no `conversations` key at all, so falling
+								   through left a pressed control with no outcome and no
+								   explanation. Nothing is posted, and the refusal is stated
+								   in-flow inside this sheet. */
+								if (badge.degraded?.length) {
+									setPinNotice("Could not read what is unread — nothing was cleared. Try again.");
+									return;
+								}
 								const row = badge.conversations?.find(row => row.session_id === pinRow.session_id);
-								if (!row?.completion_token) return;
+								/* The read answered and this row is not in it: the conversation is
+								   no longer unread (another surface cleared it, or a newer turn
+								   replaced it), so the receipt says nothing was cleared rather
+								   than the press going silent. */
+								if (!row?.completion_token) {
+									publishMarkNotice({ text: markAllReceipt(0, 0, 0), danger: false });
+									setPinTarget(null);
+									return;
+								}
 								const receipt = await markAllSeen([{ session_id: pinRow.session_id, completion_token: row.completion_token }]);
 								publishMarkNotice({ text: markAllReceipt(receipt.read.length, receipt.superseded.length, receipt.unknown.length), danger: false });
 								setPinTarget(null);

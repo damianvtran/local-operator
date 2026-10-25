@@ -572,11 +572,18 @@ describe("column budget while a request is pending", () => {
 		slot = { projection: projection({ subagents: withFailures }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByRole("button", { name: /^Agents 1\/22/ })).toBeTruthy();
-		const failed = screen.getByText(/3 failed/);
-		expect(failed).toBeTruthy();
+		/* The pill's VISIBLE failure marker is the compact `✗ N` the redesign
+		   chose (design review round 1, D2): at 360 the full sentence's last word
+		   was clipped flush at the strip's edge, so the one word that says why the
+		   roster matters was the first thing lost. The complete translated
+		   sentence rides on the control's accessible name, so nothing is lost to
+		   assistive tech, and the sibling assertions below still pin the danger
+		   ink and the roster counts. */
+		const pill = screen.getByRole("button", { name: /^Agents 1\/22/ });
+		expect(pill.getAttribute("aria-label")).toContain("3 failed");
 		// In the danger colour, or it reads as one more neutral count.
-		expect(failed.className).toContain("text-danger");
+		expect(pill.className).toContain("text-danger");
+		expect(screen.getByText("✗ 3")).toBeTruthy();
 	});
 
 	it("says nothing about failures when there are none", () => {
@@ -616,8 +623,9 @@ describe("column budget while a request is pending", () => {
 		// carries the dim. Walking the chain is the assertion that matters —
 		// checking the span alone passes even when the dim sits above it, which
 		// is exactly how this shipped.
-		const failed = screen.getByText(/3 failed/);
-		expect(failed.className).toContain("text-danger");
+		expect(rosterHeader.getAttribute("aria-label")).toContain("3 failed");
+		const failed = screen.getByText("✗ 3");
+		expect(rosterHeader.className).toContain("text-danger");
 		for (let el: HTMLElement | null = failed; el; el = el.parentElement) {
 			expect(el.className).not.toContain("opacity-60");
 			if (el === rosterHeader) break;

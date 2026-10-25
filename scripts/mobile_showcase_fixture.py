@@ -92,7 +92,13 @@ from local_operator.mobile.types import (
 # localhost must not overwrite each other's valid signed cookie and manufacture
 # a 401. Only this isolated process changes namespace; signing and auth gates
 # remain the real production implementations, including absent/invalid 401s.
-daemon_module.COOKIE_NAME = "lop_probe_34b75f5a0b31"
+#
+# THE NAME IS PER-RUN (fixture-only, no product code reads it). Two independent
+# lanes serving localhost at the same time otherwise share one cookie name, and
+# whichever signs last replaces the other's still-valid cookie — a 401 the code
+# under test never caused. `LOP_MOBILE_FIXTURE_COOKIE` names it explicitly; the
+# default carries the port so two fixtures on different ports cannot collide.
+daemon_module.COOKIE_NAME = os.environ.get("LOP_MOBILE_FIXTURE_COOKIE") or "lop_probe_34b75f5a0b31"
 
 #: The variable NAME (never a value) a caller may use instead of the second
 #: argument — the same contract every sibling fixture documents.
@@ -100,6 +106,14 @@ FIXTURE_PASSWORD_ENV = "LOP_MOBILE_FIXTURE_PASSWORD"
 
 #: A synthetic project root. Never a real path on the operator's machine.
 CWD = "/synthetic/home/projects/local-operator"
+
+
+#: A deliberately LONG cwd (operator finding B): the composer's workspace control
+#: and the directory sheet must truncate or wrap it, never widen the phone.
+LONG_CWD = (
+    "/synthetic/home/projects/clients/northwind-traders/"
+    "quarterly-reconciliation-2026/vendor-ledger-exports/raw"
+)
 
 #: ``1`` serves an EMPTY store (the list's empty state); the capture sets it for
 #: one leg of its run.
@@ -198,6 +212,23 @@ def _showcase_transcript() -> list[TranscriptEntry]:
             ),
         ),
         _tool("sc-8", "task", "designer: measure sheets at 360x780", "running", elapsed=48.0),
+        # WORST-CASE CONTENT for the no-sideways-scroll rule (operator finding B):
+        # a 200+ character code line with no break opportunity, and a table with
+        # six columns. Both used to become horizontal rails inside the message.
+        TranscriptEntry(
+            id="sc-8b",
+            kind="assistant",
+            text=(
+                "The failing selector, verbatim:\n\n```\n"
+                + "document.querySelector('"
+                + "main>section>div.lo-row" * 8
+                + "').getBoundingClientRect()\n```\n\n"
+                "| screen | width | chrome | content | bordered | targets |\n"
+                "|---|---|---|---|---|---|\n"
+                "| conversation list | 320 | 96 px | 472 px | 3 spinner rings | 0 under 44 px |\n"
+                "| conversation view | 390 | 56 px | 680 px | 0 | 0 under 44 px |\n"
+            ),
+        ),
         TranscriptEntry(
             id="sc-9",
             kind="user",
@@ -212,7 +243,7 @@ def _showcase_projection() -> SessionProjection:
         pid=930001,
         kind="tui",
         conversation_name="Relay redesign review",
-        cwd=CWD,
+        cwd=LONG_CWD,
         model_label="Claude Opus 5.5",
         model_selector="anthropic/claude-opus-5-5",
         effort="high",
@@ -517,6 +548,18 @@ PREVIOUS = [
 #: Pins, newest first. One live, one durable.
 PINS = ["5c075dc7896d", "5c09f2d5fcb3"]
 
+#: Every tag category the rig creates, in catalogue order.
+TAG_CATEGORIES = [
+    "Work",
+    "Design",
+    "Personal",
+    "Finance",
+    "Travel",
+    "Client Northwind Traders",
+    "Research",
+    "Home",
+]
+
 #: ``{session_id: (tag names, primary)}``.
 TAGS = {
     "5c00a941bb95": (["Work", "Design"], "Design"),
@@ -525,6 +568,9 @@ TAGS = {
     "5c075dc7896d": (["Personal"], "Personal"),
     "5c0b51d6a6f0": (["Personal"], "Personal"),
     "5c06e542556a": (["Work"], "Work"),
+    "5c0a5df0f9c6": (["Finance", "Home"], "Finance"),
+    "5c09f2d5fcb3": (["Client Northwind Traders", "Research"], "Client Northwind Traders"),
+    "5c08c867b3a0": (["Travel"], "Travel"),
 }
 
 
@@ -567,7 +613,9 @@ def _seed_store(live: list[tuple[SessionProjection, int, bool]]) -> None:
     # Pins: oldest first so PINS[0] ends up newest.
     for session_id in reversed(PINS):
         set_pin(root, session_id, True)
-    categories = write_categories(root, [(None, "Work"), (None, "Design"), (None, "Personal")])
+    # EIGHT categories (operator finding B): more than any phone line holds, so
+    # the filter strip has to collapse the rest behind its `+N` door.
+    categories = write_categories(root, [(None, name) for name in TAG_CATEGORIES])
     by_name = {item["name"]: item["id"] for item in categories}
     for session_id, (names, primary) in TAGS.items():
         set_entity_tags(root, "session", session_id, [by_name[n] for n in names], by_name[primary])
@@ -651,9 +699,13 @@ def showcase_app(daemon: MobileDaemon):
     # Prepend before the daemon's SPA catch-all: /showcase is fixture-only and
     # must not be resolved to the product index.html by the static route.
     async def metrics_script(_request):
+        # NO-STORE, because this file IS the audit: a cached copy silently measured
+        # the screen with the previous rules and reported its old numbers under the
+        # new run's state label (measured in review round 1's remediation).
         return Response(
             Path(__file__).with_name("mobile_showcase_metrics.js").read_text(),
             media_type="text/javascript",
+            headers={"Cache-Control": "no-store"},
         )
 
     async def save_metrics(request):
@@ -705,6 +757,13 @@ def showcase_app(daemon: MobileDaemon):
 
 async def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 4290
+    # Default the cookie namespace to the PORT unless a lane named one, so two
+    # fixtures on different ports never share a signing namespace.
+    # The cookie namespace defaults to THIS PORT, in code and not only in prose:
+    # two lanes on localhost must never share a signing name, and a lane that
+    # sets the env var explicitly keeps its own.
+    if not os.environ.get("LOP_MOBILE_FIXTURE_COOKIE"):
+        daemon_module.COOKIE_NAME = f"lop_probe_fixture_{port}"
     password = required_password(sys.argv[2:])
     daemon = MobileDaemon(port=port, password=password, dial_registrants=False)
     if os.environ.get(EMPTY_ENV) == "1":

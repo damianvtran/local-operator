@@ -163,11 +163,18 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 	   not a new telemetry calculation. Its drill-down lives in an in-flow
 	   sheet so reading channels cannot steal conversation height. */
 	if (compact) {
+		/* UNIT AND CURRENCY ARE NOT NEGOTIABLE (design review round 1, D1). In a
+		   44 px box the two facts rendered `30.9…` and the money never appeared at
+		   all — a reading clipped inside its own value is not a shorter reading, it
+		   is a false one. The slot is fixed at 96 px (6 rem) so the model button's
+		   truncation point does not move as the numbers change, and it never
+		   shrinks: the model label beside it is the elastic element, because a
+		   truncated NAME stays truthful while a truncated AMOUNT does not. */
 		const label = [context.spelling?.split("/")[0], spend.text].filter(Boolean).join(" · ");
 		return <>
 			<button type="button" onClick={() => setExpanded(true)}
 				aria-label={messageRuntime.t("relay.chrome.composer.spend_label", { label })}
-				className="min-h-11 w-11 min-w-11 truncate text-meta tabular-nums text-ink-dim active:text-ink">{label}</button>
+				className="flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap text-meta tabular-nums text-ink-dim active:text-ink">{label}</button>
 			<Sheet open={expanded} onClose={() => setExpanded(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
 				<SessionStatus projection={projection} detail />
 			</Sheet>

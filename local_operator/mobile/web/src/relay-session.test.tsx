@@ -28,8 +28,8 @@ import { messageRuntime, useLocaleSnapshot } from "./store";
 const BEFORE = {
 	"relay.session.list.search_placeholder": "Search conversations…",
 	"relay.session.list.empty_hint": "start one below, or from the TUI on your machine",
-	"relay.session.list.no_matches": "No matching conversations",
-	"relay.session.list.start_idle": "New session",
+	"relay.session.list.no_matches": "no matching conversations",
+	"relay.session.list.start_idle": "new session",
 	"relay.session.list.start_busy": "starting…",
 	"relay.session.view.back": "back to sessions",
 	"relay.session.view.empty_title": "no messages yet",
@@ -49,6 +49,25 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	document.documentElement.lang = "en";
 	document.documentElement.dir = "ltr";
+});
+
+/** The keys the redesigned list ACTUALLY renders (sentence case, O1). The
+    superseded `relay.session.*` values above stay frozen and unused — the
+    catalogue freeze forbids editing an existing English value, so a changed
+    string is a new `relay.chrome.*` key and both are asserted. */
+const CHROME = {
+	"relay.chrome.list.no_matches": "No matching conversations",
+	"relay.chrome.list.new": "New",
+	"relay.chrome.list.new_label": "New session",
+	"relay.chrome.list.starting": "Starting…",
+} as const;
+
+describe("relay.chrome list copy the redesign renders", () => {
+	it("paints the sentence-case English the list surfaces use", () => {
+		for (const [key, text] of Object.entries(CHROME)) {
+			expect(messageRuntime.t(key as keyof typeof CHROME)).toBe(text);
+		}
+	});
 });
 
 describe("relay.session extraction", () => {

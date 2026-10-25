@@ -109,10 +109,12 @@ export function ToolRow({
 	const running =
 		entry.tool_state === "running" || entry.tool_state === "composing";
 	/* A queued row is live — the call has been announced and may still execute —
-	   so it keeps the raised background of a live row, but it does NOT pulse:
-	   the pulse is the "work is happening" signal (branding §7.3), and nothing
-	   is happening while the call waits behind a sibling. Its glyph is dim like
-	   composing's for the same reason. */
+	   so it keeps the DIM pending glyph of a live row, but it does NOT pulse: the
+	   pulse is the "work is happening" signal (branding §7.3), and nothing is
+	   happening while the call waits behind a sibling. The redesign flattened the
+	   tool rows onto the transcript's ground (§7.1), so the queued state is
+	   carried by glyph ink alone; the glyph is dim like composing's for the same
+	   reason. */
 	const queued = entry.tool_state === "queued";
 	const isDiffFirst =
 		DIFF_FIRST_TOOLS.has(entry.tool_name.toLowerCase()) &&

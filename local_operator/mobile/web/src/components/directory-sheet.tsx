@@ -294,7 +294,7 @@ export function WorkingDirectoryChip({
 			<Chip
 				onClick={() => setOpen(true)}
 				aria-label={messageRuntime.t("relay.chrome.composer.folder_label", { name: cwd || label })}
-				className="!h-11 min-w-11 max-w-full !bg-transparent !px-1 !text-meta"
+				className="!h-11 w-11 min-w-11 max-w-full !bg-transparent !px-1 !text-meta"
 			>
 				{/* A folder glyph drawn inline: this package carries no icon
 				    dependency (the same reason the list's marks are text). 14 px
@@ -303,7 +303,11 @@ export function WorkingDirectoryChip({
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
 					<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
 				</svg>
-				<span className="min-w-0 truncate">{label}</span>
+				{/* GLYPH ONLY (design review round 1, D1): at 360 and 390 the name
+				    spent the composer meta row's whole budget and still rendered as
+				    `local-o…`, so it cost a fact without telling one. The full path
+				    is the control's accessible name above and the sheet's own
+				    subject; the last segment alone was never the useful part. */}
 			</Chip>
 			<DirectorySheet
 				open={open}

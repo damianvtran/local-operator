@@ -244,7 +244,11 @@ export function LibraryScreen() {
 				/>
 			</div>
 
-			<div className="lo-scroll flex gap-1 overflow-x-auto px-2 pb-2">
+			{/* WRAPS, NEVER SCROLLS SIDEWAYS (operator finding B). At most nine
+			    category chips, each a short word plus a count: a second line costs
+			    one row of a screen whose content is a long list, hides nothing and
+			    adds no tap, which beats a rail whose end needs a sideways swipe. */}
+			<div className="flex flex-wrap gap-1 px-2 pb-2">
 				{categoryChips.map((chip) => (
 					<Chip
 						key={chip.id || "all"}

@@ -249,8 +249,13 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
         # A namespace's longer function name plus several typed placeholders can
         # exceed the same 100-column gate as the return statement. Wrap the
         # generated signature too, rather than hand-editing one generated key
-        # module or giving this namespace a lint exemption.
-        if len(header) > 100:
+        # module or giving this namespace a lint exemption. `signature` is EMPTY
+        # for a zero-placeholder key, and wrapping an empty one emitted a lone
+        # `,` inside the parentheses — invalid Python for a long identifier that
+        # the generator has always accepted (agent review round 1, C1-2). A
+        # function NAME cannot be split by any formatter, so that shape keeps the
+        # single-line header it has at the merge base.
+        if len(header) > 100 and signature:
             wrapped = signature.replace(", ", ",\n    ")
             header = f"def {fname}(\n    {wrapped},\n) -> Msg:"
         body.append(f"{header}\n{call}\n")

@@ -29,8 +29,8 @@ import { messageRuntime, useLocaleSnapshot } from "./store";
 const BEFORE = {
 	"relay.shell.list.empty": "no sessions running",
 	"relay.shell.list.connecting": "connecting…",
-	"relay.shell.list.section.active": "Active",
-	"relay.shell.list.section.previous": "Previous",
+	"relay.shell.list.section.active": "Active Sessions",
+	"relay.shell.list.section.previous": "Previous Sessions",
 	"relay.shell.list.theme": "choose theme",
 	"relay.shell.session.waiting": "waiting for projection…",
 	"relay.shell.session.connecting": "connecting to session…",
@@ -40,6 +40,20 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	document.documentElement.lang = "en";
 	document.documentElement.dir = "ltr";
+});
+
+/** The section headings the drawer's list view actually renders now. */
+const CHROME = {
+	"relay.chrome.list.section.active": "Active",
+	"relay.chrome.list.section.previous": "Previous",
+} as const;
+
+describe("relay.chrome section copy the redesign renders", () => {
+	it("paints the sentence-case English the sections use", () => {
+		for (const [key, text] of Object.entries(CHROME)) {
+			expect(messageRuntime.t(key as keyof typeof CHROME)).toBe(text);
+		}
+	});
 });
 
 describe("relay.shell extraction", () => {

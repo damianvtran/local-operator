@@ -146,6 +146,84 @@ afterEach(() => {
 	delete document.documentElement.dataset.view;
 });
 
+/** A minimal roster row, copied from the sibling render test rather than
+    trimmed: SubagentsPanel reads most of these fields. */
+function subagentRow(): SessionProjection["subagents"][number] {
+	return {
+		job_id: "j1",
+		label: "audit",
+		agent: "coder",
+		status: "completed",
+		progress: "",
+		elapsed_s: 1,
+		model_label: "",
+		result_text: "",
+		error_text: "",
+		parent_job_id: null,
+		session_id: "j1-session",
+		prompt: "",
+		launch_message_id: "",
+		effort: "high",
+		ancestors: [],
+		ancestor_ids: [],
+		child_ids: [],
+		peer_ids: [],
+		transcript: [],
+		todos: [],
+		activity: "",
+	};
+}
+
+/** A retained projection carrying every disclosure the tray can hold. */
+function retained(flags: Partial<SessionProjection>): Partial<SessionProjection> {
+	return {
+		todos: [{ name: "Todos", items: [{ text: "audit", status: "pending", reason: "" }] }],
+		subagents: [subagentRow()],
+		...flags,
+	};
+}
+
+/* THE BANNER NEVER OWNS THE ONLY DOOR (agent review round 1, C1-1 = QA Q1-2).
+   The ended/degraded banner used to REPLACE the tray, and the tray held the one
+   setter that opens the Tasks and Agents sheets — so a finished conversation's
+   own history became unreadable without restarting its runtime. These cases go
+   through the real SessionScreen and assert the DOORS, then open them. */
+describe.each<[string, Partial<SessionProjection>]>([
+	["ended", { ended: true }],
+	["degraded", { degraded: true }],
+])("a %s conversation keeps its retained history reachable (C1-1)", (_state, flags) => {
+	it("exposes the tasks and agents doors and opens both sheets from them", () => {
+		slot = { projection: projection(retained(flags)), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+
+		/* Named by their own words, not by a hidden gesture: the tray chips are
+		   BUTTONs, `aria-expanded` describes the sheet they own, and the chip
+		   primitive's `lo-hit` gives them the 44 px floor inside the tray's own
+		   44 px strip. happy-dom does no layout, so the BAND is a rendered-audit
+		   number; this pins the structure that makes it real. */
+		const tasks = screen.getByRole("button", { name: /^Tasks/ });
+		const agents = screen.getByRole("button", { name: /^Agents/ });
+		for (const door of [tasks, agents]) {
+			expect(door.tagName).toBe("BUTTON");
+			expect(door.className).toContain("lo-hit");
+			expect(door.closest("div")?.className).toContain("h-11");
+			expect(door.getAttribute("aria-expanded")).toBe("false");
+		}
+
+		/* The sheet is MODAL, so it takes the rest of the screen out of the
+		   accessibility tree while it is open — the door is read through the
+		   handle captured above, and the sheet is asserted by its own name. */
+		fireEvent.click(tasks);
+		expect(tasks.getAttribute("aria-expanded")).toBe("true");
+		expect(screen.getByRole("dialog", { name: "Tasks" })).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
+
+		fireEvent.click(agents);
+		expect(agents.getAttribute("aria-expanded")).toBe("true");
+		expect(screen.getByRole("dialog", { name: "Agents" })).toBeTruthy();
+	});
+});
+
 describe("an ended session (U7)", () => {
 	it("says so and offers the documented resume, which reopens the conversation", async () => {
 		slot = { projection: projection({ ended: true }), connected: true };

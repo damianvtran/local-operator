@@ -100,10 +100,18 @@ export function AsksSheet({
 }: {
 	open: boolean;
 	onClose: () => void;
-	/** The conversation this sheet was opened from: the only one whose asks it
-	    lists (see the module note). */
+	/** The conversation this sheet was opened from, or empty for the
+	    cross-conversation view the navigation drawer's Questions destination
+	    opens (UX review round 1, U1). */
 	currentSessionId: string;
 }) {
+	/* EMPTY MEANS ALL CONVERSATIONS, and that is a real mode rather than a
+	   missing argument: the drawer's destination is machine-wide. Passing "" into
+	   the per-conversation filter matched no row at all, so a destination that
+	   exists to show what is waiting painted "nothing waiting" over three
+	   outstanding asks. In this mode every row carries its own conversation's
+	   name, so an answer is never attributed to the wrong conversation. */
+	const crossConversation = currentSessionId === "";
 	const [allRows, setRows] = useState<PendingAsk[]>([]);
 	const [loaded, setLoaded] = useState(false);
 	/** The receipt for a dismissal this sheet has just seen, KEYED TO THE ASK it
@@ -128,7 +136,9 @@ export function AsksSheet({
 	   frame's `asks_open` does not (a timed-out ask is not counted, #2388), so
 	   a dismissal or a late answer on another surface would otherwise wait for
 	   the backstop. */
-	const rowsSignature = askRowsSignature(useProjection(currentSessionId).projection?.asks);
+	const rowsSignature = askRowsSignature(
+		crossConversation ? undefined : useProjection(currentSessionId).projection?.asks,
+	);
 
 	const load = useCallback(async () => {
 		/* THE READ IS BOUNDED (U6). `AbortSignal.timeout` is the platform's own
@@ -192,15 +202,20 @@ export function AsksSheet({
 	/* Only the ended/not-running strip reads the session list now: whether the
 	   opening conversation has ended changes the strip's wording. */
 	const ended = useMemo(
-		() => sessions.some((session) => session.session_id === currentSessionId && session.ended === true),
-		[sessions, currentSessionId],
+		() =>
+			!crossConversation &&
+			sessions.some((session) => session.session_id === currentSessionId && session.ended === true),
+		[sessions, currentSessionId, crossConversation],
 	);
 
 	/* THIS CONVERSATION'S ROWS ONLY, before anything orders or counts them, so
 	   the title, the empty state and the list all describe the same set. */
 	const rows = useMemo(
-		() => allRows.filter((row) => String(row.session_id) === currentSessionId),
-		[allRows, currentSessionId],
+		() =>
+			crossConversation
+				? allRows
+				: allRows.filter((row) => String(row.session_id) === currentSessionId),
+		[allRows, currentSessionId, crossConversation],
 	);
 
 	/* THE HEAD FIRST, then the wire's own order (`orderedForDisplay`) — the
@@ -301,9 +316,22 @@ export function AsksSheet({
 					</p>
 				) : null}
 				{listed.map((row) => {
-					const sessionId = currentSessionId;
+					/* THE ROW'S OWN CONVERSATION, always: in the cross-conversation
+					   view the answer op must go to the conversation that asked, and
+					   the name below stops a row being attributed to the wrong one. */
+					const sessionId = crossConversation ? String(row.session_id) : currentSessionId;
+					const conversationName = crossConversation
+						? sessions.find((session) => session.session_id === sessionId)
+								?.conversation_name || sessionId
+						: "";
 					return (
 						<div key={`${sessionId}:${row.ask_id}`} className="flex flex-col gap-1">
+							{/* Data, not copy: the projection's own conversation name. */}
+							{crossConversation ? (
+								<p className="truncate px-1 text-meta font-medium text-ink-dim">
+									{conversationName}
+								</p>
+							) : null}
 							{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
 							    (design round 1, D4 = UX U4; the two gates are the round-2 corrections).
 

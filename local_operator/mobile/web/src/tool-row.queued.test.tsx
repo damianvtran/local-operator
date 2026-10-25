@@ -58,13 +58,18 @@ describe("the phone's queued tool row", () => {
 		expect(row?.textContent).not.toContain("⟳");
 	});
 
-	it("stays raised but does not pulse", () => {
+	it("stays visibly pending but does not pulse", () => {
 		const row = rowFor("queued");
-		expect(row?.className).toContain("bg-elevated");
-		expect(row?.className).not.toContain("bg-surface");
-		// The pulse is the "work is happening" signal; nothing is happening
-		// while the call waits its turn.
+		/* THE GROUND IS FLAT NOW (relay redesign §7.1/§7.5): every tool row sits
+		   on the transcript's own ground, so the queued state cannot be carried by
+		   a raised box. It is carried by the dim pending glyph with no pulse — the
+		   pulse is the "work is happening" signal and nothing is happening while
+		   the call waits its turn — which is exactly what distinguishes it from a
+		   running row (asserted by the next test). */
+		expect(row?.className ?? "").not.toContain("bg-elevated");
+		expect(row?.textContent).toContain("⋯");
 		const glyph = row?.querySelector("span");
+		expect(glyph?.className ?? "").toContain("text-ink-dim");
 		expect(glyph?.className ?? "").not.toContain("lo-pulse");
 	});
 
