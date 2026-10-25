@@ -312,7 +312,7 @@ async def test_a_pre_remediation_record_is_ignored_rather_than_reinterpreted(tmp
         )
     )
 
-    assert ANCHOR_VERSION == 2, "the version moved; a v1 record must not be reinterpreted"
+    assert ANCHOR_VERSION == 3, "the version moved; a v1 record must not be reinterpreted"
     assert read_anchor(tmp_path) is None
     assert proves_absent(tmp_path) is False
 

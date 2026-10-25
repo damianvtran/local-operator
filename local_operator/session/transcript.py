@@ -2923,6 +2923,11 @@ class Transcript:
             current = written
         if (current.st_ino, current.st_size) == (written.st_ino, written.st_size):
             written = current
+        # Shared by _append and append_imported, after journal fsync. A failed
+        # sidecar write cannot reject committed rows; stale hints fail validation.
+        from local_operator.session.tail_anchor import update_selection_after_commit
+
+        update_selection_after_commit(self.directory)
         return _page_source_signature(written)
 
     def _restore_mtime(self, previous_mtime: float | None) -> None:
