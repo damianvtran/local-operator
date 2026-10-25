@@ -47,7 +47,7 @@ def _bash(root: Path, script: str) -> None:
 def test_empty_extant_subtree_is_clean(root: Path) -> None:
     _bash(
         root,
-        r'''
+        r"""
         set -euo pipefail
         shopt -s nullglob globstar
         source "$LIB"
@@ -60,14 +60,14 @@ def test_empty_extant_subtree_is_clean(root: Path) -> None:
         printf 'populated 0\n' >"$cgroup_dir/init.scope/cgroup.events"
         collect_cgroup "$cgroup_dir"
         [ -z "$remaining" ] && [ -z "$populated" ] && [ -z "$read_error" ]
-        ''',
+        """,
     )
 
 
 def test_real_descendant_is_present_until_it_exits(root: Path) -> None:
     _bash(
         root,
-        r'''
+        r"""
         set -euo pipefail
         shopt -s nullglob globstar
         source "$LIB"
@@ -96,14 +96,14 @@ def test_real_descendant_is_present_until_it_exits(root: Path) -> None:
         collect_cgroup "$cgroup_dir"
         [ -z "$remaining" ] && [ -z "$populated" ] && [ -z "$read_error" ]
         trap - EXIT
-        ''',
+        """,
     )
 
 
 def test_unreadable_process_evidence_fails_closed(root: Path) -> None:
     _bash(
         root,
-        r'''
+        r"""
         set -euo pipefail
         shopt -s nullglob globstar
         source "$LIB"
@@ -116,14 +116,14 @@ def test_unreadable_process_evidence_fails_closed(root: Path) -> None:
         printf 'populated 0\n' >"$cgroup_dir/init.scope/cgroup.events"
         collect_cgroup "$cgroup_dir"
         [ -n "$read_error" ]
-        ''',
+        """,
     )
 
 
 def test_wrong_scope_is_never_signaled(root: Path) -> None:
     _bash(
         root,
-        r'''
+        r"""
         set -euo pipefail
         shopt -s nullglob globstar
         source "$LIB"
@@ -142,5 +142,5 @@ def test_wrong_scope_is_never_signaled(root: Path) -> None:
         trap - EXIT
         kill -TERM "$child"
         wait "$child" || true
-        ''',
+        """,
     )
