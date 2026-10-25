@@ -2328,6 +2328,27 @@ available memory — and run in its own process group, because the guard can onl
 a group it owns. Do not hand-roll an unbounded runner when the repo already has a
 bounded one (the pytest worker cap above is the pattern).
 
+## Branch-moving commands: one target, one invocation
+
+A `git push`, `gh pr merge`, `gh release create`, or anything with `--force` is
+issued as **one command with one literal target** — the PR number, the ref, the
+tag spelled out in the invocation itself — and the resulting state is read back
+afterwards.
+
+Never build such a command in a loop, in a batch of several commands, or from a
+target another step computed. A batch that is malformed should fail to parse; it
+must not resolve to a plausible-looking target. The failure this rule exists to
+prevent is not hypothetical: on 2026-10-25 a malformed multi-command batch fired
+`gh pr merge --squash` at an unrelated, unreviewed pull request. The only reason
+that repository did not merge it was `reviewDecision: REVIEW_REQUIRED` — a
+control that happened to be set, not anything the operator did. One flag
+(`--admin`, routinely used here for reviewed PRs) would have been enough to make
+it real.
+
+This applies to every automated lane, not just interactive work, and it composes
+with the release rules below: a release owner still derives the window and takes
+the lock, but each of those steps is its own invocation with its own readback.
+
 ## Who may merge: two tiers
 
 `main` is governed by a ruleset that requires **one approving review**, plus the
