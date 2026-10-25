@@ -2073,3 +2073,17 @@ def test_a_grant_for_a_quota_blocked_family_says_quota_blocked(
         owner, BORROWER_DEVICE, key="mesh-empty", provider="mesh-empty", session="sess-3"
     )
     assert empty["code"] == "no_local_credential", empty
+
+
+def test_a_borrow_reaching_a_closed_broker_is_refused_as_unavailable(owner: Any) -> None:
+    """R1-2: the teardown race is a named refusal, not a handler that reads as a bug.
+
+    A slow-op handler can already hold the broker when the relay's stop hook closes
+    its loop. The closed latch refuses to restart (that is the leak fix); this is
+    the answer the peer must see — ``unavailable`` with the reason — rather than the
+    generic ``internal`` / ``RuntimeError`` a bare closed-loop error used to become.
+    """
+    owner.broker._loop.close()
+    detail = _ask_grant(owner, BORROWER_DEVICE)
+    assert detail["code"] == "unavailable", detail
+    assert "shutting down" in str(detail.get("message") or ""), detail

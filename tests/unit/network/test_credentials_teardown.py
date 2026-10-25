@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -69,6 +70,35 @@ def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 async def _never() -> None:
     """A coroutine that starts nothing and returns at once (the submit path)."""
     return None
+
+
+class _PausingLock:
+    """A real lock that parks ONE thread's first acquire until the test releases it.
+
+    R1-1's window is between an accessor's ``_stop`` check and the critical
+    section; this holds a driver thread exactly there. The stop hook's acquire
+    runs on the main thread and is let straight through, which is what makes the
+    interleaving deterministic rather than a timing gamble.
+    """
+
+    def __init__(self, paused: threading.Thread) -> None:
+        self._real = threading.Lock()
+        self._paused_thread = paused
+        self.arrived = threading.Event()
+        self.release = threading.Event()
+        self._parked = False
+
+    def __enter__(self) -> "_PausingLock":
+        if threading.current_thread() is self._paused_thread and not self._parked:
+            self._parked = True
+            self.arrived.set()
+            if not self.release.wait(10.0):
+                raise AssertionError("the test never released the parked accessor")
+        self._real.acquire()
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self._real.release()
 
 
 class _WedgedLoop:
@@ -201,6 +231,9 @@ def test_a_wedged_broker_does_not_strand_the_sync_engine(
 
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         server_a.stop()
+        # A REPEATED STOP IS THE LATCH TEST (#2913 shape): it still joins and
+        # re-checks the survivor, but the same episode is named only once.
+        server_a.stop()
 
     assert not engine_thread.is_alive(), "the wedged broker stranded the sync engine's loop"
     assert engine_loop._closed is True  # noqa: SLF001
@@ -234,6 +267,106 @@ def test_the_devices_fixture_teardown_reaps_both_slice_loops(
 
     assert f"mesh-broker-loop-{server_a.identity.device_id[-8:]}" in _broker_loop_names()
     assert f"mesh-broker-loop-{server_b.identity.device_id[-8:]}" in _broker_loop_names()
+
+
+def test_an_accessor_parked_after_its_check_cannot_build_behind_stop(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: the broker window, reproduced by parking the accessor before the lock.
+
+    The accessor passes the stop check, parks, and the stop hook completes while
+    it is parked. On the old body the resumed accessor built and stashed a broker
+    after ``stop()`` — its caller's ``submit`` then started a loop that no later
+    hook could ever visit. With the check inside the shared lock it resumes, sees
+    ``_stop`` and creates nothing.
+    """
+    stop = threading.Event()
+    server = SimpleNamespace(
+        root=tmp_path,
+        identity=SimpleNamespace(device_id="d_" + "b" * 32, name="race-broker"),
+        _stop=stop,
+    )
+    built = owner_mod.MeshCredentialBroker(
+        root=tmp_path, self_device=server.identity.device_id, server=server
+    )
+    monkeypatch.setattr(
+        owner_mod.MeshCredentialBroker, "for_relay", classmethod(lambda cls, srv: built)
+    )
+    result: list[Any] = []
+    thread = threading.Thread(target=lambda: result.append(owner_mod.broker_for_relay(server)))
+    lock = _PausingLock(thread)
+    monkeypatch.setattr(owner_mod, "_BROKER_LOCK", lock)
+    try:
+        thread.start()
+        assert lock.arrived.wait(10.0), "the accessor never reached the lock"
+        stop.set()
+        owner_mod.stop_broker_for_relay(server)
+        assert getattr(server, owner_mod._BROKER_ATTR, None) is None
+        lock.release.set()
+        thread.join(10.0)
+        assert result == [None], "the accessor built a broker after the stop hook ran"
+        assert getattr(server, owner_mod._BROKER_ATTR, None) is None
+        assert server.identity.device_id[-8:] not in {
+            name.removeprefix("mesh-broker-loop-") for name in _broker_loop_names()
+        }
+    finally:
+        lock.release.set()
+        thread.join(10.0)
+        built.close()
+
+
+def test_a_sync_accessor_parked_after_its_check_cannot_build_behind_stop(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: the engine window — same parking, same shared-lock requirement."""
+    stop = threading.Event()
+    server = SimpleNamespace(
+        root=tmp_path,
+        identity=SimpleNamespace(device_id="d_" + "c" * 32, name="race-sync"),
+        _stop=stop,
+    )
+    result: list[Any] = []
+    thread = threading.Thread(target=lambda: result.append(sync_mod.sync_for_relay(server)))
+    lock = _PausingLock(thread)
+    monkeypatch.setattr(sync_mod, "_SYNC_CREATE_LOCK", lock)
+    try:
+        thread.start()
+        assert lock.arrived.wait(10.0), "the accessor never reached the lock"
+        stop.set()
+        sync_mod.stop_engine_for_relay(server)
+        assert getattr(server, sync_mod._SYNC_ATTR, None) is None
+        lock.release.set()
+        thread.join(10.0)
+        assert result == [None], "the accessor built an engine after the stop hook ran"
+        assert getattr(server, sync_mod._SYNC_ATTR, None) is None
+    finally:
+        lock.release.set()
+        thread.join(10.0)
+
+
+def test_a_close_issued_on_the_loop_thread_does_not_deadlock() -> None:
+    """R1-4: the self-join guard. A task that closes its own loop must return.
+
+    ``Thread.join`` on one's own thread raises ``RuntimeError``; the guard turns
+    that into a queued stop plus an immediate return, and the loop thread's own
+    ``finally`` closes the loop. A later close from this thread clears the handle.
+    """
+    loop = owner_mod._BrokerLoop("self")  # noqa: SLF001 — the class under test
+    seen: list[str] = []
+
+    async def _close_self() -> None:
+        loop.close(timeout=0.01)  # noqa: SLF001
+        seen.append("returned")
+
+    loop.submit(_close_self(), timeout=10.0)
+    deadline = time.monotonic() + 10.0
+    while loop._thread is not None and loop._thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert seen == ["returned"], "close() inside the loop did not return"
+    assert loop._thread is not None and not loop._thread.is_alive(), "the loop thread outlived"
+    loop.close(timeout=0.01)  # a later close clears the retained handle
+    assert loop._thread is None  # noqa: SLF001
 
 
 def test_neither_accessor_builds_an_owner_once_the_relay_is_stopping(

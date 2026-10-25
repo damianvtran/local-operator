@@ -141,6 +141,16 @@ LOOP_EXECUTOR_THREADS = 2
 BROKER_LOOP_STOP_TIMEOUT_S = 5.0
 
 
+class _BrokerLoopClosed(RuntimeError):
+    """A request reached a broker loop its relay had already closed (teardown).
+
+    A named type, not a bare ``RuntimeError``: the borrow path maps it to the
+    broker's own ``unavailable`` refusal (review round 1, R1-2), because a peer
+    must not read a handler answered ``internal`` at the moment the operator shut
+    the relay down as a broker bug.
+    """
+
+
 class _BrokerLoop:
     """ONE long-lived event loop and its thread, for every brokered request.
 
@@ -169,7 +179,7 @@ class _BrokerLoop:
             # reachable on the server while links finish tearing down, and a fresh
             # ``_BrokerLoop`` generation there would outlive the relay by definition.
             if self._closed:
-                raise RuntimeError("the credential broker's event loop is closed")
+                raise _BrokerLoopClosed("the credential broker's event loop is closed")
             if self._loop is not None and self._thread is not None and self._thread.is_alive():
                 return self._loop
             ready = threading.Event()
@@ -258,6 +268,12 @@ class _BrokerLoop:
         survivor dies — but the latch (the ``_survivor`` thread object) makes it
         warn only once per episode. A thread that ignores its stop cannot be killed
         from here; this makes the condition visible, not impossible.
+
+        THE BOUND IS PER JOIN, NOT A STOP CEILING. Five seconds is what this join
+        waits once it holds ``_lock``; acquiring that lock can itself wait out the
+        loop thread's ``ready.wait(10.0)`` startup gate. A relay stop composes the
+        broker's join, the sync engine's identical one, and the definitions /
+        rollout hooks (5 s each): roughly 40 s worst case for one relay, not five.
         """
         with self._lock:
             self._closed = True
@@ -680,6 +696,18 @@ class MeshCredentialBroker:
             )
         except MeshRefusal as exc:
             return self._refuse(link, key, provider, by, exc.code, str(exc))
+        except _BrokerLoopClosed:
+            # THE RELAY SHUT DOWN BETWEEN THE DISPATCH AND THE SUBMIT. This is not
+            # a broker bug: answer with the same by-name ``unavailable`` the other
+            # late paths give, and never start a loop behind the stop hook.
+            return self._refuse(
+                link,
+                key,
+                provider,
+                by,
+                "unavailable",
+                "this relay is shutting down, so no credential was refreshed or lent",
+            )
         except Exception as exc:  # noqa: BLE001 — a broker bug must answer, not close the link
             return self._refuse(link, key, provider, by, "internal", exc.__class__.__name__)
         if isinstance(outcome, BrokerError):
@@ -2227,15 +2255,20 @@ def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
     ``None`` is deliberately NOT cached — a share that arrives after the relay
     started must be served without a restart (``for_relay``'s docstring).
     """
-    stop = getattr(server, "_stop", None)
-    if stop is not None and stop.is_set():
-        # A BROKER BUILT AFTER THE STOP BEGAN would start a loop behind the stop
-        # hook that exists to reap one. Same guard as the #2914 ``ensure_syncer`` /
-        # ``ensure_driver`` shape: the relay's own ``_stop`` event, not a new flag.
-        # An in-flight handler then gets the by-name refusal it gives a device
-        # that owns nothing, which is the honest answer during teardown.
-        return None
     with _BROKER_LOCK:
+        # THE CHECK SHARES THE LOCK WITH THE STOP HOOK, and that is the whole fix
+        # (review round 1, R1-1). Read outside it, an accessor that passed just
+        # before ``_stop`` was set still built and stashed after the hook's stash
+        # read — a loop started behind the reaper, on a relay that cannot restart.
+        # Holding the same lock makes the two orders the only two: the accessor
+        # builds first (the hook then closes it), or the hook runs first and this
+        # check refuses. Python's lock is not reentrant, so ``stop_broker_for_relay``
+        # takes it for its read and closes outside it.
+        stop = getattr(server, "_stop", None)
+        if stop is not None and stop.is_set():
+            # The by-name refusal a device that owns nothing already gets; the
+            # handler's caller answers it honestly instead of starting a loop.
+            return None
         broker = getattr(server, _BROKER_ATTR, None)
         if broker is not None:
             return broker
@@ -2262,7 +2295,12 @@ def stop_broker_for_relay(server: Any, *, timeout: float = BROKER_LOOP_STOP_TIME
     refuses to restart) rather than a fresh one built behind the stop. The server
     dies with the relay; nothing module-level retains it.
     """
-    broker = getattr(server, _BROKER_ATTR, None)
+    with _BROKER_LOCK:
+        # SAME LOCK AS THE ACCESSOR (R1-1): a build that passed its ``_stop`` check
+        # cannot land between this read and the close. The close runs OUTSIDE the
+        # lock because it joins a thread, and holding the build lock across a join
+        # would serialise every late request behind a wedged loop.
+        broker = getattr(server, _BROKER_ATTR, None)
     if broker is None:
         return
     broker.close(timeout=timeout)

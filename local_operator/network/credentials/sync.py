@@ -2302,17 +2302,21 @@ def sync_for_relay(server: Any) -> SyncEngine | None:
     """
     if server is None:
         return None
-    stop = getattr(server, "_stop", None)
-    if stop is not None and stop.is_set():
-        # BUILDING AN ENGINE AFTER THE STOP BEGAN would start a loop behind the
-        # stop hook that exists to reap one (the #2914 ``ensure_*`` guard shape).
-        return None
     root = getattr(server, "root", None)
     identity = getattr(server, "identity", None)
     self_device = str(getattr(identity, "device_id", "") or "")
     if root is None or not self_device:
         return None
     with _SYNC_CREATE_LOCK:
+        # THE STOP CHECK IS INSIDE THE LOCK THE HOOK TAKES (review round 1, R1-1).
+        # Outside it, an accessor that passed just before ``_stop`` was set could
+        # still build and stash after ``stop_engine_for_relay`` read the stash; the
+        # step's in-flight exchange then started a loop on a relay that can never
+        # restart. Same shape as ``ensure_syncer``/``stop_syncer`` under
+        # ``_syncer_lock``.
+        stop = getattr(server, "_stop", None)
+        if stop is not None and stop.is_set():
+            return None
         engine = getattr(server, _SYNC_ATTR, None)
         if engine is not None:
             return engine
@@ -2339,7 +2343,11 @@ def stop_engine_for_relay(server: Any) -> None:
     after the close for the broker's reason: the closed engine refuses to restart,
     so a step arriving late reaches it rather than a fresh one.
     """
-    engine = getattr(server, _SYNC_ATTR, None)
+    with _SYNC_CREATE_LOCK:
+        # SAME LOCK AS THE ACCESSOR (R1-1): a build that passed its ``_stop`` check
+        # cannot land after this read. The close is outside the lock because it
+        # joins a thread, and a wedged loop must not serialise late requests here.
+        engine = getattr(server, _SYNC_ATTR, None)
     if engine is None:
         return
     engine.close()
