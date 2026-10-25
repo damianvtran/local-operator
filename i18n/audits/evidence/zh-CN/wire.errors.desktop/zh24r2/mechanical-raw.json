@@ -1,0 +1,895 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.errors.desktop",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "generated_utc": "2026-10-25T00:45:58Z",
+  "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.desktop.json",
+      "sha256": "9a164be42a80d9bf0f60ad2a9f1d76fd1601855a4d19ffac3bf35d6bef11f76d"
+    },
+    "context": null,
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.errors.desktop.json",
+      "sha256": "7f17dea1c4ce3debbf30d2581a295394f18d65125429bdb8c0b9216ac7fd4f0a"
+    }
+  },
+  "checks": {
+    "key_parity": {
+      "key_count_en": 84,
+      "key_count_zh": 84,
+      "missing": [],
+      "extra": [],
+      "order_identical": true,
+      "order_mismatch": [],
+      "ok": true
+    },
+    "non_nfc": [],
+    "control_chars": [],
+    "bidi_controls": [],
+    "zero_width": [],
+    "fullwidth_latin_or_digits": [],
+    "cjk_latin_space": [],
+    "icu_arguments": {
+      "mismatches": [],
+      "ok": true
+    },
+    "plural_structure": {
+      "rows": [],
+      "errors": [],
+      "ok": true
+    },
+    "technical_tokens": {
+      "missing": [],
+      "ok": true
+    },
+    "width": {
+      "over_budget": [],
+      "ok": true
+    }
+  },
+  "width_rows": [
+    {
+      "key": "wire.errors.desktop.agents_config_client_fields",
+      "maxCells": null,
+      "en_cells": 100,
+      "zh_cells": 60,
+      "zh_rendered_cells": 60,
+      "over": null,
+      "ratio": 0.6,
+      "zh_wide_cells": 60
+    },
+    {
+      "key": "wire.errors.desktop.agents_config_local_only",
+      "maxCells": null,
+      "en_cells": 100,
+      "zh_cells": 62,
+      "zh_rendered_cells": 62,
+      "over": null,
+      "ratio": 0.62,
+      "zh_wide_cells": 62
+    },
+    {
+      "key": "wire.errors.desktop.agents_config_running",
+      "maxCells": null,
+      "en_cells": 77,
+      "zh_cells": 52,
+      "zh_rendered_cells": 52,
+      "over": null,
+      "ratio": 0.675,
+      "zh_wide_cells": 52
+    },
+    {
+      "key": "wire.errors.desktop.aida_bootstrap_failed",
+      "maxCells": null,
+      "en_cells": 64,
+      "zh_cells": 40,
+      "zh_rendered_cells": 47,
+      "over": null,
+      "ratio": 0.625,
+      "zh_wide_cells": 61
+    },
+    {
+      "key": "wire.errors.desktop.aida_disabled",
+      "maxCells": null,
+      "en_cells": 134,
+      "zh_cells": 110,
+      "zh_rendered_cells": 117,
+      "over": null,
+      "ratio": 0.821,
+      "zh_wide_cells": 131
+    },
+    {
+      "key": "wire.errors.desktop.aida_greet_failed",
+      "maxCells": null,
+      "en_cells": 62,
+      "zh_cells": 32,
+      "zh_rendered_cells": 32,
+      "over": null,
+      "ratio": 0.516,
+      "zh_wide_cells": 32
+    },
+    {
+      "key": "wire.errors.desktop.aida_no_provider",
+      "maxCells": null,
+      "en_cells": 107,
+      "zh_cells": 58,
+      "zh_rendered_cells": 65,
+      "over": null,
+      "ratio": 0.542,
+      "zh_wide_cells": 79
+    },
+    {
+      "key": "wire.errors.desktop.answer_epoch_mismatch",
+      "maxCells": null,
+      "en_cells": 47,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.553,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "wire.errors.desktop.aside_adopt_unconfirmed",
+      "maxCells": null,
+      "en_cells": 45,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.533,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "wire.errors.desktop.aside_limit_reached",
+      "maxCells": null,
+      "en_cells": 39,
+      "zh_cells": 28,
+      "zh_rendered_cells": 28,
+      "over": null,
+      "ratio": 0.718,
+      "zh_wide_cells": 28
+    },
+    {
+      "key": "wire.errors.desktop.aside_max_turns",
+      "maxCells": null,
+      "en_cells": 36,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.667,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "wire.errors.desktop.aside_not_adoptable",
+      "maxCells": null,
+      "en_cells": 28,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.857,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "wire.errors.desktop.aside_request_reused",
+      "maxCells": null,
+      "en_cells": 35,
+      "zh_cells": 22,
+      "zh_rendered_cells": 22,
+      "over": null,
+      "ratio": 0.629,
+      "zh_wide_cells": 22
+    },
+    {
+      "key": "wire.errors.desktop.aside_still_running",
+      "maxCells": null,
+      "en_cells": 46,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.522,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "wire.errors.desktop.aside_unavailable",
+      "maxCells": null,
+      "en_cells": 33,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "over": null,
+      "ratio": 0.545,
+      "zh_wide_cells": 18
+    },
+    {
+      "key": "wire.errors.desktop.claim_authorization_required",
+      "maxCells": null,
+      "en_cells": 40,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "over": null,
+      "ratio": 0.45,
+      "zh_wide_cells": 18
+    },
+    {
+      "key": "wire.errors.desktop.claim_body_not_object",
+      "maxCells": null,
+      "en_cells": 37,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.703,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "wire.errors.desktop.claim_key_unpublished",
+      "maxCells": null,
+      "en_cells": 44,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.591,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_not_absolute",
+      "maxCells": null,
+      "en_cells": 47,
+      "zh_cells": 31,
+      "zh_rendered_cells": 31,
+      "over": null,
+      "ratio": 0.66,
+      "zh_wide_cells": 31
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_not_plain",
+      "maxCells": null,
+      "en_cells": 71,
+      "zh_cells": 44,
+      "zh_rendered_cells": 44,
+      "over": null,
+      "ratio": 0.62,
+      "zh_wide_cells": 44
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_not_string",
+      "maxCells": null,
+      "en_cells": 30,
+      "zh_cells": 22,
+      "zh_rendered_cells": 22,
+      "over": null,
+      "ratio": 0.733,
+      "zh_wide_cells": 22
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_null",
+      "maxCells": null,
+      "en_cells": 44,
+      "zh_cells": 30,
+      "zh_rendered_cells": 30,
+      "over": null,
+      "ratio": 0.682,
+      "zh_wide_cells": 30
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_outside_configured",
+      "maxCells": null,
+      "en_cells": 72,
+      "zh_cells": 42,
+      "zh_rendered_cells": 42,
+      "over": null,
+      "ratio": 0.583,
+      "zh_wide_cells": 42
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_wildcard",
+      "maxCells": null,
+      "en_cells": 36,
+      "zh_cells": 20,
+      "zh_rendered_cells": 20,
+      "over": null,
+      "ratio": 0.556,
+      "zh_wide_cells": 20
+    },
+    {
+      "key": "wire.errors.desktop.claim_origins_not_list",
+      "maxCells": null,
+      "en_cells": 42,
+      "zh_cells": 33,
+      "zh_rendered_cells": 33,
+      "over": null,
+      "ratio": 0.786,
+      "zh_wide_cells": 33
+    },
+    {
+      "key": "wire.errors.desktop.conversations_unreadable",
+      "maxCells": null,
+      "en_cells": 87,
+      "zh_cells": 46,
+      "zh_rendered_cells": 46,
+      "over": null,
+      "ratio": 0.529,
+      "zh_wide_cells": 46
+    },
+    {
+      "key": "wire.errors.desktop.credential_operation_failed",
+      "maxCells": null,
+      "en_cells": 41,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": null,
+      "ratio": 0.341,
+      "zh_wide_cells": 14
+    },
+    {
+      "key": "wire.errors.desktop.cwd_marker_read_failed",
+      "maxCells": null,
+      "en_cells": 59,
+      "zh_cells": 35,
+      "zh_rendered_cells": 45,
+      "over": null,
+      "ratio": 0.593,
+      "zh_wide_cells": 84
+    },
+    {
+      "key": "wire.errors.desktop.cwd_marker_write_failed",
+      "maxCells": null,
+      "en_cells": 60,
+      "zh_cells": 35,
+      "zh_rendered_cells": 45,
+      "over": null,
+      "ratio": 0.583,
+      "zh_wide_cells": 84
+    },
+    {
+      "key": "wire.errors.desktop.desktop_refusal",
+      "maxCells": null,
+      "en_cells": 7,
+      "zh_cells": 7,
+      "zh_rendered_cells": 17,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 56
+    },
+    {
+      "key": "wire.errors.desktop.effort_levels_missing",
+      "maxCells": null,
+      "en_cells": 38,
+      "zh_cells": 23,
+      "zh_rendered_cells": 23,
+      "over": null,
+      "ratio": 0.605,
+      "zh_wide_cells": 23
+    },
+    {
+      "key": "wire.errors.desktop.effort_not_in_levels",
+      "maxCells": null,
+      "en_cells": 43,
+      "zh_cells": 39,
+      "zh_rendered_cells": 37,
+      "over": null,
+      "ratio": 0.907,
+      "zh_wide_cells": 37
+    },
+    {
+      "key": "wire.errors.desktop.fast_mode_unsupported",
+      "maxCells": null,
+      "en_cells": 24,
+      "zh_cells": 19,
+      "zh_rendered_cells": 19,
+      "over": null,
+      "ratio": 0.792,
+      "zh_wide_cells": 19
+    },
+    {
+      "key": "wire.errors.desktop.feed_subscriber_limit",
+      "maxCells": null,
+      "en_cells": 33,
+      "zh_cells": 20,
+      "zh_rendered_cells": 20,
+      "over": null,
+      "ratio": 0.606,
+      "zh_wide_cells": 20
+    },
+    {
+      "key": "wire.errors.desktop.feed_subscription_unknown",
+      "maxCells": null,
+      "en_cells": 33,
+      "zh_cells": 20,
+      "zh_rendered_cells": 20,
+      "over": null,
+      "ratio": 0.606,
+      "zh_wide_cells": 20
+    },
+    {
+      "key": "wire.errors.desktop.force_requires_confirm_replace",
+      "maxCells": null,
+      "en_cells": 60,
+      "zh_cells": 55,
+      "zh_rendered_cells": 55,
+      "over": null,
+      "ratio": 0.917,
+      "zh_wide_cells": 55
+    },
+    {
+      "key": "wire.errors.desktop.librarian_bootstrap_failed",
+      "maxCells": null,
+      "en_cells": 71,
+      "zh_cells": 43,
+      "zh_rendered_cells": 43,
+      "over": null,
+      "ratio": 0.606,
+      "zh_wide_cells": 43
+    },
+    {
+      "key": "wire.errors.desktop.librarian_disabled",
+      "maxCells": null,
+      "en_cells": 151,
+      "zh_cells": 123,
+      "zh_rendered_cells": 123,
+      "over": null,
+      "ratio": 0.815,
+      "zh_wide_cells": 123
+    },
+    {
+      "key": "wire.errors.desktop.librarian_owner_active",
+      "maxCells": null,
+      "en_cells": 113,
+      "zh_cells": 81,
+      "zh_rendered_cells": 81,
+      "over": null,
+      "ratio": 0.717,
+      "zh_wide_cells": 81
+    },
+    {
+      "key": "wire.errors.desktop.library_asset_not_found",
+      "maxCells": null,
+      "en_cells": 33,
+      "zh_cells": 20,
+      "zh_rendered_cells": 20,
+      "over": null,
+      "ratio": 0.606,
+      "zh_wide_cells": 20
+    },
+    {
+      "key": "wire.errors.desktop.library_bad_cursor",
+      "maxCells": null,
+      "en_cells": 82,
+      "zh_cells": 48,
+      "zh_rendered_cells": 48,
+      "over": null,
+      "ratio": 0.585,
+      "zh_wide_cells": 48
+    },
+    {
+      "key": "wire.errors.desktop.library_bad_filter",
+      "maxCells": null,
+      "en_cells": 61,
+      "zh_cells": 36,
+      "zh_rendered_cells": 36,
+      "over": null,
+      "ratio": 0.59,
+      "zh_wide_cells": 36
+    },
+    {
+      "key": "wire.errors.desktop.library_chat_session_missing",
+      "maxCells": null,
+      "en_cells": 48,
+      "zh_cells": 22,
+      "zh_rendered_cells": 22,
+      "over": null,
+      "ratio": 0.458,
+      "zh_wide_cells": 22
+    },
+    {
+      "key": "wire.errors.desktop.library_content_denied",
+      "maxCells": null,
+      "en_cells": 43,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.605,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "wire.errors.desktop.library_content_missing",
+      "maxCells": null,
+      "en_cells": 62,
+      "zh_cells": 30,
+      "zh_rendered_cells": 30,
+      "over": null,
+      "ratio": 0.484,
+      "zh_wide_cells": 30
+    },
+    {
+      "key": "wire.errors.desktop.library_metadata_unavailable",
+      "maxCells": null,
+      "en_cells": 65,
+      "zh_cells": 40,
+      "zh_rendered_cells": 40,
+      "over": null,
+      "ratio": 0.615,
+      "zh_wide_cells": 40
+    },
+    {
+      "key": "wire.errors.desktop.library_not_an_image",
+      "maxCells": null,
+      "en_cells": 28,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "over": null,
+      "ratio": 0.643,
+      "zh_wide_cells": 18
+    },
+    {
+      "key": "wire.errors.desktop.library_tag_category",
+      "maxCells": null,
+      "en_cells": 41,
+      "zh_cells": 30,
+      "zh_rendered_cells": 30,
+      "over": null,
+      "ratio": 0.732,
+      "zh_wide_cells": 30
+    },
+    {
+      "key": "wire.errors.desktop.library_tag_limit",
+      "maxCells": null,
+      "en_cells": 46,
+      "zh_cells": 37,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.804,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "wire.errors.desktop.library_tag_name",
+      "maxCells": null,
+      "en_cells": 38,
+      "zh_cells": 34,
+      "zh_rendered_cells": 41,
+      "over": null,
+      "ratio": 0.895,
+      "zh_wide_cells": 55
+    },
+    {
+      "key": "wire.errors.desktop.library_tag_unknown",
+      "maxCells": null,
+      "en_cells": 31,
+      "zh_cells": 20,
+      "zh_rendered_cells": 20,
+      "over": null,
+      "ratio": 0.645,
+      "zh_wide_cells": 20
+    },
+    {
+      "key": "wire.errors.desktop.masked_credential_form",
+      "maxCells": null,
+      "en_cells": 65,
+      "zh_cells": 46,
+      "zh_rendered_cells": 46,
+      "over": null,
+      "ratio": 0.708,
+      "zh_wide_cells": 46
+    },
+    {
+      "key": "wire.errors.desktop.move_failed",
+      "maxCells": null,
+      "en_cells": 35,
+      "zh_cells": 30,
+      "zh_rendered_cells": 40,
+      "over": null,
+      "ratio": 0.857,
+      "zh_wide_cells": 79
+    },
+    {
+      "key": "wire.errors.desktop.packaged_profile_not_found",
+      "maxCells": null,
+      "en_cells": 26,
+      "zh_cells": 16,
+      "zh_rendered_cells": 16,
+      "over": null,
+      "ratio": 0.615,
+      "zh_wide_cells": 16
+    },
+    {
+      "key": "wire.errors.desktop.pass_name_or_all",
+      "maxCells": null,
+      "en_cells": 33,
+      "zh_cells": 27,
+      "zh_rendered_cells": 27,
+      "over": null,
+      "ratio": 0.818,
+      "zh_wide_cells": 27
+    },
+    {
+      "key": "wire.errors.desktop.plane_already_controlled",
+      "maxCells": null,
+      "en_cells": 41,
+      "zh_cells": 22,
+      "zh_rendered_cells": 22,
+      "over": null,
+      "ratio": 0.537,
+      "zh_wide_cells": 22
+    },
+    {
+      "key": "wire.errors.desktop.profile_name_taken",
+      "maxCells": null,
+      "en_cells": 91,
+      "zh_cells": 54,
+      "zh_rendered_cells": 54,
+      "over": null,
+      "ratio": 0.593,
+      "zh_wide_cells": 54
+    },
+    {
+      "key": "wire.errors.desktop.profile_registry_unavailable",
+      "maxCells": null,
+      "en_cells": 35,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "over": null,
+      "ratio": 0.514,
+      "zh_wide_cells": 18
+    },
+    {
+      "key": "wire.errors.desktop.project_confirm_mismatch",
+      "maxCells": null,
+      "en_cells": 74,
+      "zh_cells": 49,
+      "zh_rendered_cells": 56,
+      "over": null,
+      "ratio": 0.662,
+      "zh_wide_cells": 70
+    },
+    {
+      "key": "wire.errors.desktop.project_not_found",
+      "maxCells": null,
+      "en_cells": 39,
+      "zh_cells": 32,
+      "zh_rendered_cells": 32,
+      "over": null,
+      "ratio": 0.821,
+      "zh_wide_cells": 32
+    },
+    {
+      "key": "wire.errors.desktop.question_no_longer_pending",
+      "maxCells": null,
+      "en_cells": 46,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.522,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "wire.errors.desktop.refresh_requires_live",
+      "maxCells": null,
+      "en_cells": 27,
+      "zh_cells": 16,
+      "zh_rendered_cells": 16,
+      "over": null,
+      "ratio": 0.593,
+      "zh_wide_cells": 16
+    },
+    {
+      "key": "wire.errors.desktop.remote_refusal_silent",
+      "maxCells": null,
+      "en_cells": 46,
+      "zh_cells": 36,
+      "zh_rendered_cells": 36,
+      "over": null,
+      "ratio": 0.783,
+      "zh_wide_cells": 36
+    },
+    {
+      "key": "wire.errors.desktop.requested_not_found",
+      "maxCells": null,
+      "en_cells": 58,
+      "zh_cells": 36,
+      "zh_rendered_cells": 36,
+      "over": null,
+      "ratio": 0.621,
+      "zh_wide_cells": 36
+    },
+    {
+      "key": "wire.errors.desktop.runtime_unreachable",
+      "maxCells": null,
+      "en_cells": 70,
+      "zh_cells": 44,
+      "zh_rendered_cells": 44,
+      "over": null,
+      "ratio": 0.629,
+      "zh_wide_cells": 44
+    },
+    {
+      "key": "wire.errors.desktop.scope_kind_required",
+      "maxCells": null,
+      "en_cells": 48,
+      "zh_cells": 36,
+      "zh_rendered_cells": 36,
+      "over": null,
+      "ratio": 0.75,
+      "zh_wide_cells": 36
+    },
+    {
+      "key": "wire.errors.desktop.scope_kind_unknown",
+      "maxCells": null,
+      "en_cells": 34,
+      "zh_cells": 29,
+      "zh_rendered_cells": 29,
+      "over": null,
+      "ratio": 0.853,
+      "zh_wide_cells": 29
+    },
+    {
+      "key": "wire.errors.desktop.scope_name_required",
+      "maxCells": null,
+      "en_cells": 48,
+      "zh_cells": 36,
+      "zh_rendered_cells": 36,
+      "over": null,
+      "ratio": 0.75,
+      "zh_wide_cells": 36
+    },
+    {
+      "key": "wire.errors.desktop.scope_name_too_long",
+      "maxCells": null,
+      "en_cells": 51,
+      "zh_cells": 38,
+      "zh_rendered_cells": 38,
+      "over": null,
+      "ratio": 0.745,
+      "zh_wide_cells": 38
+    },
+    {
+      "key": "wire.errors.desktop.session_copy_terminal_only",
+      "maxCells": null,
+      "en_cells": 65,
+      "zh_cells": 42,
+      "zh_rendered_cells": 42,
+      "over": null,
+      "ratio": 0.646,
+      "zh_wide_cells": 42
+    },
+    {
+      "key": "wire.errors.desktop.session_files_artifact_missing",
+      "maxCells": null,
+      "en_cells": 80,
+      "zh_cells": 46,
+      "zh_rendered_cells": 46,
+      "over": null,
+      "ratio": 0.575,
+      "zh_wide_cells": 46
+    },
+    {
+      "key": "wire.errors.desktop.session_files_bad_cursor",
+      "maxCells": null,
+      "en_cells": 82,
+      "zh_cells": 48,
+      "zh_rendered_cells": 48,
+      "over": null,
+      "ratio": 0.585,
+      "zh_wide_cells": 48
+    },
+    {
+      "key": "wire.errors.desktop.session_files_bad_filter",
+      "maxCells": null,
+      "en_cells": 61,
+      "zh_cells": 36,
+      "zh_rendered_cells": 36,
+      "over": null,
+      "ratio": 0.59,
+      "zh_wide_cells": 36
+    },
+    {
+      "key": "wire.errors.desktop.session_files_file_not_found",
+      "maxCells": null,
+      "en_cells": 45,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.578,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "wire.errors.desktop.session_files_materialise_failed",
+      "maxCells": null,
+      "en_cells": 38,
+      "zh_cells": 24,
+      "zh_rendered_cells": 28,
+      "over": null,
+      "ratio": 0.632,
+      "zh_wide_cells": 50
+    },
+    {
+      "key": "wire.errors.desktop.session_files_not_an_artifact",
+      "maxCells": null,
+      "en_cells": 78,
+      "zh_cells": 42,
+      "zh_rendered_cells": 42,
+      "over": null,
+      "ratio": 0.538,
+      "zh_wide_cells": 42
+    },
+    {
+      "key": "wire.errors.desktop.session_is_remote_open",
+      "maxCells": null,
+      "en_cells": 253,
+      "zh_cells": 198,
+      "zh_rendered_cells": 198,
+      "over": null,
+      "ratio": 0.783,
+      "zh_wide_cells": 198
+    },
+    {
+      "key": "wire.errors.desktop.session_is_remote_write",
+      "maxCells": null,
+      "en_cells": 115,
+      "zh_cells": 85,
+      "zh_rendered_cells": 85,
+      "over": null,
+      "ratio": 0.739,
+      "zh_wide_cells": 85
+    },
+    {
+      "key": "wire.errors.desktop.session_not_found",
+      "maxCells": null,
+      "en_cells": 36,
+      "zh_cells": 26,
+      "zh_rendered_cells": 26,
+      "over": null,
+      "ratio": 0.722,
+      "zh_wide_cells": 26
+    },
+    {
+      "key": "wire.errors.desktop.skill_not_found",
+      "maxCells": null,
+      "en_cells": 15,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 0.667,
+      "zh_wide_cells": 10
+    },
+    {
+      "key": "wire.errors.desktop.sort_unknown",
+      "maxCells": null,
+      "en_cells": 28,
+      "zh_cells": 23,
+      "zh_rendered_cells": 23,
+      "over": null,
+      "ratio": 0.821,
+      "zh_wide_cells": 23
+    },
+    {
+      "key": "wire.errors.desktop.start_after_end",
+      "maxCells": null,
+      "en_cells": 30,
+      "zh_cells": 24,
+      "zh_rendered_cells": 24,
+      "over": null,
+      "ratio": 0.8,
+      "zh_wide_cells": 24
+    },
+    {
+      "key": "wire.errors.desktop.unknown_command",
+      "maxCells": null,
+      "en_cells": 15,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "over": null,
+      "ratio": 0.533,
+      "zh_wide_cells": 8
+    },
+    {
+      "key": "wire.errors.desktop.unknown_provider",
+      "maxCells": null,
+      "en_cells": 16,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 0.625,
+      "zh_wide_cells": 10
+    }
+  ]
+}

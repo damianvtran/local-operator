@@ -1,0 +1,151 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "audit_kind": "independent_translation_reaudit",
+  "locale": "zh-CN",
+  "namespace": "relay.ask",
+  "round": 2,
+  "audit_date": "2026-10-24",
+  "key_count": 11,
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "fix_commit_under_review": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "supersedes": [
+    {
+      "audit_id": "zh24a1",
+      "record": "i18n/audits/evidence/zh-CN/relay.ask/zh24a1/record.json",
+      "pre_fix_target_sha256_prefix": "f57ce2524036",
+      "reason": "Names pre-fix target bytes; superseded by this current-byte record."
+    }
+  ],
+  "supersedes_statement": "This record supersedes the pre-fix audit record(s) listed in `supersedes` for relay.ask: they name target bytes `f57ce2524036…` and earlier, which are no longer current after cb716031e3. All verdicts and hashes here are derived from revision d9f70f622d.",
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "b1d9d628481a",
+    "model": "deepseek/deepseek-flash",
+    "audit_date": "2026-10-24",
+    "independent_from_translator_session": true,
+    "independent_from_implementer": true,
+    "actual_model_source": "Session header for b1d9d628481a reports the served model deepseek/deepseek-flash; no fallback was observed during this audit.",
+    "tooling": "Read-only: local_operator.i18n.runtime.render_message for ICU rendering, audit.py and fix-verify.py in this bundle for mechanics; no catalogue, ledger, allowance, shipped or hold file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/relay.ask.json",
+      "sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/relay.ask.context.json",
+      "sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/relay.ask.json",
+      "sha256": "9c3b9ea4bc7d9fb5eded9212a1d32d1b2ec8474be7d369dc5d1bdfd38aea9fbe"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision."
+  },
+  "changed_keys": [
+    "relay.ask.context.messages",
+    "relay.ask.dismiss.moot_note"
+  ],
+  "fix_verification": {
+    "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/fix-verification.json",
+    "changed_key_count": 2,
+    "all_values_match_proposal": true,
+    "all_argument_sets_equal": true,
+    "all_renders_ok": true,
+    "over_budget": []
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "verdict": "clean",
+    "findings_total": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "finding_ids": [],
+    "unresolved_blocker_major_count": 0
+  },
+  "ledger_entry_candidate": {
+    "locale": "zh-CN",
+    "namespace": "relay.ask",
+    "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+    "translator": {
+      "agent": null,
+      "model": null,
+      "date": null
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-24",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "zh-CN core held-candidate wave 2026-10-24, round 2 at current bytes. Evidence: i18n/audits/evidence/zh-CN/relay.ask/zh24r2/record.json. All 2 applied fix(es) verified against the pre-fix proposal; no residual finding; blocker/major 0. Auditor independent of translator and implementer; current-byte round."
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report; audit.log is the executed command transcript for this namespace; fix-verification.json, mechanical-raw.json, runtime-mechanical.json and pseudo-evidence.json are machine output. String-level audit only: no native terminal, relay SPA or rendered-frame pass is claimed.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/audit.log",
+      "sha256": "09276ebcaff5ecc40fc3b203ea5ab48d71e426cdae2b074b9105fc5fc1074bc8"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/audit.py.txt",
+      "sha256": "8c396c384520289bed2de98ff0119346a2c96c39b2ddfab0407e6aebf5dc3611"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/relay.ask.compact.txt",
+      "sha256": "710535ffcd80d1789c9dc89c334eb97ad8a9410caaac5e88323f2988c726f94e"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/relay.ask.pairs.txt",
+      "sha256": "7d6b5022a67fabaa61eb131caf637f1a28df19f402fa669f63e87f2dfb462900"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/fix-verification.json",
+      "sha256": "bb4a73d6c6c525127b937553e7a588cb662eaf1607fc06bba090a8d2499ee95b"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/fix-verify.py.txt",
+      "sha256": "8d0df4677ddd17c018738ef0282f6fb4ab419d531edbfcfe5def843b0d29bf02"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/mechanical-raw.json",
+      "sha256": "7540f887975473b65c7131ca81de1f917cecabc3ff680973bb8626ff54d052de"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/pseudo-evidence.json",
+      "sha256": "19cc5c3d35d0d417ba6734074f306677d27cf3d9794b9ef2cf575ce48710ddbf"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/report.md",
+      "sha256": "98786c6b875ea2b49881fc26add7f5987c92afb23ebfb03f67b5ef0592ba3d8c"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/relay.ask/zh24r2/runtime-mechanical.json",
+      "sha256": "f6a3f7fb19aaa34d3928d852d5ae31f6574c9f5230a7381d653d0fca07cc4aed"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.desktop",
+  "record": "i18n/audits/evidence/zh-CN/wire.errors.desktop/zh24r2/record.json",
+  "supersedes": [
+    "i18n/audits/evidence/zh-CN/wire.errors.desktop/zh24a1/record.json",
+    "i18n/audits/evidence/zh-CN/wire.errors.desktop/zhca1/record.json"
+  ],
+  "provenance": "Bundle receipt for independent re-audit zh24r2 written 2026-10-24 by translation-auditor (lopdev team), session b1d9d628481a, served model deepseek/deepseek-flash; this manifest is not another audit.",
+  "hashes": {
+    "audit.log": "35e23015315508505389ffb649ed84b0704a84f5884e81979560d45a73667d0d",
+    "audit.py.txt": "8c396c384520289bed2de98ff0119346a2c96c39b2ddfab0407e6aebf5dc3611",
+    "wire.errors.desktop.compact.txt": "aac1cb92afbbbb4d1d3bd2ad257f207523d024d5c681728f0df5e4de450edc18",
+    "wire.errors.desktop.pairs.txt": "46fc9f102597fe6f544f777bff5ace3f900a22eaa9bbacc3acf1564adb1fe52e",
+    "fix-verification.json": "133c29908900481e98e1254039f11a6b47290fc0b159bdcc559721788352c4c6",
+    "fix-verify.py.txt": "8d0df4677ddd17c018738ef0282f6fb4ab419d531edbfcfe5def843b0d29bf02",
+    "mechanical-raw.json": "fb8e4bebf51add22f2a476c09cce51452553a7fc275cbfc9960b1b8eacb8c286",
+    "pseudo-evidence.json": "94b161466539ad44a730892344f09fc5548b527c3a400a8dd277dd36fbc1d63a",
+    "report.md": "ed143695374ea21f2f5c7a276c99d27349655249389d53dcefa3272dd13e6744",
+    "runtime-mechanical.json": "34abfcd046d748c1bcc009f544cc8351b657e22d4c59e8d9e7311711563c1291"
+  }
+}

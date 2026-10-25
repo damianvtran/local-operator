@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "wire.memory",
+  "record": "i18n/audits/evidence/zh-CN/wire.memory/zh24r2/record.json",
+  "supersedes": [
+    "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/record.json",
+    "i18n/audits/evidence/zh-CN/wire.memory/zhca1/record.json"
+  ],
+  "provenance": "Bundle receipt for independent re-audit zh24r2 written 2026-10-24 by translation-auditor (lopdev team), session b1d9d628481a, served model deepseek/deepseek-flash; this manifest is not another audit.",
+  "hashes": {
+    "audit.log": "51aef7c5f16af2989f3a060382869acc463428141cddba29bd748c589969234c",
+    "audit.py.txt": "8c396c384520289bed2de98ff0119346a2c96c39b2ddfab0407e6aebf5dc3611",
+    "wire.memory.compact.txt": "6d90774f8aa543c050e449e0535568761d48b555643e57e80d8a0ecdd9be247c",
+    "wire.memory.pairs.txt": "265a6f1820e68b6f675094b88df383dc846176ed845b70c5f896efa3a9875e92",
+    "fix-verification.json": "46344448eaac987e3c32ca329fa01c51c237e9cafe9db860ee4a74193167ab3e",
+    "fix-verify.py.txt": "8d0df4677ddd17c018738ef0282f6fb4ab419d531edbfcfe5def843b0d29bf02",
+    "mechanical-raw.json": "79ac00023afb51b2cd921edfa6c392dcada618793efa16ff8f9924b07e702b65",
+    "pseudo-evidence.json": "87da9f55b0c333a33bfbe6fcf22a674a68843ed5586cfef236036ca8e64a651f",
+    "report.md": "de3ce09dc87bf994e0693dbafd75b9e0fd35a6cfc6d05900b6923562c31e7a81",
+    "runtime-mechanical.json": "5ad8f1859e6c8dd2f5b09e74c768f6507c676e8df80f1ccc0180272279d898e6"
+  }
+}
