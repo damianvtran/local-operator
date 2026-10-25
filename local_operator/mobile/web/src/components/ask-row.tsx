@@ -65,7 +65,7 @@ export function AskRow({ entry }: { entry: TranscriptEntry }) {
 				</span>
 				<span className="min-w-0 flex-1 text-body-sm text-ink-muted">{entry.text}</span>
 				{hasDetails ? (
-					<span aria-hidden className="shrink-0 text-ink-dim">
+					<span aria-hidden className="lo-directional shrink-0 text-ink-dim">
 						{open ? "▾" : "▸"}
 					</span>
 				) : null}

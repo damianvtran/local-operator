@@ -33,6 +33,7 @@
  */
 import { cn } from "../lib/cn";
 import { dockAsk, outstandingAsks, questionTally } from "../lib/asks";
+import { isolate } from "../lib/bidi";
 import { messageRuntime } from "../store";
 import type { PendingAsk } from "../types";
 
@@ -98,12 +99,14 @@ export function AskDock({
 						quiet ? "text-ink-muted" : "text-ink",
 					)}
 				>
-					· {preview}
+					{/* A question is arbitrary text (any language, possibly a path); the run
+				   is isolated so the RTL document cannot re-order its edges. */}
+				· {isolate(preview)}
 				</span>
 			) : (
 				<span className="min-w-0 flex-1" />
 			)}
-			<span aria-hidden className={cn("shrink-0", quiet ? "text-ink-dim" : "text-accent")}>
+			<span aria-hidden className={cn("lo-directional shrink-0", quiet ? "text-ink-dim" : "text-accent")}>
 				▸
 			</span>
 		</button>

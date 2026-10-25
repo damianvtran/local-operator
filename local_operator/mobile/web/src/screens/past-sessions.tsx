@@ -20,10 +20,12 @@ import { SessionTagLine } from "../components/session-tag-line";
 import { formatRelative } from "../lib/format";
 import { resumeRefusalText } from "../lib/refusal";
 import { navigate } from "../router";
-import { messageRuntime } from "../store";
+import { messageRuntime, useLocaleSnapshot } from "../store";
 import type { PastSession } from "../types";
 
 export function PastSessionsScreen() {
+	/* Repaint on a live language write (QA Q-1): `t()` alone never re-renders. */
+	useLocaleSnapshot();
 	const [query, setQuery] = useState("");
 	const [sessions, setSessions] = useState<PastSession[] | null>(null);
 	const [error, setError] = useState("");
@@ -78,7 +80,7 @@ export function PastSessionsScreen() {
 					aria-label={messageRuntime.t("relay.session.past.back")}
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
-					<span aria-hidden className="lo-directional">‹</span>
+					<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 				</button>
 				<h1 className="text-heading">{messageRuntime.t("relay.session.past.heading")}</h1>
 			</header>

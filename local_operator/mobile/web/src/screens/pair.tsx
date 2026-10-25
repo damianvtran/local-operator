@@ -140,7 +140,7 @@ export function PairScreen() {
 					aria-label="back to sessions"
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
-					<span aria-hidden className="lo-directional">‹</span>
+					<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 				</button>
 				<h1 className="min-w-0 flex-1 truncate text-body font-medium">Pair this phone</h1>
 			</header>

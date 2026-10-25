@@ -313,7 +313,7 @@ function AgentHeader({
 				aria-label="back to parent conversation"
 				className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 			>
-				<span aria-hidden className="lo-directional">‹</span>
+				<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			</button>
 			<div className="min-w-0 flex-1">
 				<p className="truncate text-body-sm font-medium">{shown?.label || "Agent"}</p>

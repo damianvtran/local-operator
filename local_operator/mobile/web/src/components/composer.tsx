@@ -36,6 +36,7 @@ import { Sheet } from "./ui/sheet";
 import { UsageSheet } from "./usage-sheet";
 import { WorkingDirectoryChip } from "./directory-sheet";
 import { cn } from "../lib/cn";
+import { textDirection } from "../lib/bidi";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
 import type { PromptImage, SessionProjection, SlashCommand } from "../types";
 
@@ -386,6 +387,11 @@ const SENDING_HINT = `${CONNECTING_STATUS} — send again when this one lands.`;
    system-ui — 4.5px over — this one measures 77.8px, which survives narrower
    viewports and font fallbacks too. The product name is carried by the app
    shell (document title, header mark). */
+/* English until the composer's own copy is extracted (QA Q-3). The field's
+   DIRECTION is what keeps this readable: an empty draft resolves LTR (the
+   placeholder's own language), so the RTL document cannot move its trailing
+   ellipsis to the visual start ("…Message", QA Q-6), and the field follows the
+   draft's own first strong character once the reader types. */
 const COMPOSER_PLACEHOLDER = "Message…";
 
 /* THE CLUSTER'S BOX, IN ONE PLACE. The composer is the biggest thing on this
@@ -482,6 +488,7 @@ export function ComposerFrame() {
 						aria-hidden
 						tabIndex={-1}
 						placeholder={COMPOSER_PLACEHOLDER}
+						dir="ltr"
 						className={COMPOSER_FIELD}
 					/>
 				</div>
@@ -1470,6 +1477,7 @@ export function Composer({
 							}
 						}}
 						placeholder={COMPOSER_PLACEHOLDER}
+						dir={textDirection(text)}
 						disabled={disabled}
 						rows={1}
 						enterKeyHint="send"

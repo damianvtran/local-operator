@@ -37,7 +37,7 @@ import { cn } from "../lib/cn";
 import { assetPrompt, formatBytes, kindLabel, originLabel } from "../lib/library";
 import { formatRelative } from "../lib/format";
 import { navigate, navigateUp } from "../router";
-import { setDraft } from "../store";
+import { setDraft, useLocaleSnapshot } from "../store";
 import type { LibraryAsset } from "../types";
 
 const TEXT_PREVIEW_LIMIT = 32_000;
@@ -193,6 +193,8 @@ function commandId(): string {
 }
 
 export function LibraryAssetScreen({ assetId }: { assetId: string }) {
+	/* Repaint on a live language write (QA Q-1): `t()` alone never re-renders. */
+	useLocaleSnapshot();
 	const [asset, setAsset] = useState<LibraryAsset | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
@@ -270,7 +272,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 						aria-label="back to library"
 						className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 					>
-						<span aria-hidden className="lo-directional">‹</span>
+						<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 					</button>
 					<h1 className="text-heading text-ink">asset</h1>
 				</header>
@@ -295,7 +297,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 					aria-label="back to library"
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
-					<span aria-hidden className="lo-directional">‹</span>
+					<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 				</button>
 				<h1 className="min-w-0 flex-1 truncate px-1 text-heading text-ink">{asset.name}</h1>
 				<button

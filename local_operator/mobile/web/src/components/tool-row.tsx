@@ -190,7 +190,7 @@ export function ToolRow({
 					</span>
 				) : null}
 				{hasDetails ? (
-					<span className="shrink-0 text-ink-dim" aria-hidden>
+					<span className="lo-directional shrink-0 text-ink-dim" aria-hidden>
 						{open ? "▾" : "▸"}
 					</span>
 				) : null}

@@ -216,7 +216,15 @@
 }
 
 /* Navigation glyphs describe travel, not text: mirror only the marked glyphs,
-   never media, brand marks, send/up icons, or the whole technical island. */
+   never media, brand marks, send/up icons, or the whole technical island.
+
+   TWO GLYPH CLASSES, ONE FLIP EACH. Non-mirrored glyphs (▸ ▾ ↳) need only this
+   class: the transform is what makes them point the RTL way. Bidi-mirrored
+   glyphs — the back control's U+2039 `‹` has `Bidi_Mirrored=1` — are already
+   mirrored by the bidi algorithm inside RTL text, so their call sites ALSO carry
+   `dir="ltr"` (the technical-island rule above isolates the glyph) and the
+   transform is the only flip that applies. Without it the two flips cancel and
+   the back control points the LTR way in an RTL screen (design round 1, D5). */
 .lo-directional {
 	display: inline-block;
 }

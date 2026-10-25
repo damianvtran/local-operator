@@ -57,6 +57,7 @@ import {
 	useCapabilities,
 	useMarkNotice,
 	usePinMarks,
+	useLocaleSnapshot,
 	useSessions,
 } from "../store";
 import { WideViewButton } from "../components/wide-view-button";
@@ -624,8 +625,16 @@ function SessionCard({
 				    touch (a row drag is a tap), and `main` itself became horizontally
 				    scrollable. `min-w-0 truncate` lets both spans share the row; the
 				    row can never exceed it. */}
-				<span dir="ltr" className="ms-auto min-w-0 truncate font-mono text-mono-sm text-ink-dim">
-					{s.model_label}
+				{/* The label sits at the ROW's far end, so `ms-auto` must resolve
+				    against the ROW's direction, not the label's. With `dir="ltr"` on
+				    this span the margin computed as `margin-left:auto` inside an RTL
+				    flex row: the 322px of free space stayed at the trailing (left)
+				    edge and the label hugged the cwd instead of pinning to it
+				    (design round 1, D1 / QA Q-4). Keep the RTL outer span owning the
+				    margin and isolate the model text itself; long labels still
+				    truncate and short ones pin to the trailing edge. */}
+				<span className="ms-auto min-w-0 truncate font-mono text-mono-sm text-ink-dim">
+					<bdi dir="ltr">{s.model_label}</bdi>
 				</span>
 			</div>
 		</button>
@@ -879,6 +888,9 @@ function usePaintedRows(
 }
 
 export function SessionListScreen() {
+	/* A live language write changes copy this screen has already painted; the
+	   snapshot is the ONE locale authority, so subscribing repaints it (QA Q-1). */
+	useLocaleSnapshot();
 	const { sessions, connected, revision } = useSessions();
 	const capabilities = useCapabilities();
 	/* FLIP settle state: per session id, the card ELEMENT measured last time and

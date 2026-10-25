@@ -209,3 +209,49 @@ describe("retainConfigStream", () => {
 		}
 	});
 });
+
+// The FIRST CONTENT PAINT (i18n review round 1, QA Q-2 / design D3). A cold
+// deep link used to paint English copy before the baseline frame arrived, so
+// `main.tsx` resolves the baseline BEFORE mounting. These pin the resolver's
+// contract: it takes the first frame of the SAME config route, applies it
+// through the one authority, and leaves the English default when the route is
+// absent or the stream never speaks.
+describe("resolveInitialLocale", () => {
+	const frame = (language: string) =>
+		new Response(`event: config\ndata: {"changed_keys":[],"language":"${language}"}\n\n`, {
+			headers: { "content-type": "text/event-stream" },
+		});
+
+	it("publishes the baseline frame so lang/dir and copy agree on the first paint", async () => {
+		vi.resetModules();
+		const fresh = await import("./store");
+		const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => frame("ur"));
+		vi.stubGlobal("fetch", fetchMock);
+		await fresh.resolveInitialLocale();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/config/events");
+		const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
+		expect(result.current.uiLocale).toBe("ur");
+		expect(result.current.direction).toBe("rtl");
+		expect(document.documentElement.lang).toBe("ur");
+		expect(document.documentElement.dir).toBe("rtl");
+		unmount();
+	});
+
+	it("keeps the English default when the route is absent or stalled", async () => {
+		const routes: Array<() => Promise<Response>> = [
+			() => Promise.resolve(new Response(null, { status: 404 })),
+			() => Promise.reject(new Error("offline")),
+		];
+		for (const route of routes) {
+			vi.resetModules();
+			const fresh = await import("./store");
+			vi.stubGlobal("fetch", vi.fn(route));
+			await fresh.resolveInitialLocale();
+			const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
+			expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: expect.any(Number) });
+			expect(document.documentElement.dir).toBe("ltr");
+			unmount();
+		}
+	});
+});

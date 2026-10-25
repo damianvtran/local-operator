@@ -53,6 +53,7 @@ import {
 	retainSessionListStream,
 	usePinMarks,
 	useProjection,
+	useLocaleSnapshot,
 	useRouteTitle,
 	useSessions,
 } from "../store";
@@ -219,7 +220,7 @@ function Header({
 				aria-label={messageRuntime.t("relay.session.view.back")}
 				className={cn(HEADER_CONTROL, "text-ink-muted")}
 			>
-				<span aria-hidden className="lo-directional">‹</span>
+				<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			</button>
 			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
@@ -434,6 +435,9 @@ export function SessionScreen({
 	sessionId: string;
 	jobId?: string;
 }) {
+	/* A live language write changes copy this screen has already painted; the
+	   snapshot is the ONE locale authority, so subscribing repaints it (QA Q-1). */
+	useLocaleSnapshot();
 	const { projection, connected } = useProjection(sessionId);
 	/* THE ROUTE'S OWN TAB TITLE (U4, batch 2). A phone's task switcher and share
 	 * sheet read `document.title`, and a session wearing the list's `(3) local
@@ -758,7 +762,7 @@ export function SessionScreen({
 							aria-label={messageRuntime.t("relay.session.view.back")}
 							className={cn(HEADER_CONTROL, "text-ink-muted")}
 						>
-							<span aria-hidden className="lo-directional">‹</span>
+							<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 						</button>
 						{/* The title's own slot, empty: `truncate` + `flex-1` in a row whose
 						    height is set by the control beside it. */}

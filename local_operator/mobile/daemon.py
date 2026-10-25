@@ -9618,6 +9618,10 @@ def _render_login_html(*, error: bool = False) -> str:
     return re.sub(r"__([A-Z_]+)__", lambda match: values[match[1]], _LOGIN_HTML)
 
 
+# The password input alone carries `dir="ltr"` (design round 1, D7 / QA Q-9): the
+# page is `dir="rtl"` for Urdu, and a field inheriting it puts the caret, and any
+# Latin password, on the wrong edge. The label, submit and error keep the page
+# direction — they are translated copy.
 _LOGIN_HTML = """<!doctype html>
 <html lang="__LANG__" dir="__DIR__">
 <head>
@@ -9733,7 +9737,7 @@ _LOGIN_HTML = """<!doctype html>
   __ERROR__
   <div class="field">
     <label for="password">__PASSWORD__</label>
-    <input id="password" type="password" name="password"
+    <input id="password" type="password" name="password" dir="ltr"
            autocomplete="current-password" autofocus required>
   </div>
   <button type="submit">__SUBMIT__</button>

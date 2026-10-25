@@ -458,12 +458,39 @@ def _planned_files(emitted: Path) -> dict[Path, str]:
     # (the generator tests build mini-trees) without binding them to relay.shell.
     # The committed bundle's exact contents are pinned by test_generate's
     # ownership test, so a silent empty bundle cannot ship.
+    #
+    # ONLY SELECTABLE LOCALES ARE EMITTED (review round 2, MINOR). The runtime's
+    # `uiLocaleFor` selects a non-English UI locale only when EVERY owned
+    # namespace carries the whole English key set for it; a locale that misses
+    # one owned namespace or one key paints English as a whole and can never have
+    # its bundle read. Emitting it would ship dead copy — measured at 43,129 B for
+    # eight locales against 15,445 B for the en-only baseline — so the set is
+    # intersected with the English key sets here, mirroring that runtime rule.
+    # `en` is always present: it is the fallback every partial locale reads.
+    zh = catalogues.catalogue_root()
     owned: dict[str, dict[str, dict[str, str]]] = {}
     for namespace in OWNED_SPA_NAMESPACES:
+        en_path = en_dir / f"{namespace}.json"
+        if not en_path.is_file():
+            continue
+        english = _read_json(en_path)
         for locale in _shipped_locales():
-            path = catalogues.catalogue_root() / locale / f"{namespace}.json"
-            if path.is_file():
-                owned.setdefault(namespace, {})[locale] = _read_json(path)
+            path = zh / locale / f"{namespace}.json"
+            if not path.is_file():
+                continue
+            messages = _read_json(path)
+            if locale == "en" or set(english) <= set(messages):
+                owned.setdefault(namespace, {})[locale] = messages
+    # A locale is only kept when it cleared EVERY owned namespace above.
+    covering = set(owned[next(iter(owned))]) if owned else set()
+    for namespace in owned:
+        covering &= set(owned[namespace])
+    for namespace in list(owned):
+        owned[namespace] = {
+            locale: messages
+            for locale, messages in owned[namespace].items()
+            if locale in covering or locale == "en"
+        }
     planned[REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"] = _render_bundled_module(
         owned
     )

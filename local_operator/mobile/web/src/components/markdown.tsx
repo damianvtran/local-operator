@@ -13,6 +13,7 @@
  * surface, and a javascript: URL in agent output must never be clickable.
  */
 import type { ReactNode } from "react";
+import { isolateTechnicalRuns } from "../lib/bidi";
 
 let keySeq = 0;
 function key(): string {
@@ -36,7 +37,11 @@ function renderInline(text: string): ReactNode[] {
 	let last = 0;
 	for (const m of text.matchAll(INLINE_RE)) {
 		const idx = m.index ?? 0;
-		if (idx > last) out.push(text.slice(last, idx));
+		if (idx > last) {
+			/* Plain prose: paths and URLs get an isolate so an RTL paragraph cannot
+			   detach their leading "/" or trailing punctuation (QA Q-6). */
+			out.push(isolateTechnicalRuns(text.slice(last, idx)));
+		}
 		const [full, code, linkText, href, bold1, bold2, strike, italic1, italic2] = m;
 		if (code !== undefined) {
 			out.push(
