@@ -330,12 +330,52 @@ def _write_pinned_unit(unit: Path, generation: Path, port: int) -> None:
         raise ProbeFailure(f"generation interpreter is missing: {old_image}")
     pinned = rendered.replace(current_image, str(old_image), 1)
     unit.parent.mkdir(parents=True, exist_ok=True)
+    # systemd opens append: targets before Python starts. The normal installer
+    # creates this parent for the same fresh-store case; direct unit writes must too.
+    relay.log_path().parent.mkdir(parents=True, exist_ok=True)
     unit.write_text(pinned, encoding="utf-8")
     _require(["systemctl", "--user", "daemon-reload"])
 
 
+def _write_readiness_diagnostics(observed: dict[str, Any]) -> None:
+    """Preserve bounded, non-secret evidence when readiness never converges."""
+    journal_tail = "journalctl unavailable"
+    if shutil.which("journalctl") is not None:
+        try:
+            journal = _run(
+                ["journalctl", "--user", "-u", relay.SYSTEMD_UNIT, "-n", "80", "--no-pager"],
+                timeout=5.0,
+            )
+            journal_tail = (journal.stdout + "\n" + journal.stderr).strip()[-2000:]
+        except ProbeFailure as exc:
+            journal_tail = str(exc)
+    log = relay.log_path()
+    try:
+        network_tail = log.read_text(encoding="utf-8", errors="replace")[-2000:].strip()
+    except OSError as exc:
+        network_tail = f"unavailable: {exc}"
+    payload = {
+        "last_observation": observed,
+        "journal_tail": journal_tail,
+        "network_log_path": str(log),
+        "network_log_tail": network_tail,
+    }
+    destination = (
+        Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()) / "native-relay-readiness.json"
+    )
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        # A secondary artifact error must not hide the actual readiness failure.
+        pass
+
+
 def _start_and_wait(generation: Path, sha: str) -> dict[str, Any]:
     _require(["systemctl", "--user", "start", relay.SYSTEMD_UNIT])
+    observed: dict[str, Any] = {}
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         observed = _observation()
@@ -344,6 +384,7 @@ def _start_and_wait(generation: Path, sha: str) -> dict[str, Any]:
             _assert_identity(observed, generation, sha, "service start", expected_stale=True)
             return observed
         time.sleep(0.1)
+    _write_readiness_diagnostics(observed)
     raise ProbeFailure(f"relay did not become ready on its advertised source {sha}")
 
 
