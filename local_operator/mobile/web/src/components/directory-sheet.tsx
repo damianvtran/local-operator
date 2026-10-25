@@ -217,13 +217,13 @@ export function DirectorySheet({
 						   ``focus:`` variant, matching the list's own search input --
 						   this sheet's field is the only place in the app that had one,
 						   and it would now be a no-op. */
-						className="min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-transparent px-3 font-mono text-mono-sm text-ink outline-none placeholder:text-ink-dim"
+						className="min-h-11 min-w-0 flex-1 rounded-sm bg-transparent px-3 font-mono text-mono-sm text-ink outline-none placeholder:text-ink-dim"
 					/>
 					<button
 						type="button"
 						onClick={() => void commit(typed)}
 						disabled={busy || !typed.trim()}
-						className="flex min-h-11 shrink-0 items-center justify-center rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-elevated disabled:text-ink-disabled"
+						className="flex min-h-11 shrink-0 items-center justify-center rounded-sm bg-surface px-3 text-body-sm text-ink active:bg-elevated disabled:text-ink-disabled"
 					>
 						{busy ? "moving…" : "change"}
 					</button>

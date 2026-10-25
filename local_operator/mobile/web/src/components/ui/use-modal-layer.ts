@@ -22,8 +22,20 @@ export function useModalLayer({ open, onClose, returnFocusRef, initialFocusRef }
 		openerRef.current = returnFocusRef?.current ?? (document.activeElement instanceof HTMLElement
 			? document.activeElement
 			: null);
-		const background = Array.from(dialog.parentElement?.children ?? [])
-			.filter((node): node is HTMLElement => node instanceof HTMLElement && node !== dialog);
+		/* A gate sheet may be nested in the header while a drawer is a direct
+		   column child. Walk siblings at every ancestor level so BOTH shapes
+		   inert the whole background, without a portal or inerting the modal's
+		   own ancestors (which would disable the dialog too). */
+		const background: HTMLElement[] = [];
+		let branch: HTMLElement = dialog;
+		while (branch.parentElement) {
+			const parent = branch.parentElement;
+			for (const node of Array.from(parent.children)) {
+				if (node instanceof HTMLElement && node !== branch) background.push(node);
+			}
+			if (parent === document.body) break;
+			branch = parent;
+		}
 		const previous = background.map((node) => ({
 			node,
 			inert: node.hasAttribute("inert"),

@@ -15,8 +15,14 @@ export function Snackbar({ text, danger = false, onDismiss }: {
 	const origin = useRef<{ x: number; y: number } | null>(null);
 	useEffect(() => {
 		if (!text) return;
-		const timer = setTimeout(() => dismiss.current(), 4000);
-		return () => clearTimeout(timer);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const arm = () => {
+			clearTimeout(timer);
+			if (document.visibilityState !== "hidden") timer = setTimeout(() => dismiss.current(), 4000);
+		};
+		arm();
+		document.addEventListener("visibilitychange", arm);
+		return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", arm); };
 	}, [text]);
 	if (!text) return null;
 	return <div className="lo-snack absolute inset-x-4 bottom-[calc(5.5rem+env(safe-area-inset-bottom))] z-20 flex items-center gap-2 rounded-md bg-elevated ps-4 pe-1 py-1 shadow-overlay"

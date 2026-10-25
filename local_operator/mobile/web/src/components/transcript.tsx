@@ -1,3 +1,4 @@
+import { useScrollCues } from "../lib/use-scroll-cues";
 /**
  * The transcript: user bubbles, assistant prose (markdown), one-line tool
  * rows, quiet notices and compaction markers. Rendered as a tail window of
@@ -473,6 +474,7 @@ export function Transcript({
 	const [hasMore, setHasMore] = useState(true);
 	const [loadingOlder, setLoadingOlder] = useState(false);
 	const scrollRef = useRef<HTMLDivElement>(null);
+	const scrollCue = useScrollCues();
 	const pinnedRef = useRef(true);
 	/* Auto-load trigger guard: one in-flight page at a time. */
 	const loadingRef = useRef(false);
@@ -773,7 +775,7 @@ export function Transcript({
 
 	return (
 		<div
-			ref={scrollRef}
+			ref={node => { scrollRef.current = node; return scrollCue(node); }}
 			onScroll={onScroll}
 			className={cn(
 				/* overflow-x-hidden as the backstop: break-words on the rows should

@@ -245,7 +245,15 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
             # drift gate compares bytes, so a formatter pass after generation
             # would make the check unreproducible (review round 2, MAJOR).
             call = f'    return Msg(\n        "{key}",\n        {{{pairs}}},\n    )'
-        body.append(f"def {fname}({signature}) -> Msg:\n{call}\n")
+        header = f"def {fname}({signature}) -> Msg:"
+        # A namespace's longer function name plus several typed placeholders can
+        # exceed the same 100-column gate as the return statement. Wrap the
+        # generated signature too, rather than hand-editing one generated key
+        # module or giving this namespace a lint exemption.
+        if len(header) > 100:
+            wrapped = signature.replace(", ", ",\n    ")
+            header = f"def {fname}(\n    {wrapped},\n) -> Msg:"
+        body.append(f"{header}\n{call}\n")
     if body:
         # Imports only when something uses them: a namespace stub with zero
         # keys yet must not trip flake8's unused-import rule (F401) — the

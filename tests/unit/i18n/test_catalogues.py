@@ -200,11 +200,11 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     namespaces = (
         "cli.exec_remote_help",
         "relay.approvals",
+        "relay.ask",
+        "relay.asks",
         # Borderless phone chrome carries its own audited namespace; existing
         # English labels stay untouched while all seven locales join the wave.
         "relay.chrome",
-        "relay.ask",
-        "relay.asks",
         "relay.session.tags",
         "tui.asks",
         "tui.authoring",

@@ -41,10 +41,10 @@ export function WideViewButton({ className }: { className?: string }) {
 			aria-label="wide view"
 			aria-pressed={wide}
 			className={cn(
-				"flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md border text-meta select-none",
+				"flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-meta select-none",
 				wide
-					? "border-accent bg-accent text-on-accent active:bg-accent-active"
-					: "border-control bg-surface text-ink-muted active:bg-elevated",
+					? "bg-accent text-on-accent active:bg-accent-active"
+					: "bg-surface text-ink-muted active:bg-elevated",
 				className,
 			)}
 		>

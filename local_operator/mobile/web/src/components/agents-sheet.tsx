@@ -39,7 +39,7 @@ function RootRow({ sessionId, onNavigate }: { sessionId: string; onNavigate: () 
 				onNavigate();
 				navigate(`/s/${encodeURIComponent(sessionId)}`);
 			}}
-			className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-left active:bg-surface"
+			className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-start active:bg-surface"
 		>
 			<span aria-hidden className="w-4 shrink-0 text-center text-ink-dim">⌂</span>
 			<span className="min-w-0 flex-1 truncate text-body-sm text-ink">Root conversation</span>
@@ -60,7 +60,7 @@ function Group({
 }) {
 	if (agents.length === 0) return null;
 	return (
-		<section className="border-t border-hairline px-3 py-2 first:border-t-0">
+		<section className="px-3 py-2 first:border-t-0">
 			<h3 className="mb-1 text-meta font-medium text-ink-dim">{label}</h3>
 			{agents.map((agent) => (
 				<AgentRow

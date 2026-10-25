@@ -1,3 +1,4 @@
+import { useScrollCues } from "../../lib/use-scroll-cues";
 /**
  * Sheet — the bottom-anchored overlay every picker on the phone uses
  * (model sheet, effort rungs, slash sheet, subagent detail). Bottom sheets
@@ -37,6 +38,7 @@ export function Sheet({
 	initialFocusRef?: RefObject<HTMLElement | null>;
 }) {
 	const titleId = useId();
+	const scrollCue = useScrollCues();
 	const [dragY, setDragY] = useState(0);
 	const panelRef = useRef<HTMLDivElement>(null);
 	const drag = useRef<{ y: number; at: number; pointer: number } | null>(null);
@@ -170,7 +172,7 @@ export function Sheet({
 						</button>
 					</div>
 				) : null}
-				<div className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
+				<div ref={scrollCue} className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
 					{children}
 				</div>
 			</div>

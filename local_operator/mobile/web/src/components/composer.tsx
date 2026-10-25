@@ -244,7 +244,7 @@ function SlashSheet({
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="mb-1 min-h-11 rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 				{filtered.map((c) => (
 					<button
@@ -456,7 +456,7 @@ function PaperclipGlyph() {
 export function ComposerFrame() {
 	return <div className={COMPOSER_SHELL} aria-hidden>
 		<div className={COMPOSER_INPUT_ROW}>
-			<div className={COMPOSER_FIELD_BOX}><textarea disabled rows={1} tabIndex={-1} placeholder={COMPOSER_PLACEHOLDER} className={COMPOSER_FIELD} /></div>
+			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={COMPOSER_PLACEHOLDER} className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, "text-ink-disabled")}><PaperclipGlyph /></span>
 			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
 			<span className={cn(COMPOSER_ROUND, "bg-sunken text-ink-disabled")}>↑</span>
@@ -1200,7 +1200,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={() => void send("continue", "prompt")}
-					className="flex min-h-11 items-center justify-center rounded-sm border border-control bg-surface text-body-sm text-ink active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-sm bg-surface text-body-sm text-ink active:bg-elevated"
 				>
 					{resumeLabel}
 				</button>
@@ -1222,10 +1222,10 @@ export function Composer({
 				   than by colour alone. */
 				<div
 					className={cn(
-						"rounded-sm border px-3 py-2 text-body-sm",
+						"rounded-sm px-3 py-2 text-body-sm",
 						noticeTone === "success"
-							? "border-success-border bg-success-wash text-success"
-							: "border-control bg-elevated text-ink",
+							? "bg-success-wash text-success"
+							: "bg-elevated text-ink",
 					)}
 				>
 					<p role="status" aria-live="polite">{notice}</p>
@@ -1233,7 +1233,7 @@ export function Composer({
 			) : null}
 
 			{error ? (
-				<div className="rounded-sm border border-danger-border bg-danger-wash px-3 py-2 text-body-sm text-danger">
+				<div className="rounded-sm bg-danger-wash px-3 py-2 text-body-sm text-danger">
 					<p role="alert" aria-live="assertive">{error}</p>
 					{retryPending ? (
 						<>
@@ -1243,7 +1243,7 @@ export function Composer({
 							<button
 								type="button"
 								onClick={() => void send(text)}
-								className="mt-2 min-h-11 rounded-sm border border-danger-border px-3"
+								className="mt-2 min-h-11 rounded-sm px-3"
 							>
 								{RETRY_BUTTON_LABEL}
 							</button>
@@ -1263,7 +1263,7 @@ export function Composer({
 							type="button"
 							onClick={() => removeImage(img.preview)}
 							aria-label="remove attachment"
-							className="relative size-14 overflow-hidden rounded-sm border border-control"
+							className="relative size-14 overflow-hidden rounded-sm border-control"
 						>
 							<img
 								src={img.preview}
@@ -1359,7 +1359,7 @@ export function Composer({
 					aria-label="attach image"
 					className={cn(
 						COMPOSER_ROUND,
-						"border border-control text-ink-muted active:bg-elevated disabled:opacity-50",
+						"text-ink-muted active:bg-elevated disabled:opacity-50",
 					)}
 				>
 					<PaperclipGlyph />
@@ -1384,10 +1384,10 @@ export function Composer({
 									: "start voice input"
 						}
 						className={cn(
-							"flex size-11 shrink-0 items-center justify-center rounded-full border active:bg-elevated disabled:opacity-50",
+							"flex size-11 shrink-0 items-center justify-center rounded-full active:bg-elevated disabled:opacity-50",
 							dictation === "recording"
-								? "border-danger-border bg-danger-wash text-danger"
-								: "border-control text-ink-muted",
+								? "bg-danger-wash text-danger"
+								: "text-ink-muted",
 						)}
 					>
 						{dictation === "transcribing" ? (

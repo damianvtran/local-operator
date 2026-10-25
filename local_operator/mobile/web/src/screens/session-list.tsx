@@ -1,3 +1,4 @@
+import { useScrollCues } from "../lib/use-scroll-cues";
 /**
  * Session list (`#/`) — the phone's home. One card per live session, kept
  * current by the list SSE; footer row with new session, past sessions,
@@ -41,6 +42,7 @@ import {
 	startSession,
 } from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
+import { SessionTagLine } from "../components/session-tag-line";
 import { Drawer, type DrawerItem } from "../components/ui/drawer";
 import { Snackbar } from "../components/ui/snackbar";
 import { Chip } from "../components/ui/chip";
@@ -469,9 +471,9 @@ function SessionCard({
 				</span>
 				{decision && pendingLabel ? <span className="shrink-0 text-meta text-danger">{pendingLabel}</span>
 					: (s.asks_open ?? 0) > 0 ? <span className="shrink-0 text-meta text-accent">{s.asks_open} ask{s.asks_open === 1 ? "" : "s"}</span>
-					: unread ? <NewMark visible={unread} />
 					: s.ended ? <span className="shrink-0 text-meta text-ink-dim">ended</span>
 					: s.degraded ? <span className="shrink-0 text-meta text-ink-dim">not answering</span> : null}
+				<NewMark visible={unread && !decision && !(s.asks_open ?? 0)} />
 				{/* The optimistic pin MARK remains observable while the daemon alone
 				    owns section membership; hiding its glyph must not erase the
 				    acknowledgement of a press awaiting confirmation. */}
@@ -487,12 +489,14 @@ function SessionCard({
 			    line box to every untagged row and make the list's density depend on
 			    which conversations happen to be tagged, the same defect class the
 			    blank second line had. A tagged row grows by exactly one line. */}
-			<div className="min-w-0 truncate ps-5 text-meta tabular-nums text-ink-dim">
-				{[(s.tags?.find(tag => tag.id === s.primary) ?? s.tags?.[0])?.name,
+			<div className="flex min-w-0 items-center gap-2 ps-5 text-meta tabular-nums text-ink-dim">
+				<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} className="max-w-[45%] shrink-0" />
+				<span className="min-w-0 truncate">{[
 					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,
 					delegating ? delegatedChip(children) : null,
 					s.todos_open ? `${s.todos_open} todo` : null,
-					!s.tags?.length ? cwdText : null].filter(Boolean).join(" · ") || "\u00a0"}
+					!s.tags?.length ? cwdText : null].filter(Boolean).join(" · ") || "\u00a0"}</span>
+				{s.opened_by != null ? <span className="ms-2 shrink-0"><span className="sr-only">opened by </span>agent</span> : null}
 			</div>
 		</button>
 	);
@@ -812,6 +816,8 @@ export function SessionListScreen() {
 	   the store on every open, so a project another surface created meanwhile is
 	   never missed. */
 	const [projectsOpen, setProjectsOpen] = useState(false);
+	const listCue = useScrollCues();
+	const filtersCue = useScrollCues(true);
 	const [query, setQuery] = useState("");
 	const [searchOpen, setSearchOpen] = useState(false);
 	const [drawerOpen, setDrawerOpen] = useState(false);
@@ -1417,7 +1423,7 @@ export function SessionListScreen() {
 		<div className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col">
 			<header className="flex h-[calc(52px+env(safe-area-inset-top))] shrink-0 items-center gap-1 px-1 pt-[env(safe-area-inset-top)]">
 				<button type="button" className="relative flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface"
-					aria-label={messageRuntime.t("relay.chrome.drawer.open")} aria-expanded={drawerOpen} aria-controls="relay-navigation" onClick={() => setDrawerOpen(true)}>☰
+					ref={projectsButtonRef} aria-label={messageRuntime.t("relay.chrome.drawer.open")} aria-expanded={drawerOpen} aria-controls="relay-navigation" onClick={() => setDrawerOpen(true)}>☰
 					{sessions.length > 0 && !connected ? <span aria-hidden className="absolute end-2 top-2 size-2 rounded-full bg-warning" /> : null}
 				</button>
 				{searchOpen ? <input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)}
@@ -1429,14 +1435,14 @@ export function SessionListScreen() {
 					aria-label={searchOpen ? messageRuntime.t("relay.chrome.list.search_close") : messageRuntime.t("relay.chrome.list.search_open")}
 					onClick={() => { setSearchOpen(!searchOpen); setQuery(""); }}>{searchOpen ? "✕" : "⌕"}</button>
 			</header>
-			{!searchOpen && (rows.length > 0 || !connected) ? <div role="group" aria-label={messageRuntime.t("relay.chrome.list.filter_label")}
+			{!searchOpen && (rows.length > 0 || !connected) ? <div ref={filtersCue} role="group" aria-label={messageRuntime.t("relay.chrome.list.filter_label")}
 				className="lo-scroll lo-fade-x flex h-10 shrink-0 items-center gap-2 overflow-x-auto px-3">
 				<Chip selected={filter === "all"} aria-pressed={filter === "all"} onClick={() => setFilter("all")}>{messageRuntime.t("relay.chrome.list.filter.all")}</Chip>
 				<Chip selected={filter === "needs"} aria-pressed={filter === "needs"} onClick={() => setFilter("needs")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.needs_you", { count: needsCount })}</Chip>
 				<Chip selected={filter === "unread"} aria-pressed={filter === "unread"} onClick={() => setFilter("unread")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.unread", { count: unreadCount })}</Chip>
 				{tagsAvailable ? tags.map(tag => <Chip key={tag.id} className="shrink-0" selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}>{tag.name}</Chip>) : null}
 			</div> : null}
-			<main onPointerDown={onListPointerDown} onScroll={event => {
+			<main ref={listCue} onPointerDown={onListPointerDown} onScroll={event => {
 				const y = event.currentTarget.scrollTop;
 				if (Math.abs(y - listScroll.current) > 4) setFabCollapsed(y > 24 && y > listScroll.current);
 				listScroll.current = y;

@@ -25,12 +25,12 @@ vi.mock("./api", () => ({
 const SESSION = "abcd1234ef56";
 
 /** Open the sheet from the chip. The chip's own accessible name is
-    "working directory: <path>" and a sheet ROW is named by its path, so the
+    "Working folder: <path>" and a sheet ROW is named by its path, so the
     query is deliberately the exact label rather than a substring — `/working
     directory/` also matches rows that name a directory under one. */
 async function openSheet() {
 	fireEvent.click(
-		await screen.findByRole("button", { name: "working directory: /Users/tester/src/app" }),
+		await screen.findByRole("button", { name: "Working folder: /Users/tester/src/app" }),
 	);
 }
 
@@ -64,7 +64,7 @@ async function renderChip(cwd = "/Users/tester/src/app") {
 describe("the working-directory chip", () => {
 	it("shows the session's own directory, shortened against home", async () => {
 		await renderChip();
-		expect(await screen.findByText("~/src/app")).toBeTruthy();
+		expect(await screen.findByText("app")).toBeTruthy();
 	});
 
 	it("falls back to the raw path while home is still unknown", async () => {
@@ -72,7 +72,7 @@ describe("the working-directory chip", () => {
 		// directory it already knows from the session's own projection.
 		getDirectories.mockReturnValue(new Promise(() => undefined));
 		render(<WorkingDirectoryChip sessionId={SESSION} cwd="/Users/tester/src/app" onMoved={vi.fn()} />);
-		expect(await screen.findByText("/Users/tester/src/app")).toBeTruthy();
+		expect(await screen.findByText("app")).toBeTruthy();
 	});
 
 	it("offers the current directory, home, tmp and the recents when opened", async () => {

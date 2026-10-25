@@ -77,7 +77,7 @@ import { Sheet } from "./ui/sheet";
 /** The one skin the sheet's text, date, number and select controls share — a
     field added to a form must not look like a foreign control. */
 const FIELD_CLASS =
-	"min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim";
+	"min-h-11 rounded-sm bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim";
 
 /** One form field: label, control, and the helper that explains the control.
 
@@ -244,7 +244,7 @@ function sessionState(row: ProjectLinkedSession): { word: string; ink: string } 
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
 	return (
-		<section className="border-t border-hairline px-3 py-2">
+		<section className="px-3 py-2">
 			<h3 className="mb-1 text-meta font-medium text-ink-dim">{title}</h3>
 			{children}
 		</section>
@@ -274,7 +274,7 @@ function ProjectRow({
 		<button
 			type="button"
 			onClick={onOpen}
-			className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-2 text-left active:bg-surface"
+			className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-2 text-start active:bg-surface"
 		>
 			<span className="flex min-w-0 items-baseline gap-2">
 				<span className="min-w-0 flex-1 truncate text-body font-medium text-ink">
@@ -299,7 +299,7 @@ function ProjectRow({
 				>
 					{progress}
 				</span>
-				<span className="ml-auto shrink-0 text-ink-dim">{meta.join(" · ")}</span>
+				<span className="ms-auto shrink-0 text-ink-dim">{meta.join(" · ")}</span>
 			</span>
 		</button>
 	);
@@ -839,7 +839,7 @@ export function ProjectsSheet({
 							</div>
 							<Button
 								variant="tonal"
-								className="ml-auto"
+								className="ms-auto"
 								onClick={() => {
 									setFormError("");
 									setView({ name: "create" });
@@ -1038,7 +1038,7 @@ export function ProjectsSheet({
 												disabled={busy}
 												aria-pressed={milestone.completed_at !== null}
 												onClick={() => void toggleMilestone(detail.project, milestone)}
-												className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm px-1 text-left active:bg-surface disabled:opacity-50"
+												className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm px-1 text-start active:bg-surface disabled:opacity-50"
 											>
 												<span
 													aria-hidden
@@ -1543,7 +1543,7 @@ export function ProjectsSheet({
 							   control is an explanation rather than a button that 404s. */
 							<p className="text-meta break-words text-warning">{SLASH_IN_MILESTONE}</p>
 						) : removalArmed ? (
-							<div className="flex flex-col gap-2 rounded-sm border border-danger-border bg-danger-wash p-3">
+							<div className="flex flex-col gap-2 rounded-sm bg-danger-wash p-3">
 								<p className="text-body-sm break-words text-danger">
 									remove “{editingMilestone}” from this project? the milestone is gone;
 									the project's sessions and its history are untouched.
@@ -1606,7 +1606,7 @@ export function ProjectsSheet({
 									type="button"
 									disabled={busy}
 									onClick={() => void linkSession(view.key, session.session_id)}
-									className="flex min-h-11 w-full flex-col items-start gap-0.5 rounded-sm px-1 py-1 text-left active:bg-surface disabled:opacity-50"
+									className="flex min-h-11 w-full flex-col items-start gap-0.5 rounded-sm px-1 py-1 text-start active:bg-surface disabled:opacity-50"
 								>
 									<span className="flex w-full min-w-0 items-baseline gap-2">
 										<span className="min-w-0 flex-1 truncate text-body-sm text-ink">

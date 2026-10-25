@@ -310,7 +310,12 @@ def session_tray_agents(*, running: int | float, total: int | float) -> Msg:
     return Msg("relay.chrome.session.tray.agents", {"running": running, "total": total})
 
 
-def session_tray_agents_failed(*, failed: int | float, running: int | float, total: int | float) -> Msg:
+def session_tray_agents_failed(
+    *,
+    failed: int | float,
+    running: int | float,
+    total: int | float,
+) -> Msg:
     return Msg(
         "relay.chrome.session.tray.agents_failed",
         {"failed": failed, "running": running, "total": total},

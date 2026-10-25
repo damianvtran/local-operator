@@ -180,7 +180,7 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 				<div
 					data-testid="session-status"
 					className={cn(
-						"flex items-center gap-2 border-b border-hairline px-3 font-mono text-mono-sm tabular-nums",
+						"flex items-center gap-2 px-3 font-mono text-mono-sm tabular-nums",
 						/* The spend control carries the 44px touch floor; the row's
 						   own vertical padding would add to it, so the padded row is
 						   only for the non-interactive (legacy / no-breakdown) cell.
@@ -271,7 +271,7 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 				<div
 					id={panelId}
 					data-testid="session-status-channels"
-					className="flex flex-wrap items-baseline gap-x-2 border-b border-hairline px-3 pt-1 pb-1 font-mono text-mono-sm tabular-nums text-ink-muted"
+					className="flex flex-wrap items-baseline gap-x-2 px-3 pt-1 pb-1 font-mono text-mono-sm tabular-nums text-ink-muted"
 				>
 					{breakdown.chips.map((chip, index) => (
 						<span key={`${chip.label}-${index}`} data-testid="session-status-channel">

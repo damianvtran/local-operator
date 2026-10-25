@@ -16,6 +16,27 @@ from local_operator.i18n import format as fmt
 REPO = Path(__file__).resolve().parents[3]
 
 
+def test_long_keyword_signature_wraps_without_losing_required_parameters(i18n_generate) -> None:
+    """Several typed placeholders must not make generated source fail its own lint."""
+    import ast
+
+    module = i18n_generate._render_keys_module(
+        "demo",
+        {
+            "demo.session.tray.agents_failed": (
+                "Agents {running, number}/{total, number}: {failed, number} failed"
+            )
+        },
+    )
+    assert all(len(line) <= 100 for line in module.splitlines())
+    tree = ast.parse(module)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    assert {arg.arg for arg in function.args.kwonlyargs} == {"failed", "running", "total"}
+    assert function.args.kw_defaults == [None, None, None]
+    assert not function.args.args and function.args.kwarg is None
+    compile(module, "demo.py", "exec")
+
+
 @pytest.fixture()
 def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     """A fixture catalogue root + emitted tables wired into the generator."""

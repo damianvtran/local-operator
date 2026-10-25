@@ -170,7 +170,7 @@ function QuestionField({
 							? messageRuntime.t("relay.asks.card.placeholder_secret")
 							: messageRuntime.t("relay.asks.card.placeholder_answer")
 					}
-					className="min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim disabled:opacity-50"
+					className="min-h-11 w-full rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim disabled:opacity-50"
 				/>
 			</div>
 		);
@@ -206,10 +206,10 @@ function QuestionField({
 						}}
 						aria-pressed={on}
 						className={cn(
-							"flex min-h-11 flex-col justify-center rounded-sm border border-l-2 px-3 py-2 text-left",
+							"flex min-h-11 flex-col justify-center rounded-sm border border-s-2 px-3 py-2 text-start",
 							on
-								? "border-accent border-l-accent bg-accent-wash"
-								: "border-control border-l-accent bg-elevated active:bg-accent-wash",
+								? "border-accent border-s-accent bg-accent-wash"
+								: "border-control border-s-accent bg-elevated active:bg-accent-wash",
 							"disabled:opacity-50",
 						)}
 					>
@@ -566,7 +566,7 @@ export function AskCard({
 								   the queue records its own default (the agent already walked past
 								   that deadline, so nothing turns on the operator naming one). */
 								onClick={() => dismiss()}
-								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
+								className="flex min-h-11 self-start items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
 							>
 								{/* D1 (design round 1): the label IS the width, so it stays put while
 								    the dismissal is in flight. The in-flight mark used to be the bare
@@ -637,7 +637,7 @@ export function AskCard({
 											patchDraft(() => ({ skipped: Array.from(next) }));
 										}}
 										className={cn(
-											"flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm active:bg-elevated disabled:opacity-50",
+											"flex min-h-11 self-start items-center rounded-sm px-3 text-body-sm active:bg-elevated disabled:opacity-50",
 											skipped.has(id) ? "text-ink" : "text-ink-muted",
 										)}
 									>
@@ -723,7 +723,7 @@ export function AskCard({
 							type="button"
 							disabled={busy !== ""}
 							onClick={decline}
-							className="flex min-h-11 items-center justify-center rounded-sm border border-danger-border bg-danger-wash px-3 text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
+							className="flex min-h-11 items-center justify-center rounded-sm bg-danger-wash px-3 text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
 						>
 							{busy === "decline" ? "…" : messageRuntime.t("relay.asks.card.decline")}
 						</button>
@@ -774,7 +774,7 @@ export function AskCard({
 											}
 											onClick={() => dismiss(reason)}
 											className={cn(
-												"flex w-full flex-col items-start gap-0.5 rounded-sm border border-control px-3 py-2 text-left active:bg-elevated disabled:opacity-50",
+												"flex w-full flex-col items-start gap-0.5 rounded-sm px-3 py-2 text-start active:bg-elevated disabled:opacity-50",
 												sentReason === reason && busy === "dismiss"
 													? "text-ink"
 													: "text-ink-muted",
@@ -896,7 +896,7 @@ export function AskCard({
 			data-testid="ask-card"
 			data-ask-id={row.ask_id}
 			data-ask-status={String(row.status || "open")}
-			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
+			className="flex flex-col gap-2 rounded-md bg-surface p-2.5"
 		>
 			{lapsed && !terminal ? (
 				/* A LAPSED ASK IS COLLAPSED BEHIND ITS BADGE (decision D11, Ben's
@@ -912,7 +912,7 @@ export function AskCard({
 					headerClassName="gap-2"
 					header={(open: boolean) => (
 						<>
-							<span className="shrink-0 rounded-sm border border-hairline px-1.5 text-meta text-ink-muted">
+							<span className="shrink-0 rounded-sm px-1.5 text-meta text-ink-muted">
 								{messageRuntime.t("relay.asks.card.timed_out_badge")}
 							</span>
 							{/* The header names the question only while CLOSED (#2481 UX U7):

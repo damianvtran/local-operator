@@ -1,3 +1,4 @@
+import { useScrollCues } from "../lib/use-scroll-cues";
 /**
  * Session view (`#/s/:sessionId`) — the core screen. Layout contract:
  *
@@ -472,6 +473,7 @@ export function SessionScreen({
 	);
 	/* The asks sheet — the EXPANDED half of R7 (§5.0). Client-local interaction
 	   state with no wire meaning, exactly as the design's §5.0 states. */
+	const trayCue = useScrollCues(true);
 	const [asksOpen, setAsksOpen] = useState(false);
 	const [gateOpen, setGateOpen] = useState(false);
 	const [tasksOpen, setTasksOpen] = useState(false);
@@ -769,6 +771,7 @@ export function SessionScreen({
 	   prompt this device just sent makes the column non-empty the instant it
 	   leaves the composer, and hiding its row behind "no messages yet" would put
 	   the placeholder in front of the very message that proves the send worked. */
+	const needsApproval = blocking?.kind === "approval";
 	const taskItems = projection.todos.flatMap(phase => phase.items);
 	const tasksDone = taskItems.filter(task => task.status === "done" || task.status === "dropped").length;
 	const agentsRunning = projection.subagents.filter(agent => agent.status === "running").length;
@@ -856,15 +859,15 @@ export function SessionScreen({
 			    An ended/degraded banner replaces this slot, never overlays history. */}
 			{projection.ended ? <EndedSessionStrip sessionId={sessionId} /> : projection.degraded ?
 				<p role="status" className="flex min-h-11 shrink-0 items-center bg-warning-wash px-3 text-meta text-warning">{messageRuntime.t("relay.chrome.session.degraded")}</p>
-			: (blocking || (projection.asks?.length ?? 0) > 0 || projection.todos.some(p => p.items.length) || projection.subagents.length) ?
-				<div aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="lo-scroll lo-fade-x flex h-11 shrink-0 items-center gap-2 overflow-x-auto px-3">
-					{blocking ? <Chip onClick={() => setGateOpen(true)} className="shrink-0 !bg-danger-wash !text-danger" aria-label={messageRuntime.t("relay.chrome.session.tray.approve_label")}>{messageRuntime.t("relay.chrome.session.tray.approve")}</Chip> : null}
+			: (needsApproval || (projection.asks?.length ?? 0) > 0 || projection.todos.some(p => p.items.length) || projection.subagents.length) ?
+				<div ref={trayCue} aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="lo-scroll lo-fade-x flex h-11 shrink-0 items-center gap-2 overflow-x-auto px-3">
+					{needsApproval ? <Chip onClick={() => setGateOpen(true)} className="shrink-0 !bg-danger-wash !text-danger" aria-label={messageRuntime.t("relay.chrome.session.tray.approve_label")}>{messageRuntime.t("relay.chrome.session.tray.approve")}</Chip> : null}
 					<AskDock rows={projection.asks} onOpen={openAsks} />
-					{projection.todos.some(p => p.items.length) ? <Chip className="shrink-0" onClick={() => setTasksOpen(true)}>{messageRuntime.t("relay.chrome.session.tray.tasks", {
+					{projection.todos.some(p => p.items.length) ? <Chip className={cn("shrink-0", blocking && "!text-ink-dim")} disabled={Boolean(blocking)} aria-expanded={tasksOpen} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setTasksOpen(true)}>{messageRuntime.t("relay.chrome.session.tray.tasks", {
 						done: tasksDone,
 						total: taskItems.length,
 					})}</Chip> : null}
-					{projection.subagents.length ? <Chip className="shrink-0" onClick={() => setAgentsOpen(true)}>{agentsFailed > 0
+					{projection.subagents.length ? <Chip className={cn("shrink-0", blocking && agentsFailed === 0 && "!text-ink-dim", agentsFailed > 0 && "!text-danger")} disabled={Boolean(blocking)} aria-expanded={agentsOpen} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setAgentsOpen(true)}>{agentsFailed > 0
 						? messageRuntime.t("relay.chrome.session.tray.agents_failed", { running: agentsRunning, total: projection.subagents.length, failed: agentsFailed })
 						: messageRuntime.t("relay.chrome.session.tray.agents", { running: agentsRunning, total: projection.subagents.length })}</Chip> : null}
 				</div> : null}

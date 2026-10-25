@@ -152,9 +152,9 @@ describe("an ended session (U7)", () => {
 		render(<SessionScreen sessionId="s1" />);
 
 		// The reader is told what happened, in the strip's own words.
-		expect(screen.getByText("session ended — history kept")).toBeTruthy();
+		expect(screen.getByText("Session ended · history kept")).toBeTruthy();
 
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
 		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledWith("s1"));
 		// The route echoes the id, so the phone lands on the SAME session route —
 		// the shape that makes U16 (below) a same-route survival problem.
@@ -174,7 +174,7 @@ describe("an ended session (U7)", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByRole("button", { name: "resume" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /tap to resume/ })).toBeNull();
 		expect(screen.queryByText("turn cut off — tap to resume")).toBeNull();
 	});
@@ -186,11 +186,11 @@ describe("an ended session (U7)", () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
 		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledTimes(1));
 		// Retrying is safe (the daemon coalesces concurrent resumes), so the
 		// control must come back — and a second press must actually fire again.
-		const again = await screen.findByRole("button", { name: "resume" });
+		const again = await screen.findByRole("button", { name: "Resume" });
 		expect((again as HTMLButtonElement).disabled).toBe(false);
 		fireEvent.click(again);
 		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledTimes(2));
@@ -203,32 +203,26 @@ describe("an ended session (U7)", () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
 		await waitFor(() =>
 			expect(screen.getByRole("alert").textContent).toContain(
 				"Could not resume: no runtime to resume into",
 			),
 		);
 		// The affordance survives the refusal — retrying is the reader's call.
-		expect(screen.getByRole("button", { name: "resume" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
 		expect(mocks.navigate).not.toHaveBeenCalled();
 	});
 
-	it("the ended strip rides the header as an overlay, not an in-flow row (U19/D4)", () => {
+	it("keeps the ended banner in flow above the composer, never over history", () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-
-		/* The ladder container: absolutely positioned under the header, and
-		   pointer-events-none so its dead space passes touches through to the
-		   transcript beneath (scrolling from the strip's own row must work). */
-		const row = screen.getByText("session ended — history kept");
-		const ladder = row.closest("div.absolute");
-		expect(ladder?.className).toContain("pointer-events-none");
-		expect(ladder?.className).toContain("top-full");
-		// ...while the one control the rung owns opts back in.
-		expect(screen.getByRole("button", { name: "resume" }).className).toContain(
-			"pointer-events-auto",
-		);
+		const row = screen.getByText("Session ended · history kept");
+		expect(row.closest("div.absolute")).toBeNull();
+		const composer = document.querySelector(".lo-composer");
+		expect(composer).toBeTruthy();
+		expect(row.compareDocumentPosition(composer! ) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
 	});
 
 	it("reaches wide view through the session menu, with its state visible (D2, #1870)", () => {
@@ -262,13 +256,13 @@ describe("an ended session (U7)", () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 		/* The words are spelled out, not a bare `~` (UX round 2, U25 = D8). */
-		expect(screen.getByText("a send or resume reopens it in your home folder")).toBeTruthy();
+		expect(screen.getByText("A send or Resume reopens it in your home folder")).toBeTruthy();
 	});
 
 	it("a resume that succeeds without a live frame says so (U24)", async () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
 		expect(
 			await screen.findByText("reopening — this can take a few seconds"),
 		).toBeTruthy();
@@ -279,7 +273,7 @@ describe("an ended session (U7)", () => {
 		try {
 			slot = { projection: projection({ ended: true }), connected: true };
 			render(<SessionScreen sessionId="s1" />);
-			fireEvent.click(screen.getByRole("button", { name: "resume" }));
+			fireEvent.click(screen.getByRole("button", { name: "Resume" }));
 			// Flush the POST's promise without advancing the clock.
 			await act(async () => {
 				await Promise.resolve();
@@ -302,7 +296,7 @@ describe("an ended session (U7)", () => {
 		});
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
 		await waitFor(() =>
 			expect(screen.getByRole("alert").textContent).toBe(
 				"Could not resume: this session is no longer saved",
@@ -310,57 +304,21 @@ describe("an ended session (U7)", () => {
 		);
 	});
 
-	it("anchors the ladder under the spend/context glance, not over it (D9)", () => {
-		slot = {
-			projection: projection({
-				ended: true,
-				context_tokens: 12400,
-				context_window: 200000,
-			}),
-			connected: true,
-		};
+	it("keeps spend reachable from the composer while the ended banner is present", () => {
+		slot = { projection: projection({ ended: true, context_tokens: 12400, context_window: 200000 }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		const status = screen.getByTestId("session-status");
-		const row = screen.getByText("session ended — history kept");
-		const ladder = row.closest("div.absolute");
-		/* One wrapper holds the header, the glance row and the ladder, so the
-		   ladder's `top-full` anchor is BELOW the glance row by construction:
-		   the strip can no longer paint over the numbers a struggling session
-		   most needs. */
-		expect(ladder).toBeTruthy();
-		expect(status.parentElement).toBe(ladder?.parentElement);
+		const spend = screen.getByRole("button", { name: /Spend & context:/ });
+		expect(spend.closest(".lo-composer")).toBeTruthy();
+		expect(screen.getByText("Session ended · history kept").closest("div.absolute")).toBeNull();
+	});
+	it("spends no transcript top inset once health is an in-flow bottom banner", () => {
+		slot = { projection: projection({ ended: true, transcript: [userRow("prompt")] }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		expect(document.querySelector("[data-scroll-top-inset]")).toBeNull();
+		expect(screen.getByText("prompt")).toBeTruthy();
+		expect(screen.getByText("Session ended · history kept").closest("div.absolute")).toBeNull();
 	});
 
-	it("reserves the rung's measured height inside the transcript (U23 = D7)", () => {
-		/* happy-dom lays nothing out (every rect is 0), so the rung's height is
-		   injected at the one place the screen measures it — the ladder
-		   container's own rect — and the assertion reads the spacer the screen
-		   then hands the transcript. */
-		const original = Element.prototype.getBoundingClientRect;
-		Element.prototype.getBoundingClientRect = function (this: Element) {
-			if (
-				typeof this.className === "string" &&
-				this.className.includes("top-full")
-			) {
-				return { height: 52 } as unknown as DOMRect;
-			}
-			return original.call(this);
-		};
-		try {
-			slot = {
-				projection: projection({ ended: true, transcript: [userRow("prompt")] }),
-				connected: true,
-			};
-			render(<SessionScreen sessionId="s1" />);
-			const spacer = document.querySelector<HTMLElement>("[data-scroll-top-inset]");
-			expect(spacer).toBeTruthy();
-			expect(spacer?.style.height).toBe("52px");
-			// Above every reachable row, not between them.
-			expect(spacer?.parentElement?.firstElementChild).toBe(spacer);
-		} finally {
-			Element.prototype.getBoundingClientRect = original;
-		}
-	});
 });
 
 describe("the route's tab title (U21)", () => {
@@ -380,10 +338,10 @@ describe("a degraded session (U7)", () => {
 		slot = { projection: projection({ degraded: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("not answering — showing its last synced view")).toBeTruthy();
+		expect(screen.getByText("Not answering — sends will wait")).toBeTruthy();
 		// `ended` and `degraded` are different facts; the degraded strip must
 		// not drag the resume affordance (and its restart offer) in with it.
-		expect(screen.queryByRole("button", { name: "resume" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
 		expect(screen.queryByText(/session ended/)).toBeNull();
 	});
 });
@@ -396,17 +354,17 @@ describe("the health ladder renders exactly one rung", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("session ended — history kept")).toBeTruthy();
-		expect(screen.queryByText("not answering — showing its last synced view")).toBeNull();
-		expect(screen.queryByText("reconnecting — showing the last synced view")).toBeNull();
+		expect(screen.getByText("Session ended · history kept")).toBeTruthy();
+		expect(screen.queryByText("Not answering — sends will wait")).toBeNull();
+		expect(screen.queryByText("Reconnecting…")).toBeNull();
 	});
 
 	it("prefers degraded over the phone's own link", () => {
 		slot = { projection: projection({ degraded: true }), connected: false };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("not answering — showing its last synced view")).toBeTruthy();
-		expect(screen.queryByText("reconnecting — showing the last synced view")).toBeNull();
+		expect(screen.getByText("Not answering — sends will wait")).toBeTruthy();
+		expect(screen.queryByText("Reconnecting…")).toBeNull();
 	});
 });
 
@@ -414,14 +372,14 @@ describe("the phone's own dropped link (U11)", () => {
 	it("says reconnecting once a projection is on screen, and nothing while it has none", () => {
 		slot = { projection: projection(), connected: false };
 		const first = render(<SessionScreen sessionId="s1" />);
-		expect(screen.getByText("reconnecting — showing the last synced view")).toBeTruthy();
+		expect(screen.getByText("Reconnecting…")).toBeTruthy();
 		first.unmount();
 
 		// With no data yet the view already says `connecting to session…`;
 		// a second line would be noise about noise.
 		slot = { projection: null, connected: false };
 		render(<SessionScreen sessionId="s1" />);
-		expect(screen.queryByText("reconnecting — showing the last synced view")).toBeNull();
+		expect(screen.queryByText("Reconnecting…")).toBeNull();
 	});
 });
 

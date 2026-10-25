@@ -1,3 +1,4 @@
+import { useScrollCues } from "../../lib/use-scroll-cues";
 /** Destinations leave the conversation surface, not the column. This drawer
  * shares Sheet's modal layer (including opening-press suppression) and never
  * portals to body: viewport pinning and phone capture depend on that ancestry.
@@ -27,6 +28,7 @@ export function Drawer({ open, onClose, items, status }: {
 	status: string;
 }) {
 	const titleId = useId();
+	const scrollCue = useScrollCues();
 	const { dialogRef, closeRef, focusEdge } = useModalLayer({ open, onClose });
 	if (!open) return null;
 	return <div id="relay-navigation" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}
@@ -41,7 +43,7 @@ export function Drawer({ open, onClose, items, status }: {
 				<button ref={closeRef} type="button" onClick={onClose} aria-label={messageRuntime.t("relay.chrome.drawer.close")}
 					className="flex size-11 items-center justify-center rounded-md text-ink-muted active:bg-elevated">✕</button>
 			</div>
-			<div className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
+			<div ref={scrollCue} className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
 				{items.filter(item => item.available !== false).map((item, i, visible) => {
 					const classes = `flex min-h-12 w-full items-center gap-3 rounded-md px-3 text-start text-body ${item.current ? "bg-accent-wash text-accent" : "text-ink active:bg-elevated"} ${item.preference && !visible[i - 1]?.preference ? "mt-4" : ""}`;
 					const content = <><span aria-hidden className="flex size-5 shrink-0 items-center justify-center text-ink-muted">{item.icon}</span><span className="min-w-0 flex-1">{item.label}</span>{item.count !== undefined ? <span className="text-meta tabular-nums text-ink-dim">{item.count}</span> : null}</>;

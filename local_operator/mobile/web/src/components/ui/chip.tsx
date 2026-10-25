@@ -38,7 +38,7 @@ export function Chip({
 		<button
 			type="button"
 			className={cn(
-				"lo-hit inline-flex h-8 items-center gap-1 rounded-full px-3 text-body-sm select-none active:bg-elevated",
+				"lo-hit inline-flex h-8 min-w-11 items-center gap-1 rounded-full px-3 text-body-sm select-none active:bg-elevated",
 				selected
 					? "bg-accent-wash text-accent"
 					: "bg-surface text-ink-muted",

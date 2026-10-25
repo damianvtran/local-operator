@@ -77,7 +77,7 @@ describe("session creation routes", () => {
 	it("one tap on the list starts a session with no cwd and focuses the composer", async () => {
 		history.replaceState(null, "", "#/");
 		render(<App />);
-		const button = await screen.findByRole("button", { name: "new session" });
+		const button = await screen.findByRole("button", { name: "New session" });
 		fireEvent.click(button);
 		await waitFor(() => expect(location.hash).toBe(`#/s/${sessionId}`));
 		// NO cwd: the daemon owns the default (GET /api/directories publishes the
@@ -116,7 +116,7 @@ describe("the retired new-session route", () => {
 		render(<App />);
 		// The list's own control, not a directory picker: the hash is kept
 		// working for bookmarks and stale links, and it lands somewhere sensible.
-		expect(await screen.findByRole("button", { name: "new session" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "New session" })).toBeTruthy();
 		expect(screen.queryByPlaceholderText("or type another path…")).toBeNull();
 		// AND THE ADDRESS BAR AGREES (UX round 1, U5). Rendering the list under a
 		// hash that names a screen we no longer have leaves a bookmark — and a

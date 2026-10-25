@@ -29,8 +29,8 @@ import { messageRuntime, useLocaleSnapshot } from "./store";
 const BEFORE = {
 	"relay.shell.list.empty": "no sessions running",
 	"relay.shell.list.connecting": "connecting…",
-	"relay.shell.list.section.active": "Active Sessions",
-	"relay.shell.list.section.previous": "Previous Sessions",
+	"relay.shell.list.section.active": "Active",
+	"relay.shell.list.section.previous": "Previous",
 	"relay.shell.list.theme": "choose theme",
 	"relay.shell.session.waiting": "waiting for projection…",
 	"relay.shell.session.connecting": "connecting to session…",

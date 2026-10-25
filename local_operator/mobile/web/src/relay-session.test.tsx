@@ -28,8 +28,8 @@ import { messageRuntime, useLocaleSnapshot } from "./store";
 const BEFORE = {
 	"relay.session.list.search_placeholder": "Search conversations…",
 	"relay.session.list.empty_hint": "start one below, or from the TUI on your machine",
-	"relay.session.list.no_matches": "no matching conversations",
-	"relay.session.list.start_idle": "new session",
+	"relay.session.list.no_matches": "No matching conversations",
+	"relay.session.list.start_idle": "New session",
 	"relay.session.list.start_busy": "starting…",
 	"relay.session.view.back": "back to sessions",
 	"relay.session.view.empty_title": "no messages yet",

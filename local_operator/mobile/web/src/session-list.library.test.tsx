@@ -50,7 +50,8 @@ describe("library footer entry", () => {
 	it("is present and navigates to the list when the capability is advertised", () => {
 		capability = { library: 1 };
 		render(<SessionListScreen />);
-		fireEvent.click(screen.getByRole("button", { name: "library" }));
+		fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+		fireEvent.click(screen.getByRole("link", { name: "Library" }));
 		expect(location.hash).toBe("#/library");
 	});
 });

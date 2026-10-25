@@ -164,7 +164,7 @@ export function ToolRow({
 				 * reader the number is short (design round 1 D1). ``min-w-0 truncate``
 				 * lets the name share the squeeze and ellipsize honestly; the clock
 				 * span below keeps ``shrink-0``, so it always fits. */}
-				<span className="min-w-0 shrink truncate font-mono text-mono-sm text-ink-muted">
+				<span className="min-w-0 shrink truncate text-body-sm text-ink-muted">
 					{entry.tool_name}
 				</span>
 				<span className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">

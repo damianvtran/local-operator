@@ -91,7 +91,7 @@ export function PastSessionsScreen() {
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="min-h-11 w-full rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 			</div>
 
@@ -131,13 +131,13 @@ export function PastSessionsScreen() {
 									   title is kept beside it because it is the only
 									   thing saying what this branched from. */}
 									{s.forked ? (
-										<span className="mr-1.5 text-meta text-ink-dim">
+										<span className="me-1.5 text-meta text-ink-dim">
 											[fork]
 										</span>
 									) : null}
 									{s.name || "untitled"}
 									{s.body_match ? (
-										<span className="ml-1.5 text-meta text-info">
+										<span className="ms-1.5 text-meta text-info">
 											in conversation
 										</span>
 									) : null}
@@ -165,7 +165,7 @@ export function PastSessionsScreen() {
 								type="button"
 								onClick={() => void resume(s.id)}
 								disabled={resumingId !== ""}
-								className="min-h-11 shrink-0 rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-accent-wash disabled:opacity-50"
+								className="min-h-11 shrink-0 rounded-sm bg-surface px-3 text-body-sm text-ink active:bg-accent-wash disabled:opacity-50"
 							>
 								{resumingId === s.id ? "opening…" : "resume"}
 							</button>

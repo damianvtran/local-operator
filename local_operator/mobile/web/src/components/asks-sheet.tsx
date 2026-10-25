@@ -268,7 +268,7 @@ export function AsksSheet({
 						<button
 							type="button"
 							onClick={() => void load()}
-							className="flex min-h-11 items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated"
+							className="flex min-h-11 items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated"
 						>
 							{messageRuntime.t("relay.asks.sheet.retry")}
 						</button>

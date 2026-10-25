@@ -104,7 +104,7 @@ export function ModelSheet({
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="mb-1 min-h-11 rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 				{/* ONE exclusive ladder: error → loading → empty-filtered, and the rows
 				    below it. The precedence runs that way round because each rung is a

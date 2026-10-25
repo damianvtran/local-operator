@@ -31,8 +31,9 @@
  * ABSENT AT ZERO. The bar is not rendered (never rendered empty, never a zero
  * badge), so its presence is itself the statement.
  */
+import { useId } from "react";
 import { cn } from "../lib/cn";
-import { outstandingAsks, questionTally } from "../lib/asks";
+import { dockAsk, outstandingAsks, questionTally } from "../lib/asks";
 import { messageRuntime } from "../store";
 import type { PendingAsk } from "../types";
 
@@ -44,6 +45,9 @@ export function AskDock({
 	/** Summon the asks sheet — the answer surface. */
 	onOpen: () => void;
 }) {
+	const previewId = useId();
+	const head = dockAsk(rows);
+	const preview = String(head?.questions?.[0]?.question ?? "").trim();
 	const outstanding = outstandingAsks(rows);
 	if (outstanding.length === 0) return null;
 	
@@ -68,6 +72,7 @@ export function AskDock({
 		<button
 			type="button"
 			aria-label={label}
+			aria-describedby={preview ? previewId : undefined}
 			data-testid="ask-dock"
 			data-ask-count={outstanding.length}
 			onClick={onOpen}
@@ -92,6 +97,7 @@ export function AskDock({
 				?
 			</span>
 			<span className="shrink-0 text-body-sm text-ink-muted">{label}</span>
+			{preview ? <span id={previewId} className="sr-only">{preview}</span> : null}
 		</button>
 	);
 }
