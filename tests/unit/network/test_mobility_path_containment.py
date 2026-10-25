@@ -70,7 +70,7 @@ def test_receiving_handler_refuses_an_unsafe_invite_before_writes(
     handler = server_b._handlers["net_session_move"]  # noqa: SLF001
     link = cast(Any, SimpleNamespace(device_id=server_a.identity.device_id))
 
-    with pytest.raises(MeshRefusal, match="one safe conversation id") as refused:
+    with pytest.raises(MeshRefusal, match="a move needs a conversation id") as refused:
         handler(link, {"phase": "invite", "session_id": session_id})
 
     assert refused.value.code == "bad_request"

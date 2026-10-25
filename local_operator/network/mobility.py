@@ -2415,7 +2415,7 @@ def _validated_session_id(value: Any) -> str:
         # Translate the storage contract to the move protocol's malformed-request
         # error without coercing a non-string into a different identifier.
         raise _peer_error(
-            "bad_request", "a move needs one safe conversation id, without path syntax"
+            "bad_request", "a move needs a conversation id without path syntax"
         ) from None
 
 
