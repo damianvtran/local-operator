@@ -2545,6 +2545,68 @@ def test_offered_model_ids_is_the_catalogues_answer_or_no_answer(tmp_path, monke
     assert set(static_models("openai")) <= served, "static rows must survive a listing's answer"
 
 
+def test_explicit_refresh_replaces_a_failed_or_stale_listing(tmp_path) -> None:
+    """A new provider model appears on explicit refresh, not a later restart.
+
+    This covers both cache boundaries that hid the reported release: a failed
+    read arms backoff, which invalidation must clear, and a subsequently stale
+    document must be replaced rather than merged with or served beside the new
+    inventory. It also verifies that a cached API-key document cannot authorize
+    an OAuth account's read.
+    """
+    calls = 0
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, request=request)
+        return httpx.Response(
+            200,
+            request=request,
+            json={"data": [{"id": "gpt-6.1-sol", "context_window": 1_050_000}]},
+        )
+
+    client = _StubClient([])
+    client.get = lambda url, **kwargs: transport(  # type: ignore[method-assign]
+        httpx.Request("GET", url, params=kwargs.get("params"), headers=kwargs.get("headers"))
+    )
+    first, first_status = available_models(
+        "openai", api_key="synthetic-token", client=client, cache_dir=tmp_path, ttl_s=0
+    )
+    assert first_status == "static"
+    assert "gpt-6.1-sol" not in {row.id for row in first}
+    discovery.invalidate_listing("openai", cache_dir=tmp_path)
+
+    second, second_status = available_models(
+        "openai", api_key="synthetic-token", client=client, cache_dir=tmp_path, ttl_s=0
+    )
+    assert calls == 2
+    assert second_status == "ok"
+    assert "gpt-6.1-sol" in {row.id for row in second}
+
+    third, third_status = available_models(
+        "openai", api_key="synthetic-token", client=client, cache_dir=tmp_path, ttl_s=0
+    )
+    assert calls == 3
+    assert third_status == "ok"
+    assert {row.id for row in third} == {row.id for row in second}
+
+    # The same cache directory cannot silently substitute another credential's
+    # document when the account-scoped subscription lookup is requested.
+    subscription, subscription_status = available_models(
+        "openai",
+        api_key="synthetic-token",
+        is_oauth=True,
+        account_id="acct-42",
+        client=_StubClient([]),
+        cache_dir=tmp_path,
+        ttl_s=0,
+    )
+    assert subscription_status == "static"
+    assert "gpt-6.1-sol" not in {row.id for row in subscription}
+
+
 def test_a_registry_schedule_survives_the_merge_and_is_never_invented() -> None:
     """The time-of-use schedule rides from the registry row to the picker's row.
 

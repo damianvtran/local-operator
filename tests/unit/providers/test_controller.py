@@ -3570,6 +3570,27 @@ async def test_the_picker_ttl_is_the_only_ttl_override(controller, store, monkey
 
 
 @pytest.mark.asyncio
+async def test_successful_live_refresh_invalidates_derived_model_metadata(
+    controller, store, monkeypatch
+) -> None:
+    """A picker refresh cannot leave old model capabilities in process memos."""
+    store.upsert_credential("openai", {"access": "synthetic", "type": "oauth"})
+    calls = _spy_available_models(monkeypatch, live={"openai": ["gpt-6.1-sol"]})
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.model.configure.invalidate_model_info_cache",
+        lambda: cleared.append("memo"),
+    )
+
+    entries, statuses = await controller.live_catalogue(providers={"openai"}, ttl_s=0)
+
+    assert statuses == {"openai": "ok"}
+    assert [entry.selector for entry in entries] == ["openai/gpt-6.1-sol"]
+    assert calls == [("openai", 0)]
+    assert cleared == ["memo"]
+
+
+@pytest.mark.asyncio
 async def test_usable_providers_suppresses_secondary_flavour_when_oauth_active(
     controller, store
 ) -> None:

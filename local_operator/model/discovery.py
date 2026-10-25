@@ -1994,6 +1994,18 @@ def _merge_name(live_name: str, static_name: str, model_id: str) -> str:
     return candidate
 
 
+def _account_catalogue_scope(provider_id: str, account_id: str | None) -> str | None:
+    """The identity whose document an account-scoped listing reader must use.
+
+    A caller that knows the selected account must not have to know each wire's
+    scope convention. Kimi uses its OAuth account id; ChatGPT uses the ChatGPT
+    account; Meta permits email. An explicit ``credential:...`` scope (Muse's
+    derived key identity) is already canonical. Unknown is NOT a licence to
+    union accounts: ``None`` selects the legacy unscoped fallback only.
+    """
+    return account_id if provider_id in OPENAI_OAUTH_PROVIDERS | {"meta-muse"} else None
+
+
 def _cache_key(
     storage_id: str,
     *,
@@ -2228,10 +2240,16 @@ def cached_available_models(
     storage_id = credential_provider_id(definition.id)
     # First paint stays network/credential-value free. The caller supplies ONLY
     # the selected account's metadata scope; never sweep another account's files.
+    # OAuth is carried by the selected account's metadata scope. Restricting
+    # this to Meta left OpenAI's first frame on the API-key cache, hiding a
+    # subscription-only model even after a successful live refresh.
     key = _cache_key(
         storage_id,
-        account_scoped=bool(storage_id == "meta-muse" and account_id),
+        account_scoped=_account_catalogue_scope(storage_id, account_id) is not None,
         account_id=account_id,
+        host_scoped=bool(
+            _account_catalogue_scope(storage_id, account_id) and definition.oauth_base_url
+        ),
     )
     if definition.local_setup:
         from local_operator.providers.local import endpoint_cache_key, resolve_base_url
@@ -2274,7 +2292,11 @@ def cached_available_models(
     listing = peek_listing(key, cache_dir=cache_dir)
     capture = listing_capture_version(storage_id)
     live_rows = _rows_from_payload(listing.payload, capture)
-    authoritative = _listing_replaces_static(storage_id, live_rows)
+    authoritative = _listing_replaces_static(
+        storage_id,
+        live_rows,
+        account_scoped=_account_catalogue_scope(storage_id, account_id) is not None,
+    )
     if live_rows is None or (not live_rows and not authoritative):
         return merge_models(rows, None), "static"
 

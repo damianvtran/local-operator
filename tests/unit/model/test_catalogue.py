@@ -851,6 +851,66 @@ def test_a_failed_write_does_not_strand_a_temp_file(tmp_path, monkeypatch) -> No
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_openai_metadata_memo_tracks_its_accounts_refreshed_document(tmp_path, monkeypatch) -> None:
+    """A provider refresh must replace same-model metadata in a live process.
+
+    Explicit credentials isolate this from ambient accounts. The first read
+    writes and resolves one OAuth account's document; replacing that document
+    must change the next answer even inside the same daily memo bucket. A second
+    account must resolve against its own document, not the first account's.
+    """
+    from local_operator.model import discovery
+
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(configure_mod, "_catalogue_api_key", lambda *_a, **_kw: "")
+    monkeypatch.setattr(configure_mod, "_borrowed_listing_token", lambda *_a, **_kw: "")
+    for account_id, window in (("acct-one", 111_000), ("acct-two", 222_000)):
+        rows, status = discovery.available_models(
+            "openai",
+            api_key="sk-synthetic",
+            is_oauth=True,
+            account_id=account_id,
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request, window=window: httpx.Response(
+                        200,
+                        json={
+                            "models": [
+                                {
+                                    "slug": "gpt-6.1-sol",
+                                    "display_name": "GPT-6.1 Sol",
+                                    "context_window": window,
+                                }
+                            ]
+                        },
+                    )
+                )
+            ),
+            cache_dir=tmp_path,
+        )
+        assert status == "ok" and rows[0].context_window == window
+        info = configure_mod.resolve_model_info(
+            "openai", "gpt-6.1-sol", credential=("token", True, account_id)
+        )
+        assert info.context_window == window
+
+    # Keep the account, replace the document (the real live-refresh boundary),
+    # then resolve again without manually clearing configure's memo.
+    key = discovery._cache_key("openai", account_scoped=True, account_id="acct-one")
+    document = catalogue._cache_path(key, tmp_path)
+    payload = json.loads(document.read_text())
+    payload["payload"]["models"][0]["context_window"] = 333_000
+    catalogue._write_cache(document, payload["payload"])
+    refreshed = configure_mod.resolve_model_info(
+        "openai", "gpt-6.1-sol", credential=("token", True, "acct-one")
+    )
+    assert refreshed.context_window == 333_000
+    other = configure_mod.resolve_model_info(
+        "openai", "gpt-6.1-sol", credential=("token", True, "acct-two")
+    )
+    assert other.context_window == 222_000
+
+
 def test_the_in_process_memo_expires_with_the_wall_clock() -> None:
     """A bare ``lru_cache`` would pin whatever metadata a long-lived process saw
     at boot: the HTTP server and scheduler workers run for days, the disk cache

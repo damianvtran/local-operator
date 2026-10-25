@@ -2679,12 +2679,14 @@ def resolve_model_info(
 
             account_id = "credential:" + hashlib.sha256(credential[0].encode()).hexdigest()
         scope = _cache_key(provider, account_scoped=credential[1], account_id=account_id)
-        if provider == "meta-muse":
+        if provider in {"openai", "meta-muse"}:
             from local_operator.model.catalogue import _cache_path, _document_stamp
 
             # Existing file identity changes on a refreshed account document.
             # A daily memo bucket must not hide newly returned limits/efforts;
             # this needs neither a global epoch nor paint-triggered network IO.
+            # Binding both account-scoped providers also keeps an explicit
+            # resolver's document and first-frame/live catalogue identical.
             scope = f"{scope}:{_document_stamp(_cache_path(scope, None))}"
         if provider == "openai" and credential[1] and not credential[2]:
             scope = "openai-oauth-unscoped"
