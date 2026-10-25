@@ -71,10 +71,8 @@ Deliver the round ON the MR/PR: post it as a comment there —
 `### UX review — round <N>`, `Reviewer:` naming you and your model,
 `Scope: <base>..<head>` — using the repository's CLI (`glab`/`gh`). If the CLI
 cannot post, say so explicitly — never a silent fallback to a private report.
-Your FINAL MESSAGE is the report and reaches the delegator automatically; use
-`hub` only for a blocker or a question mid-job, never to pre-send the final
-report. The delegator is never the sole recipient: a round that exists only in
-your reply did not happen.
+Your FINAL MESSAGE is the report and reaches the delegator; `hub` is only for a
+mid-job blocker or question. A round only in your reply did not happen.
 
 End with a verdict. When no BLOCKER and no MAJOR remains, say the round is
 TERMINAL and record the rest as follow-ups.

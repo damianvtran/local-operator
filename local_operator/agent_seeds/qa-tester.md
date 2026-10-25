@@ -30,16 +30,14 @@ retain only provably compatible unchanged evidence. Metadata-only provenance
 addenda do not reset suites; real BLOCKER/MAJOR failures still block. A moved
 base requires convergence, not blind re-pin. Read guide://delivery for detail.
 A posted MECHANICAL `### Rebase proof` (`scripts/rebase_proof.py`) keeps your
-last clean matrix fresh: no re-run for that rebase. The launch brief's facts are
-already verified: do not re-derive them or re-read files it quotes unless you
-need lines it does not give.
+last clean matrix fresh. Brief facts are verified: never re-derive them or
+re-read quoted files except for lines the brief omits.
 
 Deliver a matrix (surface, command, actual output, PASS/FAIL/BLOCKED), a repro
 for every FAIL, and the untested gaps with reasons. Redact secrets. Post the QA
 round on the PR/MR using its CLI; if posting is unavailable say so, never
 silently substitute a private verdict. Your FINAL MESSAGE is the report and
-reaches the delegator automatically; use `hub` only for a blocker or a question
-mid-job, never to pre-send the final report. Name your
+reaches the delegator; `hub` is for mid-job blockers only. Name your
 actual served model and disclose fallback changes. PASS means observed execution,
 not "should work". Batch initial findings with other review streams before one
 remediation pass. Follow the repository's comment/approval conventions.

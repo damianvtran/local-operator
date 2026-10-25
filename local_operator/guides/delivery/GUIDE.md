@@ -87,16 +87,13 @@ unchanged evidence when byte/source compatibility is proved. A model-header or
 provenance-only metadata correction is an addendum, not a reason to rerun the
 suite; a new executable or user-visible change is not metadata.
 
-A moved base is NOT a blind re-pin: run
-`python scripts/rebase_proof.py <old-head> <new-head> --base origin/main` and
-post its `### Rebase proof` block on the PR. Verdict MECHANICAL (range-diff all
-`=`, byte-identical +/- line sets, no file overlap with upstream's movement)
-keeps the last clean code review AND QA round fresh: no new agent round.
-Otherwise run one `old-head..new-head` convergence round for semantic conflicts
-in the files it names, reviewing and testing the affected content. A test-only
-or docs-only commit after a clean round needs only a delta review by the same
-reviewer, and no QA re-run unless the test touches a QA'd surface. Merge-time
-CI green is still required. Follow
+A moved base is NOT a blind re-pin: post the `### Rebase proof` from
+`scripts/rebase_proof.py <old-head> <new-head>` (range-diff all `=`,
+byte-identical +/- line sets, no overlap with upstream's files). MECHANICAL
+keeps the last clean code AND QA rounds fresh; otherwise run one
+`old-head..new-head` convergence round on the files it names. A test- or
+docs-only commit after a clean round needs only the same reviewer's delta
+review, no QA re-run unless it touches a QA'd surface. CI must still be green. Follow
 `AGENTS.md`'s SHA-freshness rules and the standing PR comment format. A genuine
 late BLOCKER/MAJOR with a demonstrated code path stays admissible; delta scope
 never waives correctness, security or regression risk. Fix real BLOCKER/MAJOR
