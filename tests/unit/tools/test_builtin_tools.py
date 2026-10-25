@@ -5673,7 +5673,7 @@ async def test_read_whole_injected_guidance_returns_section_index(tools, context
     # No body lines: neither the duplicated head nor the tail ships inline.
     assert "padding line 5" not in result.text
     assert "rule 2 lives here." not in result.text
-    assert result.details["guidance_index"] is True
+    assert (result.details or {}).get("guidance_index") is True
 
 
 @pytest.mark.asyncio
