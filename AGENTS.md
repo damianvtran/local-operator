@@ -1542,7 +1542,13 @@ git -C ~/local-operator update-ref refs/heads/main origin/main
 #    Then tag + GitHub Release on the bump's merge commit. --target creates
 #    the tag on that exact SHA; the publish workflow triggers on the release.
 $EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # public copy only; no authoring/checklist section
-gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
+
+# Resolve the target in its OWN command, print it, and check it is the bump's
+# merge commit you expect -- then pass the literal SHA. Do not embed the
+# substitution in the release command: see "Branch-moving commands".
+git -C ~/local-operator fetch --tags origin main
+git -C ~/local-operator rev-parse origin/main          # copy this SHA after checking it
+gh release create vX.Y.Z --target <the SHA you just checked> \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
 # 5. Install and verify — REQUIRED: the release is not complete until this
@@ -1663,8 +1669,8 @@ unchanged, advance the clone's own `main` first.
 ### A green run is a function of the tree it was computed against
 
 **The tag target is the bump's MERGE commit** — which is what "Mechanics, in
-order" step 4 already does with
-`--target "$(git -C ~/local-operator rev-parse origin/main)"`, once the bump
+order" step 4 already does: resolve `origin/main` in its own command, check it is
+the bump's merge commit, then pass that literal SHA to `--target`, once the bump
 has merged and `origin/main` has been fetched. **Never the bump
 branch's own head**, which is a different SHA and is not what ships.
 
@@ -2348,7 +2354,7 @@ commands. Three visible steps — freeze, verify, use — satisfy this rule; one
 embedded `$(...)` does not, because nobody sees the value until it has already
 been acted on.
 
-This rule exists because of a real near-miss. On the night of 2026-10-24/25 a
+This rule exists because of a real near-miss. On 2026-10-24 (local; 2026-10-25 UTC) a
 malformed multi-command batch fired `gh pr merge --squash` at an unrelated,
 unreviewed pull request. Nothing merged: the repository's required-review
 control refused it, exactly as designed. But that control was the only thing
