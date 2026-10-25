@@ -994,8 +994,28 @@ class OSWorldV2Adapter:
         return supplied
 
     async def observe(self, params: ObserveParams) -> ObservationResult:
-        if self._current_observation is None:
+        current = self._current_observation
+        if current is None:
             raise AdapterStateError("observe before reset_start")
+        if params.episode_id != current.episode_id:
+            raise AdapterStateError("observe belongs to another episode")
+        if params.fresh:
+            if self._provider is None or self._observation_builder is None:
+                raise AdapterStateError("fresh observe before reset_start")
+            # A not-applied recovery must show the ACTUAL screen, not the last
+            # accepted cache: the desktop can move autonomously while input is
+            # refused. Capture only -- no execute/settle/receipt. Build before
+            # publishing either state field so cancellation or a failed capture
+            # leaves the old binding intact; no await separates the publish.
+            raw = await self._provider.observe()
+            output = self._observation_builder.build(
+                raw,
+                task_id=current.task_id,
+                episode_id=current.episode_id,
+                sequence=self._sequence + 1,
+            )
+            self._current_observation = output
+            self._sequence = output.sequence
         return ObservationResult(observation=self._current_observation)
 
     async def probe(self, params: ProbeParams) -> ProbeResult:
@@ -1008,8 +1028,8 @@ class OSWorldV2Adapter:
         endpoint the allocation readiness check already trusts, and nothing
         here advances, mutates, or records.
 
-        Unlike ``observe`` -- which answers the LAST ACCEPTED observation from
-        memory and deliberately never touches the guest -- this method's whole
+        Unlike default ``observe`` -- which answers the LAST ACCEPTED observation
+        from memory (``fresh=True`` explicitly opts into capture) -- this method's whole
         value is that it does touch the guest, so its answer can differ from
         the cached one when the control server is gone. State-gated like every
         other RUNNING call: before ``reset_start`` there is no guest to ask,

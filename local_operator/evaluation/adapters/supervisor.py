@@ -1094,7 +1094,13 @@ class VerifiedAdapterSession:
         return initial
 
     async def observe(self, params: ObserveParams, *, timeout: float) -> ObservationResult:
-        """Read the current snapshot. Poisons on failure, deliberately.
+        """Read the accepted snapshot, or adopt an explicit live capture.
+
+        Default requests must equal the accepted snapshot. ``fresh=True`` is
+        the declared not-applied recovery's opt-in: it captures actual state
+        and must pass exact-next-sequence/content/artifact validation before
+        the verifier adopts the binding. Neither mode applies input or creates
+        an execution receipt, and failures in EITHER mode poison deliberately.
 
         ``observe`` is READ-ONLY, so a failure here is not an ambiguous
         mutation and the poison below is stricter than the mutating-call rule
@@ -1129,7 +1135,14 @@ class VerifiedAdapterSession:
                 "observe", params, ObservationResult, timeout=timeout
             )
             assert isinstance(result, ObservationResult)
-            self.verifier.verify_current_snapshot(result.observation)
+            if params.fresh:
+                # A read-only capture advances the OBSERVATION binding, not an
+                # applied-action count. Reuse exact-next/content/artifact checks:
+                # an unsupported adapter returning cache must fail closed, not
+                # silently label old pixels fresh. No execution receipt exists.
+                self.verifier.accept_output(result.observation)
+            else:
+                self.verifier.verify_current_snapshot(result.observation)
         except BaseException:
             await self._poison_after_ambiguous_mutation()
             raise

@@ -121,16 +121,15 @@ from local_operator.evaluation.receipts import (
 #
 # 1.7 adds the NOT-APPLIED phase: ``"not_applied"`` joins ``ErrorPhase``
 # (rpc.py), written by a worker only when the adapter raised
-# ``ActionNotAppliedError`` from ``execute`` (see below). No field is added and
-# no existing line's bytes move, but the bump is still required: ``phase`` is a
-# CLOSED ``Literal`` on a ``ProtocolModel``, so a 1.6 parent receiving
-# ``"phase":"not_applied"`` would fail to validate the error line itself --
-# an opaque protocol failure on the error path, mid-episode, rather than the
-# graceful "treat as unknown" a reader might assume. The exact-version pin in
-# ``AdapterSelector`` turns the mismatch into a refusal at selection time,
-# before a worker is spawned. (A 1.7 parent reading a 1.6 worker is fine on
-# the wire -- the old worker can only ever write the two old values -- but the
-# pin is exact in both directions by design, as for every earlier bump.)
+# ``ActionNotAppliedError`` from ``execute`` (see below). The bump is required:
+# ``phase`` is a CLOSED ``Literal``, so a 1.6 parent rejects the new value, not
+# a graceful "treat as unknown". 1.7 also adds ``ObserveParams.fresh`` for the
+# opt-in read-only live capture required by the declaration; its default keeps
+# cached snapshot semantics. That field changes canonical observe request
+# bytes even at the default: old workers forbid the new key, and new workers
+# cannot canonically round-trip old requests that lack it (same reason as 1.3).
+# The exact-version pin in ``AdapterSelector`` refuses mixed peers at selection
+# before a worker is spawned, not mid-episode on the error/recovery path.
 ADAPTER_SCHEMA_VERSION = "1.7"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
@@ -699,7 +698,17 @@ class ResetStartParams(OperationParams):
 
 
 class ObserveParams(ProtocolModel):
+    """Read the accepted snapshot, or explicitly capture a new read-only one.
+
+    ``fresh=False`` preserves the cached snapshot contract used by reset and
+    committed read-back recovery. ``fresh=True`` captures the actual environment
+    WITHOUT applying actions, settling, or creating an execution receipt. It
+    publishes the exact next observation sequence only after capture/build
+    succeeds; callers validate/adopt it as a new observation binding.
+    """
+
     episode_id: StrictIdentifier
+    fresh: bool = False
 
 
 class ObservationResult(ProtocolModel):
@@ -717,7 +726,7 @@ class ProbeParams(ProtocolModel):
     key for the same reason ``observe`` does not: there is no mutation to
     correlate or replay.
 
-    WHY NOT ``observe``. ``observe`` answers the LAST ACCEPTED observation
+    WHY NOT ``observe``. Default ``observe`` answers the LAST ACCEPTED observation
     from the worker's own state, deliberately without touching the guest (the
     re-bind contract depends on it: see ``test_fake_end_to_end``), so it
     cannot say whether the control server that dropped the in-flight execute
@@ -797,6 +806,14 @@ class ActionNotAppliedError(Exception):
     re-apply" -- resuming a never-applied batch would accept an observation
     for actions that never ran). The parent never resends the batch either;
     only the model may choose to issue it again, against a fresh observation.
+
+    An adapter adopting this error must support ``observe(fresh=True)``: the
+    parent's ONE read-only recovery captures the actual current environment,
+    publishes the exact next observation sequence, and never applies input or
+    creates an execution receipt. Returning the old cache instead fails the
+    parent's next-sequence validation and ends the episode, fail-closed. A
+    capture/build failure must leave the adapter's last accepted observation
+    and sequence unchanged; the parent poisons that failed recovery normally.
 
     Raising this when ANY input of the batch may have reached the environment
     -- an ambiguous delivery, or a failure after an earlier statement of the

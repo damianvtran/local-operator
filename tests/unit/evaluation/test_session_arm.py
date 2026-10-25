@@ -1752,7 +1752,8 @@ class TestFailedExecuteRecovery:
                 raise _observation_phase_error()
             return _result(input_observation=obs0, output_observation=obs1)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return obs0
 
@@ -1794,7 +1795,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _observation_phase_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             return obs1  # newer than the screen the model last saw
 
         bridge = _bridge(tmp_path, execute=execute, recover=recover)
@@ -1816,7 +1818,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _observation_phase_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             raise _observation_phase_error()  # the environment is still down
 
@@ -1841,7 +1844,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _deadline_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return _observation()
 
@@ -1890,7 +1894,8 @@ class TestFailedExecuteRecovery:
             # refusal (the recorded sequence's final class).
             raise _invalid_state_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             recovered_calls.append(1)
             return _observation(sequence=2, text="screen C")
 
@@ -1937,7 +1942,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _invalid_state_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             raise _observation_phase_error()
 
@@ -1966,7 +1972,8 @@ class TestFailedExecuteRecovery:
                 ),
             )
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return _observation()
 
@@ -1986,7 +1993,8 @@ class TestFailedExecuteRecovery:
             executed.append(batch)
             raise _observation_phase_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             raise _observation_phase_error()
 
         bridge = _bridge(
@@ -2043,7 +2051,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _observation_phase_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             return obs0
 
         bridge = _bridge(
@@ -2099,11 +2108,12 @@ class TestNotAppliedRebind:
             executed.append(batch)
             if len(executed) == 1:
                 raise _not_applied_error()
-            return _result(input_observation=obs0, output_observation=obs1)
+            return _result(input_observation=obs1, output_observation=_observation(sequence=2))
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
             re_reads.append(1)
-            return obs0
+            return obs1
 
         bridge = _bridge(
             tmp_path,
@@ -2116,8 +2126,9 @@ class TestNotAppliedRebind:
         assert first["is_error"] is True
         assert first["details"]["recovered"] is True
         assert first["details"]["not_applied"] is True
-        # The SAME screen the model saw: not re-rendered (no false dedup note).
-        assert [block.text for block in first["content"]] == [RECOVERY_AFTER_NOT_APPLIED]
+        # Fresh screen follows the declaration; its FULL binding is journalled.
+        assert [block.text for block in first["content"]] == [RECOVERY_AFTER_NOT_APPLIED, "seen 1"]
+        assert recorded[1][1]["observation"] == obs1
         assert bridge.end_requested is None
         assert re_reads == [1]
         assert [kind for kind, _ in recorded] == ["output_epoch", "not_applied_rebind"]
@@ -2128,6 +2139,7 @@ class TestNotAppliedRebind:
         after = await bridge.call(self._WAIT)
         assert after["is_error"] is False
         assert len(executed) == 2 and re_reads == [1]
+        assert executed[1].observation_id == obs1.observation_id
         # The failed batch's epoch was charged at admission, the success's too.
         assert bridge.steps == 2
 
@@ -2140,7 +2152,8 @@ class TestNotAppliedRebind:
             del batch
             raise _not_applied_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
             re_reads.append(1)
             return _observation()
 
@@ -2182,7 +2195,8 @@ class TestNotAppliedRebind:
                 raise _not_applied_error()
             return _result(input_observation=obs0, output_observation=obs1)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
             return obs0
 
         bridge = _bridge(tmp_path, observation=obs0, execute=execute, recover=recover, max_steps=50)
@@ -2199,7 +2213,8 @@ class TestNotAppliedRebind:
             del batch
             raise _not_applied_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
             re_reads.append(1)
             raise _observation_phase_error()
 
@@ -2246,7 +2261,8 @@ class TestNotAppliedRebind:
                 ),
             )
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
             re_reads.append(1)
             return _observation()
 
@@ -2336,7 +2352,8 @@ class TestAmbiguousDeliveryRebind:
                 raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
             return _result(input_observation=obs0, output_observation=obs1)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return obs0
 
@@ -2390,7 +2407,8 @@ class TestAmbiguousDeliveryRebind:
             del batch
             raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             return obs0
 
         bridge = _bridge(tmp_path, observation=obs0, execute=execute, recover=recover)
@@ -2422,7 +2440,8 @@ class TestAmbiguousDeliveryRebind:
             del batch
             raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             return obs0
 
         bridge = _bridge(
@@ -2462,7 +2481,8 @@ class TestAmbiguousDeliveryRebind:
             del batch
             raise _ambiguous_delivery_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return _observation()
 
@@ -2492,7 +2512,8 @@ class TestAmbiguousDeliveryRebind:
             del batch
             raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             raise _observation_phase_error()
 
@@ -4334,3 +4355,48 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.attempted_groups == 1
         assert outcome.steps == 0
         assert text.count("tool_execution_end") == 2  # both paired
+
+
+def test_identical_read_only_pixels_are_neutral_and_do_not_escalate_action_streak(
+    tmp_path: Path,
+) -> None:
+    frames = (_frame(tmp_path, PNG),)
+    renderer = ObservationRenderer(tmp_path)
+    renderer.render(_observation(frames=frames))
+    capture = renderer.render_read_only(_observation(sequence=1, frames=frames))
+    sentence = "\n".join(block.text for block in capture if hasattr(block, "text"))
+    assert "read-only capture, not an action result" in sentence
+    assert "your last action" not in sentence and "Do not repeat" not in sentence
+    # The ordinary action-result path keeps its existing advice, with no
+    # artificial no-progress streak charged by the read-only capture.
+    normal = renderer.render(_observation(sequence=2, frames=frames))
+    text = "\n".join(block.text for block in normal if hasattr(block, "text"))
+    assert "your last action changed nothing visible" in text
+    assert renderer._builder._no_change_streak == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_seam_forwards_fresh_explicitly_and_preserves_default(
+    tmp_path: Path,
+) -> None:
+    from local_operator.evaluation.adapters.api import ObservationResult, ObserveParams
+    from local_operator.evaluation.runner.episode import EpisodeConfig
+    from local_operator.evaluation.session_arm import _make_recover
+
+    calls: list[ObserveParams] = []
+    live = _observation(sequence=1)
+
+    class Session:
+        async def observe(self, params: ObserveParams, *, timeout: float) -> ObservationResult:
+            calls.append(params)
+            return ObservationResult(observation=live)
+
+    config = EpisodeConfig(
+        evidence_root=tmp_path / "evidence",
+        artifact_root=tmp_path / "artifacts",
+        rescue_root=tmp_path / "rescue",
+    )
+    recover = _make_recover(cast(Any, Session()), config, live.episode_id)
+    assert await recover(fresh=True) == live
+    assert await recover() == live
+    assert [params.fresh for params in calls] == [True, False]

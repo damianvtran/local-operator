@@ -82,7 +82,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 if TYPE_CHECKING:
     from local_operator.owned_process import OwnerStatusChannel
@@ -276,9 +276,9 @@ AMBIGUOUS_REBIND_BUDGET = 2
 #: was decided against a screen that may since have moved on its own.
 RECOVERY_AFTER_NOT_APPLIED = (
     "Not applied: the environment could not accept your last batch, and none of "
-    "its actions were applied -- the environment is as it was before that call. "
-    "The episode continues. You may re-issue the batch; check the current screen "
-    "first, since it may have changed on its own."
+    "its actions were applied. The episode continues. A fresh read-only capture "
+    "of the current screen follows. You may re-issue the batch; check that screen "
+    "first, since the environment may have changed on its own."
 )
 
 #: How many CONSECUTIVE declared not-applied failures one episode re-binds
@@ -653,11 +653,15 @@ class ObservationRenderer:
         )
         self._turns: list[EpisodeTurn] = []
 
-    def render(self, observation: Observation) -> list[Any]:
+    def render_read_only(self, observation: Observation) -> list[Any]:
+        """Render a capture without attributing unchanged pixels to an action."""
+        return self.render(observation, read_only=True)
+
+    def render(self, observation: Observation, *, read_only: bool = False) -> list[Any]:
         """The observation's content blocks, in the builder's own rendering."""
 
         self._turns.append(EpisodeTurn(observation=observation))
-        self._builder.append_new_turns(self._turns)
+        self._builder.append_new_turns(self._turns, read_only=read_only)
         message = self._builder.messages[-1]
         return list(message.content)
 
@@ -767,6 +771,7 @@ RecordBatch = Callable[[str, Mapping[str, Any]], None]
 #: ``ExecuteResult``.
 ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 
+
 #: The re-bind seam: one bounded attempt to fetch the observation the episode
 #: may continue from, called by the bridge after an execute failure that is
 #: RE-BINDABLE (``_rebindable_failure``: the committed read-back class, or a
@@ -774,7 +779,14 @@ ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 #: call; tests fill it with a fake.
 #: ``None`` means the bridge has no re-read path and a failed execute is
 #: terminal -- legibly (see ``ActionBridge._after_failed_execute``).
-RecoverObservation = Callable[[], Awaitable[Observation]]
+class RecoverObservation(Protocol):
+    """The re-bind seam explicitly distinguishes cached and live reads.
+
+    Only a declared not-applied batch requests ``fresh=True``. Other recovery
+    classes retain their cached binding and exact-equality validation.
+    """
+
+    def __call__(self, *, fresh: bool = False) -> Awaitable[Observation]: ...
 
 
 def _split_ask_delivery(delivery: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -864,6 +876,9 @@ class ActionBridge:
     #: owns WHEN; the driver owns the RPC. ``None`` degrades a failed execute
     #: to a legible end rather than a silent one.
     recover: RecoverObservation | None = None
+    #: The shared renderer's read-only variant, used only for a fresh recovery:
+    #: unchanged pixels describe a capture, not an action that never happened.
+    render_read_only: Callable[[Observation], list[Any]] | None = None
     #: The task as it was stated -- the reset observation's text -- restated by
     #: the completion challenge (the same source the runner's gate uses).
     instruction: str = ""
@@ -1813,7 +1828,7 @@ class ActionBridge:
         recover_error: Exception | None = None
         if recovery_attempted and recover is not None:
             try:
-                recovered = await recover()
+                recovered = await recover(fresh=True) if not_applied else await recover()
             except Exception as failure:  # noqa: BLE001 - the wedge sentence names it
                 recover_error = failure
         if recovered is not None:
@@ -1846,10 +1861,10 @@ class ActionBridge:
         sentences: the adapter proved nothing was applied, so the model is told
         the batch did not run and may be re-issued (``RECOVERY_AFTER_NOT_APPLIED``).
 
-        The recovered screen is re-rendered only when it differs from the one
-        the model last saw, for the sibling's reason: the renderer's dedup note
-        ("your last action changed nothing visible") would read as a claim
-        about a batch that never ran.
+        The live capture has a new content-derived observation ID and next
+        sequence, even if the pixels did not move. The shared renderer's
+        read-only variant states identical pixels neutrally rather than
+        attributing them to an action that never ran.
 
         Its own record kind, ``not_applied_rebind``, keeps these apart from the
         committed-class ``recovered`` rows in a bundle, with the running
@@ -1865,7 +1880,7 @@ class ActionBridge:
             TextContent(text=RECOVERY_AFTER_NOT_APPLIED),
         ]
         if shown_before is None or shown_before.observation_id != recovered.observation_id:
-            rendered = self.render(recovered)
+            rendered = (self.render_read_only or self.render)(recovered)
             self._last_shown = (recovered.observation_id, rendered)
             self._last_observation = recovered
             content = [*content, *rendered]
@@ -1881,6 +1896,9 @@ class ActionBridge:
                     "limit": NOT_APPLIED_REBIND_LIMIT,
                     "transport_error": _bounded_cause(error, limit=500),
                     "observation_id": recovered.observation_id,
+                    # This is a new observation binding with no execution
+                    # receipt; retain the full transition for offline audit.
+                    "observation": recovered,
                 },
             )
         details: dict[str, Any] = {
@@ -2772,6 +2790,7 @@ async def run_session_episode(
             endpoint=endpoint,
             surface=surface,
             render=renderer.render,
+            render_read_only=renderer.render_read_only,
             execute=_make_execute(adapter_session, config, record),
             # The re-bind seam: one read-only ``observe`` after a re-bindable
             # failed execute (see ``_make_recover``).
@@ -3772,9 +3791,12 @@ def _make_recover(
     a pre-dispatch refusal (``invalid_state``: nothing applied) -- and whose
     configured read-back retries have already run out, so this is NOT a retry
     of that read-back (raising those is a comparability-affecting change, see
-    INFRA.md) but a fresh state read through the read-only ``observe`` method
-    every adapter
-    already answers (``reset_start`` reads observation zero through it). It
+    INFRA.md) but a read through the read-only ``observe`` method every adapter
+    already answers (``reset_start`` reads observation zero through it). Its
+    default returns the last accepted snapshot, preserving existing committed
+    and refusal recovery. ONLY a declared not-applied recovery opts into
+    ``fresh=True``: a live capture whose exact-next sequence and content are
+    validated/adopted by the supervisor, without an action or receipt. It
     re-establishes what the bridge lost: a current observation the token can
     be re-armed with. When it cannot -- the environment is still unable to
     answer, or the read is refused -- the bridge ends the episode with the
@@ -3789,9 +3811,9 @@ def _make_recover(
     on a run that would otherwise have died anyway.
     """
 
-    async def recover() -> Observation:
+    async def recover(*, fresh: bool = False) -> Observation:
         result = await adapter_session.observe(
-            ObserveParams(episode_id=episode_id), timeout=config.step_timeout
+            ObserveParams(episode_id=episode_id, fresh=fresh), timeout=config.step_timeout
         )
         return result.observation
 
