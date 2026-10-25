@@ -765,3 +765,76 @@ def render_context_files(files: list[Path], cwd: str | Path) -> str:
 def load_repo_guidance(cwd: str | Path, *, boundary: Path | None = None) -> str:
     """One call: discover + render. ``""`` when there is nothing to inject."""
     return render_context_files(discover_context_files(cwd, boundary=boundary), cwd)
+
+
+#: Per-cwd memo of :func:`discover_context_files` for the ``read`` tool's
+#: guidance-index branch. Discovery walks every ancestor and hashes each
+#: candidate, and the read tool would otherwise repeat that walk on every
+#: whole-file read. Bounded (a session's cwd rarely changes; a long-lived
+#: process may host a few) and cleared wholesale rather than LRU-evicted,
+#: because a stale entry costs only a missed shortcut, never wrong content:
+#: the branch re-checks the file itself before shaping anything.
+_READ_DISCOVERY_CACHE: dict[str, tuple[Path, ...]] = {}
+_READ_DISCOVERY_CACHE_MAX = 64
+
+
+def _discovered_for_read(cwd: str | Path) -> tuple[Path, ...]:
+    key = str(cwd)
+    cached = _READ_DISCOVERY_CACHE.get(key)
+    if cached is None:
+        try:
+            cached = tuple(path.resolve() for path in discover_context_files(cwd))
+        except (OSError, ValueError):
+            cached = ()
+        if len(_READ_DISCOVERY_CACHE) >= _READ_DISCOVERY_CACHE_MAX:
+            _READ_DISCOVERY_CACHE.clear()
+        _READ_DISCOVERY_CACHE[key] = cached
+    return cached
+
+
+def render_read_index(path: Path, cwd: str | Path, shown: str) -> str | None:
+    """What a whole-file ``read`` of an injected guidance file returns, or None.
+
+    Why this exists: team briefs say "read AGENTS.md before work", so children
+    re-read the guidance file the parent and their own system prompt already
+    carry. Measured over a week: ~2,700 such reads, 27 MB of results. For a file
+    larger than the read clamp the whole-file read returns only its first
+    8 KiB, i.e. the SAME head :func:`render_context_files` already injected,
+    and nothing from the sections the reader actually needed. Returning the
+    section index instead (built by the very scanner/renderer the prompt uses,
+    so the two can never disagree on line numbers) costs ~4 KB and tells the
+    reader which range to read next.
+
+    Returns None — the caller falls through to the ordinary read — when the
+    file is not one discovery would inject for ``cwd`` (an AGENTS.md in some
+    other repo was never in the prompt, so claiming its head is there would
+    be false), or when it fits the head whole (then nothing was elided and
+    the plain read is the honest answer). Ranged and raw reads never reach
+    here; the caller keeps those exact.
+
+    Constraint: discovery here runs WITHOUT the session's world boundary (the
+    read tool does not carry it), so inside a bounded benchmark world a file
+    above the boundary could be shaped although the prompt omitted it. Such
+    a world is synthetic and the index still names every range, so the cost
+    is one wording inaccuracy, never unreachable content.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    if resolved not in _discovered_for_read(cwd):
+        return None
+    try:
+        _text, head_lines, has_more = _read_head(resolved)
+    except OSError:
+        return None
+    if not has_more:
+        return None
+    return (
+        f"`{shown}` is repository guidance: its head (L1-{head_lines}) is already "
+        f"in your system prompt under <repo-guidance>, so a whole-file read "
+        f"would only repeat it. Read the section you need by range."
+        + _render_index(resolved, shown, head_lines).replace(
+            "is NOT included above", "is NOT in your system prompt"
+        )
+    )

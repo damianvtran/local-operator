@@ -5652,6 +5652,62 @@ async def test_read_summary_falls_back_on_syntax_error(tools, context, tmp_path)
     assert "def broken(:" in result.text
 
 
+def _oversized_guidance() -> str:
+    filler = "\n".join(f"padding line {i}" for i in range(900))
+    body = f"# Project\n\n## Head section\n\n{filler}\n"
+    for index in range(3):
+        body += f"\n## Late section {index}\n\nrule {index} lives here.\n"
+    return body
+
+
+@pytest.mark.asyncio
+async def test_read_whole_injected_guidance_returns_section_index(
+    tools, context, tmp_path
+) -> None:
+    """A whole-file read of the AGENTS.md this session's prompt already carries
+    returns the section index, not the 8 KiB clamp that only repeats the head."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, context)
+    assert result.is_error is False
+    assert "already in your system prompt" in result.text
+    assert re.search(r"- L\d+-\d+: Late section 2", result.text)
+    # No body lines: neither the duplicated head nor the tail ships inline.
+    assert "padding line 5" not in result.text
+    assert "rule 2 lives here." not in result.text
+    assert result.details["guidance_index"] is True
+
+
+@pytest.mark.asyncio
+async def test_read_guidance_range_raw_and_foreign_files_stay_exact(
+    tools, context, tmp_path
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
+    ranged = await _call(tools, "read", {"path": "AGENTS.md", "range": "3-3"}, context)
+    assert ranged.text == "3| ## Head section"
+    raw = await _call(tools, "read", {"path": "AGENTS.md", "raw": True}, context)
+    assert "padding line 5" in raw.text and "already in your system prompt" not in raw.text
+    # An AGENTS.md discovery would NOT inject for this cwd (a sibling repo) was
+    # never in the prompt, so claiming its head is there would be false.
+    other = tmp_path.parent / f"{tmp_path.name}-other"
+    (other / ".git").mkdir(parents=True)
+    (other / "AGENTS.md").write_text(_oversized_guidance())
+    foreign = await _call(tools, "read", {"path": str(other / "AGENTS.md")}, context)
+    assert "already in your system prompt" not in foreign.text
+    assert "padding line 5" in foreign.text
+
+
+@pytest.mark.asyncio
+async def test_read_small_injected_guidance_stays_whole(tools, context, tmp_path) -> None:
+    # Fits the injected head whole: nothing was elided, the plain read is honest.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("# Project\n\nshort rule\n")
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, context)
+    assert "short rule" in result.text
+    assert "already in your system prompt" not in result.text
+
+
 @pytest.mark.asyncio
 async def test_read_short_python_file_stays_raw(tools, context, tmp_path) -> None:
     (tmp_path / "small.py").write_text("def a():\n    return 1\n")

@@ -9274,6 +9274,25 @@ async def _read_path(
                     },
                 )
 
+    # An injected guidance file (AGENTS.md/CLAUDE.md that context_files put in
+    # this session's prompt) read whole returns its section index, not the
+    # 8 KiB clamp — that clamp IS the head the prompt already carries, so it
+    # bought nothing (measured ~2,700 such reads/week). Same opt-outs as the
+    # Python summary below: range/raw stay exact. See render_read_index.
+    from local_operator.context_files import CANDIDATE_NAMES, render_read_index
+
+    if not params.range and not params.raw and path.name in CANDIDATE_NAMES:
+        guidance_index = await asyncio.to_thread(
+            render_read_index, path, _safe_cwd(context), str(path)
+        )
+        if guidance_index is not None:
+            return _text(
+                tool_call_id,
+                "read",
+                guidance_index,
+                details={"path": str(path), "summary": True, "guidance_index": True},
+            )
+
     # Python files read whole get a declaration-only structural summary:
     # the model sees the symbol table (with line ranges) instead of the full
     # body, and re-reads only the ranges it needs. The repo's own benchmark
