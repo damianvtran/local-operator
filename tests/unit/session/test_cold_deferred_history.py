@@ -36,12 +36,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
 
-from local_operator.harness.types import Message, TextContent, Usage
+from local_operator.harness.types import Message, MessageRole, TextContent, Usage
 from local_operator.session import cold_metadata, replay_cache
 from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import (
@@ -59,7 +60,7 @@ SESSION_ID = "abcdef012345"
 
 
 @pytest.fixture(autouse=True)
-def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """A store, a HOME and an empty replay cache for every test."""
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -82,7 +83,7 @@ def _session_dir(config: Path, session_id: str = SESSION_ID) -> Path:
     return directory
 
 
-def _message(id_: str, role: str, text: str) -> Message:
+def _message(id_: str, role: MessageRole, text: str) -> Message:
     return Message(id=id_, role=role, content=[TextContent(text=text)])
 
 
