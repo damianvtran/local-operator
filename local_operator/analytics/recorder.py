@@ -1012,17 +1012,51 @@ class AnalyticsRecorder:
             )
 
     def close(self, timeout: float = 2.0) -> None:
-        """Stop the writer and close the store (process teardown / tests)."""
+        """Stop the writer and close the store (process teardown / tests).
+
+        ``_closed`` is set BEFORE the join, deliberately: it is the fence that
+        turns every producer (``record`` and friends return early on it) into a
+        no-op and stops ``_ensure_thread`` from starting a replacement writer
+        while this join runs. The price is that a timed-out close leaves a
+        CLOSED recorder with a live writer — the safe side of that trade, since
+        no new work can enter the queue and the surviving writer only drains
+        what it already held. It cannot be restarted from here, so that state is
+        reported instead of hidden.
+
+        ``Thread.join(timeout)`` returns nothing either way, so the outcome is
+        read from ``is_alive()`` afterwards rather than assumed. A writer still
+        alive at the deadline is named in a warning and its handle is KEPT (this
+        method used to drop it unconditionally), because the handle is the only
+        thing that can show the condition after the fact. A thread that ignores
+        its sentinel cannot be killed from here — this makes it observable, not
+        impossible.
+        """
         if self._closed:
             return
         self._closed = True
-        if self._thread is not None:
+        writer = self._thread
+        if writer is not None:
             try:
                 self._queue.put_nowait(None)
             except queue.Full:
+                # The sentinel did not fit, so the writer will never see it and
+                # its join is expected to time out; the warning below reports it
+                # rather than leaving the drop silent.
                 pass
-            self._thread.join(timeout=timeout)
-            self._thread = None
+            writer.join(timeout=timeout)
+            if writer.is_alive():
+                logger.warning(
+                    "analytics: writer thread did not stop within the %.1fs close "
+                    "timeout and is still running — it was not killed; the recorder "
+                    "is closed and accepts no more samples, and the writer's handle "
+                    "is kept so this stays observable",
+                    timeout,
+                )
+            else:
+                self._thread = None
+        # ``AnalyticsStore.close`` closes only the CALLING thread's connection
+        # (see its docstring), so a writer that is still alive keeps its own; this
+        # does not rip a connection out from under it.
         self._store.close()
 
 
