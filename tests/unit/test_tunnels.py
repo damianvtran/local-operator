@@ -3847,7 +3847,15 @@ async def test_a_lease_ending_under_backpressure_still_completes_the_response(
 
                 def stalled_reader() -> bytes:
                     with closing(socket.create_connection(("127.0.0.1", port))) as sock:
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                        # Linux's delayed-ACK/flow-control behavior can reduce a
+                        # 4 KiB receive window to ~8 KiB per four seconds once
+                        # this socket stalls; that leaves a real backpressured
+                        # response draining long after the test deadline even
+                        # with no gateway involved (raw-socket control). Keep a
+                        # receive buffer large enough to drain, while the real
+                        # uvicorn write-side high-water mark still forces the
+                        # lease path through its blocked-send case.
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
                         sock.sendall(
                             b"GET /api/sessions/events HTTP/1.1\r\nHost: "
                             + HOST.encode()
