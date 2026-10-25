@@ -19,6 +19,7 @@ store RETURNED as dropped, which is how the shipped store loses one).
 from __future__ import annotations
 
 import inspect
+import logging
 import multiprocessing as mp
 import sqlite3
 import threading
@@ -74,6 +75,77 @@ def test_record_never_raises_when_closed(tmp_path):
     # Recording on a closed recorder is a silent no-op, not an exception.
     rec.record(_snap())
     assert rec.dropped == 0
+
+
+class _WriterThatIgnoresTheSentinel(threading.Thread):
+    """A stand-in writer that never stops, driven without a real thread.
+
+    ``close`` can only learn whether its join succeeded by asking
+    ``is_alive()``, so the failing branch is asserted by answering that question
+    directly: a real wedged thread would need a sleep and would still race the
+    assertion. Never started, so nothing runs here; ``join_timeout`` records what
+    ``close`` handed to the wait, which is the caller's timeout rather than a
+    literal of its own.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="lo-analytics-writer", daemon=True)
+        self.join_timeout: float | None = None
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return True
+
+
+def test_close_reports_a_writer_that_will_not_stop(tmp_path, caplog):
+    """A timed-out join is REPORTED and stays observable, not silently cleared.
+
+    ``Thread.join(timeout)`` returns ``None`` whether or not the thread stopped,
+    so the old ``join(); self._thread = None`` could not tell a stuck writer
+    from a clean stop: it dropped the only handle and called it success. The
+    warning names the timeout and the surviving writer, and the handle must
+    still be there afterwards so the condition can be seen again.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    writer = _WriterThatIgnoresTheSentinel()
+    rec._thread = writer
+    with caplog.at_level(logging.WARNING, logger=recorder_module.logger.name):
+        rec.close(timeout=1.5)
+    assert rec._thread is writer, "a live writer must stay reachable after close()"
+    assert writer.join_timeout == 1.5, "close() must wait for the timeout it was given"
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == recorder_module.logger.name and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1, caplog.text
+    message = warnings[0].getMessage()
+    assert "1.5s" in message, message
+    assert "still running" in message, message
+
+
+def test_close_clears_the_handle_and_stays_silent_when_the_writer_stops(tmp_path, caplog):
+    """The normal path: the sentinel is honoured, the handle goes, no warning."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    rec.record(_snap())
+    rec.flush_for_test()
+    assert rec._thread is not None
+    with caplog.at_level(logging.WARNING, logger=recorder_module.logger.name):
+        # Generous on purpose: the join returns as soon as the sentinel is
+        # honoured, and a cap tight enough for a loaded host to miss would turn
+        # CPU contention into a reported timeout that never happened.
+        rec.close(timeout=10.0)
+    assert rec._thread is None
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == recorder_module.logger.name and record.levelno >= logging.WARNING
+    ]
+    assert warnings == [], caplog.text
 
 
 def test_batching_coalesces_burst(tmp_path):
