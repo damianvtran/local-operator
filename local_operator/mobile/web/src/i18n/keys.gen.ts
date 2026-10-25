@@ -505,6 +505,10 @@ export type MessageParams = {
   "wire.errors.media.transcription_unexpected": { "error": string };
   "wire.errors.media.unknown_model": { "provider": string; "model": string; "error": string };
   "wire.errors.media.unknown_provider": { "provider": string };
+  "wire.errors.notifications.store_busy": undefined;
+  "wire.errors.notifications.store_full": { "where": string };
+  "wire.errors.notifications.store_unavailable": { "where": string };
+  "wire.errors.notifications.unknown_item": undefined;
   "wire.errors.sdk_spec.agent_identity_conflict": undefined;
   "wire.errors.sdk_spec.approval_callback_gate_required": undefined;
   "wire.errors.sdk_spec.approval_declared_tools_empty": undefined;
@@ -1518,6 +1522,7 @@ export type MessageParams = {
   "wire.slash.usage": undefined;
   "wire.slash.library.help": undefined;
   "wire.slash.library.librarian_help": undefined;
+  "wire.slash.notifications_page.help": undefined;
   "wire.tunnel_setup.checking": undefined;
   "wire.tunnel_setup.corrupt_intent": undefined;
   "wire.tunnel_setup.deadline": undefined;

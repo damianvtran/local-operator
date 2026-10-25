@@ -209,6 +209,16 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # appending never shifts a provider-visible array prefix, which is what the
     # prompt cache keys on.
     "artifact_data": lambda context: build_artifact_data_tool(context),
+    # createIf: rung 3 — present only where the session bound its inbox door
+    # (`context.notify_inbox`; absent for delegated children, sessions the
+    # operator's listings hide, one-shot hosts, output-contract sessions and
+    # under LOP_NOTIFY=0 — see `Session._notify_inbox_callable` and
+    # docs/design/notifications-inbox.md §3.2). Deferred (~500 billed tokens
+    # published against ~76 of context headroom; the system.md `has_notify`
+    # clause names when to reach for it). Appended at the END of both tables on
+    # purpose: appending never shifts a provider-visible array prefix, which is
+    # what the prompt cache keys on.
+    "notify": lambda context: builtin.build_notify_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -267,9 +277,11 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "generate_voiceover",
     "generate_sound_effect",
     "tags",
-    # The newest append (see the table comment above): createIf-gated on a
-    # stored anthropic OAuth grant.
+    # createIf-gated on a stored anthropic OAuth grant.
     "artifact_data",
+    # The newest append (see the table comment above): createIf-gated on the
+    # session's inbox door.
+    "notify",
 ]
 
 

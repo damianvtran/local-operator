@@ -1965,12 +1965,14 @@ def test_the_probe_is_a_reader(tmp_path):
     asyncio.run(feed.close())
 
 
-def test_a_quiet_tick_costs_five_stats_and_no_record_reads(tmp_path):
+def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     """THE I/O BUDGET, as a COUNT. One extra stat is the whole cost of watching.
 
     The record doorbell is one ``os.stat`` on ``run/mobile`` and the settings
     doorbell one on ``config.yml``, added to a tick that already made three (the
-    attention store and its two journal sidecars), and on
+    attention store and its two journal sidecars); the inbox doorbell adds
+    three (``notifications.db`` and the same two sidecars through the shared
+    fingerprint, docs/design/notifications-inbox.md §5.3). On
     a store where nothing moved it must read NOTHING: not one record, not the
     wake index, no SQL. Every later byte on this path is paid per event rather
     than per tick, which is the difference between this and the whole-list refetch
@@ -1993,10 +1995,11 @@ def test_a_quiet_tick_costs_five_stats_and_no_record_reads(tmp_path):
     feed._catalogue_probed_at = time.monotonic()
     feed._status_probed_at = time.monotonic()
     feed._authoring_probed_at = time.monotonic()
+    feed._asks_probed_at = time.monotonic()
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
-    assert counts["stat"] + counts["lstat"] <= 5, counts
+    assert counts["stat"] + counts["lstat"] <= 8, counts
     assert counts["record_reads"] == 0, counts
     assert counts["scandir"] == 0, counts
     asyncio.run(feed.close())

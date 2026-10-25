@@ -89,6 +89,13 @@ def test_shipped_wire_namespaces_exist() -> None:
         # which fr/hi/vi CARRY, and an English edit to a carried namespace
         # invalidates that locale's ledger row and unships the whole locale.
         "wire.remote_compute",
+        # The Notifications inbox (docs/design/notifications-inbox.md): the
+        # desktop routes' refusal copy, and the `/notifications` page row's
+        # description as an English-only CHILD of `wire.slash` (the
+        # `wire.slash.library` shape — the audited `wire.slash` bytes and their
+        # locale ledger hashes do not move).
+        "wire.errors.notifications",
+        "wire.slash.notifications_page",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -107,6 +114,8 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
+    assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
+    assert catalogues.load_catalogue("en", "wire.slash.notifications_page") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale

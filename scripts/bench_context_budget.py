@@ -1716,6 +1716,27 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # questions (opt in to a body; acknowledge that a body can carry a credential),
 # and the approval tier keys on the second.
 BUDGET_BILLED_TOKENS = 33_700
+#
+# THEN RAISED AGAIN, by the NOTIFICATIONS INBOX on the merged tree (`notify`,
+# docs/design/notifications-inbox.md §3.3-§4): the tool is DEFERRED and the
+# system.md clause is gated on `has_notify`, so the child arm does not move
+# (`notify` joins CHILD_NEVER_HOLDS). The delta is small and was measured with
+# THIS script on the rebased tree, one isolated HOME, top arm with and without
+# the tool in the surface:
+#   without notify   {WITHOUT} chars = ~{WITHOUT_BILLED} billed
+#   with notify      {WITH} chars = ~{WITH_BILLED} billed
+#   delta             +{DELTA_CHARS} chars = ~+{DELTA_BILLED} billed
+#     +{INSTR} instructions — the `has_notify` clause after the `ask` sentence;
+#      +{INV} tool_inventory — "notify (post to the operator's inbox)" on the
+#          schema-on-demand line;
+#       +0 tool_schemas — deferred; published it would cost 1,624 chars
+#          (~584 billed), which is why it is deferred.
+# The ceiling itself stays the browser surface's number: this delta fits inside
+# the headroom that raise left, so the inbox does not buy a ratchet of its own.
+# The adoption probe that guards the deferral (deferral.py's `notify` note) is
+# what decides whether this stays; un-deferring raises this ceiling by the
+# published delta in the same PR.
+
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1930,8 +1951,13 @@ def tool_schema_chars(tools: list[AgentTool]) -> int:
 #: (docs/design/quiet-turns.md §4) — so the constructor's capability merge
 #: never mounts it and there is nothing for the prune to undo. The child arm
 #: measures the unrestricted child — the widest surface a subagent can carry
-#: — so it is the full surface minus these.
-CHILD_NEVER_HOLDS = frozenset({"ask", "ask_withdraw", "wake", "monitor", "patience", "no_reply"})
+#: — so it is the full surface minus these. ``notify``'s inbox door is ``None``
+#: for every child too (``Session._notify_inbox_callable``: a child reports
+#: through ``hub`` and its parent decides), so the child arm neither holds the
+#: tool nor renders the ``has_notify`` clause.
+CHILD_NEVER_HOLDS = frozenset(
+    {"ask", "ask_withdraw", "wake", "monitor", "patience", "no_reply", "notify"}
+)
 
 
 def measure_start_context(

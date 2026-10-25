@@ -183,6 +183,7 @@ PREFIXES_TEXT_POLICY = {
     # the single token `read` is the control. The shape below is what draws that
     # line; this flag would erase it.
     "notifications": False,
+    "unread": False,
     # FALSE, all three, for `/notifications`' reason: the text these own is a
     # WORD the handler reads (`yes`), and a sentence after it must stay a
     # message — `/delete yes please tell me what happened` is prose a user is
@@ -259,6 +260,7 @@ ARGUMENT_SHAPE_POLICY = {
     # sentence. An empty vocabulary is exactly what makes one token the control
     # and two the message.
     "notifications": ArgumentShape.WORD,
+    "unread": ArgumentShape.WORD,
     # ONE flag, `--copy`, from a one-word vocabulary (`SESSION_COPY_FLAG`). Its
     # path USES the token — the terminal copies the ID, the desktop route refuses
     # it by name — so `/session --copy` is the control while `/session more

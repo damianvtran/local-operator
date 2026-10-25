@@ -2453,6 +2453,17 @@ class ToolContext(BaseModel):
     #: SENTENCE the model must act on (write text instead) or ``None`` when the
     #: quiet end is allowed. A refusal is never coerced into a message.
     quiet_end: Callable[[], Awaitable[str | None]] | None = None
+    #: THE INBOX DOOR (``docs/design/notifications-inbox.md`` §3.2): the
+    #: ``notify`` tool's whole availability fact, bound by
+    #: ``Session._notify_inbox_callable``. ``None`` for a delegated child (it
+    #: reports through ``hub`` and its parent decides), a session the operator's
+    #: own listings hide (``resume.is_user_session``), a one-shot host or an
+    #: output-contract session (the ``quiet_end`` exclusions), and under
+    #: ``LOP_NOTIFY=0``. Present, it is called with the validated arguments and
+    #: the tool call id, writes the item (rung 0 decided inside), and returns
+    #: the sentence the model reads; it raises only for a store refusal the
+    #: tool reports as a retryable error.
+    notify_inbox: Callable[..., Awaitable[str]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per

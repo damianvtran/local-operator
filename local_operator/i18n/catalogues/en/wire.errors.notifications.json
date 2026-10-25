@@ -1,0 +1,6 @@
+{
+  "wire.errors.notifications.store_busy": "The notifications store is busy right now, so nothing changed. Try again in a moment.",
+  "wire.errors.notifications.store_full": "This computer is out of disk space, so nothing changed. Free some space on the volume holding {where}, then try again.",
+  "wire.errors.notifications.store_unavailable": "The notifications store could not be read or written. Retrying will not help; check {where} and the disk it is on.",
+  "wire.errors.notifications.unknown_item": "That notification is no longer in the inbox."
+}

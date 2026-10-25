@@ -121,6 +121,18 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # name it, and the purpose phrase below keeps it findable; the first
         # call or ``tool://`` read publishes its schema.
         "artifact_data",
+        # ``notify`` is deferred on the start-context budget's arithmetic
+        # (docs/design/notifications-inbox.md §3.3): published, its schema and
+        # description measured ~500 billed tokens against ~76 of headroom on
+        # the top arm. Discovery rides the ``system.md`` clause gated on
+        # ``has_notify`` (the WHEN) plus this set's purpose phrase; the first
+        # call or ``tool://notify`` read publishes the schema (a mis-formed first
+        # call pays one validation round trip). The named probe guarding this
+        # choice: 20 scripted wake turns per arm on one live model; under 80%
+        # correct calls removes it from this set and raises the bench ceiling in
+        # the same PR (one line — ``network`` and ``ask_withdraw`` were
+        # re-admitted on exactly this signal).
+        "notify",
     }
 )
 
@@ -144,6 +156,7 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "library": "long-term asset catalog",
     "no_reply": "end a turn silently",
     "artifact_data": "claude.ai artifact shared data store",
+    "notify": "post to the operator's inbox",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every
