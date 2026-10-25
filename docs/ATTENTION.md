@@ -335,24 +335,14 @@ post with `notify` plus the open asks. Its items are a SECOND store
 marks, and the two stores never acknowledge each other: reading a completion
 never reads an item, and reading an item never reads a completion.
 
-**Rung 0 — watching AND active, decided at write time.** When `notify` runs, the
-session reads fresh evidence (`notifications/presence.py`) and, when the operator
-is demonstrably in THIS conversation, records the item already read
-(`read_via="watching"`, shown as "Seen live" under All) and raises no banner.
-Both halves must be positively present:
-
-- the desktop delivery lease is live (pid alive, heartbeat inside the 45 s TTL),
-  its window is attended (focused, visible, not minimised) and shows this
-  session, `screen_locked` is explicitly `false`, and `input_at_ms` is no older
-  than 120 s (`ATTENTION_INPUT_EVIDENCE_S`); or
-- an attached terminal watching this session reported real input (Key/MouseDown)
-  within the same window — wired by the TUI lane; absent today, so a terminal
-  alone never satisfies rung 0.
-
-`input_at_ms` and `screen_locked` are additive lease fields Electron main writes
-each beat. **Absent or malformed means unknown, and unknown is not active**: an
-older desktop build leaves every item unread, never silently read. Every
-rung-0 write logs the evidence age so a false suppression can be spot-checked.
+**Creation is always unread.** Matching session presence and fresh activity
+are not item-specific evidence: the operator may be scrolled up, in a child
+view, behind a modal, or the new callout may not have rendered. Machine-wide
+OS idle time also includes activity in another app or pane. Neither signal
+acknowledges a new revision. Persist unread, publish/render the anchor, then
+accept a per-item token-bound receipt with fresh post-update input. Readable
+history remains available. The banner lane may use a short bounded grace and
+must re-check read state before delivery; presence alone never clears it.
 
 **In-view auto-read is the per-result rule applied to items.** A surface may mark
 an item read without a gesture only through `POST /v1/desktop/notifications/seen`,

@@ -399,7 +399,7 @@ def test_a_delegated_child_or_hidden_session_gets_no_door(tmp_path: Path) -> Non
     assert hidden._notify_inbox_callable() is None
 
 
-def test_the_session_door_writes_the_item_and_rung0_marks_it_read(
+def test_the_session_door_never_reads_a_new_item_from_presence(
     tmp_path: Path, monkeypatch
 ) -> None:
     from tests.unit.session.test_session import ScriptedStream, make_session
@@ -423,11 +423,12 @@ def test_the_session_door_writes_the_item_and_rung0_marks_it_read(
     watched = asyncio.run(
         door(title="Seen live", body="", priority="high", key="", links=[], anchor_id="call_10")
     )
-    assert "viewing this conversation" in watched
+    assert watched.startswith("Notified (id n_")
     rows, _ = store.list_items(state="all")
     by_title = {row["title"]: row for row in rows}
-    assert by_title["Seen live"]["read_via"] == "watching"
-    assert store.counts()[0] == 1
+    assert by_title["Seen live"]["read_via"] is None
+    assert by_title["Seen live"]["read_rev"] == 0
+    assert store.counts()[0] == 2
 
 
 def test_a_notify_wake_may_end_quietly_once_an_item_was_posted(tmp_path: Path) -> None:

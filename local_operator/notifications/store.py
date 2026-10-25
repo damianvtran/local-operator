@@ -479,20 +479,18 @@ class NotificationStore:
         session_title: str = "",
         agent_id: str = "",
         team_id: str = "",
-        read_via: str | None = None,
         now: int | None = None,
     ) -> NotifyOutcome:
         """Create or update one item (collapse table: contract §1.3).
 
-        ``read_via="watching"`` is rung 0: the item is created (or updated)
-        already read, because the operator is in the conversation and active.
+        Every changed revision starts unread: session presence cannot prove
+        the new callout rendered. Only a subsequent per-item receipt or an
+        explicit operator read gesture may acknowledge it.
         Raises :class:`NotifyRefused` over the hourly new-item cap, and
         :class:`NotificationStoreBusy` when contention outlasts the budget.
         """
         if priority not in _PRIORITY_RANK:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
-        if read_via is not None and read_via not in READ_VIA:
-            raise ValueError(f"read_via must be one of {', '.join(READ_VIA)}")
         title = " ".join(str(title or "").split())[:TITLE_MAX]
         if not title:
             raise ValueError("title must not be empty")
@@ -524,7 +522,7 @@ class NotificationStore:
                     )
                 item_id = new_item_id()
                 seq = self._next_seq(conn)
-                read = read_via is not None
+                read = False
                 conn.execute(
                     "INSERT INTO items (id, seq, session_id, session_title, agent_id, team_id, "
                     "priority, title, body_md, links_json, key, content_hash, revision, "
@@ -548,7 +546,7 @@ class NotificationStore:
                         stamp,
                         1 if read else 0,
                         stamp if read else None,
-                        read_via,
+                        None,
                     ),
                 )
                 return NotifyOutcome("created", item_id, 1, 1, read, priority, seq)
@@ -588,7 +586,7 @@ class NotificationStore:
                 (item_id, item_id, HISTORY_CAP),
             )
             seq = self._next_seq(conn)
-            read = read_via is not None
+            read = False
             conn.execute(
                 "UPDATE items SET seq=?, priority=?, title=?, body_md=?, links_json=?, "
                 "content_hash=?, revision=?, repeat_count=?, anchor_id=?, updated_at=?, "
@@ -606,7 +604,7 @@ class NotificationStore:
                     stamp,
                     revision if read else int(current["read_rev"]),
                     stamp if read else current["read_at"],
-                    read_via if read else current["read_via"],
+                    current["read_via"],
                     current["dismissed_at"] if stays_dismissed else None,
                     current["dismissed_via"] if stays_dismissed else None,
                     item_id,

@@ -24,7 +24,7 @@ item must update in place rather than pile up.
 |---|---|---|
 | D1 | The reel shows OPEN asks only ("Waiting on you"); settled asks appear only in an item's detail. | `notifications/items.py` `open_asks`, `detail` |
 | D2 | `/notifications` is the new page; the old completion-receipt listing is `/unread` (`/unread read` clears), behaviour and receipt copy unchanged. Until the TUI page lands (L2) the terminal routes `/notifications` to the same receipt handler. | `slash_commands.py`, `tui/app.py` |
-| D3 | Watching AND active ⇒ created read ("Seen live"), listed under All, no banner. | `notifications/presence.py`, `Session._notify_inbox` |
+| D3 (superseded) | Operator presence addendum: creation is always unread; only item-specific evidence acknowledges it. | `Session._notify_inbox`, `NotificationStore.notify`, `seen` |
 | D10 | Sidebar id `notifications` appended to the wire vocabulary; default layout puts it under Aida and folds Schedules into More; `read_layout` drops ids it does not know instead of discarding the whole layout. | `server/sidebar_layout.py` |
 | D11 | Aida's seed: raise a `notify` for findings the operator must act on. | `agent_seeds/aida.md` |
 
@@ -148,11 +148,13 @@ only: the client refetches.
 
 ### 6.2 Rung 0 at write time
 
-See `../ATTENTION.md` "Inbox items". Every unknown fails toward notifying: the
-cost of a false "watching" is an item nobody saw marked read; the cost of a
-false "not watching" is one redundant badge. The desktop's new lease fields
-(`input_at_ms`, `screen_locked`) are read tolerantly — absent means not active —
-so this lane changes nothing for an older desktop build.
+See `../ATTENTION.md` "Inbox items". The operator's presence addendum
+supersedes the initial creation-time predicate: matching session and fresh
+activity do NOT prove a newly written callout rendered. Scrolled-up, child,
+covered and not-yet-rendered cases all stay unread, even with fresh OS input.
+Persist unread → render the anchor → per-item revision-bound receipt with
+fresh post-update input. L1b owns bounded banner grace and re-checking the
+read watermark before delivery. Presence remains an advisory signal only.
 
 ## 7. TUI and 8. Desktop (core side)
 

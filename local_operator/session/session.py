@@ -16352,25 +16352,16 @@ class Session:
         links: list[dict[str, str]],
         anchor_id: str,
     ) -> str:
-        """Write one item (rung 0 decided here) and return the sentence for the model.
+        """Persist unread; presence never proves a newly written callout was seen.
 
-        Rung 0 (§6.2): when the operator is watching this conversation AND
-        active, the item is created already read (``read_via="watching"``) and
-        the model is told so, which is what stops it escalating. The evidence is
-        read fresh and logged on every rung-0 write (§14 risk 3). The banner
-        ladder for unread high items is L1b; this lane records the item and the
-        ``delivered_rev`` watermark only.
+        Even a focused session with fresh machine input may be scrolled up,
+        covered, or showing a child. Only a later item-specific render receipt
+        can acknowledge this revision. L1b owns bounded banner grace; it must
+        re-read the item's read watermark before claiming delivery.
         """
-        from local_operator.notifications import presence
         from local_operator.notifications.store import NotificationStore
 
         root = Path(self._config_dir)
-        verdict = await asyncio.to_thread(
-            presence.watching_and_active,
-            self.session_id,
-            root=root,
-            tui=self._notify_tui_evidence(),
-        )
         store = NotificationStore(root)
         outcome = await asyncio.to_thread(
             store.notify,
@@ -16383,14 +16374,9 @@ class Session:
             anchor_id=anchor_id,
             session_title=self.conversation_name,
             agent_id=self._agent_id or "",
-            read_via="watching" if verdict.watching else None,
         )
-        if verdict.watching:
-            logger.info(
-                "notify: %s recorded read (rung 0) %s", outcome.item_id, presence.describe(verdict)
-            )
         self._run_notified = True
-        return _notify_sentence(outcome, watching=verdict.watching)
+        return _notify_sentence(outcome, watching=False)
 
     def _notify_tui_evidence(self) -> Any:
         """The attached TUI's input evidence, when the runtime reports one (L1b/L2).

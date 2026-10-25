@@ -1,32 +1,14 @@
-"""Rung 0 of the item ladder: is the operator watching this conversation AND active?
+"""Advisory session presence, never acknowledgement of an inbox revision.
 
-``docs/design/notifications-inbox.md`` §6.2. When the operator is reading the
-conversation that raises an item, and has demonstrably touched the machine in
-the last two minutes, a banner or an unread badge for it would be redundant:
-the agent's message is already in front of them. The item is then created
-already read (``read_via="watching"``), stays listed under All as "Seen live",
-and raises nothing.
+The operator's presence addendum supersedes the original rung-0 creation
+predicate. A focused session and fresh OS activity cannot prove that a new
+callout rendered: it may be scrolled off, covered, in a child pane, or not
+painted yet. This evaluator remains available to the banner lane as advisory
+evidence; callers MUST NOT mark an item read from its verdict. Creation is
+always unread. Only the per-item revision/anchor-bound receipt can auto-read.
 
-EVERY UNKNOWN FAILS TOWARD NOTIFYING (§6.3). The cost of a false "watching" is
-an item nobody saw marked read; the cost of a false "not watching" is one
-redundant badge. So each signal must be POSITIVELY present and fresh:
-
-* the desktop delivery lease is live (pid alive, heartbeat inside
-  ``PRESENCE_TTL_S``; :func:`session.runtime.presence.read_delivery` reaps the
-  rest), its window is focused, visible and not minimised (``attended``), it
-  shows THIS session, ``screen_locked`` is explicitly ``False``, and
-  ``input_at_ms`` is no older than :data:`INPUT_EVIDENCE_S`;
-* or an attached TUI watching this session reported real input within the same
-  window (the runtime passes that evidence in; see :class:`TuiEvidence`).
-
-``input_at_ms`` and ``screen_locked`` are NEW lease fields that Electron main
-writes on each beat (the desktop UI lane). They are read TOLERANTLY here: an
-absent or malformed field means "unknown", which is "not active" — an older UI
-keeps today's behaviour exactly (every item unread), never a silent read.
-
-Stdlib-only apart from the presence reader, which is itself import-light, so
-the ``notify`` tool can ask this question at execute time without loading a
-server.
+Unknown or stale fields fail toward not active. The lease readers remain
+stdlib-light for runtime and cold-route callers.
 """
 
 from __future__ import annotations
