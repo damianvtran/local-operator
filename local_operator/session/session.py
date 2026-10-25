@@ -4391,6 +4391,9 @@ class Session:
         #: handle (``ServingSessionHandle._publish_session_started``) and probed
         #: so a reduced host without it is a no-op.
         self._publish_session_started: Callable[[], None] | None = None
+        #: Publishes this turn's busy admission under the shared relay-restart
+        #: fence. Wired by the serving handle; reduced hosts simply have no record.
+        self._publish_turn_admitted: Callable[[], None] | None = None
         #: Guards the once-per-lifetime peer-inbox drain inside
         #: ``_run_turn_pipeline``. That drain is deliberately NOT at the top of
         #: the pipeline: it runs once this turn's own messages are durable, so a
@@ -17019,6 +17022,20 @@ class Session:
         The generation stamp on the emitted end is the one from the start that
         opened the run, so the TUI's supersede guard still pairs them.
         """
+        # LINEARIZE TURN ADMISSION WITH RELAY RECOVERY. The caller already holds
+        # ``_turn_lock``, so the serving handle's busy predicate is true here.
+        # Hold the shared cross-process fence until that busy record is durable:
+        # a member restart either sees it and refuses, or finishes its exclusive
+        # idle+supervisor decision before this admission may proceed.
+        from local_operator.session.runtime import restart_fence
+
+        admission = await restart_fence.acquire_shared(self._config_dir)
+        try:
+            publish_admission = getattr(self, "_publish_turn_admitted", None)
+            if callable(publish_admission):
+                publish_admission()
+        finally:
+            restart_fence.release_shared(admission)
         await self._refresh_context_metadata()
         # Flip the discovery record's ``started`` bit the first time a REAL
         # turn runs. This is the single choke point every spawn path funnels

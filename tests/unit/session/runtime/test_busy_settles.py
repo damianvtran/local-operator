@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import AgentEndEvent
+from local_operator.session.runtime import restart_fence
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
@@ -111,6 +112,44 @@ async def test_the_record_busy_bit_settles_for_every_turn_shape(tmp_path: Path, 
         assert server._busy is False, f"{path}: the record still says busy after the turn"
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_turn_admission_publishes_busy_before_crossing_restart_fence(
+    tmp_path: Path,
+) -> None:
+    """A real Session cannot pass its pipeline boundary during an exclusive restart."""
+    session, handle, server = await _rig(tmp_path / "sess", replies=1)
+    crossed_fence = asyncio.Event()
+    observed: list[bool] = []
+    original_refresh = session._refresh_context_metadata
+
+    async def _refresh_after_admission() -> None:
+        # The serving hook must have published busy BEFORE the pipeline is
+        # allowed past its shared-fence critical section.
+        observed.append(server._busy)
+        crossed_fence.set()
+        await original_refresh()
+
+    session._refresh_context_metadata = _refresh_after_admission
+    prompt_task: asyncio.Task[Any] | None = None
+    try:
+        with restart_fence.exclusive(session._config_dir, timeout_s=0.0):
+            prompt_task = asyncio.create_task(handle.prompt("hello", wait_complete=True))
+            await asyncio.sleep(0.05)
+            assert not crossed_fence.is_set(), "the turn crossed an exclusive restart fence"
+            assert not prompt_task.done()
+        await asyncio.wait_for(crossed_fence.wait(), 2.0)
+        await asyncio.wait_for(prompt_task, 5.0)
+    finally:
+        if prompt_task is not None and not prompt_task.done():
+            prompt_task.cancel()
+            await asyncio.gather(prompt_task, return_exceptions=True)
+        await session.dispose()
+    # Naming/aside work may use the same pipeline; EVERY such admission must
+    # carry the same busy-before-fence ordering, not just the user prompt.
+    assert observed and all(observed)
+    assert server._busy is False
 
 
 @pytest.mark.asyncio

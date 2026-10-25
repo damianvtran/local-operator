@@ -836,6 +836,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "machinery",
     ),
     "local_operator/session/runtime/registry.py": (1, "``reaped`` under the runtime's run dir"),
+    "local_operator/session/runtime/restart_fence.py": (
+        1,
+        "``FENCE_NAME`` is the permanent per-device admission-lock inode under "
+        "``<config>/run``; it coordinates local processes and is not session content "
+        "or state that travels with a conversation",
+    ),
     "local_operator/session/runtime/types.py": (
         3,
         "``run``'s per-runtime subdirectories (``run/mobile``, ``run/host``, ``run/serve``): "
