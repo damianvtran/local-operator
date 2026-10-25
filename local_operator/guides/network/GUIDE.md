@@ -1163,27 +1163,27 @@ inherits, what is lent per command, and what must already be on the node.
 
 ## Provisioning a working copy on a peer
 
-An offloaded session runs on the peer, and it can only touch repository files
-that peer has on its own disk. Pairing does not create a checkout: onboarding
-installs a build, joins the member and writes the grants, and none of that
-clones a repository. A lane that expects `~/local-operator` on a node without it
-fails at the first `git` call.
+Phase 2 already says a checkout is not something it can deliver, and pairing
+pairing does not create one either. An offloaded session can only touch
+repository files the peer holds, so a lane that expects `~/local-operator` on a
+node without one fails at the first `git` call.
 
 Provision the copy on the device that will run the work, in a session created
-there (`lop network sessions create --peer <id>`) or over SSH:
+there (`lop network sessions --peer <id> --create --prompt <p>`) or over SSH:
 
 ```bash
 git clone https://github.com/<owner>/<repo>.git ~/<repo>   # or: gh repo clone <owner>/<repo> ~/<repo>
-git -C ~/<repo> config user.name      # an identity must print, not an error
-git -C ~/<repo> config user.email
-gh auth status                        # the account that will push
+git config --global user.name         # ready reads this scope, not the repo's
+git config --global user.email
+gh auth status                        # optional: its own login, if any
 ```
 
-Without `user.name` and `user.email` that peer cannot commit, and without a
-signed-in `gh` it cannot push or open a PR. Both are per-device, and neither one
-is inherited. Re-read `lop network ready --peer <id>` afterwards: its `tooling`
-row still warns about what the node has not installed, and that install is the
-same kind of local step.
+Without `user.name` and `user.email` that peer cannot commit. Push and PR-write
+need a granted `github` credential, not a login: a peer with no grant and no
+login gets no `GH_TOKEN` and cannot push, and a share is what makes it work.
+All of it is per-device, and none of it is inherited. Re-read `tooling` in
+`lop network ready --peer <id>`: it still warns about what the node has not
+installed, and that install is the same kind of local step.
 
 ## When something looks wrong
 
