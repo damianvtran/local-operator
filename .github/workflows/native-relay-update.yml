@@ -20,7 +20,10 @@ concurrency:
 
 jobs:
   user-systemd-generation-move:
-    runs-on: ubuntu-latest
+    # ubuntu-latest migrated to Ubuntu 26, whose hardened runner kills a
+    # directly started user manager before it logs. Use the supported LTS
+    # production surface; preflight still fails red if user systemd is absent.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
