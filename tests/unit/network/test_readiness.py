@@ -1770,8 +1770,8 @@ def test_model_credential_row_resolves_no_default_first() -> None:
             True,
             "not verified from here",
         ),
-        ({}, {"rows": ["row"]}, False, "share it"),
-        ({}, {"rows": []}, False, "sign in to openai here"),
+        ({}, {"rows": ["row"]}, False, "--model <provider>/<model-id>"),
+        ({}, {"rows": []}, False, "sign in to openai on cloud-node-1"),
     ],
     ids=["own-login", "borrowed-here", "borrowed-third", "signed-in-here", "neither"],
 )
@@ -1785,6 +1785,148 @@ def test_model_credential_verdicts(
     assert row["ok"] is ok, row
     haystack = row["detail"] + " ".join(row["remedies"])
     assert needle in haystack, row
+
+
+def _composed_model_credential_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    *,
+    peer_holds: bool = False,
+) -> dict[str, Any]:
+    """Compose one model row from real network, placement and AuthStore state."""
+    from local_operator.network import identity, relay, store, types
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.providers.auth_store import AuthStore
+
+    viewer_root = tmp_path / "viewer"
+    peer_root = tmp_path / "peer"
+    viewer_root.mkdir()
+    peer_root.mkdir()
+    ident = identity.mint(viewer_root, name="viewer")
+    server = relay.RelayServer(
+        root=viewer_root,
+        identity=ident,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+    )
+    peer_ident = identity.mint(peer_root, name="cloud-node-1")
+    record = types.NetworkRecord(
+        network_id=store.new_network_id(),
+        name="readiness-test",
+        created_by=ident.device_id,
+        self_device_id=ident.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    relay.admit(
+        record,
+        device_id=ident.device_id,
+        public_key=ident.public_key,
+        name=ident.name,
+        role="admin",
+        added_by=ident.device_id,
+        added_via="self",
+        persist=False,
+    )
+    relay.admit(
+        record,
+        device_id=peer_ident.device_id,
+        public_key=peer_ident.public_key,
+        name=peer_ident.name,
+        role="drive",
+        added_by=ident.device_id,
+        persist=False,
+    )
+    store.save(record, viewer_root)
+    # Placement lookup enumerates the peer's network records before reading the
+    # credential document, so replicate the membership record to its real root.
+    store.save(record, peer_root)
+
+    # The viewer owns the provider login in every cell. The peer's own store is
+    # empty for the failure cells and populated for the healthy control.
+    for root, holds in ((viewer_root, True), (peer_root, peer_holds)):
+        auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+        try:
+            if holds:
+                auth.upsert_credential(provider, {"type": "api_key", "key": "test-only"})
+        finally:
+            auth.close()
+    with placement_mod.mutate(
+        record.network_id, peer_root, self_device=peer_ident.device_id
+    ) as document:
+        document.declare(
+            provider,
+            owner_device=ident.device_id,
+            owner_device_name=ident.name,
+            provider=provider,
+            by=ident.device_id,
+        )
+
+    monkeypatch.setattr(
+        readiness,
+        "default_model_fact",
+        lambda _root: {
+            "hosting": provider,
+            "model_name": "synthetic-model",
+            "resolved": True,
+            "reason": "",
+        },
+    )
+    facts = readiness.collect_peer_facts(peer_root, home=peer_root)
+    link = SimpleNamespace(peer_build={}, capabilities={wire.PEER_READINESS_V1})
+    monkeypatch.setattr(readiness, "_reachability_rows", lambda *_args, **_kwargs: ([], link))
+    monkeypatch.setattr(readiness, "_ask_readiness", lambda *_args, **_kwargs: (facts, ""))
+
+    payload = readiness.compose(server)
+    return next(
+        row
+        for row in payload["checks"]
+        if row.get("capability") == readiness.CAPABILITY_MODEL_CREDENTIAL
+    )
+
+
+@pytest.mark.parametrize("provider", ["radient", "radient-key", "synthetic-provider"])
+def test_model_credential_failure_offers_model_choice_never_sharing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    row = _composed_model_credential_row(tmp_path, monkeypatch, provider)
+
+    assert row["ok"] is False and row["code"] == readiness.CODE_NOT_SHARED
+    assert row["detail"] == (
+        f"{provider} is shared in this network, but cloud-node-1 is not among its "
+        "holders: a borrow there would be refused"
+    )
+    assert row["remedies"] == [
+        "create with --model <provider>/<model-id> naming a provider cloud-node-1 " "holds instead"
+    ]
+    assert row["source"] == readiness.SOURCE_PEER
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    assert rendered.splitlines() == [
+        f"FAIL readiness model_credential cloud-node-1: {provider} is shared in this "
+        "network, but cloud-node-1 is not among its holders: a borrow there would be refused",
+        "    - create with --model <provider>/<model-id> naming a provider cloud-node-1 "
+        "holds instead",
+    ]
+    assert "credential share" not in rendered
+    assert "share it with" not in rendered
+    assert "as a holder" not in rendered
+    assert "synthetic-provider/" not in rendered
+
+
+def test_model_credential_healthy_peer_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _composed_model_credential_row(
+        tmp_path, monkeypatch, "synthetic-provider", peer_holds=True
+    )
+
+    assert row["ok"] is True
+    assert row["detail"] == "cloud-node-1 serves synthetic-provider from its own login"
+    assert row["remedies"] == []
+    assert readiness.render_check_lines([row]) == [
+        "ok  readiness model_credential cloud-node-1: "
+        "cloud-node-1 serves synthetic-provider from its own login"
+    ]
 
 
 def test_a_share_that_has_not_been_pulled_is_not_denied() -> None:
