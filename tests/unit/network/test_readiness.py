@@ -1899,8 +1899,13 @@ def _composed_model_credential_row(
     provider: str,
     *,
     peer_holds: bool = False,
+    framed: bool = False,
 ) -> dict[str, Any]:
-    """Compose one model row from real network, placement and AuthStore state."""
+    """Compose one model row from real network, placement and AuthStore state.
+
+    ``framed`` publishes the current peer's ``credential_required`` fact; without
+    it the facts are an older peer's, which must keep the legacy sentences.
+    """
     from local_operator.network import identity, relay, store, types
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.providers.auth_store import AuthStore
@@ -1976,6 +1981,7 @@ def _composed_model_credential_row(
             "model_name": "synthetic-model",
             "resolved": True,
             "reason": "",
+            **({"credential_required": True} if framed else {}),
         },
     )
     facts = readiness.collect_peer_facts(peer_root, home=peer_root)
@@ -2033,6 +2039,102 @@ def test_model_credential_healthy_peer_is_unchanged(
         "ok  readiness model_credential cloud-node-1: "
         "cloud-node-1 serves synthetic-provider from its own login"
     ]
+
+
+# ---------------------------------------------------------------------------
+# The DEFAULT model, framed as the create preflight will meet it
+# ---------------------------------------------------------------------------
+
+
+def test_an_unservable_default_names_the_default_and_the_create_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live node-2 shape: default radient, the peer not among radient's holders.
+
+    The create preflight refuses ``model_credential_missing`` here; the row must
+    say THAT (the default, and a create without --model refused), keep the
+    holder fact, and remedy with a model choice -- never a share, never
+    "declined" (no decline is persisted to read). Composed from real network,
+    placement and AuthStore state; only the peer's default pair is pinned.
+    """
+    for cell in ("legacy", "framed"):
+        (tmp_path / cell).mkdir()
+    legacy = _composed_model_credential_row(tmp_path / "legacy", monkeypatch, "radient")
+    row = _composed_model_credential_row(tmp_path / "framed", monkeypatch, "radient", framed=True)
+
+    assert row["ok"] is False and row["code"] == readiness.CODE_NOT_SHARED
+    assert row["detail"] == (
+        "cloud-node-1's default model radient/synthetic-model cannot be served "
+        f"({legacy['detail']}); a create there without --model is refused"
+    )
+    assert row["remedies"] == [
+        "set cloud-node-1's default to a model it holds (`/model default` in its window), "
+        "or create with --model <provider>/<model-id> naming a provider cloud-node-1 holds instead"
+    ]
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    for forbidden in ("credential share", "share it with", "as a holder", "declin"):
+        assert forbidden not in rendered
+    # An older peer (no ``credential_required``) keeps today's sentence exactly.
+    assert legacy["detail"].startswith("radient is shared in this network")
+    assert legacy["remedies"] == [
+        "create with --model <provider>/<model-id> naming a provider cloud-node-1 holds instead"
+    ]
+
+
+def test_a_servable_default_is_unchanged_when_framed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _composed_model_credential_row(
+        tmp_path, monkeypatch, "deepseek", peer_holds=True, framed=True
+    )
+    assert row["ok"] is True
+    assert row["detail"] == "cloud-node-1 serves deepseek from its own login"
+
+
+def _default_root(root: Path, hosting: str, model_name: str) -> Path:
+    root.mkdir(parents=True)
+    (root / "config.yml").write_text(
+        f'version: "0.0.0"\nvalues:\n  hosting: {hosting}\n  model_name: {model_name}\n',
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_a_keyless_default_is_ready_because_create_needs_no_credential(tmp_path: Path) -> None:
+    """Ready used to FAIL a local-server default the create preflight accepts."""
+    from local_operator.network import relay
+    from local_operator.providers import registry
+
+    keyless = next(
+        d.id for d in registry.PROVIDER_REGISTRY if d.allows_missing_api_key and d.wire != "mock"
+    )
+    root = _default_root(tmp_path / "peer", keyless, "local-model")
+    before = sorted(p.name for p in root.iterdir())
+    facts = readiness.collect_peer_facts(root, home=root)
+    assert sorted(p.name for p in root.iterdir()) == before  # a report writes nothing
+    assert facts["default_model"]["credential_required"] is False
+    row = readiness.model_credential_row(
+        _member(), facts, viewer=_FakeViewer(rows=[]), peer_label="cloud-node-1"
+    )
+    assert row["ok"] is True
+    assert (
+        row["detail"] == f"cloud-node-1's default model {keyless}/local-model needs no credential"
+    )
+    # The prediction: the create preflight on the same root does not refuse.
+    assert relay._model_credential_refusal(root, None, None) == ""
+
+
+def test_an_unreadable_store_stays_unknown_for_a_framed_default(tmp_path: Path) -> None:
+    """Create's fail-open on "cannot tell" is not proof; the row stays UNKNOWN."""
+    root = _default_root(tmp_path / "peer", "radient", "auto")
+    (root / "auth.db").write_bytes(b"not a database")
+    facts = readiness.collect_peer_facts(root, home=root)
+    assert facts["default_model"]["credential_required"] is True
+    row = readiness.model_credential_row(
+        _member(), facts, viewer=_FakeViewer(rows=[]), peer_label="cloud-node-1"
+    )
+    assert row["ok"] is False and row["code"] == readiness.CODE_UNKNOWN
+    assert "default model" not in row["detail"]
 
 
 def test_a_share_that_has_not_been_pulled_is_not_denied() -> None:
