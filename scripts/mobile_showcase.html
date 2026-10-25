@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<title>Isolated relay showcase</title>
+<style>body{margin:0;padding:8px;background:#ddd;font:14px system-ui}header{display:flex;gap:12px;align-items:center;margin-bottom:8px}pre{position:absolute;inset-inline-start:420px;top:50px;max-width:700px;white-space:pre-wrap}iframe{display:block;border:0;width:390px;height:844px}label{display:flex;gap:4px}</style>
+<header><label>Phone <select id="phone"><option>390x844</option><option>360x780</option></select></label>
+<label>Theme <select id="theme"><option value="localOperatorDark">Dark</option><option value="localOperatorLight">Light</option></select></label>
+<button id="phone390" onclick="document.querySelector('#phone').value='390x844';setup()">390 phone</button>
+<button id="phone360" onclick="document.querySelector('#phone').value='360x780';setup()">360 phone</button>
+<button id="dark" onclick="document.querySelector('#theme').value='localOperatorDark';setup()">Dark theme</button>
+<button id="light" onclick="document.querySelector('#theme').value='localOperatorLight';setup()">Light theme</button>
+<label><input id="rtl" type="checkbox">Force RTL</label><a href="/showcase">Reset</a>
+<label>State <input id="state" value="list-populated"></label><button id="audit">Audit</button></header><pre id="result"></pre>
+<iframe title="Phone relay" id="phone-relay" src="/"></iframe>
+<script src="/showcase/metrics.js"></script><script>
+const frame=document.querySelector('iframe');
+function setup(){const [w,h]=document.querySelector('#phone').value.split('x');frame.style.width=w+'px';frame.style.height=h+'px';const doc=frame.contentDocument;if(doc){doc.documentElement.dataset.theme=document.querySelector('#theme').value;doc.documentElement.dir=document.querySelector('#rtl').checked?'rtl':'ltr';}}
+document.querySelector('#audit').addEventListener('click',async()=>{const data=JSON.parse(window.measureRelay(frame.contentWindow));data.device_pixel_ratio=frame.contentWindow.devicePixelRatio;data.theme=frame.contentDocument.documentElement.dataset.theme;data.direction=frame.contentDocument.documentElement.dir;const result={state:document.querySelector('#state').value,metrics:data};document.querySelector('#result').textContent=JSON.stringify(result);await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(result)});});
+frame.addEventListener('load',setup);document.querySelectorAll('#phone,#theme,#rtl').forEach(el=>el.addEventListener('change',setup));
+</script></html>
