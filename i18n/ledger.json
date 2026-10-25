@@ -4540,7 +4540,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5053,7 +5053,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.ask/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.ask/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5129,7 +5129,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.session.tags/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.session.tags/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5205,7 +5205,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.asks/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.asks/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5224,7 +5224,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.authoring/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.authoring/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5471,7 +5471,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.team_authoring/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5661,7 +5661,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors.desktop/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors.desktop/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5794,7 +5794,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.memory/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.memory/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5832,7 +5832,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.remote_compute/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
@@ -5851,7 +5851,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.settings/zh24a1/record.json. Auditor independent of translator; current-byte round."
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.settings/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     },
     {
       "locale": "zh-CN",
