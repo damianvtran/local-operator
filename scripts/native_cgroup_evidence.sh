@@ -178,6 +178,26 @@ signal_payload_pid() {
   kill "-$signal" "$pid" 2>/dev/null || [ ! -d "$NATIVE_PROC_ROOT/$pid" ]
 }
 
+native_history_allows_retry() {
+  local repository=$1 workflow=$2 current=$3 runs consumed
+  # 40223296178 is the one consumed, failed diagnostic whose evidence must stay.
+  # The operator authorized exactly one reviewed retry, not a general rerun
+  # bypass: require that predecessor once and reject every other history row.
+  runs=$("$GH_BIN" run list --repo "$repository" \
+    --workflow "$workflow" --limit 100 --json databaseId) || return 1
+  consumed=$("$JQ_BIN" -r --arg current "$current" '
+    if type != "array" then 1
+    elif all(.[]; (.databaseId | type) == "number") then
+      ([.[] | select(.databaseId == 40223296178)] | length) as $consumed
+      | ([.[] | select((.databaseId | tostring) == $current)] | length) as $current_rows
+      | ([.[] | select((.databaseId != 40223296178) and
+          ((.databaseId | tostring) != $current))] | length) as $unexpected
+      | if $consumed == 1 and $current_rows <= 1 and $unexpected == 0 then 0 else 1 end
+    else 1 end
+  ' <<<"$runs") || return 1
+  [ "$consumed" = 0 ]
+}
+
 authenticate_scope() {
   scope_authenticated=false
   uid=$(id -u)

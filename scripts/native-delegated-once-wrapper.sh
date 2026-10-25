@@ -11,7 +11,10 @@ shopt -s nullglob globstar
 : "${EXPECTED_WRAPPER_SHA256:?}" "${EXPECTED_PROBE_SHA256:?}"
 : "${EXPECTED_SCOPE_LIB_SHA256:?}" "${GH_TOKEN:?}"
 [ "$GITHUB_RUN_ATTEMPT" = 1 ]
-EXPECTED_BASE=7f4b0bab4e2ba4b7327ae36808627ba83c41d0c6
+# The attribution rewrite moved the fixed base to this tree-identical commit.
+# Keeping the same tree preserves the old-code negative control while restoring
+# the rewritten-history ancestor assertion below.
+EXPECTED_BASE=0e6f3d4476a502ea79470638daa51939e2dfeb67
 unset NATIVE_PROC_ROOT NATIVE_CGROUP_ROOT
 source "$GITHUB_WORKSPACE/scripts/native_cgroup_evidence.sh"
 # The one-shot label carries the independently reviewed commit. The workflow
@@ -51,15 +54,11 @@ actual_scope_lib_sha=$("$SHA256SUM" "$GITHUB_WORKSPACE/scripts/native_cgroup_evi
 actual_scope_lib_sha=${actual_scope_lib_sha%% *}
 [ "$actual_scope_lib_sha" = "$EXPECTED_SCOPE_LIB_SHA256" ]
 
-# A prior run of this one-shot workflow consumes the authorization even if a
-# later label names another head. The concurrency key serializes relabels, so
-# this read-only history check cannot race a second dispatch into sudo.
-runs=$("$GH_BIN" run list --repo "$GITHUB_REPOSITORY" \
-  --workflow native-delegated-once.yml --limit 100 --json databaseId)
-consumed=$("$JQ_BIN" -r --arg current "$GITHUB_RUN_ID" \
-  '[.[] | select((.databaseId | tostring) != $current)] | length' <<<"$runs")
-[ "$consumed" = 0 ] || {
-  printf 'one-shot diagnostic was already consumed by an earlier run\n' >&2
+# The concurrency key serializes relabels. The shared guard tolerates only the
+# consumed failed run 40223296178 for the operator's one reviewed retry; API
+# errors, a missing predecessor, or any additional/unexpected run fail closed.
+native_history_allows_retry "$GITHUB_REPOSITORY" native-delegated-once.yml "$GITHUB_RUN_ID" || {
+  printf 'authorized retry history does not match the single consumed failed run\n' >&2
   exit 2
 }
 

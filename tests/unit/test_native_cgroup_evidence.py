@@ -278,3 +278,148 @@ def test_foreign_init_scope_is_not_authenticated(root: Path) -> None:
         [ "$scope_authenticated" = false ]
         """,
     )
+
+
+def test_own_init_scope_control_pid_is_signaled(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        shopt -s nullglob globstar
+        source "$LIB"
+        expected_cgroup="$EXPECTED"
+        scope=test.scope
+        mkdir -p "$NATIVE_PROC_ROOT"
+        sleep 30 &
+        child=$!
+        trap 'kill -KILL "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true' EXIT
+        mkdir -p "$NATIVE_PROC_ROOT/$child"
+        printf '0::%s/init.scope\n' "$expected_cgroup" >"$NATIVE_PROC_ROOT/$child/cgroup"
+        mock_systemctl() { printf '%s\n' "$child"; }
+        mock_ps() { printf '%s\n' "$(id -u)"; }
+        SYSTEMCTL=mock_systemctl
+        PS_BIN=mock_ps
+        signal_scope_control_pid TERM
+        wait "$child" || true
+        if kill -0 "$child" 2>/dev/null; then
+          printf 'own init.scope ControlPID was not signaled\n' >&2
+          exit 1
+        fi
+        trap - EXIT
+        """,
+    )
+
+
+def test_foreign_init_scope_control_pid_is_not_signaled(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        shopt -s nullglob globstar
+        source "$LIB"
+        expected_cgroup="$EXPECTED"
+        scope=test.scope
+        mkdir -p "$NATIVE_PROC_ROOT"
+        sleep 30 &
+        child=$!
+        trap 'kill -KILL "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true' EXIT
+        mkdir -p "$NATIVE_PROC_ROOT/$child"
+        printf '0::/system.slice/foreign.scope/init.scope\n' >"$NATIVE_PROC_ROOT/$child/cgroup"
+        mock_systemctl() { printf '%s\n' "$child"; }
+        mock_ps() { printf '%s\n' "$(id -u)"; }
+        SYSTEMCTL=mock_systemctl
+        PS_BIN=mock_ps
+        if signal_scope_control_pid TERM; then
+          printf 'foreign init.scope ControlPID unexpectedly signaled\n' >&2
+          exit 1
+        fi
+        kill -0 "$child"
+        [[ "$scope_error" == *outside* ]]
+        trap - EXIT
+        kill -TERM "$child"
+        wait "$child" || true
+        """,
+    )
+
+
+def test_history_allows_only_the_consumed_failed_run(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        source "$LIB"
+        GH_BIN=mock_gh
+        JQ_BIN=jq
+        current=99999999999
+        mock_gh() { printf '%s\n' '[{"databaseId":40223296178}]'; }
+        native_history_allows_retry owner/repo native-delegated-once.yml "$current"
+        # The live list also includes the current run; it is not another attempt.
+        mock_gh() {
+          printf '%s\n' '[{"databaseId":40223296178},{"databaseId":99999999999}]'
+        }
+        native_history_allows_retry owner/repo native-delegated-once.yml "$current"
+        """,
+    )
+
+
+def test_history_refuses_the_consumed_run_plus_any_other(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        source "$LIB"
+        GH_BIN=mock_gh
+        JQ_BIN=jq
+        mock_gh() {
+          printf '%s\n' '[{"databaseId":40223296178},{"databaseId":123456789}]'
+        }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'additional run unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        """,
+    )
+
+
+def test_history_refuses_a_different_or_missing_predecessor(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        source "$LIB"
+        GH_BIN=mock_gh
+        JQ_BIN=jq
+        mock_gh() { printf '%s\n' '[{"databaseId":123456789}]'; }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'different predecessor unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        mock_gh() { printf '%s\n' '[]'; }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'missing predecessor unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        """,
+    )
+
+
+def test_history_refuses_api_and_malformed_response_failures(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        source "$LIB"
+        GH_BIN=mock_gh
+        JQ_BIN=jq
+        mock_gh() { return 1; }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'API failure unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        mock_gh() { printf '%s\n' 'not-json'; }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'malformed history unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        """,
+    )
