@@ -186,12 +186,12 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     # hosted runner. This fixture is not chrooted, so use upstream's supported
     # unprivileged override rather than sudo or a host permission change.
     env["SYSTEMD_IN_CHROOT"] = "0"
-    env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+    # Keep the PRIVATE session bus supplied by dbus-run-session. A headless
+    # manager has no login session to create one for it.
     # Set this in the parent BEFORE Popen too: failure cleanup must still talk
     # to the private manager, never fall back to the runner's real user bus.
     os.environ["XDG_RUNTIME_DIR"] = str(xdg)
     os.environ["SYSTEMD_IN_CHROOT"] = "0"
-    os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
     executable = _systemd_binary()
     if executable is None:
         raise ProbeBlocked("systemd user-manager executable is unavailable")
@@ -399,6 +399,8 @@ def main() -> int:
     try:
         if not sys.platform.startswith("linux"):
             raise ProbeBlocked("real Linux user systemd is required")
+        if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            raise ProbeBlocked("invoke this probe through a private dbus-run-session")
         missing = [
             name
             for name in ("systemctl", "ps", "git")

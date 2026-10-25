@@ -48,7 +48,7 @@ jobs:
           UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
         run: |
           git fetch --no-tags origin main
-          python scripts/native_relay_update_probe.py \
+          dbus-run-session -- python scripts/native_relay_update_probe.py \
             --repo "$GITHUB_WORKSPACE" \
             --base "$(git merge-base HEAD origin/main)" \
             --json "$RUNNER_TEMP/native-relay-update.json"
