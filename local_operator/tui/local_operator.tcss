@@ -2558,6 +2558,65 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 
+/* ── full-page notifications view (`/notifications`, lane L2) ────────────── *
+ *
+ * A sibling of the schedule and library modes: same title/rule/columns/notice/
+ * hints skeleton, the transcript hidden and the dock greyed. Narrow (< 120
+ * columns) shows ONE of the list or the detail; wide splits 55/45 with a
+ * one-cell `edge` rule between them (design §8.3). Row ink is painted as rich
+ * spans in Python (`notifications_render`), not here, for `/review`'s reason:
+ * a widget class cannot reach inside one Static's spans. */
+.notifications-view .settings-view-columns {
+    /* The header row already separates title and list; the settings page's
+     * quiet top row would cost the 80x24 frame one of its few list rows. */
+    padding: 0;
+}
+
+.notifications-view-text {
+    width: 1fr;
+    height: auto;
+}
+
+.notifications-view-list {
+    width: 1fr;
+}
+
+.notifications-view-detail {
+    width: 1fr;
+}
+
+.notifications-view.-wide .notifications-view-list {
+    width: 55fr;
+}
+
+.notifications-view.-wide .notifications-view-detail {
+    width: 45fr;
+    padding: 0 0 0 1;
+}
+
+.notifications-view-edge {
+    width: 1;
+    height: 1fr;
+    background: $lo-edge;
+}
+
+/* One row: a receipt, a refusal or the y/n confirm. Fixed so a notice that
+ * appears does not move the list under the cursor. */
+.notifications-view .settings-view-detail {
+    height: 1;
+    padding: 0;
+}
+
+/* The settings skeleton's hint row is 2 tall with a 1-row top pad; here the
+ * notice row above already separates it, and the 80x24 frame needs that row
+ * for the list. One row, no pad (measured: the inherited pad clipped the
+ * hints to a 0-row content box). */
+.notifications-view .notifications-view-hints {
+    height: 1;
+    padding: 0;
+}
+
+
 /* ── full-page projects view ───────────────────────────────────────────── *
  *
  * The fourth sibling MODE (see the org-chart and settings blocks above):
