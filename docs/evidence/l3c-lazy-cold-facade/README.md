@@ -105,3 +105,44 @@ is a separate change.
   with `l3c_frames.py` and `l3c_cpu.py`. Every process is reaped by pid and every
   root is a temp directory. Both need `L3C_WORKTREE` (and `L3C_ROOT_BASE` /
   `L3C_ROOT_BRANCH` for the shell driver) pointing at the two checkouts.
+
+## The TUI's cold-boot frame is unchanged
+
+The TUI never passes `deferred_history` — its cold facade, the peer viewers, the
+mobile daemon, `/resume`, a new session and the sidebar's saved preview all take
+the eager path — so the frame to prove unchanged is the TUI's own cold boot.
+Captured with the repo's own recipe (`scripts/eager_boot_shot.py --isolated`,
+real `OperatorApp`, isolated `HOME`/config, both checkouts run from the SAME cwd
+and rendered with `rsvg-convert`):
+
+| artifact | sha256 |
+|---|---|
+| `tui-cold-open-before.svg` (`origin/main`) | `6fbca07611c0e7210dc2b8ddc547f3c4da4eb3bb73adb5decd1588fef2cd47c0` |
+| `tui-cold-open-after.svg` (branch) | `6fbca07611c0e7210dc2b8ddc547f3c4da4eb3bb73adb5decd1588fef2cd47c0` |
+
+Byte-identical SVG, and `compare -metric AE` on the two rasters reports **0**
+differing pixels. Both frames were looked at: splash, version, cwd line, the
+slash hints, the tip line and the composer band all paint as before.
+
+An earlier uncontrolled pair (each side run from its own checkout) differed in
+exactly the two fields that track the run rather than the code — the printed cwd
+and the composer's settle state — which is why this pair is taken from one cwd
+and compared byte for byte.
+
+## The order the renderer uses, and what a deferred read installs
+
+Two behaviours the review asked to be pinned rather than argued:
+
+* **`/history` before `/events` needs no hydrated history.**
+  `test_the_history_page_before_events_needs_no_hydrated_history` drives the real
+  route, then the real handshake, and asserts the page equals the eager page
+  *and* that the facade is still deferred afterwards — the page is answered from
+  the journal index, so nothing in that path touches `_history`.
+* **Hydration installs the journal as of the READ, not as of the open.**
+  `through_id=None` is the same cut the eager cold open uses, so deferral moves
+  the moment and never the cut;
+  `test_hydration_reads_the_journal_as_of_the_hydration_not_the_open` appends a
+  row while the facade sits deferred and asserts it is installed exactly once,
+  that `_cold_painted_ids` derives from that same list, and that the result
+  equals what an EAGER facade reads at the same instant. The record's witness is
+  cache-validation evidence and never a fence on that read.

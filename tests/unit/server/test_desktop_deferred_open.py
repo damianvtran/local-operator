@@ -28,17 +28,26 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
 from local_operator.harness.types import Message, TextContent, ToolCall, Usage
+from local_operator.server.routes import desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session import cold_metadata, replay_cache
 from local_operator.session import transcript_index as ti
+from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import TRANSCRIPT_FILENAME, Transcript
 
 SESSION_ID = "defeed012345"
+
+
+async def _never_take_over() -> None:
+    raise AssertionError("a cold facade never takes over")
+
 
 #: Frame keys two independent opens cannot make equal, and why. ``epoch`` is
 #: minted per facade (it names one attachment's lifetime), the serve clocks are
@@ -290,3 +299,179 @@ async def test_an_open_after_the_journal_changed_is_eager_and_paints_the_new_row
     second = await _open(root, SESSION_ID)
     assert second["deferred"] is False, "a moved journal must not be served from a record"
     assert second["rows"] == first["rows"] + 1
+
+
+# --------------------------------------------------------------------------
+# The ORDER the renderer actually uses: /history first, then /events
+# --------------------------------------------------------------------------
+
+TOKEN = "synthetic-deferred-token"
+
+
+def _app(root: Path) -> tuple[FastAPI, Any]:
+    app = FastAPI()
+    app.include_router(desktop_sessions.router)
+    pool = DesktopSessions(root)
+    app.state.desktop_sessions = pool
+    app.state.config_manager = ConfigManager(config_dir=root)
+    return app, pool
+
+
+async def _page_then_frame(root: Path) -> dict[str, Any]:
+    """``/history`` over the REAL route, then the ``/events`` handshake.
+
+    That is the order the renderer asks in: the journal page paints first and the
+    event stream follows it. The facts are sampled inside both handovers, because
+    the facade a page builds is disposed when its bridge is released.
+    """
+    app, pool = _app(root)
+    transport = ASGITransport(app=app)
+    facts: dict[str, Any] = {}
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://localhost",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ) as client:
+        response = await client.get(
+            f"/v1/desktop/sessions/{SESSION_ID}/history", params={"open_frame": 1}
+        )
+        assert response.status_code == 200, response.text
+        facts["page"] = _canonical(response.json()["result"])
+    pool = DesktopSessions(root)
+    async with pool.session(SESSION_ID) as bridge:
+        facade = bridge.remote
+        assert facade is not None
+        facts["deferred_after_page"] = facade._deferred_history is not None
+        facts["history_hydrated_after_page"] = facade._history_hydrated
+        sub = bridge.subscribe()
+        stream = bridge.events(sub, epoch=bridge.epoch, after_seq=bridge.sequence)
+        await anext(stream)
+        facts["frame"] = _canonical(await anext(stream))
+        await stream.aclose()
+    return facts
+
+
+@pytest.mark.asyncio
+async def test_the_history_page_before_events_needs_no_hydrated_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The journal page is answered from the JOURNAL, not from the message list.
+
+    This pins the ordering the renderer depends on: ``/history`` is requested
+    before ``/events``, so the deferred facade has to serve a page while
+    ``_history`` is still unread. The page must be the same page the eager facade
+    serves, and asking for it must not quietly hydrate (which would turn the
+    deferral into a per-page parse and defeat the point of the record).
+
+    A page is read from ``load_transcript_page`` — the journal index — so the
+    claim is that nothing in that path touches ``_history``, which the
+    ``deferred_after_page`` assertion states directly rather than inferring from
+    "it did not raise".
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    root = tmp_path / "config"
+    root.mkdir(parents=True, exist_ok=True)
+    ConfigManager(config_dir=root)
+    await _seed(root)
+
+    eager = await _page_then_frame(root)
+    assert cold_metadata.cold_metadata_path(root, SESSION_ID).exists()
+
+    replay_cache.replay_cache().clear()
+    _reset_replay_calls()
+    deferred = await _page_then_frame(root)
+
+    assert (
+        deferred["deferred_after_page"] is True
+    ), "serving /history must not hydrate the deferred message list"
+    assert deferred["history_hydrated_after_page"] is False
+    assert deferred["page"] == eager["page"], "the deferred page is the same page"
+    assert deferred["frame"] == eager["frame"], "and so is the frame that follows it"
+
+
+# --------------------------------------------------------------------------
+# WHAT the deferred read installs: the journal as of the READ, and no other
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hydration_reads_the_journal_as_of_the_hydration_not_the_open(
+    tmp_path: Path,
+) -> None:
+    """A row written while the facade sat deferred is INSTALLED when it reads.
+
+    THE SEMANTICS, pinned rather than assumed. A deferred cold open captures a
+    ``through_id`` of ``None`` — the same cut the eager read uses — so deferral
+    moves the MOMENT of the read, never its cut. A row appended in between is
+    therefore part of the hydrated list, exactly as it would have been had the
+    eager read happened at hydration time.
+
+    That is safe on every surface that reads it, and this test states the two
+    reasons instead of relying on timing: the hydrated list equals what an EAGER
+    facade reads at the same instant (so no row is lost, and none is duplicated),
+    and ``_cold_painted_ids`` is derived from that same list (so the cold-to-live
+    gap replay measures against what was actually installed).
+
+    The alternative — fencing the read at the open's journal version — would need
+    a byte cut the reader does not support, and would install a list OLDER than
+    the page the renderer has already painted from the same journal.
+    """
+    root = tmp_path / "config"
+    root.mkdir(parents=True, exist_ok=True)
+    ConfigManager(config_dir=root)
+    directory = await _seed(root, turns=2)
+    # The first open is the record's writer, and it is eager by construction:
+    # the deferral under test is a LATER process's open of the same journal.
+    first = await AttachedSession.cold(
+        SESSION_ID,
+        config_dir=root,
+        cwd=str(root),
+        takeover_factory=_never_take_over,
+        surface="desktop",
+        deferred_history=True,
+    )
+    try:
+        assert first._deferred_history is None, "no record yet, so nothing to defer"
+    finally:
+        await first.dispose()
+    replay_cache.replay_cache().clear()
+
+    facade = await AttachedSession.cold(
+        SESSION_ID,
+        config_dir=root,
+        cwd=str(root),
+        takeover_factory=_never_take_over,
+        surface="desktop",
+        deferred_history=True,
+    )
+    try:
+        assert facade._deferred_history is not None, "precondition: a hit deferred the read"
+        transcript = Transcript(directory)
+        late = Message(role="user", content=[TextContent(text="written while deferred")])
+        await transcript.append_message(late)
+        transcript.flush()
+
+        await facade.hydrate_deferred_history()
+        rows = [m.id for m in facade.history()]
+        assert late.id in rows, "the read reflects the journal as of the read"
+        assert rows.count(late.id) == 1, "and installs it exactly once"
+        assert facade._cold_painted_ids == set(rows), (
+            "the paint set is derived from what was installed, so the cold-to-live "
+            "gap replay measures against this list and not an earlier one"
+        )
+    finally:
+        await facade.dispose()
+
+    # The same read, taken eagerly at the same moment, is the same list.
+    replay_cache.replay_cache().clear()
+    eager = await AttachedSession.cold(
+        SESSION_ID,
+        config_dir=root,
+        cwd=str(root),
+        takeover_factory=_never_take_over,
+        surface="desktop",
+    )
+    try:
+        assert [m.id for m in eager.history()] == rows
+    finally:
+        await eager.dispose()

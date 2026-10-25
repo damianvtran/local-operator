@@ -1955,6 +1955,15 @@ class AttachedSession:
                 self._deferred_history = await self._deferred_cold_details()
             if self._deferred_history is None:
                 await self._load_history(None, want_checkpoint=True)
+            else:
+                # THE FLAG HAS TO AGREE WITH THE STATE. ``_history_hydrated`` is
+                # True from construction (a new facade's empty list is real), but
+                # on a deferral there IS no list, and code that reads the flag
+                # alone — ``materialize_history``'s early return, a future
+                # caller — must not be told a list exists. Every accessor gates
+                # on ``_deferred_history`` first; this keeps the two consistent
+                # so the next reader of the flag cannot be misled by it.
+                self._history_hydrated = False
             # Ordered before ``_install_frontend`` so the roster, todos and
             # title are present in the FIRST state the widgets ever see —
             # installing twice would paint an empty panel and then repaint it,
@@ -6534,6 +6543,19 @@ class AttachedSession:
         # cold open makes: identical type tuples mean this read shares the replay
         # cache and its in-flight singleflight with any concurrent eager read of
         # this journal, instead of paying a second parse beside it.
+        #
+        # ``through_id=None`` IS the captured cut, not a missing one. The eager
+        # cold open reads with ``through_id=None`` too — "everything durable up
+        # to now" — so deferral moves the MOMENT of the read, never its cut: a
+        # row appended while the facade sat deferred is in this list, exactly as
+        # it would have been had the read happened at open time. That is safe on
+        # every reader, and both reasons are pinned by
+        # ``test_hydration_reads_the_journal_as_of_the_hydration_not_the_open``:
+        # the list equals what an EAGER facade reads at the same instant, and
+        # ``_cold_painted_ids`` below is derived from this list, so the
+        # cold-to-live gap replay measures against what was actually installed.
+        # The deferral's ``witness`` is cache-validation evidence for the record,
+        # never a fence on this read.
         history = await self._read_transcript(want_checkpoint=True, through_id=None)
         if self._deferred_history is not deferred:
             # A seed, a close or a second open invalidated this hydration while
