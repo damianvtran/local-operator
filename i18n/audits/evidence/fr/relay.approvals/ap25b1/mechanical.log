@@ -1,0 +1,107 @@
+$ python3 i18n-recheck.py .   # cwd=/Users/damian/local-operator/.worktrees/relay-rebase  rev=3d0f77762a
+# actual output, 2026-10-25, session 402ebc67c9ec
+
+namespace: relay.approvals
+en keys: 21
+
+=== fr ===
+keys: 21  parity: True
+retired gate.body_scope present: False
+placeholders identical: True
+leading/trailing/double spaces: none
+composed (bold marked by **):
+  Les deux premiers choix ne changent que **cette session** ; le dernier modifie la **valeur par défaut de toutes les sessions** suivantes.
+seams (component-inserted U+0020 at each join):
+  before->session_clause: U+0065'e' | U+0063'c' ok
+  session_clause->between: U+006E'n' | U+003B';' SPACE-BEFORE-ASCII-PUNCT
+  between->default_clause: U+0061'a' | U+0076'v' ok
+  default_clause->after: U+0073's' | U+0073's' ok
+fr: U+202F/U+00A0 inside the five pieces: False
+fr: guide requires U+202F before ; : ! ?: True
+
+=== es ===
+keys: 21  parity: True
+retired gate.body_scope present: False
+placeholders identical: True
+leading/trailing/double spaces: none
+composed (bold marked by **):
+  Las dos primeras opciones cambian **esta sesión** solamente; la última cambia el **valor predeterminado de todas las sesiones** siguientes.
+seams (component-inserted U+0020 at each join):
+  before->session_clause: U+006E'n' | U+0065'e' ok
+  session_clause->between: U+006E'n' | U+0073's' ok
+  between->default_clause: U+006C'l' | U+0076'v' ok
+  default_clause->after: U+0073's' | U+0073's' ok
+es: guide rule: - No space before : ; ? ! (unlike French).
+
+=== vi ===
+keys: 21  parity: True
+retired gate.body_scope present: False
+placeholders identical: True
+leading/trailing/double spaces: none
+composed (bold marked by **):
+  Hai lựa chọn đầu chỉ đổi **phiên này** mà thôi; lựa chọn cuối đổi **mặc định cho mọi phiên** sau đó.
+seams (component-inserted U+0020 at each join):
+  before->session_clause: U+0069'i' | U+0070'p' ok
+  session_clause->between: U+0079'y' | U+006D'm' ok
+  between->default_clause: U+0069'i' | U+006D'm' ok
+  default_clause->after: U+006E'n' | U+0073's' ok
+vi: guide rule: - Quotes: “ ”; em dash " — " with spaces; ellipsis …; no space before
+
+=== zh-CN ===
+keys: 21  parity: True
+retired gate.body_scope present: False
+placeholders identical: True
+leading/trailing/double spaces: none
+composed (bold marked by **):
+  前两个选项只改变 **本会话** 而已；最后一个则把其后 **所有会话的默认值** 改掉。
+seams (component-inserted U+0020 at each join):
+  before->session_clause: U+53D8'变' | U+672C'本' SPACE-BETWEEN-HAN
+  session_clause->between: U+8BDD'话' | U+800C'而' SPACE-BETWEEN-HAN
+  between->default_clause: U+540E'后' | U+6240'所' SPACE-BETWEEN-HAN
+  default_clause->after: U+503C'值' | U+6539'改' SPACE-BETWEEN-HAN
+
+=== ru ===
+keys: 21  parity: True
+retired gate.body_scope present: False
+placeholders identical: True
+leading/trailing/double spaces: none
+composed (bold marked by **):
+  Первые два варианта меняют **эту сессию** только; а **значение по умолчанию для всех последующих сессий** меняет последний.
+seams (component-inserted U+0020 at each join):
+  before->session_clause: U+0442'т' | U+044D'э' ok
+  session_clause->between: U+044E'ю' | U+0442'т' ok
+  between->default_clause: U+0430'а' | U+0437'з' ok
+  default_clause->after: U+0439'й' | U+043C'м' ok
+ru: guide rule: - Em dash " — " with spaces; ellipsis …; no typographic spacing before
+
+=== hi ===
+keys: 21  parity: True
+retired gate.body_scope present: False
+placeholders identical: True
+leading/trailing/double spaces: none
+composed (bold marked by **):
+  पहले दो विकल्प केवल **इस सत्र को** बदलते हैं; आख़िरी वाला इसके बाद आने वाले **सभी सत्रों का डिफ़ॉल्ट** बदलता है।
+seams (component-inserted U+0020 at each join):
+  before->session_clause: U+0932'ल' | U+0907'इ' ok
+  session_clause->between: U+094B'ो' | U+092C'ब' ok
+  between->default_clause: U+0947'े' | U+0938'स' ok
+  default_clause->after: U+091F'ट' | U+092C'ब' ok
+
+=== ur ===
+keys: 21  parity: True
+retired gate.body_scope present: False
+placeholders identical: True
+leading/trailing/double spaces: none
+composed (bold marked by **):
+  پہلے دو اختیارات صرف **اسی سیشن کو** بدلتے ہیں؛ آخری والا اس کے بعد آنے والے **تمام سیشنز کا ڈیفالٹ** بدلتا ہے۔
+seams (component-inserted U+0020 at each join):
+  before->session_clause: U+0641'ف' | U+0627'ا' ok
+  session_clause->between: U+0648'و' | U+0628'ب' ok
+  between->default_clause: U+06D2'ے' | U+062A'ت' ok
+  default_clause->after: U+0679'ٹ' | U+0628'ب' ok
+ur: guide rule: 
+
+=== en recomposition vs pre-split key (75d3966b56) ===
+identical: True
+old: 'The first two choices change this session only; the last changes the default for all sessions that follow it.'
+new: 'The first two choices change this session only; the last changes the default for all sessions that follow it.'
