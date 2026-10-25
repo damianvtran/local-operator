@@ -5661,9 +5661,7 @@ def _oversized_guidance() -> str:
 
 
 @pytest.mark.asyncio
-async def test_read_whole_injected_guidance_returns_section_index(
-    tools, context, tmp_path
-) -> None:
+async def test_read_whole_injected_guidance_returns_section_index(tools, context, tmp_path) -> None:
     """A whole-file read of the AGENTS.md this session's prompt already carries
     returns the section index, not the 8 KiB clamp that only repeats the head."""
     (tmp_path / ".git").mkdir()
