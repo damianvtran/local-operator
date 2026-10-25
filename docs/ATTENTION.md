@@ -289,7 +289,8 @@ reason.
 The explicit half is load-bearing too. A timer, a poll, a subscription or a
 focus change may never reach the batch operation, and nothing here changes the
 per-result rule for the surfaces that acknowledge one at a time. The TUI's
-`/notifications read` renders the set it is about to clear — one catalogue read,
+`/unread read` (formerly `/notifications read`; the name moved to the
+Notifications page, decision D2) renders the set it is about to clear — one catalogue read,
 painted before the write — and acknowledges exactly that read's pairs, so the
 rows a user clears are rows they were shown, including the one that finished
 while they were typing; the desktop clears the rows its sidebar holds, and only
@@ -325,6 +326,51 @@ the watermark a human read), while `unseen` is the column an `AttentionState`
   carries. Two words with one meaning, owned by two layers, is a smaller defect
   than three surfaces renaming a status string — but it is a defect, and this is
   where a future round should look before it moves either one.
+
+## Inbox items: rung 0 and in-view auto-read
+
+The Notifications page (`docs/design/notifications-inbox.md`) holds items agents
+post with `notify` plus the open asks. Its items are a SECOND store
+(`notifications.db`) beside `attention.db`, with their own read and delivery
+marks, and the two stores never acknowledge each other: reading a completion
+never reads an item, and reading an item never reads a completion.
+
+**Rung 0 — watching AND active, decided at write time.** When `notify` runs, the
+session reads fresh evidence (`notifications/presence.py`) and, when the operator
+is demonstrably in THIS conversation, records the item already read
+(`read_via="watching"`, shown as "Seen live" under All) and raises no banner.
+Both halves must be positively present:
+
+- the desktop delivery lease is live (pid alive, heartbeat inside the 45 s TTL),
+  its window is attended (focused, visible, not minimised) and shows this
+  session, `screen_locked` is explicitly `false`, and `input_at_ms` is no older
+  than 120 s (`ATTENTION_INPUT_EVIDENCE_S`); or
+- an attached terminal watching this session reported real input (Key/MouseDown)
+  within the same window — wired by the TUI lane; absent today, so a terminal
+  alone never satisfies rung 0.
+
+`input_at_ms` and `screen_locked` are additive lease fields Electron main writes
+each beat. **Absent or malformed means unknown, and unknown is not active**: an
+older desktop build leaves every item unread, never silently read. Every
+rung-0 write logs the evidence age so a false suppression can be spot-checked.
+
+**In-view auto-read is the per-result rule applied to items.** A surface may mark
+an item read without a gesture only through `POST /v1/desktop/notifications/seen`,
+and only per item: the item's own rendered `revision` and `anchor_id`, rendered,
+uncovered and visible in a focused foreground interface, with a fresh input
+edge. The server re-checks what it can — the item belongs to
+`evidence.session_id`, the revision and anchor are current, and
+`evidence.input_at_ms` is within 120 s AND later than the item's last change —
+and answers `skipped` with the reason (`unknown`, `stale_revision`,
+`anchor_mismatch`, `stale_evidence`, `already`) otherwise. The desktop sends it through the foreground
+receipt guard (`notifications.seen`), like the existing receipt ops.
+
+**No automatic path may acknowledge in bulk** (R10). Mark-all-read and dismiss-
+by-session are explicit gestures, token-bound: they carry the `through_seq` the
+surface last painted (the answer's `high_water`), so an item written or updated
+after the paint stays unread. By-id writes carry the `revision` the surface
+rendered. An open ask is never dismissed through the reel (`skipped: live_ask`,
+ask log untouched); settling it goes through the existing reasoned door.
 
 ## Upgrade boundaries
 
