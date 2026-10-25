@@ -1262,3 +1262,115 @@ def test_the_envelope_hint_for_the_same_class_still_states_the_whole_contract(
         assert hint
         assert "observation_id" not in hint, class_key
         assert "public_observations" not in hint, class_key
+
+
+@pytest.mark.asyncio
+async def test_a_standard_key_alias_is_bound_and_executed_under_its_canonical_name() -> None:
+    """Normalisation happens BEFORE the batch is bound.
+
+    The main16 OSWorld arm refused ``Return``/``Escape``/``Page_Down`` 50+
+    times; the call must now execute, and the batch handed to the adapter --
+    the one the receipt digests and the evidence records -- must carry only
+    the canonical names, so the action-batch id is the one a canonical
+    spelling produces.
+    """
+
+    pending = _observation(2, frames=(_frame("screen"),))
+    offline = _Offline(pending)
+    result = await offline.call(
+        {
+            "actions": [
+                {"kind": "key", "keys": ["Escape"]},
+                {"kind": "key", "keys": ["ctrl", "minus"]},
+                {"kind": "key", "keys": ["Return"]},
+            ]
+        }
+    )
+
+    assert not result.is_error, result.content
+    (batch,) = offline.execute.batches
+    assert [action.keys for action in batch.actions] == [  # type: ignore[union-attr]
+        ("ESC",),
+        ("CTRL", "-"),
+        ("ENTER",),
+    ]
+    canonical = ActionBatch.model_validate(
+        {
+            **batch.model_dump(),
+            "actions": [
+                {**action.model_dump(), "keys": keys}
+                for action, keys in zip(batch.actions, (["esc"], ["ctrl", "-"], ["enter"]))
+            ],
+        }
+    )
+    assert canonical_digest("adapter-action-batch-v1", batch) == canonical_digest(
+        "adapter-action-batch-v1", canonical
+    )
+
+
+#: The field-placement refusals measured in the main16 evidence, with the
+#: repair each hint must now state on top of the generic "not a field" line.
+_PLACEMENT_REPAIRS = [
+    (
+        "wait-on-key",
+        {
+            "actions": [
+                {"kind": "type", "text": "ls"},
+                {"kind": "key", "keys": ["enter"], "wait": 1},
+            ]
+        },
+        [
+            '"wait" is not a field of a "key" action',
+            "A pause is its own action",
+            '[{"kind": "key", "keys": ["enter"]}, {"kind": "wait", "duration_ms": 1000}]',
+        ],
+    ),
+    (
+        "wait-ms-on-key",
+        {"actions": [{"kind": "key", "keys": ["enter"], "wait_ms": 500}]},
+        ['"wait_ms" is not a field', '{"kind": "wait", "duration_ms": 1000}'],
+    ),
+    (
+        "key-for-keys",
+        {"actions": [{"kind": "key", "key": "End"}]},
+        ['"key" is not a field of a "key" action', 'Did you mean "keys"?'],
+    ),
+    (
+        "duplicate-keys",
+        {"actions": [{"kind": "key", "keys": ["down", "down"]}]},
+        ['"keys" in a "key" action was refused', "cannot contain duplicate keys"],
+    ),
+    (
+        "cmd-is-ambiguous",
+        {"actions": [{"kind": "key", "keys": ["cmd", "a"]}]},
+        ["'cmd' is not an accepted key name", '"ctrl" for the application shortcut', '"meta"'],
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "arguments", "expected"),
+    _PLACEMENT_REPAIRS,
+    ids=[case[0] for case in _PLACEMENT_REPAIRS],
+)
+async def test_a_misplaced_field_refusal_shows_the_corrected_form(
+    name: str, arguments: dict[str, Any], expected: list[str]
+) -> None:
+    """Still REFUSED -- the contract stays strict -- but the repair is stated.
+
+    The corrected example is in this tool's own projected shape, so it never
+    re-advertises ``observation_id``.
+    """
+
+    pending = _observation(2, frames=(_frame("screen"),))
+    offline = _Offline(pending)
+    result = await offline.call(arguments)
+
+    assert result.is_error, name
+    assert offline.execute.batches == []
+    text = result.content[0].text  # type: ignore[union-attr]
+    for phrase in expected:
+        assert phrase in text, (name, text)
+    assert "observation_id" not in text, name
+    assert 'use "meta" instead' not in text, name
