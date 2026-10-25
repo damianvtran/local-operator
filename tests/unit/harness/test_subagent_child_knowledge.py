@@ -427,3 +427,30 @@ async def test_review_child_still_resolves_its_skills(tmp_path, monkeypatch) -> 
             await child.dispose()
     finally:
         await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_child_inherits_the_parents_injected_guidance_record(tmp_path, monkeypatch) -> None:
+    """A child carries the parent's ``<repo-guidance>`` block verbatim, so its
+    read tool must judge "already in your prompt" against the PARENT's record
+    of that block — never a fresh look at the disk (review R1-1)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(subagent_mod, "_child_mcp_wiring", lambda *args, **kwargs: None)
+    record = (("/repo/AGENTS.md", "0" * 64),)
+    parent, _stream = _parent_session(tmp_path, _parent_block())
+    setattr(parent._system_blocks_provider, "injected_guidance", record)
+    try:
+        assert parent._build_tool_context().injected_guidance == record
+        child = await subagent_mod._build_child_session(
+            label="review",
+            prompt="review the change",
+            parent_session=parent,
+            model_spec=None,
+            job_id="child-guidance-job",
+        )
+        try:
+            assert child._build_tool_context().injected_guidance == record
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()

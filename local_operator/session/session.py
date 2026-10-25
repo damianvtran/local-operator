@@ -18816,6 +18816,9 @@ class Session:
             # its namespace mid-task). See the module docstring of
             # ``local_operator/tools/eval.py``.
             kernel_managed_by_session=True,
+            # What THIS prompt carries, frozen at construction beside the
+            # prompt block itself (children inherit the parent's).
+            injected_guidance=getattr(self._system_blocks_provider, "injected_guidance", ()),
             session_id=self._session_id,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
