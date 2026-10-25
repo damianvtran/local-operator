@@ -4015,34 +4015,23 @@ class AgentLoop:
             public.provider_payload = None
             scrubbed_error = redact(error) if error else error
 
-            def contains_raw(value: Any) -> bool:
-                if isinstance(value, str):
-                    return any(needle in value for needle in needles)
-                if isinstance(value, Mapping):
-                    return any(
-                        contains_raw(key) or contains_raw(item) for key, item in value.items()
-                    )
-                if isinstance(value, (list, tuple)):
-                    return any(contains_raw(item) for item in value)
-                return False
-
-            # Exact containment catches a disconnected/no-op sink. Re-running
-            # the established hooks checks their supported encoded spellings and
-            # proves the published carriers are stable under another scrub.
+            # EVERY published carrier goes through the ONE coverage primitive,
+            # not a raw-substring test: with a disconnected or no-op sink the
+            # established scrub leaves a JSON/URL-escaped echo unchanged, and a
+            # substring test would then accept it into history, events and the
+            # next request (review S-10).
             for block in public.content:
                 if not isinstance(block, TextContent):
                     raise OneTurnSecretScopeError("unscrubbable public content")
-                if contains_raw(block.text) or redact(block.text) != block.text:
+                if one_turn_secret_value_is_present(secrets, block.text, redact):
                     raise OneTurnSecretScopeError("assistant text scrub incomplete")
             for call in public.tool_calls:
                 # Tool identity is the pairing key and the dispatch name. A
                 # secret here cannot be masked into a different valid identity:
                 # refuse the whole turn before execution or publication.
-                if (
-                    contains_raw(call.id)
-                    or contains_raw(call.name)
-                    or redact(call.id) != call.id
-                    or redact(call.name) != call.name
+                if any(
+                    one_turn_secret_value_is_present(secrets, text, redact)
+                    for text in (call.id, call.name)
                 ):
                     raise OneTurnSecretScopeError("unsafe assistant tool identity")
                 _, arguments_changed = _scrub_argument_value(call.arguments, argument_scrub)
@@ -4052,15 +4041,20 @@ class AgentLoop:
                     != call.raw_arguments
                 )
                 if (
-                    contains_raw(call.arguments)
-                    or contains_raw(call.raw_arguments)
+                    one_turn_secret_value_is_present(
+                        secrets, json.dumps(call.arguments, default=str), argument_scrub
+                    )
+                    or (
+                        call.raw_arguments is not None
+                        and one_turn_secret_value_is_present(
+                            secrets, call.raw_arguments, argument_scrub
+                        )
+                    )
                     or arguments_changed
                     or raw_changed
                 ):
                     raise OneTurnSecretScopeError("assistant argument scrub incomplete")
-            if scrubbed_error and (
-                contains_raw(scrubbed_error) or redact(scrubbed_error) != scrubbed_error
-            ):
+            if scrubbed_error and one_turn_secret_value_is_present(secrets, scrubbed_error, redact):
                 raise OneTurnSecretScopeError("provider error scrub incomplete")
 
             executing = assistant.model_copy(
@@ -5507,12 +5501,9 @@ class AgentLoop:
             )
             public = result.model_copy(update={"content": content, "details": details})
             leases = list(context.one_turn_secret_leases.values())
-            needles = [lease.value.get_secret_value() for lease in leases]
             published = json.dumps(public.model_dump(mode="json"), default=str)
-            if any(needle in published for needle in needles) or one_turn_secret_value_is_present(
-                [lease.value for lease in leases],
-                published,
-                redact,
+            if one_turn_secret_value_is_present(
+                [lease.value for lease in leases], published, redact
             ):
                 raise OneTurnSecretScopeError("tool event scrub incomplete")
             return public
