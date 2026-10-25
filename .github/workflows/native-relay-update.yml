@@ -47,7 +47,6 @@ jobs:
         env:
           GIT_CONFIG_SYSTEM: /dev/null
           GIT_TERMINAL_PROMPT: "0"
-          PYTHONPATH: ${{ github.workspace }}
           UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
         run: |
           git fetch --no-tags origin main

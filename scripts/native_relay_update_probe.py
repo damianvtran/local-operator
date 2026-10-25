@@ -43,6 +43,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import local_operator
 from local_operator import procname, update
 from local_operator.network import relay, store
 
@@ -82,6 +83,57 @@ def _require(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]
         detail = (result.stderr or result.stdout).strip()[-1800:]
         raise ProbeFailure(f"{argv[0]} exited {result.returncode}: {detail}")
     return result
+
+
+def _generation_environment(env: dict[str, str] | None = None) -> dict[str, str]:
+    """A child environment that cannot import the driver checkout by accident.
+
+    A generation's interpreter is not sufficient provenance: PYTHONPATH takes
+    precedence over its site-packages. Strip both Python path overrides at every
+    manager/generation-child boundary; the driver is already imported by now.
+    """
+    clean = (os.environ if env is None else env).copy()
+    clean.pop("PYTHONPATH", None)
+    clean.pop("PYTHONHOME", None)
+    return clean
+
+
+def _assert_generation_imports(
+    generation: Path, env: dict[str, str], cwd: Path, label: str
+) -> dict[str, Any]:
+    """Execute the intended interpreter and prove three imports belong to it."""
+    interpreter = update._generation_install_root(generation) / "bin" / "python3"  # noqa: SLF001
+    code = (
+        "import json, local_operator, local_operator.update as update, "
+        "local_operator.network.relay as relay; "
+        "print(json.dumps({'local_operator': local_operator.__file__, "
+        "'update': update.__file__, 'relay': relay.__file__}))"
+    )
+    result = _require(
+        [str(interpreter), "-c", code],
+        env=_generation_environment(env),
+        cwd=cwd,
+        timeout=15.0,
+    )
+    try:
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise ProbeFailure(f"{label}: could not read generation import provenance") from exc
+    install_root = update._generation_install_root(generation).resolve()  # noqa: SLF001
+    modules: dict[str, str] = {}
+    for name in ("local_operator", "update", "relay"):
+        value = payload.get(name) if isinstance(payload, dict) else None
+        if not isinstance(value, str):
+            raise ProbeFailure(f"{label}: no {name} import path in child receipt")
+        path = Path(value).resolve()
+        try:
+            path.relative_to(install_root)
+        except ValueError as exc:
+            raise ProbeFailure(
+                f"{label}: {name} imported outside intended generation: {path}"
+            ) from exc
+        modules[name] = str(path)
+    return {"interpreter": str(interpreter), "modules": modules}
 
 
 def _sha(path: Path) -> str:
@@ -178,7 +230,7 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     xdg = scratch / "xdg"
     xdg.mkdir(mode=0o700)
     os.chmod(xdg, 0o700)
-    env = os.environ.copy()
+    env = _generation_environment()
     env["XDG_RUNTIME_DIR"] = str(xdg)
     env["SYSTEMD_LOG_LEVEL"] = "debug"
     env["SYSTEMD_LOG_TARGET"] = "console"
@@ -267,7 +319,7 @@ def _install_source(source: Path, sha: str, version: str, ref: str) -> Path:
 
 def _write_pinned_unit(unit: Path, generation: Path, port: int) -> None:
     rendered = relay.render_systemd(port=port)
-    current_image = procname.supervised_image()
+    current_image = str(procname.supervised_image() or "")
     if not current_image or current_image not in rendered:
         raise ProbeFailure("could not identify the rendered unit image for the historical fixture")
     old_image = update._generation_install_root(generation) / "bin" / "python3"  # noqa: SLF001
@@ -307,6 +359,10 @@ def _refresh(generation: Path, scratch: Path, label: str) -> dict[str, Any]:
     real_ps = shutil.which("ps")
     if real_ps is None:
         raise ProbeBlocked("ps is required for both the fault and the success proof")
+    env = _generation_environment()
+    imports = _assert_generation_imports(generation, env, scratch, label)
+    interpreter = update._generation_install_root(generation) / "bin" / "python3"  # noqa: SLF001
+
     wrapper_dir = scratch / "fault-bin"
     wrapper_dir.mkdir(exist_ok=True)
     real_ps_link = wrapper_dir / "real-ps"
@@ -326,11 +382,9 @@ def _refresh(generation: Path, scratch: Path, label: str) -> dict[str, Any]:
         encoding="utf-8",
     )
     wrapper.chmod(0o755)
-    env = os.environ.copy()
     env["PATH"] = f"{wrapper_dir}:{env.get('PATH', '')}"
     env["LOP_NATIVE_PS_FAIL_ONCE"] = str(marker)
     env["LOP_NATIVE_REAL_PS"] = str(real_ps_link)
-    interpreter = update._generation_install_root(generation) / "bin" / "python3"  # noqa: SLF001
     result = _run(
         [str(interpreter), "-m", "local_operator.cli", "update", "--refresh-daemons"],
         env=env,
@@ -348,6 +402,7 @@ def _refresh(generation: Path, scratch: Path, label: str) -> dict[str, Any]:
         "returncode": result.returncode,
         "receipt_lines": lines[-20:],
         "post_fault_ps": "real ps delegated; mandatory post-restart check could pass",
+        "imports": imports,
     }
 
 
@@ -419,6 +474,25 @@ def main() -> int:
     scratch = Path("")
     exit_code = 1
     try:
+        driver_root = args.repo.resolve()
+        driver: dict[str, str] = {}
+        driver_modules = (
+            ("local_operator", local_operator),
+            ("update", update),
+            ("relay", relay),
+        )
+        for name, module in driver_modules:
+            path = Path(module.__file__ or "").resolve()
+            try:
+                path.relative_to(driver_root)
+            except ValueError as exc:
+                raise ProbeFailure(f"driver {name} is outside the PR checkout: {path}") from exc
+            driver[name] = str(path)
+        result["driver"] = driver
+        os.environ.pop("PYTHONPATH", None)
+        os.environ.pop("PYTHONHOME", None)
+        result["generation_python_overrides"] = "removed before manager and generation children"
+
         if not sys.platform.startswith("linux"):
             raise ProbeBlocked("real Linux user systemd is required")
         if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
