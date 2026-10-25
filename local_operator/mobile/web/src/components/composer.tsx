@@ -34,6 +34,7 @@ import {
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
 import { UsageSheet } from "./usage-sheet";
+import { SessionStatus } from "./session-status";
 import { WorkingDirectoryChip } from "./directory-sheet";
 import { cn } from "../lib/cn";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
@@ -259,7 +260,7 @@ function SlashSheet({
 							}
 							onClose();
 						}}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
 						<span className="shrink-0 font-mono text-mono-sm text-ink">
 							/{c.name}
@@ -313,7 +314,7 @@ function EffortSheet({
 						key={rung}
 						type="button"
 						onClick={() => set(rung)}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -397,21 +398,21 @@ const COMPOSER_PLACEHOLDER = "Message…";
    pair of numbers someone keeps in step by hand — the frame and the composer
    cannot disagree about the shell, the input row, the field or the control size. */
 const COMPOSER_SHELL =
-	"flex flex-col gap-1.5 px-3 pt-1.5 pb-[max(env(safe-area-inset-bottom),0.5rem)]";
-const COMPOSER_CWD_ROW = "flex min-w-0 flex-1 items-center px-0.5";
-const COMPOSER_INPUT_ROW = "flex items-end gap-2";
+	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-1";
+const COMPOSER_CWD_ROW = "flex min-w-0 flex-1 items-center";
+const COMPOSER_INPUT_ROW = "flex flex-wrap items-center";
 const COMPOSER_FIELD_BOX =
-	"flex min-w-0 flex-1 items-end rounded-md border bg-elevated px-3 py-2";
+	"order-first flex min-h-11 w-full min-w-0 basis-full items-end px-1 py-1";
 const COMPOSER_FIELD =
-	"lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none placeholder:text-ink-muted";
+	"lo-scroll max-h-33 min-h-11 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none placeholder:text-ink-muted";
 const COMPOSER_ROUND = "flex size-11 shrink-0 items-center justify-center rounded-full";
 /* The model/effort chips row, which is BELOW the field. It is easy to miss as
    part of the box and it is 44 px of it: a reserve without it left the field
    59 px lower than the real one, which is exactly the shift this whole frame
    exists to prevent (measured before it was added: field rect
    [64, 812, 262, 24] against the settled [77, 753, 236, 24]). */
-const COMPOSER_CHIP_ROW = "flex items-center gap-2 px-0.5";
-const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center font-mono text-mono-sm text-ink-dim";
+const COMPOSER_CHIP_ROW = "flex min-w-0 flex-1 items-center gap-1";
+const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
 
 /** The composer's box, empty, for the frames before a session's projection.
 
@@ -453,53 +454,14 @@ function PaperclipGlyph() {
 }
 
 export function ComposerFrame() {
-	return (
-		<div className={COMPOSER_SHELL} aria-hidden>
-			<div className={COMPOSER_CWD_ROW}>
-				<div className="min-h-11" />
-			</div>
-			<div className={COMPOSER_INPUT_ROW}>
-				{/* The settled empty composer's own three glyphs and placeholder, in
-				   their DISABLED styling: the attach disc at `opacity-50`, the field
-				   empty with `Message…`, the send disc `bg-sunken`
-				   /`text-ink-disabled`. Design review round 1 (D1) measured the gap
-				   this closes: the reserve read as "ring + outline" with the
-				   right-hand control invisible (the sunken disc sits at 1.05:1
-				   against the canvas) and then three glyphs and a placeholder
-				   popped in at the reveal. */}
-				<span
-					className={cn(
-						COMPOSER_ROUND,
-						"border border-control text-ink-muted opacity-50",
-					)}
-				>
-					<PaperclipGlyph />
-				</span>
-				<div className={cn(COMPOSER_FIELD_BOX, "border-control")}>
-					<textarea
-						disabled
-						rows={1}
-						aria-hidden
-						tabIndex={-1}
-						placeholder={COMPOSER_PLACEHOLDER}
-						className={COMPOSER_FIELD}
-					/>
-				</div>
-				<span
-					className={cn(
-						COMPOSER_ROUND,
-						"bg-sunken text-ink-disabled",
-					)}
-				>
-					<span aria-hidden>↑</span>
-				</span>
-			</div>
-			<div className={COMPOSER_CHIP_ROW}>
-				<span className={cn(COMPOSER_CHIP, "flex-1")} />
-				<span className={COMPOSER_CHIP} />
-			</div>
+	return <div className={COMPOSER_SHELL} aria-hidden>
+		<div className={COMPOSER_INPUT_ROW}>
+			<div className={COMPOSER_FIELD_BOX}><textarea disabled rows={1} tabIndex={-1} placeholder={COMPOSER_PLACEHOLDER} className={COMPOSER_FIELD} /></div>
+			<span className={cn(COMPOSER_ROUND, "text-ink-disabled")}><PaperclipGlyph /></span>
+			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
+			<span className={cn(COMPOSER_ROUND, "bg-sunken text-ink-disabled")}>↑</span>
 		</div>
-	);
+	</div>;
 }
 
 /* The dictation outcome lines (U2/U3/D2), rendered in the same polite status
@@ -518,7 +480,6 @@ export function Composer({
 	pid,
 	projection,
 	onOpenModels,
-	onOpenEffort,
 	effortOpen,
 	onCloseEffort,
 	autoFocus = false,
@@ -1370,18 +1331,6 @@ export function Composer({
 				</div>
 			) : null}
 
-			{/* THE WORKING-DIRECTORY CHIP. It sits directly above the input cluster
-			    (rather than beside the send controls) so it never competes with them
-			    for width on a narrow phone, and so the row it opens is where a reader
-			    already looks when asking "where is this session working?". */}
-			<div className={COMPOSER_CWD_ROW}>
-				<WorkingDirectoryChip
-					sessionId={pid}
-					cwd={shownCwd}
-					onMoved={requestMove}
-				/>
-			</div>
-
 			<div
 				className={COMPOSER_INPUT_ROW}
 				onDragOver={(e) => {
@@ -1455,7 +1404,7 @@ export function Composer({
 				<div
 					className={cn(
 						COMPOSER_FIELD_BOX,
-						dragOver ? "border-accent" : "border-control",
+						dragOver ? "outline-2 outline-accent" : "",
 					)}
 				>
 					<textarea
@@ -1470,6 +1419,7 @@ export function Composer({
 							}
 						}}
 						placeholder={COMPOSER_PLACEHOLDER}
+						aria-label={messageRuntime.t("relay.chrome.composer.label")}
 						disabled={disabled}
 						rows={1}
 						enterKeyHint="send"
@@ -1485,12 +1435,24 @@ export function Composer({
 					/>
 				</div>
 
+				{/* A single meta cluster replaces two 44 px bands. Each reading keeps
+				    its real picker; only the presentation changes, never send/retry
+				    routing or the pending-envelope lifetime. */}
+				<div className={COMPOSER_CHIP_ROW}>
+					<div className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
+					<button type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink")}
+						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
+						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
+					</button>
+					<SessionStatus projection={projection} compact />
+				</div>
+
 				{projection.streaming ? (
 					<button
 						type="button"
 						onClick={abort}
 						aria-label="stop"
-						className="flex size-11 shrink-0 items-center justify-center rounded-full border border-danger-border text-danger active:bg-danger-wash"
+						className="flex size-11 shrink-0 items-center justify-center rounded-full bg-danger-wash text-danger active:bg-danger-wash"
 					>
 						■
 					</button>
@@ -1507,36 +1469,6 @@ export function Composer({
 				</button>
 			</div>
 
-			<div className={COMPOSER_CHIP_ROW}>
-				{projection.queued_count > 0 ? (
-					<span className="font-mono text-mono-sm text-ink-dim">
-						{projection.queued_count} queued
-					</span>
-				) : null}
-				<span className="flex-1" />
-				{/* D5 (mobile UX batch): the model chip is ONE line with an ellipsis —
-				    under a long model label it used to wrap to two full-width lines
-				    and push the row's second chip off-screen. The chip shrinks under
-				    its content down to the 44px floor, and the truncating span
-				    supplies the ellipsis (the row itself stays on one line — flex
-				    rows never wrap). */}
-				<button
-					type="button"
-					onClick={onOpenModels}
-					className={cn(COMPOSER_CHIP, "active:text-ink-muted")}
-				>
-					<span className="truncate">{projection.model_label || "model"}</span>
-				</button>
-				{projection.effort_ladder.length > 0 ? (
-					<button
-						type="button"
-						onClick={onOpenEffort}
-						className={cn(COMPOSER_CHIP, "active:text-ink-muted")}
-					>
-						{projection.effort || "effort"}
-					</button>
-				) : null}
-			</div>
 
 			<SlashSheet
 				open={slashOpen && !disabled}

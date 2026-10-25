@@ -179,7 +179,7 @@ export function DirectorySheet({
 						   an unavailable action. The accent border, the wash and
 						   the word do the work at full opacity (4.86:1 / 4.57:1). */
 						className={cn(
-							"flex min-h-11 items-center gap-2 rounded-sm border px-3 text-left active:bg-elevated",
+							"flex min-h-11 items-center gap-2 rounded-sm border px-3 text-start active:bg-elevated",
 							tag === "current" ? "border-accent bg-accent-wash" : "border-control bg-surface",
 						)}
 					>
@@ -278,7 +278,7 @@ export function WorkingDirectoryChip({
 		};
 	}, []);
 
-	const label = cwd ? displayPath(cwd, home) : "…";
+	const label = cwd ? cwd.split("/").filter(Boolean).at(-1) || displayPath(cwd, home) : "…";
 
 	return (
 		<div className="flex min-w-0 items-center">
@@ -293,8 +293,8 @@ export function WorkingDirectoryChip({
 			    (design round 1, D1). */}
 			<Chip
 				onClick={() => setOpen(true)}
-				aria-label={`working directory: ${cwd || "unknown"}`}
-				className="min-w-0 max-w-full"
+				aria-label={messageRuntime.t("relay.chrome.composer.folder_label", { name: cwd || label })}
+				className="!h-11 min-w-11 max-w-full !bg-transparent !px-1 !text-meta"
 			>
 				{/* A folder glyph drawn inline: this package carries no icon
 				    dependency (the same reason the list's marks are text). 14 px

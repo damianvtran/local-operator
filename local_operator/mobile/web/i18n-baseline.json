@@ -60,20 +60,8 @@
       "[\"jsx:title\",\"untitled\"]": 1
     },
     "src/screens/session-view.tsx": {
-      "[\"jsx:aria-label\",\"needs you — approvals in this session\"]": 1,
-      "[\"jsx:aria-label\",\"session menu\"]": 1,
-      "[\"jsx:expression\",\"needs you — approvals in this session\"]": 1,
-      "[\"jsx:expression\",\"needs you\"]": 1,
-      "[\"jsx:expression\",\"not answering — showing its last synced view\"]": 2,
-      "[\"jsx:expression\",\"reconnecting — showing the last synced view\"]": 2,
-      "[\"jsx:expression\",\"resume\"]": 1,
-      "[\"jsx:expression\",\"resuming…\"]": 1,
       "[\"jsx:expression\",\"untitled\"]": 1,
-      "[\"jsx:text\",\"a send or resume reopens it in your home folder\"]": 1,
-      "[\"jsx:text\",\"needs you\"]": 1,
-      "[\"jsx:text\",\"not answering — showing its last synced view\"]": 1,
-      "[\"jsx:text\",\"reconnecting — showing the last synced view\"]": 1,
-      "[\"jsx:text\",\"session ended — history kept\"]": 1
+      "[\"jsx:aria-label\",\"session menu\"]": 1
     },
     "src/screens/past-sessions.tsx": {
       "[\"jsx:expression\",\"no matches\"]": 2,
@@ -88,9 +76,7 @@
     },
     "src/components/directory-sheet.tsx": {
       "[\"jsx:expression\",\"moving…\"]": 1,
-      "[\"jsx:expression\",\"change\"]": 1,
-      "[\"jsx:aria-label\",\"working directory:\"]": 1,
-      "[\"jsx:aria-label\",\"unknown\"]": 1
+      "[\"jsx:expression\",\"change\"]": 1
     },
     "src/components/model-sheet.tsx": {
       "[\"jsx:expression\",\"no models available from this machine — check the runtime's\\n\\t\\t\\t\\t\\t\\tproviders\"]": 1,

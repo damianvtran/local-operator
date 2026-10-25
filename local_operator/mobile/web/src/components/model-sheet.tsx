@@ -23,12 +23,14 @@ export function ModelSheet({
 	onClose,
 	pid,
 	projection,
+	onOpenEffort,
 }: {
 	open: boolean;
 	onClose: () => void;
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
 	projection: SessionProjection;
+	onOpenEffort?: () => void;
 }) {
 	/* `null` means NOT RESOLVED YET, which is a different fact from "resolved
 	   and empty" and has to be told apart from it — see the render ladder below.
@@ -92,6 +94,9 @@ export function ModelSheet({
 	return (
 		<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.session.model.sheet_title")}>
 			<div className="flex flex-col gap-1 p-2">
+				{onOpenEffort && projection.effort_ladder.length > 0 ? <button type="button" onClick={onOpenEffort} className="flex min-h-12 items-center justify-between rounded-sm px-3 text-start text-body active:bg-surface">
+					{messageRuntime.t("relay.chrome.model.effort")}<span className="text-ink-dim">{projection.effort}</span>
+				</button> : null}
 				<input
 					value={filter}
 					onChange={(e) => setFilter(e.target.value)}
@@ -138,7 +143,7 @@ export function ModelSheet({
 							key={m.selector}
 							type="button"
 							onClick={() => void choose(m)}
-							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 						>
 							{/* The slot is always reserved so nothing shifts, but only
 							    the CURRENT row paints a dot. The inert `bg-hairline`

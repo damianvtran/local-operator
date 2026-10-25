@@ -128,15 +128,15 @@ export function ToolRow({
 		<div
 			className={cn(
 				"rounded-sm px-1.5",
-				(running || queued) && "bg-elevated",
-				entry.tool_state === "failed" && "bg-danger-wash",
-				entry.tool_state === "done" && "bg-surface",
+				
+				
+				
 			)}
 		>
 			<button
 				type="button"
 				onClick={() => hasDetails && setOpen(!open)}
-				className="flex min-h-11 w-full items-center gap-1.5 text-left select-none"
+				className="flex min-h-11 w-full items-center gap-1.5 text-start select-none"
 			>
 				<span
 					className={cn(
@@ -200,7 +200,7 @@ export function ToolRow({
 				/* Cap the WHOLE expansion, not just its blocks: intent + error +
 				   args + diff + output stack, and unbounded they could still
 				   fill the viewport. The expansion scrolls as one region. */
-				<div className="lo-scroll flex max-h-96 flex-col gap-1.5 overflow-y-auto pb-1 pl-6">
+				<div className="lo-scroll flex max-h-96 flex-col gap-1.5 overflow-y-auto pb-1 ps-6">
 					{entry.intent ? (
 						<p className="text-body-sm text-ink-muted">
 							{entry.intent}

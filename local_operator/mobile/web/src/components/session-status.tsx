@@ -48,6 +48,8 @@
  * D2 ruling. See `contextEstimateMarker` for both precedents and the ruling.
  */
 import { useEffect, useId, useState } from "react";
+import { Sheet } from "./ui/sheet";
+import { messageRuntime } from "../store";
 import { cn } from "../lib/cn";
 import {
 	channelBreakdown,
@@ -96,7 +98,7 @@ function isTextEntry(target: EventTarget | null): boolean {
 	);
 }
 
-export function SessionStatus({ projection }: { projection: SessionProjection }) {
+export function SessionStatus({ projection, compact = false, detail = false }: { projection: SessionProjection; compact?: boolean; detail?: boolean }) {
 	// THE PUBLISHED OBJECT WINS when the runtime has one: its `total_micro`
 	// already spans this session's inference, its channels AND its children,
 	// computed in one backend place — so the row renders that figure rather
@@ -121,13 +123,13 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 	/* The disclosure is user state, not wire state: the runtime never says
 	   whether a reader has opened the chips, and the next projection must not
 	   re-open what they closed. */
-	const [expanded, setExpanded] = useState(false);
+	const [expanded, setExpanded] = useState(detail);
 	const panelId = useId();
 	/* A reading is only a door when there is a panel behind it, and a control
 	   with nothing behind it is the dead control this row must not ship. */
 	const canExpand = hasBreakdown;
 	useEffect(() => {
-		if (!expanded) return;
+		if (!expanded || compact || detail) return;
 		/* USER INTENT ONLY — NEVER `scroll`. This listener used to collapse on
 		   every scroll event, and at the bottom of a long transcript the panel's
 		   own 61px insertion shrank the scroll extent, so the browser's tail-follow
@@ -152,11 +154,25 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 			window.removeEventListener("touchmove", collapse, true);
 			window.removeEventListener("keydown", onKey, true);
 		};
-	}, [expanded]);
+	}, [expanded, compact, detail]);
 	if (!hasRow) return null;
 	/* Collapsed means ABSENT, including the no-figure case: a breakdown whose
 	   total cannot be spelled keeps its facts behind the `cost detail` control
 	   rather than spending a permanent second line. */
+	/* The compact composer reading is the same published spend/context fact,
+	   not a new telemetry calculation. Its drill-down lives in an in-flow
+	   sheet so reading channels cannot steal conversation height. */
+	if (compact) {
+		const label = [context.spelling?.split("/")[0], spend.text].filter(Boolean).join(" · ");
+		return <>
+			<button type="button" onClick={() => setExpanded(true)}
+				aria-label={messageRuntime.t("relay.chrome.composer.spend_label", { label })}
+				className="min-h-11 w-11 min-w-11 truncate text-meta tabular-nums text-ink-dim active:text-ink">{label}</button>
+			<Sheet open={expanded} onClose={() => setExpanded(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
+				<SessionStatus projection={projection} detail />
+			</Sheet>
+		</>;
+	}
 	const showPanel = hasBreakdown && expanded;
 	return (
 		<>
@@ -174,7 +190,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 				>
 					{/* Reading order is the one both references use — the TUI band's right
 					    group and the desktop strip both read context before spend — and
-					    `ml-auto` sits on the SECOND cell rather than on `justify-between`,
+					    `ms-auto` sits on the SECOND cell rather than on `justify-between`,
 					    so a lone reading keeps a fixed edge and the row does not reflow as
 					    the other appears or vanishes. */}
 					{context.spelling ? (
@@ -186,7 +202,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							{/* The estimate marker: the desktop's dim WORD, not a glyph —
 							    D2's ruling; `contextEstimateMarker` names both precedents. */}
 							{estimateMarker ? (
-								<span className="ml-1 text-ink-dim">{estimateMarker}</span>
+								<span className="ms-1 text-ink-dim">{estimateMarker}</span>
 							) : null}
 						</span>
 					) : null}
@@ -201,7 +217,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 								   should hear; the suffix names what the press opens. */
 								aria-label={`${spend.text} spend breakdown`}
 								onClick={() => setExpanded((open) => !open)}
-								className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
+								className="ms-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
 							>
 								<span className="truncate">{spend.text}</span>
 								<span aria-hidden className={CHEVRON_BOX}>
@@ -214,7 +230,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							   dead control. */
 							<span
 								data-testid="session-status-spend"
-								className="ml-auto min-w-0 truncate text-ink-muted"
+								className="ms-auto min-w-0 truncate text-ink-muted"
 							>
 								{spend.text}
 							</span>
@@ -232,7 +248,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							aria-controls={expanded ? panelId : undefined}
 							aria-label="cost detail"
 							onClick={() => setExpanded((open) => !open)}
-							className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
+							className="ms-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
 						>
 							<span className="truncate">cost detail</span>
 							<span aria-hidden className={CHEVRON_BOX}>

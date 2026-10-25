@@ -1306,7 +1306,7 @@ export function SessionListScreen() {
 	   ref or the long-press handler — the bug a fourth copy of this markup would
 	   eventually grow. */
 	const renderCard = (s: SessionSummary) => (
-		<div key={s.session_id} className="group relative flex items-center">
+		<div key={s.session_id} className="relative flex items-center">
 		<SessionCard
 			s={s}
 			home={home}
@@ -1468,8 +1468,8 @@ export function SessionListScreen() {
 				<span aria-hidden>＋</span>{!fabCollapsed || starting ? <span>{starting ? messageRuntime.t("relay.chrome.list.starting") : messageRuntime.t("relay.chrome.list.new")}</span> : null}
 			</button>
 			<Snackbar text={startError || markNotice?.text || ""} danger={Boolean(startError || markNotice?.danger)} onDismiss={() => { setStartError(""); publishMarkNotice(null); }} />
-			<div id="relay-navigation"><Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} items={DRAWER_ITEMS}
-				status={messageRuntime.t("relay.chrome.drawer.status", { state: connected ? "online" : sessions.length ? "retrying" : "connecting" })} /></div>
+			<Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} items={DRAWER_ITEMS}
+				status={messageRuntime.t("relay.chrome.drawer.status", { state: connected ? "online" : sessions.length ? "retrying" : "connecting" })} />
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)}>
 				{tagsAvailable ? <SessionGroupToggle grouped={groupEnabled} busy={catalogueBusy} failed={groupingOn && catalogueError} paused={groupingPaused} onToggle={toggleGrouping} onRetry={retryCatalogue} /> : null}
 			</ThemePicker>

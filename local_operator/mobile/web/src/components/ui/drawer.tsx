@@ -29,7 +29,7 @@ export function Drawer({ open, onClose, items, status }: {
 	const titleId = useId();
 	const { dialogRef, closeRef, focusEdge } = useModalLayer({ open, onClose });
 	if (!open) return null;
-	return <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}
+	return <div id="relay-navigation" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}
 		className="inset-x-0 z-50 mx-auto w-full max-w-[var(--lo-column-max,28rem)]" style={columnBox()}>
 		<span data-focus-guard tabIndex={0} aria-hidden onFocus={() => setTimeout(() => focusEdge(true), 0)} />
 		<button type="button" tabIndex={-1} aria-hidden data-testid="drawer-scrim"
