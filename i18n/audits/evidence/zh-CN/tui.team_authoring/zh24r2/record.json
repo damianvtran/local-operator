@@ -1,0 +1,152 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "audit_kind": "independent_translation_reaudit",
+  "locale": "zh-CN",
+  "namespace": "tui.team_authoring",
+  "round": 2,
+  "audit_date": "2026-10-24",
+  "key_count": 36,
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "fix_commit_under_review": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "supersedes": [
+    {
+      "audit_id": "zh24a1",
+      "record": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24a1/record.json",
+      "pre_fix_target_sha256_prefix": "75eba5f7cc79",
+      "reason": "Names pre-fix target bytes; superseded by this current-byte record."
+    }
+  ],
+  "supersedes_statement": "This record supersedes the pre-fix audit record(s) listed in `supersedes` for tui.team_authoring: they name target bytes `75eba5f7cc79…` and earlier, which are no longer current after cb716031e3. All verdicts and hashes here are derived from revision d9f70f622d.",
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "b1d9d628481a",
+    "model": "deepseek/deepseek-flash",
+    "audit_date": "2026-10-24",
+    "independent_from_translator_session": true,
+    "independent_from_implementer": true,
+    "actual_model_source": "Session header for b1d9d628481a reports the served model deepseek/deepseek-flash; no fallback was observed during this audit.",
+    "tooling": "Read-only: local_operator.i18n.runtime.render_message for ICU rendering, audit.py and fix-verify.py in this bundle for mechanics; no catalogue, ledger, allowance, shipped or hold file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.team_authoring.json",
+      "sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.team_authoring.context.json",
+      "sha256": "40e81d7469be5fb0da215e96d77189b218ed6a9879b13e4d4dc9f7b5f6c188ce"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.team_authoring.json",
+      "sha256": "c69efd739dee226a97f0b435794d890fa6618f0ddf736672c8b671b5b464c82f"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision."
+  },
+  "changed_keys": [
+    "tui.team_authoring.members_hint"
+  ],
+  "fix_verification": {
+    "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/fix-verification.json",
+    "changed_key_count": 1,
+    "all_values_match_proposal": true,
+    "all_argument_sets_equal": true,
+    "all_renders_ok": true,
+    "over_budget": []
+  },
+  "current_report_verdict": {
+    "status": "passed-with-minor-findings",
+    "verdict": "clean-with-findings",
+    "findings_total": 1,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0,
+    "finding_ids": [
+      "ZH24R2-01"
+    ],
+    "unresolved_blocker_major_count": 0
+  },
+  "ledger_entry_candidate": {
+    "locale": "zh-CN",
+    "namespace": "tui.team_authoring",
+    "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+    "translator": {
+      "agent": null,
+      "model": null,
+      "date": null
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-24",
+      "result": "passed-with-minor-findings",
+      "findings": 1
+    },
+    "status": "passed-with-minor-findings",
+    "note": "zh-CN core held-candidate wave 2026-10-24, round 2 at current bytes. Evidence: i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/record.json. All 1 applied fix(es) verified against the pre-fix proposal; one pre-existing minor recorded; blocker/major 0. Auditor independent of translator and implementer; current-byte round."
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report; audit.log is the executed command transcript for this namespace; fix-verification.json, mechanical-raw.json, runtime-mechanical.json and pseudo-evidence.json are machine output. String-level audit only: no native terminal, relay SPA or rendered-frame pass is claimed.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/audit.log",
+      "sha256": "c921a56867dc653e409c0d4bbb55b34b3094130e1066b83fa6279fa00be59a9c"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/audit.py.txt",
+      "sha256": "8c396c384520289bed2de98ff0119346a2c96c39b2ddfab0407e6aebf5dc3611"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/tui.team_authoring.compact.txt",
+      "sha256": "d6d8224a50e95b1d31d84c110c1e1023f4d086420e6ddd1979ffe1034070cf63"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/tui.team_authoring.pairs.txt",
+      "sha256": "bdba7e882288fdf005c45d5d9e0045096e31277cf36e640dce38e784aa6c1a0a"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/fix-verification.json",
+      "sha256": "a7fa64b5d85713351a42a1d75a0fec7614dcfb9655cdec8210552ea7a62c0073"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/fix-verify.py.txt",
+      "sha256": "8d0df4677ddd17c018738ef0282f6fb4ab419d531edbfcfe5def843b0d29bf02"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/mechanical-raw.json",
+      "sha256": "8e204fb29592191c76748e4c9a6a2b974ede9d44a7174b05cc3a60aba9ce6594"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/pseudo-evidence.json",
+      "sha256": "2f466d8ce51bf9a685a7e4c623b3eebd1d375ba462e6589cd61639044948d79f"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/report.md",
+      "sha256": "f6d1995110fc55bfb48f227115b18d015e3d3cc55430e4b2ab7e333947215770"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/runtime-mechanical.json",
+      "sha256": "47def802bf29f9be031e3f4d65d927b5799d19f1c71e8a10664bcc65ce7d46ab"
+    }
+  ]
+}

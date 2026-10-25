@@ -1,0 +1,668 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.errors.desktop",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "generated_utc": "2026-10-25T00:45:58Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 84,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "wire.errors.desktop.agents_config_client_fields",
+      "zh_render": "配置运行会自行选择工作目录和模型，因此不能同时传入<fields>。",
+      "en_render": "A configuration run chooses its own working directory and model, so <fields> cannot be sent with it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.agents_config_local_only",
+      "zh_render": "配置运行会编辑本设备的智能体和团队，因此不能在其他设备上启动。",
+      "en_render": "A configuration run edits this device's agents and teams, so it cannot be started on another device.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.agents_config_running",
+      "zh_render": "已有配置运行正在进行。打开它查看进展，或先将其停止。",
+      "en_render": "A configuration run is already going. Open it to follow it, or stop it first.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aida_bootstrap_failed",
+      "zh_render": "无法创建release-notes的会话；重试（参见日志）。",
+      "en_render": "release-notes's session could not be created; try again (see the logs).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aida_disabled",
+      "zh_render": "此后端已禁用release-notes，因此<op>未执行任何操作。通过aida.enabled启用她（或取消设置LOCAL_OPERATOR_NO_AIDA）后重试。",
+      "en_render": "release-notes is disabled on this backend, so <op> did nothing. Enable her with aida.enabled (or unset LOCAL_OPERATOR_NO_AIDA) and try again.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aida_greet_failed",
+      "zh_render": "无法安排问候；重试（参见日志）。",
+      "en_render": "The greeting could not be scheduled; try again (see the logs).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aida_no_provider",
+      "zh_render": "尚未配置提供商，因此release-notes无法向你问候。连接提供商后重试。",
+      "en_render": "No provider is configured yet, so release-notes has nothing to greet you with. Connect a provider, then try again.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.answer_epoch_mismatch",
+      "zh_render": "此回答属于先前的会话所有者",
+      "en_render": "This answer belongs to an earlier session owner",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aside_adopt_unconfirmed",
+      "zh_render": "确认将此题外问答加入会话",
+      "en_render": "Confirm adding this aside to the conversation",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aside_limit_reached",
+      "zh_render": "关闭一个题外问答或等待其过期",
+      "en_render": "Close an aside or wait for it to expire",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aside_max_turns",
+      "zh_render": "交流16轮后需新建题外问答",
+      "en_render": "Start a new aside after 16 exchanges",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aside_not_adoptable",
+      "zh_render": "无法将此题外问答纳入会话",
+      "en_render": "This aside cannot be adopted",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aside_request_reused",
+      "zh_render": "此题外问答请求已使用过",
+      "en_render": "This aside request was already used",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aside_still_running",
+      "zh_render": "等待题外问答完成后再关闭",
+      "en_render": "Wait for the aside to finish before closing it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.aside_unavailable",
+      "zh_render": "此题外问答已不可用",
+      "en_render": "This aside is no longer available",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_authorization_required",
+      "zh_render": "需要桌面认领授权。",
+      "en_render": "Desktop claim authorization is required.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_body_not_object",
+      "zh_render": "认领请求体必须为JSON对象。",
+      "en_render": "The claim body must be a JSON object.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_key_unpublished",
+      "zh_render": "此后端未发布桌面认领密钥。",
+      "en_render": "This backend published no desktop claim key.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_not_absolute",
+      "zh_render": "认领来源必须为绝对http(s)来源。",
+      "en_render": "Claim origins must be absolute http(s) origins.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_not_plain",
+      "zh_render": "认领来源必须为纯来源，不含路径、查询或片段。",
+      "en_render": "Claim origins must be plain origins, without a path, query or fragment.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_not_string",
+      "zh_render": "认领来源必须为字符串。",
+      "en_render": "Claim origins must be strings.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_null",
+      "zh_render": "不能认领不透明（'null'）来源。",
+      "en_render": "An opaque ('null') origin cannot be claimed.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_outside_configured",
+      "zh_render": "认领不能添加已配置桌面来源范围以外的来源。",
+      "en_render": "A claim cannot install an origin outside the configured desktop origins.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_origin_wildcard",
+      "zh_render": "不能认领通配符来源。",
+      "en_render": "A wildcard origin cannot be claimed.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.claim_origins_not_list",
+      "zh_render": "认领请求体的'origins'必须为列表。",
+      "en_render": "The claim body's 'origins' must be a list.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.conversations_unreadable",
+      "zh_render": "暂时无法读取会话。此问题会自行恢复；稍后重试。",
+      "en_render": "Conversations could not be read right now. This recovers on its own; retry in a moment.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.credential_operation_failed",
+      "zh_render": "凭据操作未完成",
+      "en_render": "The credential operation did not complete",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.cwd_marker_read_failed",
+      "zh_render": "无法读取会话的工作目录标记：permission denied",
+      "en_render": "cannot read the session's working-directory marker: permission denied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.cwd_marker_write_failed",
+      "zh_render": "无法写入会话的工作目录标记：permission denied",
+      "en_render": "cannot write the session's working-directory marker: permission denied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.desktop_refusal",
+      "zh_render": "permission denied",
+      "en_render": "permission denied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.effort_levels_missing",
+      "zh_render": "<model>没有推理强度级别",
+      "en_render": "<model> has no reasoning-effort levels",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.effort_not_in_levels",
+      "zh_render": "<model>接受<levels>，不接受'<effort>'",
+      "en_render": "<model> accepts <levels> — not '<effort>'",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.fast_mode_unsupported",
+      "zh_render": "<model>没有快速模式",
+      "en_render": "<model> has no fast mode",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.feed_subscriber_limit",
+      "zh_render": "桌面事件流订阅者过多",
+      "en_render": "Too many desktop feed subscribers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.feed_subscription_unknown",
+      "zh_render": "未知的桌面事件流订阅",
+      "en_render": "Unknown desktop feed subscription",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.force_requires_confirm_replace",
+      "zh_render": "--force会替换你的副本；使用replace并传入confirm_replace",
+      "en_render": "--force replaces your copy; use replace with confirm_replace",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.librarian_bootstrap_failed",
+      "zh_render": "无法创建Librarian的会话；重试（参见日志）。",
+      "en_render": "The Librarian's session could not be created; try again (see the logs).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.librarian_disabled",
+      "zh_render": "此后端已禁用Librarian，因此<op>未执行任何操作。通过librarian.enabled启用她（或取消设置LOCAL_OPERATOR_NO_LIBRARIAN）后重试。",
+      "en_render": "The Librarian is disabled on this backend, so <op> did nothing. Enable her with librarian.enabled (or unset LOCAL_OPERATOR_NO_LIBRARIAN) and try again.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.librarian_owner_active",
+      "zh_render": "一个运行中的会话持有Librarian的定时任务，因此未安排本轮执行。待该会话关闭后重试。",
+      "en_render": "A live session owns the Librarian's schedule, so no pass was scheduled. Try again after that conversation closes.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_asset_not_found",
+      "zh_render": "资源库中没有该资源。",
+      "en_render": "That asset is not in the Library.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_bad_cursor",
+      "zh_render": "此分页游标并非为本次请求签发。从第一页重新开始。",
+      "en_render": "That page cursor was not issued for this request. Start again from the first page.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_bad_filter",
+      "zh_render": "<field>的值不被此版本识别：<value>。",
+      "en_render": "<field> has a value this version does not recognise: <value>.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_chat_session_missing",
+      "zh_render": "此设备上不存在该会话。",
+      "en_render": "That conversation does not exist on this device.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_content_denied",
+      "zh_render": "无法通过资源库显示此文件。",
+      "en_render": "This file cannot be shown from the Library.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_content_missing",
+      "zh_render": "此设备上已无该资源对应的文件。",
+      "en_render": "The file for this asset is no longer available on this device.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_metadata_unavailable",
+      "zh_render": "资源库的元数据存储不可用；未作任何更改。",
+      "en_render": "The Library's metadata store is unavailable; nothing was changed.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_not_an_image",
+      "zh_render": "此资源没有缩略图。",
+      "en_render": "This asset has no thumbnail.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_tag_category",
+      "zh_render": "<category>不是资源库标签类别。",
+      "en_render": "<category> is not a Library tag category.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_tag_limit",
+      "zh_render": "一个资源最多可有10个标签。",
+      "en_render": "An asset may carry at most 10 tags.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_tag_name",
+      "zh_render": "标签名称长度为1–24个字符：release-notes。",
+      "en_render": "Tag names are 1-24 characters: release-notes.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.library_tag_unknown",
+      "zh_render": "资源库中没有该标签。",
+      "en_render": "That tag is not in the Library.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.masked_credential_form",
+      "zh_render": "在掩码凭据表单中输入凭据，不要输入到命令文本中",
+      "en_render": "Enter credentials in the masked credential form, not command text",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.move_failed",
+      "zh_render": "无法移动到<requested>：permission denied",
+      "en_render": "cannot move to <requested>: permission denied",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.packaged_profile_not_found",
+      "zh_render": "未找到内置配置档",
+      "en_render": "Packaged profile not found",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.pass_name_or_all",
+      "zh_render": "传入name或all，不能同时传入",
+      "en_render": "Pass either name or all, not both",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.plane_already_controlled",
+      "zh_render": "此桌面控制面已被控制。",
+      "en_render": "This desktop plane is already controlled.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.profile_name_taken",
+      "zh_render": "该名称属于另一个智能体。选择其他名称以扩展内置配置档。",
+      "en_render": "That name belongs to another agent. Choose a different name to extend the packaged profile.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.profile_registry_unavailable",
+      "zh_render": "配置档注册表不可用",
+      "en_render": "The profile registry is unavailable",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.project_confirm_mismatch",
+      "zh_render": "confirm必须逐字重复项目名称release-notes（名称，而非id）",
+      "en_render": "confirm must repeat the project name release-notes exactly (the name, not the id)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.project_not_found",
+      "zh_render": "没有id或名称为<key>的项目<names>",
+      "en_render": "no project with id or name <key><names>",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.question_no_longer_pending",
+      "zh_render": "此问题或审批已不再待处理",
+      "en_render": "This question or approval is no longer pending",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.refresh_requires_live",
+      "zh_render": "刷新需要实时用量",
+      "en_render": "Refresh requires live usage",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.remote_refusal_silent",
+      "zh_render": "<device>拒绝了该操作，未提供更多说明",
+      "en_render": "<device> refused that and said nothing further",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.requested_not_found",
+      "zh_render": "未找到请求的会话、配置档、团队或订阅",
+      "en_render": "Requested session, profile, team or subscription not found",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.runtime_unreachable",
+      "zh_render": "会话所有者不可用。重新连接并核对状态后重试。",
+      "en_render": "Session owner is unavailable. Reconnect and reconcile before retrying.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.scope_kind_required",
+      "zh_render": "指定scope_name时必须提供scope_kind。",
+      "en_render": "scope_kind is required when scope_name is given.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.scope_kind_unknown",
+      "zh_render": "scope_kind必须为<kinds>之一。",
+      "en_render": "scope_kind must be one of <kinds>.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.scope_name_required",
+      "zh_render": "指定scope_kind时必须提供scope_name。",
+      "en_render": "scope_name is required when scope_kind is given.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.scope_name_too_long",
+      "zh_render": "scope_name不得超过<max_length>个字符。",
+      "en_render": "scope_name must be at most <max_length> characters.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_copy_terminal_only",
+      "zh_render": "--size仅在终端中有效；/session视图会显示ID",
+      "en_render": "--size works only in the terminal; the /session view shows the ID",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_files_artifact_missing",
+      "zh_render": "此文件的存储副本已不在本设备上，因此无法保存。",
+      "en_render": "The stored copy of this file is no longer on this device, so it cannot be saved.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_files_bad_cursor",
+      "zh_render": "此分页游标并非为本次请求签发。从第一页重新开始。",
+      "en_render": "That page cursor was not issued for this request. Start again from the first page.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_files_bad_filter",
+      "zh_render": "<field>的值不被此版本识别：<value>。",
+      "en_render": "<field> has a value this version does not recognise: <value>.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_files_file_not_found",
+      "zh_render": "此会话的列表中没有该文件。",
+      "en_render": "That file is not in this conversation's list.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_files_materialise_failed",
+      "zh_render": "无法保存文件：write failed。",
+      "en_render": "The file could not be saved: write failed.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_files_not_an_artifact",
+      "zh_render": "该文件已存在于磁盘上的自身路径，无需保存。",
+      "en_render": "That file already exists on disk at its own path, so there is nothing to save.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_is_remote_open",
+      "zh_render": "<session_id>位于<label>，此桌面端尚不能打开其他设备上的会话。使用`lop sessions move <session_id> --to local`将其移回本机，或在终端中使用`/network sessions --peer <label> --engage <session_id>`操控。",
+      "en_render": "<session_id> lives on <label>, and this desktop cannot open a conversation on another device yet. Move it home with `lop sessions move <session_id> --to local`, or pilot it from the terminal with `/network sessions --peer <label> --engage <session_id>`.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_is_remote_write",
+      "zh_render": "<noun>（属于<session_id>）位于<label>，此桌面端尚不能向该设备写入；本机未作任何更改。",
+      "en_render": "The <noun> for <session_id> lives on <label>, and this desktop cannot write it there yet; nothing was changed here.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.session_not_found",
+      "zh_render": "没有id为<session_id>的会话",
+      "en_render": "no conversation with id <session_id>",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.skill_not_found",
+      "zh_render": "未找到技能",
+      "en_render": "Skill not found",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.sort_unknown",
+      "zh_render": "sort必须为<sorts>之一。",
+      "en_render": "sort must be one of <sorts>.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.start_after_end",
+      "zh_render": "开始时间必须早于结束时间",
+      "en_render": "The start must precede the end",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.unknown_command",
+      "zh_render": "未知命令",
+      "en_render": "Unknown command",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.errors.desktop.unknown_provider",
+      "zh_render": "未知提供商",
+      "en_render": "Unknown provider",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]*[\\w/-]",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

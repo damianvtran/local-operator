@@ -1,0 +1,20 @@
+$ git -C /Users/damian/local-operator/.worktrees/zh-cn-core rev-parse HEAD
+d9f70f622d9f0f1600c667cfe918571a408e3cb6
+# Transcript of the zh24r2 re-audit at this revision. audit.py.txt and fix-verify.py.txt are preserved byte-identically; the commands below are their reproduction form.
+$ python3 i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/audit.py.txt --ns wire.remote_compute --out i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2
+namespace=wire.remote_compute keys=43 revision=d9f70f622d9f0f1600c667cfe918571a408e3cb6
+key_parity: missing=0 extra=0 order_identical=True
+nfc=0 control=0 bidi=0 zero_width=0 fullwidth_latin_digits=0 cjk_latin_space=0
+icu_arguments: mismatches=0; plural_structure_errors=0
+technical_tokens_missing=0
+width: keys_with_budget=0 over_budget=0
+render: plural_samples=0 static_samples=43 failures=0 plural_keys=0 select_keys=0
+$ python3 i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/fix-verify.py.txt wire.remote_compute i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2
+namespace=wire.remote_compute changed_keys=6 matches=True args_equal=True renders_ok=True over_budget=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+$ sha256sum (en, context, target)
+d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8  local_operator/i18n/catalogues/en/wire.remote_compute.json
+ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36  local_operator/i18n/catalogues/en/wire.remote_compute.context.json
+87e37fac0ae0d3fb3fe28920983d6d4e31be55f3a10c74f3d48f1bc21bab6d91  local_operator/i18n/catalogues/zh-CN/wire.remote_compute.json
