@@ -12,7 +12,7 @@ shopt -s nullglob globstar
 : "${EXPECTED_SCOPE_LIB_SHA256:?}" "${GH_TOKEN:?}"
 [ "$GITHUB_RUN_ATTEMPT" = 1 ]
 EXPECTED_BASE=7f4b0bab4e2ba4b7327ae36808627ba83c41d0c6
-unset NATIVE_PROC_ROOT
+unset NATIVE_PROC_ROOT NATIVE_CGROUP_ROOT
 source "$GITHUB_WORKSPACE/scripts/native_cgroup_evidence.sh"
 # The one-shot label carries the independently reviewed commit. The workflow
 # need not contain its own commit SHA, and a later/relabelled head cannot pass.
@@ -123,7 +123,7 @@ cat >"$payload" <<'PAYLOAD'
 #!/usr/bin/env bash
 set -euo pipefail
 shopt -s nullglob globstar
-unset NATIVE_PROC_ROOT
+unset NATIVE_PROC_ROOT NATIVE_CGROUP_ROOT
 source "$PROBE_REPO/scripts/native_cgroup_evidence.sh"
 expected_cgroup="/system.slice/$PROBE_SCOPE"
 cgroup_dir="/sys/fs/cgroup$expected_cgroup"

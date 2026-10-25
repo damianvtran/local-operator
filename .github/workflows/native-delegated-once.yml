@@ -35,9 +35,9 @@ jobs:
       - name: Run the one authorized delegated diagnostic
         env:
           EXPECTED_HEAD: ${{ github.event.label.name }}
-          EXPECTED_WRAPPER_SHA256: cca745bff0c639e93ae547f23524ce634083cc392ecd087b4a3c6be09fca00c5
-          EXPECTED_PROBE_SHA256: bd22408a6fedb81b8f766669241d189cd6bd459303a7803daa22f593bdd19c68
-          EXPECTED_SCOPE_LIB_SHA256: 1f7ad6a655ab1b4f28686262dc1da1126ab5f872aeaebb27beee5c83512e25b6
+          EXPECTED_WRAPPER_SHA256: ad83eebbcbee03287a6fcf3422988807c3c732d7b5b977987fe5391940962278
+          EXPECTED_PROBE_SHA256: a95cdb650fc9be993a982551e46484107d9276f45849d0454c90dbc5f40c2ab6
+          EXPECTED_SCOPE_LIB_SHA256: da81807bbdd61895db53d3741d25754c9d0e6e0ab4bff6ab33bc7a1bf3c2925f
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/native-delegated-once-wrapper.sh
       - name: Upload scope and native receipts

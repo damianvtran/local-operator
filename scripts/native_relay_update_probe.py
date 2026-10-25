@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 import local_operator
-from local_operator import procname, update
+from local_operator import update
 from local_operator.network import relay, store
 
 
@@ -322,7 +322,7 @@ def _install_source(source: Path, sha: str, version: str, ref: str) -> Path:
 
 def _write_pinned_unit(unit: Path, generation: Path, port: int) -> None:
     rendered = relay.render_systemd(port=port)
-    current_image = str(procname.supervised_image() or "")
+    current_image = str(relay._systemd_unit_image())  # noqa: SLF001
     if not current_image or current_image not in rendered:
         raise ProbeFailure("could not identify the rendered unit image for the historical fixture")
     old_image = update._generation_install_root(generation) / "bin" / "python3"  # noqa: SLF001

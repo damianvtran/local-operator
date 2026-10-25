@@ -5,6 +5,7 @@
 # shellcheck shell=bash
 
 NATIVE_PROC_ROOT=${NATIVE_PROC_ROOT:-/proc}
+NATIVE_CGROUP_ROOT=${NATIVE_CGROUP_ROOT:-/sys/fs/cgroup}
 
 read_pid_cgroup() {
   local pid=$1 line file="$NATIVE_PROC_ROOT/$1/cgroup"
@@ -97,6 +98,14 @@ collect_cgroup() {
   done
 }
 
+scope_path_is_root_or_init() {
+  local path=$1
+  # systemd's manager_setup_cgroup() moves every process in the delegated root
+  # into init.scope. The payload may therefore authenticate in either location,
+  # never in an arbitrary scope; the delegation boundary remains the root.
+  [ "$path" = "$expected_cgroup" ] || [ "$path" = "$expected_cgroup/init.scope" ]
+}
+
 scope_state() {
   local output rc
   scope_status=""
@@ -130,8 +139,8 @@ signal_scope_control_pid() {
     scope_error="ControlPID $pid is not runner-owned"
     return 1
   }
-  if ! pid_cgroup=$(read_pid_cgroup "$pid") || [ "$pid_cgroup" != "$expected_cgroup" ]; then
-    scope_error="ControlPID $pid is outside $expected_cgroup"
+  if ! pid_cgroup=$(read_pid_cgroup "$pid") || ! scope_path_is_root_or_init "$pid_cgroup"; then
+    scope_error="ControlPID $pid is outside $expected_cgroup or its init.scope"
     return 1
   fi
   kill -TERM "$pid" 2>/dev/null || [ ! -d "$NATIVE_PROC_ROOT/$pid" ]
@@ -170,18 +179,17 @@ signal_payload_pid() {
 }
 
 authenticate_scope() {
+  scope_authenticated=false
   uid=$(id -u)
   gid=$(id -g)
   [ "$uid" -ne 0 ] && [ "$gid" -ne 0 ] || return 1
   [ "$(id -un)" = runner ] && [ "$(id -gn)" = runner ] || return 1
-  IFS= read -r cgroup_line </proc/self/cgroup || return 1
-  case $cgroup_line in
-    0::*) cgroup=${cgroup_line#0::} ;;
-    *) return 1 ;;
-  esac
+  cgroup=$(read_pid_cgroup "$$") || return 1
   expected_cgroup="/system.slice/$PROBE_SCOPE"
-  [ "$cgroup" = "$expected_cgroup" ] || return 1
-  cgroup_dir="/sys/fs/cgroup$cgroup"
+  scope_path_is_root_or_init "$cgroup" || return 1
+  # Even after migration to init.scope, ownership and recursive observation stay
+  # anchored at the exact delegated root rather than a foreign/current subtree.
+  cgroup_dir="$NATIVE_CGROUP_ROOT$expected_cgroup"
   owner=$(stat -c '%u' "$cgroup_dir") || return 1
   group=$(stat -c '%g' "$cgroup_dir") || return 1
   [ "$owner" = "$uid" ] && [ "$group" = "$gid" ] || return 1

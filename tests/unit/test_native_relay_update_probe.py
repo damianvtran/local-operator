@@ -122,3 +122,23 @@ def test_one_shot_label_preserves_full_head_within_github_limit() -> None:
         f"{prefix}{head.upper()}",
     ):
         assert re.fullmatch(bash_pattern.removeprefix("^").removesuffix("$"), invalid) is None
+
+
+def test_historical_unit_uses_the_renderers_source_checkout_fallback(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An absent generation shim must not make the fixture reject its own unit."""
+    generation = root / "generation"
+    install_root = root / "install-root"
+    _minimal_venv(install_root, with_package=False)
+    monkeypatch.setattr(probe.update, "_generation_install_root", lambda _generation: install_root)
+    monkeypatch.setattr("local_operator.procname.supervised_image", lambda: None)
+    monkeypatch.setattr(probe, "_require", lambda _argv: None)
+    unit = root / "relay.service"
+
+    assert probe.relay._systemd_unit_image() == Path(sys.executable)  # noqa: SLF001
+    probe._write_pinned_unit(unit, generation, 50295)  # noqa: SLF001
+
+    # Old fixture code searched for an empty image and raised before writing the
+    # unit; the shared renderer choice instead reaches the generation interpreter.
+    assert str(install_root / "bin" / "python3") in unit.read_text(encoding="utf-8")

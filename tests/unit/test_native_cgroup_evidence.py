@@ -190,3 +190,91 @@ def test_already_reaped_child_is_a_noop_not_a_wrapper_failure(root: Path) -> Non
         signal_payload_pid "$child" TERM
         """,
     )
+
+
+def test_systemd_init_scope_migration_preserves_authenticated_cleanup(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        shopt -s nullglob globstar
+        source "$LIB"
+        PROBE_SCOPE=test.scope
+        expected_cgroup="$EXPECTED"
+        NATIVE_CGROUP_ROOT="$FIXTURE/sysfs"
+        cgroup_root="$NATIVE_CGROUP_ROOT$expected_cgroup"
+        mkdir -p "$NATIVE_PROC_ROOT/$$" "$cgroup_root/init.scope"
+        printf '0::%s/init.scope\n' "$expected_cgroup" >"$NATIVE_PROC_ROOT/$$/cgroup"
+        id() {
+          case $1 in
+            -u|-g) printf '1001\n' ;;
+            -un|-gn) printf 'runner\n' ;;
+            *) return 1 ;;
+          esac
+        }
+        stat() {
+          case $2 in
+            %u|%g) printf '1001\n' ;;
+            *) return 1 ;;
+          esac
+        }
+        # systemd moves the payload from the delegated root into init.scope.
+        # Authentication follows that one legitimate move but still anchors the
+        # owner check and observation at the exact owned root.
+        authenticate_scope
+        [ "$scope_authenticated" = true ]
+        [ "$cgroup_dir" = "$cgroup_root" ]
+
+        sleep 30 &
+        child=$!
+        trap 'kill -KILL "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true' EXIT
+        mkdir -p "$NATIVE_PROC_ROOT/$child"
+        printf '0::%s/init.scope\n' "$expected_cgroup" >"$NATIVE_PROC_ROOT/$child/cgroup"
+        printf '' >"$cgroup_root/cgroup.procs"
+        printf 'populated 0\n' >"$cgroup_root/cgroup.events"
+        printf '%s\n' "$$" "$child" >"$cgroup_root/init.scope/cgroup.procs"
+        printf 'populated 1\n' >"$cgroup_root/init.scope/cgroup.events"
+        collect_payload_cgroup
+        [[ " $remaining " == *" $child "* ]]
+        [[ "$populated" == *cgroup.events* ]]
+        [ -z "$read_error" ]
+        trap - EXIT
+        kill -TERM "$child"
+        wait "$child" || true
+        """,
+    )
+
+
+def test_foreign_init_scope_is_not_authenticated(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        shopt -s nullglob globstar
+        source "$LIB"
+        PROBE_SCOPE=test.scope
+        expected_cgroup="$EXPECTED"
+        NATIVE_CGROUP_ROOT="$FIXTURE/sysfs"
+        mkdir -p "$NATIVE_PROC_ROOT/$$" "$NATIVE_CGROUP_ROOT$expected_cgroup"
+        printf '0::/system.slice/foreign.scope/init.scope\n' >"$NATIVE_PROC_ROOT/$$/cgroup"
+        id() {
+          case $1 in
+            -u|-g) printf '1001\n' ;;
+            -un|-gn) printf 'runner\n' ;;
+            *) return 1 ;;
+          esac
+        }
+        stat() {
+          case $2 in
+            %u|%g) printf '1001\n' ;;
+            *) return 1 ;;
+          esac
+        }
+        scope_authenticated=true
+        if authenticate_scope; then
+          printf 'foreign init.scope unexpectedly authenticated\n' >&2
+          exit 1
+        fi
+        [ "$scope_authenticated" = false ]
+        """,
+    )
