@@ -3363,10 +3363,14 @@ def test_a_snapshot_install_reports_the_candidate_it_promoted(
     """
     from local_operator import update
 
-    generation = _fake_generation(tmp_path)
-    _drive_snapshot_route(monkeypatch, tmp_path, wheel=wheel, install_result=generation)
-    # The pointer a successful install leaves behind: the promoted tree.
-    monkeypatch.setattr(update, "current_generation", lambda: generation)
+    promoted = _fake_generation(tmp_path, version="0.90.0")
+    # A DIFFERENT tree than the one this run promoted — a concurrent writer
+    # flipping the pointer after our install. ``promoted`` must still name the
+    # tree the install call returned; deriving it from the pointer would make
+    # this assertion FAIL (review round 1, M1).
+    concurrent = _fake_generation(tmp_path / "concurrent", version="0.90.1")
+    _drive_snapshot_route(monkeypatch, tmp_path, wheel=wheel, install_result=promoted)
+    monkeypatch.setattr(update, "current_generation", lambda: concurrent)
 
     assert update_command(from_snapshot="v0.90.0", services=False) == 0
 
@@ -3374,10 +3378,12 @@ def test_a_snapshot_install_reports_the_candidate_it_promoted(
     assert report["ok"] is True
     rolling = report["rolling"]
     assert rolling["core_installed"] is True
-    assert rolling["promoted"]["generation"] == str(generation)
+    assert rolling["promoted"]["generation"] == str(promoted)
     assert rolling["promoted"]["version"] == "0.90.0"
-    assert rolling["now_current"]["generation"] == str(generation)
-    assert rolling["now_current"]["version"] == "0.90.0"
+    assert rolling["now_current"]["generation"] == str(concurrent)
+    assert (
+        rolling["now_current"]["version"] == "0.90.1"
+    ), "the pointer moved on; only the promoted candidate may be claimed as promoted"
     # The frozen success fields stay exactly as they were.
     assert {"schema", "ok", "install_version", "target", "serve", "daemons"} <= set(report)
 
