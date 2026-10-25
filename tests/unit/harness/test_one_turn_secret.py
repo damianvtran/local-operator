@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import urllib.parse
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
@@ -1037,6 +1038,130 @@ async def test_full_run_generator_close_cleans_lease_and_placeholder() -> None:
     assert context.original_call_args == {}
     assert canary not in variables.redaction_values()
     assert canary not in _public_event_json(events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spelling", ["json", "quote", "quote_plus"])
+async def test_noop_sink_cannot_publish_an_encoded_assistant_echo(spelling: str) -> None:
+    """S-10 / Q-5: the published carriers use the coverage primitive.
+
+    A disconnected or no-op ``redact_tool_result`` leaves an encoded echo
+    unchanged, and idempotence then proves nothing. Under the previous
+    raw-substring check these echoes were ACCEPTED into assistant events and
+    durable history; the turn must instead fail closed. The canary contains a
+    space and a slash on purpose, so ``quote`` and ``quote_plus`` are genuinely
+    different spellings.
+    """
+    canary = 'v0rn-encoded value/with slash-"q"\\path-9f2a'
+    if spelling == "json":
+        rendered = json.dumps(canary)[1:-1]
+    elif spelling == "quote":
+        rendered = urllib.parse.quote(canary, safe="")
+    else:
+        rendered = urllib.parse.quote_plus(canary)
+    variables = VariableStore()
+    requests: list[ChatRequest] = []
+
+    def stream_fn(request: ChatRequest, _signal: AbortSignal | None) -> Any:
+        requests.append(request)
+        index = len(requests)
+
+        async def generate() -> Any:
+            if index == 1:
+                for event in _tool_delta("secret-call", "native-secret", "{}"):
+                    yield event
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            assert request.has_one_turn_secrets
+            yield StreamTextDelta(delta=rendered)
+            yield StreamEndEvent(stop_reason="stop")
+
+        return generate()
+
+    context = LoopContext(
+        system_blocks=[],
+        messages=[],
+        tools=[_secret_tool("native-secret", canary)],
+        tool_context=ToolContext(cwd=".", variables=variables),
+    )
+    config = _config(
+        stream_fn,
+        variables,
+        redact_tool_result=lambda text: text,
+        redact_tool_arguments=lambda text: text,
+    )
+    loop = AgentLoop()
+    events = [event async for event in loop.run([Message.user("go")], context, config, None)]
+    published = _public_event_json(events)
+    from local_operator.harness.loop import _ONE_TURN_SECRET_SCRUB_ERROR
+
+    assert _ONE_TURN_SECRET_SCRUB_ERROR in published, "the turn must refuse, not merely drop"
+    assert canary not in published
+    assert rendered not in published
+    history = json.dumps(
+        [
+            message.model_dump(mode="json")
+            for message in context.messages
+            if isinstance(message, Message)
+        ]
+    )
+    assert canary not in history and rendered not in history
+    loop._clear_one_turn_secrets(context)
+    assert context.one_turn_secret_leases == {}
+
+
+@pytest.mark.asyncio
+async def test_noop_sink_cannot_execute_url_encoded_arguments() -> None:
+    """Q-5 argument arm: an encoded-only argument must not run or be replayed."""
+    canary = 'v0rn-argument secret/path-"q"-4b71'
+    rendered = urllib.parse.quote(canary, safe="")
+    variables = VariableStore()
+    executed: list[dict[str, Any]] = []
+    requests: list[ChatRequest] = []
+    payload = json.dumps({"text": rendered})
+
+    def stream_fn(request: ChatRequest, _signal: AbortSignal | None) -> Any:
+        requests.append(request)
+        index = len(requests)
+
+        async def generate() -> Any:
+            if index == 1:
+                for event in _tool_delta("secret-call", "native-secret", "{}"):
+                    yield event
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            assert request.has_one_turn_secrets
+            for event in _tool_delta("echo-call", "echo", payload):
+                yield event
+            yield StreamEndEvent(stop_reason="toolUse")
+
+        return generate()
+
+    context = LoopContext(
+        system_blocks=[],
+        messages=[],
+        tools=[_secret_tool("native-secret", canary), _echo_tool("echo", executed)],
+        tool_context=ToolContext(cwd=".", variables=variables),
+    )
+    config = _config(
+        stream_fn,
+        variables,
+        redact_tool_result=lambda text: text,
+        redact_tool_arguments=lambda text: text,
+    )
+    loop = AgentLoop()
+    events = [event async for event in loop.run([Message.user("go")], context, config, None)]
+    assert executed == [], "an unprovable encoded argument must not reach the executor"
+    published = _public_event_json(events)
+    assert rendered not in published
+    later = ChatRequest(
+        model=MODEL,
+        messages=[message for message in context.messages if isinstance(message, Message)],
+    )
+    from tests.unit.providers.test_one_turn_secret import _BUILDERS
+
+    assert all(rendered not in json.dumps(build(later)) for build in _BUILDERS.values())
+    loop._clear_one_turn_secrets(context)
 
 
 @pytest.mark.asyncio

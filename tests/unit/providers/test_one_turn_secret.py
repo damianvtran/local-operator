@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -200,6 +200,26 @@ def test_with_model_allows_only_equal_model_and_effective_budget() -> None:
     smaller = request.model.model_copy(update={"max_output_tokens": 1})
     with pytest.raises(OneTurnSecretScopeError):
         request.with_model(smaller)
+
+
+def test_with_model_refuses_a_context_window_change_with_equal_output_bound() -> None:
+    """M1: the refusal is stricter than the design's minimum, deliberately.
+
+    The design allows metadata-only resolution and forbids blanket
+    context-window changes. A window change moves what admitted this exact
+    request (compaction/compression decisions downstream read it), so it is
+    refused even when the output bound is unchanged. The reviewer asked for
+    either allowance or the reason recorded; this is the reason, pinned.
+    """
+    request = _request("call-a")
+    request.arm_one_turn_secrets({"call-a": SecretStr(_canary("m1"))})
+    wider = request.model.model_copy(update={"context_window": request.model.context_window * 2})
+    assert turn_output_budget(wider) == turn_output_budget(request.model)
+    with pytest.raises(OneTurnSecretScopeError):
+        request.with_model(wider)
+    # The metadata-only resolution S-7 permits still passes.
+    resolved = request.model.model_copy(update={"context_metadata_resolved": True})
+    assert request.with_model(resolved).has_one_turn_secrets
 
 
 def test_every_input_refusal_degradation_fails_before_a_client() -> None:
@@ -498,114 +518,179 @@ async def test_real_openai_equal_metadata_resolution_dispatches() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_stream_post_arming_clones_cannot_mutate_overlay(
+async def test_session_stream_local_decoration_is_allowed_but_contract_is_not(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """S-9/S-8 boundary: what the SESSION may decorate, and what it may never.
+
+    ``SessionStreamFn`` decorates every request with the per-turn effort fit,
+    the prompt-cache key and the aggregator host pin. Refusing those made an
+    armed request unreachable (S-9), so the clone guard tolerates exactly that
+    local set. What it still refuses is a change to the request's CONTRACT —
+    messages, model identity, generation budget, fast mode — which is what an
+    armed secret must never ride across.
+    """
+
     from unittest.mock import MagicMock
 
+    from local_operator.harness.types import OneTurnSecretScopeError
     from local_operator.model.configure import SessionStreamFn
-    from local_operator.providers import failover as failover_module
 
-    canary = _canary("session-clones")
-    owner = SessionStreamFn(MagicMock(), {}, "secret-clone-session")
-    seen: list[ChatRequest] = []
-
-    async def fake_stream(request: ChatRequest, *_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
-        seen.append(request)
-        yield StreamEndEvent(stop_reason="stop")
-
-    async def no_preflight(_model: ModelSpec) -> None:
-        return None
-
-    monkeypatch.setattr(failover_module, "stream_with_failover", fake_stream)
-    monkeypatch.setattr(owner, "preflight_usage", no_preflight)
-    monkeypatch.setattr(owner, "_effort_for", lambda _model: "high")
-    owner._cache_lineage_id = "cache-after-arming"
-    owner._provider_affinity[request_model_id := "m"] = "host-after-arming"
-    request = _live_request(canary)
+    canary = _canary("session-contract")
+    owner = SessionStreamFn(MagicMock(), {}, "contract-session")
+    owner._provider_affinity["m"] = "pinned-host"
+    owner._cache_lineage_id = "cache-lineage"
+    owner._effort_for = lambda _model: "high"  # type: ignore[method-assign]
+    request = _live_request(canary, "openrouter")
     request.model = request.model.model_copy(
-        update={"model_id": request_model_id, "reasoning_efforts": ("low", "high")}
+        update={"supports_prompt_cache": True, "reasoning_efforts": ("low", "high")}
     )
-    request.arm_one_turn_secrets(request._one_turn_secrets, redact=request._one_turn_redact)
+
+    # Contract-breaking rewrites still fail closed, before any client.
     with pytest.raises(OneTurnSecretScopeError):
-        _ = [event async for event in owner(request, None)]
-    assert seen == []
+        request.model_copy(update={"messages": [*request.messages, Message.user("more")]})
+    with pytest.raises(OneTurnSecretScopeError):
+        request.model_copy(update={"model": request.model.model_copy(update={"fast_mode": True})})
+    with pytest.raises(OneTurnSecretScopeError):
+        request.model_copy(update={"max_tokens": (request.max_tokens or 0) + 1})
+
+    # The session's own decoration set is accepted and keeps the overlay.
+    decorated = request.model_copy(
+        update={
+            "prompt_cache_key": "cache-lineage",
+            "provider_affinity": "pinned-host",
+            "effort_override": "high",
+        }
+    )
+    assert decorated.has_one_turn_secrets
+    assert decorated.wire_messages()[-1].text == canary
 
 
 @pytest.mark.asyncio
 async def test_served_host_never_reaches_observation_affinity_or_later_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from unittest.mock import MagicMock
+    """S-11: the REAL ``stream_with_failover`` wrapper is what is under test.
+
+    The previous revision replaced the wrapper itself, so it could not detect
+    the wrapper being removed. Only the PROVIDER CLIENT is substituted, and the
+    provider frame carries the canary as its response id, usage stamp and
+    served host, so the production scrub must be the thing that removes it.
+    """
+    from dataclasses import asdict
 
     from local_operator.model.configure import SessionStreamFn
-    from local_operator.providers import failover as failover_module
-    from local_operator.session.request_observation import RequestFinalObservation
 
     canary = _canary("served-host")
-    owner = SessionStreamFn(MagicMock(), {}, "secret-host-session")
-    seen_observations: list[RequestFinalObservation] = []
+    bodies: list[dict[str, Any]] = []
+    owner = SessionStreamFn(
+        cast(Any, FakeAuth({"openrouter": ["synthetic-key"]})), {}, "secret-host-session"
+    )
+    seen_observations: list[Any] = []
     owner.subscribe_requests(seen_observations.append)
-    captured: list[ChatRequest] = []
 
-    async def first_stream(request: ChatRequest, *_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
-        captured.append(request)
-        yield StreamUsageEvent(
-            usage=Usage(input_tokens=1, output_tokens=1, provider=canary, model_id=canary)
-        )
-        yield StreamEndEvent(
-            stop_reason="stop",
-            served_provider=canary,
-            usage=Usage(input_tokens=1, output_tokens=1, provider=canary, model_id=canary),
-            provider_payload={"native": canary},
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(http_request.content))
+        payload = {
+            "id": canary,
+            "provider": canary,
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
+        }
+        return httpx.Response(
+            200, content=_sse_bytes([payload]), headers={"content-type": "text/event-stream"}
         )
 
-    async def first_stream_with_boundary(
-        request: ChatRequest, *args: Any, **kwargs: Any
-    ) -> AsyncIterator[Any]:
-        async for event in first_stream(request, *args, **kwargs):
-            yield failover_module._one_turn_scrub_stream_event(request, event)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatClient("https://openrouter.ai/api/v1", http_client=http)
+
+    async def client_for(_selector: Any) -> Any:
+        return client
 
     async def no_preflight(_model: ModelSpec) -> None:
         return None
 
     monkeypatch.setattr(owner, "preflight_usage", no_preflight)
-    monkeypatch.setattr(failover_module, "stream_with_failover", first_stream_with_boundary)
+    monkeypatch.setattr(owner, "_client_for", client_for)
     request = _live_request(canary, "openrouter")
     request.model = request.model.model_copy(update={"supports_prompt_cache": True})
-    events = [event async for event in owner(request, None)]
-    assert all(
-        not isinstance(event, StreamEndEvent)
-        or (
-            event.served_provider is None
-            and event.provider_payload is None
-            and event.usage is not None
-            and event.usage.provider is None
-            and event.usage.model_id is None
-        )
-        for event in events
-    )
-    from dataclasses import asdict
+    try:
+        events = [event async for event in owner(request, None)]
+    finally:
+        await http.aclose()
 
+    assert len(bodies) == 1
     assert canary not in json.dumps(
         [asdict(row) for row in seen_observations],
         default=lambda value: value.model_dump(mode="json"),
     )
-    assert canary not in json.dumps(owner._provider_affinity)
+    assert owner._provider_affinity == {}
+    # The end frame may still name the SAFE selector failover stamped
+    # (openrouter/m); what it must not carry is the provider-controlled host,
+    # the native payload, or any spelling of the value.
+    assert all(
+        not isinstance(event, StreamEndEvent)
+        or (event.served_provider is None and event.provider_payload is None)
+        for event in events
+    )
+    assert canary not in json.dumps([event.model_dump(mode="json") for event in events])
 
-    async def second_stream(
-        request: ChatRequest, *_args: Any, **_kwargs: Any
-    ) -> AsyncIterator[Any]:
-        captured.append(request)
-        yield StreamEndEvent(stop_reason="stop")
 
-    monkeypatch.setattr(failover_module, "stream_with_failover", second_stream)
-    later = _request(canary)
-    later.model = request.model
-    _ = [event async for event in owner(later, None)]
-    assert len(captured) == 2
-    later_request = captured[-1]
-    assert not later_request.has_one_turn_secrets
-    assert canary not in json.dumps(later_request.model_dump(mode="json"))
-    bodies = [build(later_request) for build in _BUILDERS.values()]
-    assert all(canary not in json.dumps(body) for body in bodies)
+@pytest.mark.asyncio
+async def test_real_session_stream_dispatches_with_the_canary_in_one_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S-9: an armed request must REACH a provider from a real session.
+
+    Confidentiality without reachability is not the feature: the raw value has
+    to land in exactly the immediate request. This drives the real session, the
+    real failover wrapper and a real wire client, so ``dispatched == 1`` and
+    the canary appears in that one body exactly once — with all three
+    decoration passes active.
+    """
+
+    from local_operator.model.configure import SessionStreamFn
+
+    canary = _canary("session-reachable")
+    bodies: list[dict[str, Any]] = []
+    owner = SessionStreamFn(
+        cast(Any, FakeAuth({"openrouter": ["synthetic-key"]})), {}, "reachable-session"
+    )
+    owner._provider_affinity["m"] = "pinned-host"
+    owner._effort_for = lambda _model: "high"  # type: ignore[method-assign]
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(http_request.content))
+        payload = {
+            "id": "synthetic-id",
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
+        }
+        return httpx.Response(
+            200, content=_sse_bytes([payload]), headers={"content-type": "text/event-stream"}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAICompatClient("https://openrouter.ai/api/v1", http_client=http)
+
+    async def client_for(_selector: Any) -> Any:
+        return client
+
+    async def no_preflight(_model: ModelSpec) -> None:
+        return None
+
+    monkeypatch.setattr(owner, "preflight_usage", no_preflight)
+    monkeypatch.setattr(owner, "_client_for", client_for)
+    request = _live_request(canary, "openrouter")
+    request.model = request.model.model_copy(
+        update={"supports_prompt_cache": True, "reasoning_efforts": ("low", "high")}
+    )
+    try:
+        events = [event async for event in owner(request, None)]
+    finally:
+        await http.aclose()
+
+    assert len(bodies) == 1, "the armed request must reach the provider exactly once"
+    assert json.dumps(bodies[0]).count(canary) == 1, "raw value belongs in this one body"
+    # The session's own cache key reached the wire, i.e. decoration ran and
+    # did not raise. The exact spelling is the client's business, not this test's.
+    assert bodies[0].get("prompt_cache_key")
+    assert any(isinstance(event, StreamEndEvent) for event in events)

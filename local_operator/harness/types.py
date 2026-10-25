@@ -694,6 +694,32 @@ ONE_TURN_SECRET_RECEIPT = (
     "Secret resolved for one model request; value redacted from session history."
 )
 
+#: Request fields the session's own decoration passes may set on an ARMED
+#: request. They are applied on every turn (effort fit, prompt-cache key,
+#: aggregator host pin) and carry no message content; refusing them made a real
+#: ``SessionStreamFn`` fail closed before dispatch (review S-9). ``with_model``
+#: deliberately does NOT consult this set: a change to the model contract —
+#: provider, model id, wire capability, fast mode or generation budget — still
+#: raises, so an armed secret cannot be re-aimed at another model.
+_CLONE_GUARD_FIELDS = frozenset(
+    {
+        "prompt_cache_key",
+        "provider_affinity",
+        "effort_override",
+        "effort_ceiling",
+        # Local native-accounting clone performed inside a wire builder
+        # (``providers/context.bind_native_context``); it changes admission
+        # bookkeeping for the same bytes, never the bytes themselves.
+        "context_tokens_hint",
+        "context_tokens_hint_model",
+        "context_tokens_hint_measured",
+        "context_binding",
+        "native_context_tokens",
+    }
+)
+#: Model fields that same decoration may set: the per-turn effort fit.
+_CLONE_GUARD_MODEL_FIELDS = frozenset({"reasoning_effort"})
+
 
 def one_turn_secret_value_is_present(
     values: Iterable[SecretStr], text: str, redact: Callable[[str], str] | None
@@ -709,16 +735,25 @@ def one_turn_secret_value_is_present(
         forms.add(json.loads('"' + text.replace('"', '\\"') + '"'))
     except (ValueError, TypeError):
         pass
-    try:
-        forms.add(urllib.parse.unquote(text))
-    except (TypeError, ValueError):
-        pass
+    # BOTH URL decoders: ``quote_plus`` spells a space as ``+`` and ``quote`` as
+    # ``%20``, and a canary with either character is only recognised by its own
+    # decoder (review Q-5 measured ``quote_plus`` surviving).
+    for decode in (urllib.parse.unquote, urllib.parse.unquote_plus):
+        try:
+            forms.add(decode(text))
+        except (TypeError, ValueError):
+            pass
     for secret in values:
         value = secret.get_secret_value()
         if not value:
             return True
         encoded = json.dumps(value, ensure_ascii=False)[1:-1]
-        candidates = {value, encoded, urllib.parse.quote(value, safe="")}
+        candidates = {
+            value,
+            encoded,
+            urllib.parse.quote(value, safe=""),
+            urllib.parse.quote_plus(value),
+        }
         for candidate in candidates:
             if any(candidate and candidate in form for form in forms):
                 return True
@@ -4389,24 +4424,33 @@ class ChatRequest(BaseModel):
             exclude={"context_metadata_resolved", "display_name"},
         )
 
-    def _one_turn_safe_template(self, *, local_accounting: bool = False) -> tuple[Any, ...]:
+    def _one_turn_safe_template(self, *, allow_local_decoration: bool = False) -> tuple[Any, ...]:
         # Direct field reads, NOT an armed model_dump exemption. Generic callers
         # must never be able to repeat the private comparison as a public dump.
         # preparation_ms and same_route_retry are the only outer-retry
-        # normalizations. The separate clone comparison additionally tolerates
-        # the existing LOCAL native-accounting clone inside a wire builder; it
-        # does not change messages, model, generation, cache or routing.
+        # normalizations; every other declared field is part of the contract.
+        #
+        # ``allow_local_decoration`` is the CLONE guard's view only (see
+        # ``model_copy``). It tolerates the two passes ``SessionStreamFn`` runs
+        # on every request -- the per-turn effort fit and the cache/routing
+        # decoration -- plus the wire builder's native accounting. Refusing
+        # those made a real session fail closed before dispatch (review S-9),
+        # which made the feature unreachable where it must work. They steer
+        # caching and host choice for the SAME model; none carries content.
+        # ``with_model`` stays strict, so an armed secret still cannot change
+        # model, provider, fast mode or generation budget.
         excluded = {"preparation_ms", "same_route_retry"}
-        if local_accounting:
-            excluded |= {
-                "context_tokens_hint",
-                "context_tokens_hint_model",
-                "context_tokens_hint_measured",
-                "context_binding",
-                "native_context_tokens",
-            }
-        fields = tuple(name for name in type(self).model_fields if name not in excluded)
-        return tuple(getattr(self, name) for name in fields)
+        if allow_local_decoration:
+            excluded |= _CLONE_GUARD_FIELDS
+        values: list[Any] = []
+        for name in type(self).model_fields:
+            if name in excluded:
+                continue
+            value = getattr(self, name)
+            if name == "model" and allow_local_decoration:
+                value = value.model_dump(exclude=_CLONE_GUARD_MODEL_FIELDS)
+            values.append(value)
+        return tuple(values)
 
     def with_model(self, spec: "ModelSpec") -> "ChatRequest":
         """This request aimed at a DIFFERENT model, with its bound re-derived.
@@ -4446,6 +4490,12 @@ class ChatRequest(BaseModel):
         ):
             # A secret overlay is authorized for one exact model/budget request.
             # Failover and fast-mode downgrade must not re-aim or rewrite it.
+            # Stricter than the design's minimum ON PURPOSE (review M1): a
+            # context-window-only change with an equal output bound is refused
+            # too, because the window is part of what admitted this request and
+            # the design says not to blanket-allow context-window changes. The
+            # allowed relaxation is the METADATA marker handled by
+            # ``_one_turn_model_contract``, not the budget itself.
             raise OneTurnSecretScopeError(
                 "An armed one-turn secret request cannot change model or generation budget."
             )
@@ -4462,8 +4512,8 @@ class ChatRequest(BaseModel):
         """
         candidate = cast("ChatRequest", BaseModel.model_copy(self, update=update, deep=deep))
         if self.has_one_turn_secrets and (
-            candidate._one_turn_safe_template(local_accounting=True)
-            != self._one_turn_safe_template(local_accounting=True)
+            candidate._one_turn_safe_template(allow_local_decoration=True)
+            != self._one_turn_safe_template(allow_local_decoration=True)
         ):
             raise OneTurnSecretScopeError("An armed one-turn secret request cannot be rewritten.")
         return candidate
