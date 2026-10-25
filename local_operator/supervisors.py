@@ -349,6 +349,13 @@ def systemd_path() -> str:
     long-lived unit ahead of the system directories. The same reasoning is
     recorded for the wakes LaunchAgent at ``wakes/supervisor.py`` ("a PATH baked
     into the plist render would vary per calling session").
+
+    The cost, accepted: a unit-level ``Environment=PATH=`` overrides any PATH the
+    user manager supplies through ``DefaultEnvironment=`` or ``environment.d``,
+    so directories configured only there (NixOS profiles, Linuxbrew) are not
+    seen by a supervised daemon. Determinism and keeping callers' directories
+    out of long-lived units outweigh that; such a host can still add a PATH
+    drop-in.
     """
     return os.pathsep.join(
         [
