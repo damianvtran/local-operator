@@ -646,6 +646,13 @@ def test_allowance_growth_permits_debt_for_an_untranslatable_locale(
     the manifest) and the growth ratchet (which rejects added rows when
     English grows) are mutually unsatisfiable for any change that adds
     English copy: a deadlock rather than a ratchet.
+
+    The fixture's locale is synthetic (``de``): every ``SUPPORTED_LOCALES``
+    entry now carries catalogues, so no real locale stands in for the
+    untranslatable case — using one would encode today's shipping state as the
+    premise of a mechanism test (see the comment on the fixture below).
+    ``ur`` was the last real locale the carve-out applied to, and it stops
+    applying the moment a locale becomes translatable.
     """
     base = {"pairs": []}
     # A synthetic locale with no catalogue in the tree: the carve-out is about

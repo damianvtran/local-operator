@@ -17,6 +17,12 @@
  * strings once and puts them in each surface's PR; this file is this surface's
  * copy of that one table.
  *
+ * THE SENTENCES NOW LIVE IN `relay.asks.status.*` (the relay SPA's owned
+ * catalogue). This module stays pure — it takes the translator as an argument
+ * instead of importing the store — so it can still be exercised without a
+ * rendered React tree, and every call site resolves the same key the TUI's
+ * equivalent names.
+ *
  * TWO RULES THE STRINGS ENFORCE, both from §5:
  *
  *  * **No surface may claim a notification that did not happen.** `delivered`
@@ -32,6 +38,7 @@
  * the minimized bar's count, and that bar is labeled by the design as an ask
  * summary, not a "needs you" badge.
  */
+import type { Translator } from "../i18n/keys.gen";
 import type { AskQuestion, PendingAsk } from "../types";
 
 /** The statuses the wire carries (design §4's frozen `PendingAsk.status`). */
@@ -116,9 +123,10 @@ export function questionTally(rows: PendingAsk[] | undefined | null): {
  *  has no default at all ("do not run anything that needed it"), so "took its
  *  default" claimed more than the agent was told. "Timed out", Ben's word and
  *  the badge's, byte-identical to the desktop's `ASK_STATUS_COPY.timed_out` and
- *  the TUI card title (#2481 design D2): one state, one name on every surface. */
-export const LAPSED_BODY = "the agent goes ahead without your answer";
-const LAPSED_LINE = `Timed out — ${LAPSED_BODY}`;
+ *  the TUI card title (#2481 design D2): one state, one name on every surface.
+ *
+ *  The two keys stay separate because the collapsed card's badge prints only
+ *  the state word, while the state line prints the full sentence. */
 
 /** Whether an ask's conversation is DEAD — every op on it is a terminal refusal.
  *
@@ -157,7 +165,7 @@ export function remainingMs(row: PendingAsk, nowMs: number): number {
  *  boundaries are chosen so the number never reads as more precise than it is —
  *  minutes under 90, hours under 48, days after that.
  */
-export function durationLabel(ms: number): string {
+export function durationLabel(ms: number, t: Translator): string {
 	const seconds = Math.floor(ms / 1000);
 	/* SUB-SECOND IS NOT NOTHING (agent review round 1, N1). This returned ""
 	   for a deadline inside the next second, so the open line read "expires in"
@@ -166,11 +174,11 @@ export function durationLabel(ms: number): string {
 	   would claim a minute that has already nearly passed. */
 	/* A deadline already past is the caller's other branch (""), not a countdown. */
 	if (ms <= 0) return "";
-	if (seconds < 60) return "<1 m";
-	if (seconds < 90 * 60) return `${Math.floor(seconds / 60)} m`;
+	if (seconds < 60) return t("relay.asks.duration.less_than_minute");
+	if (seconds < 90 * 60) return t("relay.asks.duration.minutes", { count: Math.floor(seconds / 60) });
 	const hours = seconds / 3600;
-	if (hours < 48) return `${Math.floor(hours)} h`;
-	return `${Math.floor(hours / 24)} d`;
+	if (hours < 48) return t("relay.asks.duration.hours", { count: Math.floor(hours) });
+	return t("relay.asks.duration.days", { count: Math.floor(hours / 24) });
 }
 
 /** The rows in the order every ask surface should show them: the ask the CHIP
@@ -200,7 +208,11 @@ export function orderedForDisplay(rows: PendingAsk[] | undefined | null): Pendin
  *  `nowMs` is the CLIENT's clock and the countdown is rendered from it, per §5 —
  *  the phone may be minutes away from the runtime's clock, and a countdown the
  *  server computed at push time would freeze at whatever it said then. */
-export function askStateLine(row: PendingAsk, nowMs: number): { text: string; tone: AskTone } {
+export function askStateLine(
+	row: PendingAsk,
+	nowMs: number,
+	t: Translator,
+): { text: string; tone: AskTone } {
 	const status = String(row.status || "open");
 	const left = remainingMs(row, nowMs);
 	switch (status) {
@@ -212,10 +224,13 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 				   fold's race window or a phone clock running ahead. Either way the
 				   ask is still answerable, and claiming "expires in 0 m" would be
 				   untrue. */
-				return { text: "Queued — the agent is continuing; deadline passed", tone: "attention" };
+				return {
+					text: t("relay.asks.status.queued_deadline_passed"),
+					tone: "attention",
+				};
 			}
 			return {
-				text: `Queued — the agent is continuing; expires in ${durationLabel(left)}`,
+				text: t("relay.asks.status.queued", { duration: durationLabel(left, t) }),
 				tone: "waiting",
 			};
 		}
@@ -224,27 +239,27 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 			   exist in the transcript; until then the honest word is "delivering"
 			   (see the module note). */
 			return row.delivered
-				? { text: "Answered — the agent was told", tone: "settled" }
-				: { text: "Answered — delivering", tone: "settled" };
+				? { text: t("relay.asks.status.answered"), tone: "settled" }
+				: { text: t("relay.asks.status.delivering"), tone: "settled" };
 		case "late":
-			return { text: "Answered late — the agent was told", tone: "settled" };
+			return { text: t("relay.asks.status.late"), tone: "settled" };
 		case "declined":
-			return { text: "Declined — the agent was told", tone: "settled" };
+			return { text: t("relay.asks.status.declined"), tone: "settled" };
 		case "dismissed":
-			return { text: "Dismissed — no reply was sent", tone: "gone" };
+			return { text: t("relay.asks.status.dismissed"), tone: "gone" };
 		case "withdrawn":
 			/* DESIGN §12's state word; the settled register here names the ACTOR —
 			   the agent retracted, the user did not (design review round 1, D2).
 			   Like `dismissed`, the ask is over with nothing to send; unlike it,
 			   the asker retracted the question rather than the user. */
-			return { text: "Withdrawn — the agent no longer needs an answer", tone: "gone" };
+			return { text: t("relay.asks.status.withdrawn"), tone: "gone" };
 		case "expired":
 			return {
-				text: "Expired — this ask is too old to answer; ask the agent again",
+				text: t("relay.asks.status.expired"),
 				tone: "gone",
 			};
 		case "timed_out":
-			return { text: LAPSED_LINE, tone: "gone" };
+			return { text: t("relay.asks.status.timed_out"), tone: "gone" };
 		default:
 			/* A status from a newer runtime. Passing it through as its own word is
 			   the same rule the projects sheet follows for an unknown project

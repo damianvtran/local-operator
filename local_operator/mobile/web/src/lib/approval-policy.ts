@@ -32,6 +32,7 @@
  *     land an unproven global write behind a typo.
  */
 import { requestOperatorChallenge, sendCommandWithProof, type CommandReceipt } from "../api";
+import type { Translator } from "../i18n/keys.gen";
 import type { ApprovalMode, ApprovalProvenance } from "../types";
 import { operatorFieldsFor } from "./operator-device";
 
@@ -111,10 +112,10 @@ async function signAndSend(
  * conversation with its own choice keeps it (the runtime's own receipt says so),
  * so "all" would be a claim neither the runtime nor this phone can make.
  */
-export function globalDefaultReceipt(receipt: CommandReceipt): string {
+export function globalDefaultReceipt(receipt: CommandReceipt, t: Translator): string {
 	const said = receipt.detail.trim();
 	if (said) return said;
-	return "the default for sessions that follow it is now auto";
+	return t("relay.approvals.policy.default_auto_receipt");
 }
 
 /**
@@ -145,32 +146,47 @@ export function globalDefaultReceipt(receipt: CommandReceipt): string {
  * them, and half a statement ("Approvals: Ask.") is still a true one — but a
  * mode with no provenance must not invent a scope, so the fallback names the
  * mode only.
+ *
+ * THE WORDS COME FROM `relay.approvals.policy.*`, and the translator is an
+ * ARGUMENT rather than an import — the same purity rule `lib/asks.ts` follows:
+ * this module can be exercised without a rendered React tree or a store. The
+ * mode words are keys of their own (`mode_ask`/`mode_auto`) because a locale
+ * may translate "Ask" and "Auto" differently from the words the sentence
+ * templates wrap them in, and the templates take them as placeholders so word
+ * order stays the translator's to choose.
  */
-export function approvalPolicyLine(input: {
-	approval_mode?: ApprovalMode | "";
-	approval_provenance?: ApprovalProvenance | "";
-	approval_global_mode?: ApprovalMode | "";
-}): string {
+export function approvalPolicyLine(
+	input: {
+		approval_mode?: ApprovalMode | "";
+		approval_provenance?: ApprovalProvenance | "";
+		approval_global_mode?: ApprovalMode | "";
+	},
+	t: Translator,
+): string {
 	const mode =
-		input.approval_mode === "auto" ? "Auto" : input.approval_mode === "ask" ? "Ask" : "";
+		input.approval_mode === "auto"
+			? t("relay.approvals.policy.mode_auto")
+			: input.approval_mode === "ask"
+				? t("relay.approvals.policy.mode_ask")
+				: "";
 	if (!mode) return "";
 	const provenance = input.approval_provenance;
 	if (provenance === "session") {
 		const global =
 			input.approval_global_mode === "auto"
-				? "Auto"
+				? t("relay.approvals.policy.mode_auto")
 				: input.approval_global_mode === "ask"
-					? "Ask"
+					? t("relay.approvals.policy.mode_ask")
 					: "";
 		/* No global mode, no clause: see the block comment above. */
 		return global
-			? `Approvals: ${mode} — session override; global ${global}.`
-			: `Approvals: ${mode} — session override.`;
+			? t("relay.approvals.policy.session_override_global", { mode, global })
+			: t("relay.approvals.policy.session_override", { mode });
 	}
-	if (provenance === "pin") return `Approvals: ${mode} — this run.`;
-	if (provenance === "global") return `Approvals: ${mode} — global default.`;
+	if (provenance === "pin") return t("relay.approvals.policy.this_run", { mode });
+	if (provenance === "global") return t("relay.approvals.policy.global_default", { mode });
 	/* A newer owner naming a scope this build does not know: state the mode,
 	 * claim no origin. Guessing "global default" here would be the one wording
 	 * this line exists to prevent. */
-	return `Approvals: ${mode}.`;
+	return t("relay.approvals.policy.mode_only", { mode });
 }

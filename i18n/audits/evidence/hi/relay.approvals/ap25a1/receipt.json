@@ -1,0 +1,14 @@
+{
+ "schema": 1,
+ "audit_id": "ap25a1",
+ "locale": "hi",
+ "namespace": "relay.approvals",
+ "record": "i18n/audits/evidence/hi/relay.approvals/ap25a1/record.json",
+ "provenance": "Bundle written by the implementation session on 2026-10-25 from the ledger row's recorded audit, measured hashes and a labelled mechanical replay. The audit session's own command log was not captured and is not reconstructed.",
+ "hashes": {
+  "record.json": "eb9e1f70b5f1233b5bc29b97e2ef815a145e1d9448c1cb5202f8f8413f646a50",
+  "report.md": "72a47d5cb5fd6724d9c1802e0b653ed175f9592c1074645b7960212087f6266d",
+  "mechanical-recheck.log": "f565f7cd18aeaed4dbef1e1f7ad42131ad307621085f51d884e3f7415bc180eb",
+  "recheck.py.txt": "08a357be03f1139a79e9b54fbd1ad1097d143777161b94201c5dd83f835e1343"
+ }
+}
