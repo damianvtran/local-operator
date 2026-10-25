@@ -431,10 +431,44 @@ def _anchor_current(directory: Path) -> bool:
         # Asked and answered in this process: this journal needs no sidecar (see
         # ``_NO_ANCHOR_NEEDED``). Without this the degraded pass spins on it forever.
         return True
+    if _rewritten_since_record(directory, stat):
+        return False
     anchor = read_anchor(directory)
     if anchor is None:
         return False
     return anchor.checkpoint_absent and anchor.inode == stat.st_ino and anchor.size == stat.st_size
+
+
+def _rewritten_since_record(directory: Path, journal: os.stat_result) -> bool:
+    """Whether the journal's inode metadata changed after the anchor was published.
+
+    THE PREWARM HALF OF THE DESKTOP REWRITE GUARD
+    (``server.utils.desktop_sessions._checkpoint_proven_absent``, #2941). That
+    reader refuses a record when the journal has not grown and its ``st_ctime_ns``
+    is newer than the record file's ``st_mtime_ns`` — the shape of an in-place
+    rewrite the boundary digest cannot see. A plain ``chmod``/``chown`` (or a
+    backup tool's metadata restore) moves ctime the same way, and the reader
+    cannot tell the two apart, so it falls back to the full walk. Without this,
+    the selector here sees an unchanged inode/size and calls the record current,
+    ``write_tail_anchor`` sees ``validate_anchor`` pass and returns early, and the
+    fast path is lost for good. Answering "stale" makes the next pass rebuild the
+    record ONCE (one ``build_anchor`` scan, off the hot path); the new record's
+    mtime is past the ctime, so the reader trusts it again. Same-size only: a
+    grown journal is the append path, whose ctime moves by construction and whose
+    suffix the validator already scans.
+    """
+    from local_operator.session.tail_anchor import anchor_path
+
+    try:
+        record = os.stat(anchor_path(directory))
+    except OSError:
+        return False
+    anchor = read_anchor(directory)
+    return (
+        anchor is not None
+        and journal.st_size == anchor.size
+        and journal.st_ctime_ns > record.st_mtime_ns
+    )
 
 
 async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> int:
@@ -599,7 +633,15 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     """
     directory = Path(root) / "sessions" / session_id
     if validate_anchor(directory, read_anchor(directory)) is not None:
-        return False
+        try:
+            journal = (directory / TRANSCRIPT_FILENAME).stat()
+        except OSError:
+            return False
+        if not _rewritten_since_record(directory, journal):
+            return False
+        # Valid but older than the journal's last metadata change: the desktop
+        # reader will not trust it, so rebuild it once (see
+        # ``_rewritten_since_record``).
     # SINGLE-FLIGHT (F15): the expensive half is ``build_anchor``'s whole-file scan
     # for a checkpointless journal, and this writer is reachable from both the
     # startup queue and a warm request. The second caller leaves immediately; the

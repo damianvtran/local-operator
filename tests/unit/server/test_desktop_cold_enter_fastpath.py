@@ -324,3 +324,49 @@ async def test_an_ordinary_append_after_the_proof_keeps_the_fast_path(
     calls = _count_walks(monkeypatch)
     assert await _bridge_cwd(root) == str(root.parent)
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_only_change_is_rebuilt_once_by_prewarm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 2 (MINOR): a ``chmod`` bumps ctime without touching a byte, so
+    the desktop guard refuses the record. Prewarm must then call the record stale
+    and republish it ONCE, after which the cold open skips the walk again and the
+    selector stops re-queueing the journal."""
+    from local_operator.session import index_prewarm
+
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    await _journal(directory)
+    assert index_prewarm.write_tail_anchor(root, SESSION_ID)
+    assert index_prewarm._anchor_current(directory)
+    journal = directory / "transcript.jsonl"
+    journal.chmod(0o600)
+    record = directory / tail_anchor.ANCHOR_FILENAME
+    assert journal.stat().st_ctime_ns > record.stat().st_mtime_ns
+
+    calls = _count_walks(monkeypatch)
+    assert await _bridge_cwd(root) == str(root.parent)
+    assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]  # refused: falls back to the walk
+
+    builds: list[object] = []
+    real_build = index_prewarm.build_anchor
+
+    def counted_build(target):  # type: ignore[no-untyped-def]
+        builds.append(target)
+        return real_build(target)
+
+    monkeypatch.setattr(index_prewarm, "build_anchor", counted_build)
+    assert not index_prewarm._anchor_current(directory)
+    assert index_prewarm.write_tail_anchor(root, SESSION_ID)
+    assert len(builds) == 1
+    # Settled: the selector calls it current and a second pass builds nothing.
+    assert index_prewarm._anchor_current(directory)
+    assert not index_prewarm.write_tail_anchor(root, SESSION_ID)
+    assert len(builds) == 1
+
+    calls.clear()
+    assert await _bridge_cwd(root) == str(root.parent)
+    assert calls == []
