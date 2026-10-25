@@ -94,7 +94,7 @@ def test_at_the_batch_threshold_every_eligible_result_clears_at_once():
     total = sum(estimate_tokens(m) for m in _results(history))
     _, cleared = clear_aged_tool_results(history, batch_tokens=total)
     assert cleared == 3
-    assert all(m.provider_payload["pruned"] is True for m in _results(history))
+    assert all((m.provider_payload or {}).get("pruned") is True for m in _results(history))
 
 
 def test_results_below_min_tokens_are_neither_counted_nor_cleared():
@@ -157,7 +157,7 @@ def test_pairing_survives_and_prior_details_are_kept():
     assert len(history) == before
     result = _results(history)[0]
     assert result.tool_call_id == "c0"
-    assert result.provider_payload["details"]["path"] == "/repo/f0.py"
+    assert (result.provider_payload or {})["details"]["path"] == "/repo/f0.py"
 
 
 def test_stub_names_the_read_path_and_range():

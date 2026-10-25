@@ -23,8 +23,10 @@ import pytest
 from local_operator.compaction.api import CompactionSettings
 from local_operator.harness.types import (
     AgentTool,
+    Message,
     ModelSpec,
     StreamEndEvent,
+    StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
@@ -64,7 +66,7 @@ def _view_tool() -> AgentTool:
 
 
 def _script() -> ScriptedStream:
-    turns = [
+    turns: list[list[StreamEvent]] = [
         [
             StreamToolCallDelta(
                 index=0, id=f"c{i}", name="read", argument_delta=json.dumps({"path": f"/r/f{i}.py"})
@@ -154,7 +156,7 @@ async def test_the_request_after_a_clear_carries_stubs_and_keeps_its_prefix(tmp_
     session_texts = {
         m.tool_call_id: m.text
         for m in session._context.messages
-        if getattr(m, "role", "") == "tool"
+        if isinstance(m, Message) and m.role == "tool"
     }
     await session.dispose()
     resumed = _session(tmp_path / "sess", ScriptedStream([]), enabled=True)
