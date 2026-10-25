@@ -65,6 +65,7 @@ requirement exists to prevent. So a report may, at most:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 import time
@@ -91,6 +92,8 @@ from local_operator.network.credentials.types import (
     peer_int,
     synthetic_credential_id,
 )
+
+logger = logging.getLogger("local_operator.network.credentials.owner")
 
 #: How long a second asker joins an in-flight resolve for the same key. Short on
 #: purpose: it exists to catch the CONCURRENT case (several provider calls in one
@@ -132,6 +135,11 @@ REPORT_BLOCK_MIN_INTERVAL_S = 300.0
 #: Small: the only blocking work is the file-lock acquire inside the MCP refresh.
 LOOP_EXECUTOR_THREADS = 2
 
+#: Bounded join for :meth:`_BrokerLoop.close` (the #2913 shape). A broker loop
+#: serves only submitted coroutines, so a healthy stop is immediate; the bound is a
+#: promptness claim for a wedged loop, not a wait a healthy relay ever pays.
+BROKER_LOOP_STOP_TIMEOUT_S = 5.0
+
 
 class _BrokerLoop:
     """ONE long-lived event loop and its thread, for every brokered request.
@@ -147,9 +155,21 @@ class _BrokerLoop:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        #: Terminal once ``close`` runs: a stopped relay's broker must not start a
+        #: fresh loop behind the stop hook that was meant to quiet it.
+        self._closed = False
+        #: The #2913 warning latch: the thread object already reported, so repeated
+        #: closes still join/re-check but name the survivor only once.
+        self._survivor: threading.Thread | None = None
 
     def loop(self) -> asyncio.AbstractEventLoop:
         with self._lock:
+            # A CLOSED LOOP IS TERMINAL, and the check is what stops a late request
+            # resurrecting one after the relay's stop hooks ran: the broker is still
+            # reachable on the server while links finish tearing down, and a fresh
+            # ``_BrokerLoop`` generation there would outlive the relay by definition.
+            if self._closed:
+                raise RuntimeError("the credential broker's event loop is closed")
             if self._loop is not None and self._thread is not None and self._thread.is_alive():
                 return self._loop
             ready = threading.Event()
@@ -170,7 +190,35 @@ class _BrokerLoop:
                 )
                 self._loop = loop
                 ready.set()
-                loop.run_forever()
+                try:
+                    loop.run_forever()
+                finally:
+                    # CLOSED ON THIS THREAD, for ``RelayServer._page_loop_main``'s
+                    # reason: ``loop.stop`` only ends ``run_forever``, and the
+                    # selector, self-pipe and default executor stay open until
+                    # ``close()`` — which also shuts that executor down. Issuing the
+                    # close from the stopping thread would race a coroutine still
+                    # being submitted to the loop; after ``run_forever`` returns
+                    # this thread is the one place the loop is provably idle.
+                    #
+                    # PENDING TASKS ARE CANCELLED FIRST (the page loop's M-2/M-R-1
+                    # teardown): a task still awaiting ``run_in_executor`` would
+                    # otherwise be destroyed pending, and its
+                    # ``run_coroutine_threadsafe`` completion would never be
+                    # delivered. The extra drain is unconditional because a task
+                    # that completed before the stop still has its completion
+                    # callback queued, and ``close`` clears the ready queue.
+                    try:
+                        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                        for task in pending:
+                            task.cancel()
+                        if pending:
+                            loop.run_until_complete(
+                                asyncio.gather(*pending, return_exceptions=True)
+                            )
+                        loop.run_until_complete(asyncio.sleep(0))
+                    finally:
+                        loop.close()
 
             self._thread = threading.Thread(
                 target=run, name=f"mesh-broker-loop-{self.name}", daemon=True
@@ -195,13 +243,65 @@ class _BrokerLoop:
             future.cancel()
             raise
 
-    def close(self) -> None:
+    def close(self, *, timeout: float = BROKER_LOOP_STOP_TIMEOUT_S) -> None:
+        """Stop the loop and JOIN it, bounded, keeping a survivor findable (#2913).
+
+        ``Thread.join(timeout)`` returns ``None`` whether or not the thread stopped,
+        so the old body — schedule ``loop.stop`` and return — could not tell a
+        wedged loop from a clean stop, and the caller saw success either way. Read
+        the outcome from ``is_alive()`` after the join; a clean stop clears the
+        handle and is silent, a survivor is REPORTED ONCE with its thread name and
+        the timeout and keeps its handle.
+
+        IDEMPOTENT, INCLUDING THE WARNING. A second ``close`` still joins and
+        re-checks — that re-check is the only path that clears the handle once the
+        survivor dies — but the latch (the ``_survivor`` thread object) makes it
+        warn only once per episode. A thread that ignores its stop cannot be killed
+        from here; this makes the condition visible, not impossible.
+        """
         with self._lock:
+            self._closed = True
             loop = self._loop
+            thread = self._thread
             self._loop = None
-        if loop is None:
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                # Closed between the check and the call. The join below is still the
+                # right next step: the thread either exited (clean) or is wedged
+                # somewhere outside the loop (survivor).
+                pass
+        if thread is None:
             return
-        loop.call_soon_threadsafe(loop.stop)
+        if thread is threading.current_thread():
+            # A close issued FROM the loop thread (a coroutine doing its own
+            # teardown) cannot join itself. The stop is already queued, the thread's
+            # own ``finally`` closes the loop, and the handle stays set so a later
+            # close from another thread can reap and clear it.
+            return
+        thread.join(timeout=timeout)
+        with self._lock:
+            if not thread.is_alive():
+                if self._thread is thread:
+                    self._thread = None
+                if self._survivor is thread:
+                    self._survivor = None
+                return
+            # The handle is the only thing that can observe or retry this thread
+            # later, so it is KEPT while the thread is alive. An identity check
+            # keeps a replacement registered meanwhile (a new generation) untouched.
+            self._thread = thread
+            if self._survivor is thread:
+                return
+            self._survivor = thread
+        logger.warning(
+            "mesh credentials: broker loop %s did not stop within the %.1fs timeout "
+            "and is still running; nothing can kill it, so its handle is kept for a "
+            "later stop",
+            thread.name,
+            timeout,
+        )
 
 
 class MeshCredentialBroker:
@@ -2078,11 +2178,18 @@ class MeshCredentialBroker:
         except Exception:  # noqa: BLE001
             return None
 
-    def close(self) -> None:
-        """Stop the broker's loop. For tests and for a relay shutting down."""
+    def close(self, *, timeout: float = BROKER_LOOP_STOP_TIMEOUT_S) -> None:
+        """Stop the broker's loop; joined, bounded and reported by ``_BrokerLoop``.
+
+        This method used to schedule ``loop.stop()`` and return, so a caller could
+        not tell a wedged loop from a clean stop. The join-and-report lives in
+        :meth:`_BrokerLoop.close` so the relay's teardown and a direct call share
+        one implementation; its closed latch makes a second call a no-op (and stops
+        a late request restarting the loop).
+        """
         if self._github_lender is not None:
             self._github_lender.close()
-        self._loop.close()
+        self._loop.close(timeout=timeout)
 
 
 #: The private attribute a relay server carries its one broker under.
@@ -2120,6 +2227,14 @@ def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
     ``None`` is deliberately NOT cached — a share that arrives after the relay
     started must be served without a restart (``for_relay``'s docstring).
     """
+    stop = getattr(server, "_stop", None)
+    if stop is not None and stop.is_set():
+        # A BROKER BUILT AFTER THE STOP BEGAN would start a loop behind the stop
+        # hook that exists to reap one. Same guard as the #2914 ``ensure_syncer`` /
+        # ``ensure_driver`` shape: the relay's own ``_stop`` event, not a new flag.
+        # An in-flight handler then gets the by-name refusal it gives a device
+        # that owns nothing, which is the honest answer during teardown.
+        return None
     with _BROKER_LOCK:
         broker = getattr(server, _BROKER_ATTR, None)
         if broker is not None:
@@ -2133,6 +2248,24 @@ def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
                 # growing a module-level table that outlives it.
                 pass
         return broker
+
+
+def stop_broker_for_relay(server: Any, *, timeout: float = BROKER_LOOP_STOP_TIMEOUT_S) -> None:
+    """Close the broker this relay created, if it created one (slice ``on_stop``).
+
+    THE STASH IS READ, NOT ``broker_for_relay``: that accessor builds on first
+    need, and a relay that never brokered anything has no loop to stop — creating
+    one during teardown would be the exact leak this hook exists to prevent.
+
+    THE STASH IS KEPT after the close. The server is what the broker belongs to,
+    and the closed broker is the object a late request must reach (its loop
+    refuses to restart) rather than a fresh one built behind the stop. The server
+    dies with the relay; nothing module-level retains it.
+    """
+    broker = getattr(server, _BROKER_ATTR, None)
+    if broker is None:
+        return
+    broker.close(timeout=timeout)
 
 
 def _already_expired(expiry: float | None, *, now: float | None = None) -> bool:
