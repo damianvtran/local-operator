@@ -8466,29 +8466,59 @@ def _runtime_census(image: Path | None) -> tuple[dict[str, int], bool, tuple[str
             counts["known_old_busy" if busy else "known_old_idle"] += 1
 
     for root in _config_roots():
-        seen: set[str] = set()
-        try:
-            # THE LISTING AND THE SCAN TAKE THE SAME NAME. ``RUN_DIRNAME`` is the
-            # namespace ``registry.scan`` actually reads; spelling anything else
-            # here is the defect this helper exists for.
-            before = _entry_names(root, RUN_DIRNAME)
-            rows = registry.scan(
-                root, parse=SessionRecord.from_json, reap=False, check_zombie=False
-            )
-            after = _entry_names(root, RUN_DIRNAME)
-            unreadable, note = _verdict_from_listing(root / RUN_DIRNAME, before, after, len(rows))
-            if unreadable:
+        # DEDUPED BY PID, not session id: a RUNTIME is a process, and the same
+        # process is the one thing that can appear in both namespaces (its boot
+        # record, then its live record). Two pids that happen to share a session
+        # id are two processes — a resume window can publish both — and a census
+        # of runtimes must count both.
+        seen: set[int] = set()
+        unreachable = _unreachable_namespace(root, RUN_DIRNAME)
+        if unreachable is None:
+            try:
+                # THE LISTING AND THE SCAN TAKE THE SAME NAME. ``RUN_DIRNAME`` is
+                # the namespace ``registry.scan`` actually reads; spelling
+                # anything else here is the defect this helper exists for.
+                before = _entry_names(root, RUN_DIRNAME)
+                rows = registry.scan(
+                    root, parse=SessionRecord.from_json, reap=False, check_zombie=False
+                )
+                after = _entry_names(root, RUN_DIRNAME)
+                unreadable, note = _verdict_from_listing(
+                    root / RUN_DIRNAME, before, after, len(rows)
+                )
+                if unreadable:
+                    measured = False
+                    reasons.append(note or f"{root / RUN_DIRNAME} could not be read whole")
+                for record, state in rows:
+                    if state == "stale":
+                        # A dead pid names no running runtime. This is the ONLY
+                        # state that is excluded.
+                        continue
+                    pid = int(getattr(record, "pid", 0))
+                    seen.add(pid)
+                    if state in ("live", "wedged"):
+                        # ``wedged`` IS A LIVE PROCESS: pid alive, owner stopped
+                        # beating (``registry``'s own vocabulary). A long turn on
+                        # an old generation is exactly the population
+                        # ``known_old_busy`` exists for, so it is counted in its
+                        # busy/idle bucket — not ``unknown``, which means "live but
+                        # its tree cannot be classified".
+                        count(record)
+                    else:
+                        # A state this build does not know: the record parsed, so a
+                        # runtime likely exists, but its liveness cannot be placed.
+                        counts["unknown"] += 1
+            except Exception:  # noqa: BLE001 — unreadable is a reason, never a zero
                 measured = False
-                reasons.append(note or f"{root / RUN_DIRNAME} could not be read whole")
-            for record, state in rows:
-                if state != "live":
-                    continue
-                seen.add(str(getattr(record, "session_id", "")))
-                count(record)
-        except Exception:  # noqa: BLE001 — unreadable is a reason, never a zero
+                reasons.append(f"{root / RUN_DIRNAME} could not be read")
+                logger.debug("runtime census unreadable under %s", root, exc_info=True)
+        elif unreachable.unreadable:
+            # AN OBSTRUCTED NAMESPACE IS A GAP, not an empty census: a regular
+            # file where ``run/mobile`` should be is the shape whose records are
+            # gone while every runtime still importing a generation has nothing
+            # left to name it (``_unreachable_namespace``).
             measured = False
-            reasons.append(f"{root / RUN_DIRNAME} could not be read")
-            logger.debug("runtime census unreadable under %s", root, exc_info=True)
+            reasons.append(unreachable.note or f"{root / RUN_DIRNAME} could not be read")
         # The pre-heartbeat window: a starting runtime is visible only here.
         boot = _boot_records_under(root)
         if boot.unreadable:
@@ -8498,18 +8528,21 @@ def _runtime_census(image: Path | None) -> tuple[dict[str, int], bool, tuple[str
             try:
                 if not registry.pid_alive(record.pid):
                     continue
-            except Exception:  # noqa: BLE001 — an unanswerable liveness check is a gap
+                pid = int(getattr(record, "pid", 0))
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                # ``count`` resolves the named tree; a path that cannot be
+                # resolved must degrade the CENSUS, not escape this helper and
+                # swallow the frozen report line (review round 1, R1-2).
+                count(record)
+            except Exception:  # noqa: BLE001 — one record costs the gap, not the report
                 measured = False
                 reasons.append(
-                    f"{root / HOST_RUN_DIRNAME} record {record.pid} has no readable liveness"
+                    f"{root / HOST_RUN_DIRNAME} record {getattr(record, 'pid', '?')} "
+                    "names a tree this build could not read"
                 )
-                continue
-            session_id = str(getattr(record, "session_id", ""))
-            if session_id and session_id in seen:
-                continue
-            if session_id:
-                seen.add(session_id)
-            count(record)
+                logger.debug("runtime census: unreadable boot record under %s", root, exc_info=True)
     return counts, measured, tuple(reasons)
 
 
