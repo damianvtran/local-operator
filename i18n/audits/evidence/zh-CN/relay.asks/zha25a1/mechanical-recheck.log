@@ -1,0 +1,41 @@
+# Replayed by the implementation session on 2026-10-25 at 58102b3ae3cd0062e4f2dfee89f4b150bf330b68.
+# NOT the auditor's log: no command output was captured during the audit;
+# see record.json -> audit_log (absent) and mechanical_recheck.
+
+replay of the mechanical checks in the ledger row
+revision:  58102b3ae3
+namespace: relay.asks
+locale:    zh-CN
+en sha256:      d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc
+zh-CN sha256: 915fef75f0c939a5dcc0c31eb5637e8ef85c253279002eb6f1d118bf180783ea
+
+keys: en=77 zh-CN=77
+  missing: 0
+  unknown: 0
+ICU: 77 messages compared
+  parse errors: 0
+  argument-tuple mismatches: 0
+plurals: 4 plural message(s) ['relay.asks.dock.timed_out', 'relay.asks.dock.waiting', 'relay.asks.pending.options', 'relay.asks.sheet.title_waiting']
+  cldr categories for zh-CN: ['other']
+  lossless-branch problems: 0
+controls: bidi/zero-width=0
+  straight quotes: 0
+  double spaces: 0
+  English leakage (value == en): 1 ['relay.asks.gate.unpaired_ask_label']
+
+gate copy, side by side:
+  relay.asks.gate.body: 'Ask会暂停每个需要审批的工具调用，直到你回答对应的卡片。Auto会在本会话剩余时间内让它们直接运行，不再询问。'
+  relay.asks.gate.keep_asking: '继续询问（ask）'
+  relay.asks.gate.not_paired_error: '此手机尚未与该设备配对——配对一次后，它就能自行给出此授权。'
+  relay.asks.gate.notice_ask: '本会话的审批仍为ask'
+  relay.asks.gate.notice_auto: '本会话的审批模式现为auto——需要审批的工具会直接运行'
+  relay.asks.gate.operator_refused: '{message}（此手机的签名被拒绝——在那台机器上，`lop operator devices`会显示此设备是已撤销还是已过期。）'
+  relay.asks.gate.run_without: '无需询问直接运行（auto）'
+  relay.asks.gate.title: '此会话中的审批'
+  relay.asks.gate.unpaired_after: '模式从不需要配对。'
+  relay.asks.gate.unpaired_ask_label: 'ask'
+  relay.asks.gate.unpaired_before: '此手机尚未与该设备配对，因此'
+  relay.asks.gate.unpaired_middle: '会先要求你完成配对。将审批保持在'
+  relay.asks.gate.unpaired_run_label: '无需询问直接运行'
+
+RESULT: PASS — mechanical parity holds at the audited bytes

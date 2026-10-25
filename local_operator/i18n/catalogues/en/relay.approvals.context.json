@@ -24,10 +24,30 @@
     "tone": "Sentence case, full stop. It follows the runtime's own receipt sentence.",
     "note": "Owned relay SPA approvals copy. Keeps a successful mode change from reading as an answer to the blocked call."
   },
-  "relay.approvals.gate.body_scope": {
-    "role": "scope sentence under the approval-gate sheet's body",
-    "tone": "Sentence case, full stop. 'this session' and 'the default for all sessions' are the two scopes the buttons offer.",
-    "note": "Owned relay SPA approvals copy. It follows relay.asks.gate.body and exists because the sheet offers a third, global scope."
+  "relay.approvals.gate.body_scope.after": {
+    "role": "closing relative clause of the approval-gate sheet's scope sentence",
+    "tone": "Ends with a full stop. 'it' refers to the last choice (the global default); keep that reference unambiguous in your language.",
+    "note": "Owned relay SPA approvals copy. ONE OF FIVE KEYS THAT COMPOSE ONE SENTENCE, read in this order: body_scope.before → body_scope.session_clause → body_scope.between → body_scope.default_clause → body_scope.after. The component joins them with single spaces, so never add leading or trailing spaces. Only the two *_clause keys are rendered in bold; this key is plain. Full English sentence: 'The first two choices change **this session** only; the last changes the **default for all sessions** that follow it.' The sentence is split rather than marked up so the two blast-radius phrases stay emphasised without markup in the catalogue: keep the emphasis where the keys put it and do not add your own."
+  },
+  "relay.approvals.gate.body_scope.before": {
+    "role": "opening clause of the approval-gate sheet's scope sentence",
+    "tone": "Sentence case, no punctuation at the end: the sentence continues through four more keys.",
+    "note": "Owned relay SPA approvals copy. Composed in order before → session_clause → between → default_clause → after, with single spaces. 'The first two choices' means the two session-scoped buttons above this line (keep asking, run without asking). Function words may migrate between keys when your grammar needs them — the French copy keeps ne … que inside this key ('Les deux premiers choix ne changent que **cette session**') — because the emphasis is pinned to the *_clause keys, not to this fragment. Keep the composed sentence grammatical and idiomatic."
+  },
+  "relay.approvals.gate.body_scope.between": {
+    "role": "the contrast that joins the two emphasised scope phrases in the approval-gate sheet's scope sentence",
+    "tone": "Lowercase start because it continues the opening clause; carries the semicolon, the pivot to the last choice and the article before the bold phrase. Translate it as a clause fragment with context, never as a bare 'only'.",
+    "note": "Owned relay SPA approvals copy. English: 'only; the last changes the'. The emphasised noun phrase that completes it is `default_clause` ('default for all sessions'); the article stays in this plain key because main's bold run starts at 'default'. The semicolon separates the two scopes — use your typography's punctuation and spacing (French uses U+202F before ';'). If your language places a negation before the emphasised phrase, put it here or in `before` so the composed sentence stays grammatical; the emphasised phrase itself must remain unbroken. Full English sentence: 'The first two choices change **this session** only; the last changes the **default for all sessions** that follow it.'"
+  },
+  "relay.approvals.gate.body_scope.default_clause": {
+    "role": "the emphasised noun phrase naming the global scope in the approval-gate sheet's scope sentence",
+    "tone": "Noun phrase only: no verb, no leading article (main's bold run starts at 'default'), no trailing punctuation. Rendered in bold.",
+    "note": "Owned relay SPA approvals copy. This is the second of the two scopes the sheet offers and the one with the larger blast radius (every session that follows the default). The parenthetical '(default auto)' is not part of this key — the third button label carries it. Full English sentence: 'The first two choices change **this session** only; the last changes the **default for all sessions** that follow it.'"
+  },
+  "relay.approvals.gate.body_scope.session_clause": {
+    "role": "the emphasised noun phrase naming the session scope in the approval-gate sheet's scope sentence",
+    "tone": "Noun phrase only: no verb, no leading or trailing punctuation. Rendered in bold.",
+    "note": "Owned relay SPA approvals copy. This is the scope the first two choices act on — the session in front of the reader — and the contrast the sentence exists to draw (the third choice is the global default). Keep it a noun phrase; the verb lives in `before`. Full English sentence: 'The first two choices change **this session** only; the last changes the **default for all sessions** that follow it.'"
   },
   "relay.approvals.gate.default_auto": {
     "role": "third choice in the approval-gate sheet: loosen the global default",

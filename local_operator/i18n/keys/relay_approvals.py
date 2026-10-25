@@ -30,8 +30,24 @@ def card_still_needs_answer() -> Msg:
     return Msg("relay.approvals.card.still_needs_answer", {})
 
 
-def gate_body_scope() -> Msg:
-    return Msg("relay.approvals.gate.body_scope", {})
+def gate_body_scope_after() -> Msg:
+    return Msg("relay.approvals.gate.body_scope.after", {})
+
+
+def gate_body_scope_before() -> Msg:
+    return Msg("relay.approvals.gate.body_scope.before", {})
+
+
+def gate_body_scope_between() -> Msg:
+    return Msg("relay.approvals.gate.body_scope.between", {})
+
+
+def gate_body_scope_default_clause() -> Msg:
+    return Msg("relay.approvals.gate.body_scope.default_clause", {})
+
+
+def gate_body_scope_session_clause() -> Msg:
+    return Msg("relay.approvals.gate.body_scope.session_clause", {})
 
 
 def gate_default_auto() -> Msg:

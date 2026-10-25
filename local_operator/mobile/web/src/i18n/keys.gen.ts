@@ -20,7 +20,11 @@ export type MessageParams = {
   "relay.approvals.card.set_auto_all": undefined;
   "relay.approvals.card.set_auto_session": undefined;
   "relay.approvals.card.still_needs_answer": undefined;
-  "relay.approvals.gate.body_scope": undefined;
+  "relay.approvals.gate.body_scope.after": undefined;
+  "relay.approvals.gate.body_scope.before": undefined;
+  "relay.approvals.gate.body_scope.between": undefined;
+  "relay.approvals.gate.body_scope.default_clause": undefined;
+  "relay.approvals.gate.body_scope.session_clause": undefined;
   "relay.approvals.gate.default_auto": undefined;
   "relay.approvals.gate.refused_nothing_changed": undefined;
   "relay.approvals.gate.unpaired_default_auto": undefined;

@@ -190,9 +190,22 @@ export function GateSheet({
 						   sends no provenance — see the prop's note. */
 						<p className="text-meta text-ink-muted">{policyLine}</p>
 					) : null}
+					{/* THE SCOPE SENTENCE IS COMPOSED, NOT ONE STRING (M5). Main renders
+					    "The first two choices change <strong>this session</strong> only; the
+					    last changes the <strong>default for all sessions</strong> that
+					    follow it." — the two phrases that carry the blast radius are bold
+					    because they are what the third choice's danger turns on. A single
+					    catalogued string can only render them flat, and no translator could
+					    restore emphasis the key dropped. Clause keys keep it structural:
+					    five keys are read in this fixed order and joined with single
+					    spaces, and only the two *_clause keys are wrapped here. */}
 					<p className="text-body-sm text-ink-muted">
 						{messageRuntime.t("relay.asks.gate.body")}{" "}
-						{messageRuntime.t("relay.approvals.gate.body_scope")}
+						{messageRuntime.t("relay.approvals.gate.body_scope.before")}{" "}
+						<strong>{messageRuntime.t("relay.approvals.gate.body_scope.session_clause")}</strong>{" "}
+						{messageRuntime.t("relay.approvals.gate.body_scope.between")}{" "}
+						<strong>{messageRuntime.t("relay.approvals.gate.body_scope.default_clause")}</strong>{" "}
+						{messageRuntime.t("relay.approvals.gate.body_scope.after")}
 					</p>
 					<Button disabled={busy !== null} onClick={() => void choose("ask")}>
 						{busy === "ask" ? "…" : messageRuntime.t("relay.asks.gate.keep_asking")}

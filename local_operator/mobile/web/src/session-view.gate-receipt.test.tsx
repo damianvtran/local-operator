@@ -176,15 +176,41 @@ describe("the phone's gate sheet", () => {
 		/* BOTH authority-increasing choices are named: the global scope is the one
 		   a reader is most likely to assume is exempt because it is "only a
 		   default", and it is not. It is named in its own sentence —
-		   `relay.approvals.gate.unpaired_default_auto`, en-only at this commit —
-		   rather than as another fragment inside the translated first sentence,
-		   so the seven locales that carry the fragments keep their own word order
-		   instead of getting one English clause spliced into the middle. */
+		   `relay.approvals.gate.unpaired_default_auto` (carried by all seven
+		   locales) — rather than as another fragment inside the translated first
+		   sentence, so the locales that carry the fragments keep their own word
+		   order instead of getting one English clause spliced into the middle. */
 		expect(said.textContent).toContain(
 			"Run without asking in all sessions also needs a paired phone.",
 		);
 		// ...and it was there BEFORE the tap: no request had been made yet.
 		expect(mocks.sendCommandWithProof).not.toHaveBeenCalled();
+	});
+
+	it("keeps main's emphasis on the two blast-radius phrases (M5)", async () => {
+		/* KEYING MUST NOT DROP SEMANTIC EMPHASIS. Main renders this sentence with
+		   <strong> around "this session" and "the default for all sessions"; one
+		   catalogued string can only render them flat, and a translator could
+		   never restore emphasis the key dropped. The sentence is therefore
+		   composed from five clause keys, and this pins BOTH halves: the exact
+		   words (the split changed no copy) and exactly two bold runs at the two
+		   scope phrases (a later refactor cannot flatten them silently). */
+		await openSheet();
+		const scope = screen.getByText(
+			(_, element) =>
+				element?.tagName === "P" &&
+				(element.textContent ?? "").includes("The first two choices change"),
+		);
+		expect(scope.textContent).toContain(
+			"The first two choices change this session only; the last changes the default for all sessions that follow it.",
+		);
+		const bold = Array.from(scope.querySelectorAll("strong")).map(
+			(element) => element.textContent,
+		);
+		expect(bold).toEqual(["this session", "default for all sessions"]);
+		// The five keys are joined with single spaces; a doubled space at a join
+		// is invisible in review and visible to the reader.
+		expect(scope.textContent).not.toContain("  ");
 	});
 
 	it("shows the runtime's own unconfigured copy, setup action and all (U1)", async () => {
