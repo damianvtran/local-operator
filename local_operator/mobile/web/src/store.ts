@@ -401,7 +401,7 @@ export function openEventStream(
 	const clearWatchdog = () => { if (watchdog !== null) clearTimeout(watchdog); watchdog = null; };
 	const unhealthy = () => {
 		if (reported || outage !== null || closed) return;
-		outage = setTimeout(() => { outage = null; reported = true; onDisconnect(); }, OUTAGE_GRACE_MS);
+		outage = setTimeout(() => { outage = null; reported = true; flushData(); onDisconnect(); }, OUTAGE_GRACE_MS);
 	};
 	const healthy = () => {
 		if (outage !== null) clearTimeout(outage);

@@ -3758,9 +3758,7 @@ async def test_a_lease_ending_under_backpressure_still_completes_the_response(
                 yield b"data: " + b"x" * 65536 + b"\n\n"
 
     def origin(request):
-        return httpx.Response(
-            200, stream=Endless(), headers={"content-type": "text/event-stream"}
-        )
+        return httpx.Response(200, stream=Endless(), headers={"content-type": "text/event-stream"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
         gateway = Gateway(connection, upstream, mobile_password="pw")

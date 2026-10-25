@@ -24,7 +24,7 @@ export class FetchStreamFixture {
 		this.chunk(`event: ${event}\ndata: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
 	}
 	end() { if (!this.closed) { this.closed = true; this.sink.close(); } }
-	fail() { if (!this.closed) { this.closed = true; this.sink.error(new Error("fixture disconnect")); } }
+	fail() { if (!this.closed) { this.closed = true; this.sink.error(new Error()); } }
 	static fetch = vi.fn(async (url: string, init?: RequestInit) => new FetchStreamFixture(url, init?.signal).response);
 	static install() {
 		FetchStreamFixture.instances = [];

@@ -183,6 +183,44 @@ TUI's own dark/light brand themes included), mapped onto Tailwind `@theme`
 roles (`bg-surface`, `text-ink-muted`, `border-control`, `text-accent`, …) —
 never a raw hex in a component.
 
+#### Live streams over a tunnel
+
+The web store reads SSE with same-origin authenticated `fetch`, not
+`EventSource`: it needs HTTP status codes and keepalive bytes to distinguish
+routine rotation from a real outage. The gateway's **60-second security lease
+is unchanged**. A clean EOF after at least five seconds reopens with at most
+250 ms jitter without marking the retained view disconnected. Errors retry
+from 250 ms with jitter and exponential backoff capped at ten seconds; a 503
+honours `Retry-After`, bounded to thirty seconds. A 401 clears private browser
+state and reloads into the normal login flow instead of retrying forever.
+
+Every byte, including the unchanged `: keepalive` comment (now every fifteen
+seconds), resets a 35-second silence watchdog. A stalled socket is aborted and
+reopened. Returning to a visible page, a `pageshow`, or an `online` event also
+reopens a stream silent for twenty seconds, or skips pending error backoff.
+Only an outage lasting 2.5 seconds marks the view disconnected; the last good
+projection stays visible. Each connection's first snapshot resets its version
+fence, so a restarted daemon's lower counter is still authoritative.
+
+Frames are full snapshots, not event deltas. The daemon retains one pending
+projection per subscriber and sends at most ten per second, including the
+trailing snapshot after a burst. List frames are spaced by 400 ms, shared
+between subscribers where possible, and byte-identical frames are suppressed;
+keepalives continue even when busy sessions cause only identical list frames.
+The web applies only the latest raw frame per animation frame and batches
+store notifications. Event names and JSON shapes are unchanged for native
+clients; transient reasoning rows are previews, not one-shot commands.
+
+List subscriptions linger ten seconds after their final mount and projection
+subscriptions five seconds, avoiding navigation churn. After the last phone
+projection stream closes, the daemon holds its attach client, watch count and
+generation fence for a twenty-second reconnect grace. Returning cancels that
+release without a second `watch`. A phone that really leaves can therefore
+count as watching for up to twenty more seconds (including notification routing
+and idle residency). Startup handoff remains separately bounded at sixty
+seconds; session moves still use the existing viewer for `retire_if_pristine`,
+so the relay never counts its own second connection against the move.
+
 Screens, following branding.md §7's agent-output hierarchy:
 
 - **Login** — minimal, brand mark, password field, 16 px inputs.
