@@ -74,6 +74,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -344,6 +345,38 @@ STOP_BYE_SETTLE_S = 0.05
 #: second bound of its own.
 PAGE_LOOP_STOP_JOIN_S = 5.0
 
+#: How long :meth:`RelayServer.stop` waits for ONE of the five lifecycle daemon
+#: loops (``mesh-accept``, ``mesh-control``, ``mesh-heartbeat``,
+#: ``mesh-membership``, ``mesh-redial``) before deciding it survived the stop.
+#:
+#: ONE SECOND IS DELIBERATELY SHORT. Every loop wakes on ``_stop`` (or on a socket
+#: that is closed right after it is set) and the healthy ones exit in
+#: microseconds, so this bound only ever waits out a genuinely stuck loop. It is
+#: NOT the redial loop's dial budget (:data:`LISTING_PROBE_BUDGET_S`, 12 s): a
+#: stop that lands while a redial is dialling a black-holed peer must not hold a
+#: caller for 12 s, so that loop is reported as a survivor and finishes on its
+#: own — see :meth:`RelayServer._join_loop_threads`.
+RELAY_LOOP_STOP_JOIN_S = 1.0
+
+#: The bound for the WHOLE five-loop join. Five sequential joins at
+#: :data:`RELAY_LOOP_STOP_JOIN_S` would otherwise multiply the worst case by
+#: five, which is why the loop shrinks each remaining wait to what is left of
+#: this budget. A thread reached after the budget is exhausted is not waited for
+#: at all — it is reported from ``is_alive()`` like any other survivor.
+RELAY_LOOP_STOP_TOTAL_S = 5.0
+
+#: Bound on the loopback connection :meth:`RelayServer._wake_accept_loop` opens
+#: to a listening socket so a thread parked in ``accept()`` observes ``_stop``
+#: before the socket is closed.
+#:
+#: WHY A CONNECTION AT ALL: ``close()`` wakes a blocked ``accept()`` on Darwin but
+#: not portably — on Linux the blocked syscall keeps a reference to the socket and
+#: waits for the next connection, so a stop would leave both accept loops alive
+#: until their join bound and then report them as survivors on every single stop.
+#: The wake connection is closed by the loop's existing post-accept
+#: ``_close_if_stopped`` guard, exactly as a peer that dials after ``_stop`` is.
+ACCEPT_WAKE_CONNECT_S = 0.25
+
 # ---------------------------------------------------------------------------
 # Slow ops: off-reader dispatch (mesh build plan §0 finding 4)
 # ---------------------------------------------------------------------------
@@ -400,6 +433,9 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # §8.2). Slow by registration below: the handler may run a real install
         # inside its own bounded deadline.
         "net_update",
+        # One peer's own relay recovery; the member answers before its
+        # supervisor replaces the process, and the origin verifies on reconnect.
+        "net_restart",
     }
 )
 
@@ -427,6 +463,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         # ask a peer (the ``peer_*`` boundary rule; the peer-scope half is
         # ``net_update``).
         "peer_update",
+        "peer_restart",
     }
 )
 
@@ -448,6 +485,9 @@ SLICE_MODULES: tuple[str, ...] = (
     # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
     # starts no thread of its own (the S3 rollout driver is a different slice).
     "local_operator.network.meshupdate",
+    # Peer-targeted relay recovery. No fleet fan-out and no independent role:
+    # the member's existing self-decided update grant authorises its own relay.
+    "local_operator.network.meshrestart",
     # S3a of the rolling updates: the rollout record and the serial pass. It
     # serves NO ops of its own — one start hook, the ``mesh-rollout`` driver
     # thread — and it opens no record by itself: the trigger that does is
@@ -1556,7 +1596,12 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
             hosts.append(text)
 
     for host in (*declared, *settings.advertise_hosts):
-        add(host)
+        text = str(host or "").strip()
+        reason = addresses.stale_declared_address_reason(text)
+        if reason is not None:
+            logger.warning("Skipping advertised address %s: %s.", text, reason)
+            continue
+        add(text)
     live = _own_relay_listen(settings.root)
     for endpoint in live.get("advertised") or []:
         add(endpoint)
@@ -3134,6 +3179,47 @@ INCIDENT_ACK_DEADLINE_S = 2.0
 #: deadline by the SEND bound (a full queue waits up to ``op_wait_s``), which is why
 #: the sweep is not the deadline itself.
 INCIDENT_SEND_SLACK_S = 1.0
+
+#: The incident fan-out threads already named in a survivor warning (R1-1).
+#: Keyed by THREAD OBJECT rather than by call, so a repeated join of the same
+#: list does not re-warn while a new fan-out (new threads) can. Weak, so an entry
+#: disappears with the thread it names instead of retaining a finished thread.
+_incident_survivors_warned: weakref.WeakSet[threading.Thread] = weakref.WeakSet()
+_incident_survivors_lock = threading.Lock()
+
+
+def _join_incident_threads(threads: list[threading.Thread], *, deadline: float) -> None:
+    """Wait for the fan-out's per-peer threads and report any that outlived it.
+
+    The receipt describes the PEERS: a thread still running when the wait ends is
+    indistinguishable from a peer that answered too slowly, and both surface as
+    ``unacked``. That is the right answer at the protocol level and is deliberately
+    left alone here. The local cause is not: a thread still alive means this
+    process stopped waiting while the work continued, which ``unacked`` cannot say.
+    Name it in one warning after the bounded join; the thread object stays on the
+    caller's list for as long as the caller holds it.
+    """
+    for thread in threads:
+        thread.join(timeout=deadline)
+    survivors = [thread for thread in threads if thread.is_alive()]
+    if not survivors:
+        return
+    # ONE warning PER survivor episode (R1-1): the same thread joined again must
+    # not be named twice, while a new fan-out's new threads are. The latch is the
+    # thread object itself and is weak, so it is dropped with the thread.
+    with _incident_survivors_lock:
+        fresh = [thread for thread in survivors if thread not in _incident_survivors_warned]
+        _incident_survivors_warned.update(survivors)
+    if not fresh:
+        return
+    logger.warning(
+        "mesh relay: %d incident acknowledgement thread(s) did not stop within "
+        "the %.1fs deadline and are still running (%s) — the receipt reports "
+        "them as unacked",
+        len(fresh),
+        deadline,
+        ", ".join(thread.name for thread in fresh),
+    )
 
 
 def panic_frame(
@@ -4860,7 +4946,25 @@ class RelayServer:
         # defaults SET (open) so ordinary operation is unchanged.
         self._admission = threading.Event()
         self._admission.set()
+        #: The five lifecycle daemon loops that are still running (or survived a
+        #: stop). It used to be append-only, so a stopped relay kept five dead
+        #: handles per generation and there was no place to observe a survivor.
+        #: ``stop()`` clears a dead entry and KEEPS a live one, which is what makes
+        #: a loop that ignored its stop reachable rather than merely logged.
         self._threads: list[threading.Thread] = []
+        #: Latches the survivor warning on the thread object (the #2913 pattern):
+        #: a repeated ``stop()`` still joins and re-checks — the only path that
+        #: clears the handle once the survivor dies — but names it only once.
+        self._loop_survivors_warned: set[threading.Thread] = set()
+        #: Guards ``_started``/``_threads``/``_loop_survivors_warned``. No loop body
+        #: takes it, so holding it across a join cannot deadlock against a loop.
+        self._loops_lock = threading.Lock()
+        #: START IS ONE-SHOT. It used to have no guard at all, so a second call
+        #: appended five more loops (and re-ran the once-only start work) beside the
+        #: first five. A separate flag rather than ``_threads`` because stop() now
+        #: prunes dead entries, and "has ever started" is a different question from
+        #: "which loops are alive".
+        self._started = False
         self._reply_waiters: dict[tuple[str, Any], "_ReplyWaiter"] = {}
         #: The last COMPLETED membership pass, by network id — what a `status` read
         #: reports when its own bounded wait for a fresh pass did not land
@@ -4973,6 +5077,9 @@ class RelayServer:
         #: shelves the loop in a critical section of the same lock.
         self._page_loop: asyncio.AbstractEventLoop | None = None
         self._page_loop_thread: threading.Thread | None = None
+        #: The page-loop survivor episode already warned about (R1-1). Cleared
+        #: with the handle; a replacement loop thread is a new episode.
+        self._page_loop_thread_warned: threading.Thread | None = None
         self._page_loop_lock = threading.Lock()
         #: Set by ``stop``: the next read builds a fresh loop rather than queueing
         #: work onto one whose thread has finished (see ``_page_loop_locked``).
@@ -5015,6 +5122,31 @@ class RelayServer:
         return str(host), int(port)
 
     def start(self, *, background: bool = False) -> None:
+        """Start the five lifecycle daemon loops, publish, run the start work.
+
+        ONE START PER SERVER, and the second is REFUSED rather than ignored. The
+        relay's lifecycle is one-shot in a way a silent no-op would misrepresent:
+        ``stop()`` closes the listening sockets and sets ``_stop`` for good, so a
+        relay that has been stopped can never be running again — returning
+        normally from ``start()`` there would tell a caller the opposite of the
+        truth, which is the worst of the three possible answers. The second call
+        while RUNNING is equally dishonest to swallow: before this guard it
+        appended five more loops beside the first five and re-ran the once-only
+        start work (``publish``, the start hooks, the approval/invite sweeps), so
+        a benign-looking retry doubled the relay's thread fleet. Raising matches
+        ``threading.Thread.start()`` and this class's own ``register_ops`` guard.
+
+        The flag is set BEFORE bind/start work: a start that fails halfway is not
+        retryable either, and letting a retry find the flag clear would append a
+        second generation beside whatever the failed one had already started.
+        """
+        with self._loops_lock:
+            if self._started:
+                raise RuntimeError(
+                    "RelayServer.start() may only be called once; this relay has "
+                    "already been started (a stopped relay cannot be restarted)"
+                )
+            self._started = True
         if self._listener is None:
             self.bind()
         if self._control is None:
@@ -5041,7 +5173,8 @@ class RelayServer:
         ):
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
-            self._threads.append(thread)
+            with self._loops_lock:
+                self._threads.append(thread)
         self.publish()
         self._flush_outboxes()
         self._run_start_hooks()
@@ -5233,6 +5366,13 @@ class RelayServer:
         snapshot/close until a pass finds nothing would not prove that — the settle
         between two passes IS the window the leak lived in, so the loop can only ever
         narrow the race it is meant to close.
+
+        THE LOOPS ARE JOINED BEFORE THIS RETURNS, with one bound for the whole
+        block (:meth:`_join_loop_threads`). It used to return with all five daemon
+        loops still running and every dead handle retained forever, which is one
+        relay generation's worth of threads left in the process. A loop that
+        outlives the join keeps its handle and is named in one warning per episode;
+        it cannot be killed from here, so the residual is visibility, not repair.
         """
         self._stop.set()
         # SLICE LOOPS GO NEXT, before any of the link teardown below: a slice's
@@ -5257,6 +5397,16 @@ class RelayServer:
         # ``_run_inbound_handshake`` refuses a handshake that completes later.
         for sock in (self._listener, self._control):
             if sock is not None:
+                # WAKE A THREAD PARKED IN ``accept()`` FIRST. Setting ``_stop`` is
+                # not enough on its own: the loop's check at the top ran before it
+                # parked. On Darwin ``close()`` aborts the blocked syscall, but that
+                # is not portable — on Linux the blocked ``accept()`` keeps the
+                # socket alive and waits for the next connection, so the two accept
+                # loops would outlive every stop by their join bound and be reported
+                # as survivors on healthy shutdowns. The wake connection is a real
+                # arrival, and ``_close_if_stopped`` closes it with no protocol —
+                # the same answer a peer that dials after the stop gets.
+                self._wake_accept_loop(sock)
                 try:
                     sock.close()
                 except OSError:
@@ -5302,13 +5452,59 @@ class RelayServer:
             if loop is not None:
                 loop.call_soon_threadsafe(loop.stop)
                 self._page_loop = None
-                self._page_loop_thread = None
                 self._page_loop_shelved = True
         # OUTSIDE THE LOCK. The join is bounded but it is still a wait, and a read
         # that arrives during it should not have to queue on this lock to learn
-        # that it needs a new loop.
+        # that it needs a new loop. ``_page_loop`` being None is that fence: a
+        # read builds a fresh loop rather than handing this one to a thread that
+        # has finished.
+        #
+        # THE THREAD HANDLE IS KEPT UNTIL THE JOIN PROVES IT STOPPED. It used to be
+        # nulled with the loop, before the join, so a page loop that ignored its
+        # stop disappeared without a trace: the shelved fence made new reads build
+        # a fresh loop and nothing named the survivor. ``join`` returns nothing
+        # either way, so the outcome is read from ``is_alive()``; a survivor is
+        # reported and stays reachable on the attribute UNTIL A NEW LOOP STARTS
+        # (a read during the join overwrites the field, and the identity check
+        # below then deliberately leaves the new thread in place). A thread that
+        # ignores its stop cannot be killed from here — this makes it observable,
+        # not impossible.
+        #
+        # THE WARNING IS LATCHED PER SURVIVOR EPISODE (R1-1): a repeated stop()
+        # still joins and re-checks — that re-check is the only path that clears
+        # the handle once the survivor dies — but only the first one names it.
         if thread is not None:
             thread.join(timeout=PAGE_LOOP_STOP_JOIN_S)
+            if thread.is_alive():
+                with self._page_loop_lock:
+                    already_warned = self._page_loop_thread_warned is thread
+                    if not already_warned:
+                        self._page_loop_thread_warned = thread
+                if not already_warned:
+                    logger.warning(
+                        "mesh relay: page-loop thread did not stop within the "
+                        "%.1fs stop timeout and is still running — it was not "
+                        "killed; the loop was shelved so new reads build a fresh "
+                        "one, and the handle is kept until a new loop starts so "
+                        "this stays observable",
+                        PAGE_LOOP_STOP_JOIN_S,
+                    )
+            else:
+                with self._page_loop_lock:
+                    # Identity-checked: a read during the join may have started a
+                    # new loop, and its thread must not be cleared as if it were
+                    # the one that just stopped.
+                    if self._page_loop_thread is thread:
+                        self._page_loop_thread = None
+                        self._page_loop_thread_warned = None
+        # THE FIVE LIFECYCLE LOOPS ARE JOINED HERE, before the link teardown and
+        # the unpublish below. Ordering is the point: joining after
+        # ``unpublish_peer_record`` would leave a heartbeat or membership pass free
+        # to republish the record the stop just removed, and joining after the bye
+        # settle would let a redial admit a link into a relay that is tearing its
+        # links down. No loop waits on another loop's exit (see the method), and
+        # this call is outside every lock a loop takes.
+        self._join_loop_threads()
         with self._links_lock:
             links = list(self.links.values())
         for link in links:
@@ -5318,6 +5514,113 @@ class RelayServer:
             link.close("we-closed")
         store.unpublish_peer_record(os.getpid(), self.root)
         self.audit.flush()
+
+    def _wake_accept_loop(self, sock: socket.socket) -> None:
+        """Wake a thread parked in ``accept()`` so it can observe ``_stop``.
+
+        THE LOOP'S OWN ``_stop`` CHECK IS AT THE TOP, so a thread already parked
+        inside ``accept()`` has passed it. Closing the listening socket aborts that
+        syscall on Darwin, but not portably: on Linux the blocked call keeps a
+        reference to the socket and waits for the next arrival, so the two accept
+        loops would outlive every stop by their join bound and be reported as
+        survivors on healthy shutdowns.
+
+        The wake is ONE connection to the socket's own bound address — a real
+        arrival, so it takes the ordinary post-accept path: ``_stop`` is already
+        set, ``_close_if_stopped`` closes it with no protocol, and the loop returns.
+        Errors are swallowed: a socket a concurrent stop already closed, or an
+        address that is no longer local, has nothing to wake, and the join bound is
+        the backstop.
+        """
+        try:
+            host, port = sock.getsockname()[:2]
+        except (AttributeError, OSError):
+            # ``AttributeError`` is a test double that is not a real socket; the
+            # wake is best-effort and the join bound remains the backstop. OSError
+            # is a socket a concurrent stop already closed, which has nothing left
+            # to wake.
+            return
+        if not port:
+            return
+        try:
+            # The connection is not used: its only job is to make ``accept()``
+            # return. ``create_connection`` covers the timeout on connect.
+            with socket.create_connection((str(host), int(port)), timeout=ACCEPT_WAKE_CONNECT_S):
+                pass
+        except OSError:
+            return
+
+    def _join_loop_threads(self) -> None:
+        """Join the five lifecycle loops; keep and name any that outlive the bound.
+
+        WHY THIS EXISTS. ``stop()`` set ``_stop``, closed the listening sockets and
+        returned while all five daemon loops were still running: ``self._threads``
+        was append-only and nothing joined it. Every relay generation therefore
+        left its five threads behind for the process lifetime — the leak the
+        network suite's instrument measured as ~8-22 extra live threads per test —
+        and those threads are what multiplied a per-thread ~45-46 MiB virtual
+        reservation into the runner's ENOMEM.
+
+        NO LOOP WAITS ON ANOTHER LOOP'S EXIT, which is what makes a plain ordered
+        join safe. The two accept loops park in ``accept()`` and are woken by
+        :meth:`_wake_accept_loop` before their sockets close; heartbeat and redial
+        wait on ``_stop`` (set before this call) and membership on
+        ``_membership_wake``, which ``stop()`` also sets. None of them takes
+        ``_loops_lock``, so holding it for the bookkeeping cannot deadlock against
+        a loop, and no lock a loop takes is held across a join.
+
+        THE ONE LOOP THAT CAN BE MID-WORK is ``mesh-redial``, whose dial is bounded
+        by :data:`LISTING_PROBE_BUDGET_S` (12 s). This join deliberately does not
+        wait that long: a stop landing inside a dial reports the loop as a survivor
+        after its one-second bound, and the loop exits at its next ``_stop`` check.
+        That is the residual — a thread that ignores its stop cannot be killed from
+        here, so this makes the condition visible and keeps the handle reachable,
+        not impossible.
+
+        A DEAD THREAD CLEARS ITS ENTRY; a live one stays in ``_threads`` so a
+        caller (and a repeated stop) can still name it. The warning is latched on
+        the thread object, so a repeated stop re-joins and re-checks — the only
+        path that clears a survivor once it dies — but names it only once.
+        """
+        with self._loops_lock:
+            threads = list(self._threads)
+        if not threads:
+            return
+        deadline = time.monotonic() + RELAY_LOOP_STOP_TOTAL_S
+        survivors: list[threading.Thread] = []
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                thread.join(timeout=min(RELAY_LOOP_STOP_JOIN_S, remaining))
+            if thread.is_alive():
+                survivors.append(thread)
+        with self._loops_lock:
+            # A dead entry is cleared; a live one stays reachable for the next stop
+            # (and for whoever is asking why this relay's fleet did not quiesce).
+            retained = [thread for thread in self._threads if thread.is_alive()]
+            self._threads[:] = retained
+            # Name a survivor only if it is STILL retained: a thread that died
+            # between the check above and this prune is no longer a survivor, and
+            # warning about it would name a handle the caller cannot reach.
+            fresh = [
+                thread
+                for thread in survivors
+                if thread in retained and thread not in self._loop_survivors_warned
+            ]
+            self._loop_survivors_warned.update(survivors)
+            # A latch only has meaning while its thread is retained; a survivor that
+            # has since died is dropped with its entry, and no further episode can
+            # begin (``start`` refuses a second call).
+            self._loop_survivors_warned.intersection_update(retained)
+        for thread in fresh:
+            logger.warning(
+                "mesh relay: %s loop was still running after stop()'s loop join "
+                "(%.1fs per loop, %.1fs total) — it was not killed and stays "
+                "reachable on RelayServer._threads",
+                thread.name,
+                RELAY_LOOP_STOP_JOIN_S,
+                RELAY_LOOP_STOP_TOTAL_S,
+            )
 
     # -- discovery record ---------------------------------------------------
 
@@ -7191,7 +7494,7 @@ class RelayServer:
         serving; :meth:`PeerLink.request` refuses that with
         :class:`OwnLinkRequestError`.
         """
-        if self._threads:
+        if self._started:
             raise RuntimeError("register_ops must be called before the relay starts")
         local_handlers = local_handlers or {}
         slow = slow or {}
@@ -12106,13 +12409,15 @@ class RelayServer:
                     target=ask,
                     args=(link, entry),
                     daemon=True,
-                    name="mesh-incident",
+                    # The device is part of the name so the still-running warning
+                    # can name WHICH peer's ask outlived the deadline — the
+                    # receipt itself cannot distinguish it from a slow peer.
+                    name=f"mesh-incident:{member.device_id}",
                 )
             )
         for thread in threads:
             thread.start()
-        for thread in threads:
-            thread.join(INCIDENT_ACK_DEADLINE_S + INCIDENT_SEND_SLACK_S)
+        _join_incident_threads(threads, deadline=INCIDENT_ACK_DEADLINE_S + INCIDENT_SEND_SLACK_S)
         with guard:
             return list(reports)
 

@@ -251,6 +251,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "through verbatim (the design's 'the member's own words'); glossing it "
         "re-worded receipts into false states (round 3, M2/Q-R3-2)",
     ),
+    ("local_operator/network/meshrestart.py", "restart_after_reply", "reason"): (
+        2,
+        "the member's busy receipt and its own supervisor's failure text, passed "
+        "verbatim into the member outcome; these are answered prose, not dial tokens, "
+        "and the peer-reason gloss would rewrite the actual refusal",
+    ),
+    ("local_operator/network/meshrestart.py", "_confirm_restart", "reason"): (
+        1,
+        "the member's post-acceptance busy/failure prose returned in its evidence "
+        "outcome; this is the member's answered sentence, not a dial token",
+    ),
+    ("local_operator/network/meshrestart.py", "restart_peer", "reason"): (
+        2,
+        "the member's own busy or bad-response prose, passed through verbatim like "
+        "meshupdate's receipts rather than rewritten by the transport-reason gloss",
+    ),
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.

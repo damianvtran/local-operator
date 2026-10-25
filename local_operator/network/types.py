@@ -174,6 +174,10 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 #: device to install a strictly newer published build. It names the BOUND, not
 #: just the act — the peer never delivers code, never names a ref and never runs
 #: a command; it names a version this device resolves through its OWN channel.
+#: Peer-initiated relay recovery uses this same self-decided lifecycle grant:
+#: restarting only this relay is narrower than replacing its build, still probes
+#: busy sessions, and gives the requester no shell or fleet-wide authority. The
+#: capability's public words name both acts so the recovery right is not hidden.
 #: Like the two onboarding scopes it is granted PER MEMBER — no NON-ADMIN role
 #: carries it (the blanket ``admin`` role holds the full vocabulary by
 #: construction, for every capability), so adding it to ``read``/``drive``
@@ -398,6 +402,10 @@ NET_OPS: tuple[str, ...] = (
     # requester, which is why the origin learns the grant from the answer rather
     # than by reading a table it cannot see.
     "net_update",
+    # Peer-initiated relay recovery (meshrestart.py). The same self-decided
+    # ``update`` grant covers this narrower lifecycle act: no role gains it, the
+    # member probes its own busy sessions, and only its own relay is restarted.
+    "net_restart",
     "net_bye",
     "ping",
 )
@@ -511,6 +519,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # OWN relay to ask a peer to move to this device's build. A local act by the
     # ``peer_*`` boundary rule — the peer-scope half is ``net_update``.
     "peer_update",
+    # The client half of ``net_restart``: this device's relay asks one named
+    # peer, then reconnects to verify the new instance rather than claiming an
+    # accepted request restarted anything.
+    "peer_restart",
 )
 
 #: The phases ``net_session_move`` carries (§1.3 of the build plan). Declared
@@ -603,8 +615,8 @@ CAPABILITY_WORDS: dict[str, str] = {
     # authority over the install, and the whole reason a standing grant is
     # defensible here is the narrowness below.
     "update": (
-        "install a newer build here when this peer asks, and only from "
-        "this device's own update channel"
+        "install a newer build here from this device's own update channel, or restart "
+        "only this device's relay for recovery, when this peer asks"
     ),
     "admin": "administer the network",
 }
@@ -697,6 +709,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # learns the grant is absent (``not_authorised``), quoted by name into the
     # ``no_grant`` skip.
     "net_update": "update",
+    # Relay recovery is the same receiver-side, self-decided lifecycle grant as
+    # an update, not ``admin`` (a network decision) or ``stop`` (one session).
+    "net_restart": "update",
     "net_bye": None,
     "ping": "list",
 }

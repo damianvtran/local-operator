@@ -172,8 +172,8 @@ def test_the_capability_and_its_ops_are_in_the_closed_tables() -> None:
     assert "update" in types.GRANTABLE_CAPABILITIES
     assert "update" in types.SELF_DECIDED_SCOPES
     assert types.CAPABILITY_WORDS["update"] == (
-        "install a newer build here when this peer asks, and only from this device's "
-        "own update channel"
+        "install a newer build here from this device's own update channel, or restart "
+        "only this device's relay for recovery, when this peer asks"
     )
     for role in ("read", "drive"):
         assert "update" not in types.capabilities_for_role(

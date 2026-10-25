@@ -167,6 +167,7 @@ async def request_onboard(request: Request, body: OnboardRequest):
             network=body.network_id,
             credential_ref=body.credential_ref,
             host_key_fp=body.host_key_fp,
+            advertise_host=body.advertise_host,
             request_id=body.request_id,
             unattended=body.unattended,
             grants=tuple(body.grant),

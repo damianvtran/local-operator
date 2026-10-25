@@ -1494,10 +1494,12 @@ class OnboardRun:
         # with the remote host's default name when the join mints its identity.
         # Attach the value so argparse also preserves names beginning with '-'.
         name = str(self.view.device.get("name") or "")
+        advertise_host = str(self.view.device.get("advertise_host") or "").strip()
+        advertise_arg = f" --advertise-host={shlex.quote(advertise_host)}" if advertise_host else ""
         try:
             joined = self._remote_lop(
                 f"lop network join @{shlex.quote(remote_token)} "
-                f"--name={shlex.quote(name)} --automated --json",
+                f"--name={shlex.quote(name)}{advertise_arg} --automated --json",
                 timeout=self._step_timeout("join"),
             )
             payload = _json_from(joined.stdout or "")

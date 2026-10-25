@@ -202,10 +202,20 @@ def validate(record: Mapping[str, Any], *, approval_id: str | None = None) -> No
     require(isinstance(anchor, dict) and set(anchor) == {"key_id", "spki_fp", "statement_digest"})
     require(all(isinstance(v, str) and 0 < len(v) <= 256 for v in anchor.values()))
     target = _object(record.get("device"))
+    required_target = {
+        "device_id",
+        "name",
+        "fingerprint",
+        "host",
+        "user",
+        "transport",
+        "host_key_fp",
+    }
     require(
         isinstance(target, dict)
-        and set(target)
-        == {"device_id", "name", "fingerprint", "host", "user", "transport", "host_key_fp"}
+        # Cards approved before advertise_host existed remain valid; new cards
+        # carry the field in the same digest-bound target block.
+        and required_target <= set(target) <= required_target | {"advertise_host"}
     )
     require(
         all(
@@ -286,7 +296,7 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
     Identity/network/member positives also come from the runner's fresh pinned
     SSH identity + both-sided active-join check. This requires live targeted
     reachability, build and operator authority from the real readiness producer.
-    Git/model/tool shortcomings remain visible, never healed with account access.
+    Git/model/repository/tool shortcomings remain visible, never healed with account access.
     """
     require(
         isinstance(report, dict)
@@ -301,6 +311,7 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
         "build",
         "operator_authority",
         "git_identity",
+        "repository",
         "model_credential",
         "mcp_servers",
         "mcp_credential",
@@ -395,6 +406,7 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
             and row.get("capability")
             in {
                 "git_identity",
+                "repository",
                 "model_credential",
                 "mcp_servers",
                 "mcp_credential",

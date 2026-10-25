@@ -919,6 +919,9 @@ class SyncEngine:
         #: both devices in one process. Production leaves it ``None``.
         self._auth_store_factory = auth_store_factory
         self._loop: Any = None
+        #: Terminal once ``close`` runs: a cadence step that lands after the
+        #: relay's stop hook must not start a fresh loop over a quiet device.
+        self._closed = False
         self._guard = threading.Lock()
         self._inflight_members: set[str] = set()
         self._pulling: set[tuple[str, str]] = set()
@@ -926,11 +929,34 @@ class SyncEngine:
     # -- lazy pieces ---------------------------------------------------------
 
     def _broker_loop(self) -> Any:
-        if self._loop is None:
-            from local_operator.network.credentials.owner import _BrokerLoop
+        with self._guard:
+            if self._closed:
+                raise RuntimeError("this relay's credential sync engine is closed")
+            if self._loop is None:
+                from local_operator.network.credentials.owner import _BrokerLoop
 
-            self._loop = _BrokerLoop(self._self_device[-8:] or "sync")
-        return self._loop
+                self._loop = _BrokerLoop(self._self_device[-8:] or "sync")
+            return self._loop
+
+    def close(self) -> None:
+        """Stop and join this engine's loop — a no-op when it never started one.
+
+        The engine is created lazily (``sync_for_relay``) and starts its loop only
+        when an exchange or a pull is first scheduled, so ``server.stop()`` on a
+        device that never synced must not warn or create anything. ``_closed`` is
+        still latched: a step that lands after the stop hook cannot resurrect the
+        loop (the same reason ``_BrokerLoop`` latches its own closed flag).
+
+        The loop object is RETAINED after close, not dropped: it holds the
+        survivor handle and warning latch a second ``close`` needs for the
+        idempotence ``_BrokerLoop.close`` already provides.
+        """
+        with self._guard:
+            self._closed = True
+            loop = self._loop
+        if loop is None:
+            return
+        loop.close()
 
     def _store(self) -> Any:
         if self._auth_store_factory is not None:
@@ -2282,6 +2308,15 @@ def sync_for_relay(server: Any) -> SyncEngine | None:
     if root is None or not self_device:
         return None
     with _SYNC_CREATE_LOCK:
+        # THE STOP CHECK IS INSIDE THE LOCK THE HOOK TAKES (review round 1, R1-1).
+        # Outside it, an accessor that passed just before ``_stop`` was set could
+        # still build and stash after ``stop_engine_for_relay`` read the stash; the
+        # step's in-flight exchange then started a loop on a relay that can never
+        # restart. Same shape as ``ensure_syncer``/``stop_syncer`` under
+        # ``_syncer_lock``.
+        stop = getattr(server, "_stop", None)
+        if stop is not None and stop.is_set():
+            return None
         engine = getattr(server, _SYNC_ATTR, None)
         if engine is not None:
             return engine
@@ -2297,6 +2332,25 @@ def sync_for_relay(server: Any) -> SyncEngine | None:
         except Exception:  # noqa: BLE001 — a server that refuses attributes pays a rebuild
             pass
         return engine
+
+
+def stop_engine_for_relay(server: Any) -> None:
+    """Close the sync engine this relay created, if it created one (``on_stop``).
+
+    READ THE STASH, never call ``sync_for_relay``: that accessor builds on first
+    need, and a relay that never synced has no loop to stop — building one during
+    teardown would be the leak this hook exists to prevent. The stash is kept
+    after the close for the broker's reason: the closed engine refuses to restart,
+    so a step arriving late reaches it rather than a fresh one.
+    """
+    with _SYNC_CREATE_LOCK:
+        # SAME LOCK AS THE ACCESSOR (R1-1): a build that passed its ``_stop`` check
+        # cannot land after this read. The close is outside the lock because it
+        # joins a thread, and a wedged loop must not serialise late requests here.
+        engine = getattr(server, _SYNC_ATTR, None)
+    if engine is None:
+        return
+    engine.close()
 
 
 # ---------------------------------------------------------------------------
