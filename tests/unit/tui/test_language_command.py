@@ -18,6 +18,7 @@ import pytest
 from rich.cells import cell_len
 
 from local_operator.config import ConfigManager
+from local_operator.i18n import resolve
 from local_operator.i18n import text as i18n_text
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui.app import OperatorApp
@@ -194,7 +195,17 @@ async def test_the_space_opens_the_choices_on_the_current_value(config_dir: Path
         picker = editor.picker
         assert picker.is_open(), "the space must open the choices list"
         rows = _choice_map(picker)
-        assert list(rows) == ["auto", "en", "fr", "es", "ru", "vi", "ur", "hi"], list(rows)
+        assert list(rows) == [
+            "auto",
+            "en",
+            "fr",
+            "es",
+            "zh-CN",
+            "ru",
+            "vi",
+            "ur",
+            "hi",
+        ], list(rows)
         assert picker.highlighted_name() == "auto", "the browse starts where the user is"
         assert rows["auto"].detail == "← current"
         # After a committed switch the marker moves with the value.
@@ -211,13 +222,18 @@ async def test_the_space_opens_the_choices_on_the_current_value(config_dir: Path
 
 @pytest.mark.asyncio
 async def test_unknown_and_unshipped_values_are_refused_with_the_affordance(
-    config_dir: Path,
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Every supported locale now ships (Chinese after its 2026-10-24
+    # disposition), so the supported-but-unshipped refusal is exercised by
+    # narrowing the generated set in isolation. Eligibility, not recognition,
+    # must still refuse the write.
+    monkeypatch.setattr(
+        resolve, "shipped_locales", lambda: ("en", "fr", "es", "ru", "vi", "ur", "hi")
+    )
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(110, 34)) as pilot:
         await _boot(pilot, app)
-        # Hindi and Urdu now ship; Chinese stays held after the incomplete
-        # slash audit. A supported-but-unshipped locale may not write config.
         for value in ("klingon", "zh-CN"):
             app._run_slash_command(f"/language {value}")
             await pilot.pause()

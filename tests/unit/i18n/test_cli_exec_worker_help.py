@@ -12,11 +12,11 @@ What this file pins, and why each pin exists:
    the render must hand back ONE. This is the only transformation this slice is
    allowed to make, and it is the one most likely to be undone by a well-meaning
    "tidy up the double apostrophes" edit.
-3. **French copy + per-namespace fallback.** The namespace now has a French
-   translation: `fr` must render its own catalogue, byte-for-byte. A locale that
-   does not carry this namespace (`es`, `ru`, `vi`, `hi`, `zh-CN`, `unknown`) must
-   still render the English source, not blank and not the message code — the
-   additive contract the programme depends on.
+3. **Translated copy + per-namespace fallback.** The namespace carries French
+   and Chinese translations: both must render their own catalogue, byte-for-byte.
+   A locale that does not carry this namespace (`es`, `ru`, `vi`, `hi`,
+   `unknown`) must still render the English source, not blank and not the
+   message code — the additive contract the programme depends on.
 4. **The ratchet, both ways.** The file is ACTIVATED (its exact path in
    `enforced`, no ceiling left in `files`), and a reintroduced literal in a real
    sink is rejected by the production scanner — the negative control that makes
@@ -180,17 +180,19 @@ def test_every_generated_message_is_zero_argument() -> None:
         assert function().params == {}
 
 
-def test_a_non_english_locale_falls_back_to_the_english_source() -> None:
+def test_translated_locales_use_their_copy_and_others_fall_back_to_english() -> None:
     french = catalogues.load_catalogue("fr", NAMESPACE)
+    chinese = catalogues.load_catalogue("zh-CN", NAMESPACE)
     for function in (keys.prompt(), keys.resume(), keys.job_id()):
         english = messages.render(function.code, function.params, locale="en")
-        rendered_fr = messages.render(function.code, function.params, locale="fr")
-        # fr carries the namespace: the French catalogue is the expected bytes,
-        # and it must be a real translation rather than the English source.
-        assert rendered_fr == render_message(french[function.code], function.params, "fr")
-        assert rendered_fr != english
+        for locale, catalogue in (("fr", french), ("zh-CN", chinese)):
+            rendered = messages.render(function.code, function.params, locale=locale)
+            # The locale carries the namespace: the catalogue is the expected
+            # bytes, and it must be a real translation, not the English source.
+            assert rendered == render_message(catalogue[function.code], function.params, locale)
+            assert rendered != english
         # Every locale without this namespace still falls back to the source.
-        for locale in ("es", "ru", "vi", "hi", "zh-CN", "unknown"):
+        for locale in ("es", "ru", "vi", "hi", "unknown"):
             assert messages.render(function.code, function.params, locale=locale) == english
 
 
