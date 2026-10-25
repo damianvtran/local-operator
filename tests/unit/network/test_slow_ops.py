@@ -60,11 +60,11 @@ def _admin_link(
     """
     server_a, server_b, host, port = pair
     record, _host, _port = _pair(pair, monkeypatch, role="admin")
-    threads, server_a._threads = server_a._threads, []  # noqa: SLF001
+    started, server_a._started = server_a._started, False  # noqa: SLF001
     try:
         register(server_a)
     finally:
-        server_a._threads = threads  # noqa: SLF001
+        server_a._started = started  # noqa: SLF001
     link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
     assert link is not None, reason
     return link, server_a
@@ -436,11 +436,11 @@ def test_register_ops_refuses_what_a_slice_may_not_do(root: Path) -> None:
         server.register_ops({}, {"session_move": local_handler}, replace=True)
         reply = server.control_dispatch("session_move", {"req": 4})
         assert reply == {"op": "ack", "req": 4, "detail": {}}
-        server._threads.append(threading.current_thread())  # noqa: SLF001
+        server._started = True  # noqa: SLF001 — the started-guard's own flag
         with pytest.raises(RuntimeError, match="before the relay starts"):
             server.register_ops({"net_sync": peer_handler}, replace=True)
     finally:
-        server._threads.clear()  # noqa: SLF001
+        server._started = False  # noqa: SLF001
         server.stop()
 
 
