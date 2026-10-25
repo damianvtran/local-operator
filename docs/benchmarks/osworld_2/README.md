@@ -20,6 +20,11 @@ sample, all ten first attempts, confirmed completion, costs, and apparatus
 amendments. Neither an individual score nor the offline checks below establish
 a full-suite benchmark result.
 
+For the separate v2.1 campaign, see the dated
+[2026-10-25 takeover methods/status addendum](TAKEOVER_V21_2026_10_25.md).
+It preserves the historical v2.0 baseline here and distinguishes the measured
+main16 diagnostic from proposed, not-yet-run main17 work.
+
 ## 1. The benchmark
 
 OSWorld 2.0 (`osworld-v2-2026.08.08`) is a computer-use benchmark of **108
