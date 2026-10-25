@@ -25,7 +25,11 @@ from __future__ import annotations
 
 import importlib.util
 import itertools
+import os
 import pathlib
+import re
+import subprocess
+import sys
 import threading
 import types
 from typing import Any
@@ -295,3 +299,98 @@ def test_only_the_process_that_runs_tests_arms_the_guard(hook_module, monkeypatc
     monkeypatch.setattr(hook_module, "_THREAD_LEAK", None)
     hook_module._install_thread_leak_report(config(numprocesses=0))
     assert hook_module._THREAD_LEAK is None, "the kill-switch did not stop arming"
+
+
+def test_the_real_hooks_report_a_leak_and_not_its_inheritor(tmp_path: pathlib.Path) -> None:
+    """The WIRING, not the reporter: a real pytest run must carry the line.
+
+    Every other case here calls ``_ThreadLeakReport`` directly, so deleting the
+    ``_thread_leak_start``/``_thread_leak_finish`` calls from
+    ``pytest_runtest_logstart``/``pytest_runtest_logreport`` would leave them all
+    green while the guard silently stopped being called. This runs a child
+    pytest over a temporary file and asserts on what a CI log would carry.
+
+    The child is pointed at the root conftest with ``-p conftest`` (from
+    ``cwd=REPO``, so the module resolves): a test file outside the repo rootdir
+    gets no conftest chain of its own. ``-n 1`` keeps a worker in the picture,
+    because the summary's worker label is part of what is being asserted.
+    """
+    probe = tmp_path / "test_probe.py"
+    probe.write_text(
+        "import threading\n"
+        "import time\n"
+        "\n"
+        "import pytest\n"
+        "\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def leaky():\n"
+        "    threading.Thread(\n"
+        "        target=time.sleep, args=(30,), name='probe-leak', daemon=True\n"
+        "    ).start()\n"
+        "    yield\n"
+        "\n"
+        "\n"
+        "def test_a_leaks(leaky):\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "def test_b_inherits_but_leaks_nothing():\n"
+        "    pass\n"
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(home / ".local-operator"),
+        "PATH": os.environ.get("PATH", ""),
+        "TERM": "xterm-256color",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(probe),
+            "-p",
+            "conftest",
+            "-q",
+            "-n",
+            "1",
+            "-p",
+            "no:randomly",
+            "--basetemp",
+            str(tmp_path / "child-pytest"),
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    assert "2 passed" in output, output
+    # Exactly two lines: one leak, one summary. A duplicated conftest import or
+    # a second registration would print more, and the inheritor would print one.
+    assert output.count("[thread-leak]") == 2, output
+    assert "test_b_inherits_but_leaks_nothing" not in output, "the inheritor was blamed"
+
+    leak = re.search(
+        r"\[thread-leak\] (gw\d+): test_probe\.py::test_a_leaks "
+        r"before=(\d+) after=(\d+) delta=\+(\d+) daemon=\d+/\d+ names=\[.*probe-leak.*\]",
+        output,
+    )
+    assert leak is not None, output
+    assert leak.group(1) == "gw0"
+    assert int(leak.group(4)) == 1, "the leak delta is not the one the fixture created"
+    assert int(leak.group(3)) - int(leak.group(2)) == 1
+
+    assert re.search(
+        r"\[thread-leak\] gw0: 1 test\(s\) left 1 thread\(s\) behind "
+        r"\(sum of positive deltas\); peak \d+ live at a test boundary",
+        output,
+    ), output

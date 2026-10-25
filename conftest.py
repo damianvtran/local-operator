@@ -396,7 +396,12 @@ _install_real_store_guard()
 def pytest_configure(config: pytest.Config) -> None:
     _refuse_a_split_tree(config)
     shard_stall_watchdog.install(config, on_ci=_on_ci_host())
-    _install_thread_leak_report(config)
+    # Report-only means COLLECTION safe too: if this ever raises, the run it was
+    # supposed to observe must still start (every other entry point swallows).
+    try:
+        _install_thread_leak_report(config)
+    except Exception:
+        _thread_leak_stand_down()
     shard_memory_dump.install()
 
 
@@ -1575,7 +1580,8 @@ class _ThreadLeakReport:
         tail = f"; {self.suppressed} further line(s) suppressed" if self.suppressed else ""
         return (
             f"[thread-leak] {self.worker}: {self.tests_reported} test(s) left "
-            f"{self.total_leaked} thread(s) behind (peak {self.peak} live); "
+            f"{self.total_leaked} thread(s) behind (sum of positive deltas); "
+            f"peak {self.peak} live at a test boundary; "
             f"worst {len(self._worst)}: {worst}{tail}"
         )
 
