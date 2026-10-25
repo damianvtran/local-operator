@@ -148,9 +148,7 @@ def test_pull_rejects_a_link_replaced_between_validation_and_write(
     original_replace = sync._replace_at
     swapped = False
 
-    def replace_with_link(
-        stage: Path, destination: Path, allowed_root: Path, **kwargs: Any
-    ) -> None:
+    def replace_with_link(stage: Path, destination: Path, scope: Any, **kwargs: Any) -> None:
         nonlocal swapped
         if destination.name == "honest":
             # Simulate a concurrent link substitution immediately BEFORE the write-time
@@ -158,7 +156,7 @@ def test_pull_rejects_a_link_replaced_between_validation_and_write(
             destination.unlink(missing_ok=True)
             destination.symlink_to(tmp_path / "outside", target_is_directory=True)
             swapped = True
-        original_replace(stage, destination, allowed_root, **kwargs)
+        original_replace(stage, destination, scope, **kwargs)
 
     monkeypatch.setattr(sync, "_replace_at", replace_with_link)
     _assert_refused(tmp_path, [_file("scratchpad/honest")], "scratchpad/honest")
@@ -178,7 +176,10 @@ def test_attachment_store_symlink_cannot_redirect_a_pull(tmp_path: Path) -> None
     assert not (outside / "member.bin").exists()
 
 
-@pytest.mark.parametrize("session_id", ["", ".", "..", "../escape", "/absolute", "a\\b"])
+@pytest.mark.parametrize(
+    "session_id",
+    ["", ".", "..", "../escape", "/absolute", "a\\b", "D:escape", "a\x00b", "a\nb"],
+)
 def test_sync_from_refuses_session_ids_that_are_not_one_component(
     tmp_path: Path, session_id: str
 ) -> None:
@@ -277,12 +278,12 @@ def test_recovery_digest_mismatch_preserves_shared_blob_and_cleans_stage(
     shared.write_bytes(b"previous good blob")
     original = sync._copy_contained
 
-    def changed_during_copy(source: Path, destination: Path, allowed_root: Path) -> None:
+    def changed_during_copy(source: Path, destination: Path, scope: Any) -> None:
         def mutate_source() -> None:
             source.write_bytes(b"changed")
 
         monkeypatch.setattr(sync, "_stream_digest", lambda path: mutate_source() or "sha256:new")
-        original(source, destination, allowed_root)
+        original(source, destination, scope)
 
     monkeypatch.setattr(sync, "_copy_contained", changed_during_copy)
     with pytest.raises(sync.SyncRefused) as refusal:
@@ -377,3 +378,163 @@ def test_honest_in_tree_and_dangling_links_round_trip(tmp_path: Path) -> None:
     assert (dest / "scratchpad" / "upward").read_text(encoding="utf-8") == "notes"
     assert os.readlink(dest / "scratchpad" / "dangling") == "nested/missing.md"
     assert not (dest / "scratchpad" / "dangling").exists()
+
+
+@pytest.mark.parametrize("kind", ["replica", "staging"])
+def test_sync_from_refuses_symlinked_network_store_parent(tmp_path: Path, kind: str) -> None:
+    root = tmp_path / "config"
+    (root / "network").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "network" / kind).symlink_to(outside, target_is_directory=True)
+    destination = root / "network" / kind / "abc123"
+    with pytest.raises(sync.SyncRefused):
+        sync.sync_from(
+            root,
+            "abc123",
+            ask=_plan([]),
+            into=destination,
+            attachments_root=destination,
+        )
+    assert not (outside / "abc123").exists()
+
+
+def test_sync_from_refuses_symlinked_attachment_store_root(tmp_path: Path) -> None:
+    root = tmp_path / "config"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "attachments").mkdir(parents=True)
+    (root / "store").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(sync.SyncRefused):
+        sync.sync_from(
+            root,
+            "abc123",
+            ask=_plan([], [_file("attachments/member.bin")]),
+            attachments_root=root / "store",
+        )
+    assert not (outside / "attachments" / "member.bin").exists()
+
+
+def test_recovery_refuses_symlinked_sessions_root(tmp_path: Path) -> None:
+    root = tmp_path / "holder"
+    _recovered_replica(root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "sessions").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(sync.SyncRefused):
+        sync.promote_replica(root, "abc123", new_id="recovered")
+    assert not (outside / "recovered").exists()
+
+
+def test_refused_plan_preserves_compressed_transcript(tmp_path: Path) -> None:
+    from local_operator.session import compression
+
+    dest = tmp_path / "replica"
+    dest.mkdir()
+    (dest / "transcript.jsonl").write_bytes(b'{"old":true}\n')
+    outcome = compression.compress_session(dest, codec="gzip")
+    assert outcome.status == "compressed"
+    archive = compression.archive_path(dest)
+    assert archive is not None
+    before = {path.name: path.read_bytes() for path in dest.iterdir()}
+    with pytest.raises(sync.SyncRefused):
+        _pull(tmp_path, _plan([_link("scratchpad/link", "../../outside")]))
+    after = {path.name: path.read_bytes() for path in dest.iterdir()}
+    assert after == before
+    assert not (dest / "transcript.jsonl").exists()
+
+
+def test_refused_link_destination_does_not_replace_existing_transcript(tmp_path: Path) -> None:
+    dest = tmp_path / "replica"
+    (dest / "scratchpad").mkdir(parents=True)
+    original = b'{"old":true}\n'
+    (dest / "transcript.jsonl").write_bytes(original)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (dest / "scratchpad" / "nested").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(sync.SyncRefused):
+        _pull(tmp_path, _plan([_link("scratchpad/nested/link", "../honest")]))
+    assert (dest / "transcript.jsonl").read_bytes() == original
+    assert not (outside / "link").exists()
+
+
+def test_stale_compressed_append_preserves_archive(tmp_path: Path) -> None:
+    from local_operator.session import compression
+
+    dest = tmp_path / "replica"
+    dest.mkdir()
+    (dest / "transcript.jsonl").write_bytes(b"{}\n")
+    assert compression.compress_session(dest, codec="gzip").status == "compressed"
+    archive = compression.archive_path(dest)
+    assert archive is not None
+    before = archive.read_bytes()
+    plan = _plan([])
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        answer = plan(frame)
+        if frame["phase"] == "plan":
+            answer["transcript"] = {
+                "mode": "append",
+                "prefix_bytes": 4,
+                "region_bytes": 3,
+                "total_bytes": 7,
+                "digest": sync.sha256_bytes(b"{}\n{}\n"),
+            }
+        return answer
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        _pull(tmp_path, ask)
+    assert refusal.value.code == "stale_plan"
+    assert archive.read_bytes() == before
+    assert not (dest / "transcript.jsonl").exists()
+
+
+def test_valid_compressed_append_restores_and_appends(tmp_path: Path) -> None:
+    from local_operator.session import compression
+
+    dest = tmp_path / "replica"
+    dest.mkdir()
+    original = b'{"line":1}\n'
+    appended = b'{"line":2}\n'
+    (dest / "transcript.jsonl").write_bytes(original)
+    assert compression.compress_session(dest, codec="gzip").status == "compressed"
+    plan = _plan([])
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        answer = plan(frame)
+        if frame["phase"] == "plan":
+            answer["transcript"] = {
+                "mode": "append",
+                "prefix_bytes": len(original),
+                "region_bytes": len(appended),
+                "total_bytes": len(original + appended),
+                "digest": sync.sha256_bytes(original + appended),
+            }
+        if frame["phase"] == "fetch" and frame["name"] == sync.TRANSCRIPT_NAME:
+            assert frame["offset"] == len(original)
+            payload = (original + appended)[frame["offset"] :]
+            return {
+                "data": base64.b64encode(payload).decode("ascii"),
+                "chunk_digest": sync.sha256_bytes(payload),
+            }
+        return answer
+
+    result = sync.pull(
+        tmp_path / "config", "session", ask=ask, dest_dir=dest, attachments_root=dest
+    )
+    assert result.transcript_mode == "append"
+    assert result.bytes == len(appended)
+    assert (dest / "transcript.jsonl").read_bytes() == original + appended
+    assert compression.archive_path(dest) is None
+
+
+def test_valid_plan_still_restores_compressed_transcript(tmp_path: Path) -> None:
+    from local_operator.session import compression
+
+    dest = tmp_path / "replica"
+    dest.mkdir()
+    (dest / "transcript.jsonl").write_bytes(b'{"old":true}\n')
+    assert compression.compress_session(dest, codec="gzip").status == "compressed"
+    _pull(tmp_path, _plan([]))
+    assert (dest / "transcript.jsonl").read_bytes() == b"{}\n"
+    assert compression.archive_path(dest) is None
