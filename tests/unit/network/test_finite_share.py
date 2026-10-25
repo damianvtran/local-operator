@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
+from local_operator.config import ConfigManager
 from local_operator.network import approvals as A
 from local_operator.network import store
-from local_operator.network.credentials import consent, finite_share, placement
+from local_operator.network.credentials import (
+    consent,
+    finite_share,
+    inheritance,
+    placement,
+)
 from local_operator.network.types import MeshRefusal
-from tests.unit.network.test_approvals_store import _sign
+from local_operator.server.routes import desktop_approvals as desktop_routes
+from local_operator.server.utils.desktop_sessions import DesktopSessions
+from tests.unit.network.test_approvals_store import _device_request, _sign
 from tests.unit.network.test_credentials_consent import N, P
 from tests.unit.network.test_credentials_consent import rig as consent_rig
 from tests.unit.network.test_credentials_real_link import _lop_network
@@ -354,3 +368,209 @@ def test_failed_deny_compensation_persists_withheld_holder(
     assert error.value.code == "finite_projection_withheld"
     entry = placement.PlacementDocument.load(N, rig.root).entry(P)
     assert entry is not None and not entry.is_holder(rig.peer.device_id)
+
+
+# ---------------------------------------------------------------------------
+# Desktop containment: typed credential requests never reach the generic signer
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _desktop_client(rig: Any, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
+    """The real bearer-gated API skin over this fixture's isolated store."""
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "finite-desktop-token")
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(rig.root)
+    app.state.desktop_sessions = DesktopSessions(rig.root)
+    app.include_router(desktop_routes.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer finite-desktop-token"},
+    ) as client:
+        yield client
+
+
+def _finite_surface(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """A real finite request and counters around the two forbidden side effects.
+
+    The signer remains the real file-only implementation. If a guard regresses,
+    the counter proves it ran; the signature is not fabricated and verification
+    remains available as an independent control. The details counter separately
+    distinguishes immediate typed-intent containment from CLI validation.
+    """
+    _signer(rig, monkeypatch)
+    consent.restrict_and_revoke(
+        N, rig.own.device_id, rig.peer.device_id, {"credential_key": P}, "desktop-finite", rig.root
+    )
+    valid = finite_share.request(N, rig.own.device_id, rig.peer.device_id, P, "session", rig.root)
+    assert finite_share.details(valid)
+    software = A.sign_decision
+    validate = finite_share.details
+    counters = {"signer": 0, "details": 0}
+
+    def counted_signer(**kw: Any) -> str:
+        counters["signer"] += 1
+        return software(**kw)
+
+    def counted_details(record: dict[str, Any]) -> list[str]:
+        counters["details"] += 1
+        return validate(record)
+
+    monkeypatch.setattr(A, "sign_decision", counted_signer)
+    monkeypatch.setattr(finite_share, "details", counted_details)
+    return valid, counters
+
+
+def _record_with_what(source: dict[str, Any], what: dict[str, Any], root: Any) -> dict[str, Any]:
+    """Reuse the reproduction's valid generic envelope and anchor provenance."""
+    return A.create_request(
+        kind=source["kind"],
+        request_id=A.new_request_id(),
+        requested_by=copy.deepcopy(source["requested_by"]),
+        device=copy.deepcopy(source["device"]),
+        what=what,
+        credential_ref=None,
+        created_at=time.time(),
+        expires_at=time.time() + 3600,
+        root=root,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["valid", "empty-withdrawals", "malformed-operation"])
+async def test_desktop_finite_refusal_precedes_signer_and_validator(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    valid, counters = _finite_surface(rig, monkeypatch)
+    what = copy.deepcopy(valid["what"])
+    if shape == "empty-withdrawals":
+        what[finite_share.OP]["denies"] = []
+    elif shape == "malformed-operation":
+        # intent() returns None for this shape. Key-presence containment must
+        # refuse it anyway rather than treating it as ordinary onboarding.
+        what[finite_share.OP] = ["not", "a", "typed", "payload"]
+    record = valid if shape == "valid" else _record_with_what(valid, what, rig.root)
+    policy = consent.ConsentDocument(N, rig.own.device_id, rig.root).path.read_bytes()
+
+    async with _desktop_client(rig, monkeypatch) as client:
+        response = await client.post(f"/v1/desktop/approvals/{record['approval_id']}/approve")
+        assert response.status_code == 409, response.text
+        detail = response.json()["detail"]
+        expected_code = (
+            "finite_disclosure_invalid"
+            if shape == "malformed-operation"
+            else "finite_terminal_approval_required"
+        )
+        assert detail["code"] == expected_code
+        if shape == "malformed-operation":
+            # Never direct an untyped payload to the CLI's generic signer.
+            assert "lop network approvals approve" not in detail["text"]
+        else:
+            assert "complete withdrawal disclosure" in detail["text"]
+            assert f"lop network approvals approve {record['approval_id']}" in detail["text"]
+        if shape == "valid":
+            denied = await client.post(f"/v1/desktop/approvals/{record['approval_id']}/deny")
+            assert denied.status_code == 200, denied.text
+            assert denied.json()["result"]["state"] == "denied"
+
+    expected_state = "denied" if shape == "valid" else "requested"
+    assert A.load_record(record["approval_id"], root=rig.root)["state"] == expected_state
+    assert counters == {"signer": 0, "details": 0}
+    assert consent.ConsentDocument(N, rig.own.device_id, rig.root).path.read_bytes() == policy
+
+
+@pytest.mark.asyncio
+async def test_desktop_unknown_credential_intent_fails_closed_without_cli_remedy(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    valid, counters = _finite_surface(rig, monkeypatch)
+    what = {
+        "anchor": copy.deepcopy(valid["what"]["anchor"]),
+        "credential_unknown_typed_operation": {"scope": "unknown"},
+    }
+    record = _record_with_what(valid, what, rig.root)
+
+    async with _desktop_client(rig, monkeypatch) as client:
+        response = await client.post(f"/v1/desktop/approvals/{record['approval_id']}/approve")
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "credential_approval_unsupported"
+    assert "lop network approvals approve" not in detail["text"]
+    assert counters == {"signer": 0, "details": 0}
+    assert A.load_record(record["approval_id"], root=rig.root)["state"] == "requested"
+
+
+@pytest.mark.asyncio
+async def test_desktop_inheritance_refusal_is_unchanged(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    valid, counters = _finite_surface(rig, monkeypatch)
+    what = {
+        "anchor": copy.deepcopy(valid["what"]["anchor"]),
+        inheritance.OP: copy.deepcopy(valid["what"][finite_share.OP]),
+    }
+    record = _record_with_what(valid, what, rig.root)
+
+    async with _desktop_client(rig, monkeypatch) as client:
+        response = await client.post(f"/v1/desktop/approvals/{record['approval_id']}/approve")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "inherit_terminal_approval_required"
+    assert counters == {"signer": 0, "details": 0}
+    assert A.load_record(record["approval_id"], root=rig.root)["state"] == "requested"
+
+
+@pytest.mark.asyncio
+async def test_desktop_ordinary_onboarding_still_signs_and_verifies(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    valid, counters = _finite_surface(rig, monkeypatch)
+    fields = _device_request(A.new_request_id())
+    fields["what"]["anchor"] = copy.deepcopy(valid["what"]["anchor"])
+    ordinary = A.create_request(**fields, root=rig.root)
+
+    async with _desktop_client(rig, monkeypatch) as client:
+        response = await client.post(f"/v1/desktop/approvals/{ordinary['approval_id']}/approve")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["state"] == "approved"
+    assert counters == {"signer": 1, "details": 0}
+    assert A.load_record(ordinary["approval_id"], root=rig.root)["state"] == "approved"
+    A.verify_for_run(ordinary["approval_id"], root=rig.root)
+
+
+def test_cli_finite_approval_still_validates_then_signs_without_apply(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    valid, counters = _finite_surface(rig, monkeypatch)
+    policy = consent.ConsentDocument(N, rig.own.device_id, rig.root).path.read_bytes()
+    events: list[str] = []
+    software = A.sign_decision
+    validate = finite_share.details
+
+    def ordered_signer(**kw: Any) -> str:
+        events.append("signer")
+        return software(**kw)
+
+    def ordered_details(record: dict[str, Any]) -> list[str]:
+        events.append("details")
+        return validate(record)
+
+    monkeypatch.setattr(A, "sign_decision", ordered_signer)
+    monkeypatch.setattr(finite_share, "details", ordered_details)
+
+    assert _lop_network("approvals", "approve", valid["approval_id"], "--json") == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["state"] == "approved"
+    assert "Withdrawal 1:" in output.err
+    # The second details call is the post-decision renderer. The discriminating
+    # requirement is that complete validation happened BEFORE the one signature.
+    assert events == ["details", "signer", "details"]
+    assert counters == {"signer": 1, "details": 2}
+    assert A.load_record(valid["approval_id"], root=rig.root)["state"] == "approved"
+    A.verify_for_run(valid["approval_id"], root=rig.root)
+    assert consent.ConsentDocument(N, rig.own.device_id, rig.root).path.read_bytes() == policy
