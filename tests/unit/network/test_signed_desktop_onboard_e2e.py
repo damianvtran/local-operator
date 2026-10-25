@@ -418,6 +418,7 @@ async def test_signed_card_existing_runner_reaches_two_process_members(rig):
     assert {r["capability"] for r in report["equipment_warnings"]} >= {
         "git_identity",
         "model_credential",
+        "repository",
     }
     assert all(set(r) == {"capability", "code"} for r in report["equipment_warnings"])
     actual = approvals.load_record(aid, root=root)["receipts"][-1]
