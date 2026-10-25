@@ -1060,10 +1060,8 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
     ):
         percent = would_hold * 100 // budget
         return (
-            f"[scratch] The pad is at {percent}% of its "
-            f"{scratchpad_size_text(budget, attributive=True)} cap, with "
-            f"{scratchpad_size_text(budget - would_hold)} of headroom — build output / "
-            "dependency trees belong outside the pad; lop sessions cleanup --dry-run "
-            "shows what is reclaimable."
+            f"[scratch] The pad is {percent}% full "
+            f"({scratchpad_size_text(budget - would_hold)} left) — remove the biggest file "
+            f"first; {SCRATCHPAD_ELSEWHERE_SHORT}."
         )
     return None

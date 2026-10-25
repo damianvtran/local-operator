@@ -1616,9 +1616,8 @@ async def test_scratchpad_write_appends_the_soft_crossing_advisory(tmp_path, mon
     assert result.text == (
         f"Created scratchpad://notes.md -> {pad / 'notes.md'} ({len(content)} chars)"
         " — kept for this session (survives restarts).\n"
-        "[scratch] The pad is at 75% of its 4,096-byte cap, with 1,024 bytes of "
-        "headroom — build output / dependency trees belong outside the pad; "
-        "lop sessions cleanup --dry-run shows what is reclaimable."
+        "[scratch] The pad is 75% full (1,024 bytes left) — remove the biggest file "
+        "first; build/dependency trees belong in a git worktree, not the pad."
     )
     assert result.text.count("[scratch] ") == 1
     assert (pad / "notes.md").read_text(encoding="utf-8") == content
@@ -1645,7 +1644,7 @@ async def test_scratchpad_overwrites_above_the_soft_threshold_do_not_nag_again(
     target = pad / "large.md"
     assert crossed.is_error is False
     assert crossed.text.count("[scratch] ") == 1
-    assert "The pad is at 80% of its 10,240-byte cap" in crossed.text
+    assert "The pad is 80% full (2,048 bytes left)" in crossed.text
     assert target.stat().st_blocks * 512 >= 8192
 
     updated = "x" * 8191 + "y"
@@ -1695,9 +1694,8 @@ async def test_scratchpad_edit_appends_the_measured_soft_crossing_advisory(
     assert result.is_error is False
     assert result.text == (
         f"Edited scratchpad://notes.md -> {target}: 1 hunk(s), 1 replacement(s) applied.\n"
-        "[scratch] The pad is at 75% of its 8,192-byte cap, with 2,048 bytes of "
-        "headroom — build output / dependency trees belong outside the pad; "
-        "lop sessions cleanup --dry-run shows what is reclaimable."
+        "[scratch] The pad is 75% full (2,048 bytes left) — remove the biggest file "
+        "first; build/dependency trees belong in a git worktree, not the pad."
     )
     assert result.text.count("[scratch] ") == 1
     assert result.details is not None and "_scratchpad_advisory" not in result.details
