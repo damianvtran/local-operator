@@ -223,6 +223,12 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         action="",
         label="Start recording",
         default="primary+shift+s",
+        # i18n: ignore keymap row copy is not extracted yet: every KEY_ACTIONS
+        # label/help is a literal here and is recorded verbatim in the
+        # wire.settings golden (the 8 keymap rows were deliberately left to a
+        # later slice). Extracting only this row would split one table across
+        # two mechanisms, and new English copy in wire.settings stales the
+        # carried locales' audited ledger rows.
         help="Starts speech-to-text recording in the desktop window.",
         tip="",
         scope="desktop",
