@@ -8820,12 +8820,22 @@ def _snapshot_command(
         note = route.reason
         if downgrade.allowed:
             note = " ".join(part for part in (note, DOWNGRADE_NOTE) if part)
+        # THE CANDIDATE THIS RUN PROMOTED, kept for the report. The PyPI path
+        # collects the same value through ``on_promoted``; without it here the
+        # rolling receipt could only read the POINTER, and a snapshot install
+        # that landed correctly still reported ``core_installed: false`` and an
+        # empty ``promoted`` (2026-10-24, v0.90.0 wheel route). "This operation
+        # promoted a candidate" is not a property of the pointer — a concurrent
+        # actor may have flipped it — so the value travels from the install call.
+        promoted_generation: Path | None = None
         if route.install_from_wheel:
             # THE PyPI PATH: no source tree and no mobile-bundle step (the
             # wheel ships the built bundle), and the marker records
             # ``pypi <version>`` — this build genuinely has no git ref.
             try:
-                install_into_generation(None, version=route.version, note=note)
+                promoted_generation = install_into_generation(
+                    None, version=route.version, note=note
+                )
             except UpdateError as exc:
                 # The sibling of the source-tree branch below: this route used
                 # to print and return, which was the one failing update exit
@@ -8934,7 +8944,7 @@ def _snapshot_command(
             _note_versions(target=snapshot.version)
             print(f"installing {snapshot.install_label} ({shape})")
             try:
-                install_into_generation(
+                promoted_generation = install_into_generation(
                     snapshot.path,
                     version=snapshot.version,
                     commit=snapshot.commit,
@@ -8968,6 +8978,7 @@ def _snapshot_command(
         roll=roll,
         before_version=before_version,
         via="snapshot",
+        promoted_generation=promoted_generation,
     )
 
 
