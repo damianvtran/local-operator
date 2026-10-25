@@ -1517,7 +1517,12 @@ def _write_namespace_record(directory: Path, name: str, payload: dict[str, Any])
 
 
 def _session_payload(
-    *, pid: int, session_id: str, install_root: Path, busy: bool
+    *,
+    pid: int,
+    session_id: str,
+    install_root: Path | str,
+    busy: bool,
+    heartbeat_at: float | None = None,
 ) -> dict[str, Any]:
     from local_operator.session.runtime.types import SessionRecord
 
@@ -1532,10 +1537,11 @@ def _session_payload(
         control_key="key",
         install_root=str(install_root),
         busy=busy,
+        heartbeat_at=time.time() if heartbeat_at is None else heartbeat_at,
     ).to_json()
 
 
-def _boot_payload(*, pid: int, session_id: str, install_root: Path) -> dict[str, Any]:
+def _boot_payload(*, pid: int, session_id: str, install_root: Path | str) -> dict[str, Any]:
     from local_operator.session.runtime.journal import BootRecord
 
     return BootRecord(pid=pid, session_id=session_id, install_root=str(install_root)).to_json()
@@ -1580,12 +1586,17 @@ def test_rolling_receipt_measures_the_runtime_census_within_its_namespaces(
             pid=live, session_id="session-busy", install_root=old / "tools" / "local-operator"
         ),
     )
-    # A runtime that has not heartbeated yet: visible only in run/host.
+    # A runtime that has not heartbeated yet: visible only in run/host. A
+    # DIFFERENT pid, because a runtime is a process — the census dedupes by pid,
+    # so reusing this process's pid would make it the same runtime.
+    booting = os.getppid()
     _write_namespace_record(
         config_root / "run" / "host",
-        f"{live}-booting.json",
+        f"{booting}.json",
         _boot_payload(
-            pid=live, session_id="session-booting", install_root=old / "tools" / "local-operator"
+            pid=booting,
+            session_id="session-booting",
+            install_root=old / "tools" / "local-operator",
         ),
     )
     monkeypatch.setattr(update, "_config_roots", lambda: [config_root])
@@ -1634,6 +1645,149 @@ def test_rolling_receipt_names_each_unreadable_runtime_namespace(
     reason = rolling["central_services_incomplete_reason"]
     assert "runtime census unreadable" in reason
     assert "run/mobile" in reason, "the reason names the namespace to look at"
+
+
+def test_rolling_receipt_counts_a_wedged_runtime_in_its_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: ``wedged`` is a LIVE PROCESS whose owner stopped beating.
+
+    Only ``stale`` means the pid is gone. A wedged runtime on an old generation
+    is exactly the population ``known_old_busy`` exists for; dropping it made the
+    base's ``unknown: 1`` become ``unknown: 0`` — a census that lost a runtime.
+    """
+    from local_operator import update
+    from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
+
+    stable = tmp_path / "lop"
+    image = stable / "generations" / "20261024T000000Z-0.90.0"
+    old = stable / "generations" / "20261024T121337Z-0.88.4"
+    for generation in (image, old):
+        (generation / "tools" / "local-operator").mkdir(parents=True)
+    config_root = tmp_path / "config"
+    live = os.getpid()
+    _write_namespace_record(
+        config_root / "run" / "mobile",
+        f"{live}.json",
+        _session_payload(
+            pid=live,
+            session_id="session-wedged",
+            install_root=old / "tools" / "local-operator",
+            busy=True,
+            heartbeat_at=time.time() - (HEARTBEAT_TIMEOUT_S + 60),
+        ),
+    )
+    monkeypatch.setattr(update, "_config_roots", lambda: [config_root])
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(stable))
+    monkeypatch.setattr(update, "current_generation", lambda: image)
+
+    rolling = update._rolling_receipt(image, update.StageReport())
+
+    runtimes = rolling["runtimes"]
+    assert runtimes["measured"] is True
+    assert runtimes["known_old_busy"] == 1
+    assert runtimes["unknown"] == 0
+
+
+def test_rolling_receipt_reports_an_obstructed_runtime_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-3: a regular file where ``run/mobile`` should be is a gap, not a zero."""
+    from local_operator import update
+
+    stable = tmp_path / "lop"
+    image = stable / "generations" / "20261024T000000Z-0.90.0"
+    (image / "tools" / "local-operator").mkdir(parents=True)
+    config_root = tmp_path / "config"
+    (config_root / "run").mkdir(parents=True)
+    (config_root / "run" / "mobile").write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(update, "_config_roots", lambda: [config_root])
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(stable))
+    monkeypatch.setattr(update, "current_generation", lambda: image)
+
+    rolling = update._rolling_receipt(image, update.StageReport())
+
+    assert rolling["runtimes"]["measured"] is False
+    reason = rolling["central_services_incomplete_reason"]
+    assert "run/mobile" in reason and "not a directory" in reason
+
+
+def test_rolling_receipt_counts_only_live_boot_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-4: a boot record left by an unclean exit is not a runtime."""
+    from local_operator import update
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()  # reaped: this pid is provably gone
+    stable = tmp_path / "lop"
+    image = stable / "generations" / "20261024T000000Z-0.90.0"
+    old = stable / "generations" / "20261024T121337Z-0.88.4"
+    for generation in (image, old):
+        (generation / "tools" / "local-operator").mkdir(parents=True)
+    config_root = tmp_path / "config"
+    _write_namespace_record(
+        config_root / "run" / "host",
+        f"{dead.pid}.json",
+        _boot_payload(
+            pid=dead.pid,
+            session_id="session-dead",
+            install_root=old / "tools" / "local-operator",
+        ),
+    )
+    live = os.getpid()
+    _write_namespace_record(
+        config_root / "run" / "host",
+        f"{live}.json",
+        _boot_payload(
+            pid=live,
+            session_id="session-booting",
+            install_root=old / "tools" / "local-operator",
+        ),
+    )
+    monkeypatch.setattr(update, "_config_roots", lambda: [config_root])
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(stable))
+    monkeypatch.setattr(update, "current_generation", lambda: image)
+
+    rolling = update._rolling_receipt(image, update.StageReport())
+
+    runtimes = rolling["runtimes"]
+    assert runtimes["measured"] is True
+    assert runtimes["known_old_idle"] == 1, "only the live boot record counts"
+    assert runtimes["unknown"] == 0
+
+
+def test_rolling_receipt_survives_a_record_naming_an_unreadable_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: ``Path.resolve()`` can raise; the census degrades, the report prints.
+
+    A path this build cannot resolve (measured shapes: OSError ELOOP for a
+    symlink loop, ValueError for a NUL byte) used to escape the boot loop and
+    take the frozen report line with it. The NUL payload is used here because it
+    is the deterministic shape on this interpreter.
+    """
+    from local_operator import update
+
+    stable = tmp_path / "lop"
+    image = stable / "generations" / "20261024T000000Z-0.90.0"
+    (image / "tools" / "local-operator").mkdir(parents=True)
+    config_root = tmp_path / "config"
+    live = os.getpid()
+    _write_namespace_record(
+        config_root / "run" / "host",
+        f"{live}.json",
+        _boot_payload(pid=live, session_id="session-broken", install_root="/tmp/bad\x00path"),
+    )
+    monkeypatch.setattr(update, "_config_roots", lambda: [config_root])
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(stable))
+    monkeypatch.setattr(update, "current_generation", lambda: image)
+
+    rolling = update._rolling_receipt(image, update.StageReport())
+
+    assert rolling["runtimes"]["measured"] is False
+    reason = rolling["central_services_incomplete_reason"]
+    assert "run/host" in reason and "could not read" in reason
 
 
 def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
