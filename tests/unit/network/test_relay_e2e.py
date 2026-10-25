@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import socket
 import threading
 import time
@@ -2444,6 +2445,89 @@ def test_a_panic_receipt_reports_a_member_it_could_not_ask(
         if event.get("event") == "panic_undelivered"
     ]
     assert [event["detail"]["outcome"] for event in rows] == ["unacked"], rows
+
+
+class _IncidentThreadStillRunning(threading.Thread):
+    """A fan-out thread whose bounded join returns while it keeps running.
+
+    ``_join_incident_threads`` can only learn whether a join succeeded by asking
+    ``is_alive()``, so the failing branch is answered directly: a real thread
+    would need to outwait the deadline, which is a sleep and still a race.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name=name, daemon=True)
+        self.join_timeout: float | None = None
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return True
+
+
+class _IncidentThreadThatFinished(threading.Thread):
+    """The clean arm: the join returns and the thread is already gone."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name=name, daemon=True)
+        self.join_timeout: float | None = None
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return False
+
+
+def test_the_incident_fan_out_names_a_thread_that_outlives_its_deadline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The receipt says ``unacked``; only the log can say the LOCAL thread survived.
+
+    A still-running acknowledgement task and a peer that answered too slowly are
+    the same ``unacked`` row on purpose — the receipt describes peers, not
+    sockets. The local half is not the same fact, though: this process stopped
+    waiting while the work continued. One warning names the threads and the
+    deadline; the protocol outcome is untouched.
+    """
+    slow = _IncidentThreadStillRunning("mesh-incident:d_a")
+    done = _IncidentThreadThatFinished("mesh-incident:d_b")
+    deadline = relay.INCIDENT_ACK_DEADLINE_S + relay.INCIDENT_SEND_SLACK_S
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        relay._join_incident_threads([slow, done], deadline=deadline)
+    assert slow.join_timeout == deadline
+    assert done.join_timeout == deadline
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == relay.logger.name and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1, caplog.text
+    message = warnings[0].getMessage()
+    assert f"{deadline:.1f}s" in message, message
+    assert "still running" in message, message
+    assert "mesh-incident:d_a" in message, message
+    assert "mesh-incident:d_b" not in message, message
+
+
+def test_the_incident_fan_out_is_silent_when_every_thread_finished(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The normal path: every acknowledgement thread returned, no warning."""
+    threads = [
+        _IncidentThreadThatFinished("mesh-incident:d_a"),
+        _IncidentThreadThatFinished("mesh-incident:d_b"),
+    ]
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        relay._join_incident_threads(cast(Any, threads), deadline=3.5)
+    assert [thread.join_timeout for thread in threads] == [3.5, 3.5]
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == relay.logger.name and record.levelno >= logging.WARNING
+    ]
+    assert warnings == [], caplog.text
 
 
 def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(

@@ -3136,6 +3136,32 @@ INCIDENT_ACK_DEADLINE_S = 2.0
 INCIDENT_SEND_SLACK_S = 1.0
 
 
+def _join_incident_threads(threads: list[threading.Thread], *, deadline: float) -> None:
+    """Wait for the fan-out's per-peer threads and report any that outlived it.
+
+    The receipt describes the PEERS: a thread still running when the wait ends is
+    indistinguishable from a peer that answered too slowly, and both surface as
+    ``unacked``. That is the right answer at the protocol level and is deliberately
+    left alone here. The local cause is not: a thread still alive means this
+    process stopped waiting while the work continued, which ``unacked`` cannot say.
+    Name it in one warning after the bounded join; the thread object stays on the
+    caller's list for as long as the caller holds it.
+    """
+    for thread in threads:
+        thread.join(timeout=deadline)
+    survivors = [thread for thread in threads if thread.is_alive()]
+    if survivors:
+        logger.warning(
+            "mesh relay: %d incident acknowledgement thread(s) still running "
+            "after the %.1fs fan-out deadline (%s) — they were not killed; the "
+            "receipt still reports those peers as unacked, so the local "
+            "condition is only visible here",
+            len(survivors),
+            deadline,
+            ", ".join(thread.name for thread in survivors),
+        )
+
+
 def panic_frame(
     record: NetworkRecord, state: SecretState, *, reason: str = "operator_panic"
 ) -> dict[str, Any]:
@@ -12131,13 +12157,15 @@ class RelayServer:
                     target=ask,
                     args=(link, entry),
                     daemon=True,
-                    name="mesh-incident",
+                    # The device is part of the name so the still-running warning
+                    # can name WHICH peer's ask outlived the deadline — the
+                    # receipt itself cannot distinguish it from a slow peer.
+                    name=f"mesh-incident:{member.device_id}",
                 )
             )
         for thread in threads:
             thread.start()
-        for thread in threads:
-            thread.join(INCIDENT_ACK_DEADLINE_S + INCIDENT_SEND_SLACK_S)
+        _join_incident_threads(threads, deadline=INCIDENT_ACK_DEADLINE_S + INCIDENT_SEND_SLACK_S)
         with guard:
             return list(reports)
 
