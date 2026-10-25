@@ -15,7 +15,6 @@ import pytest
 
 from scripts import native_relay_update_probe as probe
 
-
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="a generation venv uses a POSIX symlink")
 
 
@@ -42,10 +41,7 @@ def _minimal_venv(root: Path, *, with_package: bool = True) -> None:
     (root / "bin").mkdir(parents=True)
     (root / "bin" / "python3").symlink_to(executable)
     site = (
-        root
-        / "lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages"
+        root / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
     )
     site.mkdir(parents=True)
     if with_package:
