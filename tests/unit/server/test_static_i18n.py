@@ -3,8 +3,10 @@
 import pytest
 from fastapi import HTTPException, Request
 
+from local_operator.i18n import catalogues
 from local_operator.i18n.keys import wire_errors_files
 from local_operator.i18n.resolve import shipped_locales
+from local_operator.i18n.runtime import render_message
 from local_operator.server.routes import static
 
 
@@ -150,5 +152,29 @@ def test_new_namespace_english_fallback():
         "params": {"maximum": "3600"},
         "text": "ttl_s must be between 1 and 3600.",
     }
+    fallback: list[str] = []
+    translated: list[str] = []
     for locale in shipped_locales():
-        assert wire_errors_files.sign_ttl(maximum="3600").envelope(locale=locale) == expected
+        envelope = wire_errors_files.sign_ttl(maximum="3600").envelope(locale=locale)
+        try:
+            catalogue = catalogues.load_catalogue(locale, "wire.errors.files")
+        except catalogues.CatalogueNotFound:
+            # A locale that does not carry the namespace renders the English
+            # source; a new English child never needs translated keys.
+            fallback.append(locale)
+            assert envelope == expected, locale
+            continue
+        translated.append(locale)
+        if locale == "en":
+            assert envelope == expected
+            continue
+        # A locale that carries it renders its own copy. zh-CN does since the
+        # security disposition, so the English-only child set is not static.
+        assert envelope["text"] == render_message(
+            catalogue[expected["code"]], expected["params"], locale
+        ), locale
+        assert envelope["text"] != expected["text"], locale
+    # Both arms stay covered: some shipped locales still do not carry this
+    # namespace, and the released Chinese candidate does.
+    assert fallback
+    assert "zh-CN" in translated
