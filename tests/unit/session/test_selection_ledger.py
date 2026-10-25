@@ -57,7 +57,8 @@ async def test_ledger_legacy_provenance_and_registry_changes(tmp_path, monkeypat
         return selection.selection_from_payloads(selection._forward_payloads(tmp_path))
 
     assert selection._read_selection(tmp_path) == oracle()
-    assert oracle().boot_selector == "test/birth"
+    stored = oracle()
+    assert stored is not None and stored.boot_selector == "test/birth"
     import local_operator.providers.registry as registry
 
     original = registry.get_provider_definition
@@ -81,9 +82,11 @@ async def test_ledger_failure_does_not_fail_commit_and_truncate_falls_back(tmp_p
         tail_anchor, "write_anchor", lambda *_: (_ for _ in ()).throw(OSError("disk full"))
     )
     await transcript.append_custom("selected_model", {"version": 2, "selector": "test/second"})
-    assert selection._read_selection(tmp_path).model_id == "second"
+    stored = selection._read_selection(tmp_path)
+    assert stored is not None and stored.model_id == "second"
     transcript.path.write_bytes(before)
-    assert selection._read_selection(tmp_path).model_id == "first"
+    stored = selection._read_selection(tmp_path)
+    assert stored is not None and stored.model_id == "first"
     transcript.close()
 
 
@@ -136,7 +139,8 @@ async def test_failed_journal_fsync_cannot_publish_selection(tmp_path, monkeypat
     monkeypatch.setattr(os, "fsync", real_fsync)
     assert transcript.path.read_bytes() == before
     assert read_anchor(tmp_path) == old_anchor
-    assert selection._read_selection(tmp_path).model_id == "first"
+    stored = selection._read_selection(tmp_path)
+    assert stored is not None and stored.model_id == "first"
     transcript.close()
 
 
@@ -172,4 +176,104 @@ async def test_selection_only_record_never_grants_a_replay_cut(tmp_path):
     anchor_path(tmp_path).unlink()
     without_ledger = read_replay_suffix(tmp_path, checkpoint_types="frontend_state_checkpoint_v1")
     assert with_ledger == without_ledger
+    transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_real_prewarm_preserves_selection_hit(tmp_path, monkeypatch):
+    """R1: the absence-proof writer must not erase independent source evidence."""
+    from local_operator.session.index_prewarm import write_tail_anchor
+
+    directory = tmp_path / "sessions" / "prewarm-ledger"
+    transcript = Transcript(directory)
+    await transcript.append_custom("selected_model", {"version": 2, "selector": "test/first"})
+    await transcript.append_custom("padding", {"blob": "x" * (4 << 20)})
+    expected = selection.selection_from_payloads(selection._forward_payloads(directory))
+    assert write_tail_anchor(tmp_path, directory.name)
+    anchor = read_anchor(directory)
+    assert anchor is not None and anchor.checkpoint_absent
+    monkeypatch.setattr(selection, "_settled_selection", lambda *_: pytest.fail("full settle scan"))
+    monkeypatch.setattr(selection, "_forward_payloads", lambda *_: pytest.fail("full forward scan"))
+    assert selection._read_selection(directory) == expected
+    transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_same_size_rewrite_invalidates_selection_and_writer_prefix(tmp_path):
+    """R2: a stable terminal row is not proof an earlier selector is unchanged."""
+    transcript = Transcript(tmp_path)
+    await transcript.append_custom("selected_model", {"version": 2, "selector": "test/first"})
+    await transcript.append_custom("padding", {"blob": "unchanged terminal row"})
+    stored = selection.read_model_selection(tmp_path)
+    assert stored is not None and stored.model_id == "first"
+    before = transcript.path.stat()
+    data = transcript.path.read_bytes()
+    rewritten = data.replace(b"test/first", b"test/other")
+    assert len(data) == len(rewritten) and rewritten != data
+    with transcript.path.open("r+b") as handle:
+        handle.write(rewritten)
+    after = transcript.path.stat()
+    assert (after.st_ino, after.st_size) == (before.st_ino, before.st_size)
+    assert (after.st_mtime_ns, after.st_ctime_ns) != (before.st_mtime_ns, before.st_ctime_ns)
+    expected = selection.selection_from_payloads(selection._forward_payloads(tmp_path))
+    assert selection.read_model_selection(tmp_path) == expected
+    assert expected is not None and expected.model_id == "other"
+    # The next ordinary commit must bootstrap from changed source, not bless the
+    # stale persistent prefix merely because that source has now grown.
+    await transcript.append_custom("padding", {"blob": "after edit"})
+    assert selection._read_selection(tmp_path) == expected
+    transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_generation_proof_keeps_normal_writer_incremental(tmp_path, monkeypatch):
+    from local_operator.session import transcript as transcript_module
+
+    transcript = Transcript(tmp_path)
+    await transcript.append_custom("selected_model", {"version": 2, "selector": "test/first"})
+    anchor = read_anchor(tmp_path)
+    assert anchor is not None
+    prefix = anchor.size
+    starts = []
+    original = transcript_module._iter_complete_lines_forward
+
+    def tracked(handle, start, **kwargs):
+        starts.append(start)
+        yield from original(handle, start, **kwargs)
+
+    monkeypatch.setattr(transcript_module, "_iter_complete_lines_forward", tracked)
+    await transcript.append_custom("padding", {"blob": "ordinary append"})
+    assert starts == [prefix], "a normal commit must not reparse its whole prefix"
+    source = transcript.path.stat()
+    anchor = read_anchor(tmp_path)
+    assert anchor is not None
+    assert anchor.selection_mtime_ns == source.st_mtime_ns
+    assert anchor.selection_ctime_ns == source.st_ctime_ns
+    stored = selection._read_selection(tmp_path)
+    assert stored is not None and stored.model_id == "first"
+    transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_generation_falls_back_and_recovered_state_survives_prewarm(tmp_path):
+    import json
+    from local_operator.session.index_prewarm import write_tail_anchor
+    from local_operator.session.tail_anchor import anchor_path, read_selection_payloads
+
+    directory = tmp_path / "sessions" / "recovered"
+    transcript = Transcript(directory)
+    await transcript.append_custom("selected_model", {"version": 2, "selector": "test/first"})
+    await transcript.append_custom(
+        "selected_model", {"version": 2, "selector": "unknown-provider/no"}
+    )
+    expected = selection.selection_from_payloads(selection._forward_payloads(directory))
+    assert expected is not None and expected.recovered
+    assert write_tail_anchor(tmp_path, directory.name)
+    assert selection._read_selection(directory) == expected
+    path = anchor_path(directory)
+    raw = json.loads(path.read_text())
+    raw.pop("selection_ctime_ns")
+    path.write_text(json.dumps(raw))
+    assert read_selection_payloads(directory) is None
+    assert selection._read_selection(directory) == expected
     transcript.close()

@@ -61,7 +61,7 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +131,11 @@ class TailAnchor:
     # still be evaluated by the selection fold on every fresh process.
     selection_payloads: tuple[dict[str, Any], ...] | None = None
     checkpoint_absent: bool = True
+    # The selection prefix can change without moving the terminal row. Ordinary
+    # in-place edits change these stamps; the absence-only legacy proof never
+    # claimed to validate such edits. Missing stamps mean untrusted selection.
+    selection_mtime_ns: int | None = None
+    selection_ctime_ns: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -141,6 +146,8 @@ class TailAnchor:
             "tail_digest": self.tail_digest,
             "selection_payloads": self.selection_payloads,
             "checkpoint_absent": self.checkpoint_absent,
+            "selection_mtime_ns": self.selection_mtime_ns,
+            "selection_ctime_ns": self.selection_ctime_ns,
         }
 
 
@@ -176,7 +183,17 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
         not isinstance(payloads, list) or not all(isinstance(item, dict) for item in payloads)
     ):
         return None
-    return TailAnchor(inode, size, digest, None if payloads is None else tuple(payloads), absent)
+    mtime = raw.get("selection_mtime_ns")
+    ctime = raw.get("selection_ctime_ns")
+    return TailAnchor(
+        inode,
+        size,
+        digest,
+        None if payloads is None else tuple(payloads),
+        absent,
+        mtime if type(mtime) is int else None,
+        ctime if type(ctime) is int else None,
+    )
 
 
 def write_anchor(directory: str | Path, anchor: TailAnchor) -> bool:
@@ -402,12 +419,81 @@ _SELECTION_NEEDLES = (b'"custom_type":"selected_model"', _needle())
 
 def read_selection_payloads(directory: str | Path) -> tuple[dict[str, Any], ...] | None:
     """Source ledger validated with the existing inode/boundary/suffix gate."""
-    anchor = validate_anchor(directory, read_anchor(directory), needles=_SELECTION_NEEDLES)
+    anchor = _validated_selection_anchor(directory, read_anchor(directory))
     return None if anchor is None else anchor.selection_payloads
 
 
-def update_selection_after_commit(directory: str | Path) -> None:
+def _validated_selection_anchor(
+    directory: str | Path, anchor: TailAnchor | None
+) -> TailAnchor | None:
+    anchor = validate_anchor(directory, anchor, needles=_SELECTION_NEEDLES)
+    try:
+        source = (Path(directory) / TRANSCRIPT_FILENAME).stat()
+    except OSError:
+        return None
+    # Check generation AFTER the bounded boundary/suffix reads, so an ordinary
+    # mutation during those reads also refuses this evidence.
+    return anchor if _selection_generation_matches(anchor, source) else None
+
+
+def _selection_generation_matches(anchor: TailAnchor | None, source: os.stat_result) -> bool:
+    """Bounded proof for ordinary edits, not adversarial restored timestamps.
+
+    Both stamps are required: bookkeeping restores mtime, while ctime still
+    changes. An unobserved generation change is not assumed append-only. Readers
+    fall back; writers may reuse a prefix only against their PRE-append stat.
+    """
+    return (
+        anchor is not None
+        and anchor.selection_payloads is not None
+        and anchor.inode == source.st_ino
+        and anchor.selection_mtime_ns == source.st_mtime_ns
+        and anchor.selection_ctime_ns == source.st_ctime_ns
+    )
+
+
+def preserve_selection_evidence(directory: str | Path, anchor: TailAnchor) -> TailAnchor:
+    """Keep compatible source evidence when prewarm publishes an absence proof.
+
+    Neither artifact grants the other's privilege: the new absence proof comes
+    from build_anchor's real scan; selection is copied only from a currently
+    validated record naming that SAME complete-row boundary. A racing append or
+    incompatible proof loses the optimization, never changes an answer.
+    """
+    # Validate ONE captured record. Re-reading its payload separately could mix
+    # a racing writer's new payload with the first record's old boundary/stamps.
+    saved = _validated_selection_anchor(directory, read_anchor(directory))
+    if saved is None:
+        return anchor
+    if (saved.inode, saved.size, saved.tail_digest) != (
+        anchor.inode,
+        anchor.size,
+        anchor.tail_digest,
+    ):
+        return anchor
+    return replace(
+        anchor,
+        selection_payloads=saved.selection_payloads,
+        selection_mtime_ns=saved.selection_mtime_ns,
+        selection_ctime_ns=saved.selection_ctime_ns,
+    )
+
+
+def update_selection_after_commit(
+    directory: str | Path,
+    *,
+    previous_source: os.stat_result | None = None,
+    appended_end: int | None = None,
+    tail_row: bytes | None = None,
+) -> None:
     """Persist expendable selection evidence only after the journal's fsync.
+
+    ``previous_source`` / ``appended_end`` / ``tail_row`` are the DURABLE WRITER's
+    own facts: the file as it was immediately before this append, the size it
+    reached, and the last complete row's bytes. Supplying them keeps the refresh
+    proportional to the bytes just written. Without them the refresh must
+    re-derive the boundary from disk, which is a whole-journal read on the first
+    commit that meets an unledgered journal — paid once, never per message.
 
     A crash before replace leaves an older prefix; the suffix needle scan refuses
     it when selection evidence changed. Truncation and compaction use the existing
@@ -415,23 +501,65 @@ def update_selection_after_commit(directory: str | Path) -> None:
     L3b is deliberately deferred. Failure must never reject a durable append.
     """
     try:
-        _update_selection_after_commit(Path(directory))
+        _update_selection_after_commit(Path(directory), previous_source, appended_end, tail_row)
     except Exception:  # noqa: BLE001 — derived data cannot reject durable work
         logger.debug("selection ledger not written for %s", directory, exc_info=True)
 
 
-def _update_selection_after_commit(directory: Path) -> None:
+def _update_selection_after_commit(
+    directory: Path,
+    previous_source: os.stat_result | None,
+    appended_end: int | None,
+    tail_row: bytes | None,
+) -> None:
     from local_operator.session.transcript import _iter_complete_lines_forward
 
     path = directory / TRANSCRIPT_FILENAME
-    # Writer-only: validate the prefix boundary, then consume ALL new rows rather
-    # than claiming their needles absent. No read-path writer or migration.
-    old = validate_anchor(directory, read_anchor(directory), needles=())
-    payloads = list(old.selection_payloads) if old and old.selection_payloads is not None else []
-    start = old.size if old and old.selection_payloads is not None else 0
+    # Writer-only: consume ALL new rows rather than claiming their needles absent.
+    # No read-path writer and no migration of a journal nobody is writing.
+    saved = read_anchor(directory)
+    # THE STEADY PATH. Only the durable writer can attest which source generation
+    # preceded its append, so its pre-append stat is what lets this reuse the
+    # stored prefix without re-reading it. Comparing a stored record to POST-append
+    # stamps instead would either force a whole-journal read every turn or bless an
+    # in-place edit; the stamps therefore never validate the prefix on their own.
+    tail_payload = tail_row or b""
+    incremental = (
+        saved is not None
+        and saved.selection_payloads is not None
+        and previous_source is not None
+        and appended_end is not None
+        and tail_row
+        and appended_end >= previous_source.st_size
+        and _selection_generation_matches(saved, previous_source)
+    )
     with path.open("rb") as handle:
         stat = os.fstat(handle.fileno())
-        complete = _complete_row_end(path, stat.st_size)
+        # ONE scope for both branches: ``complete`` is the boundary the record will
+        # name, and the reader's validator pins it with the tail digest.
+        if incremental:
+            assert saved is not None and previous_source is not None and appended_end is not None
+            start = previous_source.st_size
+            complete = appended_end
+            payloads = list(saved.selection_payloads or ())
+            # Carrying the absence proof forward is sound only because the validated
+            # generation proves nothing outside this append changed, so the appended
+            # rows themselves are the whole question. A checkpoint row in them costs
+            # the proof, never the answer.
+            absent = bool(saved.checkpoint_absent)
+            digest = hashlib.sha256(tail_payload).hexdigest()[:16]
+        else:
+            start = 0
+            complete = _complete_row_end(path, stat.st_size)
+            payloads = []
+            row_bytes = _last_complete_row(path, complete)
+            if not row_bytes:
+                return
+            digest = hashlib.sha256(row_bytes).hexdigest()[:16]
+            # Bootstrap only: the absence proof is about the WHOLE file, so it is
+            # re-derived by the existing validator rather than assumed.
+            proof = validate_anchor(directory, saved)
+            absent = proof is not None and proof.checkpoint_absent
         for raw in _iter_complete_lines_forward(handle, start, end_of_file=complete):
             if b'"custom_type"' not in raw:
                 continue
@@ -455,6 +583,7 @@ def _update_selection_after_commit(directory: Path) -> None:
                     if key in details
                 }
             elif kind == ANCHOR_CUSTOM_TYPE:
+                absent = False
                 state = details.get("state")
                 model = state.get("selected_model") if isinstance(state, dict) else None
                 if not isinstance(model, dict):
@@ -471,16 +600,15 @@ def _update_selection_after_commit(directory: Path) -> None:
             else:
                 continue
             payloads.append({"custom_type": kind, "details": reduced})
-    row = _last_complete_row(path, complete)
-    if not row:
-        return
-    # Do NOT synthesize a replay anchor. Preserve a proven absence only when the
-    # existing replay validator can still prove it after this commit.
-    replay_anchor = validate_anchor(directory, old)
-    absent = replay_anchor is not None and replay_anchor.checkpoint_absent
     write_anchor(
         directory,
         TailAnchor(
-            stat.st_ino, complete, hashlib.sha256(row).hexdigest()[:16], tuple(payloads), absent
+            stat.st_ino,
+            complete,
+            digest,
+            tuple(payloads),
+            absent,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
         ),
     )

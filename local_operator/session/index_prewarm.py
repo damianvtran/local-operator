@@ -78,6 +78,7 @@ from local_operator.session.replay_cache import (
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.tail_anchor import (
     build_anchor,
+    preserve_selection_evidence,
     read_anchor,
     validate_anchor,
     write_anchor,
@@ -625,7 +626,7 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
                 return False
             _NO_ANCHOR_NEEDED[key] = (stat.st_ino, stat.st_size)
             return False
-        return write_anchor(directory, anchor)
+        return write_anchor(directory, preserve_selection_evidence(directory, anchor))
     finally:
         with _ANCHOR_LOCK:
             _ANCHOR_IN_FLIGHT.discard(key)
