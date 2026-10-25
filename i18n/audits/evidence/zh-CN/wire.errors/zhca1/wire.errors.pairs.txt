@@ -1,0 +1,3 @@
+# wire.errors — sampled en/zh pairs for attestation zhca1
+# 0/0 keys; all >120 chars and all plurals included
+

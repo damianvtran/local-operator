@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "locale": "zh-CN",
+  "namespace": "wire.memory",
+  "record": "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/record.json",
+  "provenance": "Bundle receipt for the independent zh-CN audit session 3d1df2689651, actual model deepseek/deepseek-flash; this manifest is not another audit.",
+  "hashes": {
+    "audit.log": "dab7ebba0733e433b0a2e6db584c13468674980f8bb23f9f6cc6d4df50d0287e",
+    "mechanical-raw.json": "3bb50ae184454f418146b0a657ace555700df46a1dd4f2053307c8ec9dc7122e",
+    "pseudo-evidence.json": "5119a9657c5d08dbc8ffb481f83ab2605ae0ff395afa0c928b5f727c3b447e1c",
+    "report.md": "7442456fde8b41ff0e91255b8334c31dcc65bd5cc758ba3a6d400375905818cb",
+    "runtime-mechanical.json": "bf0dc6c3031e00044bde963f2bea747b0fb1d25375ce1b9e2a71dc043836c544",
+    "wire.memory.compact.txt": "5c9836f58722234d7ee4aa039d7e1222a9e7f565eac24c0ad0307fcd71ae3823",
+    "wire.memory.pairs.txt": "229e33f19867ec37d836add55f9c11923bcb6ad6aa5d1a3dd4f4801167b51438",
+    "record.json": "66c5d2c6de94842317c4e5ca41884a4cb5f8373a67b51176771a593c3bee5d69"
+  }
+}

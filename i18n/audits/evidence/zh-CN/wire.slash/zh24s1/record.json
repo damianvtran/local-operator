@@ -1,0 +1,195 @@
+{
+  "schema": 1,
+  "audit_id": "zh24s1",
+  "audit_kind": "independent_full_namespace_audit_after_redaction_policy_correction",
+  "locale": "zh-CN",
+  "namespace": "wire.slash",
+  "round": 1,
+  "audit_date": "2026-10-24",
+  "key_count": 52,
+  "keys_read": 52,
+  "delta_key_count": 0,
+  "delta_keys": [],
+  "source_audit_revision": "f286318c89053e5e00cbb7823f6f29cd6a06d205",
+  "assembly_revision": "f286318c89053e5e00cbb7823f6f29cd6a06d205",
+  "catalogue_bytes_introduced_at": "4840abdeb650a44db3bd9b1f564b24b6546c099a",
+  "catalogue_bytes_attested_at": "00b3446cf3df78805988e25862133419a235e181",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "current_byte_peer_audit_id": null,
+  "current_byte_peer_record": null,
+  "translator": {
+    "agent": "coder (lopdev team), zh-CN core candidate wave",
+    "session": null,
+    "model": "not recorded in the commit",
+    "date": "2026-10-19",
+    "commit": "4840abdeb650a44db3bd9b1f564b24b6546c099a",
+    "provenance_note": "The catalogue bytes were introduced in the held candidate commit 4840abdeb6 (authored by Damian Tran); the translator subagent session and model are not recorded in it. 00b3446cf3 attests the carried bytes; f286318c is the assembly HEAD audited here."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "4ecbbf4d3281",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none observed"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+      "sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.context.json",
+      "sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.json",
+      "sha256": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision. The target hash is the audit's own binding because the ledger row schema records no target hash."
+  },
+  "withheld_key_resolution": {
+    "key": "wire.slash.credential",
+    "previous_state": "withheld at 51/52 because the value was unreadable under ordinary tool-output redaction; the held candidate recorded no redaction bypass.",
+    "route": "read_public_copy (local_operator.tools.public_copy.execute_read_public_copy)",
+    "policy_correction_commit": "6bfac3fccb558b6aaed2ffe3fc22e1e711526ee6",
+    "policy_document": "docs/security/redaction-policy.md",
+    "served": "committed HEAD blob for local_operator/i18n/catalogues/zh-CN/wire.slash.json",
+    "digest": "0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd",
+    "chars": 48,
+    "audit_log_path": "/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config/audit/public-copy-reads.jsonl",
+    "audit_log_sha256": "97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980",
+    "statement": "The previously withheld key was read through the sanctioned public-copy route after the redaction-policy correction. This is a fresh independent audit of the current bytes, not an upgrade or relabel of the old failed row."
+  },
+  "fresh_independent_audit": true,
+  "not_an_upgrade_of_failed_row": true,
+  "source_receipt": null,
+  "source_companions": [
+    "audit.log",
+    "hash-checks.json",
+    "mechanical-raw.json",
+    "pseudo-evidence.json",
+    "report.md",
+    "route-read-log.jsonl",
+    "route-read.json",
+    "runtime-mechanical.json",
+    "scope.json",
+    "verification.json",
+    "wire.slash.compact.txt",
+    "wire.slash.pairs.txt",
+    "scripts/audit_zh_slash.py.txt"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/audit.log",
+      "sha256": "94fd83eec6157ee93aea32b1d3ab27ffc20a77feba1b4c130fb96443a10b66e2"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/hash-checks.json",
+      "sha256": "20fe6a74620fcfbf3cccf51d30ca09cb1074159c655246ca5fe0d67ae200e3fa"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/mechanical-raw.json",
+      "sha256": "881bd5fee3c3465de9952b3607f38f9badaa58504c3d8d6faaab471aaa238ab2"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/pseudo-evidence.json",
+      "sha256": "444d5214e507b0bde4acdf6262aba2978eae93d61e6cd177d605368b53fe418b"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/report.md",
+      "sha256": "11ca9dbde255302695e3137e15f8913b67ce8eaae36bd5ce1ea72e43e4d5c317"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/route-read-log.jsonl",
+      "sha256": "97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/route-read.json",
+      "sha256": "99fc56b957d755d15a6d99a92a45e100905c1f13bcd349d61fc3ea74db2b30ed"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/runtime-mechanical.json",
+      "sha256": "bb279f1e331ab8b553b5a446bfa3413b2f93b7fa40fe244e8ea5845ed61c4f8e"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/scope.json",
+      "sha256": "2488a35f699a70e3aac2f98a7161d2bf7e2ec2da4458fa8dedec5815b53d22d3"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/verification.json",
+      "sha256": "ac922ec8db771c098c0bb2d4d660f0e26858085a6a9504052c83395b9becc161"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/wire.slash.compact.txt",
+      "sha256": "ddbd9bd9c3c395bbabffe0a154c2e53a26bc8f3399a8da25ea04f3202cbcf63b"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/wire.slash.pairs.txt",
+      "sha256": "0c784099d43424e26d272d7de09bd4fc87b81f3ff898a29b433153d581fad52e"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/scripts/audit_zh_slash.py.txt",
+      "sha256": "ba2d3bf4d5f1a1e4cfd5c40ac792fc4ea018c32853512661c668c4751b9caee9"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ZH-S1",
+      "ZH-S2",
+      "ZH-S3",
+      "ZH-S4",
+      "ZH-S5",
+      "ZH-S6",
+      "ZH-S7"
+    ],
+    "findings_total": 7,
+    "blocker": 0,
+    "major": 0,
+    "minor": 6,
+    "nit": 1,
+    "source_verdict": "clean_with_followups",
+    "rendered_followups": []
+  },
+  "ledger_entry": {
+    "locale": "zh-CN",
+    "namespace": "wire.slash",
+    "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target_sha256": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+    "translator": {
+      "agent": "coder (lopdev team), zh-CN core candidate wave",
+      "session": null,
+      "model": "not recorded in the commit",
+      "date": "2026-10-19",
+      "commit": "4840abdeb650a44db3bd9b1f564b24b6546c099a",
+      "provenance_note": "Catalogue bytes introduced in 4840abdeb6; translator session/model not recorded in the commit."
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "session": "4ecbbf4d3281",
+      "model": "deepseek/deepseek-flash",
+      "independent_from_translator_session": true
+    },
+    "status": "passed",
+    "result": "clean_with_followups",
+    "findings": 7,
+    "record_path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/record.json",
+    "route_log": "/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/config/audit/public-copy-reads.jsonl",
+    "route_log_sha256": "97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980",
+    "note": "zh24s1: 52/52 keys read at f286318c; the previously withheld key was read via the sanctioned public-copy route (digest 0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd; route log 97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980). blocker/major 0; minor 6 term/wording, nit 1 em dash. Not a security-hold clearance."
+  },
+  "audit_notes_not_execution_log": "report.md is the semantic report and evidence index; audit.log is actual command output captured during this audit. No catalogue, ledger, allowance, shipped.json or eligibility file was edited. Mechanical checks and cell-width probes were run locally; semantic findings are the auditor's own side-by-side reading of en/context/zh. No native TUI or desktop frame is claimed. zh-CN remains security-held; this audit does not clear the hold or make the locale shippable. The previously withheld credential key was read through the sanctioned public-copy route after the redaction-policy correction; this is a fresh independent audit, not an upgrade of the old failed row."
+}

@@ -1,0 +1,14 @@
+{
+  "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+  "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+  "target_sha256": "a3de10768a538e054afc35ca0aff44c29bbaa042e10e10a8913781d19de87b11",
+  "translator_hash_mismatch_count": 0,
+  "translator_hash_mismatches": [],
+  "english_and_context_unchanged_in_delta": true,
+  "english_or_context_delta_files": [],
+  "catalogue_clean_at_head": true,
+  "head_blob_sha1": "96198518bd7ec811904760f7e83770f230b275ce",
+  "target_matches_held_candidate_commit": "4840abdeb650a44db3bd9b1f564b24b6546c099a",
+  "target_bytes_match_held_candidate": true,
+  "note": "The target sha256 equals the held candidate's committed bytes at 4840abdeb6 and the current HEAD blob; the ledger row schema records no target hash, so this hash is the audit's own binding."
+}

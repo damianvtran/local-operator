@@ -1499,7 +1499,11 @@ async def test_sdk4_execution_oracle_rejects_broken_consumers(
         ({"language": []}, {"LC_ALL": "ru_RU.UTF-8"}, "ru", "ru"),
         ({"language": "auto"}, {"LANG": "hi_IN.UTF-8"}, "hi", "hi"),
         ({}, {}, "en", "en"),
-        ({"language": "zh-CN"}, {}, "en", "en"),
+        # zh-CN ships after its security disposition, and its `sdk_startup`
+        # child is English-only: the selected locale is zh-CN while the child
+        # copy falls back to en. The "unknown" arm below is the genuinely
+        # unshipped tag that exercises the English-only selection path.
+        ({"language": "zh-CN"}, {}, "zh-CN", "zh-CN"),
         ({"language": "ur"}, {}, "ur", "ur"),
         ({"language": "unknown"}, {}, "en", "en"),
         ({"language": "fr"}, {"LOP_LANG": "es"}, "fr", "fr"),

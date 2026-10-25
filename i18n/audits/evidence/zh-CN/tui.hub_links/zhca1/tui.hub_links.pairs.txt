@@ -1,0 +1,47 @@
+# tui.hub_links — sampled en/zh pairs for attestation zhca1
+# 11/56 keys; all >120 chars and all plurals included
+
+## tui.hub_links.action.pull  [8 chars]
+EN: Pull now
+ZH: 立即pull
+
+## tui.hub_links.action.retry  [5 chars]
+EN: Retry
+ZH: 重试
+
+## tui.hub_links.confirm.private  [151 chars, LONG>120]
+EN: Future changes to {item} may be published to {organization} without asking each time. Only people allowed to access that organization can receive them.
+ZH: 今后对{item}的更改可发布到{organization}，不再逐次询问。只有获准访问该组织的人才能接收。
+
+## tui.hub_links.confirm.public  [128 chars, LONG>120]
+EN: Future changes to {item} may be published publicly without asking each time. Changes from private sources are paused for review.
+ZH: 今后对{item}的更改可公开发布，不再逐次询问。来自私有来源的更改会暂停，等待审查。
+
+## tui.hub_links.hint.engage  [11 chars]
+EN: ↑↓ to begin
+ZH: ↑↓开始
+
+## tui.hub_links.mark.retry  [40 chars]
+EN: Retry {direction} for {item} at {source}
+ZH: 重试{direction}：{item}，来源为{source}
+
+## tui.hub_links.refusal.resolve_first  [47 chars]
+EN: Resolve this link's source before acting on it.
+ZH: 先解决此链接的来源问题，再执行操作。
+
+## tui.hub_links.refusal.revision_moved  [87 chars]
+EN: This link changed while you were reviewing it. Reopen the prompt to confirm the latest.
+ZH: 你审查期间此链接发生了更改。重新打开提示框，确认最新内容。
+
+## tui.hub_links.state.empty  [22 chars]
+EN: Not linked to the hub.
+ZH: 未链接到hub。
+
+## tui.hub_links.state.loading  [18 chars]
+EN: Loading hub links…
+ZH: 正在加载hub链接……
+
+## tui.hub_links.state.updated  [21 chars]
+EN: Updated from {source}
+ZH: 已从{source}更新
+

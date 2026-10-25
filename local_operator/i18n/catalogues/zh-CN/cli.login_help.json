@@ -1,0 +1,4 @@
+{
+  "cli.login_help.login": "登录提供商（OAuth或API密钥）",
+  "cli.login_help.provider": "要登录的提供商（如openai、anthropic、kimi、xai）。省略则列出支持登录的提供商。"
+}

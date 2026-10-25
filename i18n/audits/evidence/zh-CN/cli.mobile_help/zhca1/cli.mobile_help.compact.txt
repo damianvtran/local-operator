@@ -1,0 +1,4 @@
+cli.mobile_help.daemon_action	{action, select, start{Start} stop{Stop} restart{Restart} other{{action}}} the daemon	{action, select, start{启动} stop{停止} restart{重启} other{{action}}}守护进程
+cli.mobile_help.install	Install the daemon, password and LaunchAgent	安装守护进程、密码和LaunchAgent
+cli.mobile_help.logs	Tail the daemon's and the runtimes' logs	跟踪守护进程和运行时的日志末尾
+cli.mobile_help.status	Daemon health, gate and live sessions	守护进程健康状态、访问关卡和活动会话

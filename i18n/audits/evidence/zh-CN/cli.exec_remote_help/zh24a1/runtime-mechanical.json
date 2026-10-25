@@ -1,0 +1,157 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.exec_remote_help",
+  "revision": "f7a884b7b73e0b92d2b44ea2020c46b9b0d4843f",
+  "generated_utc": "2026-10-24T23:28:34Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 11,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "cli.exec_remote_help.budget_usd",
+      "zh_render": "本次运行的花费上限，单位为美元（默认：服务器的准入默认值）",
+      "en_render": "Spending cap for this run in US dollars (default: the server's admission default)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.cancel",
+      "zh_render": "取消一次远程运行并退出",
+      "en_render": "Cancel a remote run and exit",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.detach",
+      "zh_render": "打印运行ID和幂等键后退出，而不是监视该运行",
+      "en_render": "Print the run id and idempotency key, then exit instead of watching the run",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.idempotency_key",
+      "zh_render": "复用此幂等键而不生成新键，使已提交运行的重试不会运行两次",
+      "en_render": "Idempotency key to reuse instead of minting a fresh one, so a retry of a submitted run cannot run twice",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.max_hours",
+      "zh_render": "远程运行在服务器停止它之前可执行的小时数（默认：2；最大值由服务器限制）",
+      "en_render": "Hours the remote run may execute before the server stops it (default: 2; the server caps the maximum)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.network",
+      "zh_render": "提交运行所用的网络，按名称或ID指定。本设备位于多个网络时必须指定",
+      "en_render": "Network to submit the run through, by name or id. Required when this device is in more than one network",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.remote",
+      "zh_render": "在Radient远程计算上运行此任务（第1档：短时运行），而非在本机运行",
+      "en_render": "Run this task on Radient remote compute (tier 1: short-lived runs) instead of this machine",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.repo",
+      "zh_render": "远程运行检出的Git URL。配合--remote时必填：本地文件从不上传",
+      "en_render": "Git URL the remote run checks out. Required with --remote: local files are never uploaded",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.sha",
+      "zh_render": "在--repo中检出的提交。配合--remote时必填",
+      "en_render": "Commit to check out in --repo. Required with --remote",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.size",
+      "zh_render": "远程运行的计算规格：s、m或l（默认：m）",
+      "en_render": "Compute size for the remote run: s, m or l (default: m)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "cli.exec_remote_help.status",
+      "zh_render": "以JSON打印一次远程运行并退出",
+      "en_render": "Print one remote run as JSON and exit",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{2,}(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]+",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

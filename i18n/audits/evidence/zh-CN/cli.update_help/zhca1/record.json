@@ -1,0 +1,66 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "audit_kind": "independent_carried_namespace_attestation",
+ "locale": "zh-CN",
+ "namespace": "cli.update_help",
+ "round": 1,
+ "audit_date": "2026-10-24",
+ "key_count": 6,
+ "source_audit_revision": "ebb70df3a887aa7e9b448560e0546c2cf817b133",
+ "attested_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+ "current_byte_round_for_ledger": true,
+ "current_bytes_match_audited_hashes": true,
+ "attestation_record": "i18n/audits/evidence/zh-CN/cli.update_help/zhca1/attestation.json",
+ "translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session": "d9e49690d15d",
+  "model": "deepseek/deepseek-flash",
+  "date": "2026-10-24",
+  "independent_from_translator_session": true,
+  "actual_model_source": "Local Operator session header: Model: deepseek/deepseek-flash; no fallback used. The prior translator is a different agent/session."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/cli.update_help.json",
+   "sha256": "78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/cli.update_help.context.json",
+   "sha256": "46dfc07c168a78805b437a4561dc0a8f47b005a48176b424b5aca47373cdaa5f"
+  },
+  "zh-CN": {
+   "path": "local_operator/i18n/catalogues/zh-CN/cli.update_help.json",
+   "sha256": "b59b3b7c5da4535a4543b56ad54a6129f9abdcf761f7ef4e6b531b208277d790"
+  },
+  "prior_held_target_sha256": "b59b3b7c5da4535a4543b56ad54a6129f9abdcf761f7ef4e6b531b208277d790",
+  "policy": [
+   {
+    "path": "i18n/glossary.md",
+    "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+   },
+   {
+    "path": "i18n/style-guides/zh-CN.md",
+    "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+   }
+  ]
+ },
+ "current_report_verdict": {
+  "status": "carried",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "ZHC-05"
+  ],
+  "findings_total": 1,
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 0
+ },
+ "audit_notes_not_execution_log": "attestation.json is the primary record; report.md is the reading aid; audit.log is newly executed verifier output, not a historical transcript."
+}

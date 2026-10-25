@@ -1,0 +1,15 @@
+# cli.refresh_help — sampled en/zh pairs for attestation zhca1
+# 3/7 keys; all >120 chars and all plurals included
+
+## cli.refresh_help.all  [74 chars]
+EN: ask every live session on this machine (no confirmation: nothing is ended)
+ZH: 请求此机器上的每个活动会话（无需确认：不会结束任何会话）
+
+## cli.refresh_help.json  [35 chars]
+EN: machine-readable outcome per target
+ZH: 每个目标的机器可读结果
+
+## cli.refresh_help.refresh  [85 chars]
+EN: Ask running sessions to move to the build on disk at their next boundary (no signals)
+ZH: 请求运行中的会话在下一个边界切换至磁盘上的构建（不发信号）
+

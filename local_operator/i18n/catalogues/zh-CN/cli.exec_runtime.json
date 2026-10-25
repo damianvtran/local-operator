@@ -1,0 +1,13 @@
+{
+  "cli.exec_runtime.thinking": "· 思考中……",
+  "cli.exec_runtime.tool_interrupted": "⊘ {name}已中断",
+  "cli.exec_runtime.tool_failed": "✗ {name}失败",
+  "cli.exec_runtime.output_check_failed": "! 输出检查失败（{format}，第{attempt}/{max_attempts}次尝试）：{reason}",
+  "cli.exec_runtime.retry": "[dim]重试{attempt}：{error}[/dim]",
+  "cli.exec_runtime.model_fallback": "[dim]已回退至{selector}[/dim]",
+  "cli.exec_runtime.model_switched": "[dim]已切换至{selector}[/dim]",
+  "cli.exec_runtime.model_returned": "[dim]已返回{selector}[/dim]",
+  "cli.exec_runtime.compacting": "[dim]正在压缩上下文……[/dim]",
+  "cli.exec_runtime.error": "错误：{sentence}",
+  "cli.exec_runtime.aborted": "[red]已中止[/red]"
+}

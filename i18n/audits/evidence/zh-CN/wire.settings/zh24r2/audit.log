@@ -1,0 +1,27 @@
+$ git -C /Users/damian/local-operator/.worktrees/zh-cn-core rev-parse HEAD
+d9f70f622d9f0f1600c667cfe918571a408e3cb6
+# Transcript of the zh24r2 re-audit at this revision. audit.py.txt and fix-verify.py.txt are preserved byte-identically; the commands below are their reproduction form.
+$ python3 i18n/audits/evidence/zh-CN/wire.settings/zh24r2/audit.py.txt --ns wire.settings --out i18n/audits/evidence/zh-CN/wire.settings/zh24r2
+namespace=wire.settings keys=818 revision=d9f70f622d9f0f1600c667cfe918571a408e3cb6
+key_parity: missing=0 extra=0 order_identical=True
+nfc=0 control=0 bidi=0 zero_width=0 fullwidth_latin_digits=0 cjk_latin_space=0
+icu_arguments: mismatches=0; plural_structure_errors=0
+technical_tokens_missing=0
+width: keys_with_budget=7 over_budget=0
+  width wire.settings.asks_lapsed_visible_for.help max=58 zh_static=40 zh_rendered=40 zh_wide=40 over=-18
+  width wire.settings.asks_lapsed_visible_for.label max=29 zh_static=16 zh_rendered=16 zh_wide=16 over=-13
+  width wire.settings.session_compression.title max=34 zh_static=8 zh_rendered=8 zh_wide=8 over=-26
+  width wire.settings.session_compression_after_days.label max=29 zh_static=18 zh_rendered=18 zh_wide=18 over=-11
+  width wire.settings.session_compression_enabled.label max=29 zh_static=14 zh_rendered=14 zh_wide=14 over=-15
+  width wire.settings.session_scratchpad.title max=12 zh_static=6 zh_rendered=6 zh_wide=6 over=-6
+  width wire.settings.session_scratchpad_max_bytes.label max=29 zh_static=18 zh_rendered=18 zh_wide=18 over=-11
+render: plural_samples=0 static_samples=818 failures=0 plural_keys=0 select_keys=0
+$ python3 i18n/audits/evidence/zh-CN/wire.settings/zh24r2/fix-verify.py.txt wire.settings i18n/audits/evidence/zh-CN/wire.settings/zh24r2
+namespace=wire.settings changed_keys=3 matches=True args_equal=True renders_ok=True over_budget=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+$ sha256sum (en, context, target)
+c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582  local_operator/i18n/catalogues/en/wire.settings.json
+67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9  local_operator/i18n/catalogues/en/wire.settings.context.json
+77fde8865dadc3fc322ccd07a86c16277ad0a02bf44e79e89b686fa37d6807d5  local_operator/i18n/catalogues/zh-CN/wire.settings.json

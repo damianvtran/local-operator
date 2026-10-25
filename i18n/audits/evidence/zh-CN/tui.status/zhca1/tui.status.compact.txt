@@ -1,0 +1,3 @@
+tui.status.agents	{count, plural, one {# agent} other {# agents}}	{count, plural, other {# 个智能体}}
+tui.status.band.working	working	工作中
+tui.status.jobs	{count, plural, one {# job} other {# jobs}}	{count, plural, other {# 个任务}}

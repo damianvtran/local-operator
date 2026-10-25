@@ -1,0 +1,6 @@
+cli.browser_help.browser	Connect the browser tool to a Chromium extension	将browser工具连接至Chromium扩展
+cli.browser_help.daemon_action	{action, select, start{Start} stop{Stop} restart{Restart} other{{action}}} the daemon	{action, select, start{启动} stop{停止} restart{重启} other{{action}}}守护进程
+cli.browser_help.install	Install the bridge daemon	安装桥接守护进程
+cli.browser_help.logs	Tail the daemon log	跟踪守护进程日志末尾
+cli.browser_help.status_repair	Reconcile advertised state against reality: drop tabs that no longer exist and republish a fresh heartbeat. Safe while sessions are live.	将公布的状态与实际状态对齐：移除已不存在的标签页并重新发布最新心跳。会话运行中也可安全执行。
+cli.browser_help.tabs	List durable ownership records and live tabs (read-only)	列出持久化所有权记录和当前标签页（只读）

@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "zh24s1",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 15,
+  "files": [
+    {
+      "path": "audit.log",
+      "bytes": 4198,
+      "sha256": "94fd83eec6157ee93aea32b1d3ab27ffc20a77feba1b4c130fb96443a10b66e2"
+    },
+    {
+      "path": "hash-checks.json",
+      "bytes": 859,
+      "sha256": "20fe6a74620fcfbf3cccf51d30ca09cb1074159c655246ca5fe0d67ae200e3fa"
+    },
+    {
+      "path": "mechanical-raw.json",
+      "bytes": 20517,
+      "sha256": "881bd5fee3c3465de9952b3607f38f9badaa58504c3d8d6faaab471aaa238ab2"
+    },
+    {
+      "path": "pseudo-evidence.json",
+      "bytes": 3894,
+      "sha256": "444d5214e507b0bde4acdf6262aba2978eae93d61e6cd177d605368b53fe418b"
+    },
+    {
+      "path": "receipt.json",
+      "bytes": 2126,
+      "sha256": "244b8220760881aa576f8272d86306a7473eb8e251fa3e191ad91d88dba5a142"
+    },
+    {
+      "path": "record.json",
+      "bytes": 9303,
+      "sha256": "a19dafb743e471a29f2dd0677e89731417a0cbde793914b8dcd85dd013b9b2f9"
+    },
+    {
+      "path": "report.md",
+      "bytes": 10453,
+      "sha256": "11ca9dbde255302695e3137e15f8913b67ce8eaae36bd5ce1ea72e43e4d5c317"
+    },
+    {
+      "path": "route-read-log.jsonl",
+      "bytes": 945,
+      "sha256": "97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980"
+    },
+    {
+      "path": "route-read.json",
+      "bytes": 1542,
+      "sha256": "99fc56b957d755d15a6d99a92a45e100905c1f13bcd349d61fc3ea74db2b30ed"
+    },
+    {
+      "path": "runtime-mechanical.json",
+      "bytes": 884,
+      "sha256": "bb279f1e331ab8b553b5a446bfa3413b2f93b7fa40fe244e8ea5845ed61c4f8e"
+    },
+    {
+      "path": "scope.json",
+      "bytes": 1030,
+      "sha256": "2488a35f699a70e3aac2f98a7161d2bf7e2ec2da4458fa8dedec5815b53d22d3"
+    },
+    {
+      "path": "scripts/audit_zh_slash.py.txt",
+      "bytes": 37889,
+      "sha256": "ba2d3bf4d5f1a1e4cfd5c40ac792fc4ea018c32853512661c668c4751b9caee9"
+    },
+    {
+      "path": "verification.json",
+      "bytes": 637,
+      "sha256": "ac922ec8db771c098c0bb2d4d660f0e26858085a6a9504052c83395b9becc161"
+    },
+    {
+      "path": "wire.slash.compact.txt",
+      "bytes": 2404,
+      "sha256": "ddbd9bd9c3c395bbabffe0a154c2e53a26bc8f3399a8da25ea04f3202cbcf63b"
+    },
+    {
+      "path": "wire.slash.pairs.txt",
+      "bytes": 6968,
+      "sha256": "0c784099d43424e26d272d7de09bd4fc87b81f3ff898a29b433153d581fad52e"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "method": "zh-CN fit probe: Chinese renders in 2-cell CJK glyphs and is normally shorter than English, so no RTL-style synthetic stretch is meaningful. measured_cells is the authoritative cell count (East Asian Wide/Fullwidth = 2, combining marks = 0). A +25% growth scenario models a future longer phrasing for the same key; it is reported but not treated as a failure. This is a synthetic fit probe, not a rendered TUI screenshot.",
+  "argument_parity_errors": [],
+  "plural_render_count": 0,
+  "plural_render_errors": [],
+  "width_rows": [
+    {
+      "key": "wire.settings.hub_defaults.agents.help",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 72,
+      "measured_cells": 55,
+      "en_cells": 69,
+      "growth_25pct_cells": 69,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.settings.hub_defaults.teams.help",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 72,
+      "measured_cells": 44,
+      "en_cells": 67,
+      "growth_25pct_cells": 55,
+      "fits": true,
+      "growth_fits": true
+    }
+  ],
+  "static_or_reserved_over_budget": []
+}

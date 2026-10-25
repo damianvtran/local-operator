@@ -1,0 +1,19 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "locale": "zh-CN",
+ "namespace": "wire.exec",
+ "record": "i18n/audits/evidence/zh-CN/wire.exec/zhca1/attestation.json",
+ "provenance": "Attestation bundle assembled by translation-auditor (lopdev team), session d9e49690d15d, actual model deepseek/deepseek-flash; the prior audit provenance is named inside attestation.json.",
+ "hashes": {
+  "attestation.json": "179ae5c8f7b7b7ffa070ac8653271b2d6088c088238f806e1de42c5c1a4bef87",
+  "audit.log": "920917c824b58fff6f0848b50fe8f3ddb7a2d25c801f24dae3059fb2de0201d4",
+  "mechanical-raw.json": "ce0e8610dc713bca7fe2b3215b1334c6f7c6503652bf0e9a5e9fad83202c7e64",
+  "pseudo-evidence.json": "5c0f83a5bfb3af510135d199e66a5198c8334891f68272e10989d2680e44bb20",
+  "record.json": "21c89d526c6e03287b2c2b650466a02222555dc6ee4718cbd88f087da36c866e",
+  "report.md": "1dc18809d60444924516cbcc5999303e2bc000da14ac9284dff86d21f0b82d44",
+  "runtime-mechanical.json": "2c3c1092158164f8545ea003e287c9b4d2de4704ec9a055e512925bfe0dfb03e",
+  "wire.exec.compact.txt": "f04d027e5015c0fded9f0a918923016492602276468b75794420beff5b9a62ae",
+  "wire.exec.pairs.txt": "987f9a909065cf152e3b97aac5d37ed7c9c2c19a4cfc7ee7ae0411923115949f"
+ }
+}

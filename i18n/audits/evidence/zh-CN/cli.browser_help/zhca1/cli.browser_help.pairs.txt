@@ -1,0 +1,27 @@
+# cli.browser_help — sampled en/zh pairs for attestation zhca1
+# 6/20 keys; all >120 chars and all plurals included
+
+## cli.browser_help.browser  [48 chars]
+EN: Connect the browser tool to a Chromium extension
+ZH: 将browser工具连接至Chromium扩展
+
+## cli.browser_help.daemon_action  [85 chars]
+EN: {action, select, start{Start} stop{Stop} restart{Restart} other{{action}}} the daemon
+ZH: {action, select, start{启动} stop{停止} restart{重启} other{{action}}}守护进程
+
+## cli.browser_help.install  [25 chars]
+EN: Install the bridge daemon
+ZH: 安装桥接守护进程
+
+## cli.browser_help.logs  [19 chars]
+EN: Tail the daemon log
+ZH: 跟踪守护进程日志末尾
+
+## cli.browser_help.status_repair  [137 chars, LONG>120]
+EN: Reconcile advertised state against reality: drop tabs that no longer exist and republish a fresh heartbeat. Safe while sessions are live.
+ZH: 将公布的状态与实际状态对齐：移除已不存在的标签页并重新发布最新心跳。会话运行中也可安全执行。
+
+## cli.browser_help.tabs  [56 chars]
+EN: List durable ownership records and live tabs (read-only)
+ZH: 列出持久化所有权记录和当前标签页（只读）
+

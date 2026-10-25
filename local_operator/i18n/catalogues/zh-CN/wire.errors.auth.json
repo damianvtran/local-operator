@@ -1,0 +1,14 @@
+{
+  "wire.errors.auth.account_not_found": "未找到提供商账户",
+  "wire.errors.auth.auth_refusal": "{error}",
+  "wire.errors.auth.credentials_missing": "未找到此提供商的已存储凭据。",
+  "wire.errors.auth.input_invalid": "输入非空值，最多32768个字符。",
+  "wire.errors.auth.key_not_accepted": "此提供商不接受API密钥。",
+  "wire.errors.auth.key_rejected": "提供商拒绝了此API密钥。",
+  "wire.errors.auth.local_server_only": "只能测试本地提供商的服务器。",
+  "wire.errors.auth.provider_refusal": "{error}",
+  "wire.errors.auth.server_address_missing": "此提供商没有可供测试的服务器地址。",
+  "wire.errors.auth.sign_in_missing": "此登录流程已不可用。重新开始。",
+  "wire.errors.auth.sign_in_not_waiting": "此登录流程当前未在等待输入。",
+  "wire.errors.auth.store_unreadable": "无法读取凭据存储——提供商普查需要读取它。"
+}

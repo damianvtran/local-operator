@@ -1,0 +1,19 @@
+{
+ "schema": 1,
+ "audit_id": "zhca1",
+ "locale": "zh-CN",
+ "namespace": "cli.qwencloud_help",
+ "record": "i18n/audits/evidence/zh-CN/cli.qwencloud_help/zhca1/attestation.json",
+ "provenance": "Attestation bundle assembled by translation-auditor (lopdev team), session d9e49690d15d, actual model deepseek/deepseek-flash; the prior audit provenance is named inside attestation.json.",
+ "hashes": {
+  "attestation.json": "4aa8ba613c4f914a70830e2511389a4c1d47fcabc5bca488808df319160f9953",
+  "audit.log": "0b64dfe0cbf80f0202749ded7445dff8b50674e285bc246ad6f6831f9d72d18a",
+  "cli.qwencloud_help.compact.txt": "7cf0a1404b07da00b92457ecc6d17f0a5d365bf1dcb7f5476442ab358f17a8f2",
+  "cli.qwencloud_help.pairs.txt": "850672e0d7e6fac032d6b2ce9778424e8fc758e01d31d80e65ac1e5142321802",
+  "mechanical-raw.json": "047997a364cdbd5b5dccf323ddac0196b7885bec105547e6f3ef51c236231208",
+  "pseudo-evidence.json": "e063155d2a123eb57c3d42ed19593239edb76f3a792607a08743ecfa60ff76fa",
+  "record.json": "7d573ef422d5e84389297c5598deebceb50de623b8f3bf614808f38c5e9f397f",
+  "report.md": "39ddaa845b1c058bd2b2f7ca9e8317a3453fdfe8156e9263167cee15a9507390",
+  "runtime-mechanical.json": "a51687b79ba464acdb97bb6052faf2d3917c0d8bb5390b25bbf92c10008e6400"
+ }
+}

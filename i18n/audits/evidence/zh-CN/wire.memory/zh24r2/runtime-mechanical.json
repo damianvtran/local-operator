@@ -1,0 +1,199 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.memory",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "generated_utc": "2026-10-25T00:45:59Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 17,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "wire.memory.title",
+      "zh_render": "记忆",
+      "en_render": "Memory",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.command",
+      "zh_render": "查看、搜索、纠正或遗忘限定范围内的记忆",
+      "en_render": "Inspect, search, correct or forget scoped memory",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.description",
+      "zh_render": "有界本地召回与尽力而为的压缩采集；检索出的事实不可信。",
+      "en_render": "Bounded local recall and best-effort compaction capture; retrieved facts are untrusted.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.enabled.label",
+      "zh_render": "限定范围的记忆",
+      "en_render": "Scoped memory",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.enabled.help",
+      "zh_render": "启用有界SQLite记忆库。关闭不会清除已保留的事实。",
+      "en_render": "Enable the bounded SQLite memory bank. Turning this off does not erase retained facts.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.capture.label",
+      "zh_render": "压缩采集",
+      "en_render": "Compaction capture",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.capture.help",
+      "zh_render": "每次压缩提交后采集决策、目标和进展；context-full还会复用其已有摘要。显式存储仍是保留目标和决策的保障途径。",
+      "en_render": "Capture decisions, goals and progress after committed compactions; context-full also reuses its existing summary. Explicit stores remain the guaranteed route for goals and decisions.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.capture.locators.label",
+      "zh_render": "采集定位符上下文",
+      "en_render": "Capture locator context",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.capture.locators.help",
+      "zh_render": "还会保留路径、URL和ID，但仅作为同一区块中所采集的决策、目标或进展笔记的附加上下文，绝不作为独立事实。默认关闭。关闭后不影响已有事实。",
+      "en_render": "Also keep paths, URLs and ids, but only as context attached to a captured decision, goal or progress note in the same section; never as facts of their own. Off by default. Turning this off leaves existing facts untouched.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.suggest.label",
+      "zh_render": "召回建议",
+      "en_render": "Recall suggestions",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.suggest.help",
+      "zh_render": "根据当前用户消息建议最多三个不可信标题，使用单独的180-token上限。不发起网络或嵌入请求。",
+      "en_render": "Suggest up to three untrusted titles from the current user message, within a separate 180-token cap. No network or embedding request.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.sync.label",
+      "zh_render": "受信任对等设备记忆同步",
+      "en_render": "Trusted-peer memory sync",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.sync.help",
+      "zh_render": "向已配对、在接收端具有admin权限且支持memory-sync-v1的现有对等设备增量共享所选范围。包括会话记忆，但不复制会话记录。",
+      "en_render": "Incrementally share selected scopes with existing paired receiver-admin peers supporting memory-sync-v1. This includes session memories without copying transcripts.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.scopes.label",
+      "zh_render": "要同步的记忆范围",
+      "en_render": "Memory scopes to sync",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.scopes.help",
+      "zh_render": "仅共享这些命名空间。会话、团队和智能体所有者仍使用精确的注册表/会话ID；支持全部四种范围。",
+      "en_render": "Only these namespaces are shared. Session, team and agent owners remain exact registry/session IDs; all four scopes are supported.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.exclude.label",
+      "zh_render": "排除的记忆对等设备",
+      "en_render": "Excluded memory peers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.memory.exclude.help",
+      "zh_render": "不参与记忆复制的设备ID。这不会更改配对、信任或加入授权。",
+      "en_render": "Device IDs excluded from memory replication. This does not change pairing, trust or enrollment grants.",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]*[\\w/-]",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

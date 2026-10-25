@@ -1,0 +1,6 @@
+tui.usage.paid.continue	included quota used; credits will continue	包含的配额已用尽；将继续使用积分
+tui.usage.reported_balance	{count, plural, one {{shown} reported balance} other {{shown} reported balances}}	{count, plural, other {{shown}项已报告余额}}
+tui.usage.showing_prefix	showing 	显示 
+tui.usage.sign_in_expired	{value} sign-in expired	{value}项登录已过期
+tui.usage.title	Usage	用量
+tui.usage.windows_count	{count, plural, one {{shown} window} other {{shown} windows}}	{count, plural, other {{shown}个窗口}}

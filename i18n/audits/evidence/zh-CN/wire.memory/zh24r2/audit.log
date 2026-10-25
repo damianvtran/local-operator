@@ -1,0 +1,20 @@
+$ git -C /Users/damian/local-operator/.worktrees/zh-cn-core rev-parse HEAD
+d9f70f622d9f0f1600c667cfe918571a408e3cb6
+# Transcript of the zh24r2 re-audit at this revision. audit.py.txt and fix-verify.py.txt are preserved byte-identically; the commands below are their reproduction form.
+$ python3 i18n/audits/evidence/zh-CN/wire.memory/zh24r2/audit.py.txt --ns wire.memory --out i18n/audits/evidence/zh-CN/wire.memory/zh24r2
+namespace=wire.memory keys=17 revision=d9f70f622d9f0f1600c667cfe918571a408e3cb6
+key_parity: missing=0 extra=0 order_identical=True
+nfc=0 control=0 bidi=0 zero_width=0 fullwidth_latin_digits=0 cjk_latin_space=0
+icu_arguments: mismatches=0; plural_structure_errors=0
+technical_tokens_missing=0
+width: keys_with_budget=0 over_budget=0
+render: plural_samples=0 static_samples=17 failures=0 plural_keys=0 select_keys=0
+$ python3 i18n/audits/evidence/zh-CN/wire.memory/zh24r2/fix-verify.py.txt wire.memory i18n/audits/evidence/zh-CN/wire.memory/zh24r2
+namespace=wire.memory changed_keys=2 matches=True args_equal=True renders_ok=True over_budget=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+$ sha256sum (en, context, target)
+319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7  local_operator/i18n/catalogues/en/wire.memory.json
+852518b5d2bd41f4b8b72d6d89d961d35b1bafaf341726e0406973d12b1c5e7d  local_operator/i18n/catalogues/en/wire.memory.context.json
+30640d16449ca2e621ae7fd979749692f72147372f01b845c4d618191d07a9a6  local_operator/i18n/catalogues/zh-CN/wire.memory.json

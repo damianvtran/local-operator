@@ -1,0 +1,23 @@
+# wire.errors.media — sampled en/zh pairs for attestation zhca1
+# 5/20 keys; all >120 chars and all plurals included
+
+## wire.errors.media.speech_radient_sign_in_failed  [68 chars]
+EN: Your Radient sign-in has stopped working. Sign in again in Settings.
+ZH: Radient登录已失效。在设置中重新登录。
+
+## wire.errors.media.speech_upstream_reported_error  [85 chars]
+EN: Speech generation failed upstream: Radient reported an error (HTTP {status}): {error}
+ZH: 上游语音生成失败：Radient报告错误（HTTP {status}）：{error}
+
+## wire.errors.media.speech_upstream_responded  [71 chars]
+EN: Speech generation failed upstream: Upstream responded {status}: {error}
+ZH: 上游语音生成失败：上游返回{status}：{error}
+
+## wire.errors.media.speech_vendor_key_refused  [42 chars]
+EN: {vendor} refused your API key. Replace it.
+ZH: {vendor}拒绝了你的API密钥。更换密钥。
+
+## wire.errors.media.unknown_provider  [28 chars]
+EN: Unknown provider {provider}.
+ZH: 未知提供商{provider}。
+

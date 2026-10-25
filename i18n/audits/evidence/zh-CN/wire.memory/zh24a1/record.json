@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "audit_kind": "independent_delta_and_regression_audit",
+  "locale": "zh-CN",
+  "namespace": "wire.memory",
+  "round": 1,
+  "audit_date": "2026-10-24",
+  "key_count": 17,
+  "keys_read": 17,
+  "delta_key_count": 3,
+  "delta_keys": [
+    "wire.memory.capture.help",
+    "wire.memory.capture.locators.help",
+    "wire.memory.capture.locators.label"
+  ],
+  "delta_added": [
+    "wire.memory.capture.locators.help",
+    "wire.memory.capture.locators.label"
+  ],
+  "delta_modified": [
+    "wire.memory.capture.help"
+  ],
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "assembly_revision": "5b5367be1b4acef44d564dcf8cbc1c7c06b209e8",
+  "catalogue_diff_between_source_and_assembly": "empty",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "current_byte_peer_audit_id": null,
+  "current_byte_peer_record": null,
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "commit": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "3d1df2689651",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.memory.json",
+      "sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.memory.context.json",
+      "sha256": "852518b5d2bd41f4b8b72d6d89d961d35b1bafaf341726e0406973d12b1c5e7d"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.memory.json",
+      "sha256": "4e39d2bacb0ea88a16f7de720a5ae2208a580ea789ecc135a1c4368d2f3d1e28"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision."
+  },
+  "source_receipt": null,
+  "source_companions": [
+    "audit.log",
+    "mechanical-raw.json",
+    "pseudo-evidence.json",
+    "report.md",
+    "runtime-mechanical.json",
+    "wire.memory.compact.txt",
+    "wire.memory.pairs.txt"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/audit.log",
+      "sha256": "dab7ebba0733e433b0a2e6db584c13468674980f8bb23f9f6cc6d4df50d0287e"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/mechanical-raw.json",
+      "sha256": "3bb50ae184454f418146b0a657ace555700df46a1dd4f2053307c8ec9dc7122e"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/pseudo-evidence.json",
+      "sha256": "5119a9657c5d08dbc8ffb481f83ab2605ae0ff395afa0c928b5f727c3b447e1c"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/report.md",
+      "sha256": "7442456fde8b41ff0e91255b8334c31dcc65bd5cc758ba3a6d400375905818cb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/runtime-mechanical.json",
+      "sha256": "bf0dc6c3031e00044bde963f2bea747b0fb1d25375ce1b9e2a71dc043836c544"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/wire.memory.compact.txt",
+      "sha256": "5c9836f58722234d7ee4aa039d7e1222a9e7f565eac24c0ad0307fcd71ae3823"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.memory/zh24a1/wire.memory.pairs.txt",
+      "sha256": "229e33f19867ec37d836add55f9c11923bcb6ad6aa5d1a3dd4f4801167b51438"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ZH-A1",
+      "ZH-A3"
+    ],
+    "findings_total": 2,
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0,
+    "source_verdict": "clean_with_followups",
+    "rendered_followups": []
+  },
+  "ledger_entry": {
+    "locale": "zh-CN",
+    "namespace": "wire.memory",
+    "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+    "context_sha256": "852518b5d2bd41f4b8b72d6d89d961d35b1bafaf341726e0406973d12b1c5e7d",
+    "target_sha256": "4e39d2bacb0ea88a16f7de720a5ae2208a580ea789ecc135a1c4368d2f3d1e28",
+    "translator": {
+      "agent": null,
+      "session": null,
+      "model": null,
+      "date": null,
+      "commit": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+      "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "session": "3d1df2689651",
+      "model": "deepseek/deepseek-flash",
+      "independent_from_translator_session": true,
+      "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none"
+    },
+    "status": "passed",
+    "result": "clean_with_followups",
+    "findings": 2,
+    "note": "Independent zh24a1 audit at c4ba95919dbea27fcf990101f9e48ed21e977e10: 17 keys read, delta 3; blocker/major 0, minor 2, nit 0."
+  },
+  "audit_notes_not_execution_log": "Independent read-only audit of the catalogue at c4ba95919dbea27fcf990101f9e48ed21e977e10. No catalogue, ledger, allowance, shipped.json or eligibility file was edited. Mechanical checks and full-message rendering were run locally; semantic findings are the auditor's own reading of en/context/zh side by side. No native TUI or desktop frame is claimed."
+}

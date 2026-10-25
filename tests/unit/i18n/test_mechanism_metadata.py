@@ -1,4 +1,11 @@
-"""Recognition and negotiation admit audited Urdu while Chinese remains held."""
+"""Recognition, negotiation and the shipped filter across the active set.
+
+Every supported tag must normalise to its canonical locale, and the shipped
+filter must admit exactly the locales the ledger passed. Chinese was the
+long-held example here; its disposition is released (2026-10-24), so the held
+case these tests still exercise is a locale the SUPPORTED set does not carry
+at all (zh-Hant/unknown), not zh-CN.
+"""
 
 from __future__ import annotations
 
@@ -14,9 +21,9 @@ from local_operator.server.routes import capabilities, i18n
 @pytest.mark.parametrize(
     "tag, canonical, direction, expected",
     [
-        ("zh_CN.UTF-8", "zh-CN", "ltr", "en"),
-        ("zh-Hans", "zh-CN", "ltr", "en"),
-        ("zh-cn", "zh-CN", "ltr", "en"),
+        ("zh_CN.UTF-8", "zh-CN", "ltr", "zh-CN"),
+        ("zh-Hans", "zh-CN", "ltr", "zh-CN"),
+        ("zh-cn", "zh-CN", "ltr", "zh-CN"),
         ("ur_PK.UTF-8", "ur", "rtl", "ur"),
         ("ur_IN", "ur", "rtl", "ur"),
         ("zh-Hant", None, "ltr", "en"),
@@ -28,10 +35,12 @@ def test_recognition_direction_and_shipped_filter(tag, canonical, direction, exp
     assert resolve.normalise_locale(tag) == canonical
     assert locale_direction(tag) == direction
     assert resolve.resolve_language(tag, environ={}, system="Linux") == expected
-    assert "zh-CN" not in resolve.shipped_locales()
+    # Both audited waves are in the generated set; the filter, not recognition,
+    # is what decides eligibility.
+    assert "zh-CN" in resolve.shipped_locales()
     assert "ur" in resolve.shipped_locales()
     options = {value for value, _ in resolve.language_options()}
-    assert "zh-CN" not in options
+    assert "zh-CN" in options
     assert "ur" in options
 
 
@@ -53,7 +62,7 @@ def test_existing_formats_use_rfc_latin_digits(tag) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "tag, expected, direction",
-    [("ur_PK", "ur", "rtl"), ("zh-Hans", "en", "ltr"), ("fr", "fr", "ltr")],
+    [("ur_PK", "ur", "rtl"), ("zh-Hans", "zh-CN", "ltr"), ("fr", "fr", "ltr")],
 )
 async def test_mounted_capabilities_metadata_and_catalogue_gate(
     monkeypatch, tag, expected, direction
@@ -70,14 +79,16 @@ async def test_mounted_capabilities_metadata_and_catalogue_gate(
         result = response.json()["result"]
         assert result["language"] == expected
         assert result["language_direction"] == direction
-        for blocked_path in ("zh-CN/wire.errors", "ur/wire.exec"):
+        for blocked_path in ("zh-CN/wire.settings.account_policy", "ur/wire.exec"):
             blocked = await client.get(
                 f"/v1/i18n/catalogues/{blocked_path}", headers={"If-None-Match": "*"}
             )
-            # Chinese is held; Urdu does not carry wire.exec. The raw route
-            # serves committed namespaces only, not synthetic fallback files.
+            # Neither locale carries that namespace: account_policy is an
+            # approved English-only child, and Urdu does not carry wire.exec.
+            # The raw route serves committed namespaces only, not synthetic
+            # fallback files.
             assert blocked.status_code == 404
-        for shipped in ("ur", "en"):
+        for shipped in ("ur", "zh-CN", "en"):
             control = await client.get(
                 f"/v1/i18n/catalogues/{shipped}/wire.errors", headers={"If-None-Match": "*"}
             )
@@ -86,8 +97,8 @@ async def test_mounted_capabilities_metadata_and_catalogue_gate(
 
 @pytest.mark.asyncio
 async def test_capabilities_resolves_once_for_consistent_direction(monkeypatch) -> None:
-    # The production Urdu path above returns ur/rtl and held Chinese returns
-    # en/ltr. This synthetic sequence isolates the double-read race: capabilities
+    # The production Urdu path above returns ur/rtl and Chinese returns
+    # zh-CN/ltr. This synthetic sequence isolates the double-read race: capabilities
     # must derive language and direction from one resolution snapshot.
     calls = []
 
@@ -107,9 +118,9 @@ async def test_capabilities_resolves_once_for_consistent_direction(monkeypatch) 
 @pytest.mark.parametrize(
     "tag, canonical, expected",
     [
-        ("zh-cn", "zh-CN", "en"),
-        ("zh-Hans", "zh-CN", "en"),
-        ("zh_CN.UTF-8", "zh-CN", "en"),
+        ("zh-cn", "zh-CN", "zh-CN"),
+        ("zh-Hans", "zh-CN", "zh-CN"),
+        ("zh_CN.UTF-8", "zh-CN", "zh-CN"),
         ("ur_PK", "ur", "ur"),
         ("ur_IN", "ur", "ur"),
     ],

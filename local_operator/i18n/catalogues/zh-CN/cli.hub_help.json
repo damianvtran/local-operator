@@ -1,0 +1,14 @@
+{
+  "cli.hub_help.hub": "Agent Hub更新状态",
+  "cli.hub_help.status": "显示从hub pull的智能体和团队有哪些更新",
+  "cli.hub_help.status_json": "输出桌面端路由载荷",
+  "cli.hub_help.links": "列出所有hub链接（无论是否正常）及其来源、范围和策略",
+  "cli.hub_help.links_json": "输出桌面端链接载荷",
+  "cli.hub_help.link": "编辑一个hub链接的独立策略",
+  "cli.hub_help.link_set": "设置此链接的subscribe和/或auto_push策略",
+  "cli.hub_help.link_set_link_id": "来自`lop hub links`的链接ID",
+  "cli.hub_help.link_set_subscribe": "此链接的无人值守入站同步",
+  "cli.hub_help.link_set_auto_push": "此链接的无人值守出站发布",
+  "cli.hub_help.link_set_expected_revision": "上次看到的策略修订版（CAS）；省略时先读取最新修订版",
+  "cli.hub_help.link_set_confirm_public_egress": "显式同意将创作的更改发布到公开（PUBLIC）来源"
+}

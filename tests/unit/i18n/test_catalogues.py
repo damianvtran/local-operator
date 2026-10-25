@@ -36,11 +36,12 @@ def test_shipped_wire_namespaces_exist() -> None:
     # The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
-    # The held Chinese candidate lives on a separate remote ref, not in the
-    # releasable package. Pin the whole set so partial restoration cannot
-    # accidentally admit it without its failed slash audit. Urdu is present
-    # only after all 23 carried core namespaces passed their ledger gate.
-    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "ur", "vi")
+    # Chinese shipped once the policy owner lifted its security hold on
+    # 2026-10-24: the blocking wire.slash audit was remediated at current bytes
+    # and every carried namespace has a fresh passed ledger row. Pin the whole
+    # set so a partial restoration cannot admit a locale without its complete
+    # audit chain, and so a disposition cannot silently drop a shipped wave.
+    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "ur", "vi", "zh-CN")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.agents",

@@ -1,0 +1,248 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.viewer",
+  "revision": "f7a884b7b73e0b92d2b44ea2020c46b9b0d4843f",
+  "generated_utc": "2026-10-24T23:28:43Z",
+  "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.viewer.json",
+      "sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.viewer.context.json",
+      "sha256": "ed4535ceb6e3119c8a3b35f0aa0570ed0398d61c212a43f35bc6d2aa9ac389ae"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.viewer.json",
+      "sha256": "26dd0eae397bddd0c4748a8782c4552b7f29b919770ed5b152040ed9df99c793"
+    }
+  },
+  "checks": {
+    "key_parity": {
+      "key_count_en": 19,
+      "key_count_zh": 19,
+      "missing": [],
+      "extra": [],
+      "order_identical": true,
+      "order_mismatch": [],
+      "ok": true
+    },
+    "non_nfc": [],
+    "control_chars": [],
+    "bidi_controls": [],
+    "zero_width": [],
+    "fullwidth_latin_or_digits": [],
+    "cjk_latin_space": [],
+    "icu_arguments": {
+      "mismatches": [],
+      "ok": true
+    },
+    "plural_structure": {
+      "rows": [],
+      "errors": [],
+      "ok": true
+    },
+    "technical_tokens": {
+      "missing": [],
+      "ok": true
+    },
+    "width": {
+      "over_budget": [],
+      "ok": true
+    }
+  },
+  "width_rows": [
+    {
+      "key": "tui.viewer.title",
+      "maxCells": null,
+      "en_cells": 11,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 0.909,
+      "zh_wide_cells": 10
+    },
+    {
+      "key": "tui.viewer.description",
+      "maxCells": null,
+      "en_cells": 22,
+      "zh_cells": 16,
+      "zh_rendered_cells": 16,
+      "over": null,
+      "ratio": 0.727,
+      "zh_wide_cells": 16
+    },
+    {
+      "key": "tui.viewer.usage",
+      "maxCells": null,
+      "en_cells": 19,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "over": null,
+      "ratio": 0.947,
+      "zh_wide_cells": 18
+    },
+    {
+      "key": "tui.viewer.loading",
+      "maxCells": null,
+      "en_cells": 8,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 1.25,
+      "zh_wide_cells": 10
+    },
+    {
+      "key": "tui.viewer.legend",
+      "maxCells": null,
+      "en_cells": 91,
+      "zh_cells": 79,
+      "zh_rendered_cells": 79,
+      "over": null,
+      "ratio": 0.868,
+      "zh_wide_cells": 79
+    },
+    {
+      "key": "tui.viewer.truncated",
+      "maxCells": null,
+      "en_cells": 47,
+      "zh_cells": 35,
+      "zh_rendered_cells": 35,
+      "over": null,
+      "ratio": 0.745,
+      "zh_wide_cells": 35
+    },
+    {
+      "key": "tui.viewer.unreadable",
+      "maxCells": null,
+      "en_cells": 71,
+      "zh_cells": 55,
+      "zh_rendered_cells": 55,
+      "over": null,
+      "ratio": 0.775,
+      "zh_wide_cells": 55
+    },
+    {
+      "key": "tui.viewer.unsupported",
+      "maxCells": null,
+      "en_cells": 57,
+      "zh_cells": 37,
+      "zh_rendered_cells": 37,
+      "over": null,
+      "ratio": 0.649,
+      "zh_wide_cells": 37
+    },
+    {
+      "key": "tui.viewer.binary",
+      "maxCells": null,
+      "en_cells": 28,
+      "zh_cells": 18,
+      "zh_rendered_cells": 18,
+      "over": null,
+      "ratio": 0.643,
+      "zh_wide_cells": 18
+    },
+    {
+      "key": "tui.viewer.changed",
+      "maxCells": null,
+      "en_cells": 68,
+      "zh_cells": 37,
+      "zh_rendered_cells": 37,
+      "over": null,
+      "ratio": 0.544,
+      "zh_wide_cells": 37
+    },
+    {
+      "key": "tui.viewer.copied",
+      "maxCells": null,
+      "en_cells": 11,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": null,
+      "ratio": 0.909,
+      "zh_wide_cells": 10
+    },
+    {
+      "key": "tui.viewer.copy_failed",
+      "maxCells": null,
+      "en_cells": 36,
+      "zh_cells": 27,
+      "zh_rendered_cells": 59,
+      "over": null,
+      "ratio": 0.75,
+      "zh_wide_cells": 83
+    },
+    {
+      "key": "tui.viewer.open_failed",
+      "maxCells": null,
+      "en_cells": 35,
+      "zh_cells": 20,
+      "zh_rendered_cells": 20,
+      "over": null,
+      "ratio": 0.571,
+      "zh_wide_cells": 20
+    },
+    {
+      "key": "tui.viewer.kind_code",
+      "maxCells": null,
+      "en_cells": 4,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.viewer.kind_markdown",
+      "maxCells": null,
+      "en_cells": 8,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 8
+    },
+    {
+      "key": "tui.viewer.kind_text",
+      "maxCells": null,
+      "en_cells": 4,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "tui.viewer.header",
+      "maxCells": null,
+      "en_cells": 26,
+      "zh_cells": 26,
+      "zh_rendered_cells": 57,
+      "over": null,
+      "ratio": 1.0,
+      "zh_wide_cells": 81
+    },
+    {
+      "key": "tui.viewer.wrap_on",
+      "maxCells": null,
+      "en_cells": 11,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": null,
+      "ratio": 1.273,
+      "zh_wide_cells": 14
+    },
+    {
+      "key": "tui.viewer.wrap_off",
+      "maxCells": null,
+      "en_cells": 12,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": null,
+      "ratio": 1.167,
+      "zh_wide_cells": 14
+    }
+  ]
+}

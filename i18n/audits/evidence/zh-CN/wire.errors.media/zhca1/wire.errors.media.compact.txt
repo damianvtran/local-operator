@@ -1,0 +1,5 @@
+wire.errors.media.speech_radient_sign_in_failed	Your Radient sign-in has stopped working. Sign in again in Settings.	Radient登录已失效。在设置中重新登录。
+wire.errors.media.speech_upstream_reported_error	Speech generation failed upstream: Radient reported an error (HTTP {status}): {error}	上游语音生成失败：Radient报告错误（HTTP {status}）：{error}
+wire.errors.media.speech_upstream_responded	Speech generation failed upstream: Upstream responded {status}: {error}	上游语音生成失败：上游返回{status}：{error}
+wire.errors.media.speech_vendor_key_refused	{vendor} refused your API key. Replace it.	{vendor}拒绝了你的API密钥。更换密钥。
+wire.errors.media.unknown_provider	Unknown provider {provider}.	未知提供商{provider}。

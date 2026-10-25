@@ -1,0 +1,11 @@
+tui.asks.context.messages | {count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}} | {count, plural, other {提问后你发来#条消息（最后{time}）}}
+tui.asks.dismiss.answered_in_chat | Answered in chat | 已在聊天中回答
+tui.asks.dismiss.answered_in_chat_note | you already replied in the conversation | 你已在对话中回复
+tui.asks.dismiss.fleet_gone | the ask is no longer in that conversation's log. | 此问题已不在该会话的记录中。
+tui.asks.dismiss.hint | enter dismiss · esc cancel | enter忽略 · esc取消
+tui.asks.dismiss.moot | No longer needed | 不再需要
+tui.asks.dismiss.moot_note | stop waiting on it | 不再等待此问题
+tui.asks.dismiss.notice_answered_in_chat | Dismissed — answered in chat | 已忽略 — 已在聊天中回答
+tui.asks.dismiss.notice_moot | Dismissed — no longer needed | 已忽略 — 不再需要
+tui.asks.dismiss.notice_no_reply | Dismissed — no reply sent | 已忽略 — 未发送回复
+tui.asks.dismiss.title | Dismiss this ask | 忽略此问题

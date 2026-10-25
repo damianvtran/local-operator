@@ -1,0 +1,5 @@
+wire.console.description	Live terminal admission. Completed history does not consume process slots. Changes affect future starts, never terminate running work.	控制运行中终端的准入。已完成的历史记录不占进程槽位。更改仅影响后续启动，绝不会终止正在运行的工作。
+wire.console.max_live.help	32–256; default 128. Managed memory, terminal cells and available native resources can admit fewer terminals. This does not limit child-process memory.	32–256；默认128。受管内存、终端单元格和可用原生资源可能使实际准入的终端更少。这不限制子进程内存。
+wire.console.max_live.label	Live terminal ceiling	运行中终端上限
+wire.console.max_owner.help	1–32; default 8. Each conversation shares the global live allowance; completed terminals do not count.	1–32；默认8。各会话共享全局运行额度；已完成的终端不计入。
+wire.console.user_reserved.help	4–32; default 16, capped at one quarter of the live ceiling. Agent starts cannot consume these slots. Existing work is never stopped.	4–32；默认16，最高不超过运行上限的四分之一。智能体启动不能占用这些槽位。绝不会停止现有工作。

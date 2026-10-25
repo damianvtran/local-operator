@@ -1,0 +1,7 @@
+# cli.login_status_help — sampled en/zh pairs for attestation zhca1
+# 1/2 keys; all >120 chars and all plurals included
+
+## cli.login_status_help.status_alias  [56 chars]
+EN: Alias for login-status: list stored provider credentials
+ZH: 作为login-status的别名：列出已存储的提供商凭据
+

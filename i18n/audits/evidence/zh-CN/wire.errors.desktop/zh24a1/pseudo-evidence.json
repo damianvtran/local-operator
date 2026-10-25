@@ -1,0 +1,8 @@
+{
+  "method": "zh-CN fit probe: Chinese renders in 2-cell CJK glyphs and is normally shorter than English, so no RTL-style synthetic stretch is meaningful. measured_cells is the authoritative cell count (East Asian Wide/Fullwidth = 2, combining marks = 0). A +25% growth scenario models a future longer phrasing for the same key; it is reported but not treated as a failure. This is a synthetic fit probe, not a rendered TUI screenshot.",
+  "argument_parity_errors": [],
+  "plural_render_count": 0,
+  "plural_render_errors": [],
+  "width_rows": [],
+  "static_or_reserved_over_budget": []
+}

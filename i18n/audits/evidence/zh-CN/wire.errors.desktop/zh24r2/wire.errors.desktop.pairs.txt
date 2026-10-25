@@ -1,0 +1,252 @@
+wire.errors.desktop.agents_config_client_fields
+EN "A configuration run chooses its own working directory and model, so {fields} cannot be sent with it."
+ZH "配置运行会自行选择工作目录和模型，因此不能同时传入{fields}。"
+wire.errors.desktop.agents_config_local_only
+EN "A configuration run edits this device's agents and teams, so it cannot be started on another device."
+ZH "配置运行会编辑本设备的智能体和团队，因此不能在其他设备上启动。"
+wire.errors.desktop.agents_config_running
+EN "A configuration run is already going. Open it to follow it, or stop it first."
+ZH "已有配置运行正在进行。打开它查看进展，或先将其停止。"
+wire.errors.desktop.aida_bootstrap_failed
+EN "{name}'s session could not be created; try again (see the logs)."
+ZH "无法创建{name}的会话；重试（参见日志）。"
+wire.errors.desktop.aida_disabled
+EN "{name} is disabled on this backend, so {op} did nothing. Enable her with aida.enabled (or unset LOCAL_OPERATOR_NO_AIDA) and try again."
+ZH "此后端已禁用{name}，因此{op}未执行任何操作。通过aida.enabled启用她（或取消设置LOCAL_OPERATOR_NO_AIDA）后重试。"
+wire.errors.desktop.aida_greet_failed
+EN "The greeting could not be scheduled; try again (see the logs)."
+ZH "无法安排问候；重试（参见日志）。"
+wire.errors.desktop.aida_no_provider
+EN "No provider is configured yet, so {name} has nothing to greet you with. Connect a provider, then try again."
+ZH "尚未配置提供商，因此{name}无法向你问候。连接提供商后重试。"
+wire.errors.desktop.answer_epoch_mismatch
+EN "This answer belongs to an earlier session owner"
+ZH "此回答属于先前的会话所有者"
+wire.errors.desktop.aside_adopt_unconfirmed
+EN "Confirm adding this aside to the conversation"
+ZH "确认将此题外问答加入会话"
+wire.errors.desktop.aside_limit_reached
+EN "Close an aside or wait for it to expire"
+ZH "关闭一个题外问答或等待其过期"
+wire.errors.desktop.aside_max_turns
+EN "Start a new aside after 16 exchanges"
+ZH "交流16轮后需新建题外问答"
+wire.errors.desktop.aside_not_adoptable
+EN "This aside cannot be adopted"
+ZH "无法将此题外问答纳入会话"
+wire.errors.desktop.aside_request_reused
+EN "This aside request was already used"
+ZH "此题外问答请求已使用过"
+wire.errors.desktop.aside_still_running
+EN "Wait for the aside to finish before closing it"
+ZH "等待题外问答完成后再关闭"
+wire.errors.desktop.aside_unavailable
+EN "This aside is no longer available"
+ZH "此题外问答已不可用"
+wire.errors.desktop.claim_authorization_required
+EN "Desktop claim authorization is required."
+ZH "需要桌面认领授权。"
+wire.errors.desktop.claim_body_not_object
+EN "The claim body must be a JSON object."
+ZH "认领请求体必须为JSON对象。"
+wire.errors.desktop.claim_key_unpublished
+EN "This backend published no desktop claim key."
+ZH "此后端未发布桌面认领密钥。"
+wire.errors.desktop.claim_origin_not_absolute
+EN "Claim origins must be absolute http(s) origins."
+ZH "认领来源必须为绝对http(s)来源。"
+wire.errors.desktop.claim_origin_not_plain
+EN "Claim origins must be plain origins, without a path, query or fragment."
+ZH "认领来源必须为纯来源，不含路径、查询或片段。"
+wire.errors.desktop.claim_origin_not_string
+EN "Claim origins must be strings."
+ZH "认领来源必须为字符串。"
+wire.errors.desktop.claim_origin_null
+EN "An opaque ('null') origin cannot be claimed."
+ZH "不能认领不透明（'null'）来源。"
+wire.errors.desktop.claim_origin_outside_configured
+EN "A claim cannot install an origin outside the configured desktop origins."
+ZH "认领不能添加已配置桌面来源范围以外的来源。"
+wire.errors.desktop.claim_origin_wildcard
+EN "A wildcard origin cannot be claimed."
+ZH "不能认领通配符来源。"
+wire.errors.desktop.claim_origins_not_list
+EN "The claim body's 'origins' must be a list."
+ZH "认领请求体的'origins'必须为列表。"
+wire.errors.desktop.conversations_unreadable
+EN "Conversations could not be read right now. This recovers on its own; retry in a moment."
+ZH "暂时无法读取会话。此问题会自行恢复；稍后重试。"
+wire.errors.desktop.credential_operation_failed
+EN "The credential operation did not complete"
+ZH "凭据操作未完成"
+wire.errors.desktop.cwd_marker_read_failed
+EN "cannot read the session's working-directory marker: {error}"
+ZH "无法读取会话的工作目录标记：{error}"
+wire.errors.desktop.cwd_marker_write_failed
+EN "cannot write the session's working-directory marker: {error}"
+ZH "无法写入会话的工作目录标记：{error}"
+wire.errors.desktop.desktop_refusal
+EN "{error}"
+ZH "{error}"
+wire.errors.desktop.effort_levels_missing
+EN "{model} has no reasoning-effort levels"
+ZH "{model}没有推理强度级别"
+wire.errors.desktop.effort_not_in_levels
+EN "{model} accepts {levels} — not ''{effort}''"
+ZH "{model}接受{levels}，不接受''{effort}''"
+wire.errors.desktop.fast_mode_unsupported
+EN "{model} has no fast mode"
+ZH "{model}没有快速模式"
+wire.errors.desktop.feed_subscriber_limit
+EN "Too many desktop feed subscribers"
+ZH "桌面事件流订阅者过多"
+wire.errors.desktop.feed_subscription_unknown
+EN "Unknown desktop feed subscription"
+ZH "未知的桌面事件流订阅"
+wire.errors.desktop.force_requires_confirm_replace
+EN "--force replaces your copy; use replace with confirm_replace"
+ZH "--force会替换你的副本；使用replace并传入confirm_replace"
+wire.errors.desktop.librarian_bootstrap_failed
+EN "The Librarian's session could not be created; try again (see the logs)."
+ZH "无法创建Librarian的会话；重试（参见日志）。"
+wire.errors.desktop.librarian_disabled
+EN "The Librarian is disabled on this backend, so {op} did nothing. Enable her with librarian.enabled (or unset LOCAL_OPERATOR_NO_LIBRARIAN) and try again."
+ZH "此后端已禁用Librarian，因此{op}未执行任何操作。通过librarian.enabled启用她（或取消设置LOCAL_OPERATOR_NO_LIBRARIAN）后重试。"
+wire.errors.desktop.librarian_owner_active
+EN "A live session owns the Librarian's schedule, so no pass was scheduled. Try again after that conversation closes."
+ZH "一个运行中的会话持有Librarian的定时任务，因此未安排本轮执行。待该会话关闭后重试。"
+wire.errors.desktop.library_asset_not_found
+EN "That asset is not in the Library."
+ZH "资源库中没有该资源。"
+wire.errors.desktop.library_bad_cursor
+EN "That page cursor was not issued for this request. Start again from the first page."
+ZH "此分页游标并非为本次请求签发。从第一页重新开始。"
+wire.errors.desktop.library_bad_filter
+EN "{field} has a value this version does not recognise: {value}."
+ZH "{field}的值不被此版本识别：{value}。"
+wire.errors.desktop.library_chat_session_missing
+EN "That conversation does not exist on this device."
+ZH "此设备上不存在该会话。"
+wire.errors.desktop.library_content_denied
+EN "This file cannot be shown from the Library."
+ZH "无法通过资源库显示此文件。"
+wire.errors.desktop.library_content_missing
+EN "The file for this asset is no longer available on this device."
+ZH "此设备上已无该资源对应的文件。"
+wire.errors.desktop.library_metadata_unavailable
+EN "The Library's metadata store is unavailable; nothing was changed."
+ZH "资源库的元数据存储不可用；未作任何更改。"
+wire.errors.desktop.library_not_an_image
+EN "This asset has no thumbnail."
+ZH "此资源没有缩略图。"
+wire.errors.desktop.library_tag_category
+EN "{category} is not a Library tag category."
+ZH "{category}不是资源库标签类别。"
+wire.errors.desktop.library_tag_limit
+EN "An asset may carry at most {max, number} tags."
+ZH "一个资源最多可有{max, number}个标签。"
+wire.errors.desktop.library_tag_name
+EN "Tag names are 1-24 characters: {name}."
+ZH "标签名称长度为1–24个字符：{name}。"
+wire.errors.desktop.library_tag_unknown
+EN "That tag is not in the Library."
+ZH "资源库中没有该标签。"
+wire.errors.desktop.masked_credential_form
+EN "Enter credentials in the masked credential form, not command text"
+ZH "在掩码凭据表单中输入凭据，不要输入到命令文本中"
+wire.errors.desktop.move_failed
+EN "cannot move to {requested}: {error}"
+ZH "无法移动到{requested}：{error}"
+wire.errors.desktop.packaged_profile_not_found
+EN "Packaged profile not found"
+ZH "未找到内置配置档"
+wire.errors.desktop.pass_name_or_all
+EN "Pass either name or all, not both"
+ZH "传入name或all，不能同时传入"
+wire.errors.desktop.plane_already_controlled
+EN "This desktop plane is already controlled."
+ZH "此桌面控制面已被控制。"
+wire.errors.desktop.profile_name_taken
+EN "That name belongs to another agent. Choose a different name to extend the packaged profile."
+ZH "该名称属于另一个智能体。选择其他名称以扩展内置配置档。"
+wire.errors.desktop.profile_registry_unavailable
+EN "The profile registry is unavailable"
+ZH "配置档注册表不可用"
+wire.errors.desktop.project_confirm_mismatch
+EN "confirm must repeat the project name {name} exactly (the name, not the id)"
+ZH "confirm必须逐字重复项目名称{name}（名称，而非id）"
+wire.errors.desktop.project_not_found
+EN "no project with id or name {key}{names}"
+ZH "没有id或名称为{key}的项目{names}"
+wire.errors.desktop.question_no_longer_pending
+EN "This question or approval is no longer pending"
+ZH "此问题或审批已不再待处理"
+wire.errors.desktop.refresh_requires_live
+EN "Refresh requires live usage"
+ZH "刷新需要实时用量"
+wire.errors.desktop.remote_refusal_silent
+EN "{device} refused that and said nothing further"
+ZH "{device}拒绝了该操作，未提供更多说明"
+wire.errors.desktop.requested_not_found
+EN "Requested session, profile, team or subscription not found"
+ZH "未找到请求的会话、配置档、团队或订阅"
+wire.errors.desktop.runtime_unreachable
+EN "Session owner is unavailable. Reconnect and reconcile before retrying."
+ZH "会话所有者不可用。重新连接并核对状态后重试。"
+wire.errors.desktop.scope_kind_required
+EN "scope_kind is required when scope_name is given."
+ZH "指定scope_name时必须提供scope_kind。"
+wire.errors.desktop.scope_kind_unknown
+EN "scope_kind must be one of {kinds}."
+ZH "scope_kind必须为{kinds}之一。"
+wire.errors.desktop.scope_name_required
+EN "scope_name is required when scope_kind is given."
+ZH "指定scope_kind时必须提供scope_name。"
+wire.errors.desktop.scope_name_too_long
+EN "scope_name must be at most {max_length} characters."
+ZH "scope_name不得超过{max_length}个字符。"
+wire.errors.desktop.session_copy_terminal_only
+EN "{flag} works only in the terminal; the /session view shows the ID"
+ZH "{flag}仅在终端中有效；/session视图会显示ID"
+wire.errors.desktop.session_files_artifact_missing
+EN "The stored copy of this file is no longer on this device, so it cannot be saved."
+ZH "此文件的存储副本已不在本设备上，因此无法保存。"
+wire.errors.desktop.session_files_bad_cursor
+EN "That page cursor was not issued for this request. Start again from the first page."
+ZH "此分页游标并非为本次请求签发。从第一页重新开始。"
+wire.errors.desktop.session_files_bad_filter
+EN "{field} has a value this version does not recognise: {value}."
+ZH "{field}的值不被此版本识别：{value}。"
+wire.errors.desktop.session_files_file_not_found
+EN "That file is not in this conversation's list."
+ZH "此会话的列表中没有该文件。"
+wire.errors.desktop.session_files_materialise_failed
+EN "The file could not be saved: {reason}."
+ZH "无法保存文件：{reason}。"
+wire.errors.desktop.session_files_not_an_artifact
+EN "That file already exists on disk at its own path, so there is nothing to save."
+ZH "该文件已存在于磁盘上的自身路径，无需保存。"
+wire.errors.desktop.session_is_remote_open
+EN "{session_id} lives on {label}, and this desktop cannot open a conversation on another device yet. Move it home with `lop sessions move {session_id} --to local`, or pilot it from the terminal with `/network sessions --peer {label} --engage {session_id}`."
+ZH "{session_id}位于{label}，此桌面端尚不能打开其他设备上的会话。使用`lop sessions move {session_id} --to local`将其移回本机，或在终端中使用`/network sessions --peer {label} --engage {session_id}`操控。"
+wire.errors.desktop.session_is_remote_write
+EN "The {noun} for {session_id} lives on {label}, and this desktop cannot write it there yet; nothing was changed here."
+ZH "{noun}（属于{session_id}）位于{label}，此桌面端尚不能向该设备写入；本机未作任何更改。"
+wire.errors.desktop.session_not_found
+EN "no conversation with id {session_id}"
+ZH "没有id为{session_id}的会话"
+wire.errors.desktop.skill_not_found
+EN "Skill not found"
+ZH "未找到技能"
+wire.errors.desktop.sort_unknown
+EN "sort must be one of {sorts}."
+ZH "sort必须为{sorts}之一。"
+wire.errors.desktop.start_after_end
+EN "The start must precede the end"
+ZH "开始时间必须早于结束时间"
+wire.errors.desktop.unknown_command
+EN "Unknown command"
+ZH "未知命令"
+wire.errors.desktop.unknown_provider
+EN "Unknown provider"
+ZH "未知提供商"

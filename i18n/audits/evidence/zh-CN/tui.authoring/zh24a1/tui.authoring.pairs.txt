@@ -1,0 +1,244 @@
+tui.authoring.action_class
+EN "class"
+ZH "自主级别"
+CX {"note": "Autonomy class, not a school class. Reactive requires a request; proactive can initiate.", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.class_hint
+EN "proactive may initiate work without a request"
+ZH "proactive可在没有请求时主动开展工作"
+CX {"note": "Security-relevant proactive consequence; may initiate without a request.", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.create
+EN "new agent"
+ZH "新建智能体"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.delegate
+EN "delegate"
+ZH "委派"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.description
+EN "when to use"
+ZH "使用场景"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.description_clear_unsupported
+EN "This form cannot clear an existing description yet."
+ZH "此表单暂不支持清空已有描述。"
+CX {"note": "Refusal for deleting an existing description; draft remains. Not a general edit refusal.", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.discard
+EN "Discard changes? y discard · n keep editing"
+ZH "放弃更改？y放弃 · n继续编辑"
+CX {"note": "Inline y/n confirmation. Keep literal keyboard y and n and the direction of each answer.", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.edit
+EN "edit agent · {name}"
+ZH "编辑智能体 · {name}"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.effort
+EN "effort tier"
+ZH "模型档位"
+CX {"note": "Backend model tier, not reasoning effort; tier identifiers remain literal.", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.footer
+EN "/agent new · /agent edit <name> · /agent clear detaches"
+ZH "/agent new · /agent edit <name> · /agent clear解除绑定"
+CX {"note": "Slash commands and <name> are literal grammar; only surrounding prose is translated.", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.inherit
+EN "inherit"
+ZH "继承"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.instructions
+EN "instructions"
+ZH "指令"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.instructions_hint
+EN "standing guidance · Tab moves to the next field"
+ZH "常驻指引 · Tab跳至下一字段"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.invalid_effort
+EN "That effort tier is not configured."
+ZH "该模型档位未配置。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.invalid_name
+EN "Use a name without spaces or path separators."
+ZH "名称不能含空格或路径分隔符。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.invalid_tools
+EN "Use comma-separated tool names; no empty entries."
+ZH "工具名用逗号分隔，不能有空项。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.kind
+EN "kind"
+ZH "类型"
+CX {"note": "Role or specialist. Those backend identifiers are not changed by translation.", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.label
+EN "label"
+ZH "显示名称"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.legend
+EN "ctrl+s save · tab move · esc cancel"
+ZH "ctrl+s保存 · tab移动 · esc取消"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.missing
+EN "No installed role or specialist named {name}."
+ZH "未安装名为{name}的角色或专家。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.name
+EN "name"
+ZH "名称"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.no
+EN "no"
+ZH "否"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.no_change
+EN "no changes to save"
+ZH "没有更改需要保存"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.notice_read_only
+EN "Read-only: this conversation's runtime is on another device, so profile changes are not available here."
+ZH "只读：本次会话的运行时位于另一台设备，此处无法修改配置。"
+CX {"note": "Agent profile changes, not project changes. Follower session cannot open/save the local editor.", "role": "read-only refusal", "tone": "direct, calm"}
+
+tui.authoring.proactive
+EN "proactive"
+ZH "主动"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.promote_failed
+EN "could not promote: {reason}"
+ZH "无法复制到账户：{reason}"
+CX {"note": "{reason} is the registry's own English sentence (collision, missing name, rollback remainder); the wrapper is the only translated part.", "role": "refusal wrapper", "tone": "direct, no blame"}
+
+tui.authoring.promote_mixed_plan
+EN "Replace existing account definitions: {replaced} with this conversation's copy. This also copies {created}. Add `yes` to replace and copy — nothing has changed yet."
+ZH "将替换账户中的现有定义：{replaced}（以本会话的副本）。同时复制{created}。添加`yes`以替换并复制 — 尚未做任何更改。"
+CX {"note": "{replaced} names the account definitions that would be overwritten; {created} names the new copies. The overwrite comes first in the sentence and the notice is `warning` for the same reason as promote_replace_plan. `yes` stays literal.", "role": "rehearsal line when one plan both overwrites and copies", "tone": "plain, direct, destructive clause first"}
+
+tui.authoring.promote_plan
+EN "Add `yes` to copy {names} into your account — nothing has changed yet."
+ZH "添加`yes`以将{names}复制到你的账户 — 尚未做任何更改。"
+CX {"note": "{names} is a comma-joined list of the definitions a confirmed call would copy into the account. `yes` stays a literal token. Never reads as a warning: copying is a normal, reversible-in-effect act.", "role": "rehearsal line before a confirmed copy", "tone": "plain, calm, explicit that nothing changed"}
+
+tui.authoring.promote_receipt_created
+EN "Copied {names} to your account."
+ZH "已将{names}复制到你的账户。"
+CX {"note": "{names} is the comma-joined list of definitions newly COPIED into the account. Never includes a replaced row: a replacement needs its own sentence (design round 1, D2).", "role": "completion receipt, copy half", "tone": "past tense, plain"}
+
+tui.authoring.promote_receipt_keeps
+EN "This conversation keeps its own copy."
+ZH "本会话保留自己的副本。"
+CX {"note": "The clause users get wrong (the origin conversation keeps launching its own row), split out so it survives whatever precedes it. Never dropped.", "role": "completion receipt, closing fact", "tone": "plain statement of fact"}
+
+tui.authoring.promote_receipt_replaced
+EN "Replaced in your account: {names}."
+ZH "已在你的账户中替换：{names}。"
+CX {"note": "{names} is the comma-joined list of EXISTING account definitions this call overwrote. Printed only when something was replaced, so a copy-only receipt never implies a loss (design round 1, D2 / UX U1).", "role": "completion receipt, replacement half", "tone": "past tense, plain, unambiguous"}
+
+tui.authoring.promote_replace_plan
+EN "Replace existing account definitions: {names} with this conversation's copy. Add `yes` to replace — nothing has changed yet."
+ZH "替换账户中的现有定义：{names}（以本会话的副本）。添加`yes`以替换 — 尚未做任何更改。"
+CX {"note": "{names} is a comma-joined list of the account definitions the confirmed call would OVERWRITE. This sentence is printed FIRST and as a `warning` notice (design round 1, D1): the destructive half must never read as an afterthought to the copies. `yes` stays literal.", "role": "rehearsal line before a confirmed overwrite", "tone": "plain, direct, names what will be lost; leads the notice"}
+
+tui.authoring.promote_usage
+EN "Use {command} <name> [replace] [yes] [as <new name>]."
+ZH "使用{command} <name> [replace] [yes] [as <new name>]。"
+CX {"note": "Printed when /agent promote or /team promote is typed wrong. {command} is a literal command path ('/agent promote'); the bracketed flags are the grammar, kept literal, including `as <new name>` — the rename spelling the collision refusal offers (review round 1, NIT-1 / UX U2).", "role": "usage refusal for a reserved verb", "tone": "brief, keyboard-first"}
+
+tui.authoring.reactive
+EN "reactive"
+ZH "被动"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.registry_missing
+EN "No agent registry is attached to this session."
+ZH "本会话未连接智能体注册表。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.required_instructions
+EN "Instructions are required."
+ZH "指令不能为空。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.revision_changed
+EN "Someone else changed this profile; reopen to edit."
+ZH "其他人已修改此配置，重新打开后再编辑。"
+CX {"note": "CAS conflict. No save occurred; reopen before trying again.", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.role
+EN "role"
+ZH "角色"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.save_error
+EN "Could not save: {reason}"
+ZH "无法保存：{reason}"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.saved
+EN "saved agent {name}"
+ZH "已保存智能体{name}"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.scope_conversation
+EN "this conversation"
+ZH "本会话"
+CX {"note": "Marks a role or team that exists only in the current conversation. It rides a 27-cell facts line after the class token, so keep it short and concrete; it is never a warning and never uses error ink.", "role": "facts badge in the agent/team picker", "tone": "plain, lowercase, no jargon"}
+
+tui.authoring.seed_not_installed
+EN "Install this packaged starter before editing it."
+ZH "编辑前需先安装此内置初始配置。"
+CX {"note": "Packaged starter is not an installed profile. Do not imply the editor installs it.", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.specialist
+EN "specialist"
+ZH "专家"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.specialist_fields
+EN "Specialists carry no tools, effort or delegate fields."
+ZH "专家不带tools、effort或delegate字段。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.tools
+EN "tools"
+ZH "工具"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form field label", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.tools_hint
+EN "comma-separated · empty = all tools"
+ZH "逗号分隔 · 留空=所有工具"
+CX {"note": "Empty is unrestricted access, not no tools. Keep that direction explicit.", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.usage_edit
+EN "Use /agent edit <name>."
+ZH "使用/agent edit <name>。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.usage_new
+EN "Use /agent new with no extra arguments."
+ZH "使用/agent new，不带额外参数。"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}
+
+tui.authoring.yes
+EN "yes"
+ZH "是"
+CX {"note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal).", "role": "form guidance or receipt", "tone": "brief, direct, keyboard-first"}

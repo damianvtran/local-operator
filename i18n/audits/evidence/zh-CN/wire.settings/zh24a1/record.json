@@ -1,0 +1,183 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "audit_kind": "independent_delta_and_regression_audit",
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "round": 1,
+  "audit_date": "2026-10-24",
+  "key_count": 818,
+  "keys_read": 818,
+  "delta_key_count": 18,
+  "delta_keys": [
+    "wire.settings.remote_compute.description",
+    "wire.settings.remote_compute.title",
+    "wire.settings.remote_compute_enabled.choice.false.description",
+    "wire.settings.remote_compute_enabled.choice.true.description",
+    "wire.settings.remote_compute_enabled.help",
+    "wire.settings.remote_compute_enabled.label",
+    "wire.settings.session_compression.description",
+    "wire.settings.session_compression.title",
+    "wire.settings.session_compression_after_days.help",
+    "wire.settings.session_compression_after_days.label",
+    "wire.settings.session_compression_enabled.choice.false.description",
+    "wire.settings.session_compression_enabled.choice.true.description",
+    "wire.settings.session_compression_enabled.help",
+    "wire.settings.session_compression_enabled.label",
+    "wire.settings.session_scratchpad.description",
+    "wire.settings.session_scratchpad.title",
+    "wire.settings.session_scratchpad_max_bytes.help",
+    "wire.settings.session_scratchpad_max_bytes.label"
+  ],
+  "delta_added": [
+    "wire.settings.remote_compute.description",
+    "wire.settings.remote_compute.title",
+    "wire.settings.remote_compute_enabled.choice.false.description",
+    "wire.settings.remote_compute_enabled.choice.true.description",
+    "wire.settings.remote_compute_enabled.help",
+    "wire.settings.remote_compute_enabled.label",
+    "wire.settings.session_compression.description",
+    "wire.settings.session_compression.title",
+    "wire.settings.session_compression_after_days.help",
+    "wire.settings.session_compression_after_days.label",
+    "wire.settings.session_compression_enabled.choice.false.description",
+    "wire.settings.session_compression_enabled.choice.true.description",
+    "wire.settings.session_compression_enabled.help",
+    "wire.settings.session_compression_enabled.label",
+    "wire.settings.session_scratchpad.description",
+    "wire.settings.session_scratchpad.title",
+    "wire.settings.session_scratchpad_max_bytes.help",
+    "wire.settings.session_scratchpad_max_bytes.label"
+  ],
+  "delta_modified": [],
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "assembly_revision": "5b5367be1b4acef44d564dcf8cbc1c7c06b209e8",
+  "catalogue_diff_between_source_and_assembly": "empty",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "current_byte_peer_audit_id": null,
+  "current_byte_peer_record": null,
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "commit": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "3d1df2689651",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+      "sha256": "d0df5e3e6975719b39d3e81171b2d9416844a1df8a5498f81f398476eb284b55"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision."
+  },
+  "source_receipt": null,
+  "source_companions": [
+    "audit.log",
+    "mechanical-raw.json",
+    "pseudo-evidence.json",
+    "report.md",
+    "runtime-mechanical.json",
+    "wire.settings.compact.txt",
+    "wire.settings.pairs.txt"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24a1/audit.log",
+      "sha256": "f63076a9083718a5ebb6ad2f5a1d022ef05d7d60dbadefc53bca3c6994d17377"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24a1/mechanical-raw.json",
+      "sha256": "4c9da9b718ff2612b088a30ceae07e931d8ec50b3c1d502e2470d50bace65889"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24a1/pseudo-evidence.json",
+      "sha256": "2d45e5703f6b9078b67fac34af4bb4571607ad50e3a2dbb4f9272dfeb48930bb"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24a1/report.md",
+      "sha256": "a69617e29c4a08c72109ecadac088799f573d94344c7b7e6e4759859d8f881d9"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24a1/runtime-mechanical.json",
+      "sha256": "f487dd36d45fbc46a229df0d0be2fda1bf27d9655fc6d0835181a4a2cc59418f"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24a1/wire.settings.compact.txt",
+      "sha256": "393a2aa1a115ccc08400dd7aa500562576bdc6c6179a089b3409647a560330a9"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.settings/zh24a1/wire.settings.pairs.txt",
+      "sha256": "3bf3d6bc4cad3ff583cdf457ccf04194bace4a364efe5c319852c3ca3f1d6333"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ZH-A4",
+      "ZH-A6"
+    ],
+    "findings_total": 2,
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0,
+    "source_verdict": "clean_with_followups",
+    "rendered_followups": []
+  },
+  "ledger_entry": {
+    "locale": "zh-CN",
+    "namespace": "wire.settings",
+    "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+    "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+    "target_sha256": "d0df5e3e6975719b39d3e81171b2d9416844a1df8a5498f81f398476eb284b55",
+    "translator": {
+      "agent": null,
+      "session": null,
+      "model": null,
+      "date": null,
+      "commit": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+      "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "session": "3d1df2689651",
+      "model": "deepseek/deepseek-flash",
+      "independent_from_translator_session": true,
+      "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none"
+    },
+    "status": "passed",
+    "result": "clean_with_followups",
+    "findings": 2,
+    "note": "Independent zh24a1 audit at c4ba95919dbea27fcf990101f9e48ed21e977e10: 818 keys read, delta 18; blocker/major 0, minor 2, nit 0."
+  },
+  "audit_notes_not_execution_log": "Independent read-only audit of the catalogue at c4ba95919dbea27fcf990101f9e48ed21e977e10. No catalogue, ledger, allowance, shipped.json or eligibility file was edited. Mechanical checks and full-message rendering were run locally; semantic findings are the auditor's own reading of en/context/zh side by side. No native TUI or desktop frame is claimed."
+}

@@ -1,0 +1,3 @@
+wire.errors.settings.inline_credentials	Use an endpoint without inline credentials or query parameters.	使用不含内嵌凭据或查询参数的endpoint。
+wire.errors.settings.system_prompt_retrieve_failed	Error retrieving system prompt: {error}	获取系统提示词失败：{error}
+wire.errors.settings.system_prompt_update_failed	Error updating system prompt: {error}	更新系统提示词失败：{error}

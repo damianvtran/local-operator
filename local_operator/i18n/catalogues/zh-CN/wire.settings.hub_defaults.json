@@ -1,0 +1,11 @@
+{
+  "wire.settings.hub_defaults.agents.help": "关闭会暂停所有智能体/技能链接的更新；开启会订阅新链接。",
+  "wire.settings.hub_defaults.agents.label": "自动更新智能体/技能链接",
+  "wire.settings.hub_defaults.agents.off.description": "暂停所有智能体和技能链接的更新",
+  "wire.settings.hub_defaults.agents.on.description": "订阅新的智能体和技能链接",
+  "wire.settings.hub_defaults.model_default.note": "hub的merge使用当前默认模型，旧的hub模型覆盖设置会被忽略。",
+  "wire.settings.hub_defaults.teams.help": "新团队链接的默认策略；现有链接保留各自策略。",
+  "wire.settings.hub_defaults.teams.label": "订阅新团队链接",
+  "wire.settings.hub_defaults.teams.off.description": "暂停接收新团队链接的更新",
+  "wire.settings.hub_defaults.teams.on.description": "订阅新团队链接"
+}

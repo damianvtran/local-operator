@@ -1,0 +1,5 @@
+tui.welcome.hint.other_provider	another provider, including API keys	其他提供商，包括API密钥
+tui.welcome.status.login_required.short	not logged in	未登录
+tui.welcome.tip.classification_off	lop config edit classification.auto false turns hints off	lop config edit classification.auto false关闭提示
+tui.welcome.tip.fork_placement	/settings → Fork → Where a fork opens sets placement	/settings → 分叉 → “分叉打开位置”决定分叉去向
+tui.welcome.tip.model	/model <provider>/<id> switches this session only	/model <provider>/<id>仅切换本会话的模型
