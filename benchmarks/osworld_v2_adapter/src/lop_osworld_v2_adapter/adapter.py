@@ -117,7 +117,7 @@ _SETTLE_POLICIES = frozenset({"throughput", "paper"})
 #: the RPC layer's 1 s cancel grace) with margin -- a dead guest should be
 #: ANSWERED ``reachable: false``, not cancelled mid-probe. The allocation
 #: readiness loop hands the same endpoint 5 s per probe
-#: (``providers.aws._READY_PATH``); this sits just inside it for that
+#: (``providers.aws._ALLOCATION_READY_PATH``); this sits just inside it for that
 #: arithmetic, not as a fidelity claim about the loop. (agent review round
 #: 1: the earlier comment ignored requests' per-phase application.)
 _PROBE_TIMEOUT_S = 4.0

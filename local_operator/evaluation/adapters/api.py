@@ -709,8 +709,8 @@ class ProbeParams(ProtocolModel):
     re-bind contract depends on it: see ``test_fake_end_to_end``), so it
     cannot say whether the control server that dropped the in-flight execute
     is serving again. Liveness is therefore its own call, and the guest-side
-    implementation reuses the same bounded readiness GET the allocation loop
-    already trusts (``_READY_PATH``).
+    implementation reuses the same bounded liveness GET the pre-action
+    receipt wait uses (``_LIVENESS_PATH``).
     """
 
     episode_id: StrictIdentifier

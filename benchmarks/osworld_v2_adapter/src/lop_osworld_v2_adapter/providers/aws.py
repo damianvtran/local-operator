@@ -110,9 +110,36 @@ TTL_SLACK_SECONDS = 15 * 60
 _TERMINATE_TARGET_ARN = "arn:aws:scheduler:::aws-sdk:ec2:terminateInstances"
 
 # The OSWorld guest control port and the readiness endpoint upstream's own
-# ``SetupController.ensure_ready`` probes (setup.py:58-70).
+# ``SetupController.ensure_ready`` probes (setup.py:58-70). Used ONLY at
+# allocation, on a fresh desktop, where it is upstream's own admission check
+# and measured cheap (v2.1 AMI, 2026-10-25: 0.06-0.30 s over 10 samples).
 GUEST_PORT = 5000
-_READY_PATH = "/terminal"
+_ALLOCATION_READY_PATH = "/terminal"
+# The MID-EPISODE liveness endpoint: every probe taken after allocation (the
+# pre-action receipt wait, the in-loop wait between retries, the retry ledger's
+# readiness evidence and the harness's ``probe`` RPC) asks this, never
+# ``/terminal``.
+#
+# WHY NOT /terminal. Upstream's handler (xlang-ai/osworld-server @ a3cc3f0c,
+# src/accessibility.py ``get_terminal_output``) calls
+# ``pyatspi.Registry.getDesktop(0)`` and, whenever a terminal app is active,
+# serialises the WHOLE desktop's AT-SPI tree (``create_atspi_node``) before an
+# XPath search. Its cost therefore grows with what the agent has opened, which
+# is exactly the state a liveness probe must not depend on. Measured on one
+# v2.1 guest (ami-01017272139e01feb, m5.xlarge, 10 samples each): /terminal
+# 0.06 s fresh, 1.5-1.6 s with a focused gnome-terminal, 4.0-5.9 s with a
+# focused terminal over Chrome + LibreOffice, and 7.9-30.7 s while an
+# /accessibility read ran concurrently -- past the 5 s probe timeout, so a
+# live server read as ``ReadTimeout`` (ambiguous) and the action was refused
+# unsent. That is the main16 wedge shape: 7 of 7 ReadTimeout wedges had
+# opened a terminal, and POST /execute answered immediately afterwards.
+#
+# WHY /platform. Upstream's handler (src/http_routes.py) is
+# ``return platform.system()``: no desktop, AT-SPI, X or subprocess work, so
+# it answers whenever the uvicorn/Flask process can serve a request -- the
+# only thing this probe claims. Measured 0.05-0.18 s in EVERY state above,
+# including concurrently with /screenshot and with /accessibility.
+_LIVENESS_PATH = "/platform"
 # The guest's command endpoint. ``shell: false`` means the server execs the argv
 # directly, so a pipeline arrives as an explicit ``bash -c`` -- the same shape
 # upstream's own SetupController posts (setup.py:418).
@@ -186,10 +213,12 @@ def _recovery_probe_delays(budget_s: float) -> tuple[float, ...]:
 _RECOVERY_PROBE_DELAYS_S = _recovery_probe_delays(_PRE_ACTION_RECOVERY_BUDGET_S)
 # One probe's own deadline, at parity with the watchdog's ``PROBE_TIMEOUT_S``
 # (guest_supervisor.WATCHDOG_SOURCE: 5 s). Both probes only CLASSIFY a running
-# action server, and that server is single-threaded around its control
-# endpoints: a 1280x720 screenshot or a page load blocks /terminal for seconds.
-# A shorter probe sees "connected, never answered" -- ambiguous -- so
-# ``path_unreachable`` stays false and a live, merely BUSY episode is refused.
+# action server. The probe used to ask /terminal, whose cost is AT-SPI work
+# that reached seconds on a busy desktop (see ``_LIVENESS_PATH``); /platform
+# answers in ~0.1 s even beside a concurrent screenshot, so this deadline is
+# now slack for a congested path rather than for desktop work. Kept at 5 s:
+# a shorter probe sees "connected, never answered" -- ambiguous -- so
+# ``path_unreachable`` stays false and a live, merely slow episode is refused.
 # The probe is classification, not a kill: the only cost of patience is time
 # inside a fixed budget, while the cost of impatience is refusing a live
 # episode. The recorded episode loss was exactly this shape.
@@ -819,6 +848,15 @@ class AwsProvider:
         # episode that only survived because the watchdog revived the server
         # must not look like one whose server never died.
         self._supervisor_watchdog: dict[str, Any] | None = None
+        # WHEN that summary was read, as wall-clock ISO-8601 UTC (for the
+        # post-mortem reader lining it up with guest logs) and on the
+        # provider's monotonic clock (for an age that cannot jump). Recovery
+        # evidence written after a FAILED read re-emits the cached summary, and
+        # a cached ``status: serving`` once read as a fresh observation sent an
+        # investigation down the wrong path for two days; these stamps are what
+        # let the record say "cached, N s old" instead.
+        self._supervisor_watchdog_observed_at: str | None = None
+        self._supervisor_watchdog_observed_mono: float | None = None
         # Once a recovery was VERIFIED, a later watchdog-only change must not
         # overwrite that snapshot with a ``verified_none`` observation: the
         # episode did restart, and the evidence of it is the more important
@@ -1183,7 +1221,7 @@ class AwsProvider:
                     "probe_timeout_s": _RECOVERY_PROBE_TIMEOUT_S,
                     "waited_s": round(self._monotonic() - started, 3),
                     "records": self._supervisor_records,
-                    "watchdog": self._watchdog_evidence(),
+                    **self._watchdog_evidence_fields(fresh=False),
                     "final_guest_record": "not retrieved: action-server transport unavailable",
                     "guest_record_path": (
                         f"/var/lib/lop-action-supervisor/{self._supervisor_unit}.json"
@@ -1220,6 +1258,8 @@ class AwsProvider:
                     self._supervisor_watchdog is not None and watchdog != self._supervisor_watchdog
                 )
                 self._supervisor_watchdog = watchdog
+                self._supervisor_watchdog_observed_at = datetime.now(timezone.utc).isoformat()
+                self._supervisor_watchdog_observed_mono = self._monotonic()
                 if not records or records[-1]["restart"] == self._supervisor_restart:
                     if watchdog_changed and not self._supervisor_recovery_verified:
                         self._write_supervisor_evidence(
@@ -1230,7 +1270,7 @@ class AwsProvider:
                                 "receipt_unavailable": False,
                                 "records_withheld": False,
                                 "observed": "verified_none",
-                                "watchdog": watchdog,
+                                **self._watchdog_evidence_fields(fresh=True),
                                 "records": self._supervisor_records,
                             },
                         )
@@ -1262,7 +1302,7 @@ class AwsProvider:
                             "failed_action_delivery": delivery,
                             "remaining_batch": "not_sent",
                             "records": self._supervisor_records,
-                            "watchdog": self._watchdog_evidence(),
+                            **self._watchdog_evidence_fields(fresh=True),
                         },
                     )
                     # The existing recovery failure, with a fixed cause: the
@@ -1284,7 +1324,7 @@ class AwsProvider:
                         "failed_action_delivery": delivery,
                         "remaining_batch": "not_sent",
                         "records": self._supervisor_records,
-                        "watchdog": watchdog,
+                        **self._watchdog_evidence_fields(fresh=True),
                     },
                 )
                 return guest_supervisor.ReceiptResult("new_restart")
@@ -1309,7 +1349,7 @@ class AwsProvider:
                 "failed_action_delivery": delivery,
                 "remaining_batch": "not_sent",
                 "records": self._supervisor_records,
-                "watchdog": self._watchdog_evidence(),
+                **self._watchdog_evidence_fields(fresh=False),
             },
         )
         return guest_supervisor.ReceiptResult("read_failed")
@@ -1322,6 +1362,43 @@ class AwsProvider:
         """
 
         return self._supervisor_watchdog or guest_supervisor.empty_watchdog("absent")
+
+    def _watchdog_evidence_fields(self, *, fresh: bool) -> dict[str, Any]:
+        """The watchdog block plus WHERE it came from, for a recovery record.
+
+        ``fresh`` is the caller's statement that the receipt was read in this
+        very recovery call (the summary IS a current observation); otherwise
+        the block is whatever the last successful read left behind, and a
+        reader must not mistake its ``status`` for the guest's present state.
+        Siblings rather than keys inside ``watchdog``: that block is the
+        guest's own schema-versioned summary, and stamping host fields into it
+        would make it no longer the thing the guest reported.
+
+        ``watchdog_source`` is one of ``fresh_receipt`` / ``cached_last_receipt``
+        / ``absent`` (no summary was ever readable this episode).
+        ``watchdog_age_s`` is measured on the provider's monotonic clock.
+        """
+
+        if self._supervisor_watchdog is None:
+            source = "absent"
+        else:
+            source = "fresh_receipt" if fresh else "cached_last_receipt"
+        observed_mono = self._supervisor_watchdog_observed_mono
+        age = (
+            round(self._monotonic() - observed_mono, 3)
+            if observed_mono is not None and self._supervisor_watchdog is not None
+            else None
+        )
+        return {
+            "watchdog": self._watchdog_evidence(),
+            "watchdog_source": source,
+            "watchdog_observed_at": (
+                self._supervisor_watchdog_observed_at
+                if self._supervisor_watchdog is not None
+                else None
+            ),
+            "watchdog_age_s": age,
+        }
 
     def _restart_supervisor_unit(self, unit: str) -> dict[str, Any]:
         """Detached restart + freshness proof; never raises.
@@ -1633,7 +1710,7 @@ class AwsProvider:
         public_ip = found[0].get("PublicIpAddress")
         if not public_ip:
             raise AllocationError(f"instance {instance_id} has no public IP")
-        url = f"http://{public_ip}:{GUEST_PORT}{_READY_PATH}"
+        url = f"http://{public_ip}:{GUEST_PORT}{_ALLOCATION_READY_PATH}"
         deadline = time.monotonic() + self._readiness_timeout_s
         while True:
             try:
@@ -1644,7 +1721,7 @@ class AwsProvider:
             if time.monotonic() >= deadline:
                 raise ReadinessTimeout(
                     f"guest {instance_id} at {public_ip} did not answer "
-                    f"{_READY_PATH} within {self._readiness_timeout_s:.0f}s"
+                    f"{_ALLOCATION_READY_PATH} within {self._readiness_timeout_s:.0f}s"
                 )
             self._sleep(5.0)
 
@@ -2334,11 +2411,11 @@ class AwsProvider:
         await asyncio.to_thread(run)
 
     async def probe_control_server(self, timeout: float) -> bool:
-        """One bounded GET to the guest's readiness endpoint; never raises.
+        """One bounded GET to the guest's liveness endpoint; never raises.
 
-        The same endpoint, and the same meaning, as the allocation readiness
-        check (``_READY_PATH``, upstream's own ``ensure_ready`` probe), asked
-        again in the one state where the answer changes what the harness does:
+        The same endpoint, and the same meaning, as every other mid-episode
+        probe (``_LIVENESS_PATH``: "the control server serves requests"), asked
+        in the one state where the answer changes what the harness does:
         after an ambiguous delivery (see ``guest_loss``), where a control
         server that answers is the difference between continuing the episode
         with an UNKNOWN-outcome warning and ending it exactly as before. Read-
@@ -2386,7 +2463,7 @@ class AwsProvider:
         if origin is None:
             return False, {"answered": False, "cause": "no_origin"}
         try:
-            status = int(self._clients.http_get(f"{origin}{_READY_PATH}", timeout))
+            status = int(self._clients.http_get(f"{origin}{_LIVENESS_PATH}", timeout))
         except Exception as error:
             # Discard exception text: it may contain guest addresses or state.
             return False, {"answered": False, **guest_loss.failure_record(error, origin=origin)}
