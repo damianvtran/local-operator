@@ -351,3 +351,107 @@ async def test_the_snapshot_frame_releases_the_hold_before_the_stream_ends(
     with pytest.raises((asyncio.CancelledError, Exception)):
         await consumer
     assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+async def test_cancellation_at_response_start_releases_before_generator_entry(api, monkeypatch):
+    """ASGI can cancel the headers send before the generator ever starts.
+
+    This drives the app's real HTTP request scope and aborts the response-start
+    send, rather than pretending an unentered generator's finally will run.
+    """
+    _client, app, root = api
+    _write_session(root, big=True)
+    entered: list[str] = []
+    real_snapshot = module.DesktopSessionBridge.snapshot
+
+    async def snapshot(self, **kwargs):
+        entered.append(self.session_id)
+        return await real_snapshot(self, **kwargs)
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "snapshot", snapshot)
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            raise asyncio.CancelledError
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1", "method": "GET", "scheme": "http",
+        "path": f"/v1/desktop/sessions/{SID}/events", "query_string": b"",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+        "server": ("localhost", 80), "client": ("127.0.0.1", 1234),
+    }
+    with pytest.raises(asyncio.CancelledError):
+        await app(scope, receive, send)
+    assert entered == [], "the test cancelled after, not before, generator entry"
+    assert ti._PAINT_HOLDS == {}
+    task, _ = ti.start_refresh(root, SID)
+    assert not ti.refresh_deferred(root, SID)
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_exception_releases_its_deferred_scan(api, monkeypatch):
+    """A real /events request whose snapshot raises still releases promptly."""
+    client, _app, root = api
+    _write_session(root, big=True)
+    monkeypatch.setattr(ti, "_PAINT_HOLD_CEILING_S", 60.0)
+    tasks = []
+
+    async def broken_snapshot(self, **kwargs):
+        task, _ = ti.start_refresh(self.root, self.session_id)
+        tasks.append(task)
+        assert ti.refresh_deferred(self.root, self.session_id)
+        raise RuntimeError("synthetic snapshot failure")
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "snapshot", broken_snapshot)
+    with pytest.raises(RuntimeError, match="synthetic snapshot failure"):
+        await client.get(f"/v1/desktop/sessions/{SID}/events")
+    assert ti._PAINT_HOLDS == {}
+    assert await asyncio.wait_for(tasks[0], 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_two_http_opens_cancelled_mid_snapshot_release_only_their_own_hold(api, monkeypatch):
+    """Two HTTP opens share one deferred scan; cancelling one cannot release
+    the other's hold. Cancelling the second starts the scan before the ceiling.
+    """
+    client, _app, root = api
+    _write_session(root, big=True)
+    monkeypatch.setattr(ti, "_PAINT_HOLD_CEILING_S", 60.0)
+    both_entered = asyncio.Event()
+    tasks = []
+
+    async def blocked_snapshot(self, **kwargs):
+        task, _ = ti.start_refresh(self.root, self.session_id)
+        tasks.append(task)
+        if len(tasks) == 2:
+            both_entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "snapshot", blocked_snapshot)
+    opens = [
+        asyncio.create_task(client.get(f"/v1/desktop/sessions/{SID}/events")) for _ in range(2)
+    ]
+    try:
+        await asyncio.wait_for(both_entered.wait(), 30)
+        assert tasks[0] is tasks[1], "concurrent opens started two index scans"
+        opens[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await opens[0]
+        assert ti._PAINT_HOLDS[ti._key(root, SID)] == 1
+        assert ti.refresh_deferred(root, SID) and not tasks[0].done()
+        opens[1].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await opens[1]
+        assert ti._PAINT_HOLDS == {}
+        assert await asyncio.wait_for(tasks[0], 30) is not None
+    finally:
+        for request in opens:
+            if not request.done():
+                request.cancel()
+        await asyncio.gather(*opens, return_exceptions=True)

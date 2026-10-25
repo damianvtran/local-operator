@@ -1820,6 +1820,34 @@ and two shapes for one page is the defect the capability exists to prevent.
    which is why a warm index stays cheap and why an unchanged journal costs a
    stat.
 
+#### Scheduling the index behind the first frame
+
+The desktop `GET /v1/desktop/sessions/{id}/checkpoints` manifest reads the index
+without attaching a session or constructing a cold facade. It uses the pool's
+same identity/draft/peer checks and retirement predicate; peer rows still return
+`unsupported`, registered drafts return an empty `ready` manifest, and a latched
+daemon still refuses the read. It does not acquire the bridge lock, so the
+parallel `/events` request never queues behind the manifest's facade build.
+
+The desktop `/events` route takes a **per-session paint hold** before its attach
+and releases it after writing the snapshot frame. While held, a cold index
+refresh whose full scan cannot fit the existing first-paint scan-rate budget
+waits instead of competing with the first frame for CPU/GIL time. This is the
+same size/rate predicate as the manifest's bounded wait, not another threshold.
+Small journals and existing index caches are not deferred. Unpayable scans
+already answered `building` before this scheduling change; clients must re-read
+a `building` manifest to obtain the completed ticks. There is no query flag and
+no change to the manifest or frame schema.
+
+Holds are reference-counted: two concurrent opens of the same session release
+the scan after the last snapshot (or teardown). Acquire failures, stream errors,
+disconnects and unconsumed response bodies release their own hold idempotently;
+a 15-second ceiling also prevents a missed release from starving the scan.
+The frame does not wait on a scan deferred by its own hold. Other sessions are
+independent. The TUI and mobile relay never take a desktop paint hold, so their
+index scheduling remains unchanged. `LOP_OPEN_TRACE` records
+`index.refresh_start` alongside `a.wire.frame kind=snapshot` for timing evidence.
+
 #### The anchored read keeps the reader's own counts
 
 `around_id` is the renderer's FAR JUMP: it asks for a POSITION, and its

@@ -35,6 +35,7 @@ from pydantic import (
     model_validator,
 )
 from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 
 from local_operator.harness.types import ModelSpec
 from local_operator.i18n.keys import wire_errors_desktop as _wd
@@ -6020,7 +6021,11 @@ async def events(
     # ``release_once`` -- which the generator's teardown and the response's
     # background task both reach on a disconnect or a never-consumed body. The
     # release is idempotent, and the index module's ceiling bounds a leak.
-    release_paint = transcript_index.hold_paint(pool.root, session_id)
+    # Keyed by the config root ``host()`` builds the pool from -- the same root
+    # every ``start_refresh`` caller on this plane passes (``bridge.root``).
+    release_paint = transcript_index.hold_paint(
+        request.app.state.config_manager.config_dir, session_id
+    )
     context = pool.session(session_id, read=True, allow_draft=True)
     try:
         async with errors(request):
@@ -6143,7 +6148,23 @@ async def events(
         finally:
             await release_once()
 
-    return StreamingResponse(
+    class PaintHeldResponse(StreamingResponse):
+        """Release even if ASGI cancellation happens before body iteration.
+
+        A generator's ``finally`` cannot run until it has been entered, and
+        Starlette does not run background tasks if ``send(response.start)``
+        raises. The synchronous hold release therefore also belongs to the
+        response's outermost ``finally``. It is idempotent with the normal
+        snapshot/stream/background exits and never awaits under cancellation.
+        """
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                release_paint()
+
+    return PaintHeldResponse(
         stream(),
         media_type="text/event-stream",
         headers={
