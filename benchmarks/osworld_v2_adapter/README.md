@@ -830,7 +830,7 @@ statement that ends in a terminal transport failure costs at most one attempt's
 own deadline (~90 s, unchanged from a single send) plus the window; a fast
 refusal still gets its full schedule (~3.5 s). A refused port and an
 unreachable host (`EHOSTUNREACH`) are both retryable, because neither sent a
-byte. The bounded readiness GET to `/terminal` is taken once per statement and
+byte. The bounded liveness GET to `/platform` is taken once per statement and
 is **evidence, not a veto**: it rides the same host-to-guest path as the request
 that just failed, so a transient path failure fails the probe too, and
 requiring it would turn exactly that blip into a dead episode. Each retry logs
@@ -850,12 +850,22 @@ retries exhausted (N)`), console evidence, and the guest-down cause of death.
 **The pre-action receipt check gets the same treatment.** Before an action it
 waits for the control server with bounded backoff for up to 15 s of wall clock
 (~7x the observed time for a blipped path to come back). Each probe gets the
-watchdog's own 5 s bound: the action server is single-threaded around its
-control endpoints, so a screenshot or a page load blocks `/terminal` for
-seconds, and a probe that gives up sooner calls a BUSY server ambiguous -- the
-path connected, the HTTP never answered -- then refuses an episode the same
-server would serve. The probe is classification, not a kill, so patience costs
-only time inside the fixed budget. If every probe in that
+watchdog's own 5 s bound, and asks `GET /platform` -- upstream's
+`platform.system()`, no desktop work -- never `/terminal`. Upstream's
+`/terminal` serialises the whole AT-SPI desktop tree whenever a terminal is
+active; on a v2.1 guest it measured 0.06 s fresh, 4-6 s with a focused
+terminal over other apps, and 8-31 s beside a concurrent `/accessibility`
+read, while `/platform` stayed at 0.05-0.18 s in every state. Probing
+`/terminal` mid-episode turned a live server into a ReadTimeout (ambiguous:
+the path connected, the HTTP never answered) and refused the action unsent;
+that was 7 of the 10 main16 "action bridge wedged" endings. `/terminal` stays
+only as the allocation readiness check (`_ALLOCATION_READY_PATH`), upstream's
+own `ensure_ready` admission on a fresh desktop. The probe is classification,
+not a kill, so patience costs only time inside the fixed budget. Every
+recovery record also says whether its `watchdog` block was read in that call
+(`watchdog_source: fresh_receipt`) or re-emitted from the last successful read
+(`cached_last_receipt`, with `watchdog_observed_at` and `watchdog_age_s`): a
+cached `serving` is not evidence the watchdog sees the server now. If every probe in that
 wait failed on the CONNECT -- `probe_outcomes` all `not_sent`, recorded as
 `path_unreachable` -- nothing was learned about the server's generation, so the
 action is compiled and attempted anyway and the transport classifier decides
@@ -868,7 +878,7 @@ carries no `delivery=` token, because no delivery happened.
 The `delivery=ambiguous` verdict
 does feed exactly ONE gated harness measure: after such a failure the session
 asks a single read-only question, `probe` -- a bounded GET to the guest's
-readiness endpoint (`providers.aws._READY_PATH`) -- and only an ANSWERING
+liveness endpoint (`providers.aws._LIVENESS_PATH`) -- and only an ANSWERING
 control server lets the episode continue, with the model told the batch's
 effect is UNKNOWN and instructed to verify the screen before re-issuing
 anything. A probe that cannot answer fails closed, and an adapter that does

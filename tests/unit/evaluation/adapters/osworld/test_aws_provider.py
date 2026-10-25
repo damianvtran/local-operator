@@ -941,13 +941,15 @@ async def test_readiness_timeout_raises_after_deadline(
 
 
 @pytest.mark.asyncio
-async def test_probe_asks_the_readiness_endpoint_and_200_is_reachable(
+async def test_probe_asks_the_liveness_endpoint_and_200_is_reachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ambiguous-delivery probe is the allocation readiness GET, again.
+    """The ambiguous-delivery probe is the mid-episode liveness GET.
 
-    Same endpoint, same meaning: whatever answered 200 at admission answers
-    this, and the answer is the boolean the session's gate acts on. The
+    ``/platform``, not the allocation check's ``/terminal``: mid-episode the
+    desktop may hold a terminal, and upstream's ``/terminal`` then walks the
+    whole AT-SPI tree -- seconds -- so a live server would read as down. The
+    answer is the boolean the session's gate acts on. The
     caller's ``timeout`` reaches the transport unchanged -- the bound is the
     caller's, so the short probe deadline stays the harness's decision.
     """
@@ -956,7 +958,7 @@ async def test_probe_asks_the_readiness_endpoint_and_200_is_reachable(
         provider = _provider(stubs, monkeypatch)
         provider._public_ip = "203.0.113.5"
         assert await provider.probe_control_server(5.0) is True
-    assert stubs.http_calls == ["http://203.0.113.5:5000/terminal"]
+    assert stubs.http_calls == ["http://203.0.113.5:5000/platform"]
     assert stubs.http_timeouts == [5.0]
 
 
@@ -976,7 +978,7 @@ async def test_probe_collapses_every_not_answering_mode_to_false(
         provider = _provider(stubs, monkeypatch)
         provider._public_ip = "203.0.113.5"
         assert await provider.probe_control_server(5.0) is False
-    assert stubs.http_calls == ["http://203.0.113.5:5000/terminal"]
+    assert stubs.http_calls == ["http://203.0.113.5:5000/platform"]
 
     def refused(url: str, timeout: float) -> int:
         del url, timeout

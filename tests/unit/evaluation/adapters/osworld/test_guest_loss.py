@@ -769,7 +769,7 @@ async def test_refused_connect_recovers_with_one_delivered_request(
 
     class Handler(_OkHandler):
         def do_GET(self) -> None:
-            assert self.path == aws_mod._READY_PATH
+            assert self.path == aws_mod._LIVENESS_PATH
             self.send_response(200)
             self.end_headers()
 
@@ -930,7 +930,7 @@ async def test_an_unreachable_path_recovers_when_the_readiness_probe_also_fails(
 
     def probe(url: str, timeout: float) -> int:
         # A probe that CANNOT reach the guest: the path is down for it as well.
-        raise _no_route(origin, aws_mod._READY_PATH)
+        raise _no_route(origin, aws_mod._LIVENESS_PATH)
 
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path, post=post)
@@ -1101,7 +1101,7 @@ async def test_the_retry_bound_is_spent_then_the_episode_fails_as_today(
         raise _no_route(origin)
 
     def probe(url: str, timeout: float) -> int:
-        raise _no_route(origin, aws_mod._READY_PATH)
+        raise _no_route(origin, aws_mod._LIVENESS_PATH)
 
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path, post=post)
