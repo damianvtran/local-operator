@@ -328,20 +328,39 @@ def output_redirect_lines(log: Path) -> list[str]:
 
 
 def systemd_path() -> str:
-    """The executable search path shared by every rendered Linux user unit.
+    """The executable search path every rendered Linux user unit carries.
 
-    A user manager does not inherit the installer's shell PATH, so a uv tool
-    installed under ``~/.local/bin`` is otherwise invisible to supervised
-    updates. Preserve the installer's additional directories rather than
-    replacing them with a fixed allowlist, and append the system directories
-    a clean user manager would have supplied.
+    A user manager does not inherit the installer's shell PATH: it hands a unit
+    its own default (measured on an Amazon Linux node:
+    ``/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin``), so the uv the
+    official installer puts in ``~/.local/bin`` is invisible to a supervised
+    update. User-local bin first, then the system directories the manager's
+    default would have supplied (``/bin`` and ``/sbin`` for hosts without a
+    merged ``/usr``) — the Linux counterpart of ``relay._launchd_path``.
+
+    DELIBERATELY A FIXED LIST, with no ``os.environ`` input. Every installer
+    compares the installed unit to a fresh render by content (the relay's
+    ``refresh_unit_if_stale``, the wakes ``ensure_supervisor_installed`` on
+    every arm, the browser's ``_systemd_unit_is_current``), so a value copied
+    from the caller's PATH made the render depend on WHO rendered it: two
+    sessions with different PATHs rewrote and ``daemon-reload``ed the wakes
+    unit on every alternation (review round 1, M1), and a caller's activated
+    venv, session scratchpad shim or relative entry was frozen into a
+    long-lived unit ahead of the system directories. The same reasoning is
+    recorded for the wakes LaunchAgent at ``wakes/supervisor.py`` ("a PATH baked
+    into the plist render would vary per calling session").
     """
-    directories = [str(Path.home() / ".local" / "bin")]
-    directories.extend(os.environ.get("PATH", "").split(os.pathsep))
-    directories.extend(
-        ("/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin")
+    return os.pathsep.join(
+        [
+            str(Path.home() / ".local" / "bin"),
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/usr/sbin",
+            "/bin",
+            "/sbin",
+        ]
     )
-    return os.pathsep.join(dict.fromkeys(directory for directory in directories if directory))
 
 
 def render_systemd_unit(
@@ -417,6 +436,14 @@ def render_systemd_unit(
         # above the manager's ``oom_score_adj_min`` take effect, and a lower one
         # is dropped by systemd without failing the unit.
         lines.append(f"OOMScoreAdjust={int(oom_score_adjust)}")
+    # THE CLEAN-NODE INCIDENT (2026-10-25): on a fresh Amazon Linux node uv
+    # lived in ``~/.local/bin`` and the relay unit inherited the manager's PATH,
+    # which lacked it, so the first supervised self-update (``lop network
+    # update``) refused with ``[Errno 2] No such file or directory: 'uv'`` until
+    # a hand-written drop-in restored the directory. Every unit carries the
+    # PATH so each daemon resolves tools the same way. It must stay a
+    # deterministic render (see :func:`systemd_path`): the installers'
+    # content comparisons turn any caller-dependent byte into a rewrite loop.
     lines += [f"Environment={quoted(f'PATH={systemd_path()}')}", *post_lines]
     if separate_sections:
         lines.append("")

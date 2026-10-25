@@ -991,10 +991,14 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             # omission harmless here is narrower, and true: the systemd unit and
             # the Windows task both name `procname.supervised_image()` — the shim
             # that resolves the pointer at exec — so there is no stale
-            # INTERPRETER PATH for a rewrite to fix. A refresh for the other two
-            # platforms needs its own decision (the upgrade path that calls this
-            # only walks LaunchAgents), not a plist function stretched to cover
-            # them.
+            # INTERPRETER PATH for a rewrite to fix. The systemd unit's other
+            # content (its `Environment="PATH=…"` line, `supervisors.systemd_path`)
+            # CAN go stale, and is migrated by `_ensure_systemd_installed`'s
+            # content comparison on the next wake arm, not here. A refresh for
+            # the other two platforms needs its own decision (the upgrade path
+            # that calls this only walks LaunchAgents; audit A24 in
+            # `update._linux_refresh_steps`), not a plist function stretched to
+            # cover them.
             return launchd.PlistRefresh(name=name, kind="unsupported")
         path = plist_path()
         if not _launchd_is_addressable():

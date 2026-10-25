@@ -144,14 +144,19 @@ def test_the_windows_task_guard_refuses_off_windows() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_unit_finds_user_local_uv_and_preserves_the_installer_path(
+def test_a_unit_finds_user_local_uv_under_the_managers_sparse_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """systemd's sparse default PATH must not hide a uv installed for the user."""
+    """systemd's sparse default PATH must not hide a uv installed for the user.
+
+    The measured clean-node incident: the relay unit inherited
+    ``/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin`` and the update could
+    not find ``~/.local/bin/uv``. The fixture is a real executable under a
+    HOME with a space, so quoting and resolution are both exercised.
+    """
     home = tmp_path / "home with spaces"
-    custom_bin = tmp_path / "custom tools"
     monkeypatch.setattr(Path, "home", lambda: home)
-    monkeypatch.setenv("PATH", os.pathsep.join((str(custom_bin), "/opt/company/bin")))
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin")
     uv = home / ".local" / "bin" / "uv"
     uv.parent.mkdir(parents=True)
     uv.write_text("#!/bin/sh\nprintf 'uv-fixture-ok\\n'\n", encoding="utf-8")
@@ -162,8 +167,6 @@ def test_a_unit_finds_user_local_uv_and_preserves_the_installer_path(
 
     assert path == [
         str(home / ".local" / "bin"),
-        str(custom_bin),
-        "/opt/company/bin",
         "/usr/local/bin",
         "/usr/local/sbin",
         "/usr/bin",
@@ -182,6 +185,30 @@ def test_a_unit_finds_user_local_uv_and_preserves_the_installer_path(
     assert subprocess.run([discovered_uv], capture_output=True, text=True, check=True).stdout == (
         "uv-fixture-ok\n"
     )
+
+
+def test_the_unit_render_does_not_depend_on_the_callers_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same build, same machine, same unit bytes — whoever renders it.
+
+    Review/QA round 1 (M1/Q1): installers compare the installed unit with a
+    fresh render by content, so a caller-dependent PATH is a rewrite loop and
+    freezes one caller's venv, scratchpad shim or relative entry into a
+    long-lived unit.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def render(caller_path: str) -> str:
+        monkeypatch.setenv("PATH", caller_path)
+        return supervisors.render_systemd_unit(description="x", exec_start="/bin/true")
+
+    sparse = render("/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin")
+    session = render(f"{tmp_path / 'proj' / '.venv' / 'bin'}:.:bin:~/tools:/opt/company/bin")
+
+    assert sparse == session
+    for leaked in (".venv", "~/tools", "/opt/company/bin", ":.:", ":bin:"):
+        assert leaked not in sparse, leaked
 
 
 def test_a_unit_restarts_on_failure_and_not_always() -> None:
