@@ -10,7 +10,9 @@ against the dump's formatting.
 
 The fake ``/proc`` tree is deliberate: these tests must not assert on the
 host's current memory, its process table or its cgroup layout, because the CI
-runner and a developer laptop have none of those in common.
+runner and a developer laptop have none of those in common. The worker's own
+resource and kernel ceilings are asserted the same way -- the fixture gives the
+controller different values, so a dump that reads the wrong process cannot pass.
 """
 
 from __future__ import annotations
@@ -90,6 +92,36 @@ def _write_process(
     (entry / "cmdline").write_bytes(cmdline.replace(" ", "\x00").encode() + b"\x00")
 
 
+#: The worker's limits. The controller's differ on purpose: a dump that reads
+#: the wrong process is indistinguishable from a correct one unless the fixture
+#: makes the two disagree on a value the real one does not also carry.
+WORKER_LIMITS = {
+    "Max address space": ("unlimited", "unlimited", "bytes"),
+    "Max data size": ("unlimited", "unlimited", "bytes"),
+    "Max processes": ("63488", "63488", "processes"),
+    "Max stack size": ("8388608", "unlimited", "bytes"),
+    "Max open files": ("1048576", "1048576", "files"),
+}
+CONTROLLER_LIMITS = {
+    "Max address space": ("unlimited", "unlimited", "bytes"),
+    "Max data size": ("unlimited", "unlimited", "bytes"),
+    "Max processes": ("4096", "4096", "processes"),
+    "Max stack size": ("8388608", "unlimited", "bytes"),
+    "Max open files": ("4096", "4096", "files"),
+}
+
+
+def _write_limits(root: Path, pid: int, rows: dict[str, tuple[str, str, str]]) -> None:
+    lines = ["Limit                     Soft Limit           Hard Limit           Units"]
+    for label, (soft, hard, units) in rows.items():
+        lines.append(f"{label:<26}{soft:<21}{hard:<21}{units}")
+    (root / str(pid) / "limits").write_text("\n".join(lines) + "\n")
+
+
+def _write_maps(root: Path, pid: int, lines: list[str]) -> None:
+    (root / str(pid) / "maps").write_text("\n".join(lines) + "\n")
+
+
 @pytest.fixture
 def fake_proc(tmp_path: Path) -> Path:
     """A fake /proc: one pytest controller, a worker, two children, one outsider."""
@@ -115,6 +147,23 @@ def fake_proc(tmp_path: Path) -> Path:
     _write_process(root, 102, 101, "Local Operator", 80_000, "/opt/lo/bin/Local Operator --run")
     _write_process(root, 103, 101, "sleep", None, "sleep 30")
     _write_process(root, 999, 1, "unrelated", 5_000, "/usr/bin/other --daemon")
+
+    # Ceilings for the failing worker. 3277 mappings against the older 65530
+    # default gives a 5% ratio, so the arithmetic is visible in the rendering.
+    (root / "sys" / "vm").mkdir(parents=True)
+    (root / "sys" / "vm" / "max_map_count").write_text("65530\n")
+    _write_limits(root, 101, WORKER_LIMITS)
+    _write_limits(root, 100, CONTROLLER_LIMITS)
+    _write_maps(
+        root,
+        101,
+        [
+            f"7f{index:014x}-7f{index + 1:014x} r-xp 00000000 08:01 42 /usr/lib/libx.so"
+            for index in range(3277)
+        ],
+    )
+    with (root / "101" / "status").open("a") as status_file:
+        status_file.write("VmPeak:\t 3145728 kB\nVmSize:\t 2097152 kB\nThreads:\t 17\n")
     return root
 
 
@@ -178,6 +227,50 @@ def test_the_dump_records_every_field_the_next_measurement_needs(
     assert "no cgroup v2 memory.max/memory.current/memory.peak" in text
 
 
+def test_the_worker_ceilings_are_read_from_the_failing_worker(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """Every ceiling reading, taken from the worker that caught the error.
+
+    Mutation that must fail this: read ``/proc/self`` instead of the worker's
+    pid (the controller's limits differ here), print a numeric sentinel for an
+    unlimited limit, or emit ``maps`` contents rather than their line count.
+    """
+    text = memory.build_report(
+        nodeid="tests/unit/secrets/test_cli.py::test_keyring_write",
+        error=OSError(errno.ENOMEM, "Cannot allocate memory"),
+        config=_Config({"workerid": "gw3", "workercount": 3}),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "no-cgroup",
+        pid=101,
+        root_pid=100,
+    )
+
+    # Soft and hard, with ``unlimited`` rendered as the word the kernel prints.
+    assert "RLIMIT_AS (Max address space): soft=unlimited hard=unlimited units=bytes" in text
+    assert "RLIMIT_DATA (Max data size): soft=unlimited hard=unlimited units=bytes" in text
+    assert "RLIMIT_NPROC (Max processes): soft=63488 hard=63488 units=processes" in text
+    assert "RLIMIT_STACK (Max stack size): soft=8388608 hard=unlimited units=bytes" in text
+    assert "RLIMIT_NOFILE (Max open files): soft=1048576 hard=1048576 units=files" in text
+    # The controller's descriptor limit is 4096; only the worker's row may appear.
+    assert "soft=4096" not in text
+
+    # Address space and thread count at the failure, from the worker's status.
+    assert "VmPeak: 3145728 kB (3072.0 MiB)" in text
+    assert "VmSize: 2097152 kB (2048.0 MiB)" in text
+    assert "VmRSS: 262000 kB (255.9 MiB)" in text
+    assert "Threads: 17" in text
+
+    # Mapping headroom: the count only, then the ratio to the kernel ceiling.
+    assert "map_count: 3277 (" in text
+    assert "max_map_count: 65530 (" in text
+    assert "map_count / max_map_count: 3277/65530 = 0.0500 (5.00%)" in text
+
+    # The namespace task total, the same 4/788 figure /proc/loadavg carries.
+    assert "namespace tasks: total=456 runnable=2 (/proc/loadavg field 4)" in text
+
+
 def test_no_command_line_or_argv_text_reaches_the_dump(
     fake_proc: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -193,11 +286,15 @@ def test_no_command_line_or_argv_text_reaches_the_dump(
     """
     line_marker = "LEAKMARKER-ARGV-31337"
     argv_marker = "LEAKMARKER-AUX-90210"
+    map_marker = "LEAKMARKER-MAP-PATH-77777"
     for entry in fake_proc.iterdir():
         if entry.is_dir() and (entry / "cmdline").exists():
             (entry / "cmdline").write_bytes(
                 f"--label {line_marker} pytest".replace(" ", "\x00").encode() + b"\x00"
             )
+    (fake_proc / "101" / "maps").write_text(
+        f"7f0000000000-7f0000001000 r-xp 00000000 08:01 42 /opt/{map_marker}/lib.so\n"
+    )
     monkeypatch.setattr(memory.sys, "argv", ["pytest", "--label", argv_marker])
     config = _Config(
         {
@@ -220,9 +317,12 @@ def test_no_command_line_or_argv_text_reaches_the_dump(
 
     assert line_marker not in text
     assert argv_marker not in text
+    assert map_marker not in text
+    assert "/opt/" not in text
     # Removing the text did not remove the reading: the tree still roots at the
-    # controller from the worker's parent pid.
+    # controller from the worker's parent pid, and the map table is counted.
     assert "tree root pid: 100" in text
+    assert "map_count: 1 (" in text
 
 
 def test_cgroup_v2_peak_is_included_when_the_files_exist(tmp_path: Path) -> None:
@@ -307,6 +407,8 @@ def test_missing_and_unreadable_files_are_reported_not_raised(tmp_path: Path) ->
     (entry / "stat").write_text("101 (python) S 100 100 100 0 0\n")
     (entry / "status").mkdir()
     (entry / "cmdline").mkdir()
+    (entry / "limits").mkdir()
+    (entry / "maps").mkdir()
 
     text = memory.build_report(
         nodeid="tests/unit/x.py::test_y",
@@ -318,6 +420,9 @@ def test_missing_and_unreadable_files_are_reported_not_raised(tmp_path: Path) ->
     )
 
     assert "unavailable: IsADirectoryError" in text
+    assert "map_count: unavailable: IsADirectoryError" in text
+    assert "max_map_count: unavailable: FileNotFoundError" in text
+    assert "map_count / max_map_count: unavailable (a reading is missing)" in text
     # The process is still represented by its stat line, with no RSS.
     assert "processes in tree: 1" in text
     assert re.search(r"^\s*101\s+100\s+-", text, re.MULTILINE)

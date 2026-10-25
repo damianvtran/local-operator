@@ -16,17 +16,44 @@ these cells ran. The runner is gone by the time anyone reads the log, so the
 evidence has to be written at the failure.
 
 This module records that evidence from inside the xdist worker, before the test
-process unwinds: host memory and swap, load average, the shard's process tree
-and per-process RSS, the cgroup v2 high-water mark, and the failing node id.
-The next measurement -- whether to bound workers or hunt a leak -- needs exactly
-these numbers, and ``memory.peak`` is the one that outlives the moment.
+process unwinds: host memory and swap, load average, the failing worker's own
+resource and kernel ceilings, the shard's process tree and per-process RSS, the
+cgroup v2 high-water mark, and the failing node id.
+
+WHAT THE FIRST EIGHT DUMPS SETTLED
+----------------------------------
+The dump fired again on main run 40140983105, shard ``test (3.13, 3)``, head
+``a96e13e8d8``: eight dumps, all readable. Every one showed ``MemAvailable``
+11.9-12.1 GiB, ``MemFree`` 9.1 GiB, ``SwapFree`` 3.0 GiB, runner load
+3.66/3.12/1.60, no cgroup v2 memory limits, and a seven-process shard tree at
+about 3.0 GB RSS. The runner was not short of memory. That falsifies the
+capacity explanation -- it is not merely unproven -- and the worker-count
+mitigation drafted against it was withdrawn for that reason, not deferred.
+
+The one remaining class that produces ``ENOMEM`` with 12 GiB free is a
+per-process or kernel ceiling. So the dump now also records, from the failing
+worker itself: ``RLIMIT_AS``/``DATA``/``NPROC``/``STACK``/``NOFILE`` soft and
+hard, the worker's mapping count (``/proc/<pid>/maps`` lines, never the lines),
+``VmPeak``/``VmSize``/``VmRSS`` and ``Threads``, ``vm.max_map_count`` and the
+``map_count / max_map_count`` ratio, and the namespace task total from
+``/proc/loadavg``.
+
+WHAT THIS PROBE IS FOR, AND ITS FALSIFIER
+-----------------------------------------
+If the next failure shows every limit permissive and ``map_count`` far below
+``vm.max_map_count``, the ceiling theory is wrong as well, and the hunt moves to
+the spawning call itself -- the code asking the kernel for an allocation, not
+the budget the kernel reports. The dump is evidence for that decision, not a
+claim that any number is currently out of range.
 
 WHAT IT DELIBERATELY DOES NOT DO
 --------------------------------
 It does not retry, reduce a worker count, change a timeout or touch a test.
 It never reads a command line: this dump is uploaded as a public artifact, an
 argument can be a credential, and the process tree only needs pids, ppids, RSS
-and names (the root comes from the worker's parent pid).
+and names (the root comes from the worker's parent pid). It does not emit map
+lines either, only their count: a mapping line carries filesystem paths, and
+this artifact is public.
 
 Nothing is written on a healthy run: the hook is one ``isinstance`` check per
 test report and the directory is created only when an ENOMEM failure actually
@@ -35,13 +62,6 @@ an unusable dump directory disables the instrument instead of raising inside a
 pytest hook. That is the same rule ``tests/shard_stall_watchdog.py`` follows,
 and for the same reason: a diagnostic that can turn a green run red is switched
 off the first time it is wrong.
-
-THE READING THIS SUPPORTS, STATED UP FRONT
------------------------------------------
-If the same cells fail again in a run that shows plenty of ``MemAvailable`` and
-no cgroup pressure at the failure, this capacity explanation is WRONG and the
-response changes to a real-defect hunt. The dump is evidence for that decision,
-not a claim that any number is currently out of range.
 
 WHERE THE FILE LANDS
 --------------------
@@ -76,6 +96,28 @@ MEMINFO_KEYS = ("MemAvailable", "MemFree", "SwapFree", "Cached")
 #: container started -- the number a worker-count decision needs after the fact,
 #: because ``memory.current`` has usually fallen again by the time it is read.
 CGROUP_FILES = ("memory.max", "memory.current", "memory.peak")
+
+#: The worker's resource limits that can refuse an allocation while the host
+#: still has free memory, mapped from the label ``/proc/<pid>/limits`` prints.
+#: ``NOFILE`` fails with ``EMFILE`` rather than ``ENOMEM``, but it is one row on
+#: the same read and an exhausted descriptor table is the other classic
+#: per-process ceiling, so it is recorded beside the rest.
+LIMIT_ROWS = (
+    ("RLIMIT_AS", "Max address space"),
+    ("RLIMIT_DATA", "Max data size"),
+    ("RLIMIT_NPROC", "Max processes"),
+    ("RLIMIT_STACK", "Max stack size"),
+    ("RLIMIT_NOFILE", "Max open files"),
+)
+
+#: ``/proc/<pid>/status`` keys for the address-space and thread readings.
+#: ``VmPeak`` is the high-water mark a ceiling reading is compared against;
+#: ``VmSize`` and ``VmRSS`` are the same instant's current values.
+WORKER_STATUS_KEYS = ("VmPeak", "VmSize", "VmRSS", "Threads")
+
+#: Relative to a ``/proc`` root, so the fake tree in the unit tests reads the
+#: same path shape the kernel exposes.
+MAX_MAP_COUNT_PATH = Path("sys") / "vm" / "max_map_count"
 
 #: Base for local runs. CI overrides the whole directory through
 #: :data:`ENV_RUN_DIR`; ``TMPDIR`` is the platform-correct scratch root and is
@@ -305,6 +347,7 @@ def build_report(
     lines.append(f"timestamp: {moment.isoformat()} (epoch {moment.timestamp():.3f})")
     lines.extend(_error_lines(nodeid, error))
     lines.extend(_identity_lines(config, current_pid))
+    lines.extend(_ceiling_lines(proc_root, current_pid))
     lines.extend(_meminfo_lines(proc_root))
     lines.extend(_loadavg_lines(proc_root))
     lines.extend(_process_lines(proc_root, current_pid, processes, root_pid))
@@ -378,6 +421,153 @@ def _loadavg_lines(proc_root: Path) -> list[str]:
             + (f" runnable/total={parts[3]}" if len(parts) > 3 else "")
         )
     return lines
+
+
+def _ceiling_lines(proc_root: Path, pid: int) -> list[str]:
+    """The failing worker's own ceilings: rlimits, address space, task counts.
+
+    ``pid`` is the worker that caught the ``OSError`` -- in production the
+    process this hook runs in, whose ``/proc/self`` these files are. Any other
+    process would describe a neighbour, and the ceiling this probe exists to
+    test is the failing worker's. Every read is best-effort: a missing file is
+    stated, never raised, and ``maps`` is counted rather than copied because a
+    mapping line carries filesystem paths into a public artifact.
+    """
+    worker = proc_root / str(pid)
+    lines = ["", f"-- resource limits: failing worker pid {pid} ({worker / 'limits'}) --"]
+    limits_raw, limits_error = _read_text(worker / "limits")
+    if limits_raw is None:
+        lines.append(f"(unavailable: {limits_error})")
+    else:
+        rows = _parse_limit_rows(limits_raw)
+        for rlimit, label in LIMIT_ROWS:
+            row = rows.get(label)
+            if row is None:
+                lines.append(f"{rlimit} ({label}): unavailable: row absent")
+                continue
+            soft, hard, units = row
+            lines.append(f"{rlimit} ({label}): soft={soft} hard={hard} units={units or 'unknown'}")
+
+    lines.extend(["", f"-- address space and threads: failing worker pid {pid} ({worker}) --"])
+    status_raw, status_error = _read_text(worker / "status")
+    if status_raw is None:
+        lines.append(f"(unavailable: {status_error})")
+    else:
+        values = _status_values(status_raw)
+        for key in WORKER_STATUS_KEYS:
+            value = values.get(key)
+            if value is None:
+                lines.append(f"{key}: <missing>")
+            elif key == "Threads":
+                lines.append(f"{key}: {value}")
+            else:
+                lines.append(f"{key}: {_format_kb(value)}")
+
+    lines.extend(["", f"-- mapping and task ceilings: failing worker pid {pid} --"])
+    map_count, maps_error = _count_lines(worker / "maps")
+    if map_count is None:
+        lines.append(f"map_count: unavailable: {maps_error}")
+    else:
+        lines.append(f"map_count: {map_count} ({worker / 'maps'} lines; contents not emitted)")
+    max_path = proc_root / MAX_MAP_COUNT_PATH
+    max_raw, max_error = _read_text(max_path)
+    max_map_count: int | None = None
+    if max_raw is None:
+        lines.append(f"max_map_count: unavailable: {max_error}")
+    else:
+        try:
+            max_map_count = int(max_raw.strip())
+        except ValueError:
+            lines.append(f"max_map_count: {_one_line(max_raw, 80)} (unparsed)")
+        else:
+            lines.append(f"max_map_count: {max_map_count} ({max_path})")
+    if map_count is None or max_map_count is None or max_map_count <= 0:
+        lines.append("map_count / max_map_count: unavailable (a reading is missing)")
+    else:
+        ratio = map_count / max_map_count
+        lines.append(
+            f"map_count / max_map_count: {map_count}/{max_map_count} = "
+            f"{ratio:.4f} ({ratio * 100:.2f}%)"
+        )
+    tasks = _namespace_tasks(proc_root)
+    if tasks is None:
+        lines.append("namespace tasks: unavailable (no parsable /proc/loadavg)")
+    else:
+        runnable, total = tasks
+        lines.append(f"namespace tasks: total={total} runnable={runnable} (/proc/loadavg field 4)")
+    return lines
+
+
+def _parse_limit_rows(raw: str) -> dict[str, tuple[str, str, str]]:
+    """Parse ``/proc/<pid>/limits`` into ``label -> (soft, hard, units)``.
+
+    Matched by the kernel's own labels rather than by column offsets: the file
+    is column-aligned today, but a value wider than its column collapses the
+    padding, and splitting the whole line on whitespace would then read part of
+    the label as the soft limit. The labels in :data:`LIMIT_ROWS` contain no
+    runs of whitespace, so a prefix match is stable in both layouts.
+    """
+    labels = {label for _, label in LIMIT_ROWS}
+    rows: dict[str, tuple[str, str, str]] = {}
+    for line in raw.splitlines():
+        for label in labels:
+            if not line.startswith(label):
+                continue
+            fields = line[len(label) :].split()
+            if len(fields) >= 2:
+                rows[label] = (fields[0], fields[1], fields[2] if len(fields) > 2 else "")
+            break
+    return rows
+
+
+def _status_values(raw: str) -> dict[str, int]:
+    """The :data:`WORKER_STATUS_KEYS` values present in a status file."""
+    values: dict[str, int] = {}
+    for line in raw.splitlines():
+        key, separator, rest = line.partition(":")
+        if not separator or key not in WORKER_STATUS_KEYS:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            values[key] = int(parts[0])
+        except ValueError:
+            continue
+    return values
+
+
+def _count_lines(path: Path) -> tuple[int | None, str | None]:
+    """Count a file's lines without holding it or its contents.
+
+    ``/proc/<pid>/maps`` emits one mapping per line and each line carries
+    filesystem paths, so only the count is reported. Iterating the handle keeps
+    the peak at one line even when the mapping table is at the ceiling that
+    made this dump run; the whole loop is wrapped like every other read.
+    """
+    try:
+        count = 0
+        with path.open("rb") as handle:
+            for _ in handle:
+                count += 1
+        return count, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _namespace_tasks(proc_root: Path) -> tuple[int, int] | None:
+    """The ``runnable/total`` task counts in field 4 of ``/proc/loadavg``."""
+    raw, _ = _read_text(proc_root / "loadavg")
+    if not raw:
+        return None
+    parts = raw.split()
+    if len(parts) < 4 or "/" not in parts[3]:
+        return None
+    runnable, _, total = parts[3].partition("/")
+    try:
+        return int(runnable), int(total)
+    except ValueError:
+        return None
 
 
 def _process_lines(
