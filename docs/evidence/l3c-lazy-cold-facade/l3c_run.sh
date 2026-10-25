@@ -3,7 +3,9 @@
 #
 # Two worktrees, ONE synthetic fixture (APFS clones of one seed), the same code
 # path from the outside: a desktop cold open of exactly that journal.
-#   * in-process: backend CPU and journal bytes per open (fresh process each side)
+#   * in-process: backend CPU and journal bytes per open. ONE process per side,
+#     replay cache cleared between samples -- NOT a fresh process, so its hit
+#     figure is a facade-open cost and must not be quoted as a restart cost
 #   * real `serve`: the real /events route over HTTP, first frame captured
 # Nothing reads the operator's store: every root is a temp dir, every process is
 # reaped by exact pid.
