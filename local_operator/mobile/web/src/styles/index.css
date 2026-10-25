@@ -448,10 +448,17 @@ html :focus-visible {
 }
 
 /* Thin scrollbars in the sunken wells (tool output, diffs) so a long output
-   doesn't push a fat gutter into the capped-height block. */
+   doesn't push a fat gutter into the capped-height block.
+
+   THE THUMB RESTS AT THE DESKTOP'S FLOOR (borderless redesign §7.6;
+   local-operator-ui docs/design/scrollbars-fade.md §10.1): `control` at 45 %
+   over transparent. A phone draws its own transient overlay bar and ignores
+   this; a desktop-width browser and the wide view paint it, and a full-strength
+   `control` thumb there was the one hard line left once the chrome lost its
+   borders. No JS activity tracker: touch scrollbars are already transient. */
 .lo-scroll {
 	scrollbar-width: thin;
-	scrollbar-color: var(--color-control) transparent;
+	scrollbar-color: color-mix(in srgb, var(--color-control) 45%, transparent) transparent;
 }
 
 /* "There is more below" for a capped scroller, applied only while content is
@@ -471,6 +478,220 @@ html :focus-visible {
 .lo-fade-b {
 	-webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
 	mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+}
+
+/*
+ * CHROME DISSOLVES INTO CONTENT: `.lo-fade-y` / `.lo-fade-x` (borderless redesign
+ * §7.6). With the app bar's rule and the footer's rule gone, a row scrolled under
+ * opaque chrome was cut mid-glyph against a flat fill — the overlap the audit
+ * measured ("GPT-5.5" 93 % under the footer, a tool row 92 % under the status
+ * row). A mask fades the CONTENT at that edge instead of painting a band over
+ * it, so nothing can be mistaken for a control and no vertical space is spent.
+ *
+ * THE DESKTOP'S TECHNIQUE, NOT A SECOND ONE (local-operator-ui styles/index.css,
+ * the sidebar's edge cues): a registered `<length>` per edge, one `mask-image`
+ * the element always carries, and `animation-timeline: scroll(self)` moving each
+ * length over its own 24 px. A length of 0px is a hard edge, so at rest (and on
+ * any scroller shorter than its box — an inactive timeline samples nothing) the
+ * element paints NO fade: the cue appears only where content is actually clipped.
+ * The longhands are spelled out because the `animation` shorthand resets
+ * `animation-timeline`.
+ *
+ * The ENGINE WITHOUT SCROLL TIMELINES (Safari < 18) keeps the declared 0px, i.e.
+ * no cue, except where a caller has measured content below and set
+ * `data-more-below` — the same JS flag `.lo-fade-b` has always used — which
+ * paints the static bottom fade. That is today's behaviour for those engines.
+ *
+ * REDUCED MOTION: unchanged. This is a scroll-linked paint whose value IS the
+ * scroll position, not a timed animation, so the global duration cap has
+ * nothing to cap (and must not: capping it would freeze the cue at its start).
+ */
+@property --lo-fade-start {
+	syntax: "<length>";
+	inherits: false;
+	initial-value: 0px;
+}
+@property --lo-fade-end {
+	syntax: "<length>";
+	inherits: false;
+	initial-value: 0px;
+}
+.lo-fade-y,
+.lo-fade-x {
+	--lo-fade-start: 0px;
+	--lo-fade-end: 0px;
+}
+.lo-fade-y {
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent 0,
+		#000 var(--lo-fade-start),
+		#000 calc(100% - var(--lo-fade-end)),
+		transparent 100%
+	);
+	mask-image: linear-gradient(
+		to bottom,
+		transparent 0,
+		#000 var(--lo-fade-start),
+		#000 calc(100% - var(--lo-fade-end)),
+		transparent 100%
+	);
+}
+/* The inline axis follows the writing direction: `to right` in LTR becomes
+   `to left` in RTL, so the END-edge fade (the chip row's "there is more")
+   always sits at the inline end. */
+.lo-fade-x {
+	-webkit-mask-image: linear-gradient(
+		to right,
+		transparent 0,
+		#000 var(--lo-fade-start),
+		#000 calc(100% - var(--lo-fade-end)),
+		transparent 100%
+	);
+	mask-image: linear-gradient(
+		to right,
+		transparent 0,
+		#000 var(--lo-fade-start),
+		#000 calc(100% - var(--lo-fade-end)),
+		transparent 100%
+	);
+}
+[dir="rtl"] .lo-fade-x,
+.lo-fade-x:dir(rtl) {
+	-webkit-mask-image: linear-gradient(
+		to left,
+		transparent 0,
+		#000 var(--lo-fade-start),
+		#000 calc(100% - var(--lo-fade-end)),
+		transparent 100%
+	);
+	mask-image: linear-gradient(
+		to left,
+		transparent 0,
+		#000 var(--lo-fade-start),
+		#000 calc(100% - var(--lo-fade-end)),
+		transparent 100%
+	);
+}
+@supports (animation-timeline: scroll()) {
+	.lo-fade-y,
+	.lo-fade-x {
+		animation-name: lo-fade-start-cue, lo-fade-end-cue;
+		animation-timing-function: linear;
+		animation-fill-mode: both;
+		animation-duration: auto;
+		animation-range: 0 24px, calc(100% - 24px) 100%;
+	}
+	.lo-fade-y {
+		animation-timeline: scroll(self block), scroll(self block);
+	}
+	.lo-fade-x {
+		animation-timeline: scroll(self inline), scroll(self inline);
+	}
+	@keyframes lo-fade-start-cue {
+		from {
+			--lo-fade-start: 0px;
+		}
+		to {
+			--lo-fade-start: 24px;
+		}
+	}
+	@keyframes lo-fade-end-cue {
+		from {
+			--lo-fade-end: 24px;
+		}
+		to {
+			--lo-fade-end: 0px;
+		}
+	}
+}
+@supports not (animation-timeline: scroll()) {
+	.lo-fade-y[data-more-below="true"],
+	.lo-fade-x[data-more-below="true"] {
+		--lo-fade-end: 24px;
+	}
+}
+/* The reduced-motion cap above sets every animation-duration to 0.01ms with
+   `!important`; a scroll-driven animation's duration is `auto` by definition,
+   and a time-based cap on it breaks the timeline. Restored for exactly these
+   two classes — they are scroll position, not motion. */
+@media (prefers-reduced-motion: reduce) {
+	@supports (animation-timeline: scroll()) {
+		.lo-fade-y,
+		.lo-fade-x {
+			animation-duration: auto !important;
+		}
+	}
+}
+
+/*
+ * THE NAVIGATION DRAWER'S MOTION (redesign §7.5, §9): 240 ms in from the
+ * inline-start edge, the scrim fading with it. `translate` is a logical-free
+ * property, so the RTL direction flips the keyframe's sign by `:dir(rtl)`. The
+ * global reduced-motion cap makes both instant.
+ */
+@keyframes lo-drawer-in {
+	from {
+		transform: translateX(-100%);
+	}
+	to {
+		transform: translateX(0);
+	}
+}
+@keyframes lo-drawer-in-rtl {
+	from {
+		transform: translateX(100%);
+	}
+	to {
+		transform: translateX(0);
+	}
+}
+.lo-drawer-panel {
+	animation: lo-drawer-in var(--transition-duration-slow, 240ms) var(--ease-out-quart, ease-out);
+}
+.lo-drawer-panel:dir(rtl) {
+	animation-name: lo-drawer-in-rtl;
+}
+
+/*
+ * THE 44 PX HIT AREA ON A 32 PX PILL (redesign §7.7). Chips and tray pills draw
+ * 32 px so a 40/44 px row can hold them with breathing room, and an absolutely
+ * positioned `::before` extends the TARGET 6 px above and below — into the row's
+ * own padding, never onto a neighbour — so a finger still gets the 44 px floor.
+ */
+.lo-hit {
+	position: relative;
+}
+.lo-hit::before {
+	content: "";
+	position: absolute;
+	inset-inline: 0;
+	inset-block: -6px;
+}
+
+/* The sheet grabber: decorative, at the scrollbar's resting floor (α 0.45) so
+   it reads as "this lifts" without becoming the loudest mark on the panel. */
+.lo-grabber {
+	background-color: color-mix(in srgb, var(--color-control) 45%, transparent);
+}
+
+/*
+ * THE SNACKBAR (redesign §7.8): a transient outcome that used to be a line
+ * inside the list. It rises 8 px and fades in over the fast duration; reduced
+ * motion caps it to appear/disappear.
+ */
+@keyframes lo-snack-in {
+	from {
+		opacity: 0;
+		transform: translateY(8px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+.lo-snack {
+	animation: lo-snack-in var(--transition-duration-base, 180ms) var(--ease-out-quart, ease-out);
 }
 
 /* The dictation recording dot: a slow pulse so an ACTIVE recording reads at a

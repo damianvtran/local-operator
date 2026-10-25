@@ -278,7 +278,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 					<p role="alert" className="text-center text-body-sm text-danger">
 						{error || "Asset not found."}
 					</p>
-					<Button variant="outline" onClick={() => void load(assetId)}>
+					<Button variant="tonal" onClick={() => void load(assetId)}>
 						Try again
 					</Button>
 				</div>

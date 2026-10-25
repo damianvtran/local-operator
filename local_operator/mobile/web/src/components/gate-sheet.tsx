@@ -298,7 +298,7 @@ export function GateSheet({
 					    which scope it is BEFORE the tap rather than in a receipt after
 					    it. */}
 					<Button
-						variant="quiet"
+						variant="ghost"
 						disabled={busy !== null}
 						onClick={() => void choose("default auto")}
 					>

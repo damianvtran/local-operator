@@ -38,10 +38,10 @@ export function Chip({
 		<button
 			type="button"
 			className={cn(
-				"inline-flex min-h-11 items-center gap-1 rounded-sm border px-2 text-mono-sm select-none active:bg-elevated",
+				"lo-hit inline-flex h-8 items-center gap-1 rounded-full px-3 text-body-sm select-none active:bg-elevated",
 				selected
-					? "border-accent bg-accent-wash text-accent"
-					: "border-control bg-surface text-ink-muted",
+					? "bg-accent-wash text-accent"
+					: "bg-surface text-ink-muted",
 				className,
 			)}
 			{...rest}

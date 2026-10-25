@@ -22,17 +22,27 @@ export const gruvboxLight: ThemeDefinition = {
 	palette: {
 		mode: "light",
 
-		canvas: "#FBF1C7",
+		// GROUNDS PORTED FROM THE DESKTOP (gruvbox-light.ts, local-operator-ui
+		// src/renderer/src/shared/themes/palettes). The relay's borderless chrome stands
+		// every field, the composer and the search pill on `elevated` over `canvas`
+		// with no edge, so the step between them IS the boundary; this palette's
+		// relay grounds measured under the contract's 4.0 L* elevated−canvas floor
+		// (scripts/contrast-contract.mjs), the desktop's re-seat clears it. The
+		// desktop moved the inks, hairline and tones on the SAME commit (a new
+		// ground changes what every ink is measured against), and those values are
+		// ported with it; a ground ported alone failed eight text/edge pairs.
+		canvas: "#F8EEC4",
 		// Upstream defines light0_soft F2E5BC and light1 EBDBB2 below the page,
-		// not above it, so the two raised grounds are derived. They separate by
-		// shedding the cream's chroma as they rise (ΔE00 2.26 and 2.51) because
-		// a ramp this close to white has no lightness left to spend.
-		surface: "#FBF3D1",
-		elevated: "#FCF5DB",
-		sunken: "#FBEFBD",
+		// not above it, so the two raised grounds are derived: they shed the
+		// cream's chroma as they rise AND take a lightness step (the desktop's
+		// re-seat), because chroma alone left no visible step for a borderless
+		// control.
+		surface: "#FDF6D8",
+		elevated: "#FFFEF2",
+		sunken: "#EFE2B9",
 
 		ink: "#3C3836",
-		inkMuted: "#665C54",
+		inkMuted: "#4F4640",
 		// Canonical dark4 7C6F64 measures 4.21:1 on `sunken`, under the 4.5
 		// floor for a tertiary weight — and 4.33–4.34:1 on the two semantic
 		// washes, which paint dim ink for real (the failed tool row's gauge,
@@ -40,10 +50,10 @@ export const gruvboxLight: ThemeDefinition = {
 		// warm gray until all of them clear; dark4 itself still serves as the
 		// structural border below, where the floor is 3:1 and it clears with
 		// room.
-		inkDim: "#73665D",
+		inkDim: "#685C53",
 		inkDisabled: "#A89984",
 
-		hairline: "#DFD4B1",
+		hairline: "#DDD2B0",
 		borderControl: "#7C6F64",
 
 		accent: "#076678",
@@ -54,7 +64,7 @@ export const gruvboxLight: ThemeDefinition = {
 
 		// Canonical faded_green 79740E is 4.21:1 on `sunken`; this is the
 		// smallest darkening along the same olive that clears 4.5:1 on all four.
-		success: "#746F0D",
+		success: "#6D6701",
 		// A wash cannot be built by tinting this cream toward the olive: the two
 		// sit at nearly the same luminance, so every mix of them stays under
 		// 4.5:1 for the ink. This steps away in lightness while holding the
@@ -64,7 +74,7 @@ export const gruvboxLight: ThemeDefinition = {
 
 		// Canonical faded_yellow B57614 is 3.27:1 on `sunken` — the largest
 		// miss in this palette. Darkened along the same amber.
-		warning: "#956110",
+		warning: "#8D5A02",
 		warningWash: "#F1EDE7",
 		warningBorder: "#AA6E12",
 
@@ -78,9 +88,9 @@ export const gruvboxLight: ThemeDefinition = {
 		// message and an informational path read as one colour (design
 		// review D5). Aqua is equally canonical; darkened one step from
 		// #427B58 (4.32:1) to clear this contract's four-ground floor.
-		info: "#407655",
+		info: "#3B6F50",
 		infoWash: "#F8EFD1",
-		infoBorder: "#6E9B7E",
+		infoBorder: "#578C6C",
 
 		overlayShadow: "0 12px 32px -12px rgb(60 56 54 / 0.22)",
 		scrim: "rgb(60 56 54 / 0.35)",

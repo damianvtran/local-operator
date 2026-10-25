@@ -43,6 +43,21 @@
  * (monokai 3.76 -> 4.63, dracula 4.11 -> 4.62, neon 4.43 -> 4.60; the
  * remaining 28 palettes measured >= 4.5 already and are unchanged).
  *
+ * ## Why one ground step is asserted (borderless relay redesign, 2026-10-25)
+ *
+ * The redesign (docs/design/mobile-relay-redesign.md §10.2) removed the 1 px
+ * edge from every field, the composer and the search pill: each stands on
+ * `elevated` over `canvas`, so the lightness step between those two grounds IS
+ * the control's boundary. A ratio cannot see it (two near-white grounds are
+ * ~1.1:1 and still read as two objects), so the step is asserted in CIELAB L*,
+ * the axis the eye separates grounds on. 4.0 is the floor that every shipped
+ * palette clears once alucard / gruvboxLight / rosePineDawn carry the
+ * desktop's re-seated grounds (measured: 5.32 / 5.52 / 5.23); it is green on
+ * day one and catches the next palette that would silently erase a field.
+ * The rest of branding §2's ladder (surface−canvas, elevated−surface,
+ * canvas−sunken) is deliberately NOT gated here: brand light and two community
+ * palettes miss it today, and re-seating them is a palette project.
+ *
  * ## What this can and cannot see
  *
  * It parses the palette SOURCE (via `palette-source.mjs`, the same reader the
@@ -75,6 +90,11 @@ const contrast = (fg, bg) => {
 	const [a, b] = [luminance(fg), luminance(bg)].sort((x, y) => y - x);
 	return (a + 0.05) / (b + 0.05);
 };
+/* CIELAB L* (D65) from the same relative luminance: Y is already linear. */
+const lightness = (hex) => {
+	const y = luminance(hex);
+	return y > 216 / 24389 ? 116 * Math.cbrt(y) - 16 : (24389 / 27) * y;
+};
 
 /** The floors, named once: the number a class is asserted against. */
 const FLOOR = {
@@ -84,6 +104,8 @@ const FLOOR = {
 	text: 4.5,
 	/** A control's only edge, and the label on a filled control. */
 	nonText: 3,
+	/** L* between `elevated` and `canvas`: a borderless control's only edge. */
+	groundStep: 4,
 };
 
 const GROUNDS = ["canvas", "surface", "elevated", "sunken"];
@@ -169,6 +191,14 @@ for (const { id, palette } of palettes) {
 	}
 	for (const [fg, bg] of WASH_PAIRS) {
 		assertPair(id, palette, fg, bg, FLOOR.text, "text-on-wash");
+	}
+	assertions += 1;
+	const step = Math.abs(lightness(palette.elevated) - lightness(palette.canvas));
+	if (step < FLOOR.groundStep) {
+		failures.push(
+			`${id}: elevated − canvas = ${step.toFixed(2)} L*, under the ` +
+				`${FLOOR.groundStep} L* borderless ground-step floor`,
+		);
 	}
 }
 

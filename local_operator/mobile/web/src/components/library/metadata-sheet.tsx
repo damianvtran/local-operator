@@ -207,7 +207,7 @@ export function MetadataSheet({
 							aria-label="new tag name"
 							className={FIELD_CLASS}
 						/>
-						<Button variant="outline" onClick={() => void addTag()} disabled={busy}>
+						<Button variant="tonal" onClick={() => void addTag()} disabled={busy}>
 							add
 						</Button>
 					</div>
