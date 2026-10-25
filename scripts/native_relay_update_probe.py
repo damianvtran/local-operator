@@ -180,6 +180,8 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     os.chmod(xdg, 0o700)
     env = os.environ.copy()
     env["XDG_RUNTIME_DIR"] = str(xdg)
+    env["SYSTEMD_LOG_LEVEL"] = "debug"
+    env["SYSTEMD_LOG_TARGET"] = "console"
     env.pop("DBUS_SESSION_BUS_ADDRESS", None)
     # Set this in the parent BEFORE Popen too: failure cleanup must still talk
     # to the private manager, never fall back to the runner's real user bus.
@@ -189,7 +191,7 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     if executable is None:
         raise ProbeBlocked("systemd user-manager executable is unavailable")
     proc = subprocess.Popen(  # noqa: S603 — fixed executable, disposable manager
-        [executable, "--user"],
+        [executable, "--user", "--log-level=debug"],
         env=env,
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -200,8 +202,16 @@ def _start_private_manager(scratch: Path, log: Any) -> subprocess.Popen[str]:
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             detail = _log_tail(log) or "no manager log"
+            version = _run([executable, "--version"], timeout=3.0)
+            status = _run(["systemctl", "--user", "is-system-running"], env=env, timeout=3.0)
+            diagnostics = (
+                f"uid={os.getuid()} exe={executable} xdg={xdg} "
+                f"version={(version.stdout or version.stderr).strip()[:300]} "
+                f"systemctl_status={(status.stdout + status.stderr).strip()[:500]} "
+                f"manager_log={detail}"
+            )
             raise ProbeBlocked(
-                f"private systemd --user exited with {proc.returncode}: {detail}"
+                f"private systemd --user exited with {proc.returncode}: {diagnostics}"
             )
         ready = _run(["systemctl", "--user", "daemon-reload"], env=env, timeout=3.0)
         if ready.returncode == 0:
