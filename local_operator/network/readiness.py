@@ -2560,7 +2560,8 @@ def _mcp_credential_row(
             source=SOURCE_PEER,
             observed={"server": name, "url": url},
         )
-    if viewer.holds_mcp_login(url):
+    mine = viewer.holds_mcp_login(url)
+    if mine:
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -2573,6 +2574,23 @@ def _mcp_credential_row(
             ),
             remedies=[f"share it with {peer_label} (run here)"],
             source=SOURCE_LOCAL,
+            observed={"server": name, "url": url},
+        )
+    if mine is None:
+        # ``None`` is not an empty viewer store. Keep the no-placement fallback
+        # tri-state too, or an open-WAL/corrupt login gets a sign-in-first remedy.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "this device's credential store could not be read, so whether it holds "
+                f"a login for {name} ({url}) is not known"
+            ),
+            remedies=["check the credential store on this device, then re-check"],
+            source=SOURCE_UNKNOWN,
             observed={"server": name, "url": url},
         )
     if server.get("auth_declared"):

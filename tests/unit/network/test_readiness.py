@@ -623,6 +623,60 @@ def test_observation_failure_precedes_store_uncertainty(
             auth.close()
 
 
+@pytest.mark.parametrize("viewer_state", ["corrupt", "open_wal"])
+def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) -> None:
+    """A viewer store that cannot be read must not get a sign-in-first remedy."""
+    from tests.unit.mcp.test_credential_status import URL
+
+    peer_root = tmp_path / "peer"
+    viewer_root = tmp_path / "viewer"
+    peer_root.mkdir()
+    viewer_root.mkdir()
+    (peer_root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
+        encoding="utf-8",
+    )
+    auth = None
+    if viewer_state == "open_wal":
+        auth = _seed_mcp_row(viewer_root, URL)
+        assert auth.read_only_sidecar_present()
+    else:
+        (viewer_root / "auth.db").write_bytes(b"not a database")
+    viewer = None
+    try:
+        facts = readiness.collect_peer_facts(peer_root)
+        assert facts["mcp"]["servers"][0]["has_row"] is False
+        viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
+        row = readiness.mcp_credential_rows(_member(), facts, viewer=viewer, peer_label="holder")[0]
+        viewer.close()
+        viewer = None
+
+        assert row["ok"] is False
+        assert row["code"] == readiness.CODE_UNKNOWN
+        assert "this device's credential store could not be read" in row["detail"]
+        rendered = readiness.render_check_lines([row])
+        assert row["detail"] in rendered[0]
+        assert "sign in here first" not in "\n".join(rendered)
+
+        if viewer_state == "open_wal":
+            auth.close()
+            auth = None
+            control_viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
+            try:
+                control = readiness.mcp_credential_rows(
+                    _member(), facts, viewer=control_viewer, peer_label="holder"
+                )[0]
+            finally:
+                control_viewer.close()
+            assert control["code"] == readiness.CODE_NOT_SHARED
+            assert "does not share it" in control["detail"]
+    finally:
+        if viewer is not None:
+            viewer.close()
+        if auth is not None:
+            auth.close()
+
+
 def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
     """An ``auth.db`` that exists but cannot be opened is "could not be read",
     never a crash (convergence round 2, MAJOR class): every open keeps
