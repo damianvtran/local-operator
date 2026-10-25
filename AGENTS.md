@@ -2577,10 +2577,19 @@ round conclusive rather than merely narrow:
 Two further corollaries. Do not re-open dimensions the delta cannot have
 touched — a backend-only remediation keeps a design round valid, and
 re-running it spends a reviewer on unchanged pixels. And when a rebase moves
-the base, prove the content is unchanged (`git range-diff` plus byte-identical
-`+`/`-` line sets) and then run **one** convergence round over
-`<old-head>..<new-head>`, checking semantic conflicts only in files the
-upstream also touched.
+the base, run `python scripts/rebase_proof.py <old-head> <new-head> --base
+origin/main` (fetch the old head by SHA if the force-push dropped it) and post
+its `### Rebase proof` block on the PR. It checks `git range-diff` (all `=`),
+byte-identical `+`/`-` line sets of the PR's own patch, and the overlap between
+the files upstream moved and the PR's files. **MECHANICAL** (exit 0) keeps the
+last clean code review AND QA round fresh — no new agent round; measured, 85%
+of resolvable convergence rounds over the last 120 merged PRs had zero overlap
+and re-read an unchanged patch. **CONVERGENCE REVIEW NEEDED** (exit 1) means
+**one** convergence round over `<old-head>..<new-head>`, checking semantic
+conflicts in the files it names. Likewise, a test-only or docs-only commit
+after a clean round needs only a delta review by the same reviewer, and no QA
+re-run unless the test touches a QA'd surface. Merge-time CI green is still
+required, and a real BLOCKER/MAJOR found anywhere is still fixed.
 
 **Finally, a terminal approval is a property of a SHA, not of a PR.** Commits
 landing after a clean round — including ones driven by a *different* stream,
@@ -2588,7 +2597,8 @@ such as a design fix after a terminal code round — make it stale, and the
 merge gate needs a fresh round on the current head. "Everything else is green"
 is exactly when that lapses. The one narrow exception: changes since the
 review that are exclusively non-conflicting fixes from parallel approved
-streams — a docs or nit commit from another round — leave it fresh.
+streams — a docs or nit commit from another round — leave it fresh, as does a
+rebase whose posted `### Rebase proof` is MECHANICAL.
 
 ## Security advisories
 
