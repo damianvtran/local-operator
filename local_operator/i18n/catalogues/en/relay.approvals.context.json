@@ -1,0 +1,107 @@
+{
+  "relay.approvals.card.notice_session_auto": {
+    "role": "receipt fallback after loosening this session from the pending decision card",
+    "tone": "Preserve casing and the em dash. Lowercase start is deliberate: the card appends its own sentence after it.",
+    "note": "Owned relay SPA approvals copy. Only used when the runtime's receipt carried no detail; a runtime sentence always wins."
+  },
+  "relay.approvals.card.request_needs_answer": {
+    "role": "clause appended to the policy line on a pending approval card",
+    "tone": "Sentence case, full stop. It states the request is still open; do not weaken it to a hint.",
+    "note": "Owned relay SPA approvals copy. A mode change never answers the request, so the line must not read as 'handled'."
+  },
+  "relay.approvals.card.set_auto_all": {
+    "role": "link that loosens the GLOBAL default from the pending decision card",
+    "tone": "Sentence case, no full stop. Names the scope ('all sessions') before the tap.",
+    "note": "Owned relay SPA approvals copy. Authority-increasing: the press needs a paired phone and a signed challenge."
+  },
+  "relay.approvals.card.set_auto_session": {
+    "role": "link that loosens this session's gate from the pending decision card",
+    "tone": "Sentence case, no full stop. Names the scope ('this session').",
+    "note": "Owned relay SPA approvals copy. It changes the gate for future calls and never answers the request on the card."
+  },
+  "relay.approvals.card.still_needs_answer": {
+    "role": "second sentence of the mode-change receipt on the pending decision card",
+    "tone": "Sentence case, full stop. It follows the runtime's own receipt sentence.",
+    "note": "Owned relay SPA approvals copy. Keeps a successful mode change from reading as an answer to the blocked call."
+  },
+  "relay.approvals.gate.body_scope.after": {
+    "role": "closing relative clause of the approval-gate sheet's scope sentence",
+    "tone": "Ends with a full stop. 'it' refers to the last choice (the global default); keep that reference unambiguous in your language.",
+    "note": "Owned relay SPA approvals copy. ONE OF FIVE KEYS THAT COMPOSE ONE SENTENCE, read in this order: body_scope.before → body_scope.session_clause → body_scope.between → body_scope.default_clause → body_scope.after. The component joins them with a locale-aware separator - nothing for zh/ja/ko, U+202F before ; : ! ? » and after « in fr, one space otherwise - so never add leading or trailing spaces. Only the two *_clause keys are rendered in bold; this key is plain. Full English sentence: 'The first two choices change **this session** only; the last changes the **default for all sessions** that follow it.' The sentence is split rather than marked up so the two blast-radius phrases stay emphasised without markup in the catalogue: keep the emphasis where the keys put it and do not add your own."
+  },
+  "relay.approvals.gate.body_scope.before": {
+    "role": "opening clause of the approval-gate sheet's scope sentence",
+    "tone": "Sentence case, no punctuation at the end: the sentence continues through four more keys.",
+    "note": "Owned relay SPA approvals copy. Composed in order before → session_clause → between → default_clause → after, joined by that locale-aware separator. 'The first two choices' means the two session-scoped buttons above this line (keep asking, run without asking). Function words may migrate between keys when your grammar needs them — the French copy keeps ne … que inside this key ('Les deux premiers choix ne changent que **cette session**') — because the emphasis is pinned to the *_clause keys, not to this fragment. Keep the composed sentence grammatical and idiomatic."
+  },
+  "relay.approvals.gate.body_scope.between": {
+    "role": "the contrast that joins the two emphasised scope phrases in the approval-gate sheet's scope sentence",
+    "tone": "Lowercase start because it continues the opening clause; carries the semicolon, the pivot to the last choice and the article before the bold phrase. Translate it as a clause fragment with context, never as a bare 'only'.",
+    "note": "Owned relay SPA approvals copy. English: 'only; the last changes the'. The emphasised noun phrase that completes it is `default_clause` ('default for all sessions'); the article stays in this plain key because main's bold run starts at 'default'. The semicolon separates the two scopes — use your typography's punctuation and spacing (French uses U+202F before ';'). If your language places a negation before the emphasised phrase, put it here or in `before` so the composed sentence stays grammatical; the emphasised phrase itself must remain unbroken. Full English sentence: 'The first two choices change **this session** only; the last changes the **default for all sessions** that follow it.'"
+  },
+  "relay.approvals.gate.body_scope.default_clause": {
+    "role": "the emphasised noun phrase naming the global scope in the approval-gate sheet's scope sentence",
+    "tone": "Noun phrase only: no verb, no leading article (main's bold run starts at 'default'), no trailing punctuation. Rendered in bold.",
+    "note": "Owned relay SPA approvals copy. This is the second of the two scopes the sheet offers and the one with the larger blast radius (every session that follows the default). The parenthetical '(default auto)' is not part of this key — the third button label carries it. Full English sentence: 'The first two choices change **this session** only; the last changes the **default for all sessions** that follow it.'"
+  },
+  "relay.approvals.gate.body_scope.session_clause": {
+    "role": "the emphasised noun phrase naming the session scope in the approval-gate sheet's scope sentence",
+    "tone": "Noun phrase only: no verb, no leading or trailing punctuation. Rendered in bold.",
+    "note": "Owned relay SPA approvals copy. This is the scope the first two choices act on — the session in front of the reader — and the contrast the sentence exists to draw (the third choice is the global default). Keep it a noun phrase; the verb lives in `before`. Full English sentence: 'The first two choices change **this session** only; the last changes the **default for all sessions** that follow it.'"
+  },
+  "relay.approvals.gate.default_auto": {
+    "role": "third choice in the approval-gate sheet: loosen the global default",
+    "tone": "Lowercase start, matching the two session-scoped buttons beside it. Parenthetical names the scope as the runtime spells it.",
+    "note": "Owned relay SPA approvals copy. Authority-increasing: needs a paired phone and a signed `loosen` challenge."
+  },
+  "relay.approvals.gate.refused_nothing_changed": {
+    "role": "fallback sentence when a policy write's receipt reports a refusal with no detail",
+    "tone": "Lowercase start, no full stop, em dash. Matches the refusal register of the surrounding errors.",
+    "note": "Owned relay SPA approvals copy. A runtime-supplied detail always replaces this sentence."
+  },
+  "relay.approvals.gate.unpaired_default_auto": {
+    "role": "note in the approval-gate sheet naming the global scope among the choices that need pairing",
+    "tone": "Sentence case, full stop. It follows the existing unpaired warning and covers the third button.",
+    "note": "Owned relay SPA approvals copy. Stated before the tap, never as a refusal after it."
+  },
+  "relay.approvals.policy.default_auto_receipt": {
+    "role": "fallback receipt for a global-default loosening whose runtime detail was empty",
+    "tone": "Lowercase start, no full stop. The card adds its own sentence after it.",
+    "note": "Owned relay SPA approvals copy. The runtime's own detail is preferred whenever it sends one."
+  },
+  "relay.approvals.policy.global_default": {
+    "role": "policy line: the gate is the machine's global default",
+    "tone": "Sentence case, full stop, em dash before the scope clause. {mode} is a translated mode word (Ask/Auto).",
+    "note": "Owned relay SPA approvals copy. Read from the projection, never derived from this surface's last gesture."
+  },
+  "relay.approvals.policy.mode_ask": {
+    "role": "the approval mode word 'ask' as a state name",
+    "tone": "Short. Localize as the word the TUI uses for the same mode; keep it a noun-like label, not a verb.",
+    "note": "Owned relay SPA approvals copy. Substituted into the policy-line templates."
+  },
+  "relay.approvals.policy.mode_auto": {
+    "role": "the approval mode word 'auto' as a state name",
+    "tone": "Short. Localize as the word the TUI uses for the same mode; keep it a noun-like label, not a verb.",
+    "note": "Owned relay SPA approvals copy. Substituted into the policy-line templates."
+  },
+  "relay.approvals.policy.mode_only": {
+    "role": "policy line when the provenance says nothing this build knows",
+    "tone": "Sentence case, full stop. States the mode only; it must not name a scope.",
+    "note": "Owned relay SPA approvals copy. Guessing 'global default' here is the wording this line exists to prevent."
+  },
+  "relay.approvals.policy.session_override": {
+    "role": "policy line: this session overrides the machine default, whose value is unknown",
+    "tone": "Sentence case, full stop, em dash before the scope clause. {mode} is a translated mode word.",
+    "note": "Owned relay SPA approvals copy. The global clause is dropped rather than invented when the owner sends no global mode."
+  },
+  "relay.approvals.policy.session_override_global": {
+    "role": "policy line: this session overrides a known machine default",
+    "tone": "Sentence case, full stop, em dash and semicolon preserved. {mode} and {global} are translated mode words.",
+    "note": "Owned relay SPA approvals copy. Both words come from the runtime's own fields, never from negation."
+  },
+  "relay.approvals.policy.this_run": {
+    "role": "policy line: the mode is pinned for this run only",
+    "tone": "Sentence case, full stop, em dash before the scope clause. {mode} is a translated mode word.",
+    "note": "Owned relay SPA approvals copy."
+  }
+}

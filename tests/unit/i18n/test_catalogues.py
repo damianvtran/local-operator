@@ -10,6 +10,13 @@ import pytest
 
 from local_operator.i18n import catalogues, runtime
 
+#: The generated CLDR table the catalogue checker reads; the parity test passes
+#: it to `arguments_match` so the `number -> plural` upgrade is judged by the
+#: same losslessness rule as `check_catalogues`.
+_PLURAL_RULES = json.loads(
+    (Path(runtime.__file__).with_name("data") / "plural_rules.json").read_text(encoding="utf-8")
+)
+
 #: The `wire.*` namespaces still awaiting their extraction slice: stub files
 #: that M0 shipped and no slice has populated yet (RFC §5: later slices
 #: populate them). An extraction slice removes its namespace from this tuple
@@ -153,7 +160,7 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 test_shipped_wire_namespaces_exist()
 
 
-def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
+def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> None:
     # Pin only the original ten Hindi groups plus each later reviewed slice.
     # Analytics/desktop backfill is explicitly unfinished; mechanical parity is
     # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
@@ -180,11 +187,21 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # namespace, so the refusal notices fell back to English; now each carries
     # a 30-key / 84-key catalogue with its own audited ledger row (see
     # i18n/ledger.json), which is the same condition every namespace above was
-    # admitted on.
+    # admitted on. The relay.asks slice adds the SPA's ask cards/sheet/dock
+    # namespace `relay.asks` on the same terms — it is a DIFFERENT namespace
+    # from R5's `relay.ask` (the dismiss reasons and stale-ask line), and
+    # `namespaces()` returns the files sorted, so `relay.asks` sorts before
+    # `relay.session.tags` rather than where the slice landed. The approvals
+    # slice adds `relay.approvals` (17 keys, the approval-scope copy main added
+    # as literals) on the same terms: carried only now that its independent
+    # audit row exists against the current en bytes. It sorts before
+    # `relay.ask`.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
+        "relay.approvals",
         "relay.ask",
+        "relay.asks",
         "relay.session.tags",
         "tui.asks",
         "tui.authoring",
@@ -216,8 +233,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         translated = catalogues.load_catalogue(locale, namespace)
         assert translated.keys() == source.keys(), (locale, namespace)
         for key in source:
-            assert runtime.message_arguments(translated[key]) == runtime.message_arguments(
-                source[key]
+            assert i18n_check.arguments_match(
+                runtime.message_arguments(source[key]),
+                runtime.message_arguments(translated[key]),
+                translated_source=translated[key],
+                locale=locale,
+                plural=_PLURAL_RULES,
             ), (locale, namespace, key)
 
 

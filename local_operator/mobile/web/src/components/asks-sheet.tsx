@@ -39,7 +39,6 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
-import { messageRuntime } from "../store";
 import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
 import {
@@ -50,7 +49,7 @@ import {
 	orderedForDisplay,
 	questionTally,
 } from "../lib/asks";
-import { useAsksRevision, useProjection, useSessions } from "../store";
+import { messageRuntime, useAsksRevision, useProjection, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
 /** How often the open sheet re-reads the aggregate as a deadline backstop. */
@@ -72,10 +71,25 @@ const READ_TIMEOUT_MS = 8000;
  *  landed, so a crossing could be stated up to 20 s late). */
 const TICK_MS = 15000;
 
+/** The sentence a dismissal receipt shows, per reason.
+
+    A LOOKUP RATHER THAN A TEMPLATE. This used to be
+    `` `relay.ask.dismiss.receipt_${reason}` `` — a key no static check can
+    verify (a renamed or missing key would surface as the key text on screen)
+    and a shape the relay copy gate counts as unextracted literals. Spelling
+    each key here keeps them greppable and type-checked against the generated
+    key union; ``lapsed`` is the door with no recorded reason, so it names the
+    generic receipt. */
+const RECEIPT_KEY = {
+	lapsed: "relay.ask.dismiss.receipt",
+	moot: "relay.ask.dismiss.receipt_moot",
+	answered_in_chat: "relay.ask.dismiss.receipt_answered_in_chat",
+} as const;
+
 function failureText(error: unknown): string {
-	if (error instanceof TypeError) return "could not reach the daemon";
+	if (error instanceof TypeError) return messageRuntime.t("relay.asks.error.reach_failed");
 	const message = error instanceof Error ? error.message : String(error);
-	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
+	if (message === "" || /^\d{3}$/.test(message)) return messageRuntime.t("relay.asks.error.no_reason");
 	return message;
 }
 
@@ -131,7 +145,7 @@ export function AsksSheet({
 			setError("");
 		} catch (failure) {
 			if (failure instanceof DOMException && failure.name === "TimeoutError") {
-				setError("the read timed out — the daemon is not answering");
+				setError(messageRuntime.t("relay.asks.error.read_timeout"));
 				return;
 			}
 			/* The daemon's sentence, or the plainest honest line when it gave
@@ -238,10 +252,10 @@ export function AsksSheet({
 	const { waiting, lapsed } = questionTally(rows.filter((row) => !isDeadConversation(row)));
 	const title =
 		waiting > 0
-			? `asks · ${waiting} question${waiting === 1 ? "" : "s"}`
+			? messageRuntime.t("relay.asks.sheet.title_waiting", { count: waiting })
 			: lapsed > 0
-				? `asks · ${lapsed} timed out`
-				: "asks";
+				? messageRuntime.t("relay.asks.sheet.title_lapsed", { count: lapsed })
+				: messageRuntime.t("relay.asks.sheet.title_plain");
 
 	return (
 		<Sheet open={open} onClose={onClose} title={title}>
@@ -256,7 +270,7 @@ export function AsksSheet({
 							onClick={() => void load()}
 							className="flex min-h-11 items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated"
 						>
-							try again
+							{messageRuntime.t("relay.asks.sheet.retry")}
 						</button>
 					</div>
 				) : null}
@@ -265,7 +279,7 @@ export function AsksSheet({
 				    is shown about an answer that has not arrived yet. It is one line and
 				    it disappears the moment the read settles. */}
 				{!loaded && !error ? (
-					<p className="text-body-sm text-ink-muted">reading asks…</p>
+					<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.asks.sheet.loading")}</p>
 				) : null}
 				{/* THE RECEIPT IS NOT THE EMPTY STATE (agent review round 2, M1 = UX
 				    round 2, U9). It used to render only when the list was empty, so a
@@ -278,16 +292,12 @@ export function AsksSheet({
 				    thing twice. See `shownReceipt`. */}
 				{shownReceipt ? (
 					<p className="text-body-sm text-ink-muted" data-testid="ask-receipt">
-						{messageRuntime.t(
-							shownReceipt.reason === "lapsed"
-								? "relay.ask.dismiss.receipt"
-								: `relay.ask.dismiss.receipt_${shownReceipt.reason}`,
-						)}
+						{messageRuntime.t(RECEIPT_KEY[shownReceipt.reason])}
 					</p>
 				) : null}
 				{loaded && rows.length === 0 && !error && !shownReceipt ? (
 					<p className="text-body-sm text-ink-muted" data-testid="ask-sheet-empty">
-						nothing waiting — questions the agent asks will appear here.
+						{messageRuntime.t("relay.asks.sheet.empty")}
 					</p>
 				) : null}
 				{listed.map((row) => {
@@ -324,8 +334,8 @@ export function AsksSheet({
 							(ended || row.runtime_live === false) ? (
 								<p className="text-meta text-ink-dim">
 									{ended
-										? "this conversation has ended — answering will reopen it (this can take up to ~30 s)"
-										: "this conversation is not running — answering will bring it up (this can take up to ~30 s)"}
+										? messageRuntime.t("relay.asks.sheet.ended_wait")
+										: messageRuntime.t("relay.asks.sheet.not_running_wait")}
 								</p>
 							) : null}
 							<AskCard

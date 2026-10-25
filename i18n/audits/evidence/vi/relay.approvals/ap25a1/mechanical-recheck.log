@@ -1,0 +1,37 @@
+# Replayed by the implementation session on 2026-10-25 at 58102b3ae3cd0062e4f2dfee89f4b150bf330b68.
+# NOT the auditor's log: no command output was captured during the audit;
+# see record.json -> audit_log (absent) and mechanical_recheck.
+
+replay of the mechanical checks in the ledger row
+revision:  58102b3ae3
+namespace: relay.approvals
+locale:    vi
+en sha256:      321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125
+vi sha256: 675bf61065a07e2b115060d528272ec001c5af45981fa837286bb1b1c13c1f4c
+
+keys: en=17 vi=17
+  missing: 0
+  unknown: 0
+ICU: 17 messages compared
+  parse errors: 0
+  argument-tuple mismatches: 0
+plurals: 0 plural message(s) 
+  cldr categories for vi: ['other']
+  lossless-branch problems: 0
+controls: bidi/zero-width=0
+  straight quotes: 0
+  double spaces: 0
+  English leakage (value == en): 0
+
+gate copy, side by side:
+  relay.approvals.gate.body_scope: 'Hai lựa chọn đầu chỉ đổi phiên này; lựa chọn cuối đổi mặc định cho mọi phiên sau đó.'
+  relay.approvals.gate.default_auto: 'chạy không hỏi trong mọi phiên (default auto)'
+  relay.approvals.gate.refused_nothing_changed: 'đã từ chối — không có gì thay đổi'
+  relay.approvals.gate.unpaired_default_auto: 'Chạy không hỏi trong mọi phiên cũng cần điện thoại đã ghép nối.'
+
+the three approval-gate choices, side by side:
+  relay.asks.gate.keep_asking: 'tiếp tục hỏi (ask)'
+  relay.asks.gate.run_without: 'chạy không hỏi (auto)'
+  relay.approvals.gate.default_auto: 'chạy không hỏi trong mọi phiên (default auto)'
+
+RESULT: PASS — mechanical parity holds at the audited bytes

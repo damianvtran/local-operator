@@ -42,9 +42,14 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # a passed audit at the CURRENT en bytes; a row for a namespace with no
     # file (or a file with no row) would mean the released package carries
     # unaudited or missing copy. Keep the exact-name and freshness pins, not
-    # just the cardinality: 81 is the number that satisfied the gate on the
+    # just the cardinality: 81 was the number that satisfied the gate on the
     # disposition date, and the set equality is what actually enforces it.
-    assert len(chinese) == 81
+    # The relay wave adds the two namespaces zh-CN now carries alongside the
+    # release: `relay.approvals` (17 keys, the approval-scope copy main added
+    # as literals) and the restored 77-key `relay.asks`. Both were independently
+    # audited at these bytes on 2026-10-25 (four MINOR findings on relay.asks,
+    # nits elsewhere, no blocker/major), so the cardinality is 83.
+    assert len(chinese) == 83
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -75,8 +80,8 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # P3b adds its 35-key tui.team_authoring namespace after independent audit.
     # The audited `hi/wire.memory` row this branch lands makes it TWENTY-FOUR;
     # the /tag slice's independently re-audited 27-key `tui.tags` row makes it
-    # TWENTY-FIVE. LOH-11's independently audited `relay.session.tags` row makes
-    # it TWENTY-SIX. The remote_compute six-key wire.settings delta's
+    # TWENTY-FIVE. LOH-11's independently audited `relay.session.tags` row
+    # makes it TWENTY-SIX. The remote_compute six-key wire.settings delta's
     # independently audited row makes it TWENTY-SEVEN. The S3e remote-compute
     # wave adds one row per carried namespace (`cli.exec_remote_help`,
     # `wire.remote_compute`) -- TWENTY-NINE. The pin stays cardinal so an
@@ -88,7 +93,10 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # audited 7-key `tui.palette` row makes it THIRTY-THREE. The fast-mode
     # fix's refusal notices add one audited row each for `tui.notices` and
     # `wire.errors.desktop` -- THIRTY-FIVE (both newly carried, 30 and 84 keys).
-    assert len(hindi) == 35
+    # The relay.asks re-audit adds the 77-key `hi/relay.asks` row -- THIRTY-SIX.
+    # The approvals slice adds the independently audited 17-key
+    # `hi/relay.approvals` row -- THIRTY-SEVEN.
+    assert len(hindi) == 37
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

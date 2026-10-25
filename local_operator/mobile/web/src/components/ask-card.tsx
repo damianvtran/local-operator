@@ -43,7 +43,6 @@ import {
 	answeredPairs,
 	askStateLine,
 	dismissedReasonKey,
-	LAPSED_BODY,
 	isAnswerable,
 	isDeadConversation,
 	isLapsed,
@@ -53,6 +52,25 @@ import { clearAskDraft, messageRuntime, useAskDraft } from "../store";
 import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
 
+/** The two dismissal reasons, in the order the card offers them (design §17:
+    "No longer needed" first, then "Answered in chat"), with the catalogue keys
+    each row paints.
+
+    A LOOKUP RATHER THAN A TEMPLATE. The keys used to be built by interpolation
+    (``relay.ask.dismiss.${reason}`` / ``..._note``), which no static check can
+    verify — a renamed key would render as the key text on screen — and which
+    the relay copy gate counts as unextracted literals. Spelling each key here
+    keeps them greppable and type-checked against the generated key union. */
+const DISMISS_COPY = {
+	moot: { key: "relay.ask.dismiss.moot", note: "relay.ask.dismiss.moot_note" },
+	answered_in_chat: {
+		key: "relay.ask.dismiss.answered_in_chat",
+		note: "relay.ask.dismiss.answered_in_chat_note",
+	},
+} as const;
+
+const DISMISS_REASONS = ["moot", "answered_in_chat"] as const;
+
 /** The daemon's sentence, or the plainest honest thing when it gave none.
  *
  *  `api.request` falls back to the bare status when an error body is not JSON
@@ -60,9 +78,9 @@ import type { AskQuestion, PendingAsk } from "../types";
  *  the browser's own TypeError. Neither is the queue's refusal copy, so neither
  *  may be rendered as though it were. */
 function refusalText(error: unknown): string {
-	if (error instanceof TypeError) return "could not reach the daemon";
+	if (error instanceof TypeError) return messageRuntime.t("relay.asks.error.reach_failed");
 	const message = error instanceof Error ? error.message : String(error);
-	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
+	if (message === "" || /^\d{3}$/.test(message)) return messageRuntime.t("relay.asks.error.no_reason");
 	return message;
 }
 
@@ -107,9 +125,8 @@ function contextLine(row: PendingAsk): string | null {
  *  is the one the primary control would have produced, and `start a new
  *  conversation and ask again` is the user's actual next move. The ops that
  *  carry their own sentence (a dismissal, a handed-over decision) are only told
- *  apart when the refusal comes FROM THE WIRE, which this branch never does. */
-const CONVERSATION_GONE_COPY =
-	"this conversation no longer exists — the ask can never be read; start a new conversation and ask again.";
+ *  apart when the refusal comes FROM THE WIRE, which this branch never does.
+ *  The sentence itself is `relay.asks.card.gone`. */
 
 /** One question's control, plus whether it currently holds a complete answer. */
 function QuestionField({
@@ -134,8 +151,9 @@ function QuestionField({
 			<div className="flex flex-col gap-1">
 				{question.secret ? (
 					<p className="text-meta text-ink-dim">
-						secret — sent directly, not shown in the transcript
-						{question.persist ? ", and saved to your credential store" : ""}
+						{question.persist
+							? messageRuntime.t("relay.asks.card.secret_notice_persisted")
+							: messageRuntime.t("relay.asks.card.secret_notice")}
 					</p>
 				) : null}
 				<input
@@ -147,7 +165,11 @@ function QuestionField({
 					autoCapitalize={question.secret ? "none" : undefined}
 					autoCorrect={question.secret ? "off" : undefined}
 					spellCheck={question.secret ? false : undefined}
-					placeholder={question.secret ? "paste secret" : "your answer"}
+					placeholder={
+						question.secret
+							? messageRuntime.t("relay.asks.card.placeholder_secret")
+							: messageRuntime.t("relay.asks.card.placeholder_answer")
+					}
 					className="min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim disabled:opacity-50"
 				/>
 			</div>
@@ -198,7 +220,7 @@ function QuestionField({
 								   position as the only channel for older clients, but this
 								   client is told outright, and a badge that says so is
 								   cheaper to read than "the first one means it". */
-								<span className="text-ink-dim"> · recommended</span>
+								<span className="text-ink-dim"> {messageRuntime.t("relay.asks.card.recommended")}</span>
 							) : null}
 						</span>
 						{option.description ? (
@@ -208,7 +230,9 @@ function QuestionField({
 				);
 			})}
 			{question.multi ? (
-				<span className="text-meta text-ink-dim">choose any that apply</span>
+				<span className="text-meta text-ink-dim">
+					{messageRuntime.t("relay.asks.card.choose_any")}
+				</span>
 			) : null}
 		</div>
 	);
@@ -282,8 +306,7 @@ export function AskCard({
 	   aggregate's own fields (`PendingAsk.runtime_live` / `.durable`), and a
 	   second copy of them on the component was exactly the drift D7 was made of. */
 	const cold = row.runtime_live === false;
-
-	const state = askStateLine(row, nowMs);
+	const state = askStateLine(row, nowMs, messageRuntime.t);
 	/* A DISMISSED ROW STATES ITS REASON (SA-D8, design §17). The reason is a
 	   catalogue sentence rather than a literal here, so the card says it in the
 	   operator's language: `askStateLine`'s `dismissed` arm is the fallback for a
@@ -488,9 +511,11 @@ export function AskCard({
 					{/* Under the `Timed out` badge the line starts at what that means:
 					    the badge says the word one line above (#2481 UX round 2, U13). A
 					    lapsed, non-terminal card is always inside that Disclosure. */}
-					<span role="status">{lapsed ? LAPSED_BODY : stateLine}</span>
+					<span role="status">
+						{lapsed ? messageRuntime.t("relay.asks.status.lapsed_body") : stateLine}
+					</span>
 					{row.urgent && offered ? (
-						<span className="text-ink-dim">· urgent</span>
+						<span className="text-ink-dim">{messageRuntime.t("relay.asks.card.urgent")}</span>
 					) : null}
 				</span>
 			)}
@@ -507,7 +532,7 @@ export function AskCard({
 				   nothing was sent, an answer is told to ask again, a decision is told
 				   the ask can never be read (U9). */
 				<p className="text-body-sm text-danger">
-					{gone ? error : CONVERSATION_GONE_COPY}
+					{gone ? error : messageRuntime.t("relay.asks.card.gone")}
 				</p>
 			) : lapsed ? (
 				<>
@@ -550,7 +575,7 @@ export function AskCard({
 								    in-flight life of a dismissal is one append and a flash. The only
 								    change is that it dims (`disabled`) and says it is busy. Kept off the
 								    answer/decline pair, where D1 called the same glyph optional. */}
-								dismiss — send no reply
+								{messageRuntime.t("relay.asks.card.dismiss")}
 							</button>
 							{/* NO COLD LINE, AND NO COLD CLOCK (fork A, 2026-10-16). A dismissal
 							    on a conversation with no runtime used to ENGAGE it to record the
@@ -616,7 +641,9 @@ export function AskCard({
 											skipped.has(id) ? "text-ink" : "text-ink-muted",
 										)}
 									>
-										{skipped.has(id) ? "answer this after all" : "skip — send no answer"}
+										{skipped.has(id)
+											? messageRuntime.t("relay.asks.card.unskip")
+											: messageRuntime.t("relay.asks.card.skip")}
 									</button>
 								) : null}
 							</div>
@@ -630,8 +657,7 @@ export function AskCard({
 					    so instead of inviting a tap that cannot land. */}
 					{open_questions.length === 0 ? (
 						<p className="text-body-sm text-ink-muted">
-							nothing left to answer here — another surface has already taken these
-							questions.
+							{messageRuntime.t("relay.asks.card.nothing_left")}
 						</p>
 					) : null}
 
@@ -667,7 +693,7 @@ export function AskCard({
 						   ANSWER and DECLINE below, which really do engage. The gate is
 						   the op, not the row: `cold` says what an answer would cost. */
 						<p className="text-body-sm text-ink-muted">
-							bringing the session up — this can take up to ~30 s
+							{messageRuntime.t("relay.asks.card.cold_wait")}
 						</p>
 					) : null}
 
@@ -690,8 +716,8 @@ export function AskCard({
 							{busy === "respond"
 								? "…"
 								: open_questions.length > 1
-									? "send answers"
-									: "send answer"}
+									? messageRuntime.t("relay.asks.card.send_answers")
+									: messageRuntime.t("relay.asks.card.send_answer")}
 						</button>
 						<button
 							type="button"
@@ -699,7 +725,7 @@ export function AskCard({
 							onClick={decline}
 							className="flex min-h-11 items-center justify-center rounded-sm border border-danger-border bg-danger-wash px-3 text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
 						>
-							{busy === "decline" ? "…" : "decline"}
+							{busy === "decline" ? "…" : messageRuntime.t("relay.asks.card.decline")}
 						</button>
 					</div>
 
@@ -738,7 +764,7 @@ export function AskCard({
 									<span className="text-meta text-ink-dim">
 										{messageRuntime.t("relay.ask.dismiss.title")}
 									</span>
-									{(["moot", "answered_in_chat"] as const).map((reason) => (
+									{DISMISS_REASONS.map((reason) => (
 										<button
 											key={reason}
 											type="button"
@@ -759,11 +785,11 @@ export function AskCard({
 											    which reason had been sent; the pressed row keeps its
 											    words and gains the in-flight mark, the sibling dims. */}
 											<span className="text-body-sm">
-												{messageRuntime.t(`relay.ask.dismiss.${reason}`)}
+												{messageRuntime.t(DISMISS_COPY[reason].key)}
 												{busy === "dismiss" && sentReason === reason ? " …" : ""}
 											</span>
 											<span className="text-meta text-ink-dim">
-												{messageRuntime.t(`relay.ask.dismiss.${reason}_note`)}
+												{messageRuntime.t(DISMISS_COPY[reason].note)}
 											</span>
 										</button>
 									))}
@@ -887,7 +913,7 @@ export function AskCard({
 					header={(open: boolean) => (
 						<>
 							<span className="shrink-0 rounded-sm border border-hairline px-1.5 text-meta text-ink-muted">
-								Timed out
+								{messageRuntime.t("relay.asks.card.timed_out_badge")}
 							</span>
 							{/* The header names the question only while CLOSED (#2481 UX U7):
 							    open, the body states it in full, and a truncated copy one line
