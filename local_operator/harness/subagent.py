@@ -3926,6 +3926,7 @@ async def _construct_child_session(
 
     parent_provider = getattr(parent_session, "_system_blocks_provider", None)
     repo_guidance = getattr(parent_provider, "repo_guidance", "")
+    injected_guidance = getattr(parent_provider, "injected_guidance", ())
     parent_hooks = getattr(parent_provider, "knowledge_hooks", None)
     # A bounded directory of already-selected knowledge costs far less than
     # rediscovering the same guides in every child. These are names/links and
@@ -4049,6 +4050,7 @@ async def _construct_child_session(
 
     setattr(system_blocks_provider, "append_only_state", True)
     setattr(system_blocks_provider, "repo_guidance", repo_guidance)
+    setattr(system_blocks_provider, "injected_guidance", injected_guidance)
     setattr(system_blocks_provider, "knowledge_hooks", parent_hooks)
     setattr(system_blocks_provider, "host_has_browser", host_has_browser)
     setattr(system_blocks_provider, "host_has_console", host_has_console)

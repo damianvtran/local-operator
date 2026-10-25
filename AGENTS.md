@@ -2586,10 +2586,16 @@ last clean code review AND QA round fresh — no new agent round; measured, 85%
 of resolvable convergence rounds over the last 120 merged PRs had zero overlap
 and re-read an unchanged patch. **CONVERGENCE REVIEW NEEDED** (exit 1) means
 **one** convergence round over `<old-head>..<new-head>`, checking semantic
-conflicts in the files it names. Likewise, a test-only or docs-only commit
-after a clean round needs only a delta review by the same reviewer, and no QA
-re-run unless the test touches a QA'd surface. Merge-time CI green is still
-required, and a real BLOCKER/MAJOR found anywhere is still fixed.
+conflicts in the files it names; if the proof fails, review and test the
+affected content. **The proof is file-level: it does NOT detect a cross-file
+semantic break** — upstream renames a function in a file the PR never touches
+while the PR calls it from another, and the verdict is still MECHANICAL (QA
+reproduced exactly that). Green CI on the rebased head is the guard for that
+class, which is why merge-time CI stays required. Likewise, a test-only or
+docs-only commit after a clean round needs only a delta review scoped to
+`<prev-head>..<head>` by any independent reviewer, and no QA re-run unless the
+change touches a QA'd surface. A real BLOCKER/MAJOR found anywhere is still
+fixed.
 
 **Finally, a terminal approval is a property of a SHA, not of a PR.** Commits
 landing after a clean round — including ones driven by a *different* stream,

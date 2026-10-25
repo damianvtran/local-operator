@@ -7937,3 +7937,32 @@ async def test_create_session_scopes_roles_and_teams_to_the_conversation(
         assert AgentRegistry(tmp_config_dir).get_agent_by_name("conversation-only") is None
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_factory_records_the_guidance_its_prompt_injected(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """The record the read tool trusts is built from the SAME render as the
+    prompt block, and reaches the per-turn tool context (review R1-1)."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.context_files import _head_digest, _read_head
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    guidance = repo / "AGENTS.md"
+    guidance.write_text("# Rules\n\n## Gate\n\nalways run the gate\n")
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+        cwd=str(repo),
+    )
+    try:
+        built = cast(Session, session)
+        assert "always run the gate" in getattr(built._system_blocks_provider, "repo_guidance")
+        expected = ((str(guidance.resolve()), _head_digest(_read_head(guidance)[0])),)
+        assert built._build_tool_context().injected_guidance == expected
+    finally:
+        await session.dispose()
