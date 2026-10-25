@@ -858,34 +858,6 @@ def one_turn_container_has_secret(
             return False
 
     return walk(value)
-    seen: set[int] = set()
-
-    def walk(item: Any) -> bool:
-        if isinstance(item, str):
-            return one_turn_secret_value_is_present(values, item, redact)
-        if isinstance(item, Mapping):
-            if id(item) in seen:
-                return False
-            seen.add(id(item))
-            return any(walk(key) or walk(entry) for key, entry in item.items())
-        if isinstance(item, (list, tuple, set, frozenset)):
-            if id(item) in seen:
-                return False
-            seen.add(id(item))
-            return any(walk(entry) for entry in item)
-        dump = getattr(item, "model_dump", None)
-        if callable(dump):
-            if id(item) in seen:
-                return False
-            seen.add(id(item))
-            try:
-                return walk(dump(mode="python"))
-            except Exception:
-                # A model that refuses to dump cannot be proven safe.
-                return True
-        return False
-
-    return walk(value)
 
 
 def one_turn_public_text(request: "ChatRequest", value: str | None) -> str | None:
