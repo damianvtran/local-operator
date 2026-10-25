@@ -1602,6 +1602,61 @@ async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_scratchpad_write_appends_the_soft_crossing_advisory(tmp_path, monkeypatch) -> None:
+    """The real write receipt carries exactly one advisory line on the crossing."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+    content = "x" * 3072
+
+    result = await tools["write"].execute(
+        "c", {"path": "scratchpad://notes.md", "content": content}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert result.text == (
+        f"Created scratchpad://notes.md -> {pad / 'notes.md'} ({len(content)} chars)"
+        " — kept for this session (survives restarts).\n"
+        "[scratch] The pad is at 75% of its 4,096-byte cap, with 1,024 bytes of "
+        "headroom — build output / dependency trees belong outside the pad; "
+        "lop sessions cleanup --dry-run shows what is reclaimable."
+    )
+    assert result.text.count("[scratch] ") == 1
+    assert (pad / "notes.md").read_text(encoding="utf-8") == content
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_edit_appends_the_measured_soft_crossing_advisory(
+    tmp_path, monkeypatch
+) -> None:
+    """The edit receipt uses the FINAL payload's crossing, not its size-less preflight."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    target = pad / "notes.md"
+    target.write_text("seed\n", encoding="utf-8")
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+    replacement = "x" * 3072
+
+    result = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://notes.md", "old_text": "seed\n", "new_text": replacement},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    assert result.text == (
+        f"Edited scratchpad://notes.md -> {target}: 1 hunk(s), 1 replacement(s) applied.\n"
+        "[scratch] The pad is at 75% of its 4,096-byte cap, with 1,024 bytes of "
+        "headroom — build output / dependency trees belong outside the pad; "
+        "lop sessions cleanup --dry-run shows what is reclaimable."
+    )
+    assert result.text.count("[scratch] ") == 1
+    assert result.details is not None and "_scratchpad_advisory" not in result.details
+    assert target.read_text(encoding="utf-8") == replacement
+
+
+@pytest.mark.asyncio
 async def test_scratchpad_refuses_a_payload_over_the_write_ceiling(tmp_path) -> None:
     """The SIZE arm, end to end, because it is the one arm that depends on a
     value computed at the call site rather than on the name. A ceiling that is
