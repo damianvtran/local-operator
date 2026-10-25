@@ -37,6 +37,7 @@ import urllib.parse
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import Enum
 from typing import (
     Any,
     Awaitable,
@@ -766,20 +767,97 @@ def one_turn_secret_value_is_present(
     return False
 
 
+#: Leaf-walk budget. Deep enough for message/tool-result trees, small enough
+#: that a hostile or cyclic structure cannot turn a refusal into a hang.
+_ONE_TURN_WALK_MAX_DEPTH = 64
+
+
 def one_turn_container_has_secret(
     values: Iterable[SecretStr],
     value: Any,
     redact: Callable[[str], str] | None = None,
 ) -> bool:
-    """Walk every STRING LEAF of ``value`` with the coverage primitive.
+    """Walk every LEAF of ``value`` with the coverage primitive.
 
     Never ``json.dumps`` a container first: dumping escapes the quotes of an
     already-escaped leaf, so an encoded value inside arguments, a tool result
     or a forwarded prompt stops matching its own spelling (review S-12/R3-1,
-    measured as JSON-escaped args and results passing a no-op sink). Pydantic
-    models are walked through ``model_dump(mode="python")`` so a result or
-    message is inspected as fields, not as its JSON spelling.
+    measured as JSON-escaped args and results passing a no-op sink).
+
+    Scalars are checked because the WIRE can turn them into text: ``bytes``,
+    ``bytearray`` and ``memoryview`` are decoded as UTF-8 (and searched as raw
+    bytes as a fallback), and pydantic models are dumped in JSON mode so a
+    ``Path``, ``Enum``, UUID or similar renders exactly as it will in the body
+    (review S-15: a tool result's ``details={"blob": value.encode()}`` reached
+    the event stream, history and the later request because Python-mode dumps
+    leave those objects untouched). A model that refuses to dump cannot be
+    proven safe, so it counts as a hit. Depth and cycle bounds keep a
+    pathological structure from becoming a hang.
     """
+    seen: set[int] = set()
+    limit = _ONE_TURN_WALK_MAX_DEPTH
+
+    def walk(item: Any, depth: int = 0) -> bool:
+        if depth > limit:
+            # Cannot be proven safe inside the budget: fail closed.
+            return True
+        if isinstance(item, str):
+            return one_turn_secret_value_is_present(values, item, redact)
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            raw = bytes(item)
+            for secret in values:
+                needle = secret.get_secret_value()
+                if needle and needle.encode("utf-8", "surrogatepass") in raw:
+                    return True
+            try:
+                decoded = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                decoded = raw.decode("utf-8", "surrogateescape")
+            return one_turn_secret_value_is_present(values, decoded, redact)
+        if isinstance(item, Mapping):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            return any(
+                walk(key, depth + 1) or walk(entry, depth + 1) for key, entry in item.items()
+            )
+        if isinstance(item, (list, tuple, set, frozenset)):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            return any(walk(entry, depth + 1) for entry in item)
+        if isinstance(item, Enum):
+            # A plain Enum renders as its VALUE on the wire, and its value may
+            # itself be a container; ``str(member)`` would only show the name.
+            return walk(item.value, depth + 1) or walk(str(item.name), depth + 1)
+        dump = getattr(item, "model_dump", None)
+        if callable(dump):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            try:
+                return walk(dump(mode="json"), depth + 1)
+            except Exception:
+                return True
+        if isinstance(item, (int, float, bool, type(None))):
+            # JSON scalars with no text of their own. Rendering them would
+            # refuse ordinary counters while armed for a one-character secret.
+            return False
+        # Any remaining object (``Path``, UUID, datetime, a decoder's output)
+        # is rendered by the serializer rather than by this walker. Check the
+        # two spellings Python would produce for it.
+        try:
+            rendered = str(item)
+        except Exception:
+            return True
+        if one_turn_secret_value_is_present(values, rendered, redact):
+            return True
+        try:
+            return one_turn_secret_value_is_present(values, repr(item), redact)
+        except Exception:
+            return False
+
+    return walk(value)
     seen: set[int] = set()
 
     def walk(item: Any) -> bool:

@@ -874,6 +874,104 @@ async def test_noop_sink_cannot_execute_json_escaped_arguments(encoded: bool) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("noop_sink", [False, True], ids=["real-sink", "noop-sink"])
+@pytest.mark.parametrize(
+    "detail_factory",
+    [
+        lambda canary: {"blob": canary.encode()},
+        lambda canary: {"blob": bytearray(canary.encode())},
+        lambda canary: {"path": __import__("pathlib").Path("/tmp/" + canary)},
+        lambda canary: {"kind": __import__("enum").Enum("SecretEnum", {"RED": canary}).RED},
+    ],
+    ids=["bytes", "bytearray", "path", "enum"],
+)
+async def test_non_string_detail_leaves_are_refused(detail_factory: Any, noop_sink: bool) -> None:
+    """S-15: scalars render as text on the wire even though they are not str.
+
+    ``details={"blob": value.encode()}`` reached the event stream, the history
+    row and the later request because the walker skipped non-string leaves and
+    ``_redact_details`` only masks ``diff``. The walker now decodes bytes-like
+    values and dumps models in JSON mode, so Path and Enum render exactly as
+    the body will.
+    """
+    canary = 'v0rn-"scalar"\\path-3d7e'
+    details = detail_factory(canary)
+    variables = VariableStore()
+    requests: list[ChatRequest] = []
+
+    async def echo_detail(tool_call_id: str, _args: dict[str, Any], *_rest: Any) -> ToolResult:
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="echo",
+            content=[TextContent(text="safe")],
+            details=details,
+        )
+
+    def stream_fn(request: ChatRequest, _signal: AbortSignal | None) -> Any:
+        requests.append(request)
+        index = len(requests)
+
+        async def generate() -> Any:
+            if index == 1:
+                for event in _tool_delta("secret-call", "native-secret", "{}"):
+                    yield event
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            assert request.has_one_turn_secrets
+            for event in _tool_delta("echo-call", "echo", json.dumps({"text": "x"})):
+                yield event
+            yield StreamEndEvent(stop_reason="toolUse")
+
+        return generate()
+
+    echo = AgentTool(
+        name="echo",
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        execute=echo_detail,
+    )
+    context = LoopContext(
+        system_blocks=[],
+        messages=[],
+        tools=[_secret_tool("native-secret", canary), echo],
+        tool_context=ToolContext(cwd=".", variables=variables),
+    )
+    if noop_sink:
+        config = _config(
+            stream_fn,
+            variables,
+            redact_tool_result=lambda text: text,
+            redact_tool_arguments=lambda text: text,
+        )
+    else:
+        config = _config(stream_fn, variables)
+    loop = AgentLoop()
+    events = [event async for event in loop.run([Message.user("go")], context, config, None)]
+    published = _public_event_json(events)
+    history = json.dumps(
+        [
+            message.model_dump(mode="json", fallback=str)
+            for message in context.messages
+            if isinstance(message, Message)
+        ],
+        default=str,
+    )
+    echo_results = [
+        result
+        for event in events
+        if type(event).__name__ == "ToolExecutionEndEvent"
+        for result in [getattr(event, "result", None)]
+        if result is not None and result.tool_name == "echo"
+    ]
+    # POSITIVE control: the tool ran and its result was WITHHELD (the static
+    # refusal), rather than the test passing because nothing was published.
+    assert echo_results, "the echo call must have executed"
+    assert all(result.is_error for result in echo_results), "the unsafe result must be refused"
+    assert canary not in published
+    assert canary not in history
+    loop._clear_one_turn_secrets(context)
+
+
+@pytest.mark.asyncio
 async def test_noop_sink_cannot_publish_a_json_escaped_result() -> None:
     """S-12 result arm: a tool RESULT carrying the encoded value."""
     canary = 'v0rn-"result"\\path-6b2d'
