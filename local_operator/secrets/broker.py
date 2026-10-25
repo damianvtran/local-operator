@@ -164,6 +164,11 @@ class SecretBroker:
         self._key: bytes | None = None
         self._server: socket.socket | None = None
         self._accept_thread: threading.Thread | None = None
+        #: The accept-thread survivor episode this broker has already warned
+        #: about (Q1/R1-1). Keyed by thread identity, not a bool: a REPLACEMENT
+        #: accept thread is a new episode and may warn, while a repeated stop()
+        #: of the same live thread stays silent. Dropped with the handle.
+        self._accept_thread_warned: threading.Thread | None = None
         self._workers: set[threading.Thread] = set()
         #: Long-lived session watchers, budgeted apart from ``_workers`` (R4).
         #: One per registered session for that session's whole life, so
@@ -172,8 +177,8 @@ class SecretBroker:
         self._watchers: set[threading.Thread] = set()
         self._stopping = threading.Event()
 
-        #: Guards ``_sessions``, ``_workers`` and ``_watchers`` only. Never
-        #: held across I/O.
+        #: Guards ``_sessions``, ``_workers``, ``_watchers`` and the
+        #: accept-thread survivor latch only. Never held across I/O.
         self._lock = threading.Lock()
         self._sessions: dict[int, _Session] = {}
         self._last_activity = time.monotonic()
@@ -315,6 +320,11 @@ class SecretBroker:
         ``serve_forever`` on the way out, so a wedged thread must not turn a
         shutdown into an exception. A thread that ignores its stop cannot be
         killed from here; keeping the handle makes the condition observable.
+
+        The warning is LATCHED on the thread object (Q1/R1-1): repeated stop()
+        calls still join and re-check, because that re-check is what clears the
+        handle once the survivor dies, but only the first call names it. The
+        latch is dropped with the handle, so a later listener can warn again.
         """
         self._stopping.set()
         server, self._server = self._server, None
@@ -327,15 +337,26 @@ class SecretBroker:
         if accept_thread is not None:
             accept_thread.join(timeout=timeout)
             if accept_thread.is_alive():
-                logger.warning(
-                    "secrets: broker accept thread did not stop within the %.1fs "
-                    "stop timeout and is still running — it was not killed; the "
-                    "broker is stopping and the thread's handle is kept so this "
-                    "stays observable",
-                    timeout,
-                )
+                # ONE warning PER survivor episode (Q1/R1-1): a repeated stop()
+                # must still join and re-check — that re-check is the only path
+                # that clears the handle once the survivor finally dies — but it
+                # must not re-warn. The latch is the thread object itself, so a
+                # replacement listener can warn again.
+                with self._lock:
+                    already_warned = self._accept_thread_warned is accept_thread
+                    if not already_warned:
+                        self._accept_thread_warned = accept_thread
+                if not already_warned:
+                    logger.warning(
+                        "secrets: broker accept thread did not stop within the "
+                        "%.1fs stop timeout and is still running — it was not "
+                        "killed; the broker is stopping and the thread's handle "
+                        "is kept so this stays observable",
+                        timeout,
+                    )
             else:
                 self._accept_thread = None
+                self._accept_thread_warned = None
         with self._lock:
             workers = list(self._workers) + list(self._watchers)
             sessions = list(self._sessions.values())

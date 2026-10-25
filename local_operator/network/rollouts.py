@@ -842,6 +842,10 @@ def tick(server: "RelayServer") -> None:
 
 _DRIVERS: dict[int, "RolloutDriver"] = {}
 _DRIVER_LOCK = threading.Lock()
+#: Warning latch for survivor ``stop_driver`` calls, keyed like ``_DRIVERS``: the
+#: value is the thread already reported, so re-entry does not repeat the warning
+#: but a replacement thread is reported in its own right (R1-1).
+_DRIVER_SURVIVOR_WARNED: dict[int, "RolloutDriver"] = {}
 
 
 class RolloutDriver(threading.Thread):
@@ -896,6 +900,9 @@ def ensure_driver(server: "RelayServer") -> RolloutDriver | None:
             return existing
         driver = RolloutDriver(server)
         _DRIVERS[id(server)] = driver
+        # A replacement is a fresh survivor: do not inherit the old thread's
+        # warning latch (R1-1).
+        _DRIVER_SURVIVOR_WARNED.pop(id(server), None)
         driver.start()
         return driver
 
@@ -915,9 +922,23 @@ def stop_driver(server: "RelayServer", *, timeout: float = DRIVER_STOP_JOIN_S) -
     once the thread is known stopped: ``Thread.join(timeout)`` returns nothing
     either way, and popping before the join left a still-running driver with no
     handle any caller could reach. A driver still alive at the deadline is
-    reported in a warning and its entry is KEPT, so a subsequent
-    ``ensure_driver`` reuses the survivor rather than starting a second scan. A
-    thread that ignores its stop cannot be killed from here; this makes the
+    reported in a warning and its entry is KEPT.
+
+    THE WARNING IS LATCHED PER SURVIVOR EPISODE (R1-1): repeated stops still
+    join and re-check — that re-check is the only path that clears the entry once
+    the survivor dies — but only the first one names it. The latch goes with the
+    entry, and a replacement driver starts unwarned.
+
+    RETENTION IS NOT REAPED BY THIS FUNCTION ALONE (R1-2): after a survivor
+    finally dies, the entry stays until the next ``stop_driver`` or
+    ``ensure_driver`` for that server (the latter replaces a dead entry); with
+    neither, the entry — and through the driver's own ``server`` reference the
+    whole relay — lives for the process lifetime. Nothing timer-based bounds it;
+    that is accepted because a later stop reclaims it and a daemon stops once and
+    exits, while an in-process host that builds and stops many relays should call
+    one of the two.
+
+    A thread that ignores its stop cannot be killed from here; this makes the
     condition visible instead of impossible.
     """
     with _DRIVER_LOCK:
@@ -927,18 +948,25 @@ def stop_driver(server: "RelayServer", *, timeout: float = DRIVER_STOP_JOIN_S) -
     driver.stop()
     driver.join(timeout=timeout)
     if driver.is_alive():
-        logger.warning(
-            "mesh rollouts: driver thread did not stop within the %.1fs timeout "
-            "and is still running — it was not killed; its registry entry is "
-            "kept so ensure_driver reuses it rather than starting a second one",
-            timeout,
-        )
+        with _DRIVER_LOCK:
+            already_warned = _DRIVER_SURVIVOR_WARNED.get(id(server)) is driver
+            if not already_warned:
+                _DRIVER_SURVIVOR_WARNED[id(server)] = driver
+        if not already_warned:
+            logger.warning(
+                "mesh rollouts: driver for %s did not stop within the %.1fs "
+                "timeout and is still running — it was not killed; its registry "
+                "entry is kept so a later stop can retry it",
+                getattr(server, "root", "<unknown>"),
+                timeout,
+            )
         return
     with _DRIVER_LOCK:
         # Identity-checked: a concurrent ensure_driver may have replaced a driver
         # that looked dead, and this must not unregister its replacement.
         if _DRIVERS.get(id(server)) is driver:
             del _DRIVERS[id(server)]
+            _DRIVER_SURVIVOR_WARNED.pop(id(server), None)
 
 
 def resume_record(

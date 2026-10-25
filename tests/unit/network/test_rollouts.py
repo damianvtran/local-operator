@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 from argparse import Namespace
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -1359,6 +1360,8 @@ class _DriverThatIgnoresTheStop:
     def __init__(self) -> None:
         self.stop_called = False
         self.join_timeout: float | None = None
+        #: Flipped by a test to model the survivor finally dying.
+        self.alive = True
 
     def stop(self) -> None:
         self.stop_called = True
@@ -1367,7 +1370,7 @@ class _DriverThatIgnoresTheStop:
         self.join_timeout = timeout
 
     def is_alive(self) -> bool:
-        return True
+        return self.alive
 
 
 class _DriverThatStops:
@@ -1420,8 +1423,10 @@ def test_stop_driver_reports_a_thread_that_will_not_stop_and_keeps_it_registered
         message = warnings[0].getMessage()
         assert "1.5s" in message, message
         assert "still running" in message, message
+        assert str(server.root) in message, "the warning must name the relay's root (R1-5)"
     finally:
         rollouts._DRIVERS.pop(id(server), None)
+        rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)
 
 
 def test_stop_driver_removes_the_entry_and_stays_silent_when_the_thread_stopped(
@@ -1440,3 +1445,77 @@ def test_stop_driver_removes_the_entry_and_stays_silent_when_the_thread_stopped(
         assert _rollout_warnings(caplog) == [], caplog.text
     finally:
         rollouts._DRIVERS.pop(id(server), None)
+        rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)
+
+
+class _DriverThatStopsAndInstallsAReplacement(_DriverThatStops):
+    """A dying driver whose join slots a successor into the registry.
+
+    Used to exercise the identity guard: the loop that ends must not delete the
+    entry it no longer owns.
+    """
+
+    def __init__(self, install: "Callable[[], None]") -> None:
+        super().__init__()
+        self._install = install
+
+    def join(self, timeout: float | None = None) -> None:
+        super().join(timeout)
+        self._install()
+
+
+def test_stop_driver_keeps_a_replacement_registered_during_the_join(
+    tmp_path: Path,
+) -> None:
+    """The identity check is load-bearing: a successor must survive the reap (R1-3)."""
+    server = _Server(tmp_path / "cfg")
+    replacement = _DriverThatStops()
+
+    def install() -> None:
+        rollouts._DRIVERS[id(server)] = cast(Any, replacement)
+
+    driver = _DriverThatStopsAndInstallsAReplacement(install)
+    rollouts._DRIVERS[id(server)] = cast(Any, driver)
+    try:
+        rollouts.stop_driver(cast(Any, server), timeout=1.5)
+        assert (
+            rollouts._DRIVERS[id(server)] is replacement
+        ), "stop_driver removed the thread that replaced the one it joined"
+    finally:
+        rollouts._DRIVERS.pop(id(server), None)
+        rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)
+
+
+def test_stop_driver_warns_once_per_survivor_episode(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Repeated stops re-check but do not re-warn, and a new survivor can (R1-1).
+
+    The third stop is the only thing that observes the survivor's death and
+    clears the entry, which is why re-entry must not become an early return.
+    """
+    server = _Server(tmp_path / "cfg")
+    driver = _DriverThatIgnoresTheStop()
+    rollouts._DRIVERS[id(server)] = cast(Any, driver)
+    try:
+        with caplog.at_level(logging.WARNING, logger=rollouts.logger.name):
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+            assert rollouts._DRIVERS[id(server)] is driver
+            assert len(_rollout_warnings(caplog)) == 1, caplog.text
+
+            driver.alive = False
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+            assert id(server) not in rollouts._DRIVERS
+            assert len(_rollout_warnings(caplog)) == 1, caplog.text
+
+            replacement = _DriverThatIgnoresTheStop()
+            rollouts._DRIVERS[id(server)] = cast(Any, replacement)
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+        assert rollouts._DRIVERS[id(server)] is replacement
+        warnings = _rollout_warnings(caplog)
+        assert len(warnings) == 2, caplog.text
+        assert "still running" in warnings[-1].getMessage()
+    finally:
+        rollouts._DRIVERS.pop(id(server), None)
+        rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -1475,6 +1476,8 @@ class _SyncerThatIgnoresTheStop:
     def __init__(self) -> None:
         self.stop_called = False
         self.join_timeout: float | None = None
+        #: Flipped by a test to model the survivor finally dying.
+        self.alive = True
 
     def stop(self) -> None:
         self.stop_called = True
@@ -1483,7 +1486,7 @@ class _SyncerThatIgnoresTheStop:
         self.join_timeout = timeout
 
     def is_alive(self) -> bool:
-        return True
+        return self.alive
 
 
 class _SyncerThatStops:
@@ -1536,8 +1539,10 @@ def test_stop_syncer_reports_a_thread_that_will_not_stop_and_keeps_it_registered
         message = warnings[0].getMessage()
         assert "1.5s" in message, message
         assert "still running" in message, message
+        assert str(server.root) in message, "the warning must name the relay's root (R1-5)"
     finally:
         definitions._syncers.pop(id(server), None)
+        definitions._syncer_survivor_warned.pop(id(server), None)
 
 
 def test_stop_syncer_removes_the_entry_and_stays_silent_when_the_thread_stopped(
@@ -1556,3 +1561,77 @@ def test_stop_syncer_removes_the_entry_and_stays_silent_when_the_thread_stopped(
         assert _definitions_warnings(caplog) == [], caplog.text
     finally:
         definitions._syncers.pop(id(server), None)
+        definitions._syncer_survivor_warned.pop(id(server), None)
+
+
+class _SyncerThatStopsAndInstallsAReplacement(_SyncerThatStops):
+    """A dying syncer whose join slots a successor into the registry.
+
+    Used to exercise the identity guard: the loop that ends must not delete the
+    entry it no longer owns.
+    """
+
+    def __init__(self, install: "Callable[[], None]") -> None:
+        super().__init__()
+        self._install = install
+
+    def join(self, timeout: float | None = None) -> None:
+        super().join(timeout)
+        self._install()
+
+
+def test_stop_syncer_keeps_a_replacement_registered_during_the_join(
+    tmp_path: Path,
+) -> None:
+    """The identity check is load-bearing: a successor must survive the reap (R1-3)."""
+    server = _LifecycleServer(_root(tmp_path / "root"))
+    replacement = _SyncerThatStops()
+
+    def install() -> None:
+        definitions._syncers[id(server)] = cast(Any, replacement)
+
+    syncer = _SyncerThatStopsAndInstallsAReplacement(install)
+    definitions._syncers[id(server)] = cast(Any, syncer)
+    try:
+        definitions.stop_syncer(server, timeout=1.5)  # type: ignore[arg-type]
+        assert (
+            definitions._syncers[id(server)] is replacement
+        ), "stop_syncer removed the thread that replaced the one it joined"
+    finally:
+        definitions._syncers.pop(id(server), None)
+        definitions._syncer_survivor_warned.pop(id(server), None)
+
+
+def test_stop_syncer_warns_once_per_survivor_episode(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Repeated stops re-check but do not re-warn, and a new survivor can (R1-1).
+
+    The third stop is the only thing that observes the survivor's death and
+    clears the entry, which is why re-entry must not become an early return.
+    """
+    server = _LifecycleServer(_root(tmp_path / "root"))
+    syncer = _SyncerThatIgnoresTheStop()
+    definitions._syncers[id(server)] = cast(Any, syncer)
+    try:
+        with caplog.at_level(logging.WARNING, logger=definitions.logger.name):
+            definitions.stop_syncer(server, timeout=1.5)  # type: ignore[arg-type]
+            definitions.stop_syncer(server, timeout=1.5)  # type: ignore[arg-type]
+            assert definitions._syncers[id(server)] is syncer
+            assert len(_definitions_warnings(caplog)) == 1, caplog.text
+
+            syncer.alive = False
+            definitions.stop_syncer(server, timeout=1.5)  # type: ignore[arg-type]
+            assert id(server) not in definitions._syncers
+            assert len(_definitions_warnings(caplog)) == 1, caplog.text
+
+            replacement = _SyncerThatIgnoresTheStop()
+            definitions._syncers[id(server)] = cast(Any, replacement)
+            definitions.stop_syncer(server, timeout=1.5)  # type: ignore[arg-type]
+        assert definitions._syncers[id(server)] is replacement
+        warnings = _definitions_warnings(caplog)
+        assert len(warnings) == 2, caplog.text
+        assert "still running" in warnings[-1].getMessage()
+    finally:
+        definitions._syncers.pop(id(server), None)
+        definitions._syncer_survivor_warned.pop(id(server), None)

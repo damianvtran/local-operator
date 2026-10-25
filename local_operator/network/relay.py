@@ -74,6 +74,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -3135,6 +3136,13 @@ INCIDENT_ACK_DEADLINE_S = 2.0
 #: the sweep is not the deadline itself.
 INCIDENT_SEND_SLACK_S = 1.0
 
+#: The incident fan-out threads already named in a survivor warning (R1-1).
+#: Keyed by THREAD OBJECT rather than by call, so a repeated join of the same
+#: list does not re-warn while a new fan-out (new threads) can. Weak, so an entry
+#: disappears with the thread it names instead of retaining a finished thread.
+_incident_survivors_warned: weakref.WeakSet[threading.Thread] = weakref.WeakSet()
+_incident_survivors_lock = threading.Lock()
+
 
 def _join_incident_threads(threads: list[threading.Thread], *, deadline: float) -> None:
     """Wait for the fan-out's per-peer threads and report any that outlived it.
@@ -3150,16 +3158,24 @@ def _join_incident_threads(threads: list[threading.Thread], *, deadline: float) 
     for thread in threads:
         thread.join(timeout=deadline)
     survivors = [thread for thread in threads if thread.is_alive()]
-    if survivors:
-        logger.warning(
-            "mesh relay: %d incident acknowledgement thread(s) still running "
-            "after the %.1fs fan-out deadline (%s) — they were not killed; the "
-            "receipt still reports those peers as unacked, so the local "
-            "condition is only visible here",
-            len(survivors),
-            deadline,
-            ", ".join(thread.name for thread in survivors),
-        )
+    if not survivors:
+        return
+    # ONE warning PER survivor episode (R1-1): the same thread joined again must
+    # not be named twice, while a new fan-out's new threads are. The latch is the
+    # thread object itself and is weak, so it is dropped with the thread.
+    with _incident_survivors_lock:
+        fresh = [thread for thread in survivors if thread not in _incident_survivors_warned]
+        _incident_survivors_warned.update(survivors)
+    if not fresh:
+        return
+    logger.warning(
+        "mesh relay: %d incident acknowledgement thread(s) did not stop within "
+        "the %.1fs deadline and are still running (%s) — the receipt reports "
+        "them as unacked",
+        len(fresh),
+        deadline,
+        ", ".join(thread.name for thread in fresh),
+    )
 
 
 def panic_frame(
@@ -4999,6 +5015,9 @@ class RelayServer:
         #: shelves the loop in a critical section of the same lock.
         self._page_loop: asyncio.AbstractEventLoop | None = None
         self._page_loop_thread: threading.Thread | None = None
+        #: The page-loop survivor episode already warned about (R1-1). Cleared
+        #: with the handle; a replacement loop thread is a new episode.
+        self._page_loop_thread_warned: threading.Thread | None = None
         self._page_loop_lock = threading.Lock()
         #: Set by ``stop``: the next read builds a fresh loop rather than queueing
         #: work onto one whose thread has finished (see ``_page_loop_locked``).
@@ -5340,26 +5359,39 @@ class RelayServer:
         # stop disappeared without a trace: the shelved fence made new reads build
         # a fresh loop and nothing named the survivor. ``join`` returns nothing
         # either way, so the outcome is read from ``is_alive()``; a survivor is
-        # reported and stays reachable on the attribute. A thread that ignores its
-        # stop cannot be killed from here — this makes it observable, not
-        # impossible.
+        # reported and stays reachable on the attribute UNTIL A NEW LOOP STARTS
+        # (a read during the join overwrites the field, and the identity check
+        # below then deliberately leaves the new thread in place). A thread that
+        # ignores its stop cannot be killed from here — this makes it observable,
+        # not impossible.
+        #
+        # THE WARNING IS LATCHED PER SURVIVOR EPISODE (R1-1): a repeated stop()
+        # still joins and re-checks — that re-check is the only path that clears
+        # the handle once the survivor dies — but only the first one names it.
         if thread is not None:
             thread.join(timeout=PAGE_LOOP_STOP_JOIN_S)
             if thread.is_alive():
-                logger.warning(
-                    "mesh relay: page-loop thread did not stop within the %.1fs "
-                    "stop timeout and is still running — it was not killed; the "
-                    "loop was shelved so new reads build a fresh one, and the "
-                    "thread's handle is kept so this stays observable",
-                    PAGE_LOOP_STOP_JOIN_S,
-                )
+                with self._page_loop_lock:
+                    already_warned = self._page_loop_thread_warned is thread
+                    if not already_warned:
+                        self._page_loop_thread_warned = thread
+                if not already_warned:
+                    logger.warning(
+                        "mesh relay: page-loop thread did not stop within the "
+                        "%.1fs stop timeout and is still running — it was not "
+                        "killed; the loop was shelved so new reads build a fresh "
+                        "one, and the handle is kept until a new loop starts so "
+                        "this stays observable",
+                        PAGE_LOOP_STOP_JOIN_S,
+                    )
             else:
                 with self._page_loop_lock:
-                    # Identity-checked: a read that arrived during the join may
-                    # already have built a new loop, and its thread is not ours
-                    # to forget.
+                    # Identity-checked: a read during the join may have started a
+                    # new loop, and its thread must not be cleared as if it were
+                    # the one that just stopped.
                     if self._page_loop_thread is thread:
                         self._page_loop_thread = None
+                        self._page_loop_thread_warned = None
         with self._links_lock:
             links = list(self.links.values())
         for link in links:

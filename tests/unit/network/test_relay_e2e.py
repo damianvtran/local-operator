@@ -2458,12 +2458,14 @@ class _IncidentThreadStillRunning(threading.Thread):
     def __init__(self, name: str) -> None:
         super().__init__(name=name, daemon=True)
         self.join_timeout: float | None = None
+        #: Flipped by a test to model the thread finally finishing.
+        self.alive = True
 
     def join(self, timeout: float | None = None) -> None:
         self.join_timeout = timeout
 
     def is_alive(self) -> bool:
-        return True
+        return self.alive
 
 
 class _IncidentThreadThatFinished(threading.Thread):
@@ -2528,6 +2530,44 @@ def test_the_incident_fan_out_is_silent_when_every_thread_finished(
         if record.name == relay.logger.name and record.levelno >= logging.WARNING
     ]
     assert warnings == [], caplog.text
+
+
+def test_the_incident_fan_out_warns_once_per_survivor_thread(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Joining the same surviving list again must not repeat its warning (R1-1).
+
+    A new fan-out builds new threads and is a new episode, so it can warn; the
+    latch is the thread object itself, kept weakly so a finished thread leaves
+    nothing behind.
+    """
+    slow = _IncidentThreadStillRunning("mesh-incident:d_a")
+    fresh = _IncidentThreadStillRunning("mesh-incident:d_b")
+
+    def messages() -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == relay.logger.name and record.levelno == logging.WARNING
+        ]
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+            relay._join_incident_threads([slow], deadline=1.5)
+            assert len(messages()) == 1, messages()
+            relay._join_incident_threads([slow], deadline=1.5)
+            assert len(messages()) == 1, messages()
+
+            slow.alive = False
+            relay._join_incident_threads([slow], deadline=1.5)
+            assert len(messages()) == 1, messages()
+
+            relay._join_incident_threads([fresh], deadline=1.5)
+            assert len(messages()) == 2, messages()
+            assert "mesh-incident:d_b" in messages()[-1], messages()
+    finally:
+        relay._incident_survivors_warned.discard(slow)
+        relay._incident_survivors_warned.discard(fresh)
 
 
 def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(

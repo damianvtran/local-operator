@@ -2042,6 +2042,10 @@ def local_sync_handler(server: "RelayServer") -> Any:
 #: hundreds of relays it never starts.
 _syncer_lock = threading.Lock()
 _syncers: dict[int, "DefinitionsSyncer"] = {}
+#: Warning latch for survivor ``stop_syncer`` calls, keyed like ``_syncers``: the
+#: value is the thread already reported, so re-entry does not repeat the warning
+#: but a replacement thread is reported in its own right (R1-1).
+_syncer_survivor_warned: dict[int, "DefinitionsSyncer"] = {}
 
 #: Per-member steps a SIBLING slice contributes to this syncer's tick, run
 #: INSIDE the ``mesh-definitions`` thread right after this device's own push for
@@ -2393,6 +2397,9 @@ def ensure_syncer(server: "RelayServer") -> "DefinitionsSyncer | None":
             return existing
         syncer = DefinitionsSyncer(server)
         _syncers[id(server)] = syncer
+        # A replacement is a fresh survivor: do not inherit the old thread's
+        # warning latch (R1-1).
+        _syncer_survivor_warned.pop(id(server), None)
         syncer.start()
         return syncer
 
@@ -2421,9 +2428,23 @@ def stop_syncer(server: "RelayServer", *, timeout: float = SYNCER_STOP_JOIN_S) -
     either way, and popping before the join left a still-running syncer with no
     handle any caller could reach (``ensure_syncer`` could start a second one
     beside it, and nothing named the first). A syncer still alive at the deadline
-    is reported in a warning and its entry is KEPT, so a subsequent
-    ``ensure_syncer`` reuses the survivor rather than doubling the cadence. A
-    thread that ignores its stop cannot be killed from here; this makes the
+    is reported in a warning and its entry is KEPT.
+
+    THE WARNING IS LATCHED PER SURVIVOR EPISODE (R1-1): repeated stops still
+    join and re-check — that re-check is the only path that clears the entry once
+    the survivor dies — but only the first one names it. The latch goes with the
+    entry, and a replacement syncer starts unwarned.
+
+    RETENTION IS NOT REAPED BY THIS FUNCTION ALONE (R1-2): after a survivor
+    finally dies, the entry stays until the next ``stop_syncer`` or
+    ``ensure_syncer`` for that server (the latter replaces a dead entry); with
+    neither, the entry — and through the syncer's own ``_server`` reference the
+    whole relay — lives for the process lifetime. Nothing timer-based bounds it;
+    that is accepted because a later stop reclaims it and a daemon stops once and
+    exits, while an in-process host that builds and stops many relays should call
+    one of the two.
+
+    A thread that ignores its stop cannot be killed from here; this makes the
     condition visible instead of impossible.
     """
     with _syncer_lock:
@@ -2433,19 +2454,25 @@ def stop_syncer(server: "RelayServer", *, timeout: float = SYNCER_STOP_JOIN_S) -
     syncer.stop()
     syncer.join(timeout=timeout)
     if syncer.is_alive():
-        logger.warning(
-            "mesh definitions: syncer thread did not stop within the %.1fs "
-            "timeout and is still running — it was not killed; its registry "
-            "entry is kept so ensure_syncer reuses it rather than starting a "
-            "second one",
-            timeout,
-        )
+        with _syncer_lock:
+            already_warned = _syncer_survivor_warned.get(id(server)) is syncer
+            if not already_warned:
+                _syncer_survivor_warned[id(server)] = syncer
+        if not already_warned:
+            logger.warning(
+                "mesh definitions: syncer for %s did not stop within the %.1fs "
+                "timeout and is still running — it was not killed; its registry "
+                "entry is kept so a later stop can retry it",
+                getattr(server, "root", "<unknown>"),
+                timeout,
+            )
         return
     with _syncer_lock:
         # Identity-checked: a concurrent ensure_syncer may have replaced a thread
         # that looked dead, and this must not unregister its replacement.
         if _syncers.get(id(server)) is syncer:
             del _syncers[id(server)]
+            _syncer_survivor_warned.pop(id(server), None)
 
 
 def install(server: "RelayServer") -> None:

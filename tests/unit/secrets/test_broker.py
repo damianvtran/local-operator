@@ -1258,12 +1258,14 @@ class _AcceptThreadThatIgnoresTheStop(threading.Thread):
     def __init__(self) -> None:
         super().__init__(name="lo-broker-accept", daemon=True)
         self.join_timeout: float | None = None
+        #: Flipped by a test to model the survivor finally dying.
+        self.alive = True
 
     def join(self, timeout: float | None = None) -> None:
         self.join_timeout = timeout
 
     def is_alive(self) -> bool:
-        return True
+        return self.alive
 
 
 class _AcceptThreadThatStops(threading.Thread):
@@ -1311,6 +1313,39 @@ def test_stop_reports_an_accept_thread_that_will_not_stop(
     message = warnings[0].getMessage()
     assert "1.5s" in message, message
     assert "still running" in message, message
+
+
+def test_stop_warns_once_per_survivor_episode(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Repeated stops re-check but do not re-warn, and a new survivor can (R1-1).
+
+    Re-entry must not become an early return: the third stop below is the only
+    thing that observes the survivor's death and clears the handle. Only the
+    warning is latched, and the latch is dropped with the handle so the next
+    listener is warned in its own right.
+    """
+    broker = SecretBroker(tmp_path / "cfg", idle_shutdown_s=0)
+    thread = _AcceptThreadThatIgnoresTheStop()
+    broker._accept_thread = thread
+    with caplog.at_level(logging.WARNING, logger=broker_module.logger.name):
+        broker.stop(timeout=1.5)
+        broker.stop(timeout=1.5)
+        assert broker._accept_thread is thread, "a live accept thread must stay reachable"
+        assert len(_broker_warnings(caplog)) == 1, caplog.text
+
+        thread.alive = False
+        broker.stop(timeout=1.5)
+        assert broker._accept_thread is None, "a stop that observes death must clear it"
+        assert len(_broker_warnings(caplog)) == 1, caplog.text
+
+        replacement = _AcceptThreadThatIgnoresTheStop()
+        broker._accept_thread = replacement
+        broker.stop(timeout=1.5)
+    assert broker._accept_thread is replacement
+    warnings = _broker_warnings(caplog)
+    assert len(warnings) == 2, caplog.text
+    assert "still running" in warnings[-1].getMessage()
 
 
 def test_stop_clears_the_accept_thread_and_stays_silent_when_it_stopped(

@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -2106,12 +2106,14 @@ class _PageLoopThreadThatIgnoresTheStop(threading.Thread):
     def __init__(self) -> None:
         super().__init__(name="page-loop-still-running", daemon=True)
         self.join_timeout: float | None = None
+        #: Flipped by a test to model the survivor finally dying.
+        self.alive = True
 
     def join(self, timeout: float | None = None) -> None:
         self.join_timeout = timeout
 
     def is_alive(self) -> bool:
-        return True
+        return self.alive
 
 
 class _PageLoopThreadThatStops(threading.Thread):
@@ -2186,6 +2188,76 @@ def test_stop_clears_the_page_loop_thread_and_stays_silent_when_it_stopped(
     assert server._page_loop_thread is None
     assert thread.join_timeout == relay.PAGE_LOOP_STOP_JOIN_S
     assert _page_loop_warnings(caplog) == [], caplog.text
+
+
+class _PageLoopThreadThatStopsAndInstallsAReplacement(_PageLoopThreadThatStops):
+    """A dying loop thread whose join installs its successor on the server.
+
+    The identity check must notice that the field is no longer this thread and
+    must not clear the newcomer (R1-3).
+    """
+
+    def __init__(self, install: "Callable[[], None]") -> None:
+        super().__init__()
+        self._install = install
+
+    def join(self, timeout: float | None = None) -> None:
+        super().join(timeout)
+        self._install()
+
+
+def test_stop_does_not_clear_a_page_loop_thread_that_replaced_it(
+    root: Path,
+) -> None:
+    """The identity check is load-bearing: a successor must survive the clear (R1-3)."""
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    replacement = _PageLoopThreadThatIgnoresTheStop()
+
+    def install() -> None:
+        server._page_loop_thread = replacement
+
+    thread = _PageLoopThreadThatStopsAndInstallsAReplacement(install)
+    server._page_loop = cast(Any, _StubPageLoop())
+    server._page_loop_thread = thread
+    server.stop()
+    assert (
+        server._page_loop_thread is replacement
+    ), "stop() cleared the page-loop thread that replaced the one it joined"
+
+
+def test_stop_warns_once_per_survivor_episode(root: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Repeated stops re-check but do not re-warn, and a new survivor can (R1-1).
+
+    The third stop is the only thing that observes the survivor's death and
+    clears the handle, which is why re-entry must not become an early return.
+    """
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    thread = _PageLoopThreadThatIgnoresTheStop()
+    server._page_loop = cast(Any, _StubPageLoop())
+    server._page_loop_thread = thread
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        server.stop()
+        server.stop()
+        assert server._page_loop_thread is thread
+        assert len(_page_loop_warnings(caplog)) == 1
+
+        thread.alive = False
+        server.stop()
+        assert server._page_loop_thread is None, "the clearing re-check must still run"
+        assert len(_page_loop_warnings(caplog)) == 1
+
+        replacement = _PageLoopThreadThatIgnoresTheStop()
+        server._page_loop = cast(Any, _StubPageLoop())
+        server._page_loop_thread = replacement
+        server.stop()
+    assert server._page_loop_thread is replacement
+    warnings = _page_loop_warnings(caplog)
+    assert len(warnings) == 2, caplog.text
+    assert "still running" in warnings[-1].getMessage()
 
 
 def test_a_read_racing_a_stop_submits_under_the_lock_that_shelves_the_loop(
