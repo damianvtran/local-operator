@@ -221,6 +221,11 @@ async def test_dispose_inside_the_window_leaks_nothing_and_loses_nothing(tmp_pat
     note = thunk()
     assert isinstance(note, CustomMessage)
     assert "halfway there" in note.details["body"]
+    from local_operator.session.transcript import Transcript
+
+    restored = Transcript(session._transcript.directory).build_llm_history()
+    assert sum("halfway there" in json.dumps(m.model_dump(mode="json")) for m in restored) == 1
+    print("\ndispose restored transcript: halfway there appears exactly once")
     gate.set()
 
 
@@ -352,3 +357,158 @@ async def test_three_child_fan_out_costs_fewer_parent_calls(tmp_path, monkeypatc
     assert after < before, (before, after)
     assert after == 4, "one initial call + one per settle; no call is spent on a note"
     assert before == 7, "one initial call + a note wake and a settle wake per child"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["ordinary-tool", "sibling-settle"])
+async def test_early_delivery_discharges_wake_before_parent_reparks(
+    tmp_path, monkeypatch, boundary
+):
+    """An already-read Y note cannot interrupt a later wait for X (R1).
+
+    Compare the actual adaptive provider requests against grace=0, not an
+    arithmetic prediction: the old delayed wake bought a fourth request.
+    """
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+
+    async def run(grace):
+        _grace(monkeypatch, grace)
+        start = asyncio.Event()
+
+        async def slow(call_id, args, signal, on_update, context):
+            start.set()
+            await asyncio.sleep(0.3)
+            return ToolResult(
+                tool_call_id=call_id, tool_name="slow", content=[TextContent(text="ok")]
+            )
+
+        class Adaptive:
+            def __init__(self):
+                self.requests = []
+
+            def __call__(self, request, signal):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    if boundary == "sibling-settle":
+                        events = _wait_call(sibling)
+                        start.set()
+                    else:
+                        events = [
+                            StreamToolCallDelta(
+                                index=0, id="slow1", name="slow", argument_delta="{}"
+                            ),
+                            StreamEndEvent(stop_reason="toolUse"),
+                        ]
+                elif (row := session.jobs.get(x)) is not None and row.status == "running":
+                    events = _wait_call(x, f"x{len(self.requests)}")
+                else:
+                    events = [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]
+
+                async def generate():
+                    for event in events:
+                        yield event
+
+                return generate()
+
+        stream = Adaptive()
+        tool = AgentTool(name="slow", parameters={"type": "object", "properties": {}}, execute=slow)
+        session = make_session(tmp_path / f"{boundary}-{grace}", stream, tools=[tool])
+        comms = session.subagent_comms
+
+        async def child_y(job_id, signal, report_progress):
+            await start.wait()
+            await asyncio.sleep(0.05)
+            comms.reply_to_parent(job_id, "Y already delivered")
+            await asyncio.sleep(3)
+            return "Y done"
+
+        async def child_x(job_id, signal, report_progress):
+            await start.wait()
+            await asyncio.sleep(1.3)
+            return "X done"
+
+        async def child_sibling(job_id, signal, report_progress):
+            await start.wait()
+            await asyncio.sleep(0.3)
+            return "sibling done"
+
+        session.jobs.register("task", "Y", child_y)
+        x = session.jobs.register("task", "X", child_x)
+        sibling = session.jobs.register("task", "sibling", child_sibling)
+        await asyncio.wait_for(session.prompt("work"), timeout=8)
+        calls = len(stream.requests)
+        assert "Y already delivered" in _wire(stream.requests[1].messages)
+        assert "still running" not in _tool_texts(stream.requests[-1].messages)[-1]
+        await _no_leaks(session)
+        return calls
+
+    before, after = await run(0.0), await run(0.7)
+    print(f"\nearly delivery {boundary}: grace=0 calls={before}; grace=0.7 calls={after}")
+    assert (before, after) == (3, 3)
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_timer_starts_still_marks_once(tmp_path, monkeypatch):
+    """A never-started coroutine has no finally; the done callback owes the mark (R2)."""
+    _grace(monkeypatch, 20)
+    session = make_session(tmp_path, ScriptedStream([]))
+    session._is_streaming = True
+    session.queue_aside_coalesced(
+        lambda: CustomMessage(custom_type=HUB_MESSAGE_TYPE, details={"body": "pending"}),
+        settled=asyncio.Event(),
+        grace_s=20,
+    )
+    [timer] = session._background_tasks
+    timer.cancel()  # deliberately no await between spawn and cancellation
+    await asyncio.gather(timer, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert session._peer_arrival.arrivals() == {HUB_MESSAGE_TYPE: 1}
+    session._is_streaming = False
+    await _no_leaks(session)
+
+
+@pytest.mark.asyncio
+async def test_dispose_parked_parent_restores_note_without_provider_call(tmp_path, monkeypatch):
+    """Q1: disposal while a real wait is parked preserves the parent's copy."""
+    from local_operator.session.transcript import Transcript
+
+    _grace(monkeypatch, 20)
+    release = asyncio.Event()
+    hold = asyncio.Event()
+    turns = []
+    stream = ScriptedStream(turns)
+    session = make_session(tmp_path, stream)
+    comms = session.subagent_comms
+
+    async def child(job_id, signal, report_progress):
+        await release.wait()
+        comms.reply_to_parent(job_id, "durable parked-parent report")
+        await hold.wait()
+        return "done"
+
+    job_id = session.jobs.register("task", "child", child)
+    turns.append(_wait_call(job_id))
+    prompt = asyncio.create_task(session.prompt("wait for child"))
+    try:
+        await wait_for(lambda: len(stream.requests) == 1)
+        await asyncio.sleep(0.05)
+        release.set()
+        await wait_for(lambda: bool(session._coalesced_notes))
+        await session.dispose()
+        await asyncio.gather(prompt, return_exceptions=True)
+        restored = Transcript(session._transcript.directory).build_llm_history()
+        rows = [
+            m
+            for m in restored
+            if "durable parked-parent report" in json.dumps(m.model_dump(mode="json"))
+        ]
+        assert len(rows) == 1
+        assert len(stream.requests) == 1, "shutdown durability must not buy a provider call"
+        assert not session._background_tasks
+        print("\nparked-parent dispose: restored note rows=1; provider calls=1; timers=0")
+    finally:
+        hold.set()
+        if not prompt.done():
+            prompt.cancel()
+            await asyncio.gather(prompt, return_exceptions=True)
+        await session.dispose()
