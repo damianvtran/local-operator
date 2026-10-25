@@ -3942,7 +3942,7 @@ async def test_a_lease_ending_under_backpressure_still_completes_the_response(
                 def stalled_reader() -> bytes:
                     with closing(socket.create_connection(("127.0.0.1", port))) as sock:
                         # Linux with a 4 KiB SO_RCVBUF drains at about
-                        # 8 KiB per ~0.2 s (~44 KB/s). A multi-MB backlog then
+                        # 8 KiB per ~0.2 s (~41 KB/s). A multi-MB backlog then
                         # needs ~80 s, so that arm cannot reach the 20 s bound
                         # with no gateway involved (raw-socket control), while
                         # the real uvicorn write-side high-water mark still

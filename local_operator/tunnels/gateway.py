@@ -78,7 +78,7 @@ class RelayStreamResponse(StreamingResponse):
                 # CancelledError that brought us here — so a failing cleanup
                 # must not replace it. CancelledError is a BaseException and so
                 # still propagates untouched.
-                logger.debug("relay stream cleanup failed", exc_info=True)
+                logger.warning("relay stream cleanup failed", exc_info=True)
 
 
 PROOF_HEADER = "x-radient-tunnel-assertion"

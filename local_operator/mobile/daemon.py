@@ -5149,6 +5149,28 @@ def build_app(daemon: MobileDaemon):
     from starlette.routing import BaseRoute, Mount, Route
 
     class SessionEventResponse(StreamingResponse):
+        """Close a stream's attachment even when ASGI cancels this response task.
+
+        Two losses are covered separately. Starlette does not reliably finalize
+        an async-for body blocked between sends, so the generator is closed
+        explicitly; and a cancellation that lands before the generator's first
+        ``__anext__`` — a parked ``http.response.start`` — leaves ``aclose()``
+        on that generator a no-op, so ``release`` carries the detach itself. The
+        streams here attach inside their iterators, which already keeps a
+        never-consumed response free of a subscriber; giving the response the
+        release as well is what stops that guarantee from depending on where
+        the attach happens to sit.
+        """
+
+        def __init__(
+            self,
+            *args: Any,
+            release: Callable[[], None] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(*args, **kwargs)
+            self._release = release
+
         async def stream_response(self, send) -> None:
             try:
                 await super().stream_response(send)
@@ -5158,7 +5180,18 @@ def build_app(daemon: MobileDaemon):
                 # otherwise their unseen subscriber can pin a viewer forever.
                 close = getattr(self.body_iterator, "aclose", None)
                 if close is not None:
-                    await close()
+                    try:
+                        await close()
+                    except Exception:
+                        # The in-flight exception belongs to the request — the
+                        # CancelledError that brought us here — and a failing
+                        # detach must not replace it.
+                        logger.warning("phone stream cleanup failed", exc_info=True)
+                if self._release is not None:
+                    try:
+                        self._release()
+                    except Exception:
+                        logger.warning("session stream cleanup failed", exc_info=True)
 
     # -- auth helpers -----------------------------------------------------------
 
@@ -5517,10 +5550,32 @@ def build_app(daemon: MobileDaemon):
             return denied
         session_id = str(request.path_params["session_id"])
 
+        # A response whose headers fail to send never began viewing. Own the
+        # queue only inside the iterator — registration happens on the first
+        # pull — while the RELEASE is owned by both callers below, because a
+        # cancellation parked on ``http.response.start`` never starts the
+        # iterator and so never runs its ``finally``.
+        queue: asyncio.Queue[dict[str, Any]] = _LatestProjectionQueue()
+
+        def release() -> None:
+            """Detach this stream's queue, from whichever close arrives first.
+
+            Membership is the idempotence: the second caller finds its queue
+            already gone and returns, so ``leave_phone_view``'s grace timer is
+            armed exactly once.
+            """
+            current = daemon.table.session_subscribers.get(session_id)
+            if current is None or queue not in current:
+                return
+            current.discard(queue)
+            if not current:
+                daemon.table.session_subscribers.pop(session_id, None)
+                # Deferred by ``PHONE_VIEW_GRACE_S``: the release, ``unwatch``
+                # and generation prune run only if no stream for this
+                # conversation opens meanwhile.
+                daemon.leave_phone_view(session_id)
+
         async def stream():
-            # A response whose headers fail to send never began viewing. Own
-            # the queue only inside the iterator, paired with its finally.
-            queue: asyncio.Queue[dict[str, Any]] = _LatestProjectionQueue()
             subscribers = daemon.table.session_subscribers.setdefault(session_id, set())
             first_watcher = not subscribers
             subscribers.add(queue)
@@ -5581,18 +5636,11 @@ def build_app(daemon: MobileDaemon):
                     yield _sse("projection", _latest_projection_frame(queue, frame))
                     sent_at = loop.time()
             finally:
-                current = daemon.table.session_subscribers.get(session_id)
-                if current is not None:
-                    current.discard(queue)
-                    if not current:
-                        daemon.table.session_subscribers.pop(session_id, None)
-                        # Deferred by ``PHONE_VIEW_GRACE_S``: the release,
-                        # ``unwatch`` and generation prune run only if no
-                        # stream for this conversation opens meanwhile.
-                        daemon.leave_phone_view(session_id)
+                release()
 
         return SessionEventResponse(
             stream(),
+            release=release,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
@@ -5665,6 +5713,15 @@ def build_app(daemon: MobileDaemon):
             return denied
         queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4)
 
+        def release() -> None:
+            """Detach the config subscriber, from whichever close arrives first.
+
+            ``detach_config_subscriber`` is already idempotent for a queue that
+            was never attached, and it only releases the shared fan-out when
+            the last subscriber goes.
+            """
+            daemon.detach_config_subscriber(queue)
+
         async def stream():
             # ATTACH ON FIRST PULL, not at route time (CI round 1, MINOR-1): a
             # response nobody consumes — a client that vanishes between the
@@ -5697,10 +5754,11 @@ def build_app(daemon: MobileDaemon):
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
-                daemon.detach_config_subscriber(queue)
+                release()
 
         return SessionEventResponse(
             stream(),
+            release=release,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
@@ -5753,6 +5811,10 @@ def build_app(daemon: MobileDaemon):
         include_peers = _query_flag(request, "include_peers")
         queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
 
+        def release() -> None:
+            """Detach the list subscriber, from whichever close arrives first."""
+            daemon.table.list_subscribers.discard(queue)
+
         async def stream():
             daemon.table.list_subscribers.add(queue)
             try:
@@ -5792,10 +5854,11 @@ def build_app(daemon: MobileDaemon):
                     yield event
                     wrote_at = loop.time()
             finally:
-                daemon.table.list_subscribers.discard(queue)
+                release()
 
         return SessionEventResponse(
             stream(),
+            release=release,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )

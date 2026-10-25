@@ -141,3 +141,115 @@ async def test_list_burst_dedupes_but_keeps_comment_liveness(monkeypatch):
     await stream.aclose()
     assert not daemon.table.list_subscribers
     await daemon.close_phone_views()
+
+
+STREAM_ROUTES = [
+    "/api/sessions/{session_id:str}/events",
+    "/api/sessions/events",
+    "/api/config/events",
+]
+
+
+async def cancel_parked(path, park_on: str):
+    """Drive one stream's response with ``send`` parked on ``park_on``, then cancel."""
+    daemon, entry = fixture_daemon()
+    response = await response_for(build_app(daemon), path)
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [(b"cookie", f"{COOKIE_NAME}={sign_cookie('pw')}".encode())],
+        "client": ("127.0.0.1", 1),
+        "server": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+    parked = asyncio.Event()
+
+    async def receive():
+        await asyncio.Future()
+
+    async def send(message):
+        if message["type"] == park_on:
+            parked.set()
+            await asyncio.Future()
+
+    task = asyncio.create_task(response(scope, receive, send))
+    await asyncio.wait_for(parked.wait(), 2)
+    task.cancel()
+    outcome: BaseException | None = None
+    try:
+        await task
+    except BaseException as exc:  # noqa: BLE001 - the test asserts the exact type
+        outcome = exc
+    return daemon, entry, outcome
+
+
+@pytest.mark.parametrize("path", STREAM_ROUTES)
+@pytest.mark.asyncio
+async def test_a_cancellation_parked_on_the_headers_leaves_no_attachment(path):
+    """A stream cancelled before its body starts must leave nothing behind.
+
+    The routes register their subscriber on the first pull, so the parked case
+    has nothing to detach; this pins that property together with the response
+    owning the release, so it cannot regress into a route-time attach that the
+    generator's ``finally`` would then never undo.
+    """
+    daemon, entry, outcome = await cancel_parked(path, "http.response.start")
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert entry.record.session_id not in daemon.table.session_subscribers
+    assert not daemon.table.list_subscribers
+    assert not daemon.config_subscribers
+    await daemon.close_phone_views()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_stream_cleanup_does_not_replace_the_cancellation(monkeypatch):
+    """The request's own cancellation outranks a cleanup failure.
+
+    The generator's ``finally`` runs inside ``aclose()``, i.e. inside the
+    response's ``finally``, where the in-flight exception is the
+    ``CancelledError``. A detach that raises there used to escape and become
+    the request's outcome.
+    """
+    daemon, entry = fixture_daemon()
+    monkeypatch.setattr(
+        daemon, "leave_phone_view", Mock(side_effect=RuntimeError("release failed"))
+    )
+    path = "/api/sessions/{session_id:str}/events"
+    response = await response_for(build_app(daemon), path)
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [(b"cookie", f"{COOKIE_NAME}={sign_cookie('pw')}".encode())],
+        "client": ("127.0.0.1", 1),
+        "server": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+    first_body = asyncio.Event()
+
+    async def receive():
+        await asyncio.Future()
+
+    async def send(message):
+        if message["type"] == "http.response.body":
+            first_body.set()
+            await asyncio.Future()
+
+    task = asyncio.create_task(response(scope, receive, send))
+    await asyncio.wait_for(first_body.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert entry.record.session_id not in daemon.table.session_subscribers
+    await daemon.close_phone_views()
