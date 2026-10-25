@@ -79,13 +79,14 @@ def _write_process(
     name: str,
     rss_kb: int | None,
     cmdline: str,
+    uid: int = 4242,
 ) -> None:
     entry = root / str(pid)
     entry.mkdir()
     # Only the comm and ppid fields matter to the parser; the rest of the
     # kernel's stat line is filler, present so the shape matches /proc.
     (entry / "stat").write_text(f"{pid} ({name}) S {ppid} 100 100 0 -1 4194560 0 0\n")
-    status = f"Name:\t{name}\n"
+    status = f"Name:\t{name}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"
     if rss_kb is not None:
         status += f"VmRSS:\t   {rss_kb} kB\n"
     (entry / "status").write_text(status)
@@ -133,6 +134,8 @@ def fake_proc(tmp_path: Path) -> Path:
         "MemAvailable:    2345678 kB\n"
         "Cached:          3456789 kB\n"
         "SwapFree:         456789 kB\n"
+        "CommitLimit:     1048576 kB\n"
+        "Committed_AS:    2097152 kB\n"
     )
     (root / "loadavg").write_text("0.52 0.58 0.59 2/456 7890\n")
     _write_process(root, 100, 1, "python", 400_000, "python -m pytest tests/unit -n 3")
@@ -146,12 +149,14 @@ def fake_proc(tmp_path: Path) -> Path:
     )
     _write_process(root, 102, 101, "Local Operator", 80_000, "/opt/lo/bin/Local Operator --run")
     _write_process(root, 103, 101, "sleep", None, "sleep 30")
-    _write_process(root, 999, 1, "unrelated", 5_000, "/usr/bin/other --daemon")
+    _write_process(root, 999, 1, "unrelated", 5_000, "/usr/bin/other --daemon", uid=0)
 
     # Ceilings for the failing worker. 3277 mappings against the older 65530
     # default gives a 5% ratio, so the arithmetic is visible in the rendering.
     (root / "sys" / "vm").mkdir(parents=True)
     (root / "sys" / "vm" / "max_map_count").write_text("65530\n")
+    (root / "sys" / "vm" / "overcommit_memory").write_text("2\n")
+    (root / "sys" / "vm" / "overcommit_ratio").write_text("50\n")
     _write_limits(root, 101, WORKER_LIMITS)
     _write_limits(root, 100, CONTROLLER_LIMITS)
     _write_maps(
@@ -162,8 +167,24 @@ def fake_proc(tmp_path: Path) -> Path:
             for index in range(3277)
         ],
     )
+    (root / "101" / "fd").mkdir()
+    for descriptor in range(3):
+        (root / "101" / "fd" / str(descriptor)).write_text("")
     with (root / "101" / "status").open("a") as status_file:
-        status_file.write("VmPeak:\t 3145728 kB\nVmSize:\t 2097152 kB\nThreads:\t 17\n")
+        status_file.write(
+            "VmPeak:\t 3145728 kB\nVmSize:\t 2097152 kB\n"
+            "VmData:\t 1048576 kB\nVmStk:\t 132 kB\nThreads:\t 17\n"
+        )
+
+    # A v1 hierarchy has its ceiling below memory/, where the v2 reads above
+    # find nothing; both are recorded so neither layout can hide a ceiling.
+    cgroup_v1 = tmp_path / "cgroup" / "memory"
+    cgroup_v1.mkdir(parents=True)
+    (cgroup_v1 / "memory.limit_in_bytes").write_text("524288000\n")
+    (cgroup_v1 / "memory.usage_in_bytes").write_text("104857600\n")
+    (cgroup_v1 / "memory.stat").write_text(
+        "cache 0\nhierarchical_memory_limit 524288000\ntotal_rss 104857600\n"
+    )
     return root
 
 
@@ -259,6 +280,8 @@ def test_the_worker_ceilings_are_read_from_the_failing_worker(
     # Address space and thread count at the failure, from the worker's status.
     assert "VmPeak: 3145728 kB (3072.0 MiB)" in text
     assert "VmSize: 2097152 kB (2048.0 MiB)" in text
+    assert "VmData: 1048576 kB (1024.0 MiB)" in text
+    assert "VmStk: 132 kB (0.1 MiB)" in text
     assert "VmRSS: 262000 kB (255.9 MiB)" in text
     assert "Threads: 17" in text
 
@@ -269,6 +292,61 @@ def test_the_worker_ceilings_are_read_from_the_failing_worker(
 
     # The namespace task total, the same 4/788 figure /proc/loadavg carries.
     assert "namespace tasks: total=456 runnable=2 (/proc/loadavg field 4)" in text
+
+    # Descriptor and per-UID task ceilings: both must describe the worker.
+    assert "open file descriptors: 3 (" in text
+    assert "processes owned by uid 4242: 4 (" in text
+
+
+def test_commit_overcommit_and_cgroup_v1_ceilings_are_recorded(
+    fake_proc: Path, tmp_path: Path
+) -> None:
+    """The strongest capacity-shaped hypothesis, plus the v1 hierarchy.
+
+    Mutation that must fail this: drop the commit block, divide by a zero
+    ``CommitLimit``, or leave the v1 files unread (the v2 block alone finds
+    nothing on a v1 host).
+    """
+    text = memory.build_report(
+        nodeid="tests/unit/secrets/test_cli.py::test_keyring_write",
+        error=OSError(errno.ENOMEM, "Cannot allocate memory"),
+        config=_Config({"workerid": "gw3", "workercount": 3}),
+        now=MOMENT,
+        proc_root=fake_proc,
+        cgroup_root=tmp_path / "cgroup",
+        pid=101,
+        root_pid=100,
+    )
+
+    assert "CommitLimit: 1048576 kB (1024.0 MiB)" in text
+    assert "Committed_AS: 2097152 kB (2048.0 MiB)" in text
+    assert "Committed_AS / CommitLimit: 2097152/1048576 = 2.0000 (200.00%)" in text
+    assert "vm.overcommit_memory: 2 (" in text
+    assert "vm.overcommit_ratio: 50 (" in text
+    assert "overcommit policy: strict" in text
+
+    assert "memory.limit_in_bytes: 524288000 bytes (500.0 MiB)" in text
+    assert "memory.usage_in_bytes: 104857600 bytes (100.0 MiB)" in text
+    assert "memory.stat hierarchical_memory_limit: 524288000 bytes (500.0 MiB)" in text
+    assert "memory.stat total_rss: 104857600 bytes (100.0 MiB)" in text
+
+
+def test_a_zero_commit_limit_does_not_produce_a_ratio(tmp_path: Path) -> None:
+    """Overcommit policy 1 reports ``CommitLimit: 0 kB``; do not divide by it."""
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "meminfo").write_text("CommitLimit: 0 kB\nCommitted_AS: 1024 kB\n")
+
+    text = memory.build_report(
+        nodeid="tests/unit/x.py::test_y",
+        error=OSError(errno.ENOMEM, "Cannot allocate memory"),
+        proc_root=proc,
+        cgroup_root=tmp_path / "no-cgroup",
+        pid=1,
+    )
+
+    assert "CommitLimit: 0 kB (0.0 MiB)" in text
+    assert "Committed_AS / CommitLimit: unavailable (a reading is missing)" in text
 
 
 def test_no_command_line_or_argv_text_reaches_the_dump(
@@ -423,6 +501,12 @@ def test_missing_and_unreadable_files_are_reported_not_raised(tmp_path: Path) ->
     assert "map_count: unavailable: IsADirectoryError" in text
     assert "max_map_count: unavailable: FileNotFoundError" in text
     assert "map_count / max_map_count: unavailable (a reading is missing)" in text
+    assert "open file descriptors: unavailable: FileNotFoundError" in text
+    assert "processes owned by uid: unavailable: IsADirectoryError" in text
+    assert "commit readings unavailable: IsADirectoryError" in text
+    assert "Committed_AS / CommitLimit: unavailable (a reading is missing)" in text
+    assert "vm.overcommit_memory: unavailable: FileNotFoundError" in text
+    assert "(no cgroup v1 memory controller files; v2 or none)" in text
     # The process is still represented by its stat line, with no RSS.
     assert "processes in tree: 1" in text
     assert re.search(r"^\s*101\s+100\s+-", text, re.MULTILINE)

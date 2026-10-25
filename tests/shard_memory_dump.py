@@ -18,7 +18,8 @@ evidence has to be written at the failure.
 This module records that evidence from inside the xdist worker, before the test
 process unwinds: host memory and swap, load average, the failing worker's own
 resource and kernel ceilings, the shard's process tree and per-process RSS, the
-cgroup v2 high-water mark, and the failing node id.
+cgroup v2 high-water mark (and the v1 ceiling where that hierarchy is in use),
+and the failing node id.
 
 WHAT THE FIRST EIGHT DUMPS SETTLED
 ----------------------------------
@@ -31,12 +32,20 @@ capacity explanation -- it is not merely unproven -- and the worker-count
 mitigation drafted against it was withdrawn for that reason, not deferred.
 
 The one remaining class that produces ``ENOMEM`` with 12 GiB free is a
-per-process or kernel ceiling. So the dump now also records, from the failing
-worker itself: ``RLIMIT_AS``/``DATA``/``NPROC``/``STACK``/``NOFILE`` soft and
-hard, the worker's mapping count (``/proc/<pid>/maps`` lines, never the lines),
-``VmPeak``/``VmSize``/``VmRSS`` and ``Threads``, ``vm.max_map_count`` and the
-``map_count / max_map_count`` ratio, and the namespace task total from
-``/proc/loadavg``.
+per-process, kernel or commit ceiling. So the dump now also records, from the
+failing worker itself: ``RLIMIT_AS``/``DATA``/``NPROC``/``STACK``/``NOFILE`` soft
+and hard, the worker's mapping count (``/proc/<pid>/maps`` lines, never the
+lines), ``VmPeak``/``VmSize``/``VmData``/``VmStk``/``VmRSS``, ``Threads``, the
+open descriptor count and the per-UID process count, ``vm.max_map_count`` and
+the ``map_count / max_map_count`` ratio, the namespace task total from
+``/proc/loadavg``, the commit accounting and overcommit policy
+(``CommitLimit``/``Committed_AS``, ``vm.overcommit_memory``/``ratio``), and the
+cgroup v1 memory ceiling beside the v2 files.
+
+Commit accounting is the strongest remaining capacity-shaped explanation: with
+``vm.overcommit_memory=2`` the kernel refuses ``mmap``/``brk`` once
+``Committed_AS`` reaches ``CommitLimit``, and ``MemAvailable`` can still read
+12 GiB while that refusal happens.
 
 WHAT THIS PROBE IS FOR, AND ITS FALSIFIER
 -----------------------------------------
@@ -110,14 +119,37 @@ LIMIT_ROWS = (
     ("RLIMIT_NOFILE", "Max open files"),
 )
 
-#: ``/proc/<pid>/status`` keys for the address-space and thread readings.
-#: ``VmPeak`` is the high-water mark a ceiling reading is compared against;
-#: ``VmSize`` and ``VmRSS`` are the same instant's current values.
-WORKER_STATUS_KEYS = ("VmPeak", "VmSize", "VmRSS", "Threads")
+#: ``/proc/<pid>/status`` keys for the address-space, stack and thread
+#: readings. ``VmPeak`` is the high-water mark a ceiling reading is compared
+#: against; ``VmSize``/``VmData``/``VmStk``/``VmRSS`` are the same instant's
+#: current values. ``VmData`` is the one ``RLIMIT_DATA`` actually governs and
+#: ``VmStk`` the one ``RLIMIT_STACK`` governs, so each limit has a paired usage
+#: rather than only the address-space total.
+WORKER_STATUS_KEYS = ("VmPeak", "VmSize", "VmData", "VmStk", "VmRSS", "Threads")
 
 #: Relative to a ``/proc`` root, so the fake tree in the unit tests reads the
 #: same path shape the kernel exposes.
 MAX_MAP_COUNT_PATH = Path("sys") / "vm" / "max_map_count"
+
+#: ``/proc/meminfo`` keys and ``/proc/sys/vm`` files of the commit accounting.
+#: With ``overcommit_memory=2`` the kernel refuses an ``mmap``/``brk`` once
+#: ``Committed_AS`` reaches ``CommitLimit``, while ``MemAvailable`` can still be
+#: high -- the exact shape the eight dumps measured. ``ratio`` only participates
+#: when the policy is strict (2); it is still recorded for every policy.
+COMMIT_MEMINFO_KEYS = ("CommitLimit", "Committed_AS")
+OVERCOMMIT_SYSCTLS = ("overcommit_memory", "overcommit_ratio")
+OVERCOMMIT_POLICIES = {
+    "0": "heuristic overcommit (the kernel guesses)",
+    "1": "always overcommit (no commit limit is enforced)",
+    "2": "strict (refuses once CommitTotal reaches CommitLimit)",
+}
+
+#: cgroup v1 exposes its memory controller one directory below the mount root.
+#: A v1 host has nothing at the v2 paths, so reading both is what keeps a v1
+#: ceiling from being invisible.
+CGROUP_V1_DIR = "memory"
+CGROUP_V1_FILES = ("memory.limit_in_bytes", "memory.usage_in_bytes")
+CGROUP_V1_STAT_KEYS = ("hierarchical_memory_limit", "total_rss")
 
 #: Base for local runs. CI overrides the whole directory through
 #: :data:`ENV_RUN_DIR`; ``TMPDIR`` is the platform-correct scratch root and is
@@ -349,9 +381,11 @@ def build_report(
     lines.extend(_identity_lines(config, current_pid))
     lines.extend(_ceiling_lines(proc_root, current_pid))
     lines.extend(_meminfo_lines(proc_root))
+    lines.extend(_commit_lines(proc_root))
     lines.extend(_loadavg_lines(proc_root))
     lines.extend(_process_lines(proc_root, current_pid, processes, root_pid))
     lines.extend(_cgroup_lines(cgroup_root))
+    lines.extend(_cgroup_v1_lines(cgroup_root))
     return "\n".join(lines) + "\n"
 
 
@@ -495,6 +529,27 @@ def _ceiling_lines(proc_root: Path, pid: int) -> list[str]:
     else:
         runnable, total = tasks
         lines.append(f"namespace tasks: total={total} runnable={runnable} (/proc/loadavg field 4)")
+
+    fd_count, fd_error = _count_entries(worker / "fd")
+    if fd_count is None:
+        lines.append(f"open file descriptors: unavailable: {fd_error}")
+    else:
+        # Reading /proc/self/fd opens a descriptor on that directory, which
+        # then appears in its own listing; say so rather than silently
+        # reporting one more open file than the worker holds.
+        caveat = " (includes the descriptor this read opened)" if pid == os.getpid() else ""
+        lines.append(f"open file descriptors: {fd_count} ({worker / 'fd'} entries){caveat}")
+
+    uid, uid_count, uid_error = _uid_processes(proc_root, pid)
+    if uid is None:
+        lines.append(f"processes owned by uid: unavailable: {uid_error}")
+    elif uid_count is None:
+        lines.append(f"processes owned by uid {uid}: unavailable: {uid_error}")
+    else:
+        lines.append(
+            f"processes owned by uid {uid}: {uid_count} "
+            f"(/proc/<pid>/status Uid; all {proc_root} entries scanned)"
+        )
     return lines
 
 
@@ -570,6 +625,139 @@ def _namespace_tasks(proc_root: Path) -> tuple[int, int] | None:
         return None
 
 
+def _commit_lines(proc_root: Path) -> list[str]:
+    """Commit accounting and the overcommit policy, which bound allocations.
+
+    ``overcommit_memory=2`` is the one policy that can refuse an allocation
+    while ``MemAvailable`` is high: the kernel checks ``Committed_AS`` against
+    ``CommitLimit`` instead of free pages. ``CommitLimit`` is ``0 kB`` on
+    kernels that do not track it, so the ratio is stated unavailable rather
+    than divided by zero.
+    """
+    lines = ["", f"-- commit and overcommit ({proc_root}) --"]
+    values: dict[str, int] = {}
+    meminfo_raw, meminfo_error = _read_text(proc_root / "meminfo")
+    if meminfo_raw is None:
+        lines.append(f"commit readings unavailable: {meminfo_error}")
+    else:
+        for line in meminfo_raw.splitlines():
+            key, separator, rest = line.partition(":")
+            if not separator or key not in COMMIT_MEMINFO_KEYS:
+                continue
+            parts = rest.split()
+            if not parts:
+                continue
+            try:
+                values[key] = int(parts[0])
+            except ValueError:
+                continue
+        for key in COMMIT_MEMINFO_KEYS:
+            if key in values:
+                lines.append(f"{key}: {_format_kb(values[key])}")
+            else:
+                lines.append(f"{key}: <missing>")
+
+    limit = values.get("CommitLimit")
+    committed = values.get("Committed_AS")
+    if limit is None or committed is None or limit <= 0:
+        lines.append("Committed_AS / CommitLimit: unavailable (a reading is missing)")
+    else:
+        ratio = committed / limit
+        lines.append(
+            f"Committed_AS / CommitLimit: {committed}/{limit} = "
+            f"{ratio:.4f} ({ratio * 100:.2f}%)"
+        )
+
+    policy: str | None = None
+    for name in OVERCOMMIT_SYSCTLS:
+        path = proc_root / "sys" / "vm" / name
+        raw, read_error = _read_text(path)
+        if raw is None:
+            lines.append(f"vm.{name}: unavailable: {read_error}")
+            continue
+        value = raw.strip()
+        try:
+            int(value)
+        except ValueError:
+            lines.append(f"vm.{name}: {_one_line(value, 80)} (unparsed)")
+            continue
+        lines.append(f"vm.{name}: {value} ({path})")
+        if name == "overcommit_memory":
+            policy = value
+    if policy is not None:
+        description = OVERCOMMIT_POLICIES.get(policy, "unknown policy value")
+        lines.append(f"overcommit policy: {description}")
+    return lines
+
+
+def _count_entries(path: Path) -> tuple[int | None, str | None]:
+    """Count directory entries without reading what they point at.
+
+    ``/proc/<pid>/fd`` holds one symlink per open descriptor, and each target
+    is a path; only the count is reported because this artifact is public.
+    """
+    try:
+        count = 0
+        with os.scandir(path) as entries:
+            for _entry in entries:
+                count += 1
+        return count, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _real_uid(proc_root: Path, pid: int) -> tuple[int | None, str | None]:
+    """The worker's real UID, the one ``RLIMIT_NPROC`` is charged against."""
+    raw, error = _read_text(proc_root / str(pid) / "status")
+    if raw is None:
+        return None, error
+    for line in raw.splitlines():
+        key, separator, rest = line.partition(":")
+        if not separator or key != "Uid":
+            continue
+        parts = rest.split()
+        if not parts:
+            return None, "Uid is empty"
+        try:
+            return int(parts[0]), None
+        except ValueError:
+            return None, "Uid is not an integer"
+    return None, "Uid is absent from status"
+
+
+def _uid_processes(proc_root: Path, pid: int) -> tuple[int | None, int | None, str | None]:
+    """How many processes the worker's real UID owns, across the namespace.
+
+    ``RLIMIT_NPROC`` is charged per real UID, so the namespace task total from
+    ``/proc/loadavg`` is not the number it is compared with. One bounded scan
+    of the pid directories: the same read :func:`read_processes` performs for
+    the process tree, and no field beyond the ``Uid`` line is parsed.
+    """
+    uid, uid_error = _real_uid(proc_root, pid)
+    if uid is None:
+        return None, None, uid_error
+    try:
+        entries = list(proc_root.iterdir())
+    except Exception as exc:
+        return uid, None, f"{type(exc).__name__}: {exc}"
+    count = 0
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        raw, _error = _read_text(entry / "status")
+        if raw is None:
+            continue
+        for line in raw.splitlines():
+            key, separator, rest = line.partition(":")
+            if not separator or key != "Uid":
+                continue
+            parts = rest.split()
+            if parts and parts[0].isdigit() and int(parts[0]) == uid:
+                count += 1
+            break
+    return uid, count, None
+
+
 def _process_lines(
     proc_root: Path,
     pid: int,
@@ -629,6 +817,52 @@ def _cgroup_lines(cgroup_root: Path) -> list[str]:
         lines.append(f"{name}: {byte_count} bytes ({_format_mib(byte_count)})")
     if not found:
         lines.append("(no cgroup v2 memory.max/memory.current/memory.peak; cgroup v1 or none)")
+    return lines
+
+
+def _cgroup_v1_lines(cgroup_root: Path) -> list[str]:
+    """The cgroup v1 memory ceiling, beside the v2 files that v1 lacks.
+
+    A v1 host has nothing at the v2 paths, so without this block a v1 ceiling
+    is invisible while the v2 block honestly says it found nothing. The
+    ``memory.stat`` values ``hierarchical_memory_limit`` and ``total_rss`` are
+    the effective ceiling and current charge when a nested group sets them.
+    """
+    memory_dir = cgroup_root / CGROUP_V1_DIR
+    lines = ["", f"-- cgroup v1 memory ({memory_dir}) --"]
+    found = False
+    for name in CGROUP_V1_FILES:
+        path = memory_dir / name
+        raw, _read_error = _read_text(path)
+        if raw is None:
+            continue
+        found = True
+        value = raw.strip()
+        try:
+            byte_count = int(value)
+        except ValueError:
+            lines.append(f"{name}: {_one_line(value, 80)} (unparsed)")
+            continue
+        lines.append(f"{name}: {byte_count} bytes ({_format_mib(byte_count)})")
+    stat_raw, _stat_error = _read_text(memory_dir / "memory.stat")
+    if stat_raw is not None:
+        found = True
+        stats: dict[str, int] = {}
+        for line in stat_raw.splitlines():
+            key, _, rest = line.partition(" ")
+            if key not in CGROUP_V1_STAT_KEYS or not rest.strip():
+                continue
+            try:
+                stats[key] = int(rest.strip())
+            except ValueError:
+                continue
+        for key in CGROUP_V1_STAT_KEYS:
+            if key in stats:
+                lines.append(f"memory.stat {key}: {stats[key]} bytes ({_format_mib(stats[key])})")
+            else:
+                lines.append(f"memory.stat {key}: <missing>")
+    if not found:
+        lines.append("(no cgroup v1 memory controller files; v2 or none)")
     return lines
 
 
