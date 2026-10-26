@@ -1264,6 +1264,17 @@ class SessionProjection:
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        # THE ROWS SERIALISE THROUGH THEIR OWN ``to_json``, not through
+        # ``asdict``'s walk of them. Every dataclass field survives ``asdict``
+        # with its DEFAULT, so the condensation facts came out on every row of
+        # every frame as ``stop_reason: ""``, ``calls_tools: false``,
+        # ``custom_type: ""``, ``terminal: false`` — four keys times up to 120
+        # rows that say nothing, which is exactly the cost ``TranscriptEntry``'s
+        # sparse ``to_json`` exists to avoid, and it moved the frame digest the
+        # offloop cost pin records. Sparse-on-the-wire has to hold on the FRAME
+        # path or it does not hold at all: the frame is the only push form.
+        if self.transcript:
+            data["transcript"] = [row.to_json() for row in self.transcript]
         if self.peer_cycles is None:
             data.pop("peer_cycles", None)
         data["pending"] = self.pending.to_json() if self.pending else None

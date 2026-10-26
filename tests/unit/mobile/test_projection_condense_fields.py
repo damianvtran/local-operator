@@ -46,6 +46,7 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.mobile.projection import ProjectionFold
+from local_operator.mobile.projection import cap_projection_frame
 from local_operator.mobile.types import (
     SessionProjection,
     SessionRecord,
@@ -280,6 +281,39 @@ def test_the_frame_cap_cannot_strip_the_facts() -> None:
         session_record(),
     )
     assert rebuilt.transcript[0].terminal is True
+
+
+def test_a_capped_frame_row_carries_no_empty_fact() -> None:
+    """SPARSE MUST HOLD ON THE FRAME PATH, not only on a single row.
+
+    Found by CI, not by these tests: ``SessionProjection.to_json`` walked the rows
+    with ``asdict``, which emits every dataclass field at its DEFAULT, so a plain
+    row left the daemon carrying ``stop_reason: ""``, ``calls_tools: false``,
+    ``custom_type: ""`` and ``terminal: false`` - four keys times up to 120 rows
+    saying nothing. The offloop wire digest (``test_projection_offloop``) caught
+    the frame moving; this test names the reason. The frame is the only push form,
+    so sparse-on-the-wire has to hold HERE or it does not hold at all.
+    """
+    plain = Message.assistant()
+    plain.id = "m-plain"
+    plain.content = [TextContent(text="plain")]
+    fold = make_fold()
+    fold.fold_history([plain])
+    frame, _ = cap_projection_frame(fold.projection)
+    assert frame["transcript"], "the fixture must carry a row"
+    for row in frame["transcript"]:
+        for key in ("stop_reason", "calls_tools", "custom_type", "terminal"):
+            assert key not in row, f"{key} rode a capped frame row that does not carry it"
+
+
+def test_a_capped_frame_row_keeps_a_fact_it_does_carry() -> None:
+    """And the sparseness is not achieved by dropping the facts everywhere."""
+    fold = make_fold()
+    fold.fold_history([assistant("a", stop_reason="toolUse")])
+    frame, _ = cap_projection_frame(fold.projection)
+    rows = [row for row in frame["transcript"] if row["id"] == "m-assistant"]
+    assert rows, "the fixture must carry the assistant row"
+    assert rows[0]["stop_reason"] == "toolUse"
 
 
 def test_a_projection_round_trips_the_facts() -> None:
