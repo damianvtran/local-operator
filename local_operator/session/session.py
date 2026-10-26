@@ -390,6 +390,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How many fallback turns one woken bridge card may open before its wake is
+#: dropped (PR #2951 round 4). A fallback that runs to dispatch settles the
+#: card, so a second admission means the first never sent its request (a
+#: pre-loop failure, a pre-aborted drop). Three allows a transient failure to
+#: recover twice; past that the cause is persistent, and every further attempt
+#: is a paid turn the same failure would refuse. The card stays durable in the
+#: transcript and on the live context, so the next ordinary turn still reads it.
+BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
+
 
 def _notice(
     message: Msg,
@@ -4315,6 +4324,24 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        # One tracked waiter coalesces admitted arrivals behind the current
+        # turn. The reservation, not this task or the card text, owes the work.
+        self._pending_body_followup_task: asyncio.Task[Any] | None = None
+        self._pending_body_followup_again = False
+        # The wake a woken idle bridge card is owed when it is routed through
+        # the body-only pass instead of the ordinary wake. That pass may open no
+        # turn (a retained failed body fails again), and a self-contained card
+        # (pair-lane excerpt, no reservation of its own) must still be read
+        # (PR #2951 round 1, MAJOR-1). A card leaves this list when a turn's
+        # pipeline starts with it on the live context, whichever path opened
+        # that turn (body pass, typed prompt, steering wake).
+        self._bridge_cards_owed_wake: list[CustomMessage] = []
+        # Fallback turns admitted per owed card (keyed by object id, cleared
+        # with the debt), and the cards the current fallback moved to its
+        # input with their original context index, so a turn that fails
+        # before the loop re-appends them can put them back.
+        self._bridge_card_fallback_attempts: dict[int, int] = {}
+        self._bridge_card_wake_moved: list[tuple[int, AgentMessage]] = []
         #: The turn's terminal verdict, captured where the loop's agent_end is
         #: handled. Settlement runs in the ``finally``, after ``_flush_held_end``
         #: has already released that event, so the verdict must be captured
@@ -10297,7 +10324,25 @@ class Session:
             self._spawn_background(self._prompt_messages([message], carried_prompt=True))
             return receipt("delivered (opened a turn)")
         # mode == "mailbox"
-        if wake and not busy:
+        body_waiter = self._pending_body_followup_task
+        joins_body_waiter = (
+            wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+            and body_waiter is not None
+            and not body_waiter.done()
+        )
+        if joins_body_waiter:
+            # Hydration owns the turn lock BEFORE is_streaming becomes true.
+            # Rearm the live finite pass before any append await can let it
+            # retire, retaining its attempted exclusions. A second ordinary
+            # idle wake would retry failed A and strand newly admitted B.
+            self._ensure_pending_body_followup()
+        native_body_wake = (
+            wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+            and (joins_body_waiter or self._pending_body_followup_row() is not None)
+        )
+        if wake and not busy and not native_body_wake:
             # _prompt_messages persists the row through the pipeline — a
             # separate transcript/context append here would double-write.
             await self._emit_peer_receipt(message, sender)
@@ -10333,6 +10378,24 @@ class Session:
                 # durable; a degraded store must not abort the receive.
                 logger.warning("bridge ask: hook failed on the record-only append", exc_info=True)
         self._append_or_park_journal(message)
+        owes_card_wake = native_body_wake and not busy
+        if owes_card_wake:
+            # Recorded only now that the card is on the context or parked. The
+            # waiter settles this with an ordinary wake if its pass opens no
+            # turn that read the card; re-arming covers a waiter that retired
+            # during the awaits above.
+            self._bridge_cards_owed_wake.append(message)
+        if owes_card_wake or (
+            not joins_body_waiter
+            and busy
+            and wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+        ):
+            # Idle admitted bodies need the SAME finite pass as busy arrivals:
+            # an ordinary oldest-only prompt could retry retained failed A and
+            # strand new B after the prior waiter exited. Persist the card first;
+            # the helper rechecks native authority before starting a new waiter.
+            self._ensure_pending_body_followup()
         await self._emit_peer_receipt(message, sender)
         # LAST, deliberately: this wakes a blocking `wait`, and the woken tool
         # returns into the loop's injection boundary where _drain_steering
@@ -10345,6 +10408,10 @@ class Session:
         # at the post-batch boundary, which is what keeps the splice hazard
         # documented above from being reintroduced here.
         self._peer_arrival.mark()
+        if owes_card_wake:
+            # The waiter opens a turn for this card (a body turn, or the
+            # ordinary fallback), so the sender is told what actually happens.
+            return receipt("delivered and woke the session")
         return receipt("delivered to the mailbox (will be read on the next turn)")
 
     async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
@@ -16826,6 +16893,9 @@ class Session:
         guard: Callable[[], bool] | None = None,
         guard_note: str = "",
         drain_steering_on_open: bool = False,
+        pending_body_only: bool = False,
+        pending_body_selected: tuple[str, str] | None = None,
+        initial_after_guard: Callable[[], list[AgentMessage]] | None = None,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
         handling so it can REJECT reentrants instead of queueing).
@@ -16896,6 +16966,13 @@ class Session:
                     f" ({guard_note})" if guard_note else "",
                 )
                 return
+            if initial_after_guard is not None:
+                # Input that depends on the context as the guard saw it, so it
+                # is computed under the same lock hold (the bridge card
+                # fallback re-presents a card stranded behind a reply). The
+                # ``finally`` below undoes the move if the turn never got that
+                # far.
+                initial = [*initial, *initial_after_guard()]
             # A newly ARRIVING unit of work is a fresh intent, exactly like a
             # typed prompt, so it clears the sticky abort the same way
             # ``prompt()`` does — see that method for the flag's contract.
@@ -16971,12 +17048,27 @@ class Session:
             # instead of publishing the ``error|disposed`` its own rationale
             # promises (repro: peer_carried_prompt.py; the cell is
             # ``test_a_peer_prompt_cut_with_zero_round_trips_still_errors``).
+            opened_body = None
+            if pending_body_only:
+                # The normal guard ran under the lock. Hydrate before opening
+                # a turn, so a refused body costs no empty model request.
+                await self._open_pending_body_turn(selected=pending_body_selected)
+                opened_body = self._pending_body_turn
+                if opened_body is None:
+                    return
             await self._run_turn_pipeline(
                 initial,
                 carried_prompt=carried_prompt,
                 drain_steering_on_open=drain_steering_on_open,
+                opened_body=opened_body,
             )
         finally:
+            if initial_after_guard is not None:
+                self._restore_unpresented_bridge_cards()
+            if pending_body_only:
+                # Cancellation between hydration and pipeline entry still
+                # releases our claim; normal settlement already cleared it.
+                self._settle_pending_body()
             # Release in its own ``finally`` (R2-1): see the helper.
             try:
                 await self._flush_queued_before_release()
@@ -16993,6 +17085,7 @@ class Session:
         may_drop: bool = True,
         carried_prompt: bool = False,
         drain_steering_on_open: bool = False,
+        opened_body: Any = None,
     ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
 
@@ -17159,6 +17252,7 @@ class Session:
                 producer_command_id=producer_command_id,
                 may_drop=may_drop,
                 drain_steering_on_open=drain_steering_on_open,
+                opened_body=opened_body,
             )
             await self._drain_continuation()
         except ImportError as exc:
@@ -17316,7 +17410,257 @@ class Session:
             sender_kind=kind if isinstance(kind, str) else "unknown",
         )
 
-    async def _open_pending_body_turn(self) -> None:
+    def _pending_body_followup_row(
+        self,
+        *,
+        selected: tuple[str, str] | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+        admitted_before: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Local authority for a body-only wake; a metadata card is not authority."""
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None or self._disposed or self._leaving_deliveries or self._one_shot_exit:
+            return None
+        if self._abort_requested or self._graceful_cancel_requested:
+            return None
+        from local_operator.team_bridge.host import owner_fence_refusal
+        from local_operator.team_bridge.store import Store
+
+        try:
+            if owner_fence_refusal(runtime) is not None:
+                return None
+            store = Store(runtime.config_dir)
+            skipped = set(exclude)
+            while True:
+                row = store.pending_body_reservation_for(
+                    runtime.owner,
+                    runtime.session_id,
+                    selected=selected,
+                    exclude=frozenset(skipped),
+                    admitted_before=admitted_before,
+                )
+                if row is None:
+                    return None
+                facts = store.per_call_admission_state(runtime.owner, runtime.session_id)
+                receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
+                if (
+                    facts
+                    and facts.get("designation_matches")
+                    and facts.get("consent_version") == row["consent_version"]
+                    and facts.get("policy_epoch") == row["policy_epoch"]
+                    and receipt
+                    and receipt.get("verdict") == "allow"
+                    and receipt.get("body_sha256") == row["body_sha256"]
+                ):
+                    return row
+                if selected is not None:
+                    return None
+                # Stale admission is not permission to consume or quarantine
+                # the row, nor to hide independently valid neighbors behind it.
+                skipped.add((row["conversation_id"], row["message_id"]))
+        except Exception:  # noqa: BLE001 — no readable authority means no automatic work
+            logger.debug("bridge: follow-up authority unavailable")
+            return None
+
+    def _ensure_pending_body_followup(self) -> None:
+        """Coalesce busy arrivals without cancelling work or creating a session.
+
+        Like the steering wake, this uses the normal guarded prompt lock. Unlike
+        a card-only wake, it must open a verified body before any provider call.
+        Each finite admission-horizon pass tries an identity at most once,
+        leaving failed rows pending with their existing reason while allowing
+        valid neighbors through. New arrivals rearm the same waiter, excluding
+        identities it already tried: no timer or same-row retry/spend loop.
+        Pending rows survive crashes under the existing claim lease; this never
+        resurrects a new runtime.
+        """
+        task = self._pending_body_followup_task
+        if task is not None and not task.done():
+            self._pending_body_followup_again = True
+            return
+        if not self._bridge_cards_owed_wake and self._pending_body_followup_row() is None:
+            return
+
+        async def drain() -> None:
+            attempted: set[tuple[str, str]] = set()
+            while True:
+                self._pending_body_followup_again = False
+                horizon = time.time()
+                while (
+                    row := self._pending_body_followup_row(
+                        exclude=frozenset(attempted),
+                        admitted_before=horizon,
+                    )
+                ) is not None:
+                    identity = (row["conversation_id"], row["message_id"])
+                    attempted.add(identity)
+                    await self._prompt_messages(
+                        [],
+                        guard=lambda identity=identity: (
+                            self._pending_body_followup_row(selected=identity) is not None
+                        ),
+                        guard_note="selected admitted bridge body no longer eligible",
+                        pending_body_only=True,
+                        pending_body_selected=identity,
+                    )
+                    # Each attempt releases the ordinary turn lock. Selecting
+                    # B explicitly prevents failed A being hydrated again here.
+                if self._pending_body_followup_again:
+                    continue
+                if self._bridge_cards_owed_wake:
+                    # No turn in this pass read a woken card: give it the
+                    # ordinary wake it would have had without the body route.
+                    # The pipeline still offers the oldest eligible body, so a
+                    # retained failed row gets at most one more attempt here.
+                    await self._prompt_messages(
+                        [],
+                        carried_prompt=True,
+                        guard=self._bridge_card_wake_still_owed,
+                        guard_note="woken bridge card already read by a later turn",
+                        initial_after_guard=self._fallback_card_wake_initial,
+                    )
+                if not self._pending_body_followup_again:
+                    return
+
+        self._pending_body_followup_task = self._spawn_background(drain())
+
+    def _settle_bridge_card_wakes(self, read: set[int]) -> None:
+        """Drop every owed card a dispatched provider request carried.
+
+        A card is READ only when a request built from it crosses the dispatch
+        boundary. Being on the live context is not enough: an idle card is
+        appended with no turn behind it, and a turn's closing journal flush is
+        followed by no request. Settling anywhere earlier either re-answers a
+        card (a flush mid-turn, PR #2951 round 2 MAJOR-R2-1) or strands one
+        (round 1 MAJOR-1).
+        """
+
+        if self._bridge_cards_owed_wake:
+            self._bridge_cards_owed_wake = [
+                card for card in self._bridge_cards_owed_wake if id(card) not in read
+            ]
+            self._forget_settled_card_attempts()
+
+    def _bridge_card_wake_still_owed(self) -> bool:
+        """The fallback turn's under-lock guard: is any owed card still unread?
+
+        Re-derived from the live context rather than trusted from the list, so
+        a path into the context that skipped settlement cannot open a turn for
+        a card already answered. That turn would end on the model's own
+        assistant message, which current Claude models reject as a prefill.
+        """
+
+        # Only the dispatch settle proves a card was read. The context's shape
+        # does not: an adopted aside's user/assistant pair can land behind a
+        # still-unread card (PR #2951 round 3, MINOR-R3-1), so a trailing
+        # assistant message says nothing about the card.
+        #
+        # Every owed card must be on the live context or parked: that is what
+        # lets the fallback's request end on it rather than on a reply. A card
+        # in neither place can never be carried, so its debt would only open
+        # turns ending on the model's own reply (PR #2951 round 4, MAJOR-R4-1).
+        # Drop it, loudly; the card stays durable in the transcript.
+        live = {id(message) for message in self._context.messages}
+        parked = {id(message) for message in self._pending_context_journal}
+        unreachable = [
+            card
+            for card in self._bridge_cards_owed_wake
+            if id(card) not in live and id(card) not in parked
+        ]
+        exhausted = [
+            card
+            for card in self._bridge_cards_owed_wake
+            if self._bridge_card_fallback_attempts.get(id(card), 0) >= BRIDGE_CARD_FALLBACK_ATTEMPTS
+        ]
+        if unreachable or exhausted:
+            logger.warning(
+                "bridge card wake: dropped %d unreachable and %d exhausted owed card(s)",
+                len(unreachable),
+                len(exhausted),
+            )
+            gone = {id(card) for card in (*unreachable, *exhausted)}
+            self._bridge_cards_owed_wake = [
+                card for card in self._bridge_cards_owed_wake if id(card) not in gone
+            ]
+            self._forget_settled_card_attempts()
+        if not self._bridge_cards_owed_wake:
+            return False
+        for card in self._bridge_cards_owed_wake:
+            attempts = self._bridge_card_fallback_attempts
+            attempts[id(card)] = attempts.get(id(card), 0) + 1
+        return True
+
+    def _forget_settled_card_attempts(self) -> None:
+        """Keep attempt counts only for cards still owed (ids can be reused)."""
+
+        owed = {id(card) for card in self._bridge_cards_owed_wake}
+        self._bridge_card_fallback_attempts = {
+            key: count for key, count in self._bridge_card_fallback_attempts.items() if key in owed
+        }
+
+    def _restore_unpresented_bridge_cards(self) -> None:
+        """Put back a card the fallback moved if its turn never re-appended it.
+
+        ``_fallback_card_wake_initial`` takes a stranded card off the context so
+        the loop's own ``extend`` of the turn input can put it last. A failure
+        before that extend (restart fence, metadata refresh, model selection,
+        inbox drain, ask reconciliation, system blocks) would otherwise leave
+        the card neither live nor parked. Restored at its original index, so
+        live order matches the transcript again; a pre-aborted turn that
+        re-parked it already put it somewhere reachable and is left alone.
+        """
+
+        moved, self._bridge_card_wake_moved = self._bridge_card_wake_moved, []
+        if not moved:
+            return
+        live = {id(message) for message in self._context.messages}
+        parked = {id(message) for message in self._pending_context_journal}
+        for index, card in sorted(moved, key=lambda pair: pair[0]):
+            if id(card) in live or id(card) in parked:
+                continue
+            self._context.messages.insert(min(index, len(self._context.messages)), card)
+            live.add(id(card))
+
+    def _fallback_card_wake_initial(self) -> list[AgentMessage]:
+        """The fallback turn's input: owed cards already behind a reply.
+
+        A card the context holds BEFORE a later assistant message would
+        otherwise leave the request ending on that reply, which current Claude
+        models reject as a prefill. Re-presenting the durable card as the
+        turn's input moves it to the tail without a second transcript row
+        (``_run_turn`` journals only initials the transcript lacks) and adds no
+        new model-facing text. Cards still parked, or already last, need
+        nothing: the opening flush or the context already ends on them.
+        """
+
+        messages = self._context.messages
+        last_reply = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if getattr(messages[index], "role", None) == "assistant"
+            ),
+            -1,
+        )
+        if last_reply < 0 or self._pending_context_journal:
+            return []
+        behind = {id(message) for message in messages[:last_reply]}
+        stranded: list[AgentMessage] = [
+            card for card in self._bridge_cards_owed_wake if id(card) in behind
+        ]
+        if not stranded:
+            return []
+        # Recorded before the move so ``_restore_unpresented_bridge_cards`` can
+        # undo it on any path that never reaches the loop's re-append.
+        self._bridge_card_wake_moved = [
+            (index, message)
+            for index, message in enumerate(messages)
+            if any(message is card for card in stranded)
+        ]
+        self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
+        return stranded
+
+    async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
         ONLY a session the bridge runtime already admitted reaches here (owner
@@ -17335,9 +17679,30 @@ class Session:
         try:
             from local_operator.team_bridge.pending_turn import PendingTurn
 
-            turn = PendingTurn(runtime.owner, runtime.session_id, config_dir=runtime.config_dir)
+            captured_owner = runtime.owner
+            captured_scope = (Path(runtime.config_dir), runtime.session_id, runtime.tenant_id)
+
+            def binding_guard() -> bool:
+                current = getattr(self, "bridge_runtime", None)
+                if current is None:
+                    return False
+                return (
+                    current is runtime
+                    and current.owner == captured_owner
+                    and (Path(current.config_dir), current.session_id, current.tenant_id)
+                    == captured_scope
+                )
+
+            turn = PendingTurn(
+                captured_owner,
+                runtime.session_id,
+                config_dir=runtime.config_dir,
+                binding_guard=binding_guard,
+            )
             won = await turn.open(
-                budget=self._pending_body_budget(), fetch=self._fetch_pending_body
+                budget=self._pending_body_budget(),
+                fetch=self._fetch_pending_body,
+                selected=selected,
             )
         except Exception:  # noqa: BLE001 — an ordinary request is the fallback
             logger.debug("bridge: pending body unavailable", exc_info=True)
@@ -17409,6 +17774,7 @@ class Session:
         producer_command_id: str | None = None,
         may_drop: bool = True,
         drain_steering_on_open: bool = False,
+        opened_body: Any = None,
     ) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``.
 
@@ -17672,16 +18038,46 @@ class Session:
             def marking_stream_fn(
                 request: ChatRequest, stream_signal: AbortSignal | None = None
             ) -> AsyncIterator[StreamEvent]:
+                frame = self._pending_body_turn
+                if frame is not None and not frame.binding_intact():
+                    # The prepared request may already contain the old owner's
+                    # frame. Refuse dispatch, rather than just stopping future
+                    # transforms after these bytes have crossed the boundary.
+                    raise RuntimeError("bridge body authority changed before dispatch")
                 inner = base_stream_fn(request, stream_signal)
+                # The context this request was built from, taken before any
+                # later boundary can extend it.
+                carried = (
+                    {id(message) for message in self._context.messages}
+                    if self._bridge_cards_owed_wake
+                    else set()
+                )
 
                 async def witness() -> AsyncIterator[StreamEvent]:
+                    # Lazy provider generators may start only after another
+                    # await. Carry the same guard to that first I/O boundary.
+                    if frame is not None and not frame.binding_intact():
+                        raise RuntimeError("bridge body authority changed before dispatch")
                     self._attention_run_request_dispatched = True
+                    if carried:
+                        # Past the refusal checks, the request is going out:
+                        # any owed card it carries has now been read.
+                        self._settle_bridge_card_wakes(carried)
                     async for event in inner:
                         yield event
 
                 return witness()
 
-            await self._open_pending_body_turn()
+            if opened_body is None:
+                await self._open_pending_body_turn()
+            else:
+                # The guarded same-session follow-up already claimed/fetched
+                # this immutable turn frame. Never claim a second body here.
+                # Pipeline awaits (notably attention_started) may have rebound
+                # the Session while the captured owner's SQLite row stayed live.
+                if not opened_body.binding_intact():
+                    return
+                self._pending_body_turn = opened_body
             config = LoopConfig(
                 # The conversation BODY goes in HERE and nowhere else: the loop
                 # calls this once per PHYSICAL request, so a turn that makes
