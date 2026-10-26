@@ -2404,10 +2404,48 @@ def _apply_validated_plan(
         if name in attested and name not in link_names:
             link_names.append(name)
     if complete_members is not None:
-        # The complete source set is authoritative for both membership and digest.
-        # No prior held entry may survive merely because this was an append.
-        attested = dict(source_members)
-        link_names = list(source_links)
+        # THE ATTESTATION IS A CLAIM ABOUT THIS DESTINATION, NOT ABOUT THE PLAN. The
+        # complete source set used to be copied in wholesale, so a member the owner
+        # DECLARED but this pull never carried was recorded as held even though the copy
+        # does not have it (or holds stale bytes): recovery re-derives the set from the
+        # replica and refused, and the session read as unavailable until a full re-pull.
+        # Every declared name is justified here instead, from the cheapest source first:
+        #
+        #   * the transcript, fetched and verified above against this same digest
+        #     (``_complete_plan_members`` binds the declared digest to that one);
+        #   * ``attested``, which at this point holds exactly what this pull WROTE — a
+        #     file whose whole digest ``_fetch_item`` verified, or a link written from
+        #     the plan — together with what this device's own ``held_report`` says it
+        #     holds at that digest. An owner omits exactly those members from the plan,
+        #     so this IS the ordinary append path: no disk read, no re-hash;
+        #   * failing both, a digest measured NOW (``_held_member_digest_now``), which
+        #     only a report that disagrees with the disk reaches.
+        #
+        # A name that none of those justify is neither attested nor dropped: ``stale_plan``
+        # makes ``sync_from`` re-plan against what is really here, so a member the source
+        # still holds is copied rather than left missing from the next restore.
+        justified = {TRANSCRIPT_NAME: digest}
+        for name, declared in sorted(source_members.items()):
+            if name in justified or attested.get(name) == declared:
+                justified[name] = declared
+                continue
+            scope = attachment_scope if name.startswith(ATTACHMENT_PREFIX) else session_scope
+            actual = _held_member_digest_now(
+                dest_dir,
+                attachments_root,
+                name,
+                is_link=name in source_links,
+                scope=scope,
+            )
+            if actual != declared:
+                raise SyncRefused(
+                    "stale_plan",
+                    f"{name} is not held here at the digest this plan declares, so the copy "
+                    "is asked for again from the start",
+                )
+            justified[name] = declared
+        attested = justified
+        link_names = [name for name in source_links if name in justified]
     attested[TRANSCRIPT_NAME] = digest
     return PullResult(
         session_id=session_id,
@@ -2621,6 +2659,51 @@ def _destination_for(dest_dir: Path, attachments_root: Path, name: str) -> Path 
     if (name not in COPY_SET_NAMES and not in_copy_set_family(name)) or name in NEVER_COPIED:
         return None
     return Path(dest_dir) / name
+
+
+def _held_member_digest_now(
+    dest_dir: Path,
+    attachments_root: Path,
+    name: str,
+    *,
+    is_link: bool,
+    scope: _WriteScope,
+) -> str:
+    """The digest of one plan member as it exists here NOW, or ``""`` if it does not.
+
+    THE LAST RESORT OF THE ATTESTATION (see ``_apply_validated_plan``): only reached for
+    a declared member that neither this pull wrote nor the destination's own
+    ``held_report`` carries, so the ordinary append never reads a byte here. The answer
+    is compared against the plan's declaration, never published on its own.
+
+    A LINK is its target text, not the bytes it points at — that is what ``held_report``
+    (and the plan) digest a carried link to, and reading through it would attest the
+    wrong member. A regular file is read no-follow through the destination's write
+    scope, so a leaf swapped for a link reads as absent rather than as its target.
+    """
+    target = _destination_for(Path(dest_dir), Path(attachments_root), name)
+    if target is None:
+        return ""
+    # A refused path is a containment refusal, not a missing member: let it propagate so
+    # a peer-authored name cannot turn into a retry loop.
+    _assert_contained(scope, target, leaf_link=is_link)
+    if is_link:
+        if not target.is_symlink():
+            return ""
+        try:
+            return sha256_bytes(os.readlink(target).encode("utf-8"))
+        except OSError:
+            return ""
+    if target.is_symlink() or not target.is_file():
+        return ""
+    try:
+        with os.fdopen(_open_for_read(target, scope), "rb") as handle:
+            digest = hashlib.sha256()
+            while block := handle.read(1 << 20):
+                digest.update(block)
+    except (OSError, SyncRefused):
+        return ""
+    return "sha256:" + digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -3182,11 +3265,19 @@ def sync_from(
     _write_scope(anchor, blobs / ATTACHMENTS_DIRNAME)
     destination.mkdir(parents=True, exist_ok=True)
     cursor = read_replica_cursor(root, session_id).get("cursor") if write_cursor else None
-    have: dict[str, Any] = held_report(destination, blobs)
-    if cursor:
-        have["cursor"] = cursor
+    have: dict[str, Any] = {}
     last: SyncRefused | None = None
     for _attempt in range(SYNC_REPLAN_ATTEMPTS):
+        # REPORTED AGAIN ON EVERY ATTEMPT, not once before the loop. The first report is
+        # only true for the instant it was taken, and a retry exists precisely because
+        # the plan it produced no longer described this destination: replaying the same
+        # report made the retry re-declare the member it had just been refused over, so
+        # the new plan omitted it again and the copy either claimed a member it lacks or
+        # failed all three times. Reading the disk again is what makes the retry a
+        # recovery; it costs the same one pass the first attempt already paid.
+        have = held_report(destination, blobs)
+        if cursor:
+            have["cursor"] = cursor
         try:
             result = pull(
                 root,
@@ -3205,7 +3296,7 @@ def sync_from(
             # next attempt is a plan that describes what is really there: the
             # cursor is dropped, so the owner offers a full copy.
             last = exc
-            have.pop("cursor", None)
+            cursor = None
             continue
         if write_cursor:
             write_replica_cursor(
