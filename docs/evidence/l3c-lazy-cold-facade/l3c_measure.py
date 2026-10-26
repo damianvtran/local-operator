@@ -27,7 +27,12 @@ from pathlib import Path
 WORKTREE = os.environ["L3C_WORKTREE"]
 sys.path.insert(0, WORKTREE)
 
-from local_operator.harness.types import Message, TextContent, ToolCall, Usage  # noqa: E402
+from local_operator.harness.types import (  # noqa: E402
+    Message,
+    TextContent,
+    ToolCall,
+    Usage,
+)
 from local_operator.session.frontend_state import (  # noqa: E402
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
     FrontendSessionState,
@@ -140,8 +145,18 @@ def frame_key_histogram(value) -> dict[str, int]:
     return out
 
 
-_VOLATILE = {"epoch", "served_at", "now", "built_at", "ts", "ts_source", "cursor",
-             "before_token", "snapshot_token", "subscription_id"}
+_VOLATILE = {
+    "epoch",
+    "served_at",
+    "now",
+    "built_at",
+    "ts",
+    "ts_source",
+    "cursor",
+    "before_token",
+    "snapshot_token",
+    "subscription_id",
+}
 
 
 def canonical(value):
