@@ -3034,13 +3034,27 @@ def _member_rm_already_revoked(args: argparse.Namespace, record: Any) -> int | N
     if not wanted or not (record.is_burned(wanted) or (tombstone and not tombstone.active)):
         return None
     imported = _import_relay()
-    pruned = imported.repair_removed_member(record, device_id=wanted, by=record.self_device_id)
-    name = str(tombstone.name) if tombstone is not None and tombstone.name else wanted
+    outcome = imported.repair_removed_member(record, device_id=wanted, by=record.self_device_id)
+    pruned = outcome.repaired
+    # R3: with the tombstone row gone only the burned id is left, and "<id> (<id[:8]>)"
+    # would print one identity twice. The short id alone is the readable spelling.
+    who = (
+        f"{tombstone.name} ({wanted[:8]})"
+        if tombstone is not None and tombstone.name
+        else wanted[:8]
+    )
     repaired = (
         f"removed {len(pruned)} stale credential reference(s) to it: {', '.join(pruned)}"
         if pruned
-        else "no credential references to it remained"
+        else "no credential references to it remained on this device"
     )
+    # R1: a row another device owns is that owner's to revise, so it is named, not
+    # rewritten — and not counted as repaired.
+    foreign = [
+        f"{key} is still listed by {owner_name or owner[:8]}, which owns it; "
+        "that device must revoke it (this device does not rewrite another owner's share)"
+        for key, owner, owner_name in outcome.owner_must_revoke
+    ]
     return _emit(
         args,
         {
@@ -3051,11 +3065,16 @@ def _member_rm_already_revoked(args: argparse.Namespace, record: Any) -> int | N
             "epoch": record.epoch,
             "rotated": False,
             "repaired": pruned,
+            "owner_must_revoke": [
+                {"key": key, "owner_device": owner, "owner_name": owner_name}
+                for key, owner, owner_name in outcome.owner_must_revoke
+            ],
         },
         [
-            f"{name} ({wanted[:8]}) was already removed from {record.name}; "
+            f"{who} was already removed from {record.name}; "
             f"the epoch was not rotated again (it is {record.epoch})",
             repaired,
+            *foreign,
             *messages_mod.COPY_CEILING_LINES,
         ],
     )

@@ -1831,7 +1831,12 @@ def admit(
 
 
 def prune_removed_device(
-    network_id: str, device_id: str, *, root: Path | None = None, by: str = ""
+    network_id: str,
+    device_id: str,
+    *,
+    root: Path | None = None,
+    by: str = "",
+    only_owner: str = "",
 ) -> tuple[list[str], str]:
     """Drop ``device_id`` from the placement document and the MCP evidence file.
 
@@ -1841,14 +1846,18 @@ def prune_removed_device(
     so they cannot drift: :func:`remove_member` at the removal itself, and
     :func:`repair_removed_member` when an already-removed device still has
     references left behind (a prune that failed, or a removal applied from a peer's
-    rotation frame, which never ran this prune locally).
+    rotation frame, which never ran this prune locally). ``only_owner`` is passed
+    through to ``placement.revoke_device_everywhere`` — see its docstring for why
+    the repair must not edit rows a third device owns.
     """
     pruned: list[str] = []
     failure = ""
     try:
         from local_operator.network.credentials import mcp_state, placement
 
-        pruned = placement.revoke_device_everywhere(network_id, device_id, root=root, by=by)
+        pruned = placement.revoke_device_everywhere(
+            network_id, device_id, root=root, by=by, only_owner=only_owner
+        )
         # Evidence about a login that belonged to the removed device is gone with
         # it: a status surface must not keep naming an owner nobody can reach.
         # Unconditional on ``pruned`` — a device that held no placement row can
@@ -1880,36 +1889,61 @@ def prune_removed_device(
     return pruned, failure
 
 
-def removed_device_references(
-    network_id: str, device_id: str, *, root: Path | None = None
-) -> list[str]:
-    """The credential keys whose local metadata still names ``device_id``.
+@dataclass(frozen=True)
+class RemovedDeviceReferences:
+    """What this device's credential metadata still says about a removed device.
 
-    A placement row it owns or holds, or an MCP evidence entry it owns. Read back
-    AFTER a repair so the receipt reports what is on disk, not what the writer
-    meant to do: ``mcp_state.forget_device`` swallows its own write failure by
-    contract, so its return value cannot prove anything.
+    ``local`` is what THIS device may rewrite: placement rows it owns (or the removed
+    device owned) and its own MCP evidence. ``owner_must_revoke`` is ``(key, owner
+    device, owner name)`` for a row a third device owns that still lists the removed
+    device as a holder — this device reports it and leaves it alone, because only
+    that owner's revision can clear it without forking ``doc_rev`` (R1).
+    """
+
+    local: list[str]
+    owner_must_revoke: list[tuple[str, str, str]]
+
+
+def removed_device_references(
+    network_id: str, device_id: str, *, self_device: str, root: Path | None = None
+) -> RemovedDeviceReferences:
+    """The references to ``device_id`` this device's metadata still carries.
+
+    Read back AFTER a repair so the receipt reports what is on disk, not what the
+    writer meant to do: ``mcp_state.forget_device`` swallows its own write failure
+    by contract, so its return value cannot prove anything.
     """
     from local_operator.network.credentials import mcp_state, placement
 
     document = placement.PlacementDocument.load(network_id, root)
-    keys = {
-        key
-        for key, entry in document.entries.items()
-        if str(entry.owner_device) == device_id or entry.is_holder(device_id)
-    }
-    keys |= {
+    local: set[str] = set()
+    foreign: list[tuple[str, str, str]] = []
+    for key, entry in sorted(document.entries.items()):
+        owner = str(entry.owner_device)
+        if owner == device_id or (owner == self_device and entry.is_holder(device_id)):
+            local.add(key)
+        elif entry.is_holder(device_id):
+            foreign.append((key, owner, str(entry.owner_device_name or "")))
+    local |= {
         key
         for key, row in mcp_state.load(network_id, root).items()
         if str(row.get("owner_device") or "") == device_id
     }
-    return sorted(keys)
+    return RemovedDeviceReferences(sorted(local), foreign)
+
+
+@dataclass(frozen=True)
+class RemovedMemberRepair:
+    """The receipt of :func:`repair_removed_member`."""
+
+    repaired: list[str]
+    owner_must_revoke: list[tuple[str, str, str]]
 
 
 def repair_removed_member(
     record: NetworkRecord, *, device_id: str, by: str, root: Path | None = None
-) -> list[str]:
-    """Re-run the removal prune for a device that is ALREADY removed. Returns the keys.
+) -> RemovedMemberRepair:
+    """Re-run the removal prune for a device that is ALREADY removed.
 
     WHY THIS EXISTS: ``member rm`` on a removed id used to answer
     ``unknown_member`` (the device resolver is active-only), while ``network show``
@@ -1924,36 +1958,58 @@ def repair_removed_member(
     * IT ERASES NOTHING REMOTE. Only this device's metadata is edited; a copy the
       removed device already holds is not reachable from here (the caller's
       receipt keeps the copy-ceiling sentence for that reason).
+    * ONLY ROWS THIS DEVICE MAY REVISE (R1). A row a third device owns is reported
+      as ``owner_must_revoke`` and left byte-identical: rewriting it locally forks
+      its ``doc_rev`` and the owner's next revision is dropped as a replay.
+    * NEVER THIS DEVICE'S OWN ID (R2). A device a peer removed has itself in
+      ``removed_ids``, and the prune deletes every row the target OWNS — on its own
+      id that empties this device's whole placement document. Leaving a network is
+      ``lop network disconnect``.
 
-    Refuses ``unknown_member`` for an id that is not removed in ``record``, and
-    ``already_revoked_repair_failed`` when the prune failed or a reference is still
-    on disk afterwards — a repair that did not land must never read as done.
+    Refuses ``unknown_member`` for an id that is not removed in ``record``,
+    ``cannot_remove_self`` for this device's id, and ``already_revoked_repair_failed``
+    when the prune failed or a local reference is still on disk afterwards — a
+    repair that did not land must never read as done.
     """
+    if device_id == record.self_device_id:
+        raise MeshRefusal(
+            "cannot_remove_self",
+            f"{device_id[:8]} is this device's own id; a device cannot remove itself from "
+            f"{record.name} (to leave the network, run 'lop network disconnect "
+            f"{record.name}')",
+        )
     member = next((row for row in record.members if row.device_id == device_id), None)
     if not record.is_burned(device_id) and (member is None or member.active):
         raise MeshRefusal("unknown_member", f"{device_id} is not a removed member of {record.name}")
+    self_device = record.self_device_id
     # Read BEFORE as well as after: the placement prune returns its keys but the
     # MCP evidence prune returns nothing, so the receipt's list is the difference
     # between the two on-disk reads rather than either writer's own account.
     try:
-        before = removed_device_references(record.network_id, device_id, root=root)
+        before = removed_device_references(
+            record.network_id, device_id, self_device=self_device, root=root
+        ).local
     except Exception:  # noqa: BLE001 — the after-read below decides the outcome
         before = []
-    pruned, failure = prune_removed_device(record.network_id, device_id, root=root, by=by)
+    pruned, failure = prune_removed_device(
+        record.network_id, device_id, root=root, by=by, only_owner=self_device
+    )
     try:
-        remaining = removed_device_references(record.network_id, device_id, root=root)
+        after = removed_device_references(
+            record.network_id, device_id, self_device=self_device, root=root
+        )
     except Exception as exc:  # noqa: BLE001 — an unreadable store proves nothing
         failure = failure or exc.__class__.__name__
-        remaining = []
-    if failure or remaining:
+        after = RemovedDeviceReferences([], [])
+    if failure or after.local:
         detail = f" ({failure})" if failure else ""
-        still = f"; still referenced by: {', '.join(remaining)}" if remaining else ""
+        still = f"; still referenced by: {', '.join(after.local)}" if after.local else ""
         raise MeshRefusal(
             "already_revoked_repair_failed",
-            f"{device_id} was already removed from {record.name}, but cleaning up its "
+            f"{device_id[:8]} was already removed from {record.name}, but cleaning up its "
             f"credential references failed{detail}{still}; re-run the command",
         )
-    return sorted(set(before) | set(pruned))
+    return RemovedMemberRepair(sorted(set(before) | set(pruned)), after.owner_must_revoke)
 
 
 def remove_member(
@@ -1974,6 +2030,13 @@ def remove_member(
     immediately and on the others as soon as they receive the frame.
     """
     moment = time.time() if now is None else now
+    # THE ROTATION LOCK IS CHECKED BEFORE ANYTHING IS TOUCHED (#2991 QA round 1,
+    # Q-1). ``rotate_epoch`` below re-checks it, but by then the placement and MCP
+    # evidence prune has already run: a lock-refused removal of an ACTIVE member
+    # left it active with its shares and evidence deleted. The relay handler
+    # prechecks the same way before its ending exchange; the CLI's local path
+    # comes straight here, so the precheck belongs to the writer.
+    rotation_lock_refusal(record, now=moment)
     member = record.member(device_id)
     if member is None:
         raise MeshRefusal("unknown_member", f"{device_id} is not a member of {record.name}")

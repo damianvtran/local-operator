@@ -952,7 +952,12 @@ def merge_from_peer(
 
 
 def revoke_device_everywhere(
-    network_id: str, device: str, *, root: Path | None = None, by: str = ""
+    network_id: str,
+    device: str,
+    *,
+    root: Path | None = None,
+    by: str = "",
+    only_owner: str = "",
 ) -> list[str]:
     """Remove ``device`` from EVERY placement row it appears in. Returns the keys.
 
@@ -972,6 +977,14 @@ def revoke_device_everywhere(
     merge churn).
 
     ``by`` rides the audit row the caller writes; it is not used in the edit.
+
+    ``only_owner`` LIMITS THE HOLDER EDITS TO ROWS THAT DEVICE OWNS (#2991 review
+    round 1, R1). A row owned by a third device is that owner's to revise: a local
+    strip bumps ``doc_rev`` on a copy the owner never saw, so the owner's next real
+    revision arrives at an equal ``doc_rev`` and ``merge`` drops it as a replay,
+    and the one after that brings the removed holder straight back. Rows owned by
+    ``device`` itself are still deleted with the filter on: their owner is removed,
+    so no authenticated revision of them can ever arrive to collide with.
     """
     root = _config_root(root)
     path = placement_path(network_id, root)
@@ -984,6 +997,8 @@ def revoke_device_everywhere(
             if str(entry.owner_device) == device:
                 del document.entries[key]
                 changed.append(key)
+                continue
+            if only_owner and str(entry.owner_device) != only_owner:
                 continue
             rows = [row for row in entry.holders if row.device != device]
             if len(rows) == len(entry.holders):

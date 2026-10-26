@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from argparse import Namespace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -37,6 +38,8 @@ NETWORK = "n_" + "1" * 32
 SELF = "d_" + "a" * 32
 GONE = "d_" + "b" * 32
 LIVE = "d_" + "c" * 32
+#: A THIRD device that owns a credential the removed device was a holder of.
+PEER = "d_" + "f" * 32
 NEVER = "d_" + "e" * 32
 
 
@@ -190,10 +193,18 @@ def test_a_burned_id_whose_tombstone_row_is_gone_is_still_already_revoked(
     _network(config)
     with store.mutate(NETWORK, config) as record:
         record.members = [row for row in record.members if row.device_id != GONE]
+        store.save(record, config)  # ``mutate`` holds the lock; the body saves
+    assert store.load(NETWORK, config).member(GONE) is None
     assert net_cli.main(_rm(GONE)) == 0
     assert json.loads(capsys.readouterr().out)["code"] == "already_revoked"
     assert _references(config, GONE) == []
     assert GONE in store.load(NETWORK, config).removed_ids
+
+    # R3: with no row there is no name, and the receipt must not print the id twice.
+    assert net_cli.main(_rm(GONE, json_out=False)) == 0
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first.startswith(f"{GONE[:8]} was already removed from home-net"), first
+    assert GONE not in first, first
 
 
 def test_an_active_member_with_the_same_name_is_untouched(
@@ -242,3 +253,177 @@ def test_a_repair_that_cannot_write_is_reported_as_a_failure(
     assert "PermissionError" in body["message"] and "openai" in body["message"]
     assert "re-run" in body["message"]
     assert "openai" in _references(config, GONE)
+
+
+# ---------------------------------------------------------------------------
+# #2991 round 1 remediation: R1, R2, Q-1
+# ---------------------------------------------------------------------------
+
+
+def _peer_document(rev_after: int, *, holders: tuple[str, ...]) -> dict[str, Any]:
+    """``PEER``'s own document for ``peer:gh``, at an exact ``doc_rev``, as it sends it."""
+    document = placement_mod.PlacementDocument(NETWORK, written_by=PEER)
+    entry = document.declare("anthropic", owner_device=PEER, provider="anthropic", by=PEER)
+    for holder in holders:
+        document.grant("anthropic", holder, scope="device", by=PEER)
+    entry.doc_rev = rev_after
+    return document.to_json()
+
+
+def _merge(config: Path, payload: dict[str, Any]) -> list[str]:
+    return placement_mod.merge_from_peer(
+        NETWORK, payload, from_device=PEER, self_device=SELF, root=config
+    )
+
+
+def test_a_row_another_device_owns_is_reported_not_rewritten(
+    config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1: the owner's revisions must keep landing through the real ``merge_from_peer``.
+
+    The removal reached this device through a rotation frame, so PEER — which owns
+    ``anthropic`` and lent it to the removed device and to this one — has not revised
+    its row yet. Rewriting that row here bumped its
+    ``doc_rev`` on a copy PEER never saw: PEER's next revision (revoking SELF) then
+    arrived at an EQUAL rev and was dropped as a replay, and the one after brought the
+    removed holder straight back.
+    """
+    _network(config)
+    assert _merge(config, _peer_document(5, holders=(GONE, SELF))) == ["anthropic"]
+    before = placement_mod.PlacementDocument.load(NETWORK, config).entry("anthropic")
+    assert before is not None and before.doc_rev == 5
+
+    assert net_cli.main(_rm(GONE)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    # Reported, attributed to its owner, and NOT counted as repaired.
+    assert "anthropic" not in payload["repaired"], payload
+    assert payload["owner_must_revoke"] == [
+        {"key": "anthropic", "owner_device": PEER, "owner_name": ""}
+    ], payload
+    after = placement_mod.PlacementDocument.load(NETWORK, config).entry("anthropic")
+    assert after is not None and after.doc_rev == 5 and after.is_holder(GONE)
+
+    # The owner's real next revision (it revokes SELF and keeps GONE for now) lands...
+    assert _merge(config, _peer_document(6, holders=(GONE,))) == ["anthropic"]
+    landed = placement_mod.PlacementDocument.load(NETWORK, config).entry("anthropic")
+    assert landed is not None and landed.doc_rev == 6 and not landed.is_holder(SELF)
+    # ...and so does the one where the owner itself prunes the removed holder.
+    assert _merge(config, _peer_document(7, holders=())) == ["anthropic"]
+    pruned = placement_mod.PlacementDocument.load(NETWORK, config).entry("anthropic")
+    assert pruned is not None and pruned.doc_rev == 7 and not pruned.is_holder(GONE)
+
+
+def test_the_human_receipt_names_the_owner_that_must_revoke(
+    config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _network(config)
+    _merge(config, _peer_document(5, holders=(GONE,)))
+    assert net_cli.main(_rm(GONE, json_out=False)) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1] == "removed 2 stale credential reference(s) to it: mcp:notion, openai"
+    assert lines[2].startswith(f"anthropic is still listed by {PEER[:8]}, which owns it")
+    assert tuple(lines[3:]) == COPY_CEILING_LINES
+
+
+def test_this_devices_own_id_is_refused_and_its_placement_kept(
+    config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R2: a device a peer removed carries its OWN id in ``removed_ids``.
+
+    The prune deletes every row its target owns, so ``member rm <own id>`` used to
+    empty this device's whole placement document and answer success.
+    """
+    _network(config)
+    with store.mutate(NETWORK, config) as record:
+        # What ``apply_epoch``'s ``removed_by_this_rotation`` arm installs: the
+        # rotator's table, with this device's own row tombstoned and its id burned.
+        own = record.member(SELF)
+        assert own is not None
+        own.removed_at, own.lifecycle = 1.0, "expired"
+        record.removed_ids = sorted({*record.removed_ids, SELF})
+        # No rotation lock in the way: the refusal under test is the self-id one.
+        record.rotation_lock_until = 0.0
+        store.save(record, config)
+    assert net_cli.main(_rm(SELF)) == 1
+    body = json.loads(capsys.readouterr().out)
+    assert body["code"] == "cannot_remove_self", body
+    assert "lop network disconnect" in body["message"]
+    assert sorted(placement_mod.PlacementDocument.load(NETWORK, config).entries) == ["openai"]
+
+
+def test_a_removal_refused_by_the_rotation_lock_prunes_nothing(
+    config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q-1 (pre-existing): the lock refusal must come before the credential prune.
+
+    ``remove_member`` pruned the target's placement and MCP evidence, THEN
+    ``rotate_epoch`` refused ``rotation_in_progress`` — leaving an ACTIVE member with
+    its shares and evidence deleted. Driven through the real CLI's local path.
+    """
+    _network(config, live_same_name=True)
+    with store.mutate(NETWORK, config) as record:
+        record.rotation_lock_until = 4_000_000_000.0
+        store.save(record, config)
+    before = _references(config, LIVE)
+    assert before == ["mcp:linear", "openai"]
+
+    assert net_cli.main(_rm(LIVE)) == 1
+    assert json.loads(capsys.readouterr().out)["code"] == "rotation_in_progress"
+    live = store.load(NETWORK, config).member(LIVE)
+    assert live is not None and live.active
+    assert _references(config, LIVE) == before
+
+
+def test_the_evidence_update_reads_inside_the_lock(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4: the read that feeds an evidence write must happen while the lock is held.
+
+    The writers used to ``load`` first and take the lock only to write, so a relay
+    ``record`` that read the file, then waited while ``forget_device`` wrote, put
+    its stale copy — the forgotten device's row included — straight back. Each
+    load is stamped with whether the lock was held at that moment; the LAST read a
+    writer makes before writing is the one its write is built from.
+    """
+    from contextlib import contextmanager
+    from typing import Iterator
+
+    _network(config)
+    held = [0]
+    events: list[tuple[str, int]] = []
+    real_lock = mcp_state._cross_process_lock  # noqa: SLF001 — the exact lock under test
+    real_load = mcp_state.load
+    real_write = store._write_private_json  # noqa: SLF001
+
+    @contextmanager
+    def tracking_lock(*args: Any, **kwargs: Any) -> Iterator[None]:
+        with real_lock(*args, **kwargs):
+            held[0] += 1
+            try:
+                yield
+            finally:
+                held[0] -= 1
+
+    def tracking_load(*args: Any, **kwargs: Any) -> Any:
+        events.append(("load", held[0]))
+        return real_load(*args, **kwargs)
+
+    def tracking_write(*args: Any, **kwargs: Any) -> Any:
+        events.append(("write", held[0]))
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_state, "_cross_process_lock", tracking_lock)
+    monkeypatch.setattr(mcp_state, "load", tracking_load)
+    monkeypatch.setattr(store, "_write_private_json", tracking_write)
+
+    for write in (
+        lambda: mcp_state.forget_device(NETWORK, GONE, root=config),
+        lambda: mcp_state.record(NETWORK, "mcp:x", state="synced", owner_device=LIVE, root=config),
+        lambda: mcp_state.clear(NETWORK, "mcp:x", root=config),
+    ):
+        events.clear()
+        write()
+        assert events[-1] == ("write", 1), events
+        feeding = [event for event in events if event[0] == "load"][-1]
+        assert feeding == ("load", 1), events
+    assert "mcp:notion" not in real_load(NETWORK, config)
