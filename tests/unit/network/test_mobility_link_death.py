@@ -36,7 +36,7 @@ from local_operator.session.placement import (
     write_handoff_entry,
 )
 from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` is a fixture
-    SESSION as _RIG_SESSION,
+    SESSION,
     Devices,
     _move,
     _owned_session,
@@ -44,8 +44,8 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` is a 
 )
 from tests.unit.network.test_relay_e2e import _pair_settled
 
-SESSION = "9f3ac1e0b7d2"
-assert _RIG_SESSION == SESSION, "the rig and this file must name one session"
+# ``SESSION`` comes from the rig: one name for the id both files move, so the cells
+# here and the cells there cannot drift apart.
 
 
 def _blob(store: Path, ref: str, payload: bytes) -> None:
@@ -196,9 +196,7 @@ def test_release_refuses_every_entry_it_cannot_prove_is_this_move(
     """Three conditions, each a way the release could otherwise do damage."""
     _prepared(tmp_path, to_device=case["device"], instance=case["instance"], phase=case["phase"])
 
-    cleared = mobility.expire_for_peer(
-        tmp_path, "", instance="i_mine", to_device="d_away"
-    )
+    cleared = mobility.expire_for_peer(tmp_path, "", instance="i_mine", to_device="d_away")
 
     assert cleared == [], cleared
     assert SESSION in read_handoff_journal(tmp_path)
