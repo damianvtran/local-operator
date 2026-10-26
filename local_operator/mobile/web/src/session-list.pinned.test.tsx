@@ -20,6 +20,7 @@ import {
 	screen,
 	waitFor,
 } from "@testing-library/react";
+import { FetchStreamFixture as Stream } from "./sse-test-fixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "./api";
 import { SessionListScreen } from "./screens/session-list";
@@ -416,26 +417,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		);
 	}
 
-	/* THE DAEMON'S TRANSPORT, faked at the one place the browser owns it. The
-	   store's own plumbing — the frame handler, the mark settlement, the
-	   refcount — stays real, which is the point: the defect lives in that code,
-	   not in EventSource. */
-	let opened: FakeEventSource[] = [];
-	class FakeEventSource {
-		readonly listeners = new Map<string, Array<(event: { data: string }) => void>>();
-		onopen: (() => void) | null = null;
-		onerror: (() => void) | null = null;
-		constructor(readonly url: string) {
-			opened.push(this);
-		}
-		addEventListener(event: string, listener: (event: { data: string }) => void) {
-			const list = this.listeners.get(event) ?? [];
-			list.push(listener);
-			this.listeners.set(event, list);
-		}
-		removeEventListener() {}
-		close() {}
-	}
+	// Keep the store real; only replace the fetch byte-stream boundary.
 
 	/* The real store, and a stream with no state of its own: a fresh module per
 	   test, so a source left over from the previous one is never the one that
@@ -444,13 +426,12 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 	async function realStoreHarness() {
 		vi.resetModules();
 		vi.doUnmock("./store");
-		opened = [];
-		vi.stubGlobal("EventSource", FakeEventSource);
+		Stream.install();
 		const { SessionListScreen: Screen } = await import(
 			"./screens/session-list"
 		);
 		render(<Screen />);
-		expect(opened).toHaveLength(1);
+		expect(Stream.instances).toHaveLength(1);
 	}
 
 	/* One list frame, exactly as the daemon writes it. Awaited `act`, because the
@@ -462,11 +443,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 	   describes is exactly one flush further away. */
 	async function pushFrame(sessions: SessionSummary[]) {
 		await act(async () => {
-			for (const source of opened) {
-				for (const listener of source.listeners.get("sessions") ?? []) {
-					listener({ data: JSON.stringify({ sessions }) });
-				}
-			}
+            for (const source of Stream.instances) source.emit("sessions", { sessions });
 		});
 		await settled();
 	}
@@ -506,7 +483,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 	async function settled() {
 		await act(async () => {
 			await new Promise((resolve) =>
-				requestAnimationFrame(() => requestAnimationFrame(resolve)),
+				requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve))),
 			);
 			await Promise.resolve();
 		});

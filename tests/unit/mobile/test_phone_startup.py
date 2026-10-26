@@ -99,6 +99,9 @@ def fixture_children(monkeypatch):
     the machine-wide LRU cap, the stamp on detach) — so this fixture turns off a
     policy that is asserted elsewhere; it does not stop it being asserted.
     """
+    # These child-lifecycle tests exercise immediate readiness release. The
+    # production reconnect grace is pinned independently in test_stream_reliability.
+    monkeypatch.setattr("local_operator.mobile.daemon.PHONE_VIEW_GRACE_S", 0)
     _write_child_config()
     actual_spawn = asyncio.create_subprocess_exec
     children = []

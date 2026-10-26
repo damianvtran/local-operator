@@ -69,8 +69,12 @@ export function isAuthorityRefusalCode(code: string): boolean {
     dead and every further call fails the same way, so the page reloads and the
     server 303s to /login. The multipart upload below is NOT the JSON helper but
     must not invent a second answer to this. */
-function handleUnauthorized(): void {
-
+let unauthorizedReloadStarted = false;
+export function handleUnauthorized(): void {
+	// List, projection and config requests can fail together. Cleanup/reload is
+	// a page-wide transition, not one reload per concurrent unauthorized leg.
+	if (unauthorizedReloadStarted) return;
+	unauthorizedReloadStarted = true;
 	/* A replaced/login-expired browser session must not expose drafts or
 	   retry envelopes to whoever authenticates next on this device. */
 	clearPrivateSessionStorage();

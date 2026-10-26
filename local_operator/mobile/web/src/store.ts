@@ -3,12 +3,11 @@
  * channels (session list, per-session projection). No library — the shape is
  * a list plus a map keyed by durable session identity.
  *
- * SSE discipline: each stream is wrapped with manual backoff (1s doubling to
- * 15s). EventSource's built-in retry is immediate on some server-close
- * shapes, which hammers a dying daemon, so on error we close, wait, and
- * reopen ourselves.
+ * SSE discipline: fetch-streamed snapshots with invisible lease rotation,
+ * a byte-silence watchdog, bounded retries and delayed outage reporting.
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { handleUnauthorized } from "./api";
 import { supplementsFromWire } from "./lib/supplement";
 import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
 import { createWireLoader } from "./i18n/wire-cache";
@@ -151,6 +150,16 @@ const projections = new Map<string, ProjectionSlot>();// useSyncExternalStore re
 const EMPTY_PROJECTION_SLOT: ProjectionSlot = { projection: null, connected: false };
 
 const listeners = new Set<() => void>();
+let streamEmitPending = false;
+/** Both streams can update in one paint. Gestures still emit synchronously. */
+function emitStream() {
+	if (streamEmitPending) return;
+	streamEmitPending = true;
+	const flush = () => { streamEmitPending = false; emit(); };
+	if (typeof requestAnimationFrame === "function") requestAnimationFrame(flush);
+	else setTimeout(flush, 16);
+}
+
 
 /* THE SPA'S OWN ENGLISH COPY, registered before any consumer renders the relay
    (the RFC's "bundle a bootstrap set", §2.1/§3.3). This is what makes the
@@ -327,56 +336,192 @@ function publishAsksRevision(rows: SessionSummary[]): void {
 /* Streams                                                             */
 /* ------------------------------------------------------------------ */
 
-const BACKOFF_MIN_MS = 1000;
-const BACKOFF_MAX_MS = 15000;
+const BACKOFF_MIN_MS = 250;
+const BACKOFF_MAX_MS = 10000;
+const SILENCE_MS = 35000;
+const OUTAGE_GRACE_MS = 2500;
+// A seed is sent even by a leg that immediately dies. Require continuous
+// residency before calling it recovered; shorter than the outage grace so a
+// quick working reconnect never paints a false outage while proving itself.
+const STABLE_STREAM_MS = 2000;
 
+/** Incremental SSE framing, including comments and CR/LF/CRLF boundaries.
+ * Resynchronization uses full snapshots, never Last-Event-ID replay. */
+export function sseFramer(deliver: (event: string, data: string) => void) {
+	let line = "", event = "", data: string[] = [], afterCR = false;
+	const finish = () => {
+		if (!line) {
+			if (data.length) deliver(event || "message", data.join("\n"));
+			event = ""; data = [];
+		} else if (!line.startsWith(":")) {
+			const colon = line.indexOf(":");
+			const key = colon < 0 ? line : line.slice(0, colon);
+			let value = colon < 0 ? "" : line.slice(colon + 1);
+			if (value.startsWith(" ")) value = value.slice(1);
+			if (key === "event") event = value;
+			if (key === "data") data.push(value);
+		}
+		line = "";
+	};
+	return (chunk: string) => {
+		for (const char of chunk) {
+			if (afterCR && char === "\n") { afterCR = false; continue; }
+			afterCR = char === "\r";
+			if (char === "\r" || char === "\n") finish();
+			else line += char;
+		}
+	};
+}
+
+/** Fetch rather than EventSource: the tunnel's clean 60 s lease rotation is
+ * routine, comments prove liveness, and HTTP 401/503 must remain observable.
+ * The last good view survives brief failures; only a sustained outage reaches
+ * onDisconnect. Each onOpen establishes a NEW snapshot/version fence.
+ * onData returns false for an invalid/stale snapshot; its connected argument
+ * stays false during a reported outage. onRecovered restores connectivity
+ * only after an accepted snapshot and a continuously open stability window. */
 export function openEventStream(
-	url: string,
-	event: string,
-	onData: (data: string) => void,
-	onOpen: () => void,
-	onDisconnect: () => void,
+	url: string, event: string, onData: (data: string, connected: boolean) => boolean | void,
+	onOpen: () => void, onDisconnect: () => void,
+	onRecovered: () => void = () => {},
 ): () => void {
-	let closed = false;
-	let attempt = 0;
-	let es: EventSource | null = null;
-	let timer: ReturnType<typeof setTimeout> | null = null;
-
-	const connect = () => {
+	let closed = false, failures = 0, generation = 0, lastByte = Date.now();
+	let controller: AbortController | null = null;
+	let retry: ReturnType<typeof setTimeout> | null = null;
+	let watchdog: ReturnType<typeof setTimeout> | null = null;
+	let outage: ReturnType<typeof setTimeout> | null = null;
+	let reported = false, inBackoff = false;
+	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+	let stableTimer: ReturnType<typeof setTimeout> | null = null;
+	const clearWatchdog = () => { if (watchdog !== null) clearTimeout(watchdog); watchdog = null; };
+	const unhealthy = () => {
+		if (reported || outage !== null || closed) return;
+		outage = setTimeout(() => { outage = null; reported = true; onDisconnect(); }, OUTAGE_GRACE_MS);
+	};
+	const healthy = () => {
+		if (outage !== null) clearTimeout(outage);
+		outage = null;
+		const wasReported = reported;
+		reported = false; failures = 0;
+		if (wasReported) onRecovered();
+	};
+	const schedule = (delay: number, backoff: boolean) => {
 		if (closed) return;
-		const source = new EventSource(url);
-		es = source;
-		// Closing an EventSource does not revoke callbacks already queued by the
-		// browser. A retired source must neither publish nor close its replacement.
-		source.addEventListener(event, (e) => {
-			if (closed || es !== source) return;
-			attempt = 0;
-			onData((e as MessageEvent).data as string);
-		});
-		source.onopen = () => {
-			if (closed || es !== source) return;
-			attempt = 0;
-			onOpen();
-		};
-		source.onerror = () => {
-			if (closed || es !== source) return;
-			source.close();
-			es = null;
-			onDisconnect();
-			const delay = Math.min(
-				BACKOFF_MAX_MS,
-				BACKOFF_MIN_MS * 2 ** attempt++,
-			);
-			timer = setTimeout(connect, delay);
-		};
+		inBackoff = backoff;
+		retry = setTimeout(() => { retry = null; inBackoff = false; void connect(); }, delay);
 	};
-
-	connect();
-	return () => {
-		closed = true;
-		if (timer) clearTimeout(timer);
-		es?.close();
+	const stopLeg = () => {
+		controller?.abort();
+		void reader?.cancel().catch(() => {});
+		reader = null;
+		clearWatchdog();
+		if (stableTimer !== null) clearTimeout(stableTimer);
+		stableTimer = null;
 	};
+	const connect = async () => {
+		if (closed) return;
+		const id = ++generation;
+		stopLeg();
+		const ctl = new AbortController(); controller = ctl;
+		const current = () => !closed && generation === id;
+		let opened: number | null = null, eof = false, stalled = false;
+		let retryAfter: number | undefined;
+		let acceptedSnapshot = false;
+		const recoverIfStable = () => {
+			if (current() && acceptedSnapshot && opened !== null && Date.now() - opened >= STABLE_STREAM_MS) healthy();
+		};
+		const arm = () => {
+			clearWatchdog();
+			watchdog = setTimeout(() => {
+				if (!current()) return;
+				stalled = true; unhealthy(); stopLeg();
+			}, SILENCE_MS);
+		};
+		// Covers a fetch whose headers never arrive as well as a stalled body.
+		lastByte = Date.now(); arm();
+		try {
+			const response = await fetch(url, {
+				credentials: "same-origin", cache: "no-store",
+				headers: { Accept: "text/event-stream" }, signal: ctl.signal,
+			});
+			if (!current()) { void response.body?.cancel(); return; }
+			if (response.status === 401) {
+				dispose(); handleUnauthorized(); return;
+			}
+			if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+				if (response.status === 503) {
+					const header = response.headers.get("retry-after");
+					if (header) {
+						const value = /^\d+(\.\d+)?$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now();
+						if (Number.isFinite(value)) retryAfter = Math.max(250, Math.min(30000, value));
+					}
+				}
+				void response.body?.cancel(); throw response;
+			}
+			opened = Date.now(); onOpen();
+			stableTimer = setTimeout(recoverIfStable, STABLE_STREAM_MS);
+			const localReader = response.body.getReader(); reader = localReader;
+			const decoder = new TextDecoder();
+			const parse = sseFramer((name, data) => {
+				if (!current() || name !== event) return;
+				// Accept every snapshot BEFORE batching renders. Last-arrival raw
+				// coalescing hid version 9 behind version 8 before the fence could
+				// see it. The daemon already caps projection/list rates at 10/2.5Hz.
+				if (onData(data, !reported) !== false) acceptedSnapshot = true;
+				recoverIfStable();
+			});
+			for (;;) {
+				const { done, value } = await localReader.read();
+				if (!current()) return;
+				if (done) { eof = true; break; }
+				if (value?.length) {
+					lastByte = Date.now(); arm();
+					parse(decoder.decode(value, { stream: true }));
+				}
+			}
+		} catch { /* Network failure follows the bounded retry policy below. */ }
+		finally {
+			if (current()) {
+				clearWatchdog(); reader = null;
+				if (stableTimer !== null) clearTimeout(stableTimer);
+				stableTimer = null;
+			}
+		}
+		if (!current()) return;
+		if (!stalled && eof && acceptedSnapshot && opened !== null && Date.now() - opened >= 5000) {
+			// Security lease unchanged: reauthorize with a fresh request, no UI blip.
+			schedule(Math.random() * 250, false); return;
+		}
+		unhealthy();
+		if (stalled) { schedule(0, false); return; }
+		const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** Math.min(failures++, 10));
+		schedule(retryAfter ?? delay * (0.5 + Math.random() * 0.5), true);
+	};
+	const wake = () => {
+		if (closed || document.visibilityState === "hidden") return;
+		if (inBackoff || Date.now() - lastByte >= 20000) {
+			if (retry !== null) clearTimeout(retry);
+			retry = null; inBackoff = false;
+			unhealthy(); void connect();
+		}
+	};
+	const hasDOM = typeof window !== "undefined" && typeof document !== "undefined";
+	if (hasDOM) {
+		window.addEventListener("pageshow", wake); window.addEventListener("online", wake);
+		document.addEventListener("visibilitychange", wake);
+	}
+	const dispose = () => {
+		closed = true; generation++;
+		if (retry !== null) clearTimeout(retry);
+		if (outage !== null) clearTimeout(outage);
+		stopLeg();
+		if (hasDOM) {
+			window.removeEventListener("pageshow", wake); window.removeEventListener("online", wake);
+			document.removeEventListener("visibilitychange", wake);
+		}
+	};
+	void connect();
+	return dispose;
 }
 
 /* ------------------------------------------------------------------ */
@@ -385,24 +530,28 @@ export function openEventStream(
 
 let listStreamClose: (() => void) | null = null;
 let listStreamRefs = 0;
+let listStreamLinger: ReturnType<typeof setTimeout> | null = null;
 
 export function retainSessionListStream(): () => void {
 	listStreamRefs++;
-	if (listStreamRefs === 1) {
+	if (listStreamLinger !== null) clearTimeout(listStreamLinger);
+	listStreamLinger = null;
+	if (listStreamClose === null) {
 		listStreamClose = openEventStream(
 			"/api/sessions/events",
 			"sessions",
-			(data) => {
+			(data, connected) => {
 				try {
 					const payload = JSON.parse(data) as {
 						sessions: SessionSummary[];
 						capabilities?: Capabilities;
 					};
+					if (!Array.isArray(payload.sessions)) return false;
 					sessions = payload.sessions;
 					sessionsRevision++;
 					capabilities = payload.capabilities ?? null;
 					wireCatalogueLoader.invalidateCapabilities();
-					sessionsConnected = true;
+					sessionsConnected = connected;
 					publishAsksRevision(payload.sessions);
 					/* A frame is the daemon's answer for every row it carries, so a mark
 					   it AGREES with has been confirmed and is dropped: from here the
@@ -411,26 +560,31 @@ export function retainSessionListStream(): () => void {
 					   press is not an answer to it — and a refused POST is cleared by the
 					   screen that sent it. */
 					settlePinMarks(payload.sessions);
-					emit();
+					emitStream();
+					return true;
 				} catch {
 					/* A malformed frame is dropped; the next one repaints. */
+					return false;
 				}
 			},
-			() => {
-				sessionsConnected = true;
-				emit();
-			},
+			() => {}, // HTTP headers cannot certify a retained list as current.
 			() => {
 				sessionsConnected = false;
-				emit();
+				emitStream();
 			},
+			() => { sessionsConnected = true; emitStream(); },
 		);
 	}
 	return () => {
 		listStreamRefs--;
 		if (listStreamRefs === 0 && listStreamClose) {
-			listStreamClose();
-			listStreamClose = null;
+			// React destroys before creating the next route. A brief linger makes
+			// list/conversation navigation reuse the same authenticated stream.
+			listStreamLinger = setTimeout(() => {
+				listStreamLinger = null;
+				if (listStreamRefs) return;
+				listStreamClose?.(); listStreamClose = null;
+			}, 10000);
 		}
 	};
 }
@@ -460,21 +614,20 @@ function applyConfigFrame(data: string): void {
 
 /* Probe ONCE whether this daemon serves the config stream.
 
-   An older daemon answers 404 on ``/api/config/events``. The EventSource
-   wrapper cannot see that status (its error event carries none), so
-   subscribing blind would retry a route that will never exist with the full
-   15 s backoff — forever, on every load. One probe fetch settles it: headers
+   An older daemon answers 404 on ``/api/config/events``. Keep capability
+   negotiation separate from transport retry: subscribing blind would retry a
+   route that will never exist. One probe fetch settles it: headers
    land immediately even for a live event-stream (``fetch`` resolves on them;
    the body is then cancelled).
 
-   ONLY 404 is PERMANENT absence (CI round 1, MINOR-3). Every other non-ok
-   answer — a 5xx behind a restarting proxy, a captive portal, a tunnel that
+   ONLY 404 is PERMANENT absence (CI round 1, MINOR-3); 401 is a terminal
+   authentication transition. Every other non-ok answer — a 5xx behind a restarting proxy, a captive portal, a tunnel that
    is not up yet — is TRANSIENT and branches to the retry path, so it
    self-heals instead of disabling live language for the whole load; a
    NETWORK failure is the same retry. A daemon that disappears AFTER a
    successful probe keeps the stream wrapper's normal reconnect behaviour;
    the probe covers the mixed-version load. */
-async function configEndpointPresence(): Promise<"present" | "absent" | "retry"> {
+async function configEndpointPresence(): Promise<"present" | "absent" | "retry" | "unauthorized"> {
 	try {
 		const res = await fetch(CONFIG_STREAM_PATH, {
 			headers: { Accept: "text/event-stream" },
@@ -485,6 +638,12 @@ async function configEndpointPresence(): Promise<"present" | "absent" | "retry">
 			await res.body?.cancel();
 		} catch {
 			/* dropping the probe's body is best-effort */
+		}
+		if (res.status === 401) {
+			// A pre-stream capability probe has the same dead-cookie rule as
+			// the stream itself; never retry it as a transient capability error.
+			handleUnauthorized();
+			return "unauthorized";
 		}
 		if (res.ok && isStream) return "present";
 		return res.status === 404 ? "absent" : "retry";
@@ -508,7 +667,7 @@ export function retainConfigStream(): () => void {
 				timer = setTimeout(start, delay);
 				return;
 			}
-			if (presence === "absent") return; // 404: no subscription, no retries
+			if (presence === "absent" || presence === "unauthorized") return; // terminal, no retries
 			configStreamClose = openEventStream(
 				CONFIG_STREAM_PATH,
 				"config",
@@ -540,27 +699,29 @@ export function retainConfigStream(): () => void {
 
 const projectionStreams = new Map<
 	string,
-	{ close: () => void; refs: number }
+	{ close: () => void; refs: number; linger: ReturnType<typeof setTimeout> | null }
 >();
 
 export function retainProjectionStream(sessionId: string): () => void {
 	const existing = projectionStreams.get(sessionId);
 	if (existing) {
 		existing.refs++;
+		if (existing.linger !== null) clearTimeout(existing.linger);
+		existing.linger = null;
 	} else {
 		projections.set(sessionId, { projection: null, connected: false });
 		let awaitingSnapshot = true;
 		const close = openEventStream(
 			`/api/sessions/${encodeURIComponent(sessionId)}/events`,
 			"projection",
-			(data) => {
+			(data, connected) => {
 				let incoming: SessionProjection;
 				try {
 					incoming = normalizeProjection(JSON.parse(data) as SessionProjection);
 				} catch {
-					return;
+					return false;
 				}
-				if (incoming.session_id !== sessionId) return;
+				if (incoming.session_id !== sessionId) return false;
 				const current = projections.get(sessionId);
 				/* The daemon reconciles owner epochs while it is alive. Its counter
 				   can restart after reconnection, whose first authenticated snapshot
@@ -569,11 +730,12 @@ export function retainProjectionStream(sessionId: string): () => void {
 					!awaitingSnapshot && current?.projection &&
 					incoming.version < current.projection.version
 				) {
-					return;
+					return false;
 				}
 				awaitingSnapshot = false;
-				projections.set(sessionId, { projection: incoming, connected: true });
-				emit();
+				projections.set(sessionId, { projection: incoming, connected });
+				emitStream();
+				return true;
 			},
 			() => {
 				// Connection establishment alone does not validate the old rendered
@@ -581,28 +743,41 @@ export function retainProjectionStream(sessionId: string): () => void {
 				awaitingSnapshot = true;
 			},
 			() => {
-				awaitingSnapshot = true;
+				// Outage reporting can land during a new leg's stability window.
+				// Only onOpen resets ordering; a status change must not reopen it.
 				const cur = projections.get(sessionId);
 				if (cur) {
 					/* Retain the last good projection while making its staleness
 					   explicit. Recovery swaps only the connection flag until a fresh
 					   frame arrives, so a flaky link never blanks selected detail. */
 					projections.set(sessionId, { ...cur, connected: false });
-					emit();
+					emitStream();
+				}
+			},
+			() => {
+				const current = projections.get(sessionId);
+				if (current?.projection) {
+					projections.set(sessionId, { ...current, connected: true });
+					emitStream();
 				}
 			},
 		);
-		projectionStreams.set(sessionId, { close, refs: 1 });
+		projectionStreams.set(sessionId, { close, refs: 1, linger: null });
 	}
 	return () => {
 		const entry = projectionStreams.get(sessionId);
 		if (!entry) return;
 		entry.refs--;
 		if (entry.refs > 0) return;
-		entry.close();
-		projectionStreams.delete(sessionId);
-		projections.delete(sessionId);
-		emit();
+		// A glance at the list and back must not tear down the viewer.
+		entry.linger = setTimeout(() => {
+			entry.linger = null;
+			if (entry.refs > 0) return;
+			entry.close();
+			projectionStreams.delete(sessionId);
+			projections.delete(sessionId);
+			emitStream();
+		}, 5000);
 	};
 }
 

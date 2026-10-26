@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -33,6 +34,53 @@ from local_operator.tunnels.config import validate_connection
 MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_STREAM_SECONDS = 60
 AUTHORIZATION_LEASE_SECONDS = 30
+
+
+logger = logging.getLogger(__name__)
+
+
+class RelayStreamResponse(StreamingResponse):
+    """Finalize the proxied origin even when ASGI cancels this response task.
+
+    Two losses have to be covered separately, which is why the origin's own
+    close arrives as ``on_close`` rather than being reached through the body
+    generator alone. Starlette's task-group cancellation does not reliably
+    finalize an async-for body blocked between sends; and a cancellation that
+    lands before the generator's first ``__anext__`` leaves ``aclose()`` on that
+    generator a no-op, so its ``finally`` never runs. A parked
+    ``http.response.start`` is exactly that second case. Repeating the close is
+    safe: ``httpx.Response.aclose`` is guarded by ``is_closed``.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        on_close: Callable[[], Awaitable[None]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_close = on_close
+
+    async def stream_response(self, send) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            await self._release_origin()
+
+    async def _release_origin(self) -> None:
+        for close in (getattr(self.body_iterator, "aclose", None), self._on_close):
+            if close is None:
+                continue
+            try:
+                await close()
+            except Exception:
+                # The in-flight exception belongs to the request — normally the
+                # CancelledError that brought us here — so a failing cleanup
+                # must not replace it. CancelledError is a BaseException and so
+                # still propagates untouched.
+                logger.warning("relay stream cleanup failed", exc_info=True)
+
+
 PROOF_HEADER = "x-radient-tunnel-assertion"
 # Why the gateway refused a relayed request, and what each surface says about it.
 #
@@ -674,19 +722,44 @@ class Gateway:
             # SSE is deliberately streamed with backpressure. Reconnects at
             # most every minute recheck edge policy; a backend revoke
             # also stops reads after the next origin chunk (keepalives are 15s).
+            #
+            # THE LEASE BOUNDS THE UPSTREAM READ, NEVER THE DOWNSTREAM WRITE.
+            # An `asyncio.timeout` around this whole loop also covered the time
+            # the task spends inside Starlette's `send` between yields, and on a
+            # slow phone link (backpressure: uvicorn parks `send` on drain) the
+            # deadline cancelled the task THERE, outside this generator — so the
+            # TimeoutError was never caught here, the response never sent its
+            # final empty chunk, and uvicorn logged "ASGI callable returned
+            # without completing response". The phone saw a truncated chunked
+            # body: a network ERROR instead of the clean end-of-stream its
+            # rotation rule expects. Measured: a reader that stalls past the
+            # deadline gets no terminator with the old shape and a complete
+            # body with this one. The deadline is unchanged; it is checked
+            # before every read and bounds each wait.
+            deadline = time.monotonic() + MAX_STREAM_SECONDS
+            chunks = upstream.aiter_raw()
             try:
-                async with asyncio.timeout(MAX_STREAM_SECONDS):
-                    async for chunk in upstream.aiter_raw():
-                        if self.revoked or time.monotonic() >= self.authorized_until:
-                            break
-                        yield chunk
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        chunk = await asyncio.wait_for(anext(chunks), remaining)
+                    except StopAsyncIteration:
+                        break
+                    if self.revoked or time.monotonic() >= self.authorized_until:
+                        break
+                    yield chunk
             except (TimeoutError, httpx.HTTPError):
                 pass
             finally:
                 await upstream.aclose()
 
-        return StreamingResponse(
-            stream(), status_code=upstream.status_code, headers=response_headers
+        return RelayStreamResponse(
+            stream(),
+            on_close=upstream.aclose,
+            status_code=upstream.status_code,
+            headers=response_headers,
         )
 
     async def websocket(self, socket: WebSocket) -> None:
