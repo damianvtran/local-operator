@@ -352,13 +352,14 @@ async def test_a_receipt_minted_for_one_link_cannot_publish_another(api) -> None
     assert transport.commit_calls == [] and transport.preview_calls == []
 
 
-async def test_a_private_skill_cannot_be_pushed_by_a_caller_outside_its_scope(api) -> None:
-    """The negative case: the hub refuses membership, the route answers a typed 403.
+async def test_a_hub_membership_refusal_is_a_typed_403_and_advances_nothing(api) -> None:
+    """The hub answers ``not_a_member`` to the commit: a typed refusal, nothing recorded.
 
-    The credential selector is the caller's identity here: the hub answers
-    ``not_a_member`` to the commit, which must surface as a typed refusal (not a
-    success, not an untyped 500), leave the preview receipt unspent, and record no
-    accepted outbound state.
+    Scope: this proves the route's handling of the hub's membership verdict (typed
+    403, receipt unspent, outbound state not advanced). It does NOT prove tenant
+    selection -- the credential-selector fake ignores which tenant it is asked for;
+    that rule is ``push_transport`` reading the stored identity, covered by the
+    foreign-origin test below and the QA round's org-A/org-B stub.
     """
 
     client, root, _, _ = api
@@ -459,3 +460,51 @@ async def test_a_client_for_another_origin_cannot_publish_this_link(api) -> None
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "origin-conflict"
     assert foreign.calls == []
+
+
+async def test_a_hub_5xx_on_commit_is_the_502_retry_class_not_a_422(api) -> None:
+    """Q2: no hub decision (an HTTP 5xx) answers the retry class under ``hub-error``."""
+
+    client, root, _, _ = api
+    link_id, _ = await link_skill(api)
+    transport = arm_transport(api, fail_commit=PushRefused("internal", "boom", outage=True))
+    edit_locally(root)
+    receipt = (await preview(client, link_id))["preview"]["preview_receipt"]
+
+    response = await client.post(
+        "/v1/desktop/hub/updates/push", json=confirm_body(link_id, receipt)
+    )
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "hub-error"
+    assert len(transport.commit_calls) == 1
+    assert len(spent(root)) == 1  # the receipt survives: a retry is a valid act
+
+
+async def test_a_commit_that_landed_before_the_response_reconciles_on_retry(api) -> None:
+    """M1: a timed-out commit that LANDED is settled as pushed, not a false conflict.
+
+    The first confirm's commit times out (pending-reconciliation, stored intent).
+    Meanwhile the hub applied it, so it now serves OUR bytes at a new revision. The
+    same-id retry must report ``pushed`` without sending a second commit.
+    """
+
+    client, root, _, _ = api
+    link_id, anon = await link_skill(api)
+    transport = arm_transport(api, hang_commit=True)
+    edit_locally(root)
+    receipt = (await preview(client, link_id))["preview"]["preview_receipt"]
+    body = confirm_body(link_id, receipt)
+
+    first = await client.post("/v1/desktop/hub/updates/push", json=body)
+    assert first.status_code == 200, first.text
+    assert first.json()["result"]["reports"][0]["outcome"] == "pending-reconciliation"
+    assert len(transport.commit_calls) == 1
+
+    # The hub applied the commit after all: it serves the edited bytes at rev-2.
+    anon.payload = envelope(manifest(ALIAS, body="Say hello, loudly.\n"), revision='"hub-rev-2"')
+    retry = await client.post("/v1/desktop/hub/updates/push", json=body)
+
+    assert retry.status_code == 200, retry.text
+    (report,) = retry.json()["result"]["reports"]
+    assert report["outcome"] == "pushed" and report["remote_revision"] == '"hub-rev-2"'
+    assert len(transport.commit_calls) == 1  # reconciled, never re-sent

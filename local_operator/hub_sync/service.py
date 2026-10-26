@@ -5555,6 +5555,21 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
             raise changed("the link changed while it was being checked")
         record = fresh
 
+        # RECONCILE A COMMIT THAT LANDED. A commit that timed out leaves a
+        # pending-reconciliation outbox record holding the VERBATIM intent. If the
+        # hub now serves exactly that content, our write landed and the hub's new
+        # revision is ours: settle it as pushed instead of reading our own success
+        # as somebody else's edit (the check below) -- and never replay the old
+        # conditional commit, which the moved revision would 412. Content equality
+        # is the proof; a hub that moved to anything else still falls through to
+        # the refusal.
+        reconciled = _reconcile_landed_commit(ctx, check, f"push-skill-{check.local_id}")
+        if reconciled is not None:
+            outcome = reconciled
+            record_push_outcome(ctx, check, outcome)
+            _delete_publication_preview(ctx.config_dir, preview_receipt, PUSH_PREVIEW_DIR)
+            return _push_answer(identity, check, outcome, outage=False)
+
         # THE HUB DID NOT MOVE: its revision is either the one the link last saw or
         # the one this machine's own last push produced. Anything else is somebody
         # else's edit, and the answer is to pull, never to resend over it.
@@ -5624,8 +5639,54 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
             # SPENT: a second confirm with this receipt (any request id) finds nothing.
             _delete_publication_preview(ctx.config_dir, preview_receipt, PUSH_PREVIEW_DIR)
 
+    # An OUTAGE (transport failure or hub 5xx) is settled in the outbox with a
+    # streak; read it back so the route can answer the retry class rather than
+    # the hub's own code.
+    settled = Outbox(ctx.config_dir).read(operation_id)
+    return _push_answer(
+        identity, check, outcome, outage=bool(settled is not None and settled.outage_streak > 0)
+    )
+
+
+def _reconcile_landed_commit(ctx: HubSyncContext, check: chk.ItemCheck, operation_id: str) -> Any:
+    """A ``pushed`` outcome when a stored uncertain commit already landed, else None."""
+
+    from local_operator.hub_sync.outbox import Outbox
+    from local_operator.hub_sync.push import PushOutcome, reconcilable
+
+    outbox = Outbox(ctx.config_dir)
+    record = outbox.read(operation_id)
+    if not reconcilable(record) or record is None or not isinstance(record.intent, Mapping):
+        return None
+    document = record.intent.get("document")
+    if (
+        not isinstance(document, Mapping)
+        or check.remote is None
+        or not check.remote_revision
+        or not _same_content(document, check.remote)
+    ):
+        return None
+    outbox.settle(
+        operation_id,
+        generation=record.generation,
+        result={"revision": check.remote_revision, "reconciled": True},
+    )
+    return PushOutcome(
+        "pushed",
+        operation_id=operation_id,
+        accepted={"accepted_document": dict(check.remote), "operation_id": operation_id},
+        revision=check.remote_revision,
+    )
+
+
+def _push_answer(
+    identity: LinkIdentity, check: chk.ItemCheck, outcome: Any, *, outage: bool
+) -> dict[str, Any]:
+    """The confirm answer: state, reason, outage class and the directional report."""
+
     return {
         "state": outcome.state,
+        "outage": outage,
         "reason": outcome.reason,
         "report": {
             "kind": "skill",
