@@ -3223,6 +3223,14 @@ class Session:
         #: construction (``harness.subagent``): a setter-only value installed
         #: on a parent after construction would otherwise never reach a child.
         confinement_root: str | None = None,
+        #: The only directory this session's SHELL may write to, or ``None``.
+        #: Set by ``harness.subagent`` for a ``scout`` child (its own
+        #: scratchpad) and never by a host: reads stay open, writes and the
+        #: network are refused by the kernel sandbox in
+        #: ``local_operator.tools.confinement.ShellWriteConfinement``.
+        #: Constructor-only on purpose -- there is no setter that could lift
+        #: it after the child's tool surface was built around it.
+        shell_write_root: str | None = None,
         #: The short name this session was DELEGATED under, set only on a
         #: subagent (``zoom-scroll-fix``, ``bridge-qa``). A child never
         #: generates a conversation title — naming runs in the TUI host and the
@@ -3663,6 +3671,13 @@ class Session:
         #: read by ``_build_tool_context`` on every turn, which is what makes
         #: it reach both the createIf checks and the executors.
         self._confinement_root = confinement_root
+        #: The write-confined shell root (see the ``shell_write_root``
+        #: parameter). Stored as given, like ``confinement_root``:
+        #: ``ShellWriteConfinement.at`` resolves it at the enforcement point, so
+        #: the sandbox profile always names the real path. Read by
+        #: ``_build_tool_context`` and by ``harness.subagent`` to keep the
+        #: confinement sticky downward.
+        self._shell_write_root = shell_write_root or None
         #: Settled model-owned jobs whose results are durably journaled but have
         #: not yet committed into this turn's model context, in settle order.
         #: Safe aside boundaries offer the SAME canonical rows to the running
@@ -19195,6 +19210,11 @@ class Session:
             # tool's enforcement point reads this single answer (see
             # ``local_operator.tools.confinement``).
             confinement_root=self._confinement_root,
+            # The scout's write-confined shell root, when it has one: the bash
+            # executor wraps every command in the write-confining sandbox (or
+            # refuses) whenever this is set. Dropped here, a scout's shell
+            # would run UNWRAPPED -- see ``test_tool_context_parity``.
+            shell_write_root=self._shell_write_root,
             # Derived, never configured: see :meth:`_scratchpad_dir`.
             scratchpad_dir=self._scratchpad_dir(),
             # The session's OWN directory: where the eval tool records its

@@ -196,7 +196,11 @@ from local_operator.tools import (
     shell_env,
     sleep_guard,
 )
-from local_operator.tools.confinement import ToolConfinement, confinement_of
+from local_operator.tools.confinement import (
+    ToolConfinement,
+    confinement_of,
+    shell_write_confinement_of,
+)
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -3999,9 +4003,22 @@ async def execute_bash(
     # bash ``env`` argument: a model-authored env map would have to carry
     # the value (or a placeholder we do not have), which is the leak this
     # store exists to prevent.
+    # A WRITE-CONFINED shell (the ``scout`` role, see
+    # ``tools.confinement.ShellWriteConfinement``) is resolved first because it
+    # changes what the child is HANDED, not only how it is spawned. The full
+    # confinement takes precedence: it is the stricter boundary (reads jailed
+    # too), so a session carrying both runs under it.
+    confinement = confinement_of(context)
+    shell_write = None if confinement is not None else shell_write_confinement_of(context)
     store = context.variables if context is not None else None
     credential_env = getattr(store, "credential_env", None)
-    extra = credential_env() if callable(credential_env) else None
+    # NO credentials for a write-confined shell. The sandbox refuses its
+    # network, so a session credential could not be USED for anything a
+    # read-only role is for -- it could only be READ (``env``, ``printenv``)
+    # and carried out through the scout's own ``web_fetch``. Withholding it is
+    # the whole defence; masking the output would be the after-the-fact
+    # filter the secret-sink scan below exists to avoid relying on.
+    extra = credential_env() if callable(credential_env) and shell_write is None else None
 
     # MESH-BORROWED GITHUB, fetch-on-use (network/credentials/github.py). When this
     # device is a holder of a remote ``github`` credential, the env is rebuilt per
@@ -4011,7 +4028,10 @@ async def execute_bash(
     # persisting ``store`` helper can never receive the token — and the token
     # itself rides GH_TOKEN/GITHUB_TOKEN for ``gh`` (which has no helper protocol).
     # On a device that borrows nothing this is a file read and an empty answer.
-    github_env = await _github_git_injections(context)
+    # Not borrowed at all for a write-confined shell, for the reason the
+    # session credentials above are withheld: no network to use it on, so the
+    # token could only leak. Skipping the call also skips the broker round trip.
+    github_env = await _github_git_injections(context) if shell_write is None else {}
 
     # Refuse a call in which a stored secret would be PRINTED, before any child
     # exists. The control this replaces is an output filter (the redaction
@@ -4142,16 +4162,24 @@ async def execute_bash(
     # working, and a temp file they leave behind sits inside the same boundary
     # as everything else the session writes. Hosts with no mechanism refuse
     # the command below rather than run it unwrapped.
-    confinement = confinement_of(context)
-    if confinement is not None:
-        temp = confinement.temp_dir()
+    # A write-confined shell gets the same temp redirection, for a sharper
+    # reason: its sandbox refuses every write outside the root, so a tool that
+    # honours ``TMPDIR`` would otherwise fail on the per-user temp dir it can
+    # no longer write (measured: ``python3``'s ``tempfile`` does exactly that).
+    temp_owner = confinement if confinement is not None else shell_write
+    if temp_owner is not None:
+        temp = temp_owner.temp_dir()
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
     env = shell_env.child_environment(
         # A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
         # the model's own command must not read ambient credentials out of its
-        # environment. Ordinary sessions keep the process's configured policy.
-        shell_env.policy_for_confinement(None if confinement is None else confinement.root),
+        # environment. A write-confined shell runs STRICT for the same reason
+        # (the provider key in lop's own environment is a credential too).
+        # Ordinary sessions keep the process's configured policy.
+        shell_env.CONFINED_SHELL_POLICY
+        if shell_write is not None
+        else shell_env.policy_for_confinement(None if confinement is None else confinement.root),
         injections=injections,
     )
 
@@ -4193,6 +4221,16 @@ async def execute_bash(
         wrapped = confinement.wrap(shell_argv)
         if wrapped is None:
             return _error(tool_call_id, "bash", confinement.spawn_refusal())
+        shell_argv = wrapped
+    elif shell_write is not None:
+        # Wrap or refuse; never run unwrapped. This branch is what makes the
+        # ``read`` approval tier ``build_bash_tool`` gives this shell honest:
+        # a call that reaches here either runs inside the sandbox or does not
+        # run. No cwd check: reads are open, so any cwd is legitimate, and a
+        # write relative to it is refused by the kernel like any other.
+        wrapped = shell_write.wrap(shell_argv)
+        if wrapped is None:
+            return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
     try:
         process = await asyncio.create_subprocess_exec(
@@ -5386,7 +5424,33 @@ def _bash_oversized_streams(
     return stdout, stderr, footer, spill_details
 
 
-def build_bash_tool() -> AgentTool:
+#: What a WRITE-CONFINED shell (the ``scout`` role) is told about its sandbox,
+#: appended to the ordinary description. Paid only in scout children: the
+#: default session's ``bash`` schema is byte-identical with or without it, so
+#: the start-of-session context budget (``scripts/bench_context_budget.py``)
+#: does not move. It names the refusal's actual spelling because a model that
+#: sees "Operation not permitted" with no explanation retries the write
+#: elsewhere instead of reporting; and it is how an INSTALLED scout whose
+#: frozen instructions still say "you cannot run anything" learns otherwise.
+_WRITE_CONFINED_BASH_NOTE = (
+    f" SANDBOXED: reads anywhere; writes only under ${SCRATCHPAD_PATH_ENV}; no "
+    "network (use web_fetch); credential files unreadable. A refused write or "
+    'connect fails with "Operation not permitted" -- that is the sandbox, not a bug.'
+)
+
+
+def build_bash_tool(context: ToolContext | None = None) -> AgentTool:
+    """The ``bash`` tool; write-confined when ``context`` carries a root.
+
+    ``context`` is the construction-time context (``TOOL_BUILDERS``). Only
+    ``shell_write_root`` is read, and only to describe the sandbox and lower
+    the approval tier: enforcement is ``execute_bash``'s, which reads the
+    per-turn context and wraps or refuses on its own. The two cannot disagree
+    in the dangerous direction -- a ``read``-tier schema with an unwrapped
+    executor -- because the scout child's construction and per-turn contexts
+    carry the same root (``harness.subagent``).
+    """
+    write_confined = shell_write_confinement_of(context) is not None
     return AgentTool(
         name="bash",
         label="Shell",
@@ -5413,9 +5477,15 @@ def build_bash_tool() -> AgentTool:
             # about to run a chain of shell steps reads THIS description, and
             # one short clause here is the whole fix.
             "For multi-step Python, prefer `eval`."
+            + (_WRITE_CONFINED_BASH_NOTE if write_confined else "")
         ),
         parameters=BashParams.model_json_schema(),
-        approval_tier="exec",
+        # ``read`` ONLY when write-confined: such a call can run inside the
+        # write/network-denying sandbox or be refused, never run on the host
+        # (``execute_bash``'s ``elif shell_write`` branch). It changes nothing
+        # a ``read`` call could not, so prompting for it in "ask" mode would
+        # charge the operator an approval per ``strings`` for no protection.
+        approval_tier="read" if write_confined else "exec",
         # bash runs shared when non-pty; models batch independent
         # commands, and exclusive would serialize the common case.
         concurrency="shared",

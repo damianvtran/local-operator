@@ -204,6 +204,8 @@ run under.
 
 from __future__ import annotations
 
+import functools
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -316,6 +318,18 @@ def kernel_exposed_read_subtrees() -> tuple[Path, ...]:
     Layouts that place controller state in these trees are refused at
     validation before anything is constructed instead (see
     ``sdk._resolve_world_root``).
+
+    CORRECTED 2026-10-26 (the scout-shell work re-measured it on macOS
+    27.0.1): an earlier version of this note said a broad allow followed by a
+    specific deny "still reached the denied file, in BOTH rule orders". That
+    is not what this host does. With a FILTERED allow (``(allow file-read*
+    (subpath ...))``, the shape :meth:`ToolConfinement.profile` emits) the
+    LATER rule wins: allow-then-deny refuses the file, deny-then-allow reads
+    it. With an UNFILTERED ``(allow file-read*)`` a filtered deny wins in
+    either order. Both are pinned by ``tests/unit/tools/
+    test_shell_write_confinement.py``. Refusing such layouts at validation
+    stays the right call regardless: it does not depend on seatbelt's
+    precedence rules, which Apple documents nowhere and could change.
     """
 
     subtrees = [Path(path) for path in _SYSTEM_READ_SUBPATHS]
@@ -544,3 +558,232 @@ def confinement_of(context: ToolContext | None) -> ToolConfinement | None:
     """The one call site-facing spelling of :meth:`ToolConfinement.from_context`."""
 
     return ToolConfinement.from_context(context)
+
+
+# ---------------------------------------------------------------------------
+# Write-only confinement: the read-only research shell (``scout``).
+# ---------------------------------------------------------------------------
+#
+# WHY A SECOND SHAPE. ``ToolConfinement`` jails an unattended episode: reads
+# AND writes stay inside one root and the in-process network tools refuse. A
+# ``scout`` is the opposite trade. Its job is reading -- the whole workspace
+# and the web -- and two real jobs failed because it could not run
+# ``strings`` on a binary or unpack an ``.asar`` into scratch, so it fell back
+# to an (edited) copy of the source on GitHub. What it must not do is CHANGE
+# anything. So this shape keeps reads open, confines WRITES to the scout's
+# own scratchpad, and gives the shell no network at all (``web_search``/
+# ``web_fetch`` stay the scout's network, unchanged and outside this module).
+#
+# The enforcement is the same kernel boundary as above, for the same reason:
+# a mutating command cannot be recognised from its text (``python3 -c``,
+# ``tar -x``, ``find -delete`` and ``git`` all write), so the write check runs
+# at the syscall. Measured on macOS 27.0.1 with this profile: writes to the
+# root, ``strings``/``otool``/``file``, ``python3`` with ``TMPDIR`` in the
+# root and ``tar -x`` into the root all work; writing, ``rm``, ``mv``,
+# ``chmod``, ``touch``, a symlink or hard link escape, ``git add``/``commit``,
+# loopback and AF_UNIX connects, ``kill`` of a process outside the sandbox and
+# a nested permissive ``sandbox-exec`` are all refused (see the darwin tests).
+#
+# THE RESIDUAL, stated: the shell reads whatever the user can read, minus the
+# credential stores denied below. That is no wider than the ``read`` tool a
+# scout already holds, and command output still passes the bash tool's
+# credential masking and secret-sink scan. The deny list is a list, not a
+# proof: a token in a file this list does not name (``~/.npmrc``,
+# ``~/.pypirc``, a project's own config) is readable here exactly as it is
+# through ``read``.
+
+#: Credential stores in the operator's HOME that a write-confined shell may
+#: not READ, relative to the resolved home directory. Each is a store whose
+#: whole purpose is holding a credential: SSH keys, the login keychain files
+#: (measured: readable as raw files without this deny), cloud and forge CLI
+#: tokens. ``.config/glab-cli`` is the GitLab twin of ``.config/gh`` and is
+#: the forge CLI this operator's other codebase uses.
+_HOME_SECRET_SUBPATHS: tuple[str, ...] = (
+    ".ssh",
+    "Library/Keychains",
+    ".aws",
+    ".config/gh",
+    ".config/glab-cli",
+    ".netrc",
+)
+
+#: Dotenv files anywhere on disk: ``.env``, ``prod.env``, ``.env.local``,
+#: ``prod.env.local`` -- and NOT ``envy.txt`` or ``.envrc`` (measured).
+#: A regex because these live in every project tree, not under one subpath.
+_DOTENV_REGEX = r"/[^/]*\.env(\.[^/]*)?$"
+
+#: The no-op profile the availability probe applies. ``sandbox-exec`` can be
+#: PRESENT and still unable to apply a profile -- most commonly when lop is
+#: itself running inside a sandbox, where ``sandbox_apply`` answers EPERM --
+#: and a host in that state would refuse every command at execute time. The
+#: probe finds that once, before a scout is ever handed a shell it cannot use.
+_PROBE_PROFILE = "(version 1)(allow default)"
+
+
+def _seatbelt_regex_literal(path: str) -> str:
+    """``path`` with every regex metacharacter escaped, for a ``#"..."`` rule."""
+
+    return "".join(f"\\{ch}" if ch in r".^$*+?()[]{}|\"" else ch for ch in path)
+
+
+@functools.lru_cache(maxsize=1)
+def _sandbox_apply_probe_reason() -> str | None:
+    """Why ``sandbox-exec`` cannot apply a profile here, or ``None`` if it can.
+
+    Cached for the life of the process: the answer is a property of the host
+    and of how lop was launched, neither of which changes mid-run, and the
+    probe is a ~16 ms spawn that would otherwise run per command.
+    """
+
+    try:
+        completed = subprocess.run(
+            [str(SANDBOX_EXEC), "-p", _PROBE_PROFILE, "/usr/bin/true"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{SANDBOX_EXEC} could not be run ({exc})"
+    if completed.returncode != 0:
+        detail = completed.stderr.decode(errors="replace").strip() or "no detail"
+        return f"{SANDBOX_EXEC} cannot apply a profile on this host ({detail})"
+    return None
+
+
+def shell_sandbox_unavailable_reason() -> str | None:
+    """Why a write-confined shell cannot run here, or ``None`` when it can.
+
+    The static check first (platform, binary present), then the cached apply
+    probe. Every caller that decides whether a scout HAS a shell, and every
+    spawn that decides whether to RUN one, reads this one answer, so the two
+    cannot disagree.
+    """
+
+    return sandbox_unavailable_reason() or _sandbox_apply_probe_reason()
+
+
+def _secret_read_denials() -> tuple[str, ...]:
+    """The ``(deny file-read* ...)`` filters for credential stores.
+
+    Paths are RESOLVED because seatbelt matches the vnode's real path: a
+    ``/tmp``-style symlinked home or config dir spelled unresolved would match
+    nothing. Both the active config dir and the default ``~/.local-operator``
+    are covered, so an isolated ``LOCAL_OPERATOR_CONFIG_DIR`` does not leave
+    the operator's real store readable.
+    """
+
+    from local_operator.paths import config_dir  # local: paths imports widely
+
+    home = Path.home().expanduser().resolve()
+    filters: list[str] = []
+    config_roots = {config_dir().expanduser().resolve(), home / ".local-operator"}
+    for root in sorted(config_roots):
+        # ``secrets/`` holds the encrypted store AND its master key; the
+        # ``credentials`` dir, ``credentials.env`` (+ backups) and
+        # ``auth.db`` (+ WAL/SHM) are matched by prefix so a sibling
+        # spelling the store writes later is covered too.
+        filters.append(f'(subpath "{root / "secrets"}")')
+        prefix = _seatbelt_regex_literal(str(root))
+        filters.append(f'(regex #"^{prefix}/(credentials|auth\\.db)")')
+    filters.extend(f'(subpath "{home / rel}")' for rel in _HOME_SECRET_SUBPATHS)
+    filters.append(f'(regex #"{_DOTENV_REGEX}")')
+    return tuple(filters)
+
+
+@dataclass(frozen=True)
+class ShellWriteConfinement:
+    """A shell that reads the host, writes only under ``root``, and has no network.
+
+    The ``scout`` role's shell (see ``harness.subagent.READ_ONLY_SHELL_ROLES``).
+    Mirrors :class:`ToolConfinement`'s call-site surface (``from_context``,
+    ``wrap``, ``spawn_refusal``, ``temp_dir``) so ``execute_bash`` treats the
+    two the same way: wrap, or refuse -- never run unwrapped.
+    """
+
+    root: Path
+
+    @classmethod
+    def at(cls, root: str | Path) -> ShellWriteConfinement:
+        """A confinement for ``root``, resolved once (see :meth:`ToolConfinement.at`)."""
+
+        return cls(root=Path(root).expanduser().resolve())
+
+    @classmethod
+    def from_context(cls, context: ToolContext | None) -> ShellWriteConfinement | None:
+        """The write confinement a tool call carries, or ``None``.
+
+        ``getattr`` for the duck-typed contexts :meth:`ToolConfinement.
+        from_context` already tolerates: no field means not confined.
+        """
+
+        raw = getattr(context, "shell_write_root", None)
+        if not raw:
+            return None
+        return cls.at(raw)
+
+    def wrap(self, argv: Sequence[str]) -> list[str] | None:
+        """``argv`` under the write-confining sandbox, or ``None`` to refuse."""
+
+        if shell_sandbox_unavailable_reason() is not None:
+            return None
+        return [str(SANDBOX_EXEC), "-p", self.profile(), *argv]
+
+    def spawn_refusal(self) -> str:
+        """The failure-closed sentence for a host that cannot enforce the boundary."""
+
+        reason = shell_sandbox_unavailable_reason() or "an unknown reason"
+        return (
+            f"refused: this shell may write only under {self.root} and this host "
+            f"cannot enforce that for shell children ({reason}); a read-only "
+            "session refuses to run commands it cannot confine"
+        )
+
+    def temp_dir(self) -> Path:
+        """The shell's temp directory INSIDE the root, created on demand."""
+
+        temp = self.root / "tmp"
+        temp.mkdir(parents=True, exist_ok=True)
+        return temp
+
+    def profile(self) -> str:
+        """The seatbelt profile for this root, as sandbox-exec's ``-p`` text.
+
+        RULE ORDER IS LOAD-BEARING, and the credential denials come LAST. On
+        this host a later conflicting rule wins over an earlier one when both
+        carry a filter, and a filtered deny beats the unfiltered
+        ``(allow file-read*)`` in either order (measured; see
+        :func:`kernel_exposed_read_subtrees`). Putting the denies after every
+        allow is correct under both behaviours, so a future change to how the
+        unfiltered allow ranks cannot silently reopen them.
+
+        Network: there is NO network allow anywhere, which is the actual
+        guarantee -- the deny line is documentation (see
+        :meth:`ToolConfinement.profile`'s fourth point for why a network allow
+        defeats the deny wherever it sits). Mach: the same two-name allowlist
+        as :class:`ToolConfinement`. Signals: only within the same sandbox,
+        so the shell cannot ``kill`` the operator's processes.
+        """
+
+        writes = " ".join(f'(literal "{path}")' for path in _SYSTEM_WRITE_LITERALS)
+        mach = " ".join(f'(global-name "{name}")' for name in _MACH_LOOKUP_GLOBAL_NAMES)
+        denials = " ".join(_secret_read_denials())
+        return (
+            "(version 1)\n"
+            "(deny default)\n"
+            "(allow process-fork)\n"
+            "(allow process-exec)\n"
+            "(allow signal (target same-sandbox))\n"
+            "(allow sysctl-read)\n"
+            f"(allow mach-lookup {mach})\n"
+            "(deny network*)\n"
+            "(allow file-read*)\n"
+            f'(allow file-write* (subpath "{self.root}") {writes})\n'
+            '(allow file-ioctl (literal "/dev/null") (literal "/dev/tty"))\n'
+            f"(deny file-read* {denials})\n"
+        )
+
+
+def shell_write_confinement_of(context: ToolContext | None) -> ShellWriteConfinement | None:
+    """The call-site spelling of :meth:`ShellWriteConfinement.from_context`."""
+
+    return ShellWriteConfinement.from_context(context)
