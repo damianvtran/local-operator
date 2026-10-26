@@ -25444,13 +25444,6 @@ _NETWORK_METADATA_KEYS = frozenset(
     }
 )
 
-#: Keys THIS module adds to an entry after writing a body. Deliberately NOT in
-#: `_NETWORK_METADATA_KEYS`: a host that sent one of these would otherwise have
-#: its value rendered, and on a body-less entry the result would describe a
-#: private file that does not exist (agent review round 6, R6-1). They are
-#: merged in by index after the filter, from this module's own write results.
-_NETWORK_BODY_FACT_KEYS = frozenset({"request_body_file", "request_body_bytes"})
-
 
 def _network_safe_url(raw: object) -> str:
     """Keep URL structure useful for correlation, never query values or credentials."""
@@ -25611,11 +25604,19 @@ async def _browser_network(
             raise ValueError("the read's combined request bodies exceed the 256 KiB limit")
         facts_by_id: dict[int, dict[str, Any]] = {}
         for entry, data in pending:
+            # A body is only ever attributed by the entry id this module already
+            # trusts. An entry without one, or two entries sharing one, cannot be
+            # attributed at all: raising here runs the rollback below, so the
+            # read fails AND unlinks every body it wrote rather than leaving an
+            # unreferenced secret on disk (agent review round 7, R7-1/R7-2).
+            identifier = entry.get("id")
+            if not isinstance(identifier, int):
+                raise ValueError("the host returned a request body for an entry with no id")
+            if identifier in facts_by_id:
+                raise ValueError("the host returned duplicate network entry ids")
             facts = _write_network_body(data, context)
             written.append(Path(facts["request_body_file"]))
-            identifier = entry.get("id")
-            if isinstance(identifier, int):
-                facts_by_id[identifier] = facts
+            facts_by_id[identifier] = facts
         safe = _network_metadata_result(raw)
         # Facts are attached AFTER the allowlist, keyed by the entry id this
         # module already trusted, so no host-supplied path can be rendered.

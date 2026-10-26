@@ -477,3 +477,25 @@ def test_a_paren_path_is_redacted_without_losing_the_value():
     assert "s20" not in rendered
     assert "https://example.test/wiki/Foo_(bar)?code=" in rendered
     assert rendered.count(").") >= 1
+
+
+def test_a_body_without_an_entry_id_rolls_back_and_persists_nothing(monkeypatch, tmp_path):
+    encoded = base64.b64encode(b"synthetic-fixture").decode()
+
+    async def fake_bridge(tool_call_id, action, wire, *, surface="", client=None):
+        return {"entries": [{"url": "https://e.test/a", "request_body_base64": encoded}]}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
+    ctx = _ctx(tmp_path)
+    result = asyncio.run(
+        builtin._browser_network(
+            "call",
+            _surface(),
+            "network_read",
+            _params(url="https://e.test/a", include_request_body=True, approved=True),
+            ctx,
+        )
+    )
+    assert result.is_error
+    scratch = tmp_path / "scratch"
+    assert not scratch.exists() or not list(scratch.glob("network-request-*.body"))
