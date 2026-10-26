@@ -332,3 +332,29 @@ def test_a_network_denial_does_not_claim_a_navigation_prompt():
     # Every other action keeps the navigation copy it has always had.
     other = BridgeError(code=ErrorCode.ORIGIN_DENIED, message="", data={"origin": "https://x.test"})
     assert "navigation" in format_error(other, action="goto", host="ui")
+
+
+def test_host_drop_counters_survive_the_metadata_allowlist(monkeypatch, tmp_path):
+    """The host's own counters must reach the caller; a dropped counter reads as zero."""
+
+    async def fake_bridge(tool_call_id, action, wire, *, surface="", client=None):
+        return {
+            "active": True,
+            "count": 1,
+            "dropped": 3,
+            "dropped_entries": 3,
+            "body_count": 0,
+            "body_bytes": 0,
+            "dropped_bodies": 2,
+            "entries": [{"id": 1, "url": "https://e.test/a"}],
+        }, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
+    ctx = _ctx(tmp_path)
+    result = asyncio.run(
+        builtin._browser_network("call", _surface(), "network_read", _params(), ctx)
+    )
+    payload = json.loads(result.text)
+    assert payload["dropped_entries"] == 3
+    assert payload["dropped_bodies"] == 2
+    assert payload["body_bytes"] == 0

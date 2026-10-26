@@ -25465,11 +25465,19 @@ def _network_metadata_result(payload: dict[str, Any]) -> dict[str, Any]:
         for key, value in payload.items()
         if key
         in {
+            # Exactly the desktop host's summary keys. It emits
+            # `dropped_entries`/`dropped_bodies`, and the earlier spelling here
+            # (`body_dropped`) silently deleted the real counter from every
+            # result — a counter nobody can read is the same as no counter, and
+            # it hid an oversize body being discarded (real-path probe,
+            # 2026-10-26).
             "active",
             "count",
             "dropped",
+            "dropped_entries",
             "body_count",
-            "body_dropped",
+            "body_bytes",
+            "dropped_bodies",
             "entries",
             "truncated",
             "capture_id",
