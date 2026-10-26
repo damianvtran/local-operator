@@ -3218,7 +3218,8 @@ async def test_other_roles_keep_their_ordinary_shell(tmp_path, monkeypatch):
         assert child._build_tool_context().shell_write_root is None, role
         await child.dispose()
     plain = await build_child(parent, agent="task", job_id="job-plain")
-    assert _bash_of(plain).approval_tier == "exec"
+    plain_bash = _bash_of(plain)
+    assert plain_bash is not None and plain_bash.approval_tier == "exec"
     assert plain._shell_write_root is None
     await plain.dispose()
     await parent.dispose()
