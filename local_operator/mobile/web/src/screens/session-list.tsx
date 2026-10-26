@@ -1016,7 +1016,7 @@ export function SessionListScreen() {
 				   answers for real. */
 				setCountUnverified(true);
 				publishMarkNotice({
-					text: "Could not read what is unread — nothing was cleared. Try again.",
+					text: messageRuntime.t("relay.transcript.session.unread_refused"),
 					danger: true,
 				});
 				return;
@@ -1604,7 +1604,7 @@ export function SessionListScreen() {
 								   explanation. Nothing is posted, and the refusal is stated
 								   in-flow inside this sheet. */
 								if (badge.degraded?.length) {
-									setPinNotice("Could not read what is unread — nothing was cleared. Try again.");
+									setPinNotice(messageRuntime.t("relay.transcript.session.unread_refused"));
 									return;
 								}
 								const row = badge.conversations?.find(row => row.session_id === pinRow.session_id);

@@ -840,6 +840,7 @@ export function AgentConversation({
 				pid={sessionId}
 				jobId={jobId}
 				entries={entries}
+				streaming={detail.status === "running"}
 				peerCycles={projection?.peer_cycles === 1}
 				tailContent={
 					<>
