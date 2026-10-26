@@ -52,6 +52,7 @@ from local_operator.harness.message_types import (
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_INCIDENT_MESSAGE_TYPE,
 )
 
 # The row DECISIONS both this fold and the TUI's must make identically. They
@@ -1304,6 +1305,19 @@ def cap_projection_frame(
     return data, True
 
 
+def _stop_reason_of(message: Any) -> str:
+    """The provider's own phase declaration on an assistant message, or ``""``.
+
+    ONE spelling for both arms. The durable ``Message`` carries it as
+    ``stop_reason``; a live event's message is the same shape, but a test double
+    or an older rehydrated row may not carry the attribute at all, and a missing
+    phase is the desktop's "unknown is absent" case - never an invented
+    ``"stop"``.
+    """
+    value = getattr(message, "stop_reason", None)
+    return value if isinstance(value, str) else ""
+
+
 def fold_messages_to_entries(
     history: list[AgentMessage],
     *,
@@ -1442,6 +1456,7 @@ def fold_messages_to_entries(
                                 400,
                             ),
                             details={"notice_kind": "wake"},
+                            custom_type=message.custom_type,
                         )
                     )
                 continue
@@ -1562,13 +1577,29 @@ def fold_messages_to_entries(
                             kind="notice",
                             text=_compact(text, _NOTICE_CHARS),
                             details={"severity": severity},
+                            custom_type=message.custom_type,
                         )
                     )
                     continue
             text = _message_text(message)
             if text:
                 entries.append(
-                    TranscriptEntry(id=message.id, kind="notice", text=_compact(text, 400))
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="notice",
+                        text=_compact(text, 400),
+                        # THE RECEIPT FAMILY, verbatim from the producer: the
+                        # client's fold reads it to decide whether a wall of
+                        # deliveries is one group and whether a row OPENS a
+                        # cycle at all (a job result or a monitor prompt does,
+                        # a generic notice does not).
+                        custom_type=message.custom_type,
+                        # A session incident ENDS the turn. The relay paints no
+                        # separate row for a ``completion_attention`` marker,
+                        # so this flag is the only terminal fact some runs
+                        # carry.
+                        terminal=message.custom_type == SESSION_INCIDENT_MESSAGE_TYPE,
+                    )
                 )
             continue
         if message.role == "user":
@@ -1672,7 +1703,18 @@ def fold_messages_to_entries(
             assistant_text = assistant_row_text(message.text)
             if assistant_text:
                 entries.append(
-                    TranscriptEntry(id=message.id, kind="assistant", text=assistant_text)
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="assistant",
+                        text=assistant_text,
+                        # The condensation facts (types.TranscriptEntry): the
+                        # provider's phase declaration and whether this row
+                        # carried calls of its own. Both arms set them, and
+                        # ``tests/unit/mobile/test_projection.py`` pins the two
+                        # arms equal for the same history.
+                        stop_reason=_stop_reason_of(message),
+                        calls_tools=bool(message.tool_calls),
+                    )
                 )
             for call in message.tool_calls:
                 # Only the FIRST call of a bang assistant message is the
@@ -1750,6 +1792,12 @@ def fold_messages_to_entries(
                         kind="notice",
                         text=_compact(text, 400),
                         details={"severity": severity},
+                        # A TERMINAL MARKER closes the turn (the plan's
+                        # ``boundaryKindOf``/``settledCloseOf`` read it). An
+                        # explicit flag rather than a severity heuristic:
+                        # ``compaction_refused`` is error-level and is NOT
+                        # terminal.
+                        terminal=True,
                     )
                 )
         elif message.role == "tool":
@@ -2238,7 +2286,12 @@ class ProjectionFold:
             if event.error:
                 self._append(
                     TranscriptEntry(
-                        id=f"err-{time.time_ns()}", kind="notice", text=_compact(event.error, 400)
+                        id=f"err-{time.time_ns()}",
+                        kind="notice",
+                        text=_compact(event.error, 400),
+                        # The run ended in an error: a terminal marker, the same
+                        # fact the durable fold gets from its ``:stop`` notice.
+                        terminal=True,
                     )
                 )
         elif isinstance(event, TurnEndEvent):
@@ -2262,6 +2315,11 @@ class ProjectionFold:
                     kind="assistant",
                     text=event.message.text,
                     final=False,
+                    # The condensation facts, set from the SAME fields the
+                    # history fold reads, so a row cannot change meaning when a
+                    # reconnect re-seeds it (the equivalence test pins it).
+                    stop_reason=_stop_reason_of(event.message),
+                    calls_tools=bool(event.message.tool_calls),
                 )
                 self._append(entry)
                 self._open_message_id = event.message.id
@@ -2288,6 +2346,13 @@ class ProjectionFold:
             if row is not None:
                 row.text = _message_text(event.message)
                 row.final = True
+                # The provider's phase declaration arrives WITH the end frame,
+                # so it is stamped here rather than at start: a lead-in frame
+                # (prose that settles before its own tool row) is only
+                # distinguishable from a real close once this field is on the
+                # row.
+                row.stop_reason = _stop_reason_of(event.message)
+                row.calls_tools = bool(event.message.tool_calls)
             self._close_reasoning_row()
             self._open_message_id = None
         elif isinstance(event, ToolCallComposeEvent):
@@ -2782,6 +2847,7 @@ class ProjectionFold:
                 kind="notice",
                 text=_compact(text, _NOTICE_CHARS),
                 details=details,
+                custom_type=custom_type or "",
             )
         )
         self._bump()

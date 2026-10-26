@@ -737,9 +737,66 @@ class TranscriptEntry:
     # Settled streaming is not the same as complete representation: transport
     # caps can replace this row with a prefix while preserving its message ID.
     text_complete: bool = True
+    # --- CONDENSATION FACTS (sparse; see ``to_json``) ---------------------
+    #
+    # These four are what the CLIENT's condensation model reads and this wire
+    # could not answer (docs/design/relay-condensation.md, gaps G2/G3/G5/G6):
+    #
+    # ``stop_reason`` - the provider's own declaration on an assistant row
+    # (``toolUse`` / ``stop`` / ``refusal``). The plan's "a turn is settled"
+    # rules read it: without it the lead-in frame - prose that settles a moment
+    # before its own tool row paints - reads as a CLOSE, so a cycle condenses and
+    # then un-condenses when the call arrives. That flip is what the desktop's
+    # ``settledCloseOf`` exists to prevent.
+    #
+    # ``calls_tools`` - the assistant row carries its own tool calls. It cannot
+    # be derived client-side: live tool ids are ``tc-<call>`` while durable ids
+    # are ``<msg>:<call>``, so prefix matching fails on exactly the rows a
+    # reconnect re-keys, and the fold legitimately drops some call rows (quiet,
+    # hidden ``send``, diverted asks), so "a tool row follows" is wrong too.
+    #
+    # ``custom_type`` - the verbatim ``custom_type`` of the ``CustomMessage`` a
+    # notice row was folded from (``job_result``, ``monitor_prompt``,
+    # ``hub_message``, ``wake_prompt``, ``session_incident``, ...). It is the
+    # receipt family: without it a wall of job results never folds and cannot
+    # open a cycle.
+    #
+    # ``terminal`` - this notice ENDS the turn (the ``:stop`` notice, an
+    # ``AgentEndEvent.error`` notice, a session incident). An explicit flag, not
+    # a severity heuristic: ``compaction_refused`` is error-level and is not
+    # terminal.
+    #
+    # TOP LEVEL, not in ``details``, because ``details`` is what the frame cap
+    # drops first (tier 2 sets it to ``{}``) and a fact the client needs on every
+    # repaint must survive that. SPARSE on the wire (``to_json``), because a
+    # capped frame is 700 KB and these are absent on most rows.
+    #
+    # BACK-COMPAT, both directions. An older client ignores keys it does not
+    # know (``_projection_from_json`` keeps only declared fields), so a new
+    # daemon talking to an old bundle degrades to today's behaviour. A new client
+    # reading an older daemon sees the defaults below, which is the desktop's own
+    # "unknown is absent" rule.
+    stop_reason: str = ""
+    calls_tools: bool = False
+    custom_type: str = ""
+    terminal: bool = False
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # SPARSE: each condensation fact goes out only when it differs from its
+        # default. The fields are defaulted-and-omitted rather than
+        # ``None``-valued because every reader's rule is "unknown is absent",
+        # and a key that is always present but empty is the same absence with
+        # 75 bytes of wire cost per row on every repaint.
+        if not self.stop_reason:
+            data.pop("stop_reason", None)
+        if not self.calls_tools:
+            data.pop("calls_tools", None)
+        if not self.custom_type:
+            data.pop("custom_type", None)
+        if not self.terminal:
+            data.pop("terminal", None)
+        return data
 
 
 @dataclass
