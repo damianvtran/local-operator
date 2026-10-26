@@ -423,14 +423,16 @@ async def screen_item(
             ),
         )
     except (BridgeRefusal, BridgeSignInRequired) as failure:
-        # A DETERMINISTIC LOCAL identity refusal (the signed-in row is not the
-        # enrolled owner, moved mid-read, or there is no sign-in): retrying
-        # cannot change it, so it is a typed ``policy_stale`` HOLD — the same
-        # code ``_verify_live_identity`` gives these conditions on the reuse
-        # path — which the loop turns into a ``screening_holds`` backoff row.
-        # Left as an exception it re-drove two hub GETs per ref per minute and
-        # never surfaced to the owner. Hub-side refusals (rate limits,
-        # outages, destination) keep propagating to the loop's own backoff.
+        # A LOCAL identity/sign-in refusal (the signed-in row is not the
+        # enrolled owner, moved mid-read, or there is no usable sign-in). It
+        # needs no hub round trip to decide and re-driving it every minute
+        # cost two hub GETs per ref, so it is held with backoff as a typed
+        # ``policy_stale`` HOLD (the code ``_verify_live_identity`` gives
+        # these conditions on the reuse path), which the loop turns into a
+        # ``screening_holds`` row. A failed refresh can be transient; the
+        # backoff then simply re-checks it later. Hub-side refusals (rate
+        # limits, outages, destination) keep propagating to the loop's own
+        # backoff.
         local = isinstance(failure, BridgeSignInRequired) or failure.code in {
             "bridge_owner_mismatch",
             "bridge_owner_moved",

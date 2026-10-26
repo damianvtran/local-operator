@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import logging
 from pathlib import Path
+from typing import Any
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -46,6 +48,26 @@ _LOG_MAX_BYTES = 256 * 1024
 _LOG_BACKUP_COUNT = 5
 
 
+class _ClassNameOnlyFormatter(logging.Formatter):
+    """Persist an exception as its CLASS name, never its message or traceback.
+
+    Several connector sites log ``exc_info=True``; a traceback carries
+    ``str(exception)`` (which can echo a body, a name or a token) and frame
+    paths under the user's home. The records are therefore only content-free
+    if this file's formatter enforces it. The record is cloned so other
+    handlers (and the cached ``exc_text``) still see the full exception.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        clone = copy.copy(record)
+        clone.exc_text = None
+        clone.stack_info = None
+        return super().format(clone)
+
+    def formatException(self, ei: Any) -> str:  # noqa: N802 - logging.Formatter API
+        return f"exc={ei[0].__name__}" if ei and ei[0] is not None else ""
+
+
 def _configure_logging(config_dir: Path) -> logging.Handler | None:
     """Send the ``local_operator.team_bridge`` loggers to a bounded private file.
 
@@ -53,8 +75,9 @@ def _configure_logging(config_dir: Path) -> logging.Handler | None:
     configured no handler, so every ``logger.warning`` in the receive path went
     to Python's last-resort stderr handler and vanished. A receive outage ran
     for hours with nothing to read. The records are already content-free by
-    construction (closed codes, stage names, exception CLASS names); this only
-    gives them somewhere to land. Attached to the package logger rather than
+    construction at most call sites (closed codes, stage names, exception CLASS
+    names), and the formatter ENFORCES it for the ones that log ``exc_info``;
+    this gives them somewhere to land. Attached to the package logger rather than
     the root so no third-party record (httpx request lines carrying URLs) is
     captured. Returns the handler (for teardown/tests), or ``None`` when the
     file cannot be opened: no log is a degraded connector, a traceback at start
@@ -72,7 +95,7 @@ def _configure_logging(config_dir: Path) -> logging.Handler | None:
         )
     except OSError:
         return None
-    handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT))
+    handler.setFormatter(_ClassNameOnlyFormatter(DEFAULT_LOG_FORMAT))
     package_logger = logging.getLogger("local_operator.team_bridge")
     package_logger.addHandler(handler)
     if package_logger.level == logging.NOTSET or package_logger.level > logging.INFO:

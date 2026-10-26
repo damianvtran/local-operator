@@ -302,18 +302,25 @@ def _bound_hub(access: Any) -> str:
     """The hub a credential row is bound to, normalized for comparison.
 
     A row authorized before the sign-in began stamping ``api_endpoint`` (commit
-    131fc1afd81, 2026-10-23) carries NO hub, and a refresh never adds one
-    (``refresh_radient_token``: "Unknown legacy metadata remains unknown until
-    sign-in"). Every such row was issued by the default Radient hub: refresh
-    itself refuses to run for any other issuer, so an unstamped row cannot
-    have been moved to another hub. It is therefore read as the default hub —
-    never as "matches whatever the owner enrolled on".
+    131fc1afd81, 2026-10-23) carries NO hub, and a refresh never adds one. Such
+    a row is read as the default hub, never as "matches whatever the owner
+    enrolled on".
 
-    That is the security property: the comparison below is against the hub the
-    ROW is bound to, not against the hub the client was told to call. A bearer
-    for hub A can therefore never screen or act for an owner enrolled on hub B:
-    a stamped row carries its own hub and an unstamped one is the default hub,
-    so both are refused for any owner whose canonical hub differs.
+    WHAT MAKES THAT SAFE (and what does not). It does NOT rest on the refresh
+    issuer check: ``refresh_radient_token`` compares the CURRENT process's token
+    URL, not the issuer that minted the row, and before 131fc1afd81 a login
+    honoured ``RADIENT_OAUTH_TOKEN_URL`` and stamped nothing, so an unstamped row
+    is not proof of the default issuer. It rests on three facts that hold
+    regardless:
+
+    * the comparison is against the hub the ROW is bound to (stamped, else the
+      default), never against the hub the client was told to call, so a client
+      pointed at hub B cannot launder a bearer for hub A;
+    * the owner's hub was proven when the enrollment committed this credential
+      against it, and the same pinned bearer already travels to that hub on
+      every poll, so this check admits no new bearer travel;
+    * an owner enrolled on any NON-default hub is still refused for an
+      unstamped row, so the relaxation can only ever admit a default-hub owner.
     """
 
     from local_operator.env import DEFAULT_RADIENT_API_BASE_URL

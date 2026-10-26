@@ -85,9 +85,12 @@ def render_plist(config_dir: Path) -> dict[str, object]:
         # plain dictionary form.
         "KeepAlive": True,
         "EnvironmentVariables": {"LOCAL_OPERATOR_CONNECTOR": "1"},
-        # Without these launchd sends stdout/stderr to /dev/null, which hid a
-        # receive outage completely (2026-10-26). Only an already-installed
-        # plist lacks them until the next install rewrites it.
+        # LATENT: nothing in production rewrites the connector plist yet, so an
+        # already-installed LaunchAgent keeps launchd's /dev/null. The
+        # operative diagnostic is the in-process rotating handler
+        # (``__main__._configure_logging``); these keys only matter once the
+        # plist is installed from this render, and launchd then creates the
+        # file with the umask's mode and never rotates it.
         "StandardOutPath": str(stderr_path(config_dir)),
         "StandardErrorPath": str(stderr_path(config_dir)),
     }

@@ -294,9 +294,10 @@ def test_run_forever_logs_a_content_free_iteration_line(
 
 
 def test_connector_log_handler_writes_a_content_free_line(tmp_path) -> None:
+    package_logger = logging.getLogger("local_operator.team_bridge")
+    level_before = package_logger.level
     handler = connector_main._configure_logging(tmp_path)
     assert handler is not None
-    package_logger = logging.getLogger("local_operator.team_bridge")
     try:
         loop_mod._log_delivery_failure(
             "pair_handling", BridgeRefusal("bridge_owner_mismatch", "PRIVATE_BODY_CANARY")
@@ -304,6 +305,7 @@ def test_connector_log_handler_writes_a_content_free_line(tmp_path) -> None:
         handler.flush()
     finally:
         package_logger.removeHandler(handler)
+        package_logger.setLevel(level_before)  # _configure_logging raises it to INFO
         handler.close()
     target = log_path(tmp_path)
     text = target.read_text()
@@ -312,6 +314,31 @@ def test_connector_log_handler_writes_a_content_free_line(tmp_path) -> None:
     assert (target.stat().st_mode & 0o777) == 0o600
     # Bounded: a rotating handler with a backup count, not an unbounded file.
     assert handler.maxBytes > 0 and handler.backupCount > 0  # type: ignore[attr-defined]
+
+
+def test_exc_info_records_persist_only_the_exception_class(tmp_path) -> None:
+    """The ``exc_info=True`` sites must not put ``str(exc)`` or frames in the file."""
+
+    package_logger = logging.getLogger("local_operator.team_bridge")
+    level_before = package_logger.level
+    handler = connector_main._configure_logging(tmp_path)
+    assert handler is not None
+    other = logging.getLogger("local_operator.team_bridge.connector.wake")
+    try:
+        try:
+            raise ValueError("PRIVATE_BODY_CANARY token=PRIVATE_TOKEN_CANARY")
+        except ValueError:
+            other.warning("bridge: delivery failed after the read ACK", exc_info=True)
+        handler.flush()
+    finally:
+        package_logger.removeHandler(handler)
+        package_logger.setLevel(level_before)
+        handler.close()
+    text = log_path(tmp_path).read_text()
+    assert "delivery failed after the read ACK" in text
+    assert "exc=ValueError" in text
+    assert "PRIVATE_" not in text
+    assert "Traceback" not in text and str(Path(__file__).parent) not in text
 
 
 def test_plist_gives_launchd_an_error_path_distinct_from_the_rotating_log(tmp_path) -> None:
@@ -380,3 +407,82 @@ async def test_take_up_with_a_conversation_message_id_explains_where_to_read(
     )
     assert out["ok"] is False and out["code"] == "conversation_message"
     assert "channel_history" in out["error"] and "channel_thread" in out["error"]
+
+
+# -- 4b. the real spine: hold row + backoff ------------------------------------
+
+
+def test_legacy_row_mismatch_writes_a_policy_stale_hold_and_backs_off(
+    tmp_path, monkeypatch
+) -> None:
+    """Drive the REAL ``handle_message_available`` -> ``screen_item`` -> status
+    fetcher -> ``_persist_hold_backoff`` chain with a legacy row whose account is
+    not the enrolled owner's. Only the hub reads and the model selection are
+    stubbed; the refusal happens before any status GET would be made.
+    """
+
+    from local_operator.team_bridge import pull as pull_mod
+    from local_operator.team_bridge.model_boundary import DefaultSelection
+    from local_operator.team_bridge.types import feed_seq
+
+    cid = _seed_row(tmp_path, account_id="acc_not_the_owner")
+    owner = _owner(cid)  # enrolled account differs from the row's
+    Store(tmp_path).commit_enrollment(
+        owner, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="sess_cos"
+    )
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
+    )
+    store = Store(tmp_path)
+    mid = "bmsg_legacy_hold"
+    fetched: list[str] = []
+
+    async def events(owner_: Any, **kwargs: Any) -> Any:
+        ref = f"message_available:message_id={mid}"
+        store.record_feed_batch(owner, feed_seq(1), [ref], resync_required=False)
+        return {"cursor": 1, "refs": [ref], "resync": False}
+
+    async def message(owner_: Any, message_id: str, **kwargs: Any) -> Any:
+        return SimpleNamespace(message_id=message_id)
+
+    async def fetch_item(owner_: Any, message_id: str, **kwargs: Any) -> Any:
+        fetched.append(message_id)
+        return {"message": {"id": message_id, "body": {"text": "x"}}}
+
+    monkeypatch.setattr(pull_mod, "events", events)
+    monkeypatch.setattr(pull_mod, "message", message)
+    monkeypatch.setattr(wake_mod, "fetch_item", fetch_item)
+    monkeypatch.setattr(wake_mod, "engagement_hold", lambda designation, config_dir: "")
+    monkeypatch.setattr(
+        "local_operator.team_bridge.model_boundary.resolve_default_selection",
+        lambda config_dir: DefaultSelection(
+            provider="p", model_id="m", spec=object(), approved_identities=frozenset({"m"})
+        ),
+    )
+    auth = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        started = time.time()
+        # Not raised: the refusal is a typed hold, not an exception for run_forever.
+        summary = asyncio.run(
+            loop_mod.run_iteration(
+                owner,
+                config_dir=tmp_path,
+                access=SimpleNamespace(credential_id=cid),
+                auth_store=auth,
+            )
+        )
+    finally:
+        auth.close()
+    assert summary["handled"][0]["action"] == "hold"
+    assert summary["handled"][0]["code"] == "policy_stale"
+    hold = store.screening_hold(owner, mid)
+    assert hold is not None and hold["hold_code"] == "policy_stale"
+    # Backed off by the schedule's first gap, not due again on the next turn.
+    assert hold["retry_at"] is not None
+    assert (
+        started + loop_mod.RETRY_BASE_S - 1
+        <= hold["retry_at"]
+        <= time.time() + loop_mod.RETRY_BASE_S
+    )
+    assert store.due_screening_holds(owner, now=time.time()) == []
+    assert fetched == [mid]  # one fetch, then quiet until retry_at
