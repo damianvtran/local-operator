@@ -17106,14 +17106,6 @@ class Session:
         finally:
             restart_fence.release_shared(admission)
         await self._refresh_context_metadata()
-        if self._bridge_cards_owed_wake:
-            # This turn builds from the live context, so a woken bridge card
-            # already on it is read; one still parked (it arrived during body
-            # hydration, after the opener's flush) stays owed its wake.
-            live = {id(message) for message in self._context.messages}
-            self._bridge_cards_owed_wake = [
-                card for card in self._bridge_cards_owed_wake if id(card) not in live
-            ]
         # Flip the discovery record's ``started`` bit the first time a REAL
         # turn runs. This is the single choke point every spawn path funnels
         # through — the user's ``prompt()``, wake deliveries
@@ -17498,13 +17490,56 @@ class Session:
                     await self._prompt_messages(
                         [],
                         carried_prompt=True,
-                        guard=lambda: bool(self._bridge_cards_owed_wake),
+                        guard=self._bridge_card_wake_still_owed,
                         guard_note="woken bridge card already read by a later turn",
                     )
                 if not self._pending_body_followup_again:
                     return
 
         self._pending_body_followup_task = self._spawn_background(drain())
+
+    def _settle_bridge_card_wakes(self, read: set[int]) -> None:
+        """Drop every owed card a dispatched provider request carried.
+
+        A card is READ only when a request built from it crosses the dispatch
+        boundary. Being on the live context is not enough: an idle card is
+        appended with no turn behind it, and a turn's closing journal flush is
+        followed by no request. Settling anywhere earlier either re-answers a
+        card (a flush mid-turn, PR #2951 round 2 MAJOR-R2-1) or strands one
+        (round 1 MAJOR-1).
+        """
+
+        if self._bridge_cards_owed_wake:
+            self._bridge_cards_owed_wake = [
+                card for card in self._bridge_cards_owed_wake if id(card) not in read
+            ]
+
+    def _bridge_card_wake_still_owed(self) -> bool:
+        """The fallback turn's under-lock guard: is any owed card still unread?
+
+        Re-derived from the live context rather than trusted from the list, so
+        a path into the context that skipped settlement cannot open a turn for
+        a card already answered. That turn would end on the model's own
+        assistant message, which current Claude models reject as a prefill.
+        """
+
+        if not self._bridge_cards_owed_wake:
+            return False
+        # Every unread owed card is on the context or parked behind it, so the
+        # admitted turn's request ends on a card, never on the model's reply.
+        # A context ending on an assistant message with nothing parked means
+        # some path delivered the cards without a dispatch this session saw:
+        # opening a turn would re-answer them from a request a provider
+        # rejects as a prefill, so the debt is dropped instead.
+        last = self._context.messages[-1] if self._context.messages else None
+        if getattr(last, "role", None) == "assistant" and not self._pending_context_journal:
+            logger.warning(
+                "bridge card wake: %d owed card(s) with nothing unread to send; dropped",
+                len(self._bridge_cards_owed_wake),
+            )
+            self._bridge_cards_owed_wake = []
+            return False
+        return True
 
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
@@ -17889,6 +17924,13 @@ class Session:
                     # transforms after these bytes have crossed the boundary.
                     raise RuntimeError("bridge body authority changed before dispatch")
                 inner = base_stream_fn(request, stream_signal)
+                # The context this request was built from, taken before any
+                # later boundary can extend it.
+                carried = (
+                    {id(message) for message in self._context.messages}
+                    if self._bridge_cards_owed_wake
+                    else set()
+                )
 
                 async def witness() -> AsyncIterator[StreamEvent]:
                     # Lazy provider generators may start only after another
@@ -17896,6 +17938,10 @@ class Session:
                     if frame is not None and not frame.binding_intact():
                         raise RuntimeError("bridge body authority changed before dispatch")
                     self._attention_run_request_dispatched = True
+                    if carried:
+                        # Past the refusal checks, the request is going out:
+                        # any owed card it carries has now been read.
+                        self._settle_bridge_card_wakes(carried)
                     async for event in inner:
                         yield event
 

@@ -508,6 +508,84 @@ async def test_self_contained_card_keeps_its_wake_behind_retained_failed_body(
 
 
 @pytest.mark.asyncio
+async def test_card_parked_during_hydration_is_read_by_exactly_one_turn(tmp_path, monkeypatch):
+    """PR #2951 round 2 MAJOR-R2-1: a card read mid-turn must not also get the fallback.
+
+    The card arrives while A's body is loading (lock held, not yet streaming),
+    so it is owed a wake and parked. The body turn makes a tool call, and that
+    tool boundary folds the parked card into the live context: that turn reads
+    it. A fallback turn afterwards would answer it twice, from a request whose
+    last message is the model's own reply.
+    """
+    tool_entered, finish_tool = asyncio.Event(), asyncio.Event()
+    hydration_entered, finish_hydration = asyncio.Event(), asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        if tool_call_id == "held-1":
+            tool_entered.set()
+            await finish_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="held_work",
+            content=[TextContent(text="done")],
+        )
+
+    tool = AgentTool(name="held_work", description="bounded test work", execute=execute)
+    async with runtime_rig(tmp_path, monkeypatch, tools=[tool]) as rig:
+        directories = sorted(p.name for p in (rig.root / "sessions").iterdir())
+        rig.stream.scripted = [
+            [],
+            _tool_call("held-1", "held_work"),
+            [StreamTextDelta(delta="settled"), StreamEndEvent(stop_reason="stop")],
+            _tool_call("body-1", "held_work"),
+            [StreamTextDelta(delta="answered"), StreamEndEvent(stop_reason="stop")],
+        ]
+        working = asyncio.create_task(rig.session.prompt("finish existing work"))
+        try:
+            await asyncio.wait_for(tool_entered.wait(), 5)
+            assert (await deliver(rig))["handled"][0]["action"] == "delivered"
+            rig.body_gates[MESSAGE_ID] = (hydration_entered, finish_hydration)
+            finish_tool.set()
+            await asyncio.wait_for(working, 10)
+            await asyncio.wait_for(hydration_entered.wait(), 5)
+            # The window the finding names: hydration owns the lock, no stream yet.
+            assert not rig.session._is_streaming and rig.session._turn_lock.locked()
+            before = len(rig.stream.requests)
+            result = await send_peer_message(
+                rig.record,
+                text="CARD-DURING-HYDRATION-77",
+                mode="mailbox",
+                wake=True,
+                sender={},
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            )
+            assert str(result) == "delivered and woke the session", str(result)
+            finish_hydration.set()
+            await settle(rig.session)
+
+            # Body turn plus its post-tool continuation, and nothing after it.
+            assert len(rig.stream.requests) == before + 2
+            reading = [
+                i
+                for i in range(before, len(rig.stream.requests))
+                if "CARD-DURING-HYDRATION-77" in "\n".join(rig.stream.texts(i))
+            ]
+            assert reading == [before + 1], reading
+            for request in rig.stream.requests[before:]:
+                assert getattr(request.messages[-1], "role", None) != "assistant"
+            first = rig.store.body_reservation(rig.owner, CONVERSATION_ID, MESSAGE_ID)
+            assert first["state"] == "completed"
+            assert rig.session._bridge_cards_owed_wake == []
+            assert rig.session._pending_body_followup_task.done()
+            assert sorted(p.name for p in (rig.root / "sessions").iterdir()) == directories
+        finally:
+            finish_tool.set()
+            finish_hydration.set()
+            if not working.done():
+                await asyncio.wait_for(working, 10)
+
+
+@pytest.mark.asyncio
 async def test_arrival_during_failed_hydration_rearms_same_waiter(tmp_path, monkeypatch):
     """B arrives after A's finite-pass horizon, before is_streaming turns true."""
     tool_entered, finish_tool = asyncio.Event(), asyncio.Event()
