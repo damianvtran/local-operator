@@ -158,3 +158,21 @@ def test_an_over_budget_diagnostics_block_never_drops_the_disclosure(tmp_path: P
     detail = _detail(tmp_path, artifact)
     assert detail[scoring.EVALUATOR_DIAGNOSTICS_KEY] == scoring.DIAGNOSTICS_REFUSED
     assert detail[scoring.GUEST_ENVIRONMENT_KEY] == _PATCH
+
+
+def test_a_result_too_large_for_the_disclosure_keeps_a_fixed_marker(tmp_path: Path) -> None:
+    """m1: the disclosure is refused with a marker, never silently dropped.
+
+    The result alone fits under the 1 MiB limit, but not with the disclosure
+    beside it. An absent key would read exactly like a stock/fake-provider
+    score, hiding a possibly-deviated guest.
+    """
+
+    big_env = {"xcursor_patch": {"applied": True, "pad": "p" * 4096}}
+    # Leave room for the wrapper and the ~40-byte marker, not the 4 KiB env.
+    raw = {"score": 0.0, "blob": "x" * (scoring.MAX_SCORE_DETAIL_BYTES - 2048)}
+    artifact = scoring.score_to_artifact(raw, artifact_root=tmp_path, environment=big_env)
+    detail = _detail(tmp_path, artifact)
+    assert detail[scoring.EVALUATOR_RESULT_KEY] == raw
+    assert detail[scoring.GUEST_ENVIRONMENT_KEY] == scoring.GUEST_ENVIRONMENT_REFUSED
+    assert artifact.binary == 0

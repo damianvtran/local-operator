@@ -1006,7 +1006,8 @@ class AwsProvider:
         the stock guest, exactly as before this existed; what it may not do is
         leave no trace, because every reported score names whether the guest
         carried the deviation. So ``guest-xcursor-patch.json`` is written on
-        every path, with ``applied`` true or false and the reason.
+        every path, with the tri-state ``applied`` (true / false / null for
+        "write attempted, unconfirmed") and the reason.
         """
 
         try:
@@ -1014,16 +1015,24 @@ class AwsProvider:
                 self._run_guest_command, clock=self._monotonic, sleep=self._sleep
             )
         except Exception as error:  # noqa: BLE001 - the module never raises; belt and braces
+            # Where it raised is unknown, so whether a write landed is unknown:
+            # the honest record is "unconfirmed", never "stock".
             report = guest_xcursor.PatchReport(
-                status="failed", reason=f"patch pass raised {type(error).__name__}"
+                status="unconfirmed", reason=f"patch pass raised {type(error).__name__}"
             )
         self.guest_xcursor_patch = report
-        if report.applied:
+        if report.applied is True:
             logger.info("guest xcursor patch: %s", report.status)
-        else:
+        elif report.applied is False:
             logger.warning(
                 "guest xcursor patch NOT applied (%s): the episode runs on the stock guest, "
                 "which leaks one X connection per screenshot",
+                report.status,
+            )
+        else:
+            logger.warning(
+                "guest xcursor patch UNCONFIRMED (%s): a write was attempted but its effect "
+                "was not verified; the guest may serve the stock or the patched module",
                 report.status,
             )
         self._write_supervisor_evidence(guest_xcursor.EVIDENCE_FILENAME, report.to_json())

@@ -112,8 +112,13 @@ The retained block rides inside the SAME detail artifact, under
 under `evaluator_result`. It is therefore bounded by the same limits, scanned by
 the same redaction pass, and referenced by the same digest — no second artifact
 and no new protocol field. The capture is additive: an evaluator that emitted
-nothing and fetched nothing produces no block, and the staged detail bytes are
-byte-identical to what they were before it existed. Nothing an evaluator
+nothing and fetched nothing produces no block. On the fake provider the staged
+detail bytes are then byte-identical to what they were before it existed; on
+AWS every detail is now the wrapped dict `{evaluator_result, guest_environment}`
+(plus `evaluator_diagnostics` when there is a block), because the guest-patch
+disclosure always rides it (see "Guest X-display leak" below) — a bare `0.0`
+detail from an earlier campaign is the same score in a different shape, so
+compare `evaluator_result`, not raw detail bytes, across campaigns. Nothing an evaluator
 returns changes, no task file is touched, and the worker's own stdout/stderr
 still carry what they carried (the capture tees rather than diverts).
 
@@ -735,14 +740,52 @@ no sudo. The stock server runs `app.run(debug=True)`, so werkzeug's reloader
 re-execs the serving child (measured 0.8 s); a new serving PID with the patched
 digest is the proof it took.
 
-**Fail-open, never silent.** An unrecognised file is never overwritten, and an
-unreachable guest, a failed write or a reload that never happens leaves the
-episode on the stock guest. Every outcome writes
-`<run-root>/osworld-cache/<episode-id>/guest-xcursor-patch.json` with
-`applied: true|false`, the status and reason, the upstream PR and merge SHA, and
-the before/after digests. The same record rides the **sealed score detail** under
-`guest_environment.xcursor_patch`, so a score read from the bundle alone still
-says whether the guest carried the deviation.
+**Fail-open, never silent — and never "stock" without proof.** An
+unrecognised file is never overwritten. Before any write, an unreachable guest
+or a missing server leaves the episode on the stock guest (`applied: false`).
+Once a write has been attempted, the record says "stock" only if a later
+inspection actually observed the stock digest (or the guest's own pre-write
+check refused the write). Otherwise — the write's response was lost, every later
+inspection failed, or the patched file is on disk but no reload was seen —
+the status is `unconfirmed` with `applied: null`: the guest may serve either
+module, because werkzeug's reloader (or any later restart) can import a patched
+file at any point, and the write's own response can be lost precisely because
+the reloader re-exec'd the child serving `/execute`. A score reader must treat
+`null` as "deviation possible", never as stock. Every outcome writes
+`<run-root>/osworld-cache/<episode-id>/guest-xcursor-patch.json` with the
+tri-state `applied`, the status and reason, `write_attempted`, the upstream PR
+and merge SHA, and the before/after digests (`sha256_after`/`server_pids_after`
+are `null` when no post-write inspection succeeded or none was needed, never an
+empty "server gone" list). The same record rides the **sealed score detail**
+under `guest_environment.xcursor_patch`, so a score read from the bundle alone
+still says whether the guest carried the deviation; if an evaluator result is so
+large that the record cannot fit beside it, the key holds the fixed marker
+`{"refused": "over_budget"}` instead of disappearing.
+
+**Why only `pyxcursor.py`: the other `Display()` callers are off the per-step
+path.** Read from the AMI's own `/home/user/server/main.py` (sha256
+`b9b1031e…`, 1,799 lines, read back from a bare guest; it is upstream
+`36a6adf4`'s file plus a per-request `/execute` timeout), the X-display users are:
+
+| line | route | call | per step? |
+| --- | --- | --- | --- |
+| 321 | `/screenshot` | `Xcursor()` | **yes** (every observation) — fixed by this patch |
+| 354, 912 | `/terminal`, `/accessibility` | `pyatspi.Registry.getDesktop(0)` (AT-SPI over D-Bus, not an Xlib display) | no: `require_terminal`/`require_a11y_tree` are off; `/terminal` is allocation readiness only |
+| 971 | `/screen_size` | `display.Display()` | no |
+| 993 | `/window_size` | `display.Display()` | no |
+| 1509 | `/start_recording` | `display.Display()` | no |
+
+Per step the adapter calls only `/execute` (actions, via its own single-shot
+transport) and `/screenshot` (`DesktopEnv._get_obs`), plus `/platform` for
+liveness. Upstream reaches `/screen_size` and `/window_size` only through
+`DesktopEnv.vm_screen_size` and the evaluator getters `get_vm_screen_size` /
+`get_vm_window_size`, and `/start_recording` only through
+`controller.start_recording`. None of the 108 v2.1 task modules references any
+of them (by method or by route), and the adapter never calls them. The
+`/screenshot` handler's other X users (`pyautogui.screenshot()` and
+`pyautogui.position()`, lines 324-325) do not leak: measured on the val2 guest
+with only `pyxcursor.py` replaced, the serving process held 15–32 fds and 26–36
+X clients across the episode plus 1,300 extra `/screenshot` calls.
 
 ### Upstream is sealed after the first reset
 

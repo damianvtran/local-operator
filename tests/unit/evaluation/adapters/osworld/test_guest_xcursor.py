@@ -36,7 +36,7 @@ from lop_osworld_v2_adapter.guest_disk import CommandResult
 
 _PKG = Path(guest_xcursor.__file__).parent
 
-#: The stock file is upstream's pre-fix file (parent ef43297b of the fix) plus
+#: The stock file is upstream's pre-fix file (the fix merge's parent 36a6adf4) plus
 #: one trailing newline, as read back from the 2.1 AMI. Rebuilt here from the
 #: vendored patched file by REMOVING exactly upstream's PR #500 additions, so
 #: the test does not need a second vendored copy and proves the diff is only
@@ -399,9 +399,11 @@ def test_a_missing_file_is_unrecognised_not_created() -> None:
         ),
         (_Guest(file=None, pids=()), "unrecognised", "stock"),
         (_Guest(file=_stock_bytes(), pids=()), "failed", "no running action server"),
-        (_Guest(file=_stock_bytes(), fail={"write": TimeoutError()}), "failed", "not replaced"),
-        (_Guest(file=_stock_bytes(), write_rc=1), "failed", "not replaced"),
-        (_Guest(file=_stock_bytes(), reload_after=None), "failed", "did not reload"),
+        # The write never reached the guest (the transport raised before
+        # delivery here), and a later inspection OBSERVED the stock digest:
+        # only that observation licenses "stock".
+        (_Guest(file=_stock_bytes(), fail={"write": TimeoutError()}), "failed", "stock digest"),
+        (_Guest(file=_stock_bytes(), write_rc=1), "failed", "stock digest"),
     ],
 )
 def test_every_failure_is_recorded_as_not_applied_and_never_raises(
@@ -415,6 +417,152 @@ def test_every_failure_is_recorded_as_not_applied_and_never_raises(
     assert record["applied"] is False
     # Transport exception TEXT can carry the guest address; only its type is kept.
     assert "10.0.0.1" not in json.dumps(record)
+
+
+class _LostResponseGuest(_Guest):
+    """The reviewer's M1 case: the write LANDS, then nothing answers.
+
+    ``/execute`` is served by the very werkzeug child the write makes reload,
+    so the write's response and every later inspect can be lost while the
+    patched file sits on disk. ``lose_write_response`` makes the write raise
+    AFTER it has replaced the file, the way a dropped response looks.
+    """
+
+    def __init__(self, *, lose_write_response: bool) -> None:
+        super().__init__(file=_stock_bytes(), reload_after=None)
+        self.lose_write_response = lose_write_response
+        self.writes = 0
+
+    def run(self, argv: Sequence[str], timeout: float) -> CommandResult:
+        if argv[2] == guest_xcursor._INSPECT_SOURCE and self.writes:
+            raise ConnectionError("server reloading")
+        result = super().run(argv, timeout)
+        if argv[2] == guest_xcursor._WRITE_SOURCE:
+            self.writes += 1
+            if self.lose_write_response:
+                raise ConnectionError("response lost")
+        return result
+
+
+@pytest.mark.parametrize("lose_write_response", [False, True])
+def test_a_write_whose_effect_is_never_observed_is_unconfirmed_never_stock(
+    lose_write_response: bool,
+) -> None:
+    guest = _LostResponseGuest(lose_write_response=lose_write_response)
+    report = _apply(guest)
+
+    # The guest really does carry the patched file now.
+    assert guest.file == guest_xcursor.patched_source()
+    assert report.status == "unconfirmed"
+    assert report.applied is None
+    record = report.to_json()
+    assert record["applied"] is None
+    assert record["write_attempted"] is True
+    # Nothing was observed after the write, and the record says exactly that.
+    assert record["sha256_after"] is None and record["server_pids_after"] is None
+    # The record must not read as the stock guest: the reason names both.
+    assert "stock or the patched" in report.reason
+    assert "not replaced" not in report.reason
+
+
+def test_a_patched_file_with_no_observed_reload_is_unconfirmed() -> None:
+    """Patched on disk, no new PID within the wait: the reloader (or any later
+    restart) can still import it, so this is neither applied nor stock."""
+
+    guest = _Guest(file=_stock_bytes(), reload_after=None)
+    report = _apply(guest)
+    assert report.status == "unconfirmed" and report.applied is None
+    assert report.sha256_after == guest_xcursor.PATCHED_SHA256
+    assert "no reload was observed" in report.reason
+
+
+def test_a_guest_side_refusal_is_stock_because_nothing_was_replaced() -> None:
+    """The guest's own pre-write check saw a changed file and wrote nothing."""
+
+    class _Raced(_Guest):
+        def run(self, argv: Sequence[str], timeout: float) -> CommandResult:
+            if argv[2] == guest_xcursor._WRITE_SOURCE:
+                self.file = b"changed underneath us\n"
+            return super().run(argv, timeout)
+
+    guest = _Raced(file=_stock_bytes())
+    report = _apply(guest)
+    assert report.status == "failed" and report.applied is False
+    assert guest.file == b"changed underneath us\n"
+    assert "left unchanged" in report.reason
+
+
+def test_records_that_never_inspected_after_say_so_rather_than_server_gone() -> None:
+    """QA note B: no post-write inspection -> ``None``, never an empty list."""
+
+    for guest in (_Guest(file=b"other image\n"), _Guest(file=guest_xcursor.patched_source())):
+        record = _apply(guest).to_json()
+        assert record["write_attempted"] is False
+        assert record["server_pids_after"] is None
+        assert record["sha256_after"] is None
+        assert record["server_pids_before"] == [1580, 1733]
+
+
+def test_the_guest_write_script_removes_its_temp_file_when_the_write_fails(
+    tmp_path: Path,
+) -> None:
+    """n3: a failed write must not leave ``pyxcursor.py.lop-tmp`` behind."""
+
+    import subprocess
+
+    target = tmp_path / "pyxcursor.py"
+    target.write_bytes(_stock_bytes())
+    target.chmod(0o664)
+    # A payload that is not base64 fails inside the guest script before the
+    # temp file exists; a read-only directory fails at the temp-file create.
+    # Force a failure AFTER the temp file is created instead: chmod to a mode
+    # the replace cannot keep by making the target vanish mid-way is not
+    # portable, so make ``os.replace`` fail by turning the target into a
+    # directory-shaped conflict.
+    conflict = tmp_path / "conflict"
+    conflict.mkdir()
+    (conflict / "child").write_text("x")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            guest_xcursor._WRITE_SOURCE.replace(
+                "os.replace(tmp, path)", "os.replace(tmp, sys.argv[4])"
+            ),
+            str(target),
+            guest_xcursor.STOCK_SHA256,
+            base64.b64encode(guest_xcursor.patched_source()).decode(),
+            str(conflict),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "pyxcursor.py.lop-tmp").exists()
+    assert target.read_bytes() == _stock_bytes()
+
+
+def test_the_guest_write_script_replaces_and_leaves_no_temp_file(tmp_path: Path) -> None:
+    import subprocess
+
+    target = tmp_path / "pyxcursor.py"
+    target.write_bytes(_stock_bytes())
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            guest_xcursor._WRITE_SOURCE,
+            str(target),
+            guest_xcursor.STOCK_SHA256,
+            base64.b64encode(guest_xcursor.patched_source()).decode(),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout)["written"] is True
+    assert target.read_bytes() == guest_xcursor.patched_source()
+    assert not (tmp_path / "pyxcursor.py.lop-tmp").exists()
 
 
 def test_a_reload_that_never_happens_is_bounded_by_the_wait() -> None:

@@ -60,6 +60,12 @@ EVALUATOR_DIAGNOSTICS_KEY = "evaluator_diagnostics"
 # bytes are unchanged.
 GUEST_ENVIRONMENT_KEY = "guest_environment"
 
+# What that key holds when the disclosure itself could not fit beside an
+# evaluator result that is close to the byte limit on its own. One fixed field,
+# like ``DIAGNOSTICS_REFUSED``, so an over-budget disclosure reads as "refused",
+# never as the absent key a stock/fake-provider score carries.
+GUEST_ENVIRONMENT_REFUSED: dict[str, str] = {"refused": "over_budget"}
+
 # What that key holds when a diagnostics block was produced but could not be
 # attached within the limits above. One field, so it fits whatever the rejected
 # block was, and a fixed value, so a reader can tell a refusal from a capture
@@ -129,9 +135,11 @@ def _detail_payload(
 ) -> Any:
     """What is persisted for a score: the raw return, plus retained diagnostics.
 
-    A capture that produced nothing (``None``) leaves ``raw`` untouched, which
-    is what keeps an episode whose evaluator emitted nothing byte-identical to
-    what this function staged before diagnostics existed.
+    A capture that produced nothing (``None``) with no environment disclosure
+    leaves ``raw`` untouched, which is what keeps an episode whose evaluator
+    emitted nothing byte-identical to what this function staged before
+    diagnostics existed. An AWS episode always carries the
+    ``guest_environment`` disclosure, so its detail is always the wrapped dict.
 
     Diagnostics can never cost the score. The block is attached only if the
     wrapped payload still satisfies the same structural and byte limits every
@@ -145,25 +153,33 @@ def _detail_payload(
 
     if not diagnostics and not environment:
         return raw
-    # The environment disclosure is a few hundred bytes of fixed-shape facts, so
-    # it is kept on every fallback below: only the evaluator's own diagnostics
-    # can be refused for size. Losing the disclosure to make room would make a
-    # deviated guest read as a stock one.
-    base: dict[str, Any] = {EVALUATOR_RESULT_KEY: raw}
-    if environment:
-        base[GUEST_ENVIRONMENT_KEY] = dict(environment)
-    candidates: list[dict[str, Any]] = []
-    if diagnostics:
-        candidates.append({**base, EVALUATOR_DIAGNOSTICS_KEY: diagnostics})
-        candidates.append({**base, EVALUATOR_DIAGNOSTICS_KEY: DIAGNOSTICS_REFUSED})
-    else:
-        candidates.append(base)
-    for candidate in candidates:
-        try:
-            _detail_bytes(candidate)
-            return candidate
-        except ScoringProtocolError:
-            continue
+    # Fallback order, most to least informative. The environment disclosure is
+    # a few hundred bytes of fixed-shape facts, so the evaluator's own
+    # diagnostics are refused for size FIRST. If the evaluator result is so
+    # close to the limit that even the disclosure cannot ride beside it, the
+    # disclosure is replaced by a fixed marker rather than dropped: an absent
+    # key would make a possibly-deviated guest read as a stock one. Only when
+    # the bare result alone fits -- a marker of ~40 bytes not fitting means the
+    # result is within ~40 bytes of the limit -- are the pre-change bytes staged,
+    # because an explanation must never cost the number it explains.
+    envs: list[dict[str, Any] | None] = (
+        [dict(environment), GUEST_ENVIRONMENT_REFUSED] if environment else [None]
+    )
+    diags: list[Mapping[str, Any] | None] = (
+        [diagnostics, DIAGNOSTICS_REFUSED] if diagnostics else [None]
+    )
+    for env in envs:
+        for diag in diags:
+            candidate: dict[str, Any] = {EVALUATOR_RESULT_KEY: raw}
+            if env is not None:
+                candidate[GUEST_ENVIRONMENT_KEY] = env
+            if diag is not None:
+                candidate[EVALUATOR_DIAGNOSTICS_KEY] = diag
+            try:
+                _detail_bytes(candidate)
+                return candidate
+            except ScoringProtocolError:
+                continue
     return raw
 
 
