@@ -9,7 +9,7 @@
   "tui.notifications.banner_digest_body": "Type /notifications to see them.",
   "tui.notifications.banner_digest_title": "{count, plural, one {# more high-priority notification} other {# more high-priority notifications}}",
   "tui.notifications.chip_high": "high",
-  "tui.notifications.confirm_dismiss_session": "Dismiss {count, plural, one {# update} other {# updates}} from {source}? y/n",
+  "tui.notifications.confirm_dismiss_session": "Dismiss {count, plural, one {# notification} other {# notifications}} ({updates, plural, one {# update} other {# updates}}) from {source}? y/n",
   "tui.notifications.confirm_mark_all": "Mark {count} read? y/n",
   "tui.notifications.dismissed": "Dismissed {count, plural, one {# update} other {# updates}}.",
   "tui.notifications.empty_caught_up_body": "Nothing is waiting on you across your conversations. Press f to show everything.",
@@ -70,5 +70,8 @@
   "tui.notifications.unread_mark_these": "/unread read marks these read",
   "tui.notifications.update_kind": "update",
   "tui.notifications.updates_since": "{count, plural, one {# update since {time}} other {# updates since {time}}}",
-  "tui.notifications.write_failed": "Couldn't update notifications — nothing else changed: {error}"
+  "tui.notifications.write_failed": "Couldn't update notifications — nothing else changed: {error}",
+  "tui.notifications.hint_mark_all": "mark all",
+  "tui.notifications.hint_confirm": "confirm",
+  "tui.notifications.hint_cancel": "cancel"
 }

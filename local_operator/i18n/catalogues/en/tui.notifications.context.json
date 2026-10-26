@@ -58,9 +58,10 @@
     "maxCells": 6
   },
   "tui.notifications.confirm_dismiss_session": {
-    "note": "One-line confirm for E: dismiss every update in this conversation; source is the conversation title.",
-    "role": "TUI /notifications page",
-    "tone": "terse, operator-facing, sentence case, no emoji"
+    "note": "y/n confirm before dismissing a whole row that may hold several revisions. `count` is ROWS (always 1 here) and `updates` is the revisions the row collapsed (its ×N chip); the sentence must keep both numbers distinct, because the reviewer's complaint was that `1 update` read as one revision while six were about to be removed. `{source}` is the conversation's own name.",
+    "role": "TUI /notifications page confirm row",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 96
   },
   "tui.notifications.confirm_mark_all": {
     "note": "One-line confirm for A or /notifications read; count is every unread row in scope.",
@@ -411,5 +412,23 @@
     "note": "Footer when a write failed; error is a short technical reason.",
     "role": "TUI /notifications page",
     "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.hint_mark_all": {
+    "note": "List footer hint for the `A` key that marks every unread notification read. Must stay short: it shares the 80-column footer with `e dismiss`, `E dismiss all`, `space select` and `esc back`, and a long label is dropped from that row.",
+    "role": "TUI /notifications page footer",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.hint_confirm": {
+    "note": "Footer hint for `y` while a y/n confirm owns the keyboard.",
+    "role": "TUI /notifications page footer (confirm armed)",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 10
+  },
+  "tui.notifications.hint_cancel": {
+    "note": "Footer hint for `n` while a y/n confirm owns the keyboard. Replaces the `esc back` hint in that state, because `esc` cancels rather than going back.",
+    "role": "TUI /notifications page footer (confirm armed)",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
   }
 }

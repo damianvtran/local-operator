@@ -45,12 +45,11 @@ READ_ASK = "·"
 SELECTED = "◼"
 ASK_GLYPH = "?"
 RULE_GLYPH = "─"
-#: The back affordance's arrow. CHROME, not copy: the TUI layout is LTR with
-#: per-string isolation (docs/I18N.md), so "back" always points left — and the
-#: ur catalogue carried `→`, which points away from where `esc` goes (DT13).
-#: Owning it here makes the direction a property of the layout, not a
-#: translation, and needs no re-audit of seven locales.
-BACK_ARROW = "←"
+#: NOT a code-owned arrow. The design review asked for `←` in every locale, and
+#: the Urdu audit had already decided the opposite for a reason a test pins
+#: (`test_urdu_paints_the_back_control_with_the_forward_arrow_it_reads_by`): the
+#: sentence is isolated RTL, so its `→` points the way an RTL reader goes BACK,
+#: and U+2190 is not mirrored by bidi. The arrow therefore stays copy-owned.
 EDGE_GLYPH = "┃"
 #: The priority ladder in block glyphs: the desktop's bars at terminal scale.
 #: THREE CELLS EVERY TIME (DT12). A lone ``▁`` plus two spaces read as an
@@ -164,19 +163,6 @@ def _seen_clause(row: dict[str, Any]) -> str:
     if via == "in_view":
         return _t(_k.seen_in_chat())
     return ""
-
-
-def _bland_back_label() -> str:
-    """The localized back label with its arrow replaced by the layout's own.
-
-    The catalogue value carries an arrow glyph, and ur carried `→` while every
-    other locale carried `←` (DT13). The arrow is not a word: it is the
-    affordance's DIRECTION in an LTR layout, so it belongs to the code and the
-    translated text is used unchanged after it.
-    """
-    label = _t(_k.back())
-    stripped = label.lstrip("←→⟵⟶ ")
-    return f"{BACK_ARROW} {stripped}" if stripped != label or label else label
 
 
 def wrap_cells(text: str, cells: int) -> list[str]:
@@ -463,7 +449,7 @@ def detail_text(
     # arrows move this, not the list" is visible without a word of new copy.
     top.append(f"{CURSOR} " if focused else " ")
     if show_back:
-        top.append(_bland_back_label(), style=ink("muted"))
+        top.append(_t(_k.back()), style=ink("muted"))
     tail = " · ".join(right) + " "
     gap = width - cell_len(top.plain) - cell_len(tail)
     top.append(" " * max(1, gap))

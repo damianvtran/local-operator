@@ -414,6 +414,82 @@ async def test_the_wide_pane_takes_the_keys_and_esc_returns_them(
 
 
 @pytest.mark.asyncio
+async def test_a_tall_detail_pane_scrolls_under_the_keyboard(tmp_path: Path, monkeypatch) -> None:
+    """DT3: the pane's own geometry, measured.
+
+    A detail taller than its box must report a virtual height above its outer
+    size, take the keys on the second `↵`, and actually move: `pagedown` changes
+    the offset and `end` reaches `max_scroll_y`. Measured on this fixture at
+    140x32: outer 60x19, virtual 59x41, offset 0 -> 18 -> 22 (max 22).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    store = NotificationStore(tmp_path)
+    body = "\n".join(f"Paragraph {index}: " + ("detail " * 14) for index in range(12))
+    item = store.notify(S1, title="a tall one", body_md=body, priority="high")
+    store.notify(S2, title="second", priority="normal")
+    app = _app()
+    async with app.run_test(size=(140, 32)) as pilot:
+        await _settle(pilot)
+        app._open_notifications_view()
+        await _settle(pilot, 14)
+        view = _page(app)
+        assert view.wide
+        rows = [str(row["id"]) for row in view.rows]
+        view._move_to(rows.index(item.item_id))
+        await _settle(pilot, 8)
+        await pilot.press("enter")
+        # The payload arrives on its own worker: wait for the REAL body, or the
+        # pane is measured against the short placeholder and the numbers lie.
+        for _ in range(30):
+            await _settle(pilot, 2)
+            if view._detail.virtual_size.height > view._detail.size.height:
+                break
+        outer = view._detail.size.height
+        virtual = view._detail.virtual_size.height
+        assert virtual > outer, (outer, virtual)
+        await pilot.press("enter")  # second ↵: the keys move to the pane
+        await _settle(pilot, 6)
+        assert view._detail_focus is True
+        cursor_after_open = str(view.current["id"]) if view.current else ""
+        start = view._detail.scroll_offset.y
+        await pilot.press("pagedown")
+        await _settle(pilot, 6)
+        after_page = view._detail.scroll_offset.y
+        assert after_page > start, (start, after_page)
+        await pilot.press("end")
+        await _settle(pilot, 6)
+        assert view._detail.scroll_offset.y == view._detail.max_scroll_y, (
+            view._detail.scroll_offset.y,
+            view._detail.max_scroll_y,
+        )
+        # Paging moved the PANE: the list cursor is where the open left it.
+        assert (str(view.current["id"]) if view.current else "") == cursor_after_open
+
+
+def test_the_confirm_names_rows_and_revisions_separately() -> None:
+    """DT5a: `×6` on the row and "1 update" in the confirm meant different things."""
+    from local_operator.i18n import keys as i18n_keys
+    from local_operator.tui.i18n_status import display_tr
+
+    translate = display_tr("tui.notifications")
+    line = translate(
+        i18n_keys.tui_notifications.confirm_dismiss_session(
+            count=1, updates=6, source="radient fraud watch"
+        )
+    )
+    assert "1 notification" in line, line
+    assert "6 updates" in line, line
+
+
+def test_the_armed_footer_names_its_keys_and_mark_all_has_a_real_key() -> None:
+    """DT5b + DT2: y/n in the armed state, and `A` labelled by the namespace."""
+    from local_operator.i18n import keys as i18n_keys
+
+    ns = i18n_keys.tui_notifications
+    assert ns.hint_confirm() and ns.hint_cancel() and ns.hint_mark_all()
+
+
+@pytest.mark.asyncio
 async def test_the_retry_countdown_never_arms_the_banner_latch(tmp_path: Path, monkeypatch) -> None:
     """R2-1: the countdown must not leave `_inbox_notify_pending` set.
 
@@ -574,23 +650,6 @@ def test_the_seen_chip_and_the_low_bars_stay_readable() -> None:
     line = render.row_line(row, 80, cursor=False, selected=False, now_ms=2)
     inks = {str(span.style) for span in line.spans}
     assert not any("dim" in ink for ink in inks if ink), inks
-
-
-def test_the_back_affordance_points_left_in_every_locale() -> None:
-    """DT13: the ur catalogue carries `→`, which points away from `esc`."""
-    row = {
-        "id": "n_3",
-        "source": "notify",
-        "priority": "normal",
-        "title": "x",
-        "created_at": 1,
-        "updated_at": 1,
-        "session": {"id": "s1"},
-        "revision": 1,
-    }
-    text = render.detail_text(None, row, 60, position=(1, 1), now_ms=2, show_back=True).plain
-    assert "→" not in text, text
-    assert "←" in text, text
 
 
 def test_the_header_states_no_counts_for_an_errored_snapshot() -> None:

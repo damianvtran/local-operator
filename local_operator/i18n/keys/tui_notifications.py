@@ -50,8 +50,11 @@ def chip_high() -> Msg:
     return Msg("tui.notifications.chip_high", {})
 
 
-def confirm_dismiss_session(*, count: int | float, source: str) -> Msg:
-    return Msg("tui.notifications.confirm_dismiss_session", {"count": count, "source": source})
+def confirm_dismiss_session(*, count: int | float, updates: int | float, source: str) -> Msg:
+    return Msg(
+        "tui.notifications.confirm_dismiss_session",
+        {"count": count, "updates": updates, "source": source},
+    )
 
 
 def confirm_mark_all(*, count: str) -> Msg:
@@ -138,8 +141,16 @@ def hint_back() -> Msg:
     return Msg("tui.notifications.hint_back", {})
 
 
+def hint_cancel() -> Msg:
+    return Msg("tui.notifications.hint_cancel", {})
+
+
 def hint_clear() -> Msg:
     return Msg("tui.notifications.hint_clear", {})
+
+
+def hint_confirm() -> Msg:
+    return Msg("tui.notifications.hint_confirm", {})
 
 
 def hint_conversation() -> Msg:
@@ -156,6 +167,10 @@ def hint_dismiss_all() -> Msg:
 
 def hint_filter() -> Msg:
     return Msg("tui.notifications.hint_filter", {})
+
+
+def hint_mark_all() -> Msg:
+    return Msg("tui.notifications.hint_mark_all", {})
 
 
 def hint_open() -> Msg:

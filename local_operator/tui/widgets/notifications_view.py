@@ -567,7 +567,19 @@ class NotificationsView(Vertical):
         def run() -> None:
             self._spawn_write("dismiss", scope=(through, observed), session_id=session_id)
 
-        self._ask(_t(_k.confirm_dismiss_session(count=len(observed), source=source)), run)
+        # DT5a: `count` is ROWS and `updates` is the revisions those rows
+        # collapse. The row's own `×6` chip and this sentence used the same word
+        # for different things, so "Dismiss 1 update" read as one revision while
+        # six were about to go.
+        revisions = sum(int(row.get("repeat_count") or 1) for row in _rows) or 1
+        self._ask(
+            _t(
+                _k.confirm_dismiss_session(
+                    count=len(observed), updates=max(1, revisions), source=source
+                )
+            ),
+            run,
+        )
 
     def action_mark_all(self) -> None:
         if self.busy or self._confirm is not None:
@@ -919,6 +931,11 @@ class NotificationsView(Vertical):
     def _hint_labels(self) -> list[tuple[str, str]]:
         row = self.detail_row
         labels: list[tuple[str, str]] = []
+        if self._confirm is not None:
+            # DT5b: while a y/n confirm owns the keyboard, `esc` CANCELS rather
+            # than going back, so "esc back" named the wrong gesture and the two
+            # keys that do work appeared only inside the sentence.
+            return [("y", _t(_k.hint_confirm())), ("n", _t(_k.hint_cancel()))]
         if self._detail_focus:
             # DT3: while the pane owns the keys the footer narrows to the way
             # back, and the pane's own top line carries the ▸ marker
@@ -955,21 +972,15 @@ class NotificationsView(Vertical):
                 labels.append(("space", _t(_k.hint_select())))
                 # DT2: ``A`` (mark every unread read, requirement 4) appeared in
                 # NO hint row in any state — the gesture existed and nothing said
-                # so. It is one string the namespace already carries
-                # (`hint_mark_all`), shown whenever there is something to mark.
+                # so. `hint_mark_all` is a real key now (it was briefly composed
+                # from `hint_read`+`filter_all` to avoid invalidating seven
+                # audited rows for two words; the copy round owns the real one).
                 snapshot = self.snapshot
                 if (
                     snapshot is not None
                     and (snapshot.unread_count + snapshot.waiting_unread_count) > 0
                 ):
-                    # COMPOSED FROM THE NAMESPACE'S OWN AUDITED STRINGS, not a new
-                    # key: `hint_read` + `filter_all` are already translated and
-                    # independently audited in all seven locales, and this
-                    # namespace's ledger rows are keyed to its exact English
-                    # source hash — one added string would invalidate seven rows
-                    # and need a translator+auditor round for two words. "read
-                    # all" is also the shortest honest label the gesture has.
-                    labels.append(("A", _t(_k.hint_read()) + " " + _t(_k.filter_all())))
+                    labels.append(("A", _t(_k.hint_mark_all())))
                 labels.append(("u", read_label))
                 labels.append(("o", _t(_k.hint_conversation())))
                 labels.append(("f", _t(_k.hint_filter())))
