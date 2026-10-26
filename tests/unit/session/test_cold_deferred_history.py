@@ -237,6 +237,20 @@ async def test_the_first_open_defers_from_tail_facts_and_writes_the_record(
     finally:
         await facade.dispose()
 
+    replay_cache.replay_cache().clear()
+    calls.clear()
+
+    def no_second_tail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the freshly filed record must HIT without another tail read")
+
+    monkeypatch.setattr(replay_cache, "read_cold_tail", no_second_tail)
+    again = await cold_open(isolated_config, deferred=True)
+    try:
+        assert again._deferred_history is not None
+        assert calls == []
+    finally:
+        await again.dispose()
+
 
 @pytest.mark.asyncio
 async def test_the_record_carries_no_message_list(
