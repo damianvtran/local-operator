@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 import time
@@ -45,6 +46,13 @@ SENDER = {"account_id": "acc_human", "kind": "human", "display_label": "Ada"}
 BODY = "hello from the channel"
 HISTORY_AT = "2026-10-20T00:00:00Z"
 
+# A root card names the in-conversation reply route (see the root reply route
+# tests below for why).
+ROOT_REPLY_LINE = (
+    "if you reply: bridge channel_post with channel_id = this conversation_id; "
+    "legacy send/reply never appears in a conversation"
+)
+
 EXPECTED_CARD_A = f"""Channel message · #qa-coordination · from Ada (human, same tenant)
 {BRIDGE_UNTRUSTED_CLAUSE}
 
@@ -53,6 +61,7 @@ tenant_id: tnt_1
 conversation_id: bcv_abcdefgh
 message_id: bcmsg_abcdef01
 conversation_seq: 1
+{ROOT_REPLY_LINE}
 guidance: bridge-guidance-v2"""
 
 
@@ -1339,3 +1348,103 @@ def test_a_channel_level_card_carries_no_thread_lines() -> None:
     assert card.splitlines()[0].startswith("Channel message · #agents")
     assert "thread_root_id:" not in card
     assert "channel_thread" not in card
+
+
+# -- root reply route --------------------------------------------------------
+#
+# A root card must name the in-conversation reply route: without it a CoS
+# answered a human's DM through legacy `bridge send`, which lands in the pair
+# inbox and never in the conversation the human is reading.
+
+
+def _root_card(*, label: str, sender: str, kind: str) -> str:
+    return build_conversation_card(
+        ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="ten_1",
+            conversation_label=label,
+            sender_label=sender,
+            sender_kind=kind,
+            mention=False,
+            message_id=MESSAGE_ID,
+            conversation_seq=3,
+        )
+    )
+
+
+def test_a_root_dm_card_names_the_in_conversation_reply_route() -> None:
+    lines = _root_card(label="Damian", sender="Damian", kind="human").splitlines()
+    assert ROOT_REPLY_LINE in lines
+    # The route names the id the card already carries, and sits just above the
+    # guidance footer so the footer stays the card's last line.
+    assert f"conversation_id: {CONVERSATION_ID}" in lines
+    assert lines[-2] == ROOT_REPLY_LINE
+    assert lines[-1].startswith("guidance: ")
+    assert "thread_root_id" not in "\n".join(lines)
+
+
+def test_a_root_channel_card_names_the_in_conversation_reply_route() -> None:
+    card = _root_card(label="#agents", sender="Bea's agent", kind="agent")
+    assert card.splitlines()[0].startswith("Channel message · #agents")
+    assert card.splitlines().count(ROOT_REPLY_LINE) == 1
+
+
+def test_a_thread_reply_card_keeps_only_its_thread_route() -> None:
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="ten_1",
+            conversation_label="#agents",
+            sender_label="Bea's agent",
+            sender_kind="agent",
+            mention=False,
+            message_id=MESSAGE_ID,
+            conversation_seq=7,
+            thread_root_id=ROOT_ID,
+        )
+    )
+    lines = card.splitlines()
+    assert lines[-3:-1] == [
+        f"thread_root_id: {ROOT_ID}",
+        "reply in thread: bridge channel_post with this thread_root_id; "
+        "read the thread with channel_thread",
+    ]
+    assert ROOT_REPLY_LINE not in lines
+    assert not any(line.startswith("if you reply: ") for line in lines)
+
+
+# The route lines are instructions the agent executes literally, and the bridge
+# schema is extra="forbid": a card naming a key the tool does not accept fails
+# the agent's first call, which pushes it back to legacy send (R1-01). So the
+# key is PARSED from the rendered card, not restated here, and a rename on
+# either side fails this test.
+_ROUTE = re.compile(r"bridge (?P<op>\w+) with (?:(?P<key>\w+) = )?this (?P<named>\w+)")
+
+
+@pytest.mark.parametrize("thread_root_id", [None, ROOT_ID], ids=["root", "thread"])
+def test_the_card_route_names_arguments_the_bridge_tool_accepts(thread_root_id) -> None:
+    from local_operator.team_bridge.tool import BridgeToolParams
+
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="ten_1",
+            conversation_label="#agents",
+            sender_label="Ada",
+            sender_kind="human",
+            mention=False,
+            message_id=MESSAGE_ID,
+            conversation_seq=2,
+            thread_root_id=thread_root_id,
+        )
+    )
+    fields = dict(line.split(": ", 1) for line in card.splitlines() if ": " in line)
+    routes = [m for line in card.splitlines() if (m := _ROUTE.search(line))]
+    assert len(routes) == 1, card
+    route = routes[0]
+    key = route["key"] or route["named"]
+    args = {"op": route["op"], key: fields[route["named"]], "body": "ok"}
+    if thread_root_id:
+        args["channel_id"] = CONVERSATION_ID
+    params = BridgeToolParams.model_validate(args)
+    assert getattr(params, key) == fields[route["named"]]
