@@ -9,7 +9,7 @@
   "tui.notifications.banner_digest_body": "Saisissez /notifications pour les afficher.",
   "tui.notifications.banner_digest_title": "{count, plural, one {# autre notification de priorité haute} many {# d’autres notifications de priorité haute} other {# autres notifications de priorité haute}}",
   "tui.notifications.chip_high": "haute",
-  "tui.notifications.confirm_dismiss_session": "Ignorer {count, plural, one {# notification} many {# de notifications} other {# notifications}} ({updates, plural, one {# mise à jour} many {# de mises à jour} other {# mises à jour}}) de « {source} » ? y/n",
+  "tui.notifications.confirm_dismiss_session": "Ignorer {count, plural, one {# notification} many {# de notifications} other {# notifications}} ({updates, plural, one {# mise à jour} many {# de mises à jour} other {# mises à jour}}) de « {source} » ? y/n",
   "tui.notifications.confirm_mark_all": "Tout marquer comme lu ({count}) ? y/n",
   "tui.notifications.dismissed": "{count, plural, one {# mise à jour ignorée} many {# de mises à jour ignorées} other {# mises à jour ignorées}}.",
   "tui.notifications.empty_caught_up_body": "Rien ne vous attend dans vos conversations. Appuyez sur f pour tout afficher.",

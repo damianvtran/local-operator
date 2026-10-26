@@ -7482,6 +7482,25 @@
       },
       "status": "pending_audit",
       "note": "Delta translation for PR #2943 (head bd657f7b164; en 75 keys, source SHA-256 b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224; previous audited source b415bc703840). Changed keys only: NEW hint_mark_all, hint_confirm, hint_cancel; CHANGED confirm_dismiss_session (two plural arguments: count = rows, updates = collapsed revisions). The other 71 values are byte-identical to the bytes the prior independent audit passed (ntt2: i18n/audits/evidence/zh-CN/tui.notifications/ntt2/, auditor translation-auditor (lopdev team, tui-audit-zh-CN round 2), radient/auto, 2026-10-25). Target SHA-256 6e926fbc317f7c790754ba4e8e5ac03b6a5e572e3db8acd6caaa792fa493c668. Independent i18n-auditor has NOT run on this delta: status stays pending_audit, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Widths measured with rich cell_len over count x updates in {0,1,2,5,6,11,21,22,101}, all within maxCells. Translator identity from the session's runtime metadata (provider anthropic, model claude-opus-5-5). zh-CN/ur/hi confirm_dismiss_session nests updates inside count (each arm renders count via {count, number}) so the source-first word order survives check.py's first-appearance argument-order rule (count, updates, source)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.settings/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
     }
   ]
 }

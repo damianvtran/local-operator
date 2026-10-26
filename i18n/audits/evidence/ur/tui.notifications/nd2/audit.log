@@ -1,0 +1,135 @@
+en sha b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224 keys 75
+
+=== fr sha=87e89e01cf6a268642de8589a819ec143fb0152e35ed65a7820c2b98229b4cf9
+ bytes: endsLF True BOM False CR False reserialize_eq True
+ keys 75 order==en True unchanged71 71 dup? False
+ hint_mark_all: NFC=True bidi=[] args () en ()
+ hint_confirm: NFC=True bidi=[] args () en ()
+ hint_cancel: NFC=True bidi=[] args () en ()
+ confirm_dismiss_session: NFC=True bidi=[] args (('count', 'plural'), ('updates', 'plural'), ('source', 'simple')) en (('count', 'plural'), ('updates', 'plural'), ('source', 'simple'))
+   plural count [('one', False, True), ('many', False, True), ('other', False, True)] need ('many', 'one', 'other')
+   plural updates [('one', False, True), ('many', False, True), ('other', False, True)] need ('many', 'one', 'other')
+  hint_mark_all "tout lu" cells=7 max=12
+  hint_confirm "confirmer" cells=9 max=10
+  hint_cancel "annuler" cells=7 max=8
+   cat('one', 'one') c=0 u=0 [65] Ignorer 0 notification (0 mise à jour) de « Fix the relay » ? y/n
+   cat('one', 'other') c=0 u=2 [66] Ignorer 0 notification (2 mises à jour) de « Fix the relay » ? y/n
+   cat('other', 'one') c=2 u=0 [66] Ignorer 2 notifications (0 mise à jour) de « Fix the relay » ? y/n
+   cat('other', 'other') c=2 u=2 [67] Ignorer 2 notifications (2 mises à jour) de « Fix the relay » ? y/n
+   overruns(source="Fix the relay") [] 0
+   worst w/ empty source 59 -> source budget 37  en: 51
+
+=== es sha=1cb3b828552df19defb073b8cff6d9f08bba2d5a812e8d9d32f93eb84d50808c
+ bytes: endsLF True BOM False CR False reserialize_eq True
+ keys 75 order==en True unchanged71 71 dup? False
+ hint_mark_all: NFC=True bidi=[] args () en ()
+ hint_confirm: NFC=True bidi=[] args () en ()
+ hint_cancel: NFC=True bidi=[] args () en ()
+ confirm_dismiss_session: NFC=True bidi=[] args (('count', 'plural'), ('updates', 'plural'), ('source', 'simple')) en (('count', 'plural'), ('updates', 'plural'), ('source', 'simple'))
+   plural count [('one', False, True), ('many', False, True), ('other', False, True)] need ('many', 'one', 'other')
+   plural updates [('one', False, True), ('many', False, True), ('other', False, True)] need ('many', 'one', 'other')
+  hint_mark_all "todo leído" cells=10 max=12
+  hint_confirm "confirmar" cells=9 max=10
+  hint_cancel "cancelar" cells=8 max=8
+   cat('one', 'one') c=1 u=1 [65] ¿Descartar 1 notificación (1 actualización) de Fix the relay? y/n
+   cat('one', 'other') c=1 u=0 [67] ¿Descartar 1 notificación (0 actualizaciones) de Fix the relay? y/n
+   cat('other', 'one') c=0 u=1 [67] ¿Descartar 0 notificaciones (1 actualización) de Fix the relay? y/n
+   cat('other', 'other') c=0 u=0 [69] ¿Descartar 0 notificaciones (0 actualizaciones) de Fix the relay? y/n
+   overruns(source="Fix the relay") [] 0
+   worst w/ empty source 61 -> source budget 35  en: 51
+
+=== zh-CN sha=6e926fbc317f7c790754ba4e8e5ac03b6a5e572e3db8acd6caaa792fa493c668
+ bytes: endsLF True BOM False CR False reserialize_eq True
+ keys 75 order==en True unchanged71 71 dup? False
+ hint_mark_all: NFC=True bidi=[] args () en ()
+ hint_confirm: NFC=True bidi=[] args () en ()
+ hint_cancel: NFC=True bidi=[] args () en ()
+ confirm_dismiss_session: NFC=True bidi=[] args (('count', 'plural'), ('updates', 'plural'), ('source', 'simple')) en (('count', 'plural'), ('updates', 'plural'), ('source', 'simple'))
+   plural count [('other', False, True)] need ('other',)
+   plural updates [('other', False, True)] need ('other',)
+  hint_mark_all "全部标为已读" cells=12 max=12
+  hint_confirm "确认" cells=4 max=10
+  hint_cancel "取消" cells=4 max=8
+   cat('other', 'other') c=0 u=0 [46] 清除来自Fix the relay的0条通知（0条更新）？y/n
+   overruns(source="Fix the relay") [] 0
+   worst w/ empty source 38 -> source budget 58  en: 51
+
+=== ru sha=85b808d1c3baffc6d4c49cdb24c6642bcd194238d9d3c660fed20d2dc4516dec
+ bytes: endsLF True BOM False CR False reserialize_eq True
+ keys 75 order==en True unchanged71 71 dup? False
+ hint_mark_all: NFC=True bidi=[] args () en ()
+ hint_confirm: NFC=True bidi=[] args () en ()
+ hint_cancel: NFC=True bidi=[] args () en ()
+ confirm_dismiss_session: NFC=True bidi=[] args (('count', 'plural'), ('updates', 'plural'), ('source', 'simple')) en (('count', 'plural'), ('updates', 'plural'), ('source', 'simple'))
+   plural count [('one', False, True), ('few', False, True), ('many', False, True), ('other', False, True)] need ('few', 'many', 'one', 'other')
+   plural updates [('one', False, True), ('few', False, True), ('many', False, True), ('other', False, True)] need ('few', 'many', 'one', 'other')
+  hint_mark_all "всё прочтено" cells=12 max=12
+  hint_confirm "подтв." cells=6 max=10
+  hint_cancel "отмена" cells=6 max=8
+   cat('few', 'few') c=2 u=2 [59] Скрыть 2 уведомления (2 обновления) из «Fix the relay»? y/n
+   cat('few', 'many') c=2 u=0 [59] Скрыть 2 уведомления (0 обновлений) из «Fix the relay»? y/n
+   cat('few', 'one') c=2 u=1 [59] Скрыть 2 уведомления (1 обновление) из «Fix the relay»? y/n
+   cat('many', 'few') c=0 u=2 [59] Скрыть 0 уведомлений (2 обновления) из «Fix the relay»? y/n
+   cat('many', 'many') c=0 u=0 [59] Скрыть 0 уведомлений (0 обновлений) из «Fix the relay»? y/n
+   cat('many', 'one') c=0 u=1 [59] Скрыть 0 уведомлений (1 обновление) из «Fix the relay»? y/n
+   cat('one', 'few') c=1 u=2 [59] Скрыть 1 уведомление (2 обновления) из «Fix the relay»? y/n
+   cat('one', 'many') c=1 u=0 [59] Скрыть 1 уведомление (0 обновлений) из «Fix the relay»? y/n
+   cat('one', 'one') c=1 u=1 [59] Скрыть 1 уведомление (1 обновление) из «Fix the relay»? y/n
+   overruns(source="Fix the relay") [] 0
+   worst w/ empty source 51 -> source budget 45  en: 51
+
+=== vi sha=50adc913c804bb51308642bbac0d7435dd2bf850995dea73df49211fad79f32f
+ bytes: endsLF True BOM False CR False reserialize_eq True
+ keys 75 order==en True unchanged71 71 dup? False
+ hint_mark_all: NFC=True bidi=[] args () en ()
+ hint_confirm: NFC=True bidi=[] args () en ()
+ hint_cancel: NFC=True bidi=[] args () en ()
+ confirm_dismiss_session: NFC=True bidi=[] args (('count', 'plural'), ('updates', 'plural'), ('source', 'simple')) en (('count', 'plural'), ('updates', 'plural'), ('source', 'simple'))
+   plural count [('other', False, True)] need ('other',)
+   plural updates [('other', False, True)] need ('other',)
+  hint_mark_all "đã đọc hết" cells=10 max=12
+  hint_confirm "xác nhận" cells=8 max=10
+  hint_cancel "hủy" cells=3 max=8
+   cat('other', 'other') c=0 u=0 [49] Ẩn 0 thông báo (0 cập nhật) từ Fix the relay? y/n
+   overruns(source="Fix the relay") [] 0
+   worst w/ empty source 41 -> source budget 55  en: 51
+
+=== ur sha=034cb9f1d3e215b3c54329ff32970227ba0d675d6f03f5f8478041de659700e7
+ bytes: endsLF True BOM False CR False reserialize_eq True
+ keys 75 order==en True unchanged71 71 dup? False
+ hint_mark_all: NFC=True bidi=[] args () en ()
+ hint_confirm: NFC=True bidi=[] args () en ()
+ hint_cancel: NFC=True bidi=[] args () en ()
+ confirm_dismiss_session: NFC=True bidi=[] args (('count', 'plural'), ('updates', 'plural'), ('source', 'simple')) en (('count', 'plural'), ('updates', 'plural'), ('source', 'simple'))
+   plural count [('one', False, True), ('other', False, True)] need ('one', 'other')
+   plural updates [('one', False, True), ('other', False, True)] need ('one', 'other')
+   plural updates [('one', False, True), ('other', False, True)] need ('one', 'other')
+  hint_mark_all "سب پڑھا ہوا" cells=11 max=12
+  hint_confirm "تصدیق" cells=5 max=10
+  hint_cancel "منسوخ" cells=5 max=8
+   cat('one', 'one') c=1 u=1 [47] Fix the relay کی 1 اطلاع (1 اپ ڈیٹ) ہٹائیں؟ y/n
+   cat('one', 'other') c=1 u=0 [48] Fix the relay کی 1 اطلاع (0 اپ ڈیٹس) ہٹائیں؟ y/n
+   cat('other', 'one') c=0 u=1 [49] Fix the relay کی 0 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n
+   cat('other', 'other') c=0 u=0 [50] Fix the relay کی 0 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n
+   overruns(source="Fix the relay") [] 0
+   worst w/ empty source 42 -> source budget 54  en: 51
+
+=== hi sha=464320741942cca3a4ec205e9e946a1238757ee450821be665c7253955f54b7c
+ bytes: endsLF True BOM False CR False reserialize_eq True
+ keys 75 order==en True unchanged71 71 dup? False
+ hint_mark_all: NFC=True bidi=[] args () en ()
+ hint_confirm: NFC=True bidi=[] args () en ()
+ hint_cancel: NFC=True bidi=[] args () en ()
+ confirm_dismiss_session: NFC=True bidi=[] args (('count', 'plural'), ('updates', 'plural'), ('source', 'simple')) en (('count', 'plural'), ('updates', 'plural'), ('source', 'simple'))
+   plural count [('one', False, True), ('other', False, True)] need ('one', 'other')
+   plural updates [('one', False, True), ('other', False, True)] need ('one', 'other')
+   plural updates [('one', False, True), ('other', False, True)] need ('one', 'other')
+  hint_mark_all "सभी को पढ़ा मानें" cells=10 max=12
+  hint_confirm "पुष्टि करें" cells=6 max=10
+  hint_cancel "रद्द करें" cells=6 max=8
+   cat('one', 'one') c=0 u=0 [39] Fix the relay की 0 सूचना (0 अपडेट) हटाएँ? y/n
+   cat('one', 'other') c=0 u=2 [39] Fix the relay की 0 सूचना (2 अपडेट) हटाएँ? y/n
+   cat('other', 'one') c=2 u=0 [40] Fix the relay की 2 सूचनाएँ (0 अपडेट) हटाएँ? y/n
+   cat('other', 'other') c=2 u=2 [40] Fix the relay की 2 सूचनाएँ (2 अपडेट) हटाएँ? y/n
+   overruns(source="Fix the relay") [] 0
+   worst w/ empty source 32 -> source budget 64  en: 51
