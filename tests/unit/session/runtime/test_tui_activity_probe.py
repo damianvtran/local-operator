@@ -209,3 +209,56 @@ async def test_the_activity_op_carries_a_timestamp_and_nothing_else(tmp_path: Pa
         writer.close()
     finally:
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_the_owner_advertises_the_activity_capability(tmp_path: Path) -> None:
+    """The STRING the client gates on must actually be on the wire.
+
+    A gate nobody can satisfy is the same bug in the other direction: the client
+    would silently never send ``activity`` and the rung-4 probe would stay dark
+    in production while every unit test still passed. So the record this server
+    publishes must carry the capability.
+    """
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.types import ATTACH_ACTIVITY_CAPABILITY
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        assert ATTACH_ACTIVITY_CAPABILITY in record.capabilities, record.capabilities
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_activity_capability_sends_nothing(tmp_path: Path) -> None:
+    """Skew, new viewer x old owner: the op is a no-op, not a stream-killing send.
+
+    An owner that predates the op answers with an error frame, and the relay
+    treats an owner-side error as ``peer-stopped-answering`` and CLOSES the
+    viewer's stream (``_forward_stream_frame``) — so a best-effort stamp would
+    cost the TUI its attach every ten seconds. The gate is what turns that into
+    a local no-op, so it is pinned here from both sides: nothing is sent when the
+    capability is withheld, and the op rides exactly one integer when it is not.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    assert client.supports_activity is False, "the pre-dial default must be off"
+
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    async def _request(op: str, **payload: object) -> str:
+        seen.append((op, payload))
+        return "ok"
+
+    client._request = _request  # type: ignore[method-assign]
+
+    assert await client.activity(input_at_ms=1_700_000_000_000) == ""
+    assert seen == [], "a withheld capability must send nothing at all"
+
+    client._activity_supported = True
+    assert await client.activity(input_at_ms=1_700_000_000_000) == "ok"
+    assert seen == [("activity", {"input_at_ms": 1_700_000_000_000})], seen

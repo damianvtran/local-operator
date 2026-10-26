@@ -76,6 +76,7 @@ from local_operator.session.runtime.registry import scan
 from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_CAPABILITY,
     ASK_ATTACHMENTS_UNSUPPORTED,
+    ATTACH_ACTIVITY_CAPABILITY,
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
     EXCLUSIVE_MOVE_CAPABILITY,
@@ -1072,6 +1073,7 @@ class AttachClient:
         self._session_id = ""
         self._attention_supported = False
         self._event_mute_supported = False
+        self._activity_supported = False
         self._exclusive_move_supported = False
         self._ask_attachments_supported = False
         self._connected = False
@@ -1083,6 +1085,17 @@ class AttachClient:
     @property
     def supports_completion_ack(self) -> bool:
         return self.connected and self._attention_supported
+
+    @property
+    def supports_activity(self) -> bool:
+        """Whether this owner advertised ``ATTACH_ACTIVITY_CAPABILITY``.
+
+        An owner without the string is exactly the pre-R6-1 behaviour: nobody
+        knows the operator is at the keyboard, so rung 4 keeps notifying — the
+        safe direction. What must NOT happen is the blind send, which the owner
+        answers with an error frame and the relay turns into a closed stream.
+        """
+        return self.connected and self._activity_supported
 
     @property
     def supports_event_mute(self) -> bool:
@@ -1171,6 +1184,11 @@ class AttachClient:
         self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in record.capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
+        # Whether this owner takes the input-freshness stamp. Read at DIAL like
+        # the mute flag: sending blind is not a refused optimisation, it is a
+        # dead stream (`_forward_stream_frame` closes on an owner-side error),
+        # so the caller must gate on this and never send without it.
+        self._activity_supported = ATTACH_ACTIVITY_CAPABILITY in record.capabilities
         # MAY THIS OWNER STORE THE INPUT ANNOTATION, resolved per dial exactly
         # like the mute flag beside it: the fields ride only to a record that
         # advertised input-mode-v1, and an older/unadvertised owner gets frames
@@ -2154,6 +2172,12 @@ class AttachClient:
         parameter is an optimisation of the banner ladder, never a feature whose
         absence breaks a turn.
         """
+        if not self._activity_supported:
+            # Skew, new viewer x old owner: the op is a no-op rather than a send.
+            # The return type is the owner's reply, which this side never reads
+            # (the TUI fires and forgets), so "" is the honest answer for "not
+            # asked".
+            return ""
         return await self._request("activity", input_at_ms=int(input_at_ms))
 
     async def abort(self) -> str:

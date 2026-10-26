@@ -109,6 +109,7 @@ from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_CAPABILITY,
     ASK_ATTACHMENTS_UNSUPPORTED,
+    ATTACH_ACTIVITY_CAPABILITY,
     ATTACH_MAX_CLIENTS,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
@@ -2349,6 +2350,11 @@ class RuntimeServer:
                 # mute is a property of the RELAY this server always runs, not
                 # of anything the handle implements.
                 + [EVENT_MUTE_CAPABILITY]
+                # Unconditional for the identical reason: the input stamp is a
+                # property of THIS server's attach records, not of the handle —
+                # and the viewer must see the string before it sends the op,
+                # because an unknown op costs it the whole stream.
+                + [ATTACH_ACTIVITY_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
