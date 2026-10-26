@@ -136,9 +136,14 @@ export function AsksSheet({
 	   frame's `asks_open` does not (a timed-out ask is not counted, #2388), so
 	   a dismissal or a late answer on another surface would otherwise wait for
 	   the backstop. */
-	const rowsSignature = askRowsSignature(
-		crossConversation ? undefined : useProjection(currentSessionId).projection?.asks,
-	);
+	/* THE HOOK IS UNCONDITIONAL (code review round 2, C2-3). It used to be
+	   `crossConversation ? undefined : useProjection(...)`, which changes the hook
+	   count if one mounted sheet ever moved between the two modes. Today's callers
+	   pass a fixed mode, so nothing breaks now — but a rules-of-hooks violation
+	   that is currently unreachable is still a trap for the next caller, and the
+	   cost of obeying the rule is one discarded value. */
+	const ownProjection = useProjection(currentSessionId).projection;
+	const rowsSignature = askRowsSignature(crossConversation ? undefined : ownProjection?.asks);
 
 	const load = useCallback(async () => {
 		/* THE READ IS BOUNDED (U6). `AbortSignal.timeout` is the platform's own
@@ -221,6 +226,42 @@ export function AsksSheet({
 	/* THE HEAD FIRST, then the wire's own order (`orderedForDisplay`) — the
 	   order the minimized chip names (UX round 1, U8). */
 	const listed = useMemo(() => orderedForDisplay(rows), [rows]);
+	/* ONE HEADER PER CONVERSATION, NOT ONE PER ASK (UX review round 2, U6). In the
+	   cross-conversation view each row used to repeat its conversation's name AND
+	   the three-line not-running notice, so two asks from one conversation cost a
+	   full repeated block for the second. Rows are grouped into blocks in their
+	   FIRST-APPEARANCE order (so the head ask still leads), and the name and the
+	   wait are stated once, above that conversation's cards. The single-conversation
+	   view is one block, which renders exactly as before. */
+	const blocks = useMemo(() => {
+		const order: string[] = [];
+		const grouped = new Map<string, PendingAsk[]>();
+		for (const row of listed) {
+			const key = crossConversation ? String(row.session_id) : currentSessionId;
+			const bucket = grouped.get(key);
+			if (bucket) bucket.push(row);
+			else {
+				grouped.set(key, [row]);
+				order.push(key);
+			}
+		}
+		return order.map((key) => ({
+			sessionId: key,
+			rows: grouped.get(key) as PendingAsk[],
+			/* The wait is a fact about the CONVERSATION, so it is decided once, from
+			   the first row the tap could actually answer: the same per-row predicate
+			   the strip used, applied to the block's first answerable member. */
+			waits: (grouped.get(key) as PendingAsk[]).some(
+				(row) =>
+					isAnswerable(String(row.status || "open")) &&
+					!isLapsed(row) &&
+					!isDeadConversation(row) &&
+					(ended || row.runtime_live === false),
+			),
+			name:
+				sessions.find((session) => session.session_id === key)?.conversation_name || key,
+		}));
+	}, [listed, crossConversation, currentSessionId, ended, sessions]);
 	/* THE RECEIPT IS THE INSTANT ECHO, AND IT STANDS DOWN WHEN ITS ROW HAS
 	   SETTLED (SA-D8, design D1 = UX U2; review round 2, M2). Since §17 a
 	   dismissal taken before the ask's deadline KEEPS the row as a settled
@@ -315,60 +356,44 @@ export function AsksSheet({
 						{messageRuntime.t("relay.asks.sheet.empty")}
 					</p>
 				) : null}
-				{listed.map((row) => {
-					/* THE ROW'S OWN CONVERSATION, always: in the cross-conversation
-					   view the answer op must go to the conversation that asked, and
-					   the name below stops a row being attributed to the wrong one. */
-					const sessionId = crossConversation ? String(row.session_id) : currentSessionId;
-					const conversationName = crossConversation
-						? sessions.find((session) => session.session_id === sessionId)
-								?.conversation_name || sessionId
-						: "";
-					return (
-						<div key={`${sessionId}:${row.ask_id}`} className="flex flex-col gap-1">
-							{/* Data, not copy: the projection's own conversation name. */}
-							{crossConversation ? (
-								<p className="truncate px-1 text-meta font-medium text-ink-dim">
-									{conversationName}
-								</p>
-							) : null}
-							{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
-							    (design round 1, D4 = UX U4; the two gates are the round-2 corrections).
+				{blocks.map((block) => (
+					<div key={block.sessionId} className="flex flex-col gap-2">
+						{/* Data, not copy: the projection's own conversation name, once per
+						    conversation (UX round 2, U6). */}
+						{crossConversation ? (
+							<p className="truncate px-1 text-meta font-medium text-ink-dim">{block.name}</p>
+						) : null}
+						{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
+						    (design round 1, D4 = UX U4; round-2 corrections below).
 
-							    ANSWERABLE, because a settled receipt offers nothing to answer, so
-							    a wait stated above it is noise about a tap that does not exist
-							    (UX round 2, U6). This strip used to render only for an `ended` row
-							    with copy naming a manual remedy the relay now performs itself;
-							    `runtime_live` widened it to the merely-not-running conversation
-							    the operator actually hits.
+						    ANSWERABLE, because a settled receipt offers nothing to answer, so
+						    a wait stated above it is noise about a tap that does not exist
+						    (UX round 2, U6). `runtime_live` widened it from `ended` alone to
+						    the merely-not-running conversation the operator actually hits.
 
-							    DURABILITY, because `runtime_live === false` is ALSO true of a
-							    conversation with no transcript at all — where the op is a
-							    terminal refusal and the promise of a ~30 s bring-up is a claim
-							    about a backend that does not exist (design round 2, D6). On
-							    those rows the strip goes silent and the card states the truth
-							    it already knows, so the sheet and the card cannot contradict
-							    each other one element apart. It is `isDeadConversation`, the
-							    CONJUNCTION of the two fields — not `durable` alone, which would
-							    silence the strip on a live conversation that answers fine
-							    (design round 3, D7).
+						    DURABILITY, because `runtime_live === false` is ALSO true of a
+						    conversation with no transcript at all — where the op is a
+						    terminal refusal and the promise of a ~30 s bring-up is a claim
+						    about a backend that does not exist (design round 2, D6). It is
+						    `isDeadConversation`, the CONJUNCTION of the two fields — not
+						    `durable` alone, which would silence the strip on a live
+						    conversation that answers fine (design round 3, D7).
 
-							    NOT LAPSED, because a lapsed card offers no answer (`isLapsed`),
-							    so "answering will bring it up" would promise a tap the card one
-							    element below does not have. */}
-							{isAnswerable(String(row.status || "open")) &&
-							!isLapsed(row) &&
-							!isDeadConversation(row) &&
-							(ended || row.runtime_live === false) ? (
-								<p className="text-meta text-ink-dim">
-									{ended
-										? messageRuntime.t("relay.asks.sheet.ended_wait")
-										: messageRuntime.t("relay.asks.sheet.not_running_wait")}
-								</p>
-							) : null}
+						    NOT LAPSED, because a lapsed card offers no answer (`isLapsed`),
+						    so "answering will bring it up" would promise a tap the card one
+						    element below does not have. */}
+						{block.waits ? (
+							<p className="text-meta text-ink-dim">
+								{ended
+									? messageRuntime.t("relay.asks.sheet.ended_wait")
+									: messageRuntime.t("relay.asks.sheet.not_running_wait")}
+							</p>
+						) : null}
+						{block.rows.map((row) => (
 							<AskCard
+								key={`${block.sessionId}:${row.ask_id}`}
 								row={row}
-								sessionId={sessionId}
+								sessionId={block.sessionId}
 								nowMs={nowMs}
 								onSettled={(kind) => {
 									/* A NON-DISMISSAL SETTLEMENT RETIRES THE RECEIPT (M1): after
@@ -381,9 +406,9 @@ export function AsksSheet({
 									setReceipt({ askId, reason: reason ?? "lapsed" })
 								}
 							/>
-						</div>
-					);
-				})}
+						))}
+					</div>
+				))}
 			</div>
 		</Sheet>
 	);

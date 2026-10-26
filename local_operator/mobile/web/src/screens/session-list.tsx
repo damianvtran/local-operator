@@ -1460,15 +1460,21 @@ export function SessionListScreen() {
 			    fit or move behind `+N`. */}
 			{!searchOpen && (rows.length > 0 || !connected) ? <div ref={tagFit.rowRef} role="group" aria-label={messageRuntime.t("relay.chrome.list.filter_label")}
 				className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-3 px-3 py-1.5">
-				<Chip data-fit-fixed selected={filter === "all"} aria-pressed={filter === "all"} onClick={() => setFilter("all")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.all")}</Chip>
-				<Chip data-fit-fixed selected={filter === "needs"} aria-pressed={filter === "needs"} onClick={() => setFilter("needs")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.needs_you", { count: needsCount })}</Chip>
-				<Chip data-fit-fixed selected={filter === "unread"} aria-pressed={filter === "unread"} onClick={() => setFilter("unread")} className="shrink-0">{messageRuntime.t("relay.chrome.list.filter.unread", { count: unreadCount })}</Chip>
+				{/* `max-[380px]:px-2` is what keeps the 320 px strip to ONE line: the
+				    three fixed chips need 306 px of the 296 px a 320 phone offers, and
+				    the 8 px a narrower inset saves on each of them buys the 16 px the
+				    `+N` control was short. Reachability was never the problem — an
+				    orphaned `+N` alone on a second line was (design review round 2,
+				    NIT). The inset is scoped to this strip; the tray has the room. */}
+				<Chip data-fit-fixed selected={filter === "all"} aria-pressed={filter === "all"} onClick={() => setFilter("all")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.all")}</Chip>
+				<Chip data-fit-fixed selected={filter === "needs"} aria-pressed={filter === "needs"} onClick={() => setFilter("needs")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.needs_you", { count: needsCount })}</Chip>
+				<Chip data-fit-fixed selected={filter === "unread"} aria-pressed={filter === "unread"} onClick={() => setFilter("unread")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.unread", { count: unreadCount })}</Chip>
 				{tagsAvailable ? visibleTags.map(tag => <Chip key={tag.id} data-fit-key={tag.id} className="min-w-0 max-w-40 shrink-0" title={tag.name} selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}><span className="truncate">{tag.name}</span></Chip>) : null}
 				{/* ONE TAP TO EVERY TAG. The visible mark is `+N`; its accessible
 				    name is the existing "N more tags" sentence (the tag line's own
 				    `+N` mark, same meaning). The sheet lists EVERY tag, so the
 				    choice is never split between two places. */}
-				{tagsAvailable && tagFit.hidden > 0 ? <Chip data-fit-overflow className="shrink-0" aria-haspopup="dialog" aria-expanded={tagFiltersOpen}
+				{tagsAvailable && tagFit.hidden > 0 ? <Chip data-fit-overflow className="shrink-0 max-[380px]:px-2" aria-haspopup="dialog" aria-expanded={tagFiltersOpen}
 					aria-label={messageRuntime.t("relay.session.tags.more", { count: tagFit.hidden })} onClick={() => setTagFiltersOpen(true)}>
 					<span aria-hidden>+{tagFit.hidden}</span></Chip> : null}
 			</div> : null}

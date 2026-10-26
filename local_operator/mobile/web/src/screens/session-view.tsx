@@ -22,7 +22,7 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { resumeSession, setSessionPin } from "../api";
 import { AskDock } from "../components/ask-dock";
 import { AsksSheet } from "../components/asks-sheet";
@@ -471,6 +471,10 @@ export function SessionScreen({
 	   outstanding set: it is what the open policy's dismissal memory records. */
 	const answerableAsks = outstandingAsks(projection?.asks);
 	const [modelsOpen, setModelsOpen] = useState(false);
+	/* The model sheet's search text lives HERE (UX round 2, U5): a fresh open
+	   clears it, while the effort view's back control returns to the same sheet
+	   with the query intact. */
+	const [modelQuery, setModelQuery] = useState("");
 	const [effortOpen, setEffortOpen] = useState(false);
 	/* THE ONE-SHOT FOCUS INTENT (see ``lib/pending-focus.ts``). Consumed at MOUNT
 	   so it cannot leak into a later mount of the same session, and consumed only
@@ -737,6 +741,60 @@ export function SessionScreen({
 	   (`session-view.health.test.tsx` pins that decision — U11). Nothing can be
 	   "synced" yet, so the ladder keeps its existing rule: it speaks once there
 	   is something to have fallen back from. */
+	/* THE TRAY'S OWN WIDTH DECIDES WHICH PILL FORM FITS (design round 2, D5 = UX
+	   U3 with D2's one-line rule still in force). The full `agents_failed` sentence
+	   names the failure but costs ~97 px more than the noun form; at 360 with the
+	   question pill and Tasks beside it, the full sentence wraps the tray to two
+	   lines (measured: `crop-r2-after-composer-stream-360-light.png`). Both forms
+	   are EXISTING copy, so the choice is a measurement, not a new string: the
+	   canvas measures both labels at the tray's own font and the tray keeps the
+	   longer one only when the line still holds it. Decided before paint, so no
+	   reflow, and re-decided when the tray resizes. */
+	const trayRef = useRef<HTMLDivElement>(null);
+	const [agentsFullLabel, setAgentsFullLabel] = useState(true);
+	const rosterRunning = projection?.subagents?.filter(agent => agent.status === "running").length ?? 0;
+	const rosterFailed = projection?.subagents?.filter(agent => agent.status === "failed").length ?? 0;
+	const failedLabel = projection?.subagents?.length
+		? messageRuntime.t("relay.chrome.session.tray.agents_failed", {
+				running: rosterRunning,
+				total: projection?.subagents?.length ?? 0,
+				failed: rosterFailed,
+			})
+		: "";
+	const nounLabel = projection?.subagents?.length
+		? messageRuntime.t("relay.chrome.session.tray.agents", {
+				running: rosterRunning,
+				total: projection?.subagents?.length ?? 0,
+			})
+		: "";
+	useLayoutEffect(() => {
+		const node = trayRef.current;
+		if (!node || !(projection?.subagents?.length) || rosterFailed === 0) return;
+		const decide = () => {
+			const style = getComputedStyle(node);
+			const available = node.clientWidth
+				- (parseFloat(style.paddingInlineStart) || 0)
+				- (parseFloat(style.paddingInlineEnd) || 0);
+			if (available <= 0) return;
+			const children = Array.from(node.children) as HTMLElement[];
+			const gap = parseFloat(style.columnGap) || 0;
+			const spent = children.reduce((sum, child) => sum + child.offsetWidth, 0)
+				+ gap * Math.max(0, children.length - 1);
+			/* The pill's own padding is already inside `spent`; only the LABEL delta
+			   is unknown, and the canvas gives it at the tray's real font. */
+			const probe = document.createElement("canvas").getContext("2d");
+			if (!probe) return setAgentsFullLabel(true);
+			probe.font = getComputedStyle(children[0] ?? node).font || style.font;
+			const delta = probe.measureText(failedLabel).width - probe.measureText(nounLabel).width;
+			setAgentsFullLabel(spent + (agentsFullLabel ? 0 : delta) <= available - 8);
+		};
+		decide();
+		if (typeof ResizeObserver === "undefined") return;
+		const observer = new ResizeObserver(decide);
+		observer.observe(node);
+		return () => observer.disconnect();
+	}, [failedLabel, nounLabel, rosterFailed, agentsFullLabel, projection?.subagents?.length]);
+
 	if (!projection) {
 		return (
 			<div
@@ -781,8 +839,34 @@ export function SessionScreen({
 	const needsApproval = blocking?.kind === "approval";
 	const taskItems = projection.todos.flatMap(phase => phase.items);
 	const tasksDone = taskItems.filter(task => task.status === "done" || task.status === "dropped").length;
-	const agentsRunning = projection.subagents.filter(agent => agent.status === "running").length;
-	const agentsFailed = projection.subagents.filter(agent => agent.status === "failed").length;
+
+	/* THE ROSTER CHIP, ONCE (code review round 2, C2-5): defined here and rendered
+	   from the slot this conversation's state owns — before tasks when something
+	   failed, after tasks when the roster is healthy (design round 1, D2).
+	   THE FULL EXISTING SENTENCE CARRIES THE NOUN AND THE FAILURE (design D5, UX
+	   U3): `✗ 1` read as a dismiss control beside two counters and never named what
+	   failed. "Agents 1/3 · 1 failed" says the noun, the running count and the
+	   failure in the pill's own danger register, with no ✕-lookalike glyph; its
+	   accessible name is that same sentence, so nothing is lost to sighted readers
+	   or to assistive tech. No new copy — the two `tray.agents*` keys already exist. */
+	/* Aliases of the top-level derivation, so the chip below reads plainly. The
+	   derivation itself had to move above the early return (React error #310). */
+	const agentsFailed = rosterFailed;
+	const agentsChip = projection.subagents.length ? (
+		<Chip
+			className={cn("shrink-0", agentsFailed > 0 ? "!bg-danger-wash !text-danger" : blocking && "!text-ink-dim")}
+			disabled={Boolean(blocking)}
+			aria-expanded={agentsOpen}
+			/* THE FULL SENTENCE IS ALWAYS THE ACCESSIBLE NAME, whichever form fits
+			   on the line: the visible pill may shorten to the noun, and the count
+			   of failed agents must not shorten with it. */
+			aria-label={agentsFailed > 0 ? failedLabel : undefined}
+			title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined}
+			onClick={() => setAgentsOpen(true)}
+		>
+			{agentsFailed > 0 && agentsFullLabel ? failedLabel : nounLabel}
+		</Chip>
+	) : null;
 	const showEmptyState =
 		projection.transcript.length === 0 && !projection.streaming && pendingEchoes.length === 0;
 
@@ -878,34 +962,31 @@ export function SessionScreen({
 				/* THE TRAY NEVER SCROLLS SIDEWAYS (operator finding B). It was an
 				   `overflow-x: auto` rail, so the last pill was reachable only by a
 				   swipe most phone users never try. Now: PRIORITY ORDER (approve,
-				   questions, a failing roster, tasks, then a healthy roster) and
-				   COMPACT forms (`2 questions`, `✗ 1`), which measure onto one
-				   44 px line at 320/360/390 in the worst fixture state. `flex-wrap`
-				   is the safety net for a longer translation: a second line costs
-				   44 px of transcript, but hides nothing and adds no tap; `gap-y-3`
-				   keeps the wrapped rows' 44 px hit bands from overlapping. */
-				<div aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-3 px-3 py-1.5">
+				   questions, a failing roster, tasks, then a healthy roster), with the
+				   pills sized so the worst state still fits one 44 px line at 360 and
+				   390. `flex-wrap` is the safety net for a longer translation: a second
+				   line costs 44 px of transcript, but hides nothing and adds no tap;
+				   `gap-x-2`/`gap-y-3` keep neighbouring hit bands from touching. */				<div ref={trayRef} aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-3 px-3 py-1.5">
 					{needsApproval ? <Chip onClick={() => setGateOpen(true)} className="shrink-0 !bg-danger-wash !text-danger" aria-label={messageRuntime.t("relay.chrome.session.tray.approve_label")}>{messageRuntime.t("relay.chrome.session.tray.approve")}</Chip> : null}
 					<AskDock rows={projection.asks} onOpen={openAsks} compact />
-					{/* AGENTS BEFORE TASKS, and a COMPACT failure marker (design review
-					    round 1, D2). At 360 the failing pill was the last one in the
-					    strip and read `Agents 1/3 · 1` — `failed` clipped flush at the
-					    clip edge, so the one word that says why the roster matters was
-					    the first thing lost. `✗ N` keeps the count and the danger ink
-					    visible in the fewest cells; the full existing sentence is the
-					    pill's accessible name, and the sheet behind it names the failed
-					    child explicitly. No new copy: `✗`, the numeral and the
-					    translated sentence already exist. */}
-					{projection.subagents.length && agentsFailed > 0 ? <Chip className={cn("shrink-0", blocking && agentsFailed === 0 && "!text-ink-dim", agentsFailed > 0 && "!text-danger")} disabled={Boolean(blocking)} aria-expanded={agentsOpen} aria-label={agentsFailed > 0 ? messageRuntime.t("relay.chrome.session.tray.agents_failed", { running: agentsRunning, total: projection.subagents.length, failed: agentsFailed }) : undefined} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setAgentsOpen(true)}>{agentsFailed > 0
-						? <span aria-hidden>✗ {agentsFailed}</span>
-						: messageRuntime.t("relay.chrome.session.tray.agents", { running: agentsRunning, total: projection.subagents.length })}</Chip> : null}
+					{/* ONE CHIP, TWO PLACES (code review round 2, C2-5). It used to be two
+					    full copies, each carrying the other's unreachable label ternary
+					    and class branch; here the definition exists once and the state
+					    decides which of the two SLOTS renders it. A failing roster sits
+					    BEFORE tasks because the word that says why the roster matters
+					    must not be the last thing on a line (design round 1, D2).
+					    THE NOUN AND THE COUNT, NOT A LONE MARK (design D5, UX U3): `✗ 1`
+					    read as a dismiss control beside two other counters and never said
+					    what failed. The full existing `agents_failed` sentence — "Agents
+					    1/3 · 1 failed" — carries the noun, the running count and the
+					    failure, in the danger register the pill already used, with no
+					    glyph that could be mistaken for ✕. No new copy. */}
+					{agentsFailed > 0 ? agentsChip : null}
 					{projection.todos.some(p => p.items.length) ? <Chip className={cn("shrink-0", blocking && "!text-ink-dim")} disabled={Boolean(blocking)} aria-expanded={tasksOpen} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setTasksOpen(true)}>{messageRuntime.t("relay.chrome.session.tray.tasks", {
 						done: tasksDone,
 						total: taskItems.length,
 					})}</Chip> : null}
-					{projection.subagents.length && agentsFailed === 0 ? <Chip className={cn("shrink-0", blocking && agentsFailed === 0 && "!text-ink-dim", agentsFailed > 0 && "!text-danger")} disabled={Boolean(blocking)} aria-expanded={agentsOpen} aria-label={agentsFailed > 0 ? messageRuntime.t("relay.chrome.session.tray.agents_failed", { running: agentsRunning, total: projection.subagents.length, failed: agentsFailed }) : undefined} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setAgentsOpen(true)}>{agentsFailed > 0
-						? <span aria-hidden>✗ {agentsFailed}</span>
-						: messageRuntime.t("relay.chrome.session.tray.agents", { running: agentsRunning, total: projection.subagents.length })}</Chip> : null}
+					{agentsFailed === 0 ? agentsChip : null}
 				</div> : null}
 			<Sheet open={tasksOpen} onClose={() => setTasksOpen(false)} title={messageRuntime.t("relay.chrome.session.tasks_title")}>
 				<TodosPanel todos={projection.todos} sheet />
@@ -917,7 +998,15 @@ export function SessionScreen({
 			<Composer
 				pid={sessionId}
 				projection={projection}
-				onOpenModels={() => setModelsOpen(true)}
+				onOpenModels={() => {
+					/* A FRESH OPEN IS A FRESH LIST: clear the query, as the sheet's own
+					   comment requires (a short stale subset on reopen reads as a bug).
+					   The effort view's back control does NOT clear it — that is the same
+					   sheet's sub-view return, not a new opening (UX round 2, U5). */
+					setModelQuery("");
+					setModelsOpen(true);
+				}}
+				onReturnToModels={() => setModelsOpen(true)}
 				onOpenEffort={() => setEffortOpen(true)}
 				effortOpen={effortOpen}
 				onCloseEffort={() => setEffortOpen(false)}
@@ -930,6 +1019,8 @@ export function SessionScreen({
 				pid={sessionId}
 				projection={projection}
 				onOpenEffort={() => { setModelsOpen(false); setEffortOpen(true); }}
+				query={modelQuery}
+				onQuery={setModelQuery}
 			/>
 
 			<AsksSheet

@@ -24,6 +24,8 @@ export function ModelSheet({
 	pid,
 	projection,
 	onOpenEffort,
+	query,
+	onQuery,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -31,6 +33,14 @@ export function ModelSheet({
 	pid: string;
 	projection: SessionProjection;
 	onOpenEffort?: () => void;
+	/** The filter, OWNED BY THE CALLER (UX review round 2, U5). It used to be
+	    local state that every opening cleared, which is right for a fresh open and
+	    wrong for the one path that is not fresh: returning from the effort view is
+	    a step BACK inside the same sheet, so the query the user typed has to still
+	    be there when they land. Ownership moves up one level, where "opening" and
+	    "coming back" are different events; `resetFilter` below is the difference. */
+	query?: string;
+	onQuery?: (value: string) => void;
 }) {
 	/* `null` means NOT RESOLVED YET, which is a different fact from "resolved
 	   and empty" and has to be told apart from it — see the render ladder below.
@@ -38,7 +48,9 @@ export function ModelSheet({
 	   `past-sessions.tsx` already states "still loading" that way; a second
 	   spelling of one idea beside an established one is the defect. */
 	const [models, setModels] = useState<ModelEntry[] | null>(null);
-	const [filter, setFilter] = useState("");
+	const [ownFilter, setOwnFilter] = useState("");
+	const filter = query ?? ownFilter;
+	const setFilter = onQuery ?? setOwnFilter;
 	const [error, setError] = useState("");
 
 	useEffect(() => {
@@ -48,7 +60,9 @@ export function ModelSheet({
 		   reopening restored the previous query and its short subset — which on a
 		   phone reads as the very bug this surface exists to fix (a short,
 		   unrepresentative list), arrived at by another route. */
-		setFilter("");
+		/* The caller resets it for a fresh open; here we only make sure a sheet
+		   that has never been opened does not inherit a stale query. */
+		if (!onQuery) setFilter("");
 		setError("");
 		/* Back to unresolved on every open, because this sheet REFETCHES per open:
 		   keeping the previous list would paint a stale catalogue as though it were

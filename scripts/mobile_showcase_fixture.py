@@ -93,12 +93,29 @@ from local_operator.mobile.types import (
 # a 401. Only this isolated process changes namespace; signing and auth gates
 # remain the real production implementations, including absent/invalid 401s.
 #
-# THE NAME IS PER-RUN (fixture-only, no product code reads it). Two independent
+# THE NAME IS PER-PORT (fixture-only, no product code reads it). Two independent
 # lanes serving localhost at the same time otherwise share one cookie name, and
 # whichever signs last replaces the other's still-valid cookie — a 401 the code
 # under test never caused. `LOP_MOBILE_FIXTURE_COOKIE` names it explicitly; the
-# default carries the port so two fixtures on different ports cannot collide.
-daemon_module.COOKIE_NAME = os.environ.get("LOP_MOBILE_FIXTURE_COOKIE") or "lop_probe_34b75f5a0b31"
+# default derives from the PORT this process binds, so two fixtures on different
+# ports cannot collide. The derivation lives in `fixture_cookie_name` and is
+# applied in `main()` where the port is known: an IMPORT must not claim a shared
+# name, and the previous constant here did exactly that (code review round 2,
+# C2-2: ports 41001 and 41002 both resolved to one fixed name).
+if os.environ.get("LOP_MOBILE_FIXTURE_COOKIE"):
+    daemon_module.COOKIE_NAME = os.environ["LOP_MOBILE_FIXTURE_COOKIE"]
+
+
+def fixture_cookie_name(port: int) -> str:
+    """The signing-cookie name this fixture process will use on ``port``.
+
+    Explicit `LOP_MOBILE_FIXTURE_COOKIE` wins; otherwise the name carries the
+    port, so two lanes on localhost never share a namespace. Callers (and tests)
+    ask this function instead of reading a module constant, which is how the
+    per-port claim is checked against two ports rather than asserted in prose.
+    """
+    return os.environ.get("LOP_MOBILE_FIXTURE_COOKIE") or f"lop_probe_fixture_{port}"
+
 
 #: The variable NAME (never a value) a caller may use instead of the second
 #: argument — the same contract every sibling fixture documents.
@@ -227,6 +244,19 @@ def _showcase_transcript() -> list[TranscriptEntry]:
                 "|---|---|---|---|---|---|\n"
                 "| conversation list | 320 | 96 px | 472 px | 3 spinner rings | 0 under 44 px |\n"
                 "| conversation view | 390 | 56 px | 680 px | 0 | 0 under 44 px |\n"
+            ),
+        ),
+        # A TWO-COLUMN table in its OWN message: the stacked fallback has to be
+        # checked against a table that FITS and therefore must stay a real table
+        # (design review round 2, D4). Two tables in one message merge into one
+        # block in this renderer, which would make the fitting case unmeasurable.
+        TranscriptEntry(
+            id="sc-8c",
+            kind="assistant",
+            text=(
+                "Which lane owns what:\n\n"
+                "| stage | owner |\n|---|---|\n"
+                "| audit | designer |\n| implementation | coder |\n"
             ),
         ),
         TranscriptEntry(
@@ -757,13 +787,9 @@ def showcase_app(daemon: MobileDaemon):
 
 async def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 4290
-    # Default the cookie namespace to the PORT unless a lane named one, so two
-    # fixtures on different ports never share a signing namespace.
-    # The cookie namespace defaults to THIS PORT, in code and not only in prose:
-    # two lanes on localhost must never share a signing name, and a lane that
-    # sets the env var explicitly keeps its own.
-    if not os.environ.get("LOP_MOBILE_FIXTURE_COOKIE"):
-        daemon_module.COOKIE_NAME = f"lop_probe_fixture_{port}"
+    # The cookie namespace is decided HERE, where the port is known: the module
+    # import above can only honour an explicit name (see `fixture_cookie_name`).
+    daemon_module.COOKIE_NAME = fixture_cookie_name(port)
     password = required_password(sys.argv[2:])
     daemon = MobileDaemon(port=port, password=password, dial_registrants=False)
     if os.environ.get(EMPTY_ENV) == "1":

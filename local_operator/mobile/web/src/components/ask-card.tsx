@@ -206,10 +206,17 @@ function QuestionField({
 						}}
 						aria-pressed={on}
 						className={cn(
-							"flex min-h-11 flex-col justify-center rounded-sm border border-s-2 px-3 py-2 text-start",
+							/* A TONE STEP, NOT AN OUTLINE (design review round 2, NIT): the
+							   option's ground was the sheet's own ground, so a 1 px
+							   `border-control` box was the only thing drawing it — the one
+							   place this PR's "separate by the ladder, not by a box" rule had
+							   not reached. `bg-surface` on the sheet's `bg-elevated` draws it
+							   with the ground ladder instead; the 2 px accent start edge stays,
+							   because that is the option's authority mark, not its boundary. */
+							"flex min-h-11 flex-col justify-center rounded-sm border-s-2 border-s-accent px-3 py-2 text-start",
 							on
-								? "border-accent border-s-accent bg-accent-wash"
-								: "border-control border-s-accent bg-elevated active:bg-accent-wash",
+								? "bg-accent-wash"
+								: "bg-surface active:bg-accent-wash",
 							"disabled:opacity-50",
 						)}
 					>

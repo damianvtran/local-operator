@@ -74,18 +74,40 @@ window.measureRelay = function(win) {
     const left = Math.max(r.left, clip.left), right = Math.min(r.right, clip.right);
     return { w: Math.max(0, right - left), h: Math.max(0, bottom - top), expanded: expandT > 0 || expandB > 0 };
   };
-  /* The engine's answer to "can a finger reach this here". Scanned only for
-     candidates that are near or below the floor, and only the band's own
-     ±24 px window, so ~30 controls cost tens of samples, not thousands. */
-  const engineBand = (el, r) => {
-    const x = Math.min(Math.max(r.left + r.width / 2, 0.5), innerWidth - 0.5);
-    const owns = (node) => Boolean(node) && (node === el || el.contains(node)
-      || (el.labels && el.labels[0] && (node === el.labels[0] || el.labels[0].contains(node))));
-    let top = null, bottom = null;
-    for (let y = Math.max(1, Math.floor(r.top - 24)); y <= Math.min(innerHeight - 1, Math.ceil(r.bottom + 24)); y++) {
-      if (owns(document.elementFromPoint(x, y))) { if (top === null) top = y; bottom = y; }
+  /* THE BAND THE POINTER ACTUALLY GETS, measured along the control's own centre
+     rays. Three reasons it is rays and not a rectangle sweep:
+       - a `rounded-full` control's CORNER is outside the circle, so a corner tap
+         really lands on the ancestor (a 9-point sweep reported eight false
+         "overlaps" for exactly this);
+       - a neighbour's expanded `::before` band steals pixels from the edge of a
+         real target, which only a hit test can see (QA round 2, Q2-1);
+       - the reported number must be the band a finger owns, not the box.
+     Ownership includes a descendant and the associated label, because those ARE
+     the control's pointer target. */
+  const ownsFactory = (el) => (node) => Boolean(node) && (node === el || el.contains(node)
+    || (el.labels && el.labels[0] && (node === el.labels[0] || el.labels[0].contains(node))));
+  const rayRun = (start, step, limit, hit) => {
+    let last = null;
+    for (let i = 0; i <= limit; i += 1) {
+      const point = start + step * i;
+      if (point < 0 || point >= limit0(step)) break;
+      if (!hit(point)) break;
+      last = point;
     }
-    return top === null ? { w: 0, h: 0 } : { w: r.width, h: bottom - top + 1 };
+    return last;
+  };
+  const limit0 = (step) => (step === 0 ? 0 : 1e9);
+  const engineBox = (el, r) => {
+    const owns = ownsFactory(el);
+    const cx = Math.min(Math.max(Math.round(r.left + r.width / 2), 0), innerWidth - 1);
+    const cy = Math.min(Math.max(Math.round(r.top + r.height / 2), 0), innerHeight - 1);
+    const top = rayRun(cy, -1, 48, (y) => owns(document.elementFromPoint(cx, y)));
+    const bottom = rayRun(cy, 1, 48, (y) => owns(document.elementFromPoint(cx, y)));
+    if (top === null || bottom === null) return null;
+    const left = rayRun(cx, -1, 96, (x) => owns(document.elementFromPoint(x, cy)));
+    const right = rayRun(cx, 1, 96, (x) => owns(document.elementFromPoint(x, cy)));
+    if (left === null || right === null) return null;
+    return { left, right, top, bottom, w: right - left + 1, h: bottom - top + 1 };
   };
   /* A control not WHOLLY inside its scrollers' client boxes (and the viewport)
      is scrolled partly or fully away: that is a scroll position, not a small
@@ -113,32 +135,95 @@ window.measureRelay = function(win) {
       const geo = geometricBand(el, r);
       const widest = Math.max(geo.w, proxy?.width || 0);
       const tallest = Math.max(geo.h, proxy?.height || 0);
-      /* The ENGINE decides wherever a pseudo box is involved. A `lo-hit` chip
-         claims 44 px through `::before`, and two wrapped rows of them overlap
-         their claims: geometry said 44 while elementFromPoint gave the top row
-         40 px and the bottom 38 px (measured at 320, review round 1b). So every
-         expanded or under-floor control is scanned, and the scan — not the
-         larger of the two numbers — is the reported height. Only controls wholly
-         in view: a half-scrolled row is a scroll position, not a small target. */
+      /* EVERY control is hit-tested now (QA round 2, Q2-1; design D7). The old
+         gate scanned only controls that were themselves expanded or under-floor,
+         so `attach image` — 44 px of its own box, no `::before` — scored 0 while a
+         NEIGHBOUR's expanded band took its bottom 6 px. Ownership is the question,
+         so ownership is measured; `engine_h` and `band` carry the answer. */
       const inView = r.top >= 0 && r.bottom <= innerHeight;
-      const needsScan = geo.expanded || widest < 44 || tallest < 44;
-      const engine = needsScan && inView && visible(el) ? engineBand(el, r) : null;
-      return { el, r, proxy, geo, engine,
-        w: widest, h: engine ? Math.max(engine.h, proxy?.height || 0) : tallest };
+      const engine = inView && visible(el) ? engineBox(el, r) : null;
+      /* The ENGINE's box is the reported size where it measured one: a control
+         whose own rect says 44 but whose band a neighbour takes is a 38 px target,
+         not a 44 px one. */
+      /* WHAT TOOK THE MISSING BAND (evidence, not a guess): the element that
+         answers just outside the engine box tells a reader whether a neighbour
+         stole it, an ancestor clipped it, or nothing is there at all. */
+      /* A CONTROL UNDER AN OVERLAY IS NOT A SMALL TARGET. The list's FAB floats
+         over the rows by design, so a row action that has scrolled beneath it keeps
+         only the part the FAB does not cover — a scroll position, exactly like the
+         half-scrolled case above. These are counted separately (`under_overlay`)
+         instead of failing the floor; a neighbour or an ancestor stealing the band
+         still fails. */
+      const thiefOf = (y) => document.elementFromPoint(Math.round(r.left + r.width / 2), y);
+      const outOfFlow = (node) => {
+        if (!node || node === el || el.contains(node)) return false;
+        const position = getComputedStyle(node).position;
+        return position === 'fixed' || position === 'absolute';
+      };
+      const partiallyCovered = engine && (engine.h < Math.round(r.height) - 1 || engine.w < Math.round(r.width) - 1);
+      const overlayCovered = partiallyCovered && (
+        outOfFlow(thiefOf(Math.max(0, engine.top - 2))) || outOfFlow(thiefOf(Math.min(innerHeight - 1, engine.bottom + 2))));
+      const stolen = partiallyCovered && !overlayCovered
+        ? {
+            above: (() => { const n = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.max(0, engine.top - 2));
+              return n ? (n.getAttribute('aria-label') || n.tagName) + '.' + String(n.className).slice(0, 24) : null; })(),
+            below: (() => { const n = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.min(innerHeight - 1, engine.bottom + 2));
+              return n ? (n.getAttribute('aria-label') || n.tagName) + '.' + String(n.className).slice(0, 24) : null; })(),
+            parent: (() => { const box = el.parentElement?.getBoundingClientRect();
+              return box ? [Math.round(box.top), Math.round(box.height)] : null; })(),
+            parent_overflow: el.parentElement ? getComputedStyle(el.parentElement).overflow : null,
+            box: [engine.left, engine.top, engine.w, engine.h],
+          }
+        : null;
+      return { el, r, proxy, geo, engine, stolen, overlayCovered,
+        w: engine ? Math.max(engine.w, proxy?.width || 0) : widest,
+        h: engine ? Math.max(engine.h, proxy?.height || 0) : tallest };
     })
-    .filter(({ w, h }) => w < 44 || h < 44)
-    .map(({ el, r, geo, engine, w, h }) => ({ label: (el.getAttribute('aria-label') || el.innerText ||
+    .filter(({ w, h, overlayCovered }) => (w < 44 || h < 44) && !overlayCovered)
+    .map(({ el, r, geo, engine, w, h, stolen }) => ({ label: (el.getAttribute('aria-label') || el.innerText ||
         el.tagName).trim().slice(0, 24),
       w: Math.round(w), h: Math.round(h),
       // Both numbers travel so a reader can tell a small control from a clipped one.
-      rect_h: Math.round(r.height), clipped_h: +geo.h.toFixed(1), engine_h: engine ? engine.h : null }));
+      rect_h: Math.round(r.height), clipped_h: +geo.h.toFixed(1), engine_h: engine ? engine.h : null,
+      stolen }));
+  const under_overlay = controls
+    .filter((el) => el.getAttribute('aria-hidden') !== 'true')
+    .map((el) => ({ el, r: el.getBoundingClientRect() }))
+    .filter(({ el, r }) => r.width > 0 && r.height > 0 && visible(el) && !scrolledAway(el, r))
+    .map(({ el, r }) => {
+      const box = engineBox(el, r);
+      if (!box || (box.w >= 44 && box.h >= 44)) return null;
+      const above = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.max(0, box.top - 2));
+      const below = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.min(innerHeight - 1, box.bottom + 2));
+      const outOfFlow = (node) => Boolean(node) && !(node === el || el.contains(node))
+        && ['fixed', 'absolute'].includes(getComputedStyle(node).position);
+      if (!outOfFlow(above) && !outOfFlow(below)) return null;
+      return { label: (el.getAttribute('aria-label') || el.innerText || el.tagName).trim().slice(0, 24),
+        band: [box.w, box.h], rect: [Math.round(r.width), Math.round(r.height)],
+        under: (outOfFlow(above) ? above : below)?.className ? String((outOfFlow(above) ? above : below).className).slice(0, 40) : null };
+    })
+    .filter(Boolean);
   const scrollers = [...document.querySelectorAll('*')].filter((el) => {
     const s = getComputedStyle(el);
     return /(auto|scroll)/.test(s.overflowY) && visible(el) && el.clientHeight > 80;
   }).map((el) => ({ el, r: el.getBoundingClientRect() }))
     .sort((a, b) => b.r.height - a.r.height);
+  /* CONTENT = the viewport minus the chrome. The largest vertical scroller is the
+     conversation — EXCEPT on an EMPTY one, which has none (a centred "No messages
+     yet" block flexes into the space), so the old rule reported content 0 and
+     chrome = the whole viewport: a pair of numbers describing no screen
+     (round-1b send-state rows). The fallback is the header-to-composer band. */
   const main = scrollers[0];
-  const contentPx = main ? Math.round(Math.min(main.r.bottom, vh) - Math.max(main.r.top, 0)) : 0;
+  const bandGap = (() => {
+    const header = document.querySelector('header'), foot = document.querySelector('.lo-composer');
+    if (!header || !foot) return null;
+    const top = header.getBoundingClientRect().bottom, bottom = foot.getBoundingClientRect().top;
+    return bottom > top ? { top, bottom } : null;
+  })();
+  const contentPx = main
+    ? Math.round(Math.min(main.r.bottom, vh) - Math.max(main.r.top, 0))
+    : bandGap ? Math.round(Math.min(bandGap.bottom, vh) - Math.max(bandGap.top, 0)) : 0;
+  const content_source = main ? 'scroller' : bandGap ? 'header-to-composer band (empty conversation)' : 'none';
   const fonts = new Set(), colors = new Set();
   for (const el of document.body.querySelectorAll('*')) {
     if (!el.childNodes.length || ![...el.childNodes].some((n) => n.nodeType === 3 &&
@@ -188,13 +273,16 @@ window.measureRelay = function(win) {
     .map((el) => {
       const r = el.getBoundingClientRect();
       const geo = geometricBand(el, r);
-      const engine = visible(el) ? engineBand(el, r) : { w: 0, h: 0 };
+      const box = visible(el) ? engineBox(el, r) : null;
+      const engine = box ? { w: box.w, h: box.h } : { w: 0, h: 0 };
       return {
         label: (el.getAttribute('aria-label') || el.innerText || el.tagName).trim().slice(0, 24),
         // The BOX, in real CSS px: separation and clearance are distances between
         // boxes, and a screenshot scale is not a measurement (operator finding A).
         rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
         rect_h: Math.round(r.height), clipped_h: +geo.h.toFixed(1), engine_h: engine.h,
+        // The engine's own owned box, so a reader can see WHERE the band is.
+        band: box ? [box.left, box.top, box.w, box.h] : null,
       };
     });
   /* CLIPPED TEXT (design round 1, D1): a control whose own copy needs more width
@@ -231,6 +319,37 @@ window.measureRelay = function(win) {
       x: Math.round(r.left), w: Math.round(r.width), need: child.scrollWidth, have: child.clientWidth };
   }) : null;
   const composer = composerEl ? {
+    /* THE FOUR OPTICAL INSETS, from the composer's own box (operator finding,
+       round 2): the placeholder is painted at the textarea's content origin, while
+       the meta line and the leading glyphs are measured from their real glyph
+       boxes — a 44 px control's BOX says nothing about where its ink starts, and
+       ink is what the operator was reading. */
+    insets: (() => {
+      const box = composerEl.getBoundingClientRect();
+      const field = composerEl.querySelector('textarea');
+      const fieldStyle = field ? getComputedStyle(field) : null;
+      const fieldRect = field ? field.getBoundingClientRect() : null;
+      const model = composerEl.querySelector('button[aria-label^="Model"]');
+      const modelSpan = model ? (model.querySelector('span') || model) : null;
+      const range = document.createRange();
+      if (modelSpan) range.selectNodeContents(modelSpan);
+      const modelRect = modelSpan && range.getClientRects().length ? range.getBoundingClientRect() : null;
+      const paperclip = composerEl.querySelector('button[aria-label^="attach image"] svg');
+      const folder = composerEl.querySelector('button[aria-label^="Working folder"] svg');
+      return {
+        box: [Math.round(box.left), Math.round(box.top), Math.round(box.width), Math.round(box.height)],
+        placeholder: fieldRect && fieldStyle ? {
+          left: +(fieldRect.left - box.left + (parseFloat(fieldStyle.paddingLeft) || 0)).toFixed(1),
+          top: +(fieldRect.top - box.top + (parseFloat(fieldStyle.paddingTop) || 0)).toFixed(1),
+        } : null,
+        lead_paperclip: paperclip ? +(paperclip.getBoundingClientRect().left - box.left).toFixed(1) : null,
+        lead_folder: folder ? +(folder.getBoundingClientRect().left - box.left).toFixed(1) : null,
+        meta_text: modelRect ? {
+          bottom: +(box.bottom - modelRect.bottom).toFixed(1),
+          left: +(modelRect.left - box.left).toFixed(1),
+        } : null,
+      };
+    })(),
     meta_row,
     rect: (() => { const r = composerEl.getBoundingClientRect();
       return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; })(),
@@ -287,6 +406,38 @@ window.measureRelay = function(win) {
       inTranscript: Boolean(transcript && transcript !== el && transcript.contains(el)) });
   }
   for (const scroller of horizontal_scrollers) failures.push({ check: 'horizontal-scroller', ...scroller });
+  /* EVERY CONTROL OWNS ITS OWN BAND (QA round 2, Q2-1; design D7): a tap
+     anywhere in a control's measured band must land on THAT control. Two engine
+     boxes that intersect are two controls claiming one pixel — the defect that
+     made `attach image` a 38 px target while its own box said 44, so a tap on its
+     lower edge opened the working-folder sheet. */
+  const labelOf = (node) => !node ? 'none'
+    : (node.getAttribute?.('aria-label') || node.innerText || node.tagName || '').trim().slice(0, 26);
+  const measured = controls
+    .filter((el) => el.getAttribute('aria-hidden') !== 'true')
+    .map((el) => ({ el, r: el.getBoundingClientRect() }))
+    .filter(({ el, r }) => r.width > 0 && r.height > 0 && visible(el) && !scrolledAway(el, r))
+    .map(({ el, r }) => ({ el, box: engineBox(el, r) }))
+    .filter((entry) => entry.box);
+  const band_overlaps = [];
+  for (let i = 0; i < measured.length; i += 1) {
+    for (let j = i + 1; j < measured.length; j += 1) {
+      const a = measured[i].box, b = measured[j].box;
+      const across = Math.min(a.right, b.right) - Math.max(a.left, b.left) + 1;
+      const down = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) + 1;
+      if (across <= 0 || down <= 0) continue;
+      /* AN OVERLAY COVERING A CONTROL IS NORMAL (a FAB over the list, a sheet over
+         the page): those two boxes intersect in the layout, and the covered control
+         simply is not tappable there — that is the overlay doing its job. The
+         defect is two controls in the SAME FLOW stealing each other's band, which
+         is what a shared offsetParent identifies: the composer's own controls,
+         a chip strip's chips, a row and its ⋮. */
+      if (measured[i].el.offsetParent !== measured[j].el.offsetParent) continue;
+      band_overlaps.push({ a: labelOf(measured[i].el), b: labelOf(measured[j].el),
+        overlap: [across, down] });
+    }
+  }
+  for (const overlap of band_overlaps) failures.push({ check: 'band-overlap', ...overlap });
   /* ZERO HORIZONTAL PLAY IN THE CONVERSATION: the transcript scroller's own
      content may not be wider than it (it carries `overflow-x: hidden`, which
      would CLIP a too-wide block silently rather than scroll it), and the
@@ -318,7 +469,7 @@ window.measureRelay = function(win) {
     failures.push({ check: 'transcript-overflow-x', ...transcript_overflow });
 
   return JSON.stringify({
-    viewport: [vw, vh], root_overflow, horizontal_scrollers, transcript_overflow, composer, failures, bordered, borderedSamples, controls: controls.length,
+    viewport: [vw, vh], band_overlaps, under_overlay, content_source, root_overflow, horizontal_scrollers, transcript_overflow, composer, failures, bordered, borderedSamples, controls: controls.length,
     small_targets: small, hit_bands, clipped_text: clipped,
     chrome_px: vh - contentPx, content_px: contentPx,
     main_scroller: main ? { top: Math.round(main.r.top), bottom: Math.round(main.r.bottom),

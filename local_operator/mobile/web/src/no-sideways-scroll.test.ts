@@ -35,6 +35,23 @@ function sources(directory: string): string[] {
 	});
 }
 
+/** A line with its comments removed. `//` inside a URL is NOT a comment (code
+    review round 2, C2-1) — the first cut stripped from any `//`, so an offender
+    sharing a line with `https://…` was invisible to this guard. A line comment
+    starts at `//` that is either at the start of the line or preceded by
+    whitespace AND not part of `scheme://`. */
+export function stripComments(line: string): string {
+	let code = line.replace(/^\s*\*.*$/, "");
+	const block = /\/\*.*?\*\//g;
+	code = code.replace(block, "");
+	for (let at = code.indexOf("//"); at >= 0; at = code.indexOf("//", at + 2)) {
+		const before = code.slice(0, at);
+		if (!/^\s*$/.test(before) && !/\s$/.test(before)) continue; // part of a URL
+		return before;
+	}
+	return code;
+}
+
 describe("the phone never scrolls sideways", () => {
 	it("no source file creates a horizontal scroller or an unwrapped text block", () => {
 		const offenders: string[] = [];
@@ -45,7 +62,7 @@ describe("the phone never scrolls sideways", () => {
 				.split("\n")
 				.forEach((line, index) => {
 					// Prose in comments may NAME a class (this file's own note does).
-					const code = line.replace(/\/\/.*$|\/\*.*?\*\/|^\s*\*.*$/g, "");
+					const code = stripComments(line);
 					for (const match of code.matchAll(REFUSED)) offenders.push(`${name}:${index + 1}: ${match[0]}`);
 				});
 		}
@@ -55,6 +72,16 @@ describe("the phone never scrolls sideways", () => {
 				"Use whitespace-pre-wrap / flex-wrap / a priority fit with an overflow sheet; " +
 				"if a rail is genuinely the best option, add it to ALLOWED with the measured reason.",
 		).toEqual([]);
+	});
+
+	it("an offender on a line carrying a URL is caught (negative control)", () => {
+		/* The stripper, not just the regex, has to survive this line: a real
+		   mistake can sit beside a link. Code review round 2, C2-1 reproduced the
+		   gap: the old stripper returned "" here, so the guard passed. */
+		const line = '\t\t<a href="https://example.invalid/x" className="overflow-x-auto">link</a>';
+		expect([...stripComments(line).matchAll(REFUSED)].map((match) => match[0])).toEqual(["overflow-x-auto"]);
+		expect([...stripComments('\tconst url = "https://example.invalid/x"; // trailing note overflow-x-auto')
+			.matchAll(REFUSED)]).toEqual([]);
 	});
 
 	it("a refused class is actually caught (negative control)", () => {

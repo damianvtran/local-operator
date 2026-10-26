@@ -481,7 +481,7 @@ html :focus-visible {
 }
 
 /*
- * CHROME DISSOLVES INTO CONTENT: `.lo-fade-y` / `.lo-fade-x` (borderless redesign
+ * CHROME DISSOLVES INTO CONTENT: `.lo-fade-y` (borderless redesign
  * §7.6). With the app bar's rule and the footer's rule gone, a row scrolled under
  * opaque chrome was cut mid-glyph against a flat fill — the overlap the audit
  * measured ("GPT-5.5" 93 % under the footer, a tool row 92 % under the status
@@ -516,8 +516,7 @@ html :focus-visible {
 	inherits: false;
 	initial-value: 0px;
 }
-.lo-fade-y,
-.lo-fade-x {
+.lo-fade-y {
 	--lo-fade-start: 0px;
 	--lo-fade-end: 0px;
 }
@@ -537,45 +536,8 @@ html :focus-visible {
 		transparent 100%
 	);
 }
-/* The inline axis follows the writing direction: `to right` in LTR becomes
-   `to left` in RTL, so the END-edge fade (the chip row's "there is more")
-   always sits at the inline end. */
-.lo-fade-x {
-	-webkit-mask-image: linear-gradient(
-		to right,
-		transparent 0,
-		#000 var(--lo-fade-start),
-		#000 calc(100% - var(--lo-fade-end)),
-		transparent 100%
-	);
-	mask-image: linear-gradient(
-		to right,
-		transparent 0,
-		#000 var(--lo-fade-start),
-		#000 calc(100% - var(--lo-fade-end)),
-		transparent 100%
-	);
-}
-[dir="rtl"] .lo-fade-x,
-.lo-fade-x:dir(rtl) {
-	-webkit-mask-image: linear-gradient(
-		to left,
-		transparent 0,
-		#000 var(--lo-fade-start),
-		#000 calc(100% - var(--lo-fade-end)),
-		transparent 100%
-	);
-	mask-image: linear-gradient(
-		to left,
-		transparent 0,
-		#000 var(--lo-fade-start),
-		#000 calc(100% - var(--lo-fade-end)),
-		transparent 100%
-	);
-}
 @supports (animation-timeline: scroll()) {
-	.lo-fade-y,
-	.lo-fade-x {
+	.lo-fade-y {
 		animation-name: lo-fade-start-cue, lo-fade-end-cue;
 		animation-timing-function: linear;
 		animation-fill-mode: both;
@@ -584,9 +546,6 @@ html :focus-visible {
 	}
 	.lo-fade-y {
 		animation-timeline: scroll(self block), scroll(self block);
-	}
-	.lo-fade-x {
-		animation-timeline: scroll(self inline), scroll(self inline);
 	}
 	@keyframes lo-fade-start-cue {
 		from {
@@ -606,8 +565,7 @@ html :focus-visible {
 	}
 }
 @supports not (animation-timeline: scroll()) {
-	.lo-fade-y[data-more-below="true"],
-	.lo-fade-x[data-more-below="true"] {
+	.lo-fade-y[data-more-below="true"] {
 		--lo-fade-end: 24px;
 	}
 }
@@ -617,8 +575,7 @@ html :focus-visible {
    two classes — they are scroll position, not motion. */
 @media (prefers-reduced-motion: reduce) {
 	@supports (animation-timeline: scroll()) {
-		.lo-fade-y,
-		.lo-fade-x {
+		.lo-fade-y {
 			animation-duration: auto !important;
 		}
 	}
@@ -667,15 +624,6 @@ html :focus-visible {
 	position: absolute;
 	inset-inline: 0;
 	inset-block: -6px;
-}
-
-/* The two SHORT inline strips (filter chips, status tray) keep the fade as
-   their only "there is more" cue (redesign §7.6 / design review D3). A classic
-   non-overlay bar inside them both doubled that cue and took 6 CSS px out of the
-   strip's own clip box, which is geometry the chips' 44 px target cannot spare.
-   Long scrollers keep `.lo-scroll`'s resting-floor thumb exactly as shipped. */
-.lo-strip-scroll {
-	scrollbar-width: none;
 }
 
 /* The sheet grabber: decorative, at the scrollbar's resting floor (α 0.45) so

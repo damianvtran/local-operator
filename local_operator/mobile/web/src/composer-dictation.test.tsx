@@ -119,6 +119,7 @@ function renderComposer() {
 			pid="p1"
 			projection={projection()}
 			onOpenModels={() => {}}
+			onReturnToModels={() => {}}
 			onOpenEffort={() => {}}
 			effortOpen={false}
 			onCloseEffort={() => {}}

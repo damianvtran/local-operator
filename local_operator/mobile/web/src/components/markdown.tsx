@@ -12,6 +12,7 @@
  * Links are forced https? and open in a new tab: this is a remote-control
  * surface, and a javascript: URL in agent output must never be clickable.
  */
+import { useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 let keySeq = 0;
@@ -249,6 +250,170 @@ const HEADING_CLASSES = [
 	"text-body-sm font-semibold",
 ];
 
+/* A CELL'S OWN BOX: `px-2` on each side, plus the table's own rule. */
+const CELL_PADDING = 16;
+const TABLE_RULE = 2;
+
+/** A cell's VISIBLE text: inline-markdown markers are syntax, not content. */
+export function markdownTableText(cell: string): string {
+	return cell
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+		.replace(/[*_~`]/g, "")
+		.trim();
+}
+
+/**
+ * How narrow each column can honestly be: its longest WORD, not its longest
+ * cell. `measure` is the engine (canvas `measureText` with the block's own font),
+ * so these are real glyph advances rather than character counts.
+ */
+export function minContentWidths(
+	head: readonly string[],
+	rows: readonly (readonly string[])[],
+	measure: (text: string) => number,
+): number[] {
+	const columns = Math.max(head.length, ...rows.map((row) => row.length), 0);
+	const widths = Array.from({ length: columns }, () => 0);
+	const widestWord = (text: string, index: number) => {
+		for (const word of markdownTableText(text).split(/\s+/)) {
+			if (!word) continue;
+			const width = measure(word);
+			if (width > (widths[index] ?? 0)) widths[index] = width;
+		}
+	};
+	head.forEach(widestWord);
+	for (const row of rows) row.forEach(widestWord);
+	return Array.from(widths, (width) => Math.ceil(width) + CELL_PADDING);
+}
+
+/**
+ * A table is only honest AS a table when every column can hold its longest word.
+ *
+ * IT WAS NOT (design review round 2, D4; UX U4). `table-fixed` gave every column
+ * an equal share of the phone's width, so cells broke mid-word — "claude/op",
+ * "Claude / Opus" — at 360 and 390, where a table is the format an agent most
+ * often needs. This is the honest test: do the longest words fit side by side?
+ */
+export function tableFitsIn(widths: readonly number[], available: number): boolean {
+	return widths.reduce((total, width) => total + width, TABLE_RULE) <= available;
+}
+
+/**
+ * One markdown table, in whichever of its two forms fits the column.
+ *
+ * FRAME 0 IS THE FINAL FORM (design D4): `available` and the word widths are read
+ * in `useLayoutEffect`, so the stacked/table switch is committed before the
+ * browser paints. `overflow-hidden` on the wrapper means even that measuring
+ * pass cannot scroll the page sideways.
+ *
+ * The stacked form keeps TABLE SEMANTICS (`role="table"/"row"/"cell"`), because
+ * the data is still a table to assistive tech even when the phone shows it as
+ * `header: value` lines.
+ */
+function MarkdownTable({ lines }: { lines: readonly string[] }) {
+	const [header, ...rest] = lines;
+	const head = splitTableRow(header ?? "");
+	const rows = rest.map((row) => splitTableRow(row));
+	const box = useRef<HTMLDivElement>(null);
+	const [fits, setFits] = useState(true);
+	/* The table's CONTENT, as one string: a streamed table whose cells grow must
+	   re-decide, while the arrays themselves are new on every render and cannot
+	   be compared by identity. */
+	const signature = [head.join("\u0000"), ...rows.map((row) => row.join("\u0000"))].join("\u0001");
+
+	useLayoutEffect(() => {
+		const decide = () => {
+			const node = box.current;
+			if (!node) return;
+			const available = node.clientWidth;
+			/* A host with no layout engine (the vitest tree) reports 0. Keeping the
+			   table form there is the honest default: "not measured" is not evidence
+			   that the columns do not fit, and the two pure helpers above carry the
+			   unit coverage for the decision itself. */
+			if (available <= 0) {
+				setFits(true);
+				return;
+			}
+			const probe = document.createElement("canvas").getContext("2d");
+			if (!probe) {
+				setFits(true);
+				return;
+			}
+			probe.font = getComputedStyle(node).font;
+			setFits(tableFitsIn(minContentWidths(head, rows, (text) => probe.measureText(text).width), available));
+		};
+		decide();
+		if (typeof ResizeObserver === "undefined" || !box.current) return;
+		const observer = new ResizeObserver(decide);
+		observer.observe(box.current);
+		return () => observer.disconnect();
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- `signature` IS this table's content
+	}, [signature]);
+
+	if (!fits) {
+		return (
+			<div
+				ref={box}
+				role="table"
+				className="max-w-full overflow-hidden rounded-sm border border-hairline text-body-sm"
+			>
+				{rows.map((row, rowIndex) => (
+					<div
+						key={`${signature}-${rowIndex}`}
+						role="row"
+						className={rowIndex > 0 ? "border-t border-hairline px-2 py-1.5" : "px-2 py-1.5"}
+					>
+						{head.map((label, column) => (
+							<div key={`${label}-${column}`} role="cell" className="flex min-w-0 gap-2">
+								<span aria-hidden className="shrink-0 break-words text-ink-dim">
+									{markdownTableText(label)}:
+								</span>
+								{/* `break-words` splits ONLY a token too long to fit a line by
+								    itself (a URL, a hash). An ordinary word always fits, so it
+								    is never cut mid-word. */}
+								<span className="min-w-0 break-words text-ink">{renderInline(row[column] ?? "")}</span>
+							</div>
+						))}
+					</div>
+				))}
+			</div>
+		);
+	}
+
+	return (
+		<div ref={box} className="max-w-full overflow-hidden rounded-sm border border-hairline">
+			<table className="w-full table-auto border-collapse text-body-sm">
+				<thead>
+					<tr className="bg-sunken">
+						{head.map((cell, column) => (
+							<th
+								key={`${cell}-${column}`}
+								className="border-b border-hairline px-2 py-1 text-left font-semibold text-ink"
+							>
+								{renderInline(cell)}
+							</th>
+						))}
+					</tr>
+				</thead>
+				<tbody>
+					{rows.map((row, rowIndex) => (
+						<tr key={`${signature}-row-${rowIndex}`}>
+							{row.map((cell, column) => (
+								<td
+									key={`${cell}-${column}`}
+									className="border-b border-hairline px-2 py-1 align-top text-ink-muted last:border-b-0"
+								>
+									{renderInline(cell)}
+								</td>
+							))}
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	);
+}
+
 export function Markdown({ text }: { text: string }) {
 	const blocks = splitBlocks(text);
 	return (
@@ -314,50 +479,8 @@ export function Markdown({ text }: { text: string }) {
 								))}
 							</div>
 						);
-					case "table": {
-						const [header, ...rows] = b.lines;
-						const head = splitTableRow(header);
-						return (
-							/* FITS THE COLUMN, NEVER SCROLLS SIDEWAYS (operator finding
-							   B). `table-fixed` divides the column's width between the
-							   columns instead of sizing them to their longest cell, and
-							   the cells break long words, so a six-column table wraps
-							   inside the message rather than becoming a rail. */
-							<div
-								key={key()}
-								className="max-w-full rounded-sm border border-hairline"
-							>
-								<table className="w-full table-fixed border-collapse text-body-sm [overflow-wrap:anywhere]">
-									<thead>
-										<tr className="bg-sunken">
-											{head.map((cell) => (
-												<th
-													key={key()}
-													className="border-b border-hairline px-2 py-1 text-left font-semibold text-ink"
-												>
-													{renderInline(cell)}
-												</th>
-											))}
-										</tr>
-									</thead>
-									<tbody>
-										{rows.map((row) => (
-											<tr key={key()}>
-												{splitTableRow(row).map((cell) => (
-													<td
-														key={key()}
-														className="border-b border-hairline px-2 py-1 align-top text-ink-muted last:border-b-0"
-													>
-														{renderInline(cell)}
-													</td>
-												))}
-											</tr>
-										))}
-									</tbody>
-								</table>
-							</div>
-						);
-					}
+					case "table":
+						return <MarkdownTable key={key()} lines={b.lines} />;
 					default:
 						return (
 							<p key={key()}>

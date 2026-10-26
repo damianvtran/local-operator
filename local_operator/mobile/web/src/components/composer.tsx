@@ -412,8 +412,28 @@ const COMPOSER_PLACEHOLDER = "Message…";
    Sharing the class strings is what makes the match structural rather than a
    pair of numbers someone keeps in step by hand — the frame and the composer
    cannot disagree about the shell, the input row, the field or the control size. */
+/* ONE OPTICAL INSET, ALL FOUR SIDES (operator finding, round 2 verbatim: "too
+   much below and not enough above … how close the Message… placeholder is to the
+   top and left vs how everything else feels"). Measured on the 390 frame before
+   this change: placeholder 13.5 px from the top and left, the paperclip's glyph
+   21.5 px from the left, the meta text 23-25 px above the bottom and its folder
+   glyph 13 px from the left — four different numbers for one edge.
+
+   Now every one of them is 15 px, and the numbers are structural rather than
+   four hand-kept values:
+   - LEFT/top: `px-2` +`pt-1.5` on the shell (8 + 6 px) plus the field box's own
+     `px-1.5`/`py-1` put the placeholder at 15-15.5 px.
+   - BOTTOM: `pb-0.5` (2 px) plus the meta row's own centring of a 17.4 px line
+     inside its 44 px band (13.3 px) = 15.3 px under the meta text. The band stays
+     44 px tall, which is why the bottom padding is 2 px and not 8: an 8 px foot
+     under a full-height row read as 23 px of dead space.
+   - LEADING GLYPHS: the paperclip is centred in a 44 px circle, so its glyph sat
+     6 px right of the text column; `-ms-1.5` shifts the BOX by 6 px (the band
+     still starts inside the composer's own padding box, never outside it). The
+     folder glyph gets `ps-1.5` in `WorkingDirectoryChip` for the same reason.
+   Total height fits: 6 + 52 + 44 + 44 + 2 = 148 px, against 152 before. */
 const COMPOSER_SHELL =
-	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-1 pb-2";
+	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-2 pb-0";
 /* THE RIGHT-SIDE CONTROL CLUSTER, one shared constant for the real composer and
    the first-paint frame (operator finding A). The stop and send discs are 44 px
    `shrink-0` controls and the row carried no gap: the two circles touched, and
@@ -434,10 +454,15 @@ const COMPOSER_CWD_ROW = "flex shrink-0 items-center";
    composer. Column gap only — the field keeps `basis-full`. */
 const COMPOSER_INPUT_ROW = "flex flex-wrap items-center gap-x-0.5";
 const COMPOSER_FIELD_BOX =
-	"order-first flex min-h-11 w-full min-w-0 basis-full items-end px-1 py-1";
+	"order-first flex min-h-11 w-full min-w-0 basis-full items-end px-1.5 py-1.5";
 const COMPOSER_FIELD =
 	"lo-scroll max-h-33 min-h-11 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none placeholder:text-ink-muted";
 const COMPOSER_ROUND = "flex size-11 shrink-0 items-center justify-center rounded-full";
+/* The attach control opens the row, so its GLYPH is the row's first pixel of ink:
+   44 px round box, 18 px glyph → 13 px of centring. `-ms-1.5` (6 px) moves the box
+   so that glyph lands on the text column at 15 px. The band still starts 2 px
+   inside the composer's padding box (x = 8 - 6 = 2), never outside the composer. */
+const COMPOSER_LEADING = "-ms-1.5";
 /* The model/effort chips row, which is BELOW the field. It is easy to miss as
    part of the box and it is 44 px of it: a reserve without it left the field
    59 px lower than the real one, which is exactly the shift this whole frame
@@ -452,7 +477,8 @@ const COMPOSER_ROUND = "flex size-11 shrink-0 items-center justify-center rounde
    structure is FIXED (not a width- or content-dependent wrap), so the
    first-paint frame reserves exactly these lines and a stop button appearing
    cannot reflow the composer. */
-const COMPOSER_CHIP_ROW = "order-last flex min-w-0 basis-full items-center gap-1";
+const COMPOSER_CHIP_ROW =
+	"order-last flex min-w-0 basis-full items-center gap-1 [@media(max-height:480px)]:order-none [@media(max-height:480px)]:basis-auto [@media(max-height:480px)]:flex-1";
 const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
 
 /** The composer's box, empty, for the frames before a session's projection.
@@ -498,7 +524,7 @@ export function ComposerFrame() {
 	return <div className={COMPOSER_SHELL} aria-hidden>
 		<div className={COMPOSER_INPUT_ROW}>
 			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={COMPOSER_PLACEHOLDER} className={COMPOSER_FIELD} /></div>
-			<span className={cn(COMPOSER_ROUND, "text-ink-disabled")}><PaperclipGlyph /></span>
+			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
 			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
 			<div className={COMPOSER_ACTION_CLUSTER}>
 				<span className={cn(COMPOSER_ROUND, "bg-sunken text-ink-disabled")}>↑</span>
@@ -523,6 +549,7 @@ export function Composer({
 	pid,
 	projection,
 	onOpenModels,
+	onReturnToModels,
 	effortOpen,
 	onCloseEffort,
 	autoFocus = false,
@@ -531,6 +558,10 @@ export function Composer({
 	pid: string;
 	projection: SessionProjection;
 	onOpenModels: () => void;
+	/** The effort view's back control (UX round 2, U5): the same sheet, one step
+	    back inside it — NOT a fresh opening, so the caller must not clear the
+	    search text the way `onOpenModels` does. */
+	onReturnToModels: () => void;
 	onOpenEffort: () => void;
 	effortOpen: boolean;
 	onCloseEffort: () => void;
@@ -1402,6 +1433,7 @@ export function Composer({
 					aria-label="attach image"
 					className={cn(
 						COMPOSER_ROUND,
+						COMPOSER_LEADING,
 						"text-ink-muted active:bg-elevated disabled:opacity-50",
 					)}
 				>
@@ -1483,7 +1515,12 @@ export function Composer({
 				    routing or the pending-envelope lifetime. */}
 				<div className={COMPOSER_CHIP_ROW}>
 					<div className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
-					<button type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink")}
+					{/* SHORT VIEWPORTS DROP THE MODEL LABEL (design review round 2, D6):
+					   at 844x390 the 152 px composer took 39 % of the height and left the
+					   conversation 130 px. The model is one tap away in the same meta row's
+					   sheet, and the folder and spend facts stay. A height query, not a
+					   width one: the cost is vertical, so the fix is too. */}
+					<button type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink [@media(max-height:480px)]:hidden")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
 						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
@@ -1526,7 +1563,7 @@ export function Composer({
 			<EffortSheet
 				open={effortOpen}
 				onClose={onCloseEffort}
-				onBack={() => { onCloseEffort(); onOpenModels(); }}
+				onBack={() => { onCloseEffort(); onReturnToModels(); }}
 				pid={pid}
 				projection={projection}
 			/>

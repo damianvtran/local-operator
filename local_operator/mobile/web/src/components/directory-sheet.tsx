@@ -294,7 +294,16 @@ export function WorkingDirectoryChip({
 			<Chip
 				onClick={() => setOpen(true)}
 				aria-label={messageRuntime.t("relay.chrome.composer.folder_label", { name: cwd || label })}
-				className="!h-11 w-11 min-w-11 max-w-full !bg-transparent !px-1 !text-meta"
+				/* NO PSEUDO EXPANSION HERE (QA round 2, Q2-1; design D7). `lo-hit`
+				   grows a control's band by 6 px each side, which is right for a 32 px
+				   chip and wrong for this one: the box is already 44 px, so the growth
+				   bought nothing and took the attach button's bottom 6 px — a tap on
+				   attach's lower edge opened THIS sheet (measured: attach's real band
+				   38 px, folder 56 px). `before:hidden` drops the growth; the band is
+				   now exactly the 44 px box, and no two controls in the composer share
+				   a pixel. `!ps-[7px]` puts the glyph on the composer's 15 px optical
+				   inset instead of 13 px. */
+				className="!h-11 w-11 min-w-11 max-w-full !bg-transparent !ps-[7px] !text-meta before:hidden"
 			>
 				{/* A folder glyph drawn inline: this package carries no icon
 				    dependency (the same reason the list's marks are text). 14 px

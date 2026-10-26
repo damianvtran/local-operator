@@ -583,7 +583,13 @@ describe("column budget while a request is pending", () => {
 		expect(pill.getAttribute("aria-label")).toContain("3 failed");
 		// In the danger colour, or it reads as one more neutral count.
 		expect(pill.className).toContain("text-danger");
-		expect(screen.getByText("✗ 3")).toBeTruthy();
+		/* THE VISIBLE FORM NOW NAMES THE FAILURE (design round 2, D5 = UX U3). The
+		   bare `✗ 3` read as a dismiss control and never said what failed; the pill
+		   shows the full existing sentence — its accessible name too — with the
+		   danger ground carrying the state. Nothing is weakened: the count, the
+		   danger ink and the phrase "3 failed" are all still asserted. */
+		expect(pill.textContent).toContain("Agents 1/22 · 3 failed");
+		expect(pill.className).toContain("bg-danger-wash");
 	});
 
 	it("says nothing about failures when there are none", () => {
@@ -624,7 +630,7 @@ describe("column budget while a request is pending", () => {
 		// checking the span alone passes even when the dim sits above it, which
 		// is exactly how this shipped.
 		expect(rosterHeader.getAttribute("aria-label")).toContain("3 failed");
-		const failed = screen.getByText("✗ 3");
+		const failed = screen.getByText("Agents 1/22 · 3 failed");
 		expect(rosterHeader.className).toContain("text-danger");
 		for (let el: HTMLElement | null = failed; el; el = el.parentElement) {
 			expect(el.className).not.toContain("opacity-60");

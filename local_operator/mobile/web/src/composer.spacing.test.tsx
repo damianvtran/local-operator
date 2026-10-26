@@ -23,10 +23,16 @@ describe("the composer's spacing constants", () => {
 		const { container } = render(<ComposerFrame />);
 		const shell = container.querySelector(".lo-composer");
 		expect(shell).toBeTruthy();
-		// px-2 = 8 px at the sides; pb-2 = 8 px below the discs. One constant pair
-		// for both, and the measured clearance is that same 8 px.
+		/* ONE OPTICAL INSET ON ALL FOUR SIDES (operator finding, round 2). The
+		   shell's own `pt-2` (8 px) plus the field box's `py-1.5` (6 px) is the
+		   14-15 px the placeholder sits at; the foot's `pb-0` plus the meta row's
+		   own centring of its 17.4 px line inside a 44 px band is the 15.2 px under
+		   the meta text. Both come from these shared constants, so the first-paint
+		   frame reserves the same box. Measured in the browser, not here: happy-dom
+		   does no layout. */
 		expect(shell?.className).toContain("px-2");
-		expect(shell?.className).toContain("pb-2");
+		expect(shell?.className).toContain("pt-2");
+		expect(shell?.className).toContain("pb-0");
 	});
 
 	it("puts every control in the row 2 px apart, and groups the right-hand pair", () => {
