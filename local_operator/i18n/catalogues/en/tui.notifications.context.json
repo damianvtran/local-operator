@@ -172,10 +172,10 @@
     "maxCells": 12
   },
   "tui.notifications.hint_answer": {
-    "note": "Footer hint after a: answer the ask.",
+    "note": "Footer hint after a: answer the ask. maxCells 9, not 8: Spanish has no compliant 8-cell form — «responder»/«contestar» are 9, and «responde» (8) would break the style guide's infinitive rule. The 8-cell budget was calibrated on French («répondre», exactly 8). Widened by the es audit; the value is what the es string already measures.",
     "role": "TUI /notifications page",
     "tone": "terse, operator-facing, sentence case, no emoji",
-    "maxCells": 8
+    "maxCells": 9
   },
   "tui.notifications.hint_back": {
     "note": "Footer hint after esc.",
@@ -202,10 +202,10 @@
     "maxCells": 10
   },
   "tui.notifications.hint_dismiss_all": {
-    "note": "Footer hint after E in the detail.",
+    "note": "Footer hint after E in the detail. maxCells 14, not 12: at 12 the es footer showed 7 hints where en shows 8 across 92–103 columns, i.e. the E dismiss-all binding disappeared from the footer. The auditor rejected «ignorar todo» (fits 12) because it abandons the settled «descartar» verb, and a settled verb outranks a footer slot that only appears on wide terminals. Widened by the es audit.",
     "role": "TUI /notifications page",
     "tone": "terse, operator-facing, sentence case, no emoji",
-    "maxCells": 12
+    "maxCells": 14
   },
   "tui.notifications.hint_filter": {
     "note": "Footer hint after f.",

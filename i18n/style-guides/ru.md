@@ -93,3 +93,9 @@ catalogues before landing here.
   dictionary), because the full «домашней папке» with a send verb does not fit
   the 276 px composer field at 16 px on a 320 px phone; `ended_detail` and
   `ended_hint` keep the full form. Revisit only with a budget change.
+- Recorded budget exception (notifications inbox, wave 3): `filter_unread`
+  keeps «новые» and `seen_in_chat` keeps «было в чате». «непрочитанные» (13
+  cells) and «видели в чате» (13) both exceed their chip budgets (8 and 12),
+  and no compliant synonym is both accurate and shorter; the chip is absorbed
+  by the title column and drops wholesale below ~45 columns, so the copy wins
+  and the budget is recorded here rather than silently widened.

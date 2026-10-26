@@ -1,0 +1,13 @@
+{
+ "schema": 1,
+ "audit_id": "ntt1",
+ "locale": "vi",
+ "namespace": "tui.notifications",
+ "record": "tui-audit/vi/tui.notifications/ntt1/record.json",
+ "provenance": "Original evidence written by independent translation-auditor session 8408dcd6e3c9, actual model radient/auto (provider-quota fallback chain disclosed), on 2026-10-25; all command output captured in-session.",
+ "hashes": {
+  "record.json": "166dc89fda0e1d70cffc69cd95a91cdc12c6fa7eb22548c88d55e1d0afc1e6fb",
+  "report.md": "0291de4d0cf9c1fcbc6c75fa7f13d3eff9a942d3cfaf7b97e395695b76bf7de8",
+  "audit.log": "48c1804a76a822e1779dc7268a87ceb6b62e58729bff37530e9f94b04afdde39"
+ }
+}
