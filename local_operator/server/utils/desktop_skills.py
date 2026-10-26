@@ -31,7 +31,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Mapping
 
 from local_operator.hub_sync.skill_document import (
     HUB_PUBLISH_BUDGETS,
@@ -99,13 +99,27 @@ def link_index(config_dir: Path) -> dict[str, SkillLink]:
 
 
 class SourceClassifier:
-    """Labels a discovered skill; built once per request (realpaths are not free)."""
+    """Labels a discovered skill; built once per request (realpaths are not free).
+
+    THE FOLDER'S REAL PATH DECIDES builtin/hub/local, never the root discovery
+    happened to reach it through. The two differ whenever the store is reached
+    by a symlink: ``default_skill_roots`` is HOME-derived and never scans a
+    moved ``<config_dir>/skills``, so with ``LOCAL_OPERATOR_CONFIG_DIR`` moved
+    the managed skills are discovered ONLY through ``~/.claude|.codex|.agents``
+    links into it (QA Q1). Labelling by the discovery root called those
+    ``external`` with no link, and the identical layout at the default dir
+    ``hub`` -- the label would then depend on where the profile lives.
+    """
 
     def __init__(self, config_dir: Path, ecosystem_roots: list[Path], links: Mapping[str, Any]):
         from local_operator.skills.discovery import packaged_skill_root
 
         self._builtin = _real(packaged_skill_root())
         self._managed = _real(Path(config_dir) / "skills")
+        # The GLOBAL native root discovery scans (``default_skill_roots`` puts
+        # ``<home>/.local-operator/skills`` there). When the config dir is moved
+        # it is another profile's store, not this one's: read-only here.
+        self._home_store = _real(Path.home() / ".local-operator" / "skills")
         self._ecosystem = [_real(root) for root in ecosystem_roots]
         self._links = links
 
@@ -113,13 +127,17 @@ class SourceClassifier:
         base = _real(skill.base_dir)
         if _inside(base, self._builtin):
             return "builtin"
-        # ``skill.source`` is the ROOT discovery reached the skill through. Its
-        # realpath, not the base dir's, names the label: a managed skill that is
-        # itself a symlink elsewhere is still the managed root's entry.
-        root = _real(skill.source)
-        if root == self._managed:
+        if _inside(base, self._managed):
             return "hub" if skill.name in self._links else "local"
-        if root in self._ecosystem:
+        # Not this profile's store. A skill under the default store while the
+        # profile has moved elsewhere belongs to another profile, and one that
+        # discovery reached through the managed root but that really lives
+        # elsewhere (a symlinked entry) is not stored here either: both are
+        # ``external`` (read-only), never ``project`` -- they are not a folder's
+        # own skills.
+        if _inside(base, self._home_store) or _real(skill.source) == self._managed:
+            return "external"
+        if _real(skill.source) in self._ecosystem:
             return "external"
         return "project"
 
@@ -136,6 +154,13 @@ def _fingerprint_and_form(base_dir: Path, linked_form: str | None) -> tuple[str 
     it has no form -- the honest answer is "not publishable as either".
     """
     from local_operator.hub_sync.skill_bundle import tree_hash_of
+
+    # The readers refuse a symlinked ROOT (that is how they refuse a skill whose
+    # root was swapped under them) but a skill directory that is itself a link --
+    # the migration's ``~/.claude/skills/<n> -> <store>/<n>`` -- is a legitimate
+    # way to reach real bytes. Resolve only the root: symlinks INSIDE the skill
+    # are still refused by the readers.
+    base_dir = Path(_real(base_dir))
 
     def bundle() -> tuple[str | None, str | None]:
         try:
@@ -207,14 +232,16 @@ def build_rows(
     return rows
 
 
-def _walk_files(base: Path) -> Iterator[tuple[str, Path]]:
-    """Regular, non-dot, non-symlink files under ``base`` with their relative path.
+def _walk_files(base: Path) -> tuple[list[tuple[str, Path]], bool]:
+    """Regular, non-dot, non-symlink files under ``base`` as ``(relative, path)``, plus a cut flag.
 
     Mirrors the resolver's own listing rules (``protocol._reference_listing``):
     dotfiles and symlinks are never advertised, so the details view cannot list
     a path a follow-up ``skill://`` read would refuse. Depth and entry count are
-    bounded because this walks user-controlled folders.
+    bounded because this walks user-controlled folders; the flag says the entry
+    bound stopped the walk, so a count taken from it is a lower bound.
     """
+    found: list[tuple[str, Path]] = []
     seen = 0
     pending: list[tuple[Path, int]] = [(base, 1)]
     while pending:
@@ -227,7 +254,7 @@ def _walk_files(base: Path) -> Iterator[tuple[str, Path]]:
         for entry in entries:
             seen += 1
             if seen > _MAX_LISTED_ENTRIES:
-                return
+                return found, True
             if entry.name.startswith(".") or entry.is_symlink():
                 continue
             path = Path(entry.path)
@@ -235,7 +262,8 @@ def _walk_files(base: Path) -> Iterator[tuple[str, Path]]:
                 if depth < MAX_PATH_SEGMENTS:
                     pending.append((path, depth + 1))
             elif entry.is_file(follow_symlinks=False):
-                yield path.relative_to(base).as_posix(), path
+                found.append((path.relative_to(base).as_posix(), path))
+    return found, False
 
 
 def _preview(path: Path) -> tuple[str | None, bool]:
@@ -273,34 +301,60 @@ def publish_budget(link: SkillLink | None, form: str | None) -> dict[str, int] |
     return {"limit": limit, "total": total}
 
 
-def build_detail(row: dict[str, Any], skill: Any | None, link: SkillLink | None) -> dict[str, Any]:
+def build_detail(
+    row: dict[str, Any],
+    skill: Any | None,
+    link: SkillLink | None,
+    resolver_text: str | None = None,
+) -> dict[str, Any]:
     """The details read: the row, the SKILL.md body, a bounded file list, the budget.
 
     ``skill`` is ``None`` for a subscribed-not-installed link: there are no
     bytes, so the body is ``None`` and ``files`` is empty rather than a 404 --
     the card exists and so does its details view.
-    """
-    from local_operator.skills.protocol import _read_text_capped
 
+    ``link`` is honoured only for a ``hub`` row: the link index is keyed by
+    alias, and a project/external copy that shadows the alias is not the linked
+    skill, so it has no destination and no publish budget (review M1).
+
+    THE BODY IS NOT SENT TWICE. The route's historical ``detail`` is the
+    resolver's text, which is exactly ``body + "\n" + reference listing`` and
+    must stay unchanged for released callers. When ``resolver_text`` starts with
+    the body this read would return, ``body`` is ``None`` and ``body_in_detail``
+    says to take ``detail[:body_length]`` instead (a 1 MiB SKILL.md was a 417 KB
+    response, QA Q4). When it does not (a concurrent edit between the two reads),
+    the body is inlined so the pair can never disagree.
+    """
+    from local_operator.skills.protocol import MAX_READ_BYTES, _read_text_capped
+
+    if row.get("source") != "hub":
+        link = None
     body: str | None = None
+    body_length: int | None = None
     body_bytes: int | None = None
+    body_truncated = False
+    body_in_detail = False
     files: list[dict[str, Any]] = []
-    truncated = False
+    files_total = 0
+    walk_cut = False
     if skill is not None:
-        body = _read_text_capped(Path(skill.file_path))
+        text = _read_text_capped(Path(skill.file_path))
         try:
             body_bytes = Path(skill.file_path).stat().st_size
         except OSError:
             body_bytes = None
-        base = Path(skill.base_dir)
-        listed = 0
-        for relative, path in sorted(_walk_files(base)):
-            if relative == "SKILL.md":
-                continue
-            if listed >= MAX_FILES:
-                truncated = True
-                break
-            listed += 1
+        # The reader cuts at ``MAX_READ_BYTES``; say so rather than make a
+        # client compare ``body_bytes`` with the string length.
+        body_truncated = body_bytes is not None and body_bytes > MAX_READ_BYTES
+        body_length = len(text)
+        if resolver_text is not None and resolver_text.startswith(text):
+            body_in_detail = True
+        else:
+            body = text
+        listed, walk_cut = _walk_files(Path(skill.base_dir))
+        candidates = sorted(item for item in listed if item[0] != "SKILL.md")
+        files_total = len(candidates)
+        for relative, path in candidates[:MAX_FILES]:
             try:
                 size = path.stat().st_size
             except OSError:
@@ -317,8 +371,13 @@ def build_detail(row: dict[str, Any], skill: Any | None, link: SkillLink | None)
     return {
         **row,
         "body": body,
+        "body_in_detail": body_in_detail,
+        "body_length": body_length,
         "body_bytes": body_bytes,
+        "body_truncated": body_truncated,
         "files": files,
-        "files_truncated": truncated,
+        # ``files_total`` is a lower bound when the bounded walk itself was cut.
+        "files_total": files_total,
+        "files_truncated": walk_cut or files_total > len(files),
         "publish_budget": publish_budget(link, row.get("form")),
     }

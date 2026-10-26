@@ -264,7 +264,8 @@ async def test_details_carry_body_bounded_files_fingerprint_form_and_budget(env)
 
     detail = data["skill_detail"]
     assert detail["link_id"] == link_id and detail["source"] == "hub"
-    assert detail["body"].startswith("---\nname: pulled")
+    # The body rides once, in the resolver's ``detail``; this field references it.
+    assert detail["body"] is None and detail["body_in_detail"] is True
     assert detail["form"] == "document" and len(detail["fingerprint"]) == 64
     assert detail["publish_budget"] == {"limit": 20 * 1024, "total": 20 * 1024}
     [ref] = detail["files"]
@@ -313,3 +314,118 @@ async def test_rows_are_a_strict_superset_of_the_historical_shape(env) -> None:
     assert {"scope", "detail", "warning_count", "version"} <= set(data)
     # The plain list carries no detail payload.
     assert data["detail"] is None and data["skill_detail"] is None
+
+
+async def test_moved_config_dir_reached_only_through_harness_symlinks_keeps_its_labels(
+    env,
+) -> None:
+    """QA Q1, verbatim: the migration layout with ``LOCAL_OPERATOR_CONFIG_DIR`` moved.
+
+    ``default_skill_roots`` never scans a moved ``<cfg>/skills``, so its skills
+    are discovered ONLY through ``~/.claude/skills`` links. The label must come
+    from the folder's real path (managed store), not from the harness root that
+    reached it -- and the link/fingerprint/form must follow the symlink.
+    """
+    project = env.tmp / "proj"
+    moved = env.tmp / "elsewhere" / "cfg"
+    _write_skill(moved / "skills", "mv-local")
+    _write_skill(moved / "skills", "mv-hub", ref="ref text")
+    link_id = _link(moved, "mv-hub")
+    # A skill under the DEFAULT store while the profile has moved: another
+    # profile's, read-only here -- not a project folder's own skill.
+    _write_skill(env.config_dir / "skills", "other-profile")
+    claude = env.home / ".claude" / "skills"
+    claude.mkdir(parents=True)
+    for name in ("mv-local", "mv-hub"):
+        os.symlink(os.path.relpath(moved / "skills" / name, claude), claude / name)
+    await env.use_config(moved)
+
+    data = await _list(env, project)
+    rows = _by_name(data)
+
+    assert rows["mv-hub"]["source"] == "hub" and rows["mv-hub"]["link_id"] == link_id
+    assert rows["mv-hub"]["form"] == "document" and len(rows["mv-hub"]["fingerprint"]) == 64
+    assert rows["mv-hub"]["editable"] is True
+    assert rows["mv-local"]["source"] == "local" and rows["mv-local"]["editable"] is True
+    assert rows["other-profile"]["source"] == "external"
+    assert rows["other-profile"]["editable"] is False
+    # The details read follows the same link: budget and file list intact.
+    detail = (await _list(env, project, name="mv-hub"))["skill_detail"]
+    assert detail["publish_budget"] == {"limit": 256 * 1024, "total": 256 * 1024}
+    assert [f["path"] for f in detail["files"]] == ["references/notes.md"]
+
+
+async def test_a_symlink_inside_a_skill_is_still_refused(env) -> None:
+    """Following the skill DIRECTORY link must not relax the in-skill symlink refusal."""
+    project = env.tmp / "proj"
+    skill = _write_skill(env.config_dir / "skills", "sneaky")
+    secret = env.tmp / "secret.md"
+    secret.write_text("TOPSECRET", encoding="utf-8")
+    os.symlink(secret, skill / "leak.md")
+
+    data = await _list(env, project, name="sneaky")
+
+    assert _by_name(data)["sneaky"]["fingerprint"] is None
+    assert "TOPSECRET" not in str(data)
+
+
+async def test_a_project_copy_over_a_hub_alias_gets_no_publish_budget(env) -> None:
+    """Review M1: the alias link must not lend a destination to a shadowing copy."""
+    project = env.tmp / "proj"
+    _write_skill(project / ".local-operator" / "skills", "pulled", "project copy")
+    _write_skill(env.config_dir / "skills", "pulled", "managed copy")
+    _link(env.config_dir, "pulled", visibility="org")
+
+    detail = (await _list(env, project, name="pulled"))["skill_detail"]
+
+    assert detail["source"] == "project" and detail["link_id"] is None
+    assert detail["publish_budget"] is None
+
+
+async def test_a_huge_body_is_flagged_and_not_sent_twice(env) -> None:
+    """QA Q4: ``body_truncated`` is explicit; the resolver text carries the bytes once."""
+    from local_operator.skills.protocol import MAX_READ_BYTES
+
+    project = env.tmp / "proj"
+    skill = _write_skill(env.config_dir / "skills", "huge")
+    (skill / "SKILL.md").write_text(
+        "---\nname: huge\ndescription: Big.\n---\n" + "y" * (MAX_READ_BYTES * 3), encoding="utf-8"
+    )
+
+    data = await _list(env, project, name="huge")
+
+    detail = data["skill_detail"]
+    assert detail["body_truncated"] is True and detail["body_bytes"] > MAX_READ_BYTES
+    assert detail["body"] is None and detail["body_in_detail"] is True
+    assert data["detail"].startswith("---\nname: huge")
+    assert len(data["detail"]) >= detail["body_length"]
+    # Bytes appear once: the response is about one body, not two.
+    assert len(str(data)) < detail["body_length"] * 1.5
+
+
+async def test_a_small_body_is_not_flagged_and_stays_consistent(env) -> None:
+    project = env.tmp / "proj"
+    _write_skill(env.config_dir / "skills", "small")
+
+    data = await _list(env, project, name="small")
+
+    detail = data["skill_detail"]
+    assert detail["body_truncated"] is False and detail["body_in_detail"] is True
+    assert data["detail"][: detail["body_length"]].startswith("---\nname: small")
+
+
+async def test_files_total_reports_the_whole_set_past_the_listing_cap(env) -> None:
+    """QA Q3: a UI can say "64 of 80" instead of guessing."""
+    from local_operator.hub_sync.skill_document import MAX_FILES
+
+    project = env.tmp / "proj"
+    skill = _write_skill(env.config_dir / "skills", "many")
+    refs = skill / "references"
+    refs.mkdir()
+    for index in range(MAX_FILES + 6):
+        (refs / f"r{index:03d}.md").write_text("x", encoding="utf-8")
+
+    detail = (await _list(env, project, name="many"))["skill_detail"]
+
+    assert len(detail["files"]) == MAX_FILES
+    assert detail["files_total"] == MAX_FILES + 6 and detail["files_truncated"] is True

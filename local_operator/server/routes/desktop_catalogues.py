@@ -729,7 +729,11 @@ async def _read_skills(
             from local_operator.server.utils import desktop_skills
 
             skill_detail = await asyncio.to_thread(
-                desktop_skills.build_detail, row, by_name.get(name), links.get(name)
+                desktop_skills.build_detail,
+                row,
+                by_name.get(name),
+                links.get(name),
+                detail,
             )
     return {
         "skills": rows,
