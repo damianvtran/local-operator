@@ -7072,9 +7072,8 @@ def _scheme_refusal(
     # This tool serves NO scheme, so the remedy is a path — and the way to get one
     # for a file in the session's scratch area is usually to read it with the scheme
     # and use the absolute path that result prints. A caller that cannot USE such a
-    # path passes its own remedy instead: ``glob`` searches the working directory
-    # and refuses absolute patterns, so "pass the absolute path" is a dead end
-    # there (round 2, Q7).
+    # path passes its own remedy instead: ``glob`` lists directories, so "pass the
+    # absolute path" of a FILE is a dead end there (round 2, Q7).
     remedy_text = remedy or (
         "For a file in this session's scratch area, read it first with "
         f'read(path="{SCRATCHPAD_SCHEME}<name>") and pass the absolute path that result prints.'
@@ -11914,7 +11913,10 @@ class GlobParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     pattern: str = Field(description="Glob pattern ('**/*.py' supported); relative to path or cwd.")
-    path: str = ""
+    # Wire text kept to the minimum that says absolute paths work: every word here
+    # is billed on every request (scripts/bench_context_budget.py); the split rules
+    # and the approval behaviour live in tool_docs.TOOL_NOTES["glob"].
+    path: str = Field(default="", description="Base directory (absolute or cwd-relative).")
 
 
 def _split_absolute_glob(pattern: str) -> tuple[str, str]:
@@ -12298,22 +12300,20 @@ async def execute_glob(
     # cannot be addressed that way" — the same misleading-answer class the other
     # path-taking tools refuse. Found while sweeping for the tools that take a
     # path string (round 1, per-tool refusal).
-    if "://" in pattern:
-        # Its own remedy, not the shared one: a scratchpad file's absolute path
-        # is a route glob CAN take now, but only as a base directory, never as the
-        # file itself — "pass the absolute path read prints" would send the model
-        # to list a file (round 2, Q7).
-        refusal = _scheme_refusal(
-            tool_call_id,
-            "glob",
-            pattern,
-            remedy=(
-                "glob searches the working directory with a relative pattern, so it cannot be "
-                f'pointed at a scratchpad file at all: read it with read(path="{SCRATCHPAD_SCHEME}'
-                '<name>"), or search inside it with grep(path=<the absolute path that read '
-                "prints>)."
-            ),
-        )
+    # Its own remedy, not the shared one: a scratchpad file's absolute path is a
+    # route glob CAN take, but only as a base DIRECTORY via ``path``, never as the
+    # file itself — "pass the absolute path read prints" would send the model to
+    # list a file (round 2, Q7). ``path`` gets the same check as the pattern: a
+    # URL there would otherwise resolve to ``<cwd>/spill:/abc`` and come back as
+    # "Path does not exist", the misleading answer grep's ``path`` already refuses.
+    scheme_remedy = (
+        "glob lists directories, not a scratchpad file: read the file with "
+        f'read(path="{SCRATCHPAD_SCHEME}<name>"), list the scratch area with glob(path=<the '
+        "directory of the absolute path that read prints>), or search inside the file with "
+        "grep(path=<that absolute path>)."
+    )
+    for raw_target in (pattern, params.path):
+        refusal = _scheme_refusal(tool_call_id, "glob", raw_target, remedy=scheme_remedy)
         if refusal is not None:
             return refusal
     # An absolute pattern is split into a base directory and a relative pattern
@@ -12330,30 +12330,34 @@ async def execute_glob(
             "pass an absolute pattern OR path, not both: with `path` set the pattern is "
             "relative to it.",
         )
-    if (is_absolute and Path(pattern).name.casefold() == "skill.md") or ".." in Path(pattern).parts:
-        message = (
-            "pattern must be relative to its base directory (no '..'); to search "
-            "elsewhere pass path=<directory>."
+    if is_absolute and Path(pattern).name.casefold() == "skill.md":
+        # Skills are virtual resources, not files the model should discover. It
+        # stays a REFUSAL even though other absolute patterns are now served: a
+        # SKILL.md search is the filesystem scan the skill:// scheme exists to
+        # replace. The redirect stands alone — leading with the generic "no '..'"
+        # sentence described a rule the pattern never broke and offered
+        # path=<directory> as a way to keep scanning (QA round 1, Q4).
+        # A conservative resource segment avoids reflecting path syntax or prose
+        # into a URL while still covering normal catalog names.
+        skill_name = Path(pattern).parent.name
+        resource = (
+            f"skill://{skill_name}"
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", skill_name)
+            else "skill://<name>"
         )
-        # Skills are virtual resources, not files the model should discover.
-        # Correct only this observed misuse so every ordinary glob error keeps
-        # its concise, generic diagnostic. It stays a REFUSAL even though other
-        # absolute patterns are now served: a SKILL.md search is the filesystem
-        # scan the skill:// scheme exists to replace.
-        if Path(pattern).is_absolute() and Path(pattern).name.casefold() == "skill.md":
-            # A conservative resource segment avoids reflecting path syntax or
-            # prose into a URL while still covering normal catalog names.
-            skill_name = Path(pattern).parent.name
-            resource = (
-                f"skill://{skill_name}"
-                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", skill_name)
-                else "skill://<name>"
-            )
-            message += (
-                " Do not scan the filesystem for SKILL.md; read the selected skill "
-                f"directly with `{resource}`."
-            )
-        return _error(tool_call_id, "glob", message)
+        return _error(
+            tool_call_id,
+            "glob",
+            "Do not scan the filesystem for SKILL.md; read the selected skill "
+            f"directly with `{resource}`.",
+        )
+    if ".." in Path(pattern).parts:
+        return _error(
+            tool_call_id,
+            "glob",
+            "pattern must be relative to its base directory (no '..'); to search "
+            "elsewhere pass path=<directory>.",
+        )
 
     root = Path(_safe_cwd(context))
     # A confined session's glob walks are judged against the confinement root
@@ -12525,31 +12529,27 @@ def build_glob_tool() -> AgentTool:
 class GrepParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    pattern: str = Field(description="Python regular expression to search for.")
-    path: str = Field(
-        default=".",
-        description="Directory or file to search (relative to the working directory).",
-    )
+    # Descriptions are terse on purpose: the schema rides every request and the
+    # start-context ratchet (scripts/bench_context_budget.py, both arms) has no
+    # headroom. Rendering and pagination detail lives in tool_docs.TOOL_NOTES["grep"]
+    # (``tool://grep``), which is read on demand.
+    pattern: str = Field(description="Python regex.")
+    path: str = Field(default=".", description="File or directory to search.")
     include: str | None = Field(
         default=None,
-        description=(
-            "Optional glob filter applied to file names/basenames " "(e.g. '*.py', '**/*.ts')."
-        ),
+        description="Glob filter on file names (e.g. '*.py').",
     )
     case: bool = Field(default=True, description="Case-sensitive matching.")
     context_lines: int = Field(
         default=0,
         ge=0,
         le=10,
-        description=(
-            "Lines of surrounding context per match (like grep -C). Context "
-            "lines render as 'path:line-text' (dash) vs matches 'path:line:text'."
-        ),
+        description="Context lines per match (like grep -C).",
     )
     skip: int = Field(
         default=0,
         ge=0,
-        description="Skip the first N matches (pagination for large result sets).",
+        description="Skip the first N matches (pagination).",
     )
     max_filesize_mb: int = Field(
         default=GREP_FILE_LIMIT_BYTES // (1024 * 1024),
@@ -12786,11 +12786,100 @@ def _python_grep_scan(
 #: line keep its match without a second, Python-flavoured regex run over text rg
 #: already matched (rg's regex dialect is not ``re``'s, and a hostile pattern on a
 #: multi-MB line is exactly the cost this tool bounds elsewhere).
-_RG_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<col>\d+):(?P<text>.*)$")
+#: Matched on the RAW bytes, not the decoded line: the column is a byte offset
+#: into the bytes rg printed, and turning it into a character offset is only exact
+#: when the byte prefix itself is decoded. Re-encoding already-decoded text inflates
+#: every invalid byte (one byte became U+FFFD, three bytes), which pushed the window
+#: thousands of characters short of the match on a Latin-1 line (review R3, QA Q1).
+_RG_LINE_RE = re.compile(rb"^(?P<path>.+?):(?P<line>\d+):(?P<col>\d+):")
 #: What one ripgrep output line carries beyond the file's own line: the path and
-#: the ``:line:col:`` prefix. Added to ``max_filesize`` to size the pipe's line limit.
+#: the ``:line:col:`` prefix. Part of the per-line cap below.
 _RG_LINE_OVERHEAD_BYTES = 64 * 1024
+#: How much of the pipe is read per await. Small enough that a stuck rg never
+#: parks a large buffer, large enough that a 64 MB file is ~1000 reads.
+_RG_READ_CHUNK_BYTES = 64 * 1024
 _RG_CONTEXT_RE = re.compile(r"^(?P<path>.+?)-(?P<line>\d+)-(?P<text>.*)$")
+
+
+class _RgLineReader:
+    """Split ripgrep's stdout into lines that can NEVER fail on length.
+
+    WHY a reader of our own rather than ``StreamReader.readline`` with a bigger
+    ``limit``: any limit is a bet on how long rg's longest line can be, and the
+    bet was lost twice. The 64 KiB default died on a minified bundle; sizing the
+    limit from ``max_filesize`` died again because rg's default ``--encoding auto``
+    TRANSCODES a BOM'd UTF-16 file to UTF-8, so a 1 MB file of CJK text prints a
+    ~1.5 MB line (review R2) — and ``readline`` raises ``LimitOverrunError`` for
+    the whole call, not just that line. Here a line longer than ``cap`` keeps its
+    first ``cap`` bytes and the rest is DRAINED and counted, so the caller can say
+    what it did not read instead of crashing.
+
+    Cancellation-safe by construction: the only await is ``stream.read``, and every
+    byte it returns is moved into ``self`` before the next await, so the caller's
+    1 s ``wait_for`` poll (which cancels a pending read) loses nothing.
+    """
+
+    def __init__(self, stream: asyncio.StreamReader, cap: int) -> None:
+        self._stream = stream
+        self._cap = cap
+        self._pending = bytearray()  # read from the pipe, not yet split
+        self._line = bytearray()  # the current line's kept head
+        self._dropped = 0  # bytes of the current line past ``cap``, discarded
+        self._eof = False
+
+    def _absorb(self, count: int) -> None:
+        """Move ``count`` pending bytes into the current line, honouring ``cap``."""
+        room = max(self._cap - len(self._line), 0)
+        self._line += self._pending[: min(count, room)]
+        self._dropped += max(count - room, 0)
+        del self._pending[:count]
+
+    def _finish(self) -> tuple[bytes, int]:
+        line, dropped = bytes(self._line), self._dropped
+        self._line.clear()
+        self._dropped = 0
+        return line, dropped
+
+    async def readline(self) -> tuple[bytes, int] | None:
+        """``(kept_head, dropped_bytes)`` for the next line (newline stripped), or
+        ``None`` at end of stream."""
+        while True:
+            newline = self._pending.find(b"\n")
+            if newline >= 0:
+                self._absorb(newline)
+                del self._pending[:1]
+                return self._finish()
+            if self._eof:
+                if self._line or self._dropped:
+                    return self._finish()
+                return None
+            # No newline yet: bank what we have (bounded by ``cap``) so a huge line
+            # never accumulates past the cap while we wait for its end.
+            self._absorb(len(self._pending))
+            chunk = await self._stream.read(_RG_READ_CHUNK_BYTES)
+            if chunk:
+                self._pending += chunk
+            else:
+                self._eof = True
+
+
+def _rg_match_text(raw_text: bytes, col: int, dropped: int, cap: int) -> str:
+    """The display text of one rg MATCH line: clipped around the match, with the
+    character offset taken from the raw byte prefix (see ``_RG_LINE_RE``), and an
+    explicit note when the line outran the reader's cap (see ``_RgLineReader``)."""
+    text = raw_text.decode("utf-8", errors="replace")
+    lead = col - 1  # rg's column is 1-based, in bytes
+    note = ""
+    if dropped:
+        note = f" [line over {cap} bytes: {dropped} more bytes not read]"
+        if lead >= len(raw_text):
+            # The match itself is in the unread tail; showing the head as if it held
+            # the hit would be the "match not in the window" bug in another form.
+            note += " (the match is past the cut; read the file by line range)"
+    if len(text) <= GREP_LINE_CLIP_CHARS:
+        return text + note
+    hit = len(raw_text[:lead].decode("utf-8", errors="replace")) if lead < len(raw_text) else None
+    return _clip_grep_line(text, hit) + note
 
 
 async def _ripgrep_scan(
@@ -12852,21 +12941,16 @@ async def _ripgrep_scan(
     argv += ["--", pattern, rel_target]
 
     try:
-        # ``limit`` is the StreamReader's longest line, and its 64 KiB DEFAULT was
-        # the crash: one minified-bundle line is bigger, ``readline`` raised
-        # ``LimitOverrunError`` (as ValueError) and the whole call died as "Tool
-        # 'grep' failed unexpectedly" — reproduced on the Claude.app renderer
-        # chunks. rg only ever prints lines from files under ``max_filesize``, so
-        # that cap (plus a path/prefix allowance) is a true upper bound on one
-        # line and the pipe can never overrun again; the line is then clipped to
-        # ``GREP_LINE_CLIP_CHARS`` before it is stored, so the big buffer is
-        # transient, one line at a time.
+        # The pipe is read by ``_RgLineReader``, never ``readline``: a long line is
+        # cut and counted instead of raising ``LimitOverrunError`` for the whole
+        # call (the "Tool 'grep' failed unexpectedly" crash on minified bundles).
+        # No ``limit=`` here for that reason: with ``read`` it is only the default
+        # flow-control watermark, never a cap on a line.
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(base),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            limit=max_filesize + _RG_LINE_OVERHEAD_BYTES,
         )
     except (OSError, ValueError):
         return None
@@ -12875,8 +12959,13 @@ async def _ripgrep_scan(
     deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
     output_cap = (GREP_SPILL_MATCH_LIMIT + 1) * 3 + 1000
     stops: tuple[_SearchStop, ...] = ()
+    # Twice the file cap: an ordinary line is never longer than its file, and rg's
+    # UTF-16 -> UTF-8 transcoding grows text at most 1.5x, so a real line is kept
+    # whole; anything longer is cut and disclosed rather than fatal.
+    line_cap = 2 * max_filesize + _RG_LINE_OVERHEAD_BYTES
     try:
         assert proc.stdout is not None
+        reader = _RgLineReader(proc.stdout, line_cap)
         while len(records) < output_cap:
             if signal and signal.aborted:
                 proc.kill()
@@ -12893,27 +12982,25 @@ async def _ripgrep_scan(
                 )
                 break
             try:
-                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
+                next_line = await asyncio.wait_for(reader.readline(), timeout=1.0)
             except (TimeoutError, asyncio.TimeoutError):
                 continue
-            if not raw:
+            if next_line is None:
                 break
-            line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            if line == "--":
+            raw, dropped = next_line
+            if raw == b"--":
                 continue
-            match = _RG_LINE_RE.match(line)
+            match = _RG_LINE_RE.match(raw)
             if match:
-                path = match.group("path")
+                path = match.group("path").decode("utf-8", errors="replace")
                 if path.startswith("./"):
                     path = path[2:]
-                text = match.group("text")
-                if len(text) > GREP_LINE_CLIP_CHARS:
-                    # rg's column is a 1-based BYTE offset; the window is cut in
-                    # characters, so convert (only paid for the long lines).
-                    lead = text.encode("utf-8", errors="replace")[: int(match.group("col")) - 1]
-                    text = _clip_grep_line(text, len(lead.decode("utf-8", errors="ignore")))
+                text = _rg_match_text(
+                    raw[match.end() :], int(match.group("col")), dropped, line_cap
+                )
                 records.append(_match_record(path, int(match.group("line")), text, "m"))
                 continue
+            line = raw.decode("utf-8", errors="replace")
             context = _RG_CONTEXT_RE.match(line)
             if context:
                 path = context.group("path")
@@ -13253,9 +13340,17 @@ async def execute_grep(
         """
         if not skipped_largest:
             return ""
-        shown = ", ".join(
-            f"{path} ({size / (1024 * 1024):.1f}MB)" for size, path in skipped_largest
-        )
+        cap_bytes = params.max_filesize_mb * 1024 * 1024
+
+        def _size(size: int) -> str:
+            # One decimal rounds a just-over-cap file DOWN to the cap (1,048,577 B
+            # read "1.0MB" under "skipped over the 1MB cap", QA round 1 Q5), so a
+            # size within 10% of the cap is shown in exact bytes instead.
+            if size < cap_bytes * 1.1:
+                return f"{size:,} B"
+            return f"{size / (1024 * 1024):.1f}MB"
+
+        shown = ", ".join(f"{path} ({_size(size)})" for size, path in skipped_largest)
         more = files_skipped - len(skipped_largest)
         if more > 0:
             shown += f", and {more} more"
@@ -13294,7 +13389,7 @@ async def execute_grep(
                 "was read, and the rest was not — so this is not an absence of "
                 "matches. Narrow the search with path=<subdirectory> or "
                 f"include=<glob> and re-run{engine_note}."
-                + (f" Also {_skipped_names()}." if skipped_names else ""),
+                + (f" Also {skipped_names}." if skipped_names else ""),
                 details=_partial_details(stops, None),
             )
         where = f" in {files_searched} file(s)" if not engine_note else ""

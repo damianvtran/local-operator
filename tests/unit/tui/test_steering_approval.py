@@ -1174,6 +1174,12 @@ async def test_a_dangerous_ask_never_paints_like_a_safe_one(width: int) -> None:
     [
         ("write: /Users/nobody/.ssh/authorized_keys", "authorized_keys"),
         ("write: /Users/nobody/Documents/notes.md", "notes.md"),
+        # glob takes an absolute base since PR #2982; the basename is what it lists
+        # (review round 1, R5).
+        (
+            "[outside workspace] glob: /Applications/Example.app/Contents/Resources/node_modules",
+            "node_modules",
+        ),
     ],
 )
 @pytest.mark.asyncio

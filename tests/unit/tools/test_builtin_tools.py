@@ -1917,8 +1917,10 @@ async def test_globs_refusal_prescribes_a_route_glob_can_take(tmp_path) -> None:
         "c", {"pattern": "scratchpad://*.md"}, None, None, context
     )
     assert refused.is_error is True
-    assert "glob searches the working directory with a relative pattern" in refused.text
-    assert "or search inside it with grep(" in refused.text
+    # glob DOES take an absolute base now, so the remedy offers it as a directory
+    # (QA round 1, Q3) instead of claiming glob cannot reach the scratch area.
+    assert "list the scratch area with glob(path=" in refused.text
+    assert "or search inside the file with grep(" in refused.text
 
     # The route this tool CAN honour, end to end: read it (which prints the path),
     # then grep that path.
@@ -4510,8 +4512,10 @@ async def test_glob_redirects_absolute_skill_search_to_protocol(tools, context) 
     )
 
     assert result.is_error is True
-    assert "relative" in result.text.lower()
-    assert "Do not scan the filesystem for SKILL.md" in result.text
+    # The redirect leads; the generic "no '..'" sentence described a rule this
+    # pattern never broke and offered path= as a way to keep scanning (QA Q4).
+    assert result.text.find("Do not scan the filesystem for SKILL.md") >= 0
+    assert "no '..'" not in result.text and "path=" not in result.text
     assert "`skill://minerva-support-workspace`" in result.text
 
 
@@ -5932,17 +5936,18 @@ class _StubbornProc:
     ``kill()`` records that it was asked and changes nothing, and ``wait()``
     returns without ever setting ``returncode`` — the state the guard must treat
     as "a stop we performed, keep the records" rather than "rg failed, walk the
-    tree in Python". ``stdout.readline`` is a coroutine because the scanner awaits
-    it, and returns EOF once its scripted lines run out.
+    tree in Python". ``stdout.read`` is a coroutine because the scanner awaits
+    it, and returns EOF once its scripted lines run out. The scanner reads the
+    pipe in chunks (``_RgLineReader``), so each scripted line is one ``read``.
     """
 
     def __init__(self, lines: list[bytes]) -> None:
         self._lines = list(lines)
         self.returncode: int | None = None
         self.killed = 0
-        self.stdout = SimpleNamespace(readline=self._readline)
+        self.stdout = SimpleNamespace(read=self._read)
 
-    async def _readline(self) -> bytes:
+    async def _read(self, _n: int = -1) -> bytes:
         return self._lines.pop(0) if self._lines else b""
 
     def kill(self) -> None:
@@ -9150,6 +9155,13 @@ def _write_minified(path: Path, needle: str = "cache_control") -> None:
     path.write_text("var a=1;" + "x" * 100_000 + needle + "y" * 100_000 + "\n")
 
 
+def _grep_body(result: ToolResult) -> str:
+    """The result minus its header line. The header echoes the pattern
+    (``1 match(es) for 'NEEDLE'``), so a needle assertion on the WHOLE text passes
+    even when the clipped window lost the match (review round 1, R4)."""
+    return result.text.split("\n", 1)[1] if "\n" in result.text else ""
+
+
 async def _grep_on_engine(tools, context, monkeypatch, engine: str, args: dict[str, Any]):
     """Run grep pinned to ``engine`` ('rg' skips when ripgrep is absent)."""
     if engine == "rg":
@@ -9176,8 +9188,9 @@ async def test_grep_survives_and_clips_a_line_over_the_pipe_limit(
 
     assert result.is_error is False, result.text
     assert "failed unexpectedly" not in result.text
-    assert "min.js:1:" in result.text
-    assert "cache_control" in result.text, "the clipped window lost the match"
+    body = _grep_body(result)
+    assert "min.js:1:" in body
+    assert "cache_control" in body, "the clipped window lost the match"
     # Bounded: nowhere near the 200 KB line (window + spill footer + header).
     assert len(result.text) < 3_000, len(result.text)
     # And it says how much it dropped, so the model knows the line continues.
@@ -9194,7 +9207,24 @@ async def test_grep_clips_a_multibyte_line_around_the_match(
     (tmp_path / "u.txt").write_text("é" * 5_000 + "NEEDLE" + "é" * 5_000 + "\n")
     result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "NEEDLE"})
     assert result.is_error is False, result.text
-    assert "NEEDLE" in result.text
+    assert "NEEDLE" in _grep_body(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize("junk", [b"\xe9", b"\xc3\x28", b"\x80"], ids=["latin1", "bad-seq", "cont"])
+async def test_grep_clips_around_the_match_after_invalid_utf8(
+    tools, context, tmp_path, monkeypatch, engine, junk
+) -> None:
+    """rg's byte column must become a character offset from the RAW byte prefix:
+    re-encoding the replaced text turned each invalid byte into three and put the
+    window ~3x short of the match (review R3, QA Q1). Valid UTF-8 never showed it."""
+    (tmp_path / "lat.js").write_bytes(junk * 3_000 + b" NEEDLE_XYZ " + junk * 3_000 + b"\n")
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "NEEDLE_XYZ"})
+    assert result.is_error is False, result.text
+    body = _grep_body(result)
+    assert body.startswith("lat.js:1:[\u2026"), body[:80]
+    assert "NEEDLE_XYZ" in body, "the clipped window lost the match"
 
 
 @pytest.mark.asyncio
@@ -9304,19 +9334,73 @@ async def test_grep_a_named_oversized_file_is_disclosed_too(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_a_just_over_cap_file_does_not_read_as_the_cap(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """1,048,577 B rendered as "1.0MB" beside "skipped over the 1MB cap" (QA Q5)."""
+    (tmp_path / "just_over.js").write_bytes(b"z" * (1024 * 1024 + 1))
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "absent"})
+    assert "just_over.js (1,048,577 B)" in result.text
+    assert "1.0MB)" not in result.text
+
+
+@pytest.mark.asyncio
 async def test_grep_rejects_a_max_filesize_above_the_ceiling(tools, context) -> None:
     result = await _call(tools, "grep", {"pattern": "x", "max_filesize_mb": 65}, context)
     assert result.is_error is True
 
 
-def test_ripgrep_line_limit_covers_the_largest_searchable_file(tmp_path) -> None:
-    """The pipe's line limit is sized from the cap, so no file under it can overrun
-    the reader — the invariant the crash fix rests on. Checked at the ceiling."""
-    assert (
-        builtin.GREP_FILE_CEILING_BYTES + builtin._RG_LINE_OVERHEAD_BYTES
-        > builtin.GREP_FILE_CEILING_BYTES
+@pytest.mark.asyncio
+async def test_grep_survives_a_transcoded_line_longer_than_its_file(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """rg transcodes a BOM'd UTF-16 file to UTF-8, so a ~1 MB file of CJK text
+    prints a ~1.5 MB line: a pipe limit sized from ``max_filesize`` overran and
+    the whole call died with ``LimitOverrunError`` (review R2). The file is UTF-16
+    on purpose and UNDER the default cap, which is what made the old bound false."""
+    blob = ("\u4e2d" * 520_000 + "NEEDLE" + "\n").encode("utf-16-le")
+    target = tmp_path / "Localizable.strings"
+    target.write_bytes(b"\xff\xfe" + blob)
+    assert target.stat().st_size < builtin.GREP_FILE_LIMIT_BYTES
+    result = await _grep_on_engine(tools, context, monkeypatch, "rg", {"pattern": "NEEDLE"})
+    assert result.is_error is False, result.text
+    assert "failed unexpectedly" not in result.text
+    body = _grep_body(result)
+    assert body.startswith("Localizable.strings:1:[\u2026"), body[:80]
+    assert "NEEDLE" in body
+
+
+class _FakeStream:
+    """A StreamReader stand-in that hands out fixed chunks, then EOF."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def read(self, _n: int) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+@pytest.mark.asyncio
+async def test_rg_line_reader_cuts_and_counts_instead_of_raising() -> None:
+    """The reader behind the crash fix: a line longer than its cap keeps the head,
+    counts what it dropped, and the NEXT line is intact — no length can raise,
+    whatever the chunk boundaries (the newline lands mid-chunk here)."""
+    reader = builtin._RgLineReader(
+        _FakeStream([b"a" * 7, b"aaa\nshort\n", b"tail-without-newline"]),  # type: ignore[arg-type]
+        cap=4,
     )
-    assert builtin.GREP_LINE_CLIP_LEAD_CHARS < builtin.GREP_LINE_CLIP_CHARS
+    assert await reader.readline() == (b"aaaa", 6)
+    assert await reader.readline() == (b"shor", 1)
+    assert await reader.readline() == (b"tail", 16)
+    assert await reader.readline() is None
+
+
+def test_rg_match_text_owns_up_to_a_match_past_the_cut() -> None:
+    """A line over the reader cap whose match sits in the dropped tail says so,
+    rather than showing a window that does not contain the hit."""
+    text = builtin._rg_match_text(b"x" * 600, col=9_000, dropped=10_000, cap=600)
+    assert "10000 more bytes not read" in text and "match is past the cut" in text
 
 
 # ---------------------------------------------------------------------------
@@ -9415,6 +9499,13 @@ async def test_glob_path_errors_are_clean(tools, context, tmp_path) -> None:
     # A scheme in either argument is still refused, never walked as a relative path.
     scheme = await _call(tools, "glob", {"pattern": "scratchpad://*.md"}, context)
     assert scheme.is_error is True
+    # ...including in ``path``, which used to resolve to ``<cwd>/spill:/abc`` and
+    # answer "Path does not exist" (QA round 1, Q3).
+    for url in ("spill://abc", "scratchpad://notes"):
+        in_path = await _call(tools, "glob", {"pattern": "*", "path": url}, context)
+        assert in_path.is_error is True
+        assert "is a URL" in in_path.text and "does not exist" not in in_path.text
+    assert not list(tmp_path.glob("*:"))
 
 
 @pytest.mark.asyncio
