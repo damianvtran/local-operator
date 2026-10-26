@@ -78,6 +78,8 @@ from local_operator.mobile.auth import (
     sign_cookie,
     verify_cookie,
 )
+from local_operator.mobile.start_receipts import CAPABILITY as START_CAPABILITY
+from local_operator.mobile.start_receipts import StartReceipts, StartRefusal, canonical_request
 from local_operator.mobile.transfer_receipts import (
     ReceiptsUnreadable,
     TransferConflict,
@@ -3424,6 +3426,7 @@ class MobileDaemon:
         #: resolves at first use — tests patch the root after building the
         #: daemon, the same reason ``SessionTable.seen_store`` is lazy.
         self._transfer_receipts: TransferReceipts | None = None
+        self._start_receipts: StartReceipts | None = None
 
     def transfer_receipts(self) -> TransferReceipts:
         """The one :class:`TransferReceipts` for this daemon's config root.
@@ -3437,6 +3440,36 @@ class MobileDaemon:
 
             self._transfer_receipts = TransferReceipts(config_dir())
         return self._transfer_receipts
+
+    def start_receipts(self) -> StartReceipts:
+        """Resolve the owner-private root lazily, exactly like transfer receipts."""
+        if self._start_receipts is None:
+            from local_operator.paths import config_dir
+
+            self._start_receipts = StartReceipts(config_dir())
+        return self._start_receipts
+
+    async def recover_started_session(self, session_id: str) -> int | None:
+        """Adopt a verified exact owner, never speculate a second constructor.
+
+        A pending receipt survived an unknown crash edge. Absence of a record
+        is not proof that the first constructor did not start or is not still
+        booting, so this path deliberately never calls ``spawn_session``.
+        """
+        from local_operator.mobile.attach_client import find_runtime_record
+        from local_operator.paths import config_dir
+
+        record, _ = await asyncio.to_thread(find_runtime_record, config_dir(), session_id)
+        if record is None:
+            return None
+        try:
+            async with asyncio.timeout(SESSION_START_TIMEOUT_S):
+                await self._prepare_phone_record(record)
+            self._arm_phone_handoff(session_id)
+            return record.pid
+        except BaseException:
+            self.release_phone_view(session_id)
+            raise
 
     def watch_display_settings(self) -> None:
         """Make this daemon's folds follow ``display.*`` writes from other processes.
@@ -5430,6 +5463,9 @@ def build_app(daemon: MobileDaemon):
                 # contract, not this app's routing table (see the i18n note
                 # above), and the two must not be conflated.
                 "session_tags": {"available": True},
+                # Authenticated build support, not a claim that receipt storage
+                # is writable right now. Typed refusals preserve the same key.
+                "session_start": dict(START_CAPABILITY),
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".
@@ -7824,6 +7860,59 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        if "create_request_id" in body:
+            # The existing gate above precedes admission AND replay. A supplied
+            # account label is never authority; keyed input has an exact schema.
+            try:
+                _, encoded_intent = canonical_request(body)
+                intent = json.loads(encoded_intent)
+
+                def resolve_start() -> dict[str, str]:
+                    from argparse import Namespace
+
+                    from local_operator.config import ConfigManager
+                    from local_operator.paths import config_dir
+                    from local_operator.session_factory import resolve_hosting_model
+
+                    raw = intent["cwd"] or _default_start_cwd()
+                    path = Path(raw).expanduser().resolve()
+                    if not path.is_dir() or not _spawn_dir_allowed(path):
+                        raise StartRefusal("invalid_start_directory", 400)
+                    # Use the same birth precedence as the constructor, then
+                    # persist the resolved pair before it can observe a later
+                    # config edit. No alternate default-selection algorithm.
+                    try:
+                        provider, model = resolve_hosting_model(
+                            None,
+                            Namespace(hosting=intent["provider"], model=intent["model_id"]),
+                            ConfigManager(config_dir()),
+                        )
+                    except ValueError as exc:
+                        # A missing/unknown provider or model is a selection
+                        # refusal (400), never an unreadable receipt store.
+                        raise StartRefusal("invalid_start_selection", 400) from exc
+                    return {"cwd": str(path), "provider": provider, "model_id": model}
+
+                async def spawn_start(chosen: dict[str, str], sid: str) -> int:
+                    return await daemon.spawn_session(
+                        chosen["cwd"], provider=chosen["provider"],
+                        model_id=chosen["model_id"], resume=sid,
+                    )
+
+                answer = await daemon.start_receipts().start(
+                    body, resolve_start, spawn_start, daemon.recover_started_session
+                )
+            except StartRefusal as exc:
+                payload: dict[str, Any] = {"error": exc.code, "code": exc.code}
+                if exc.session_id is not None:
+                    payload["session_id"] = exc.session_id
+                return JSONResponse(payload, status_code=exc.status)
+            except ValueError:
+                return JSONResponse(
+                    {"error": "invalid_start_selection", "code": "invalid_start_selection"},
+                    status_code=400,
+                )
+            return JSONResponse(answer)
         # NO DIRECTORY NAMED MEANS "WHERE THE USER HAS BEEN WORKING LATELY".
         # The one-tap start posts no cwd at all, so the resolution lives here,
         # server-side, and is the SAME function ``GET /api/directories``
