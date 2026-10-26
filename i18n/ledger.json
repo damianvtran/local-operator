@@ -6626,6 +6626,167 @@
         "relay.transcript.turn.took"
       ],
       "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.health",
+      "source_sha256": "a72d7b027ccf67ad1f39b37e78fb2b1f31af39307ada56c1b0f60932e7ac55d5",
+      "translator": {
+        "agent": "translator (lopdev session ac104a0f479f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 2f1da17f81d4)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.live",
+        "relay.health.live_detail"
+      ],
+      "note": "Independent round-1 audit by translation-auditor (lopdev session 2f1da17f81d4) on 410833276bd1bd2ff5cd8384fd5f0b75cc6d0339: 2/2 keys read against the en source and relay.health.context.json; 0 blocker, 0 major, 0 minor, 0 nit; bytes integrated verbatim from translator session ac104a0f479f. Checked: key parity, no placeholders/ICU in source or target, NFC, no Cf/bidi controls, sentence case, no trailing period; live is 8 cells by rich.cell_len against maxCells 16; register matches the locale's relay.chrome.session.subtitle.not_answering/ended siblings; 'your computer' names the machine running the session, and the detail promises delivery, not an instant reply. 'Live' renders as 'En línea', not 'Conectado' (the drawer's phone-link word) or 'Activa' (clashes with 'Inactiva' = Idle); 'tu máquina' matches the es relay.chrome.list.empty_hint call and the tú register. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.health",
+      "source_sha256": "a72d7b027ccf67ad1f39b37e78fb2b1f31af39307ada56c1b0f60932e7ac55d5",
+      "translator": {
+        "agent": "translator (lopdev session ac104a0f479f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 2f1da17f81d4)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.live",
+        "relay.health.live_detail"
+      ],
+      "note": "Independent round-1 audit by translation-auditor (lopdev session 2f1da17f81d4) on 410833276bd1bd2ff5cd8384fd5f0b75cc6d0339: 2/2 keys read against the en source and relay.health.context.json; 0 blocker, 0 major, 0 minor, 0 nit; bytes integrated verbatim from translator session ac104a0f479f. Checked: key parity, no placeholders/ICU in source or target, NFC, no Cf/bidi controls, sentence case, no trailing period; live is 8 cells by rich.cell_len against maxCells 16; register matches the locale's relay.chrome.session.subtitle.not_answering/ended siblings; 'your computer' names the machine running the session, and the detail promises delivery, not an instant reply. 'Live' renders as 'En ligne', not 'Connecté' (the drawer's phone-link word) or 'Active' (clashes with 'Inactive' = Idle); detail keeps vous, ’ U+2019 and the spaced em dash. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.health",
+      "source_sha256": "a72d7b027ccf67ad1f39b37e78fb2b1f31af39307ada56c1b0f60932e7ac55d5",
+      "translator": {
+        "agent": "translator (lopdev session bd19afcd9e0a)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 2f1da17f81d4)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.live",
+        "relay.health.live_detail"
+      ],
+      "note": "Independent round-1 audit by translation-auditor (lopdev session 2f1da17f81d4) on 410833276bd1bd2ff5cd8384fd5f0b75cc6d0339: 2/2 keys read against the en source and relay.health.context.json; 0 blocker, 0 major, 0 minor, 0 nit; bytes integrated verbatim from translator session bd19afcd9e0a. Checked: key parity, no placeholders/ICU in source or target, NFC, no Cf/bidi controls, sentence case, no trailing period; live is 5 cells by rich.cell_len against maxCells 16; register matches the locale's relay.chrome.session.subtitle.not_answering/ended siblings; 'your computer' names the machine running the session, and the detail promises delivery, not an instant reply. 'Live' renders as 'ऑनलाइन', pairing with the drawer's 'ऑफ़लाइन' and distinct from 'कनेक्टेड' (phone link) and 'सक्रिय'; 'पहुँच' uses the chandrabindu spelling the hi catalogue uses throughout. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.health",
+      "source_sha256": "a72d7b027ccf67ad1f39b37e78fb2b1f31af39307ada56c1b0f60932e7ac55d5",
+      "translator": {
+        "agent": "translator (lopdev session ac104a0f479f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 2f1da17f81d4)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.live",
+        "relay.health.live_detail"
+      ],
+      "note": "Independent round-1 audit by translation-auditor (lopdev session 2f1da17f81d4) on 410833276bd1bd2ff5cd8384fd5f0b75cc6d0339: 2/2 keys read against the en source and relay.health.context.json; 0 blocker, 0 major, 0 minor, 0 nit; bytes integrated verbatim from translator session ac104a0f479f. Checked: key parity, no placeholders/ICU in source or target, NFC, no Cf/bidi controls, sentence case, no trailing period; live is 6 cells by rich.cell_len against maxCells 16; register matches the locale's relay.chrome.session.subtitle.not_answering/ended siblings; 'your computer' names the machine running the session, and the detail promises delivery, not an instant reply. 'Live' renders as 'В сети', the natural antonym of the drawer's 'Не в сети' and distinct from 'Подключено' (phone link); feminine 'Запущена' agrees with сессия like the sibling 'Завершена'. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.health",
+      "source_sha256": "a72d7b027ccf67ad1f39b37e78fb2b1f31af39307ada56c1b0f60932e7ac55d5",
+      "translator": {
+        "agent": "translator (lopdev session bd19afcd9e0a)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 2f1da17f81d4)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.live",
+        "relay.health.live_detail"
+      ],
+      "note": "Independent round-1 audit by translation-auditor (lopdev session 2f1da17f81d4) on 410833276bd1bd2ff5cd8384fd5f0b75cc6d0339: 2/2 keys read against the en source and relay.health.context.json; 0 blocker, 0 major, 0 minor, 0 nit; bytes integrated verbatim from translator session bd19afcd9e0a. Checked: key parity, no placeholders/ICU in source or target, NFC, no Cf/bidi controls, sentence case, no trailing period; live is 7 cells by rich.cell_len against maxCells 16; register matches the locale's relay.chrome.session.subtitle.not_answering/ended siblings; 'your computer' names the machine running the session, and the detail promises delivery, not an instant reply. 'Live' renders as 'آن لائن', pairing with the drawer's 'آف لائن' and distinct from 'منسلک' (phone link) and 'فعال'; Urdu-specific letters (ی U+06CC, ک U+06A9, ہ U+06C1), no manual bidi controls, no Latin run. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.health",
+      "source_sha256": "a72d7b027ccf67ad1f39b37e78fb2b1f31af39307ada56c1b0f60932e7ac55d5",
+      "translator": {
+        "agent": "translator (lopdev session ac104a0f479f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 2f1da17f81d4)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.live",
+        "relay.health.live_detail"
+      ],
+      "note": "Independent round-1 audit by translation-auditor (lopdev session 2f1da17f81d4) on 410833276bd1bd2ff5cd8384fd5f0b75cc6d0339: 2/2 keys read against the en source and relay.health.context.json; 0 blocker, 0 major, 0 minor, 0 nit; bytes integrated verbatim from translator session ac104a0f479f. Checked: key parity, no placeholders/ICU in source or target, NFC, no Cf/bidi controls, sentence case, no trailing period; live is 14 cells by rich.cell_len against maxCells 16; register matches the locale's relay.chrome.session.subtitle.not_answering/ended siblings; 'your computer' names the machine running the session, and the detail promises delivery, not an instant reply. 'Live' renders as 'Đang hoạt động' (14 cells, within 16); 'Ngoại tuyến' is the drawer's offline word and no vi relay label uses 'hoạt động' for another state, so no collision; NFC verified. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.health",
+      "source_sha256": "a72d7b027ccf67ad1f39b37e78fb2b1f31af39307ada56c1b0f60932e7ac55d5",
+      "translator": {
+        "agent": "translator (lopdev session bd19afcd9e0a)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 2f1da17f81d4)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.live",
+        "relay.health.live_detail"
+      ],
+      "note": "Independent round-1 audit by translation-auditor (lopdev session 2f1da17f81d4) on 410833276bd1bd2ff5cd8384fd5f0b75cc6d0339: 2/2 keys read against the en source and relay.health.context.json; 0 blocker, 0 major, 0 minor, 0 nit; bytes integrated verbatim from translator session bd19afcd9e0a. Checked: key parity, no placeholders/ICU in source or target, NFC, no Cf/bidi controls, sentence case, no trailing period; live is 4 cells by rich.cell_len against maxCells 16; register matches the locale's relay.chrome.session.subtitle.not_answering/ended siblings; 'your computer' names the machine running the session, and the detail promises delivery, not an instant reply. 'Live' renders as '在线' (4 cells), matching the existing tui.projects.render.live_count call and distinct from the drawer's '已连接'; detail drops the pronoun per the zh-CN guide and uses the catalogue's full-width '——'. Copy/audit pass only; not native/live rendered-relay evidence."
     }
   ]
 }

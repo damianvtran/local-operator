@@ -56,7 +56,11 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # The condensed relay transcript's `relay.transcript` row (19 keys, its
     # zh-CN bytes independently audited at the current English source) is the
     # eighty-fifth: likewise CARRIED, so set equality requires it too.
-    assert len(chinese) == 85
+    # The session status dot's own two-key `relay.health` namespace (minted so
+    # relay.chrome's frozen English bytes stay untouched; zh-CN bytes
+    # independently audited at the current English source on 2026-10-26) is
+    # the eighty-sixth, CARRIED on the same terms.
+    assert len(chinese) == 86
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -107,8 +111,9 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # Hindi bytes were translated and independently audited on 2026-10-25 at
     # these source bytes) makes it THIRTY-EIGHT. The condensed relay
     # transcript's independently audited 19-key `hi/relay.transcript` row makes
-    # it THIRTY-NINE.
-    assert len(hindi) == 39
+    # it THIRTY-NINE. The session status dot's independently audited 2-key
+    # `hi/relay.health` row makes it FORTY.
+    assert len(hindi) == 40
     assert all(entry["status"] == "passed" for entry in hindi)
 
 
