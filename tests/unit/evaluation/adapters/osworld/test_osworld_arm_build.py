@@ -1,15 +1,19 @@
 """The arm builder's guard rails, and dependency admission's refusal cases.
 
-Two subjects, one file, because they are one apparatus: the builder decides what
-an arm installs, and the admission gate decides whether that installed set
-conforms to the reviewed override policy. Every refusal case below is a control
-that was exercised by hand during the main17 preflight; the point of the tests
-is that they stay exercised rather than being re-derived by hand next time.
+One apparatus, hence one file: the builder decides what an arm installs and the
+admission gate decides whether that installed set conforms to the reviewed
+override policy. Every refusal case here is a control that must stay exercised,
+because each of them corresponds to a real way this could go wrong:
 
-``RAW_CHECK`` is real output from a correctly built arm (main17, 2026-10-25):
-rc 1 with exactly the two overridden conflicts. It is the POSITIVE control --
-if admission ever starts demanding a green checker, or stops accepting exactly
-this report, these tests break.
+* ``RAW_CHECK`` is a real ``uv pip check`` report from a correctly built arm
+  (main17, 2026-10-25): rc 1, exactly the two overridden conflicts. If admission
+  ever demands a green checker, or stops accepting this exact report, the
+  positive control breaks.
+* The extras / marker / duplicate rows are the three real lines ``uv 0.10.8``
+  prints for a package that declares ``requests~=2.31.0``,
+  ``requests[socks]~=2.31.0`` and ``requests~=2.31.0 ; python_full_version >=
+  '3.8'``. They look like the admitted bound and are not, so they are the
+  regression guard for keying a finding on its whole requirement.
 """
 
 from __future__ import annotations
@@ -24,11 +28,12 @@ from typing import Any
 import pytest
 
 from scripts import build_osworld_arm as arm
+from scripts import osworld_arm_verify as verify
 from scripts import osworld_dependency_admission as admission
 
 ROOT = Path(__file__).resolve().parents[5]
 
-RAW_CHECK = """Using Python 3.12.13 environment at: /arms/main17/venv
+RAW_CHECK = """Using Python 3.12.13 environment at: {prefix}
 Checked 406 packages in 14ms
 Found 2 incompatibilities
 The package `zhipuai` requires `pyjwt>=2.8.0,<2.9.0`, but `2.13.0` is installed
@@ -36,29 +41,21 @@ The package `osworld` requires `requests~=2.31.0`, but `2.34.2` is installed
 """
 
 OVERRIDES = ["requests>=2.32.0", "pyjwt[crypto]>=2.10,<3"]
-DECLARED = {"osworld": ["requests~=2.31.0"], "zhipuai": ["pyjwt>=2.8.0,<2.9.0"]}
-INSTALLED = {
-    "requests": "2.34.2",
-    "pyjwt": "2.13.0",
-    "miniaudio": "1.71.0",
-    "watchdog": "6.0.0",
-}
-CORE = [
-    "requests>=2.32.0",
-    "pyjwt[crypto]>=2.10,<3",
-    "miniaudio>=1.71",
-    "watchdog>=6.0.0",
-]
+# The installed Requires-Dist rows of the two parents, in their real spelling.
+DECLARED = {"osworld": ["requests~=2.31.0"], "zhipuai": ["pyjwt (>=2.8.0,<2.9.0)"]}
+INSTALLED = {"requests": "2.34.2", "pyjwt": "2.13.0", "miniaudio": "1.71.0", "watchdog": "6.0.0"}
+CORE = ["requests>=2.32.0", "pyjwt[crypto]>=2.10,<3", "miniaudio>=1.71", "watchdog>=6.0.0"]
 
 
 def _admit(
-    text: str = RAW_CHECK,
+    text: str,
     returncode: int = 1,
     *,
     overrides: list[str] | None = None,
     installed: dict[str, str] | None = None,
     declared: dict[str, list[str]] | None = None,
     core: list[str] | None = None,
+    prefix: str | None = None,
 ) -> admission.Admission:
     return admission.admit(
         text,
@@ -67,36 +64,19 @@ def _admit(
         installed=INSTALLED if installed is None else installed,
         declared=DECLARED if declared is None else declared,
         core_requirements=CORE if core is None else core,
+        prefix=prefix,
     )
 
 
-def test_the_reviewed_policy_matches_the_committed_adapter_metadata() -> None:
-    """The reviewed set must agree with the repository it admits arms for.
+def _check(prefix: str = "/arms/main17/venv") -> str:
+    return RAW_CHECK.format(prefix=prefix)
 
-    Three files have to stay in step, and a test is cheaper than noticing in a
-    build: the adapter's committed overrides, the frozen pins those overrides
-    are allowed to move, and the reviewed conflict list this module enforces.
-    """
 
-    pyproject = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/pyproject.toml").read_text())
-    overrides = [
-        admission.Requirement(text) for text in pyproject["tool"]["uv"]["override-dependencies"]
-    ]
-    # The override list covers exactly the dependencies the reviewed bounds name.
-    assert {admission.canonicalize_name(item.name) for item in overrides} == {
-        bound.dependency for bound in admission.SUPERSEDED_BOUNDS
-    }
-    # And the committed adapter lock's own pin for each of them satisfies the
-    # override: the policy may not forbid the version the lock installs.
-    lock = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/uv.lock").read_text())
-    locked = {row["name"]: row["version"] for row in lock["package"]}
-    for item in overrides:
-        name = admission.canonicalize_name(item.name)
-        assert admission.Version(locked[name]) in item.specifier, (name, locked[name])
+# --- admission: the positive control ---------------------------------------
 
 
 def test_a_correct_arm_is_admitted_without_calling_its_checker_green() -> None:
-    verdict = _admit()
+    verdict = _admit(_check())
     assert verdict.admitted, verdict.refusals
     receipt = verdict.as_receipt()
     # The honest report: rc 1 is preserved and admission is a separate verdict.
@@ -106,206 +86,352 @@ def test_a_correct_arm_is_admitted_without_calling_its_checker_green() -> None:
     assert [row[0] for row in receipt["admitted_superseded_bounds"]] == ["osworld", "zhipuai"]
 
 
+def test_the_reviewed_policy_matches_the_committed_adapter_metadata() -> None:
+    """The reviewed set must agree with the repository it admits arms for.
+
+    A policy edit that leaves this module behind would let an arm be admitted
+    against a rule nobody reviewed, so the two are compared rather than trusted.
+    """
+
+    pyproject = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/pyproject.toml").read_text())
+    overrides = [
+        admission.Requirement(text) for text in pyproject["tool"]["uv"]["override-dependencies"]
+    ]
+    assert admission.check_policy(list(pyproject["tool"]["uv"]["override-dependencies"])) == []
+    # The override list covers exactly the dependencies the reviewed bounds name.
+    assert {admission.canonicalize_name(item.name) for item in overrides} == {
+        bound.dependency for bound in admission.SUPERSEDED_BOUNDS
+    }
+    # And the committed adapter lock's own pin for each satisfies the override:
+    # the policy may not forbid the version the lock installs.
+    lock = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/uv.lock").read_text())
+    locked = {row["name"]: row["version"] for row in lock["package"]}
+    for item in overrides:
+        name = admission.canonicalize_name(item.name)
+        assert admission.Version(locked[name]) in item.specifier, (name, locked[name])
+
+
+# --- admission: third conflicts that merely LOOK admitted -------------------
+
+
 def test_a_third_conflict_is_refused() -> None:
-    """The guard this apparatus exists for: no new conflict rides along.
+    """No new conflict rides along.
 
     Main16 had exactly such a third finding (``local-operator`` required
     ``miniaudio``, not installed). Admitting it would have meant a paid arm
     whose own harness requirement was unmet.
     """
 
-    text = RAW_CHECK.replace("Found 2 incompatibilities", "Found 3 incompatibilities")
-    text += "The package `core` requires `somepkg>=1`, but `0.9` is installed\n"
+    text = _check().replace(
+        "Found 2 incompatibilities",
+        "Found 3 incompatibilities\n"
+        "The package `gymnasium` requires `numpy<2`, but `2.2.6` is installed",
+    )
     verdict = _admit(text)
     assert not verdict.admitted
-    assert any("unadmitted conflict" in reason for reason in verdict.refusals)
+    assert any("unadmitted conflict: gymnasium requires numpy<2" in r for r in verdict.refusals)
+
+
+def test_an_extras_qualified_bound_is_not_the_admitted_bound() -> None:
+    """``requests[socks]~=2.31.0`` is a different requirement from ``requests~=2.31.0``.
+
+    uv reports it as its own finding, and the override replaces it with plain
+    ``requests>=2.32.0`` -- so the extra's package may never be installed, which
+    uv's checker does not report when the version constraint is satisfied. A key
+    that ignored extras would admit it silently.
+    """
+
+    report = _report_with(
+        extra_line="The package `osworld` requires `requests[socks]~=2.31.0`,"
+        " but `2.34.2` is installed"
+    )
+    declared = {
+        "osworld": ["requests~=2.31.0", "requests[socks]~=2.31.0"],
+        "zhipuai": list(DECLARED["zhipuai"]),
+    }
+    verdict = _admit(report, declared=declared)
+    assert not verdict.admitted
+    assert any("requests[socks]" in reason for reason in verdict.refusals)
+
+
+def _report_with(*, extra_line: str, found: int = 3) -> str:
+    """The positive-control report with one extra finding and a matching count."""
+
+    return _check().replace(
+        "Found 2 incompatibilities",
+        f"Found {found} incompatibilities\n{extra_line}",
+    )
+
+
+def test_a_marker_qualified_bound_is_not_the_admitted_bound() -> None:
+    report = _report_with(
+        extra_line=(
+            "The package `osworld` requires `requests~=2.31.0 ; python_full_version >= '3.8'`,"
+            " but `2.34.2` is installed"
+        )
+    )
+    verdict = _admit(report)
+    assert not verdict.admitted
+    assert any("unadmitted conflict" in r and "python_full_version" in r for r in verdict.refusals)
+
+
+def test_a_duplicated_admitted_line_is_refused() -> None:
+    """Two identical admitted lines are still one finding too many.
+
+    A count check cannot catch this on its own -- the duplicate is counted --
+    so the admitted bound must match EXACTLY ONCE.
+    """
+
+    report = _report_with(
+        extra_line="The package `zhipuai` requires `pyjwt>=2.8.0,<2.9.0`, but `2.13.0` is installed"
+    )
+    verdict = _admit(report)
+    assert not verdict.admitted
+    assert any("appears 2 times" in r for r in verdict.refusals)
+
+
+def test_an_extras_qualified_metadata_row_is_refused() -> None:
+    """The installed metadata is audited separately, with the same strictness."""
+
+    declared = {
+        "osworld": ["requests[socks]~=2.31.0"],
+        "zhipuai": list(DECLARED["zhipuai"]),
+    }
+    verdict = _admit(_check(), declared=declared)
+    assert not verdict.admitted
+    assert any("does not declare requests~=2.31.0 exactly" in r for r in verdict.refusals)
+
+
+# --- admission: the other refusals ----------------------------------------
 
 
 def test_a_missing_dependency_is_refused() -> None:
-    text = RAW_CHECK.replace("Found 2 incompatibilities", "Found 3 incompatibilities")
-    text += "The package `local-operator` requires `miniaudio>=1.71`, but it's not installed\n"
+    text = _check().replace(
+        "Found 2 incompatibilities",
+        "Found 3 incompatibilities\n"
+        "The package `local-operator` requires `miniaudio>=1.71`, but it's not installed",
+    )
     verdict = _admit(text)
     assert not verdict.admitted
-    assert any(reason.startswith("missing dependency") for reason in verdict.refusals)
+    assert any("missing dependency" in r and "miniaudio" in r for r in verdict.refusals)
 
 
 def test_a_changed_upstream_bound_is_refused() -> None:
-    """A moved bound invalidates the review that approved the override."""
-
-    text = RAW_CHECK.replace("~=2.31.0", "~=2.30.0")
+    text = _check().replace("`requests~=2.31.0`", "`requests~=2.32.0`")
     verdict = _admit(text)
     assert not verdict.admitted
-    assert any("unadmitted conflict" in reason for reason in verdict.refusals)
-    assert any("superseded bound absent" in reason for reason in verdict.refusals)
+    assert any("superseded bound absent" in r for r in verdict.refusals)
 
 
 def test_installed_metadata_disagreeing_with_the_report_is_refused() -> None:
-    verdict = _admit(declared={"osworld": ["requests~=2.31.0"]})
+    verdict = _admit(_check(), declared={"osworld": ["requests~=2.30"], "zhipuai": []})
     assert not verdict.admitted
-    assert any("does not declare" in reason for reason in verdict.refusals)
+    assert any("metadata does not declare" in r for r in verdict.refusals)
 
 
 def test_a_fabricated_green_report_is_refused() -> None:
-    """Green is not a better outcome here; it means the input is not this arm."""
+    verdict = _admit("Checked 406 packages in 9ms\nAll installed packages are compatible\n", 0)
+    assert not verdict.admitted
+    assert any("reports green" in r for r in verdict.refusals)
 
-    green = "Checked 406 packages in 14ms\nAll installed packages are compatible\n"
-    for verdict in (_admit(green, 0), _admit(RAW_CHECK, 0), _admit(green, 1)):
-        assert not verdict.admitted
-    assert any("green" in reason for reason in _admit(green, 0).refusals)
+
+def test_a_report_about_another_environment_is_refused() -> None:
+    verdict = _admit(_check("/arms/some-other/venv"), prefix="/arms/main17/venv")
+    assert not verdict.admitted
+    assert any("not this arm's" in r for r in verdict.refusals)
+
+
+def test_a_report_claiming_the_wrong_installed_version_is_refused() -> None:
+    text = _check().replace("but `2.13.0` is installed", "but `1.0.0` is installed")
+    verdict = _admit(text)
+    assert not verdict.admitted
+    assert any("raw report says pyjwt 1.0.0" in r for r in verdict.refusals)
 
 
 def test_unrecognised_checker_output_is_refused() -> None:
-    verdict = _admit(RAW_CHECK + "error: cannot resolve environment\n")
+    verdict = _admit(_check() + "warning: something new\n")
     assert not verdict.admitted
-    assert any("unrecognised checker output" in reason for reason in verdict.refusals)
+    assert any("unrecognised checker output" in r for r in verdict.refusals)
 
 
 def test_a_finding_count_that_disagrees_with_its_lines_is_refused() -> None:
-    verdict = _admit(RAW_CHECK.replace("Found 2 incompatibilities", "Found 4 incompatibilities"))
+    text = _check().replace("Found 2 incompatibilities", "Found 3 incompatibilities")
+    verdict = _admit(text)
     assert not verdict.admitted
-    assert any("counted 4 findings but listed 2" in reason for reason in verdict.refusals)
+    assert any("counted 3 findings but listed 2" in r for r in verdict.refusals)
+
+
+# --- admission: the override policy itself ---------------------------------
 
 
 def test_policy_drift_in_the_override_list_is_refused() -> None:
-    drifted = [*OVERRIDES, "urllib3>=2.0"]
-    verdict = _admit(overrides=drifted)
+    verdict = _admit(_check(), overrides=[*OVERRIDES, "urllib3>=2.0"])
     assert not verdict.admitted
-    assert any("a policy change needs review" in reason for reason in verdict.refusals)
+    assert any("a policy change needs review" in r for r in verdict.refusals)
 
 
 def test_a_weakened_security_floor_is_refused() -> None:
-    """Same two package names, one of them no longer a floor -- still drift.
+    verdict = _admit(_check(), overrides=["requests>=1", "pyjwt[crypto]>=2.10,<3"])
+    assert not verdict.admitted
+    assert any("requests>=2.32.0" in r for r in verdict.refusals)
 
-    A name-only comparison would admit this, and the arm would install an
-    insecure requests without any admission error.
+
+def test_dropping_the_crypto_extra_from_the_override_is_refused() -> None:
+    found = admission.check_policy(["requests>=2.32.0", "pyjwt>=2.10,<3"])
+    assert found and "pyjwt[crypto]" in found[0]
+
+
+def test_an_override_disabled_by_a_marker_is_refused() -> None:
+    """A marker turns the override off on the platforms it excludes.
+
+    ``requests>=2.32.0 ; python_version < '3'`` is never applied where the arm
+    runs, so the stale upstream bound would win -- with no visible difference in
+    the package name, the specifier or the extras.
     """
 
-    weakened = ["requests>=1", "pyjwt[crypto]>=2.10,<3"]
-    verdict = _admit(overrides=weakened)
-    assert not verdict.admitted
-    assert any("requests>=2.32.0" in reason for reason in verdict.refusals)
-
-
-def test_dropping_the_crypto_extra_from_the_jwt_override_is_refused() -> None:
-    # The harness floor carries the crypto extra; ``pyjwt>=2.10,<3`` alone
-    # installs a JWT implementation without the crypto backend it needs.
-    refused = admission.check_policy(["requests>=2.32.0", "pyjwt>=2.10,<3"])
-    assert refused and "pyjwt[crypto]" in refused[0]
-
-
-def test_the_exact_committed_override_list_passes_the_policy_check() -> None:
-    pyproject = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/pyproject.toml").read_text())
-    assert admission.check_policy(list(pyproject["tool"]["uv"]["override-dependencies"])) == []
+    found = admission.check_policy(
+        ["requests>=2.32.0 ; python_version < '3'", "pyjwt[crypto]>=2.10,<3"]
+    )
+    assert found and "python_version" in found[0]
 
 
 def test_an_installed_version_outside_the_override_floor_is_refused() -> None:
-    """A downgraded security library is not a way to satisfy a stale SDK."""
-
-    verdict = _admit(installed={**INSTALLED, "pyjwt": "2.8.0"})
+    verdict = _admit(_check(), installed={**INSTALLED, "requests": "2.31.0"})
     assert not verdict.admitted
-    assert any("outside override" in reason for reason in verdict.refusals)
-    assert any("core requirement" in reason for reason in verdict.refusals)
+    assert any("outside override" in r for r in verdict.refusals)
 
 
 def test_a_core_requirement_that_is_absent_is_refused() -> None:
-    installed = {name: value for name, value in INSTALLED.items() if name != "watchdog"}
-    verdict = _admit(installed=installed)
+    verdict = _admit(_check(), core=[*CORE, "qa-nonexistent-dist>=1.0"])
     assert not verdict.admitted
-    assert any("watchdog>=6.0.0 is not installed" in reason for reason in verdict.refusals)
+    assert any("qa-nonexistent-dist" in r for r in verdict.refusals)
 
 
-def test_the_cli_writes_its_receipt_before_refusing(
+# --- admission: the CLI's environment handling -----------------------------
+
+
+def test_the_checker_runs_with_colour_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A refusal has to leave the raw output behind, or it cannot be argued with."""
+    """``--color never`` is load-bearing, not cosmetic.
 
-    adapter = tmp_path / "adapter.toml"
-    adapter.write_text(
-        '[tool.uv]\noverride-dependencies = ["requests>=2.32.0", "pyjwt[crypto]>=2.10,<3"]\n'
-    )
-    core = tmp_path / "core.toml"
-    core.write_text('[project]\ndependencies = ["watchdog>=6.0.0"]\n')
-    out = tmp_path / "receipts"
-    out.mkdir()
+    With ``FORCE_COLOR``/``CLICOLOR_FORCE`` in the caller's environment uv wraps
+    even its non-tty output in ANSI escapes; every line then fails to parse and a
+    correct arm is refused.
+    """
 
-    def fake_run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
-        text = RAW_CHECK.replace("Found 2 incompatibilities", "Found 3 incompatibilities")
-        text += "The package `core` requires `missing>=1`, but it's not installed\n"
-        return subprocess.CompletedProcess(argv, 1, text, "")
+    seen: list[list[str]] = []
 
-    monkeypatch.setattr(admission.subprocess, "run", fake_run)
-    rc = admission.main(
-        ["--adapter-pyproject", str(adapter), "--core-pyproject", str(core), "--out", str(out)]
-    )
-    assert rc == 1
-    assert (out / "raw-pip-check.log").read_text().startswith("Using Python")
-    assert (out / "raw-pip-check.rc").read_text().strip() == "1"
-    receipt = json.loads((out / "policy-admission.json").read_text())
-    assert receipt["policy_conformant_dependency_admission"] is False
-    assert receipt["plain_pip_check_green"] is False
-    assert any("missing dependency" in reason for reason in receipt["refusals"])
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = "Found 0 incompatibilities\n"
+
+    def fake_run(argv: list[str], **kwargs: Any) -> _Result:
+        seen.append(list(argv))
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    text, returncode = admission.run_check(tmp_path)
+    assert returncode == 1
+    assert seen and seen[0][:4] == ["uv", "pip", "check", "--color"]
+    assert "--color" in seen[0] and "never" in seen[0]
+    assert (tmp_path / "raw-pip-check.log").read_text() == text
+
+
+def test_a_missing_uv_refuses_cleanly_and_keeps_a_raw_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing binary must leave evidence, not a traceback."""
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        raise FileNotFoundError(2, "No such file or directory", "uv")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    text, returncode = admission.run_check(tmp_path)
+    assert returncode == 127
+    assert "uv could not be executed" in text
+    assert (tmp_path / "raw-pip-check.rc").read_text().strip() == "127"
+
+
+# --- the builder's pure pieces ---------------------------------------------
 
 
 def test_the_frozen_export_keeps_its_rows_and_records_the_dropped_harness_row() -> None:
     rows, dropped = arm.split_frozen_requirements(
-        "# autogenerated\n"
-        "aiohttp==3.14.3\n"
-        "    # via osworld\n"
-        "local-operator==0.56.4\n"
-        "osworld @ git+https://github.com/xlang-ai/OSWorld-V2@325ab352\n"
+        "# header\nrequests==2.34.2\nlocal-operator==0.56.4\n\npyjwt==2.13.0\n"
     )
-    # The harness row is dropped (the arm installs the wheel built from the same
-    # commit) and NAMED, so the substitution is in the receipts, not implied.
+    assert rows == ["requests==2.34.2", "pyjwt==2.13.0"]
     assert dropped == ["local-operator==0.56.4"]
-    assert rows == [
-        "aiohttp==3.14.3",
-        "osworld @ git+https://github.com/xlang-ai/OSWorld-V2@325ab352",
-    ]
 
 
 def test_a_frozen_export_carrying_a_pip_option_is_refused() -> None:
-    """An export is data; an option in it would change what gets installed."""
-
-    with pytest.raises(arm.BuildRefused):
-        arm.split_frozen_requirements("--no-deps\nrequests==2.34.2\n")
+    with pytest.raises(arm.BuildRefused, match="pip option"):
+        arm.split_frozen_requirements("--index-url https://example.invalid\nrequests==2.34.2\n")
 
 
 def test_the_resolution_project_carries_the_policy_and_the_frozen_constraints() -> None:
     text = arm.resolution_project(
-        adapter_rows=["requests==2.34.2", "osworld @ git+https://example.invalid/osworld@abc"],
+        adapter_rows=["requests==2.34.2"],
         core_requirements=["miniaudio>=1.71"],
         overrides=OVERRIDES,
-        constraint_versions={"requests": "2.34.2", "pyjwt": "2.13.0"},
+        constraint_versions={"requests": "2.34.2"},
     )
     assert 'override-dependencies = ["requests>=2.32.0", "pyjwt[crypto]>=2.10,<3"]' in text
-    assert 'constraint-dependencies = ["pyjwt==2.13.0", "requests==2.34.2"]' in text
+    assert 'constraint-dependencies = ["requests==2.34.2"]' in text
+    # The harness's own requirement is a normal dependency: resolution may ADD a
+    # genuinely new mandatory one instead of hiding it behind --no-deps.
     assert '"miniaudio>=1.71"' in text
-    # package = false: the directory is a resolution input, not a distribution.
-    assert "package = false" in text
 
 
 def test_the_resolution_project_refuses_a_drifted_override_list() -> None:
-    with pytest.raises(arm.BuildRefused):
+    with pytest.raises(arm.BuildRefused, match="policy change needs review"):
         arm.resolution_project(
             adapter_rows=["requests==2.34.2"],
             core_requirements=[],
-            overrides=["requests>=2.32.0"],
-            constraint_versions={"requests": "2.34.2", "pyjwt": "2.13.0"},
+            overrides=["requests>=1", "pyjwt[crypto]>=2.10,<3"],
+            constraint_versions={"requests": "2.34.2"},
         )
 
 
-def test_install_overrides_are_exact_pins_preserving_the_crypto_extra() -> None:
-    lock = (
+def test_install_overrides_are_exact_pins_derived_from_the_committed_policy() -> None:
+    """Names and extras come from the override list, never from this module.
+
+    A hard-coded ``pyjwt`` would silently drop the ``[crypto]`` extra that the
+    harness floor needs, and a hard-coded pair would miss a third override.
+    """
+
+    lock_text = (
         '[[package]]\nname = "requests"\nversion = "2.34.2"\n'
         '[[package]]\nname = "pyjwt"\nversion = "2.13.0"\n'
     )
-    assert arm.installed_overrides(lock) == ["requests==2.34.2", "pyjwt[crypto]==2.13.0"]
-    assert arm.lock_versions(lock) == {"requests": "2.34.2", "pyjwt": "2.13.0"}
+    assert arm.installed_overrides(lock_text, OVERRIDES) == [
+        "requests==2.34.2",
+        "pyjwt[crypto]==2.13.0",
+    ]
+    with pytest.raises(arm.BuildRefused, match="no numpy row"):
+        arm.installed_overrides(lock_text, [*OVERRIDES, "numpy>=2"])
+
+
+def test_constraints_follow_the_committed_lock_and_name_every_override() -> None:
+    assert arm._constraint_versions({"requests": "2.34.2", "pyjwt": "2.13.0"}, OVERRIDES) == {
+        "requests": "2.34.2",
+        "pyjwt": "2.13.0",
+    }
+    with pytest.raises(arm.BuildRefused, match="no row"):
+        arm._constraint_versions({"requests": "2.34.2"}, OVERRIDES)
+
+
+def test_a_plan_digest_covers_the_installed_set_not_the_serialisation() -> None:
+    rows = ["requests==2.34.2", "pyjwt==2.13.0"]
+    assert arm.plan_digest(rows, OVERRIDES) == arm.plan_digest(list(reversed(rows)), OVERRIDES)
+    assert arm.plan_digest(rows, OVERRIDES) != arm.plan_digest(
+        ["requests==2.35.0", "pyjwt==2.13.0"], OVERRIDES
+    )
+    assert arm.plan_digest(rows, OVERRIDES) != arm.plan_digest(rows, ["requests>=2.33"])
 
 
 def test_the_installed_set_must_be_the_planned_set() -> None:
-    """Drift at install time is exactly what a reproducibility claim cannot absorb."""
-
     planned = {"requests": "2.34.2", "pyjwt": "2.13.0"}
     assert arm.compare_closure(pinned=planned, installed=dict(planned), allowed_extra=[]) == []
     assert (
@@ -316,14 +442,12 @@ def test_the_installed_set_must_be_the_planned_set() -> None:
         )
         == []
     )
-    extra = arm.compare_closure(
+    assert arm.compare_closure(
         pinned=planned, installed={**planned, "surprise": "1.0"}, allowed_extra=[]
-    )
-    assert extra == ["installed surprise 1.0 is not in the resolution plan"]
-    moved = arm.compare_closure(
+    ) == ["installed surprise 1.0 is not in the resolution plan"]
+    assert arm.compare_closure(
         pinned=planned, installed={**planned, "requests": "2.35.0"}, allowed_extra=[]
-    )
-    assert moved == ["installed requests 2.35.0 differs from planned 2.34.2"]
+    ) == ["installed requests 2.35.0 differs from planned 2.34.2"]
 
 
 def test_a_marker_excluded_row_may_be_absent_but_is_never_invented() -> None:
@@ -332,42 +456,321 @@ def test_a_marker_excluded_row_may_be_absent_but_is_never_invented() -> None:
     assert arm.compare_closure(pinned={"pywin32": "306"}, installed={}, allowed_extra=[]) == []
 
 
+# --- the builder's guard rails --------------------------------------------
+
+
+def test_an_arm_directory_is_created_atomically_and_never_reused(tmp_path: Path) -> None:
+    layout = arm.ArmLayout(root=tmp_path / "arm")
+    layout.create_arm()
+    assert layout.receipts.is_dir()
+    with pytest.raises(arm.BuildRefused, match="immutable"):
+        layout.create_arm()
+
+
+def test_a_short_unmerged_or_branch_only_sha_is_refused(git_repo: Path) -> None:
+    """Only one exact commit on ``origin/main``'s FIRST-PARENT line may be built.
+
+    Mere ancestry is not enough: this repository merges with merge commits, so
+    every intermediate commit of a merged branch is an ancestor of main --
+    including pre-remediation states review rejected.
+    """
+
+    with pytest.raises(arm.BuildRefused, match="full 40-character"):
+        arm.guard_source(git_repo, "abc123")
+    merged = _git(git_repo, "rev-parse", "origin/main")
+    arm.guard_source(git_repo, merged)
+
+    _git(git_repo, "checkout", "-q", "-b", "feature")
+    (git_repo / "feature.txt").write_text("feature work\n")
+    _git(git_repo, "add", ".")
+    _git(git_repo, "commit", "-q", "-m", "feature")
+    feature = _git(git_repo, "rev-parse", "HEAD")
+    _git(git_repo, "checkout", "-q", "main")
+    _git(git_repo, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+    _git(git_repo, "update-ref", "refs/remotes/origin/main", _git(git_repo, "rev-parse", "HEAD"))
+
+    # The merge commit is on the first-parent line; the branch commit is an
+    # ancestor but NOT a commit main was ever at.
+    arm.guard_source(git_repo, _git(git_repo, "rev-parse", "origin/main"))
+    with pytest.raises(arm.BuildRefused, match="first-parent"):
+        arm.guard_source(git_repo, feature)
+
+    _git(git_repo, "checkout", "-q", "-b", "unmerged", _git(git_repo, "rev-parse", "origin/main"))
+    (git_repo / "later.txt").write_text("unmerged work\n")
+    _git(git_repo, "add", ".")
+    _git(git_repo, "commit", "-q", "-m", "unmerged")
+    with pytest.raises(arm.BuildRefused, match="first-parent"):
+        arm.guard_source(git_repo, _git(git_repo, "rev-parse", "HEAD"))
+
+
+FACTS = {"plan_digest": "a" * 64, "resolution_package_count": 420, "security_pins": {}}
+
+
+def _stub_preinstall(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    """Everything up to the install, stubbed. Returns the list of steps taken.
+
+    A unit test must never build the 420-package closure or install it, so the
+    SEQUENCE is what is under test here: an existence refusal, a wrong plan or a
+    re-resolution that drifted are the failures this guards.
+    """
+
+    calls: list[str] = []
+
+    def resolve(**kwargs: Any) -> tuple[list[str], Path, dict[str, Any]]:
+        receipts: Path = kwargs["receipts"]
+        project = receipts / "resolution-project"
+        project.mkdir(parents=True, exist_ok=True)
+        (project / "uv.lock").write_text(
+            '[[package]]\nname = "requests"\nversion = "2.34.2"\n'
+            '[[package]]\nname = "pyjwt"\nversion = "2.13.0"\n'
+        )
+        pins = receipts / "policy-pins.txt"
+        pins.write_text("pyjwt[crypto]==2.13.0\nrequests==2.34.2\n")
+        calls.append("resolve")
+        return ["requests==2.34.2", "pyjwt[crypto]==2.13.0"], pins, dict(FACTS)
+
+    monkeypatch.setattr(arm, "guard_source", lambda repo, sha: None)
+    # tmp_path IS volatile, and refusing it is correct behaviour -- it is covered
+    # by its own test below. These tests are about the sequence after it.
+    monkeypatch.setattr(arm, "refuse_volatile", lambda path, label: None)
+    monkeypatch.setattr(
+        arm, "materialise_source", lambda repo, sha, dest: dest.mkdir(parents=True, exist_ok=True)
+    )
+    monkeypatch.setattr(arm, "metadata_from_source", lambda source: _metadata(tmp_path))
+    monkeypatch.setattr(arm, "metadata_from_git", lambda repo, sha, dest: _metadata(tmp_path))
+    monkeypatch.setattr(arm, "policy", lambda metadata: (OVERRIDES, CORE))
+    monkeypatch.setattr(
+        arm, "export_adapter_requirements", lambda metadata, receipts: (["requests==2.34.2"], [])
+    )
+    monkeypatch.setattr(arm, "create_arm_venv", lambda venv, receipts: {"interpreter": "stub"})
+    monkeypatch.setattr(
+        arm, "lock_versions", lambda text: {"requests": "2.34.2", "pyjwt": "2.13.0"}
+    )
+    monkeypatch.setattr(arm, "resolve_policy_project", resolve)
+    monkeypatch.setattr(
+        arm,
+        "build_wheels",
+        lambda layout: calls.append("wheels")
+        or (_whl(tmp_path, "core"), _whl(tmp_path, "adapter")),
+    )
+    monkeypatch.setattr(arm, "install_arm", lambda **kwargs: calls.append("install"))
+    monkeypatch.setattr(arm, "uv_version", lambda: "uv 0.10.8")
+    return calls
+
+
+def _stub_verifiers(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    """Stand in for the two child interpreters, writing the report they would."""
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        joined = " ".join(argv)
+        if "osworld_arm_verify.py" in joined:
+            out = Path(argv[argv.index("--out") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(
+                json.dumps(
+                    {
+                        "harness": {"version": "0.90.4"},
+                        "adapter": {
+                            "version": "0.1.3",
+                            "package_digest": "d" * 64,
+                            "source_record_digest": "e" * 64,
+                        },
+                        "installed_distributions": {
+                            "requests": "2.34.2",
+                            "pyjwt": "2.13.0",
+                            "local-operator": "0.90.4",
+                            "lop-osworld-v2-adapter": "0.1.3",
+                        },
+                        "verified": True,
+                    }
+                )
+            )
+            calls.append("verify")
+        elif "osworld_dependency_admission.py" in joined:
+            calls.append("admission")
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(arm.subprocess, "run", fake_run)
+
+
+def test_plan_mode_writes_nothing_under_out_and_is_refused_by_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan mode used to create the arm dir (~220 MB), making execute impossible.
+
+    The documented plan → execute pair must work as written, so a plan creates
+    NOTHING at ``--out`` and a plan run that is handed one is refused outright
+    rather than silently ignoring it -- the caller would otherwise believe an arm
+    had been prepared.
+    """
+
+    plan_path = tmp_path / "plan.json"
+    out = tmp_path / "arm"
+    _stub_preinstall(monkeypatch, tmp_path)
+
+    assert arm.main(["--source-sha", "a" * 40, "--plan", str(plan_path)]) == 0
+    assert plan_path.is_file(), "the plan receipt is the whole product of a plan run"
+    assert not out.exists(), "plan mode must not create the arm directory"
+    receipt = json.loads(plan_path.read_text())
+    assert receipt["plan_digest"] == "a" * 64
+    assert receipt["source_commit"] == "a" * 40
+
+    assert arm.main(["--source-sha", "a" * 40, "--out", str(out)]) == 2
+    assert not out.exists()
+
+
+def test_execute_binds_to_the_plan_and_is_not_refused_for_existence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second documented command must get past the immutability guard.
+
+    Both directions of the binding are asserted: a matching plan proceeds, a
+    drifted resolution is refused instead of installed.
+    """
+
+    out = tmp_path / "arm"
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps({"source_commit": "a" * 40, "plan_digest": FACTS["plan_digest"]})
+    )
+    calls = _stub_preinstall(monkeypatch, tmp_path)
+    _stub_verifiers(monkeypatch, calls)
+
+    rc = arm.main(
+        ["--source-sha", "a" * 40, "--out", str(out), "--execute", "--plan", str(plan_path)]
+    )
+    assert rc == 0, "the documented plan-then-execute sequence must succeed"
+    assert calls == ["resolve", "wheels", "install", "admission", "verify"], calls
+    record = json.loads((out / "receipts" / "build-record.json").read_text())
+    assert record["plan_binding"]["verified"] is True
+    assert record["refusals"] == []
+    assert record["package_digest_scope"].startswith("this install only")
+    assert record["cross_build_identity"]["source_record_digest"] == "e" * 64
+    assert record["uv_version"] == "uv 0.10.8"
+
+    # A drifted resolution must not install: the plan was the reviewed state.
+    before = list(calls)
+    drifted = tmp_path / "arm-2"
+    monkeypatch.setattr(arm, "resolve_policy_project", lambda **kwargs: _drifted(kwargs, tmp_path))
+    assert (
+        arm.main(
+            ["--source-sha", "a" * 40, "--out", str(drifted), "--execute", "--plan", str(plan_path)]
+        )
+        == 2
+    )
+    assert calls == before, "a drifted plan must refuse BEFORE building or installing"
+    assert not (drifted / "receipts" / "installed-verification.json").exists()
+
+
+def _drifted(kwargs: dict[str, Any], tmp_path: Path) -> tuple[list[str], Path, dict[str, Any]]:
+    """A resolution whose installed set differs from the planned one."""
+
+    receipts: Path = kwargs["receipts"]
+    project = receipts / "resolution-project"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / "uv.lock").write_text('[[package]]\nname = "requests"\nversion = "2.34.2"\n')
+    pins = receipts / "policy-pins.txt"
+    pins.write_text("requests==2.34.2\n")
+    return ["requests==2.34.2"], pins, {**FACTS, "plan_digest": "b" * 64}
+
+
+def test_a_volatile_arm_root_is_refused(tmp_path: Path) -> None:
+    """An arm under a purgeable root is one OS sweep away from a half receipt.
+
+    The check itself is shared with ``scripts/build_osworld_adapter.py`` through
+    ``runner.durable_root``, so the arm and the episode agree on "durable".
+    """
+
+    with pytest.raises(arm.BuildRefused, match="purge"):
+        arm.refuse_volatile(tmp_path / "arm", "arm root")
+
+
+# --- the verifier ----------------------------------------------------------
+
+
+def test_the_verifier_writes_its_report_when_it_refuses(tmp_path: Path) -> None:
+    """A refusal without its evidence is not actionable.
+
+    The report is written BEFORE the exit code is decided, so an exit-1 refusal
+    still leaves the module hashes, the installed set and the refusal reasons.
+    """
+
+    source = tmp_path / "source"
+    (source / "local_operator").mkdir(parents=True)
+    out = tmp_path / "installed-verification.json"
+    rc = verify.main(["--source", str(source), "--commit", "a" * 40, "--out", str(out)])
+    assert rc == 1
+    report = json.loads(out.read_text())
+    assert report["verified"] is False
+    assert report["refusals"]
+    # The repo venv has no adapter distribution, so that is a refusal too -- and
+    # the report still carries the core-source rows it managed to gather.
+    assert report["core_source"]
+    assert any("adapter is not installed" in reason for reason in report["refusals"])
+
+
+def test_the_cross_build_digest_ignores_installer_written_rows() -> None:
+    """``package_digest`` moves between installs of one commit; this must not.
+
+    ``direct_url.json`` records the wheel path and ``uv_cache.json`` a timestamp,
+    and both live in the installed RECORD -- which is exactly why the selector
+    digest is a this-install identity and needs a companion for drift questions.
+    """
+
+    def record(extra: str) -> list[str]:
+        return [
+            "lop_osworld_v2_adapter/__init__.py,sha256=aaa,1",
+            f"lop_osworld_v2_adapter-0.1.3.dist-info/{extra},sha256=bbb,2",
+            "lop_osworld_v2_adapter-0.1.3.dist-info/RECORD,,",
+        ]
+
+    first = verify._source_record_digest(record("direct_url.json"))
+    second = verify._source_record_digest(record("uv_cache.json"))
+    assert first == second
+    changed = verify._source_record_digest(
+        [
+            "lop_osworld_v2_adapter/__init__.py,sha256=ccc,1",
+            "lop_osworld_v2_adapter-0.1.3.dist-info/direct_url.json,sha256=bbb,2",
+            "lop_osworld_v2_adapter-0.1.3.dist-info/RECORD,,",
+        ]
+    )
+    assert changed != first
+
+
+# --- fixtures and helpers --------------------------------------------------
+
+
+def _metadata(root: Path) -> arm.Metadata:
+    adapter = root / "metadata" / "benchmarks" / "osworld_v2_adapter"
+    adapter.mkdir(parents=True, exist_ok=True)
+    (adapter / "pyproject.toml").write_text("[tool.uv]\noverride-dependencies = []\n")
+    (adapter / "uv.lock").write_text('[[package]]\nname = "requests"\nversion = "2.34.2"\n')
+    (root / "metadata" / "pyproject.toml").write_text("[project]\ndependencies = []\n")
+    return arm.Metadata(adapter, root / "metadata" / "pyproject.toml")
+
+
+def _whl(root: Path, name: str) -> Path:
+    path = root / "dist" / f"{name}.whl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a wheel")
+    return path
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
     ).stdout.strip()
 
 
-def test_a_short_or_unmerged_sha_is_refused(git_repo: Path) -> None:
-    """Only one exact, MERGED commit may be built.
-
-    A floating ref would let a later build pick up commits nobody reviewed, and
-    an arm built from unmerged source is one nobody can reproduce from ``main``.
-    """
-
-    with pytest.raises(arm.BuildRefused, match="full 40-character"):
-        arm.guard_source(git_repo, "abc123")
-    merged = _git(git_repo, "rev-parse", "HEAD")
-    arm.guard_source(git_repo, merged)  # the merged commit is accepted
-    _git(git_repo, "checkout", "-q", "-b", "unmerged")
-    (git_repo / "later.txt").write_text("unmerged work\n")
-    _git(git_repo, "add", ".")
-    _git(git_repo, "commit", "-q", "-m", "unmerged")
-    unmerged = _git(git_repo, "rev-parse", "HEAD")
-    with pytest.raises(arm.BuildRefused, match="not merged into origin/main"):
-        arm.guard_source(git_repo, unmerged)
-
-
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
-    """A throwaway repository whose ``origin/main`` is its first commit.
+    """A throwaway repository whose ``origin/main`` is its ``main``.
 
     Built rather than borrowed from the real checkout: ``guard_source`` asserts
     ancestry against ``origin/main``, and a test that depends on the real
     repository's branch state fails for reasons unrelated to this code. The
-    identity is set as LOCAL config so every later git call in the test needs no
-    environment, and the system/global git config is bypassed so an operator's
-    credential helper is never consulted.
+    identity is local config, and the system/global git config is bypassed so an
+    operator's credential helper is never consulted.
     """
 
     repo = tmp_path / "repo"

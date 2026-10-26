@@ -8,18 +8,36 @@ whether its dependency set conforms to the reviewed
 [dependency policy](dependency-policy.md). Until now that recipe existed only as
 operator scratch; this is its durable, tested form.
 
-```sh
-# plan: resolve and record, install nothing
-python scripts/build_osworld_arm.py --source-sha <40-hex-merged-sha> --out ~/worktrees/osworld/arms/<name>
+The two commands are a pair, and the order matters: **plan writes a small
+receipt and no arm directory**, so the same `--out` is free for the build.
 
-# build: wheels, venv, install, admission, installed-identity verification
-python scripts/build_osworld_arm.py --source-sha <40-hex-merged-sha> --out ~/worktrees/osworld/arms/<name> --execute
+```sh
+# 1. plan: resolve the closure and record the digest. No venv, no wheel, no
+#    arm directory -- a plan costs kilobytes, not the ~220 MB a full arm does.
+python scripts/build_osworld_arm.py --source-sha <40-hex-main-commit> --plan ~/worktrees/osworld/plans/arm-plan.json
+
+# 2. build: wheels, venv, install, admission, installed-identity verification.
+#    --plan binds the build to the resolution that was reviewed.
+python scripts/build_osworld_arm.py --source-sha <40-hex-main-commit> \
+    --out ~/worktrees/osworld/arms/<name> --execute --plan ~/worktrees/osworld/plans/arm-plan.json
 ```
 
-Exit codes: `2` refused (short or unmerged SHA, existing arm directory, volatile
-output root, unusable interpreter, failed command), `4` built but dependency
-admission or installed-identity verification refused. Receipts are written in
-both cases — a refusal without its evidence is not actionable.
+`--out` belongs to `--execute` alone: handing one to a plan run is refused rather
+than ignored, because a caller who asked for an arm would otherwise believe one
+had been prepared. `--plan` is optional for the build, but a build given one
+re-resolves and **refuses unless the plan digest still matches** (the digest
+covers the installed set and the override policy, so a moved index, a new
+upstream release inside a range or a policy edit cannot slip in between the two
+commands). A plan is only meaningful on a `3.12` interpreter, which the plan run
+checks.
+
+Exit codes: `2` refused (short, unmerged or branch-only SHA, existing arm
+directory, volatile output root, plan digest drift, unusable interpreter, failed
+command), `4` built but dependency admission or installed-identity verification
+refused. Receipts are written in both cases — a refusal without its evidence is
+not actionable. Note that the docstring's "merged" means **on `origin/main`'s
+first-parent history**: an intermediate commit of a merged branch is an ancestor
+of `main` and is refused, because it can be a state review rejected.
 
 ## What it proves
 
@@ -33,7 +51,8 @@ For the exact commit named:
 - the harness core modules executing in the arm hash identically to the same
   files in the extracted commit (the stable source identity);
 - the adapter's installed file set hashes to the `package_digest` the selector
-  pins and the worker re-verifies;
+  pins and the worker re-verifies, and to a `source_record_digest` that is
+  comparable across builds (see the identity table below);
 - dependency admission passed **under the policy** — see below.
 
 ## Dependency admission is not a green `uv pip check`
@@ -81,13 +100,33 @@ Admission refuses, fail-closed:
    `libpython3.12.dylib` beside it every invocation dies in dyld. A missing
    dylib to copy is tolerated (an interpreter linking by absolute path needs
    none); an interpreter that cannot start is a refusal.
-3. **A wheel archive hash is not an identity.** Zip member timestamps differ
-   between two builds of the same commit, so the `.whl` sha256 is not
-   reproducible and must not be used as a drift detector (main16's recorded
-   archive mismatch was this, not tampering). The record keeps archive hashes
-   under `wheel_sha256_informational_only`; the identities are the source
-   commit, the pinned module hashes, the installed file set and the package
-   digest.
+3. **A wheel archive hash is not an identity — and neither is `package_digest`.**
+   Zip member timestamps differ between two builds of the same commit, so the
+   `.whl` sha256 is not reproducible (main16's recorded archive mismatch was
+   this, not tampering); archive hashes are kept under
+   `wheel_sha256_informational_only`. One level down, the same trap applies to
+   **`package_digest`**: it hashes the installed wheel RECORD, and RECORD holds
+   entries the *installer* writes — `direct_url.json` carries the absolute wheel
+   path and `uv_cache.json` a timestamp — so two installs of the same wheel bytes
+   give different digests (measured: `9a0728015b14…` and `762103891899…` for one
+   wheel). It is exactly right for what the selector pins and the worker
+   re-verifies, and it is documented as a **this-install** identity, never as a
+   cross-build drift detector. The cross-build identity is the source commit,
+   the pinned core module hashes and `source_record_digest` (the same RECORD rows
+   with `INSTALLER`, `REQUESTED`, `direct_url.json` and `uv_cache.json`
+   removed). `discovery.distribution_digest` keeps its existing semantics
+   unchanged: the adapter guard and the recorded arms depend on them.
+
+### Identities, and which question each answers
+
+| value (in `receipts/`) | answers | stable across two builds of one commit? |
+| --- | --- | --- |
+| `source_commit` | which tree was built | yes, by definition |
+| `core_source[*].hash`, `core_module_digest` | which harness code executes | yes |
+| `installed_distributions` | the exact installed set | yes for equal lock + index |
+| `adapter.package_digest` | what the selector pins for THIS install | **no** (installer-written RECORD rows) |
+| `adapter.source_record_digest` | drift between two installs of one commit | yes |
+| `wheel_sha256_informational_only` | provenance of the local artifact only | **no** (zip timestamps) |
 
 ## What it does NOT prove
 
@@ -118,8 +157,9 @@ export) and `requirements.dropped.txt` (the harness row the wheel replaces),
 under the overrides) with its `uv.lock`, `policy-pins.txt` (what was installed),
 `installation-overrides.txt` (the policy narrowed to exact pins for pip),
 `interpreter.json` (dylib copy and interpreter identity), `raw-pip-check.log` /
-`.rc`, `policy-admission.json`, `installed-verification.json`, and
-`build-record.json`.
+`.rc`, `policy-admission.json`, `installed-verification.json`, `plan-binding.json` (when a plan was given) and
+`build-record.json`. The verifier writes its report **before** deciding its exit
+code, so a refusal carries its evidence too.
 
 `installed-verification.json` enumerates every installed distribution, so a
 later comparison needs no re-install. The tests for all of this are

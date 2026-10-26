@@ -316,26 +316,32 @@ BASE=$(python3.12 -c 'import sys; print(sys.base_prefix)')   # e.g. ~/.local/sha
 #     copy); the -V beside it is the real check and catches a genuine miss.
 cp "$BASE/lib/libpython3.12.dylib" "$VENV/lib/" 2>/dev/null || true   # macOS only
 "$VENV/bin/python3.12" -V   # must print the version, not abort
-uv pip install --python "$VENV/bin/python3.12" \
-    --no-deps dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl
+# (The single-wheel --no-deps install that used to follow belongs to the
+#  superseded step 3b below: use scripts/build_osworld_arm.py, which installs
+#  both wheels against a resolved closure.)
 
-# 3b. install the locked set. For the PAID path export WITH the osworld extra
-#     (~380 packages the cloud-free wheel does not need); omit --extra for a
-#     cloud-free venv. Export to a FILE and keep it beside the venv: it is the
-#     record of what was actually installed, and the lock's own
-#     local-operator pin lags the harness (schema 1.2 and host_secrets only
-#     exist from 0.44.30+), so substitute the harness version you are running
-#     and note the substitution in the build record.
-uv export --frozen --no-emit-project --extra osworld --no-hashes \
-    -o "$VENV/build/requirements.locked.txt"
-sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' \
-    "$VENV/build/requirements.locked.txt"   # macOS sed; GNU sed wants -i without ''
-# The export is the full resolved closure. --no-deps preserves those rows and
-# the lock's requests override instead of re-resolving upstream's stale pin.
-uv pip install --no-deps --python "$VENV/bin/python3.12" -r "$VENV/build/requirements.locked.txt"
-
-# The one expected `uv pip check` incompatibility is the documented
-# requests>=2.32 override onto OSWorld's ~=2.31 pin (see [tool.uv] above).
+# 3b. install the locked set. SUPERSEDED -- read this before copying it.
+#     The recipe that used to sit here was
+#         uv export --frozen --no-emit-project --extra osworld --no-hashes \
+#             -o "$VENV/build/requirements.locked.txt"
+#         sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' ...
+#         uv pip install --no-deps --python "$VENV/bin/python3.12" \
+#             -r "$VENV/build/requirements.locked.txt"
+#     and it is exactly how main16 ended up with a missing `miniaudio`: a frozen
+#     export replays the rows the LOCK knew about, `--no-deps` installs them
+#     without resolving anything, and a harness that has since added a mandatory
+#     dependency produces an arm whose own requirement is unmet. The sed also
+#     rewrote evidence.
+#
+#     Use scripts/build_osworld_arm.py instead: it re-resolves the closure under
+#     the committed overrides, keeps the raw pip-check output, and admits or
+#     refuses the result under the reviewed policy --
+#         python scripts/build_osworld_arm.py --source-sha <40-hex-main-commit> --plan ...
+#         python scripts/build_osworld_arm.py --source-sha <40-hex-main-commit> \
+#             --out <new arm dir> --execute --plan ...
+#     See docs/benchmarks/osworld_2/arm-build.md for the sequence, the receipts
+#     and what a build does NOT prove. Steps 3/3a above remain the venv recipe
+#     the tool implements.
 
 # 4. compute package_digest FIRST: it digests the installed wheel's RECORD and
 #    does not depend on the workspace, while step 5's --package-digest does

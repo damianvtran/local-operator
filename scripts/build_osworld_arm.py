@@ -4,8 +4,8 @@
 The arm is the interpreter the paid adapter runs in: the harness wheel, the
 adapter wheel, and the adapter's locked ``osworld`` extra. This script is the
 durable form of the operator recipe that built the main16/main17 arms; it
-encodes the three facts that recipe learned the expensive way, so none of them
-has to be rediscovered:
+encodes the facts that recipe learned the expensive way, so none of them has to
+be rediscovered:
 
 1. THE ADAPTER'S OVERRIDE POLICY IS AUTHORITATIVE. The built commit's
    ``benchmarks/osworld_v2_adapter/pyproject.toml`` declares
@@ -39,23 +39,36 @@ has to be rediscovered:
 3. A WHEEL ARCHIVE HASH IS NOT AN IDENTITY. Zip member timestamps differ
    between two builds of the same commit, so the ``.whl`` sha256 is not
    reproducible and must not be a drift detector (main16's recorded archive
-   mismatch was this, not tampering). The identity recorded here is the source
-   commit, the pinned core module source hashes, the adapter's installed RECORD
-   digest (``package_digest``) and the installed distribution set. Archive
-   hashes are kept in the record, labelled informational.
+   mismatch was this, not tampering). Neither is the adapter's
+   ``package_digest``: it hashes the installed RECORD, and RECORD contains rows
+   the INSTALLER writes (``direct_url.json`` with the absolute wheel path,
+   ``uv_cache.json`` with a timestamp), so it differs between two installs of
+   one commit. It is kept for what it is -- the value the selector pins to THIS
+   install -- and the cross-build identity is the source commit, the pinned core
+   module hashes and ``source_record_digest`` (RECORD minus installer-written
+   files) in ``receipts/installed-verification.json``. Archive hashes appear
+   only under ``wheel_sha256_informational_only``.
+
+PLAN, THEN BUILD. ``--plan <file>`` writes a small JSON receipt (never a source
+tree, venv or wheel) and creates NOTHING under ``--out``, so the documented
+sequence works and a plan costs kilobytes rather than the ~220 MB a full arm
+does. ``--execute --plan <file>`` re-resolves, refuses unless its plan digest
+still matches, and records the binding in ``build-record.json``.
 
 What this script does NOT do: it allocates no guest, contacts no provider or
-model, runs no episode, and supports no benchmark claim. It never reuses an arm
-directory -- an arm is an immutable receipt. See
-``docs/benchmarks/osworld_2/arm-build.md`` for what the recipe proves.
+model, runs no episode, and supports no benchmark claim. It does need the
+network -- the locked closure and the pinned OSWorld git ref are fetched. It
+never reuses an arm directory: an arm is an immutable receipt. See
+``docs/benchmarks/osworld_2/arm-build.md``.
 
 Exit codes: 2 = refused (bad input, unmerged source, existing arm, unusable
 interpreter, failed command); 4 = built but dependency admission or the
 installed-identity verification refused. Receipts exist in both cases.
 
 Usage:
-    python scripts/build_osworld_arm.py --source-sha <40-hex> --out <new dir>
-    python scripts/build_osworld_arm.py --source-sha <40-hex> --out <new dir> --execute
+    python scripts/build_osworld_arm.py --source-sha <40-hex> --plan /tmp/arm-plan.json
+    python scripts/build_osworld_arm.py --source-sha <40-hex> --out <new dir> \\
+        --plan /tmp/arm-plan.json --execute
 """
 
 from __future__ import annotations
@@ -63,10 +76,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -75,6 +90,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from local_operator.evaluation.adapters.discovery import (  # noqa: E402
+    AdapterDiscoveryError,
+    _symlink_free,
+)
 from local_operator.evaluation.runner import durable_root  # noqa: E402
 from scripts import osworld_dependency_admission as admission  # noqa: E402
 
@@ -93,6 +112,11 @@ _PYTHON_MINOR = "3.12"
 # resolves the closure the arm interpreter will actually run.
 _PYTHON_FLOOR = f"=={_PYTHON_MINOR}.*"
 _SHA = re.compile(r"[0-9a-f]{40}")
+# ``--color never`` on every uv call: with ``FORCE_COLOR`` or ``CLICOLOR_FORCE``
+# in the caller's environment uv writes ANSI escapes into the captured pipe, and
+# the checker's output then fails to parse. The env var cannot be trusted; the
+# flag can.
+_UV = ("uv", "--color", "never")
 
 
 class BuildRefused(RuntimeError):
@@ -133,7 +157,19 @@ class ArmLayout:
     def receipts(self) -> Path:
         return self.root / "receipts"
 
-    def create(self) -> None:
+    def create_arm(self) -> None:
+        """Create the arm root ATOMICALLY, refusing an existing one.
+
+        One ``mkdir(exist_ok=False)`` rather than an ``exists()`` check followed
+        by an ``exist_ok=True`` mkdir: the two-step form races, and losing that
+        race would let a second builder install into an arm whose receipts the
+        first one is still writing. An arm directory is immutable evidence.
+        """
+
+        try:
+            self.root.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as error:
+            raise BuildRefused(f"{self.root} exists; an arm receipt is immutable") from error
         for path in (self.source, self.core_dist, self.adapter_dist, self.receipts):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -141,7 +177,10 @@ class ArmLayout:
 def run(argv: Sequence[str]) -> str:
     """Run one external command, reporting failure as a refusal, not a traceback."""
 
-    completed = subprocess.run(list(argv), capture_output=True, text=True, check=False)
+    try:
+        completed = subprocess.run(list(argv), capture_output=True, text=True, check=False)
+    except OSError as error:
+        raise BuildRefused(f"{argv[0]} could not be executed: {error}") from error
     output = (completed.stdout + completed.stderr).strip()
     if completed.returncode != 0:
         tail = output[-2000:] if output else "(no output)"
@@ -149,9 +188,31 @@ def run(argv: Sequence[str]) -> str:
     return output
 
 
+def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """A git call that cannot reach the network.
+
+    ``GIT_NO_LAZY_FETCH=1`` matters in this checkout, which is a ``blob:none``
+    partial clone: without it, asking about a commit this clone does not have
+    makes git lazily contact origin, so a refusal would depend on the network
+    being up (and would leak the question to the remote) before it could say no.
+    """
+
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"},
+    )
+
+
 def instance_sha256(path: Path) -> str:
     """Hash of THIS file instance -- a receipt value, never an identity."""
 
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -170,25 +231,30 @@ def refuse_volatile(path: Path, label: str) -> None:
 
 
 def guard_source(repo: Path, sha: str) -> None:
-    """The source must be one exact, MERGED commit.
+    """The source must be one exact commit on ``origin/main``'s FIRST-PARENT line.
 
-    A floating ref would let a later build pick up commits nobody reviewed, and
-    an arm built from unmerged source is one no one can reproduce from ``main``.
+    Mere ancestry is not enough. This repository merges with merge commits, so
+    every intermediate commit of a merged PR branch is an ancestor of ``main`` --
+    including pre-remediation states that review rejected, which the arm must not
+    be built from. A floating ref is refused for the same reason: a later build
+    would pick up commits nobody reviewed.
     """
 
     if not _SHA.fullmatch(sha):
         raise BuildRefused("--source-sha must be the full 40-character lowercase SHA")
-    head = run(["git", "-C", str(repo), "rev-parse", f"{sha}^{{commit}}"]).strip()
-    if head != sha:
-        raise BuildRefused(f"{sha} is not a commit object in {repo}")
-    merged = subprocess.run(
-        ["git", "-C", str(repo), "merge-base", "--is-ancestor", sha, "origin/main"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if merged.returncode != 0:
-        raise BuildRefused(f"{sha} is not merged into origin/main; arms are built from reviews")
+    resolved = git(repo, "rev-parse", f"{sha}^{{commit}}")
+    if resolved.returncode != 0:
+        raise BuildRefused(f"{sha} is not a commit object in {repo}: {resolved.stderr.strip()}")
+    if resolved.stdout.strip() != sha:
+        raise BuildRefused(f"{sha} does not resolve to itself as a commit")
+    first_parent = git(repo, "rev-list", "--first-parent", "origin/main")
+    if first_parent.returncode != 0:
+        raise BuildRefused(f"origin/main is not usable in {repo}: {first_parent.stderr.strip()}")
+    if sha not in first_parent.stdout.split():
+        raise BuildRefused(
+            f"{sha} is not on origin/main's first-parent history; arms are built from merged "
+            "commits, never from an intermediate commit of a merged branch or an unmerged one"
+        )
 
 
 def materialise_source(repo: Path, sha: str, destination: Path) -> None:
@@ -199,10 +265,11 @@ def materialise_source(repo: Path, sha: str, destination: Path) -> None:
     """
 
     destination.mkdir(parents=True, exist_ok=True)
-    archive = subprocess.Popen(
+    archive = subprocess.Popen(  # noqa: S603 - argv list, no shell
         ["git", "-C", str(repo), "archive", sha],
         stdout=subprocess.PIPE,
-        text=False,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"},
     )
     if archive.stdout is None:  # pragma: no cover - defensive
         raise BuildRefused("git archive produced no output stream")
@@ -220,6 +287,50 @@ def materialise_source(repo: Path, sha: str, destination: Path) -> None:
             f"git archive {sha} could not be extracted into {destination}"
             f" (git rc={status}, tar rc={tar.returncode})"
         )
+
+
+@dataclass(frozen=True)
+class Metadata:
+    """The three committed files the policy is read from, and their hashes."""
+
+    adapter_dir: Path
+    core_pyproject: Path
+
+    @property
+    def adapter_pyproject(self) -> Path:
+        return self.adapter_dir / "pyproject.toml"
+
+    @property
+    def adapter_lock(self) -> Path:
+        return self.adapter_dir / "uv.lock"
+
+
+def metadata_from_source(source: Path) -> Metadata:
+    """Policy bytes for an arm build, from the extracted commit."""
+
+    return Metadata(source / _ADAPTER_DIR, source / "pyproject.toml")
+
+
+def metadata_from_git(repo: Path, sha: str, destination: Path) -> Metadata:
+    """Policy bytes for a PLAN, without extracting 200 MB of tree.
+
+    ``git show <sha>:<path>`` yields the same bytes the arm build will read, so
+    the plan resolves the same closure an execute would, while writing only
+    three small files into a temporary directory.
+    """
+
+    adapter = destination / _ADAPTER_DIR
+    adapter.mkdir(parents=True, exist_ok=True)
+    for relative, target in (
+        (f"{_ADAPTER_DIR}/pyproject.toml", adapter / "pyproject.toml"),
+        (f"{_ADAPTER_DIR}/uv.lock", adapter / "uv.lock"),
+        ("pyproject.toml", destination / "pyproject.toml"),
+    ):
+        shown = git(repo, "show", f"{sha}:{relative}")
+        if shown.returncode != 0:
+            raise BuildRefused(f"{relative} is missing from {sha}: {shown.stderr.strip()}")
+        target.write_text(shown.stdout)
+    return Metadata(adapter, destination / "pyproject.toml")
 
 
 def split_frozen_requirements(text: str) -> tuple[list[str], list[str]]:
@@ -294,38 +405,72 @@ def resolution_project(
     return "\n".join(lines)
 
 
+def _constraint_versions(
+    committed_lock: Mapping[str, str], overrides: Sequence[str]
+) -> dict[str, str]:
+    """Pin each overridden package at the version the COMMITTED lock chose.
+
+    The override is a policy RANGE; the lock's exact version is what the arm is
+    meant to run. Keeping them as separate constraint entries means a broad
+    floor cannot incidentally move a version the committed lock already fixed.
+    The names come from the override list (never hard-coded), so a policy edit
+    that adds a third override cannot silently skip its constraint.
+    """
+
+    names = [name for name, _extras in admission.override_names(overrides)]
+    missing = [name for name in names if name not in committed_lock]
+    if missing:
+        raise BuildRefused(f"the committed adapter lock has no row for {sorted(missing)}")
+    return {name: committed_lock[name] for name in names}
+
+
 def lock_versions(lock_text: str) -> dict[str, str]:
     """canonical name -> version for every package a uv lock pins.
 
-    Used twice, for one reason: the frozen export carries direct references
-    (``osworld @ git+https://...``) that carry no version, so the LOCK -- not the
-    exported row -- is the only place the whole planned set has a version.
+    The frozen export carries direct references (``osworld @ git+https://...``)
+    that carry no version, so the LOCK -- not the exported row -- is the only
+    place the whole planned set has a version.
     """
 
     lock = tomllib.loads(lock_text)
     return {admission.canonicalize_name(row["name"]): row["version"] for row in lock["package"]}
 
 
-def installed_overrides(
-    lock_text: str, names: tuple[str, ...] = ("requests", "pyjwt")
-) -> list[str]:
+def installed_overrides(lock_text: str, overrides: Sequence[str]) -> list[str]:
     """Narrow the policy overrides to the versions the resolution chose.
 
     pip has no project policy, so the overrides are passed to the install
     explicitly -- but as exact pins: a floor would let an already-installed newer
     version win over the frozen choice, which is how an arm silently stops
-    matching its own lock. Extras are preserved (``pyjwt[crypto]``), because the
-    crypto extra is part of the harness floor.
+    matching its own lock. The names and EXTRAS come from the committed override
+    list rather than being spelled here, so an extra the harness floor needs
+    cannot be lost between the policy and the install.
     """
 
     versions = lock_versions(lock_text)
     pins: list[str] = []
-    for name in names:
+    for name, extras in admission.override_names(overrides):
         if name not in versions:
             raise BuildRefused(f"the resolution lock has no {name} row")
-        spelling = f"{name}[crypto]" if name == "pyjwt" else name
+        spelling = f"{name}[{','.join(extras)}]" if extras else name
         pins.append(f"{spelling}=={versions[name]}")
     return pins
+
+
+def plan_digest(rows: Sequence[str], overrides: Sequence[str]) -> str:
+    """A stable digest of WHAT the plan resolved, for an execute to check.
+
+    Not a digest of the lock file: a uv lock records the project's own relative
+    source and uv's serialisation order, so two runs in different directories
+    would disagree for reasons that do not affect the arm. The installed set and
+    the policy do affect it, and those are what this covers.
+    """
+
+    payload = json.dumps(
+        {"overrides": list(overrides), "pins": sorted(row.strip() for row in rows if row.strip())},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def create_arm_venv(venv: Path, receipts: Path) -> dict[str, Any]:
@@ -350,10 +495,13 @@ def create_arm_venv(venv: Path, receipts: Path) -> dict[str, Any]:
     if copied:
         shutil.copyfile(dylib, venv / "lib" / dylib.name)
     interpreter = venv / "bin" / f"python{_PYTHON_MINOR}"
-    # Mirrors discovery._symlink_free, so a symlinked venv is refused HERE with
-    # the reason, instead of pre-dispatch on a paid run with only the guard text.
-    if interpreter.is_symlink() or interpreter.resolve() != interpreter:
-        raise BuildRefused(f"{interpreter} resolves through a symlink; discovery refuses it")
+    # The REAL guard, not a copy of its logic: this script runs in the repo venv
+    # and can import it, and two implementations of "is this launch path a
+    # symlink or lexical alias" would eventually disagree about which paths pass.
+    try:
+        _symlink_free(interpreter)
+    except AdapterDiscoveryError as error:
+        raise BuildRefused(f"discovery refuses this interpreter: {error}") from error
     try:
         version = run([str(interpreter), "-V"]).strip()
     except BuildRefused as error:
@@ -373,16 +521,16 @@ def create_arm_venv(venv: Path, receipts: Path) -> dict[str, Any]:
     return facts
 
 
-def export_adapter_requirements(source: Path, receipts: Path) -> tuple[list[str], list[str]]:
+def export_adapter_requirements(metadata: Metadata, receipts: Path) -> tuple[list[str], list[str]]:
     """Export the built commit's adapter lock (osworld extra included) and split it."""
 
     export = receipts / "requirements.locked.txt"
     run(
         [
-            "uv",
+            *_UV,
             "export",
             "--project",
-            str(source / _ADAPTER_DIR),
+            str(metadata.adapter_dir),
             "--frozen",
             "--no-emit-project",
             "--extra",
@@ -402,19 +550,28 @@ def export_adapter_requirements(source: Path, receipts: Path) -> tuple[list[str]
     return rows, dropped
 
 
+def plan_metadata_digests(metadata: Metadata) -> dict[str, str]:
+    return {
+        "core_metadata_sha256": file_sha256(metadata.core_pyproject),
+        "adapter_metadata_sha256": file_sha256(metadata.adapter_pyproject),
+        "frozen_adapter_lock_sha256": file_sha256(metadata.adapter_lock),
+    }
+
+
 def resolve_policy_project(
     *,
-    layout: ArmLayout,
+    metadata: Metadata,
+    receipts: Path,
     adapter_rows: Sequence[str],
     core_requirements: Sequence[str],
     overrides: Sequence[str],
     constraint_versions: Mapping[str, str],
     interpreter: Path,
-) -> tuple[list[str], Path, dict[str, str]]:
-    """Lock and export the synthetic project; return install overrides and pins."""
+) -> tuple[list[str], Path, dict[str, Any]]:
+    """Lock and export the synthetic project; return the install pins and facts."""
 
-    project = layout.receipts / "resolution-project"
-    project.mkdir(exist_ok=True)
+    project = receipts / "resolution-project"
+    project.mkdir(parents=True, exist_ok=True)
     (project / "pyproject.toml").write_text(
         resolution_project(
             adapter_rows=adapter_rows,
@@ -423,11 +580,11 @@ def resolve_policy_project(
             constraint_versions=constraint_versions,
         )
     )
-    run(["uv", "lock", "--project", str(project), "--python", str(interpreter)])
-    pins = layout.receipts / "policy-pins.txt"
+    run([*_UV, "lock", "--project", str(project), "--python", str(interpreter)])
+    pins = receipts / "policy-pins.txt"
     run(
         [
-            "uv",
+            *_UV,
             "export",
             "--project",
             str(project),
@@ -439,7 +596,19 @@ def resolve_policy_project(
         ]
     )
     lock_text = (project / "uv.lock").read_text()
-    return installed_overrides(lock_text), pins, lock_versions(lock_text)
+    lock = lock_versions(lock_text)
+    rows = [line.strip() for line in pins.read_text().splitlines() if line.strip()]
+    rows = [row for row in rows if not row.startswith("#")]
+    facts = {
+        "resolution_package_count": len(lock),
+        "security_pins": {
+            name: lock[name]
+            for name in sorted(lock)
+            if name in {"requests", "pyjwt", "miniaudio", "watchdog"}
+        },
+        "plan_digest": plan_digest(rows, overrides),
+    }
+    return installed_overrides(lock_text, overrides), pins, facts
 
 
 def build_wheels(layout: ArmLayout) -> tuple[Path, Path]:
@@ -451,10 +620,10 @@ def build_wheels(layout: ArmLayout) -> tuple[Path, Path]:
     coverage rather than the editable install that caused it.
     """
 
-    run(["uv", "build", "--wheel", "--out-dir", str(layout.core_dist), str(layout.source)])
+    run([*_UV, "build", "--wheel", "--out-dir", str(layout.core_dist), str(layout.source)])
     run(
         [
-            "uv",
+            *_UV,
             "build",
             "--wheel",
             "--out-dir",
@@ -490,7 +659,7 @@ def install_arm(
     (receipts / "installation-overrides.txt").write_text("\n".join(overrides) + "\n")
     run(
         [
-            "uv",
+            *_UV,
             "pip",
             "install",
             "--python",
@@ -525,177 +694,307 @@ def compare_closure(
         key = admission.canonicalize_name(name)
         if key in allowed:
             continue
-        planned = pinned.get(key)
-        if planned is None:
+        planned_version = pinned.get(key)
+        if planned_version is None:
             refusals.append(f"installed {name} {version} is not in the resolution plan")
-        elif planned != version:
-            refusals.append(f"installed {name} {version} differs from planned {planned}")
+        elif planned_version != version:
+            refusals.append(f"installed {name} {version} differs from planned {planned_version}")
     return refusals
+
+
+def _plan(args: argparse.Namespace) -> int:
+    """Resolve and report, writing a small plan receipt and NOTHING at --out."""
+
+    with tempfile.TemporaryDirectory(prefix="lop-arm-plan-") as temporary:
+        workspace = Path(temporary)
+        metadata = metadata_from_git(args.repo, args.source_sha, workspace / "metadata")
+        receipts = workspace / "receipts"
+        receipts.mkdir()
+        overrides, core_requirements = policy(metadata)
+        adapter_rows, dropped = export_adapter_requirements(metadata, receipts)
+        interpreter = Path(sys.executable)
+        if sys.version_info[:2] != tuple(int(part) for part in _PYTHON_MINOR.split(".")):
+            raise BuildRefused(
+                f"a plan must be resolved with a {_PYTHON_MINOR} interpreter (this one is "
+                f"{sys.version.split()[0]}); run it with the arm's python or a {_PYTHON_MINOR} venv"
+            )
+        constraints = _constraint_versions(
+            lock_versions(metadata.adapter_lock.read_text()), overrides
+        )
+        install_overrides, pins, facts = resolve_policy_project(
+            metadata=metadata,
+            receipts=receipts,
+            adapter_rows=adapter_rows,
+            core_requirements=core_requirements,
+            overrides=overrides,
+            constraint_versions=constraints,
+            interpreter=interpreter,
+        )
+        receipt = {
+            "source_commit": args.source_sha,
+            "overrides": overrides,
+            "installation_overrides": install_overrides,
+            "requirements_installed": str(pins),
+            "dropped_rows": dropped,
+            "uv_version": uv_version(),
+            **plan_metadata_digests(metadata),
+            **facts,
+        }
+        if args.plan is not None:
+            args.plan.parent.mkdir(parents=True, exist_ok=True)
+            args.plan.write_text(json.dumps(receipt, indent=2) + "\n")
+    print(
+        "PLAN: "
+        f"{facts['resolution_package_count']} packages, plan digest {facts['plan_digest'][:16]}, "
+        f"security pins {facts['security_pins']}; nothing installed, nothing written to --out"
+    )
+    if args.plan is not None:
+        print(f"PLAN RECEIPT: {args.plan}")
+    return 0
+
+
+def policy(metadata: Metadata) -> tuple[list[str], list[str]]:
+    """The committed override list and the harness's direct requirements."""
+
+    adapter = tomllib.loads(metadata.adapter_pyproject.read_text())
+    core = tomllib.loads(metadata.core_pyproject.read_text())
+    return (
+        list(adapter["tool"]["uv"]["override-dependencies"]),
+        list(core["project"]["dependencies"]),
+    )
+
+
+def uv_version() -> str:
+    try:
+        result = subprocess.run([*_UV, "--version"], capture_output=True, text=True, check=False)
+    except OSError:
+        return "unavailable"
+    return (result.stdout + result.stderr).strip() or "unavailable"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--source-sha", required=True, help="full 40-hex commit to build")
-    parser.add_argument("--out", required=True, type=Path, help="new arm directory (never reused)")
+    parser.add_argument("--out", type=Path, help="new arm directory (execute mode only)")
+    parser.add_argument(
+        "--plan",
+        type=Path,
+        help="plan receipt to write (plan mode) or to verify (execute mode)",
+    )
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument(
         "--execute",
         action="store_true",
-        help="build the wheels and install; without it only the resolution plan is recorded",
+        help="build the wheels and install; without it the run only plans",
     )
     args = parser.parse_args(argv)
 
-    layout = ArmLayout(root=args.out.expanduser().resolve())
     try:
         guard_source(args.repo, args.source_sha)
-        # Checked BEFORE create(): a durable-root refusal must not leave a
-        # directory behind that makes the next run look like a reused arm.
-        if layout.root.exists():
-            raise BuildRefused(f"{layout.root} exists; an arm receipt is immutable")
-        refuse_volatile(layout.root, "arm root")
-        layout.create()
-        materialise_source(args.repo, args.source_sha, layout.source)
-        adapter_pyproject = tomllib.loads(
-            (layout.source / _ADAPTER_DIR / "pyproject.toml").read_text()
-        )
-        core_pyproject = tomllib.loads((layout.source / "pyproject.toml").read_text())
-        overrides = list(adapter_pyproject["tool"]["uv"]["override-dependencies"])
-        core_requirements = list(core_pyproject["project"]["dependencies"])
-        # Provenance BEFORE anything is installed: these are the exact policy
-        # bytes the admission verdict applies to, hashed from the commit rather
-        # than from any working tree.
-        (layout.receipts / "policy-provenance.json").write_text(
-            json.dumps(
-                {
-                    "source_commit": args.source_sha,
-                    "source": f"git archive {args.source_sha}",
-                    "overrides": overrides,
-                    "core_metadata_sha256": instance_sha256(layout.source / "pyproject.toml"),
-                    "adapter_metadata_sha256": instance_sha256(
-                        layout.source / _ADAPTER_DIR / "pyproject.toml"
-                    ),
-                    "frozen_adapter_lock_sha256": instance_sha256(
-                        layout.source / _ADAPTER_DIR / "uv.lock"
-                    ),
-                    # The policy is applied as a resolver rule; no wheel metadata
-                    # is rewritten, so a raw pip check keeps reporting the two
-                    # superseded bounds.
-                    "metadata_rewrite": False,
-                },
-                indent=2,
-            )
-            + "\n"
-        )
-        adapter_rows, _dropped = export_adapter_requirements(layout.source, layout.receipts)
-        interpreter_facts = create_arm_venv(layout.venv, layout.receipts)
-        adapter_lock = tomllib.loads((layout.source / _ADAPTER_DIR / "uv.lock").read_text())
-        lock_versions = {row["name"]: row["version"] for row in adapter_lock["package"]}
-        # The two overridden packages stay pinned at the versions the committed
-        # adapter lock already froze, so a policy floor cannot move them.
-        constraint_versions = {
-            name: lock_versions[name] for name in ("requests", "pyjwt") if name in lock_versions
-        }
-        missing = {"requests", "pyjwt"} - set(constraint_versions)
-        if missing:
-            raise BuildRefused(f"the committed adapter lock has no row for {sorted(missing)}")
-        install_overrides, pins, plan = resolve_policy_project(
-            layout=layout,
-            adapter_rows=adapter_rows,
-            core_requirements=core_requirements,
-            overrides=overrides,
-            constraint_versions=constraint_versions,
-            interpreter=layout.python,
-        )
         if not args.execute:
-            print(f"PLAN ONLY: resolution receipts in {layout.receipts}; nothing installed")
-            return 0
-        wheels = build_wheels(layout)
-        install_arm(
-            interpreter=layout.python,
-            pins=pins,
-            overrides=install_overrides,
-            receipts=layout.receipts,
-            wheels=wheels,
-        )
-        # Both checks run under the ARM interpreter: the installed metadata and
-        # marker environment that matter are that interpreter's, not this one's.
-        for script, out in (
-            ("osworld_dependency_admission.py", str(layout.receipts)),
-            ("osworld_arm_verify.py", str(layout.receipts / "installed-verification.json")),
-        ):
-            result = subprocess.run(
-                [
-                    str(layout.python),
-                    "-I",
-                    "-B",
-                    str(Path(__file__).resolve().parent / script),
-                    *(
-                        [
-                            "--adapter-pyproject",
-                            str(layout.source / _ADAPTER_DIR / "pyproject.toml"),
-                            "--core-pyproject",
-                            str(layout.source / "pyproject.toml"),
-                        ]
-                        if script.startswith("osworld_dependency")
-                        else ["--source", str(layout.source), "--commit", args.source_sha]
-                    ),
-                    "--out",
-                    out,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            print((result.stdout + result.stderr).strip())
-            if result.returncode != 0:
-                raise Unverified(f"{script} refused (rc={result.returncode})")
-        recorded: dict[str, Any] = json.loads(
-            (layout.receipts / "installed-verification.json").read_text()
-        )
-        # The verifier already refused a wrong source commit or a wrong module
-        # hash; this is the second question -- does the installed SET match the
-        # plan the receipts describe?
-        refusals = compare_closure(
-            # The resolution project's own row is not installed, by design.
-            pinned={k: v for k, v in plan.items() if k != _RESOLUTION_PROJECT},
-            installed=recorded["installed_distributions"],
-            allowed_extra=[_HARNESS_DISTRIBUTION, _ADAPTER_DISTRIBUTION],
-        )
-        (layout.receipts / "build-record.json").write_text(
-            json.dumps(
-                {
-                    "arm_source_commit": args.source_sha,
-                    "harness": recorded["harness"],
-                    "adapter": recorded["adapter"],
-                    "package_digest": recorded["adapter"]["package_digest"],
-                    "interpreter": interpreter_facts,
-                    "requirements_installed": str(pins),
-                    "installation_overrides": install_overrides,
-                    "policy_admission": str(layout.receipts / "policy-admission.json"),
-                    "raw_pip_check": str(layout.receipts / "raw-pip-check.log"),
-                    "verification": str(layout.receipts / "installed-verification.json"),
-                    "closure_refusals": refusals,
-                    # NOT an identity: zip timestamps differ between builds of
-                    # the same commit (this module's docstring, point 3).
-                    "wheel_sha256_informational_only": {
-                        "core": instance_sha256(wheels[0]),
-                        "adapter": instance_sha256(wheels[1]),
-                    },
-                },
-                indent=2,
-            )
-            + "\n"
-        )
-        if refusals:
-            raise Unverified("; ".join(refusals))
+            if args.out is not None:
+                raise BuildRefused(
+                    "--out belongs to --execute; a plan writes only --plan and never an arm "
+                    "directory (that is what keeps plan-then-execute usable)"
+                )
+            return _plan(args)
+        if args.out is None:
+            raise BuildRefused("--execute needs --out")
+        return _execute(args)
     except BuildRefused as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return EXIT_REFUSED
     except Unverified as error:
         print(f"UNVERIFIED: {error}", file=sys.stderr)
         return EXIT_UNVERIFIED
+
+
+def _execute(args: argparse.Namespace) -> int:
+    layout = ArmLayout(root=args.out.expanduser().resolve())
+    # Volatile-root refusal BEFORE create: a refusal must not leave a directory
+    # behind that makes the next run look like a reused arm.
+    refuse_volatile(layout.root, "arm root")
+    layout.create_arm()
+    materialise_source(args.repo, args.source_sha, layout.source)
+    metadata = metadata_from_source(layout.source)
+    overrides, core_requirements = policy(metadata)
+    (layout.receipts / "policy-provenance.json").write_text(
+        json.dumps(
+            {
+                "source_commit": args.source_sha,
+                "source": f"git archive {args.source_sha}",
+                "overrides": overrides,
+                # The policy is applied as a resolver rule; no wheel metadata is
+                # rewritten, so a raw pip check keeps reporting the two bounds.
+                "metadata_rewrite": False,
+                **plan_metadata_digests(metadata),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    adapter_rows, _dropped = export_adapter_requirements(metadata, layout.receipts)
+    interpreter_facts = create_arm_venv(layout.venv, layout.receipts)
+    adapter_lock = lock_versions(metadata.adapter_lock.read_text())
+    constraints = _constraint_versions(adapter_lock, overrides)
+    install_overrides, pins, facts = resolve_policy_project(
+        metadata=metadata,
+        receipts=layout.receipts,
+        adapter_rows=adapter_rows,
+        core_requirements=core_requirements,
+        overrides=overrides,
+        constraint_versions=constraints,
+        interpreter=layout.python,
+    )
+    plan_binding = verify_plan(args.plan, facts, args.source_sha, layout.receipts)
+    wheels = build_wheels(layout)
+    install_arm(
+        interpreter=layout.python,
+        pins=pins,
+        overrides=install_overrides,
+        receipts=layout.receipts,
+        wheels=wheels,
+    )
+    refusals: list[str] = []
+    # Both checks run under the ARM interpreter: the installed metadata and
+    # marker environment that matter are that interpreter's, not this one's.
+    for script, extra, out in (
+        (
+            "osworld_dependency_admission.py",
+            [
+                "--adapter-pyproject",
+                str(metadata.adapter_pyproject),
+                "--core-pyproject",
+                str(metadata.core_pyproject),
+            ],
+            str(layout.receipts),
+        ),
+        (
+            "osworld_arm_verify.py",
+            ["--source", str(layout.source), "--commit", args.source_sha],
+            str(layout.receipts / "installed-verification.json"),
+        ),
+    ):
+        result = subprocess.run(
+            [
+                str(layout.python),
+                "-I",
+                "-B",
+                str(Path(__file__).resolve().parent / script),
+                *extra,
+                "--out",
+                out,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        print((result.stdout + result.stderr).strip())
+        if result.returncode != 0:
+            refusals.append(f"{script} refused (rc={result.returncode})")
+    verification_path = layout.receipts / "installed-verification.json"
+    recorded: dict[str, Any] = (
+        json.loads(verification_path.read_text()) if verification_path.is_file() else {}
+    )
+    planned = {
+        name: version
+        for name, version in lock_versions(
+            (layout.receipts / "resolution-project" / "uv.lock").read_text()
+        ).items()
+        if name != _RESOLUTION_PROJECT
+    }
+    if recorded.get("installed_distributions"):
+        refusals.extend(
+            compare_closure(
+                pinned=planned,
+                installed=recorded["installed_distributions"],
+                allowed_extra=[_HARNESS_DISTRIBUTION, _ADAPTER_DISTRIBUTION],
+            )
+        )
+    # Written on refusal too: an exit-4 identity failure with no record is the
+    # same dead end the verifier's own report-on-refusal fix removes.
+    (layout.receipts / "build-record.json").write_text(
+        json.dumps(
+            {
+                "arm_source_commit": args.source_sha,
+                "harness": recorded.get("harness"),
+                "adapter": recorded.get("adapter"),
+                "package_digest": (recorded.get("adapter") or {}).get("package_digest"),
+                "package_digest_scope": (
+                    "this install only (RECORD includes installer-written rows)"
+                ),
+                "cross_build_identity": {
+                    "source_commit": args.source_sha,
+                    "core_module_hashes": recorded.get("core_module_hashes"),
+                    "source_record_digest": (recorded.get("adapter") or {}).get(
+                        "source_record_digest"
+                    ),
+                },
+                "interpreter": interpreter_facts,
+                "requirements_installed": str(pins),
+                "installation_overrides": install_overrides,
+                "policy_admission": str(layout.receipts / "policy-admission.json"),
+                "raw_pip_check": str(layout.receipts / "raw-pip-check.log"),
+                "verification": str(verification_path),
+                "plan_binding": plan_binding,
+                "uv_version": uv_version(),
+                "closure_refusals": [
+                    reason
+                    for reason in refusals
+                    if "not in the resolution plan" in reason or "differs from planned" in reason
+                ],
+                "refusals": refusals,
+                # NOT identities: zip timestamps differ between builds of the
+                # same commit (this module's docstring, point 3).
+                "wheel_sha256_informational_only": {
+                    "core": instance_sha256(wheels[0]),
+                    "adapter": instance_sha256(wheels[1]),
+                },
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    if refusals:
+        raise Unverified("; ".join(refusals))
     print(f"BUILT: {layout.root} (receipts in {layout.receipts})")
     return 0
+
+
+def verify_plan(
+    plan_path: Path | None, facts: Mapping[str, Any], source_sha: str, receipts: Path
+) -> dict[str, Any]:
+    """Check this build against the plan it was given, if one was given.
+
+    A plan is only worth writing if the build is bound to it: the digest covers
+    the resolved installed set and the override policy, so a resolution that
+    drifted between plan and build (a moved index, a new upstream release inside
+    a range, a policy edit) is refused instead of silently installed.
+    """
+
+    if plan_path is None:
+        return {"given": False, "verified": False}
+    if not plan_path.is_file():
+        raise BuildRefused(f"--plan {plan_path} does not exist")
+    planned = json.loads(plan_path.read_text())
+    if planned.get("source_commit") != source_sha:
+        raise BuildRefused(
+            f"plan {plan_path} was made for {planned.get('source_commit')}, not {source_sha}"
+        )
+    if planned.get("plan_digest") != facts["plan_digest"]:
+        raise BuildRefused(
+            "the resolution differs from the plan "
+            f"({planned.get('plan_digest')} != {facts['plan_digest']}); re-plan, then build"
+        )
+    binding = {
+        "given": True,
+        "verified": True,
+        "plan": str(plan_path),
+        "plan_digest": facts["plan_digest"],
+        "planned_package_count": planned.get("resolution_package_count"),
+    }
+    (receipts / "plan-binding.json").write_text(json.dumps(binding, indent=2) + "\n")
+    return binding
 
 
 if __name__ == "__main__":
