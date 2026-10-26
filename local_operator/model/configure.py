@@ -44,7 +44,12 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.model import tariff
-from local_operator.model.catalogue import DEFAULT_TTL_S
+from local_operator.model.catalogue import (
+    DEFAULT_TTL_S,
+    LISTING_FAILURE_BACKOFF_S,
+    collect_unavailable,
+    note_unavailable,
+)
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
 from local_operator.model.effort import (
     default_effort,
@@ -2091,6 +2096,7 @@ def _info_from_discovery(
         )
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
+        note_unavailable(f"{provider} discovery")
         return fallback
 
     if provider == "openai" and is_oauth and status == "static":
@@ -2355,6 +2361,7 @@ def _from_price_catalogue(
         row = price_catalogue_row(provider, model_id, timeout=budget)
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("price catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        note_unavailable("price catalogue")
         return info
     if row is None:
         logger.debug("price catalogue has no entry for %s/%s", provider, model_id)
@@ -2410,6 +2417,7 @@ def _from_aggregator_catalogue(
         rows, _status = available_models(provider, api_key=None, timeout=budget, want_id=model_id)
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("aggregator catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        note_unavailable(f"{provider} aggregator catalogue")
         return info
 
     # Priced rows only. An unpriced aggregator row is a routing stub that can
@@ -2483,9 +2491,55 @@ _listing_credential: ContextVar[tuple[str, bool, str | None] | None] = ContextVa
 )
 
 
+#: How long a resolution built from a FAILED leg may be reused, in seconds.
+#:
+#: WHY (PR #2992, review MAJOR-1). The memo below is keyed on a day bucket, and
+#: every leg degrades to its fallback instead of raising, so a 401/DNS/5xx/timeout
+#: on the first resolution used to be stored as an ordinary answer and served for
+#: up to 24 h after the network recovered — a default 128k window and zero prices
+#: in place of the listing's real numbers. A degraded answer now lives only this
+#: long. It is the listing's own sync failure backoff
+#: (``catalogue.LISTING_FAILURE_BACKOFF_S``), so the retry that follows expiry is
+#: one the listing will actually attempt rather than answer from its backoff.
+DEGRADED_MEMO_TTL_S: float = LISTING_FAILURE_BACKOFF_S
+
+#: ``{memo key: wall-clock expiry}`` for memo entries a failed leg produced. The
+#: key is the cached body's own arguments; read and written under the GIL by
+#: plain dict operations, the same discipline as ``_paint_memo``.
+_degraded_until: dict[tuple[Any, ...], float] = {}
+
+#: ``{memo key: retry generation}``. An expired degraded entry cannot be evicted
+#: from ``lru_cache`` on its own, so the next call passes a NEW generation, which
+#: is a different cache key and therefore a fresh resolution; the stale entry
+#: ages out of the 64-entry bound like any other. Absent (generation 0) for every
+#: key that never degraded, which is why the argument is only passed when set.
+_degraded_generation: dict[tuple[Any, ...], int] = {}
+
+
+def _memo_attempt(key: tuple[Any, ...]) -> dict[str, int]:
+    """The extra memo-key argument for ``key``: none, or the retry generation."""
+    expiry = _degraded_until.get(key)
+    if expiry is not None and time.time() >= expiry:
+        _degraded_until.pop(key, None)
+        _degraded_generation[key] = _degraded_generation.get(key, 0) + 1
+    elif expiry is not None:
+        # Served from a still-degraded entry: the caller is getting the failed
+        # answer again, and a collector around it must hear that just as it would
+        # have heard the failure itself.
+        note_unavailable("degraded metadata memo")
+    generation = _degraded_generation.get(key, 0)
+    return {"_attempt": generation} if generation else {}
+
+
 @functools.lru_cache(maxsize=64)
 def _resolve_model_info_cached(
-    provider: str, model_id: str, _bucket: int, _scope: str = "", _base: Path | None = None
+    provider: str,
+    model_id: str,
+    _bucket: int,
+    _scope: str = "",
+    _base: Path | None = None,
+    *,
+    _attempt: int = 0,
 ) -> ModelInfo:
     """Memoized body of :func:`resolve_model_info`.
 
@@ -2496,7 +2550,30 @@ def _resolve_model_info_cached(
     long-lived process (the HTTP server, a scheduler worker) would pin whatever
     metadata it saw at boot for as long as it ran — the disk cache would refresh
     underneath it and nothing would ever read the new numbers.
+
+    ``_attempt`` is likewise key-only: see :data:`_degraded_generation`. A body
+    during which any leg reported that it could not answer
+    (:func:`catalogue.collect_unavailable`) marks its entry DEGRADED, and
+    :func:`resolve_model_info` stops serving it after :data:`DEGRADED_MEMO_TTL_S`.
     """
+    with collect_unavailable() as unavailable:
+        info = _resolve_model_info_body(provider, model_id, _base)
+    if unavailable:
+        logger.debug(
+            "%s/%s metadata degraded (%s); memoised for %.0fs only",
+            provider,
+            model_id,
+            ", ".join(sorted(set(unavailable))),
+            DEGRADED_MEMO_TTL_S,
+        )
+        _degraded_until[(provider, model_id, _bucket, _scope, _base)] = (
+            time.time() + DEGRADED_MEMO_TTL_S
+        )
+    return info
+
+
+def _resolve_model_info_body(provider: str, model_id: str, _base: Path | None) -> ModelInfo:
+    """The resolution itself, uncached: registry first, then the listing legs."""
     canonical = "test" if provider == "noop" else provider
     started = time.monotonic()
     info = _registry_fallback(canonical, model_id)
@@ -2604,6 +2681,8 @@ def invalidate_model_info_cache() -> None:
     numbers, so the fix path gets a way to say so.
     """
     _resolve_model_info_cached.cache_clear()
+    _degraded_until.clear()
+    _degraded_generation.clear()
     _paint_refreshing.clear()
     _paint_memo.clear()
     # The ladder memo is fed by the same resolution, so it degrades for the same
@@ -2692,11 +2771,25 @@ def resolve_model_info(
             scope = "openai-oauth-unscoped"
         token = _listing_credential.set(credential)
         try:
-            info = _resolve_model_info_cached(provider, model_id, bucket, scope, base)
+            info = _resolve_model_info_cached(
+                provider,
+                model_id,
+                bucket,
+                scope,
+                base,
+                **_memo_attempt((provider, model_id, bucket, scope, base)),
+            )
         finally:
             _listing_credential.reset(token)
     else:
-        info = _resolve_model_info_cached(provider, model_id, bucket, "", base)
+        info = _resolve_model_info_cached(
+            provider,
+            model_id,
+            bucket,
+            "",
+            base,
+            **_memo_attempt((provider, model_id, bucket, "", base)),
+        )
     # Feed the paint memo from the authoritative answer, so a renderer that
     # resolves AFTER the session does (the common order) paints the real row,
     # and so the background refresh is the only writer on a cold process.

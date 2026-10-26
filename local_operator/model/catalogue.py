@@ -52,6 +52,8 @@ without either overwriting the other.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import fnmatch
 import json
@@ -61,6 +63,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
 
@@ -435,6 +438,57 @@ class _ListingFetchLease:
             pass
 
 
+#: The reads that ended with NO usable document on the current resolution, or
+#: ``None`` when nobody is collecting. See :func:`collect_unavailable`.
+_unavailable: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "listing_unavailable", default=None
+)
+
+
+def note_unavailable(what: str) -> None:
+    """Record that a metadata leg ended WITHOUT an answer, for :func:`collect_unavailable`.
+
+    Called by :func:`read_listing` itself (a failed or backed-off fetch with no
+    document to fall back on) and by the resolution legs in
+    ``model.configure`` whose own ``except`` swallows an error before any read.
+    A no-op when nobody is collecting.
+    """
+    sink = _unavailable.get()
+    if sink is not None:
+        sink.append(what)
+
+
+@contextlib.contextmanager
+def collect_unavailable() -> Iterator[list[str]]:
+    """Collect every :func:`note_unavailable` inside the block into one list.
+
+    WHY (PR #2992, review MAJOR-1). Every listing leg degrades to its fallback
+    without raising, so a 401, DNS failure, 5xx or timeout was indistinguishable
+    from "the listing has nothing" by the time ``configure``'s day-bucket memo
+    stored the answer, and that degraded answer was then served for up to 24 h
+    after the network recovered. This is how the legs report "I could not
+    answer" to the memo without changing any of their return types.
+
+    A ContextVar, so collection is per calling thread/task: the legs run
+    synchronously inside one resolution, and a background revalidation thread
+    (which starts with an empty context) never reports into a caller's list.
+    A STALE document served after a failed refresh is NOT reported: its numbers
+    are real, and pinning them for the bucket is the memo's documented staleness.
+    """
+    outer = _unavailable.get()
+    sink: list[str] = []
+    token = _unavailable.set(sink)
+    try:
+        yield sink
+    finally:
+        _unavailable.reset(token)
+        # NESTED collectors both hear it: the metadata memo collects around one
+        # resolution, and a caller around it (the boot warm) asks the same
+        # question of the whole call.
+        if outer is not None:
+            outer.extend(sink)
+
+
 @dataclasses.dataclass(frozen=True)
 class Listing:
     """What :func:`read_listing` found, and how.
@@ -793,6 +847,8 @@ def read_listing(
             key,
             LISTING_FAILURE_BACKOFF_S,
         )
+        if payload is None:
+            note_unavailable(key)
         return Listing(payload=payload, age_s=age, failed=True)
 
     # CROSS-PROCESS FETCH LEASE (see the class docstring): the winner fetches
@@ -834,6 +890,7 @@ def read_listing(
             logger.debug("using stale %s catalogue (%.0fs old): %s", key, age, exc)
             return Listing(payload=payload, age_s=age, failed=True)
         logger.debug("no %s catalogue available: %s", key, exc)
+        note_unavailable(key)
         return Listing(payload=None, age_s=float("inf"), failed=True)
 
     _write_cache(path, fresh)

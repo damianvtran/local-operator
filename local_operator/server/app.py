@@ -545,6 +545,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
     try:
+        # The boot warms are optional work nobody waits on: stop them first, so a
+        # model warm parked in a provider read cannot keep issuing requests while
+        # the server drains (PR #2992 review MINOR-1). Never raises.
+        try:
+            from local_operator.session.index_prewarm import cancel_prewarm
+
+            await cancel_prewarm()
+        except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
+            logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
         if hub_sync_task is not None:
             if app.state.hub_sync is not None:
                 app.state.hub_sync.stop()
