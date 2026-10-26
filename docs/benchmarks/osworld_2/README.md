@@ -680,6 +680,70 @@ instead, read-only — and that pair of numbers is what made the
 `AWS_ROOT_VOLUME_SIZE` claim above checkable from any bundle: 30,993,747,968 in
 a 40 GiB volume says the override never reached the filesystem.
 
+### Guest X-display leak: upstream's fix applied at episode start (deviation from the stock AMI)
+
+**This is a deviation from the stock guest image, and every score must name
+it.** The episode's guest runs upstream OSWorld's own fix for an X-server
+connection leak that the released 2.1 image predates. Nothing about the task,
+its setup, the evaluator, the step/wall caps or what the model sees changes;
+the guest simply stops dying part-way through long episodes.
+
+**The measured cause (2026-10-26).** 80 of 191 sealed 2.1 episodes (42%) ended
+`bridge-wedged` with the EC2 instance still `running` and the action server
+refusing connections. The released image (`ami-01017272139e01feb`, built
+2026-03-27) ships `/home/user/server/pyxcursor.py` (sha256 `0d8e3071…`) whose
+`Xcursor()` opens an X display and never closes it, and the `/screenshot`
+handler creates one per call. Measured on live guests with read-only
+`/execute` probes:
+
+| measurement | result |
+| --- | --- |
+| action-server fds, 50 stock `/screenshot` calls on a bare guest | 15 → 65 |
+| same, over a live episode | +102 per 100 screenshots; `/platform`, `/terminal` add 0 |
+| X clients at the moment of death (`ss -x` on `/tmp/.X11-unix/X0`) | 383 → 2 (episode guest), 494 → 8 (bare guest, at 487 screenshots) |
+| after death | the GNOME/Xorg session restarts; every `osworld.service` restart fails at `import pyautogui` with `Can't connect to display ":0"` / `Invalid MIT-MAGIC-COOKIE-1 key`; the unit's start limit and the guest watchdog's no-effect cap (`attempts: 2, capped: true`) leave nothing on :5000 |
+
+The harness takes about two screenshots per step, which is why the wedges
+cluster at 200–300 steps (hazard 0.34 per 50 steps in 200–249, against
+0.01–0.03 in 50–199). All three recorded diagnostics are this one death: a
+request in flight when the server died (`outcome is unknown; delivery=ambiguous`),
+a request after it died (`not_sent … connection refused`), and a statement that
+failed while the display went away (`input may be partial`). The early (≤35
+step) wedges in the record are a different, older class: the pre-#2929
+liveness probe timing out on `/terminal` with the server still alive.
+
+**The fix is upstream's, byte for byte.** xlang-ai/OSWorld PR #500 ("fix
+xserver connections leak", merge `8253399dfa8b3c1d5783a73c29a91f11f7c6d7c3`,
+2026-05-07). Only its `desktop_env/server/pyxcursor.py` is applied — the
+vendored copy is that file at the merge commit, sha256 `87d09a46…`, checked
+at load. The PR's `main.py` refactor is **not** taken: the stock handler holds
+the `Xcursor` in a local that CPython collects on return, and the new
+`__del__` closes the display. Measured with only the file replaced: 30
+screenshots, fds 15 → 15. The `main.py` changes touch `/screen_size`,
+`/window_size` and `/start_recording`, none of which runs per step.
+
+**Pixels are unchanged.** On a static screen, a stock and a patched screenshot
+differ only in the top-bar clock minute (bbox `(1030, 8, 1038, 18)`; identical
+once that strip is masked), and two stock captures in the same minute are
+byte-identical.
+
+**How it lands.** After disk preparation and before the supervisor install and
+upstream's reset, `guest_xcursor.apply_xcursor_patch` reads the file's digest
+and the serving PIDs, and only if the file is the exact stock file writes the
+upstream file atomically (temp, fsync, `os.replace`) as the server's own user —
+no sudo. The stock server runs `app.run(debug=True)`, so werkzeug's reloader
+re-execs the serving child (measured 0.8 s); a new serving PID with the patched
+digest is the proof it took.
+
+**Fail-open, never silent.** An unrecognised file is never overwritten, and an
+unreachable guest, a failed write or a reload that never happens leaves the
+episode on the stock guest. Every outcome writes
+`<run-root>/osworld-cache/<episode-id>/guest-xcursor-patch.json` with
+`applied: true|false`, the status and reason, the upstream PR and merge SHA, and
+the before/after digests. The same record rides the **sealed score detail** under
+`guest_environment.xcursor_patch`, so a score read from the bundle alone still
+says whether the guest carried the deviation.
+
 ### Upstream is sealed after the first reset
 
 One `reset` per episode is the contract. Upstream's own allocation paths — a

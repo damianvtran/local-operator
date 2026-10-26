@@ -1226,9 +1226,25 @@ class OSWorldV2Adapter:
             raw = await self._provider.evaluate()
         return ScoreResult(
             score=scoring.score_to_artifact(
-                raw, artifact_root=self._artifact_root, diagnostics=capture.payload()
+                raw,
+                artifact_root=self._artifact_root,
+                diagnostics=capture.payload(),
+                environment=self._guest_environment(),
             )
         )
+
+    def _guest_environment(self) -> dict[str, Any] | None:
+        """The guest deviations to disclose beside the score, or None.
+
+        Read from the provider by attribute rather than through the provider
+        protocol: only the AWS provider touches a real guest, and the fake
+        provider's scored bytes must stay exactly what they were.
+        """
+
+        report = getattr(self._provider, "guest_xcursor_patch", None)
+        if report is None:
+            return None
+        return {"xcursor_patch": report.to_json()}
 
     # ------------------------------------------------------------------
     # cleanup / close / begin_rescue

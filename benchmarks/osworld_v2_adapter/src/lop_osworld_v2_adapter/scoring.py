@@ -51,6 +51,15 @@ MAX_SCORE_DETAIL_DEPTH = 64
 EVALUATOR_RESULT_KEY = "evaluator_result"
 EVALUATOR_DIAGNOSTICS_KEY = "evaluator_diagnostics"
 
+# The guest-environment disclosure: deviations from the stock image that the
+# episode ran on (today, only ``guest_xcursor``'s upstream leak fix). It rides
+# the sealed detail artifact, not just the episode cache, because the detail is
+# digest-bound into the scored bundle: a score read from the bundle alone must
+# still say whether the guest carried the deviation. Absent when the provider
+# reported nothing (the fake provider, or a pre-change adapter), so those
+# bytes are unchanged.
+GUEST_ENVIRONMENT_KEY = "guest_environment"
+
 # What that key holds when a diagnostics block was produced but could not be
 # attached within the limits above. One field, so it fits whatever the rejected
 # block was, and a fixed value, so a reader can tell a refusal from a capture
@@ -113,7 +122,11 @@ def _detail_bytes(raw: Any) -> bytes:
     return bytes(data)
 
 
-def _detail_payload(raw: Any, diagnostics: Mapping[str, Any] | None) -> Any:
+def _detail_payload(
+    raw: Any,
+    diagnostics: Mapping[str, Any] | None,
+    environment: Mapping[str, Any] | None = None,
+) -> Any:
     """What is persisted for a score: the raw return, plus retained diagnostics.
 
     A capture that produced nothing (``None``) leaves ``raw`` untouched, which
@@ -130,24 +143,36 @@ def _detail_payload(raw: Any, diagnostics: Mapping[str, Any] | None) -> Any:
     bytes are staged: an explanation must never cost the number it explains.
     """
 
-    if not diagnostics:
+    if not diagnostics and not environment:
         return raw
-    wrapped = {EVALUATOR_RESULT_KEY: raw, EVALUATOR_DIAGNOSTICS_KEY: diagnostics}
-    try:
-        _detail_bytes(wrapped)
-        return wrapped
-    except ScoringProtocolError:
-        pass
-    refused = {EVALUATOR_RESULT_KEY: raw, EVALUATOR_DIAGNOSTICS_KEY: DIAGNOSTICS_REFUSED}
-    try:
-        _detail_bytes(refused)
-        return refused
-    except ScoringProtocolError:
-        return raw
+    # The environment disclosure is a few hundred bytes of fixed-shape facts, so
+    # it is kept on every fallback below: only the evaluator's own diagnostics
+    # can be refused for size. Losing the disclosure to make room would make a
+    # deviated guest read as a stock one.
+    base: dict[str, Any] = {EVALUATOR_RESULT_KEY: raw}
+    if environment:
+        base[GUEST_ENVIRONMENT_KEY] = dict(environment)
+    candidates: list[dict[str, Any]] = []
+    if diagnostics:
+        candidates.append({**base, EVALUATOR_DIAGNOSTICS_KEY: diagnostics})
+        candidates.append({**base, EVALUATOR_DIAGNOSTICS_KEY: DIAGNOSTICS_REFUSED})
+    else:
+        candidates.append(base)
+    for candidate in candidates:
+        try:
+            _detail_bytes(candidate)
+            return candidate
+        except ScoringProtocolError:
+            continue
+    return raw
 
 
 def score_to_artifact(
-    raw: Any, *, artifact_root: Path, diagnostics: Mapping[str, Any] | None = None
+    raw: Any,
+    *,
+    artifact_root: Path,
+    diagnostics: Mapping[str, Any] | None = None,
+    environment: Mapping[str, Any] | None = None,
 ) -> ScoreArtifact:
     """Map OSWorld's raw ``evaluate()`` return to a SCORED artifact, or raise.
 
@@ -176,7 +201,7 @@ def score_to_artifact(
     if not (0 <= value <= 1):
         raise ScoringProtocolError("evaluator score is outside [0.0, 1.0]")
     value = float(value)
-    data = _detail_bytes(_detail_payload(raw, diagnostics))
+    data = _detail_bytes(_detail_payload(raw, diagnostics, environment))
     details = EvidenceArtifactRef(
         sha256=hashlib.sha256(data).hexdigest(),
         media_type="application/json",
