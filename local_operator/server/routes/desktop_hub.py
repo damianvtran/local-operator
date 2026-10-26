@@ -191,6 +191,33 @@ class SkillPublish(Input):
         return self
 
 
+class HubPush(Input):
+    """``POST /v1/desktop/hub/updates/push`` -- the UI's ``hub.push`` arm.
+
+    Body is ``desktop-contract.ts``'s exact snake_case spelling (zod-pinned there):
+    ``dry_run: true`` asks for a PREVIEW and may carry no receipt or confirmation;
+    ``dry_run: false`` is the CONFIRM and must carry the reviewed ``preview_receipt``
+    with ``confirm_publish: true``. Enforced here as the renderer does, so an
+    unreviewed publication cannot be expressed by omitting a field.
+    """
+
+    request_id: RequestID
+    link_id: str = Field(min_length=1, max_length=256)
+    direction: Literal["push"]
+    dry_run: StrictBool
+    preview_receipt: str | None = Field(default=None, min_length=1, max_length=4096)
+    confirm_publish: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def _reviewed_proposal(self) -> "HubPush":
+        if self.dry_run:
+            if self.preview_receipt is not None or self.confirm_publish is not None:
+                raise ValueError("a push preview cannot carry a confirmation")
+        elif self.preview_receipt is None or self.confirm_publish is not True:
+            raise ValueError("a confirmed publication requires its reviewed preview receipt")
+        return self
+
+
 async def _run(
     request: Request,
     config_manager: ConfigManager,
@@ -482,6 +509,128 @@ async def apply(
         return reply(
             await receipts(request).run(
                 "hub-apply:" + body.request_id, body.model_dump(), mutate, retry_safe=True
+            )
+        )
+
+
+#: Push refusals that are a STATE problem (the world moved since the review), so
+#: the renderer's "preview changed, review again" path -- which keys on exactly
+#: ``publication-preview-changed`` / ``remote-revision-changed`` -- handles them.
+_PUSH_STATE_REFUSALS = frozenset(
+    {
+        "publication-preview-changed",
+        "remote-revision-changed",
+        "policy-revision-changed",
+        "hub-moved",
+        "local-concurrent-edit",
+        "lineage-not-clean",
+    }
+    | _BUNDLE_STATE_REFUSALS
+)
+
+
+def _push_refusal(code: str, message: str) -> HTTPException:
+    """One typed status per push refusal code, so no refusal is an untyped 500.
+
+    An absent or foreign hub row is ONE plain 404 (never a distinguishable 403 that
+    would confirm a private skill exists); a hub that refused for membership is the
+    403 the publish route already uses; an unreachable hub is the 502 retry class.
+    """
+
+    if code == "no-credential":
+        from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
+
+        return _refusal(401, ORG_LOGIN_REMEDY)
+    if code in ("unauthorized", "http-401"):
+        return _refusal(401, message, code="unauthorized")
+    if code in (
+        "link-not-found",
+        "skill-not-found",
+        "skill_not_found",
+        "hub-item-missing",
+        "http-404",
+    ):
+        return _refusal(404, message, code="link-not-found")
+    if code in ("not_a_member", "insufficient_role", "forbidden", "http-403"):
+        return _refusal(403, message, code=code)
+    if code in _PUSH_STATE_REFUSALS:
+        return _refusal(409, message, code=code)
+    if code in ("hub-upstream", "hub-error", "deadline"):
+        return _refusal(502, message, code=code)
+    return _refusal(422, message, code=code or None)
+
+
+@router.post("/v1/desktop/hub/updates/push", response_model=CRUDResponse)
+async def push(
+    body: HubPush,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """Republish ONE linked skill: PREVIEW first, then a CONFIRM that carries its receipt.
+
+    This is the desktop twin of ``lop skills push`` and runs the same engine
+    (``service.preview_link_push`` / ``confirm_link_push`` over ``push_item``); it
+    adds no merge or send path of its own.
+
+    * ``dry_run: true`` -- a local-only proposal plus a receipt. NOTHING is sent to
+      the hub and no link state changes.
+    * ``dry_run: false`` -- re-validates the receipt against the CURRENT local
+      bytes, link scope, policy revision and the hub's own revision, and only then
+      sends. A stale, expired, spent or foreign receipt, or a hub that moved, is a
+      typed 409 and nothing is sent. Replaying the same ``request_id`` answers the
+      recorded outcome; a NEW id with a spent receipt finds no receipt.
+    """
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    def work(ctx: Any) -> dict[str, Any]:
+        try:
+            if body.dry_run:
+                preview = svc.preview_link_push(ctx, link_id=body.link_id)
+                return {
+                    "reports": [],
+                    "status": svc.status_snapshot(ctx),
+                    "links": svc.links_snapshot(ctx),
+                    "preview": preview,
+                }
+            assert body.preview_receipt is not None  # the model validator guarantees it
+            outcome = svc.confirm_link_push(
+                ctx, link_id=body.link_id, preview_receipt=body.preview_receipt
+            )
+        except LinkError as error:
+            raise _push_refusal(getattr(error, "code", "") or "", str(error)) from None
+        report = outcome["report"]
+        state = outcome["state"]
+        result = {
+            "reports": [report],
+            "status": svc.status_snapshot(ctx),
+            "links": svc.links_snapshot(ctx),
+            "preview": None,
+        }
+        if state in ("pushed", "no-op"):
+            return result
+        if state in ("pending-reconciliation", "skipped"):
+            # UNCERTAIN OR DEFERRED, not final: the commit may have landed (or the
+            # outbox is pacing a retry). Recording this answer against the request
+            # id would replay it forever; ``Unclaimed`` lets the same-id retry run
+            # again, where ``push_item`` replays the stored intent verbatim rather
+            # than sending a fresh create.
+            from local_operator.server.utils.desktop_receipts import Unclaimed
+
+            raise Unclaimed(result)
+        # A settled refusal: a deterministic hub answer or a lost CAS. The receipt
+        # stays unspent so the person can review again; the status carries the cause.
+        raise _push_refusal(str(outcome["reason"] or ""), f"the hub did not accept it ({state})")
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-push:" + body.request_id, body.model_dump(), mutate, retry_safe=True
             )
         )
 
