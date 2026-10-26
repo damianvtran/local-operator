@@ -50,6 +50,11 @@ class BannerTick:
     digested: tuple[str, ...] = ()
     released: tuple[str, ...] = ()
     stood_down: str = ""
+    #: How many owed rows this pass found still inside their BANNER_GRACE_MS
+    #: hold. A held row changes nothing in the store, so the caller must NOT
+    #: treat the pass as "covered": the row has to be re-examined as the clock
+    #: advances or it never banners at all (R2-1).
+    held: int = 0
 
 
 def announce_items(
@@ -95,14 +100,16 @@ def announce_items(
     from local_operator.notifications.delivery import grace_remaining_ms
 
     stamp = now_ms if now_ms is not None else int(time.time() * 1000)
+    owed = list(store.undelivered(priority="high", limit=BURST_LIMIT + 1))
+    held_rows = [row for row in owed if grace_remaining_ms(row, stamp) > 0]
     pending = [
         row
-        for row in store.undelivered(priority="high", limit=BURST_LIMIT + 1)
+        for row in owed
         if grace_remaining_ms(row, stamp) <= 0
         and not (held_session_id and str(row.get("session_id") or "") == held_session_id)
     ]
     if not pending:
-        return BannerTick()
+        return BannerTick(held=len(held_rows))
     claimed: list[Mapping[str, Any]] = []
     for row in pending:
         try:
@@ -127,7 +134,7 @@ def announce_items(
             for row in overflow:
                 _release(store, row, claimant)
                 released.append(str(row["id"]))
-    return BannerTick(tuple(raised), tuple(digested), tuple(released))
+    return BannerTick(tuple(raised), tuple(digested), tuple(released), held=len(held_rows))
 
 
 def _attempt(spawn: Callable[[], bool]) -> bool:

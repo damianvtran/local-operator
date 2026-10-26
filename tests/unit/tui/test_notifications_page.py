@@ -61,6 +61,25 @@ def _row(store: NotificationStore, item_id: str) -> dict[str, Any]:
     return row
 
 
+async def _tick_items(app: Any, pilot: Any, *, timeout_s: float = 5.0) -> None:
+    """One real `_notify_inbox_items` pass, WAITED OUT.
+
+    The pass runs in a worker (`asyncio.to_thread`), so a fixed number of
+    `pause()` calls is a race: the audit's own reproduction showed passes that
+    never ran, which is indistinguishable from the latch bug under test. This
+    waits for the latch to clear, which is the observable end of the pass.
+    """
+    app._notify_inbox_items()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        await pilot.pause()
+        await asyncio.sleep(0.02)
+        if not getattr(app, "_inbox_notify_pending", False):
+            # One more pause so the worker's own finally-block state settles.
+            await pilot.pause()
+            return
+
+
 def _page(app: Any) -> Any:
     """The mounted page, asserted present before a test reads its state."""
     view = app._notifications_view
@@ -358,25 +377,42 @@ async def test_the_sidebar_note_counts_the_badge_and_hides_when_unknown(
         assert painted == [3, 0], "an unreadable store paints nothing, not a stale count"
 
 
-def test_a_barren_banner_pass_backs_off_and_resets_on_progress() -> None:
-    """T4: a host that cannot deliver must not rescan at 1 Hz forever.
+@pytest.mark.asyncio
+async def test_the_retry_countdown_never_arms_the_banner_latch(tmp_path: Path, monkeypatch) -> None:
+    """R2-1: the countdown must not leave `_inbox_notify_pending` set.
 
-    Round 1 forgot the stamp on a failed spawn and retried on the very next
-    tick; the completion announcer's own backoff (doubling, capped at
-    ``_BACKGROUND_NOTIFY_MAX_RETRY_TICKS``) is the established answer. This pins
-    the schedule itself, which is where the bug was.
+    Round 1 armed the latch BEFORE the countdown returned, so ONE barren pass
+    silenced this surface for the life of the process (the auditor measured 140
+    consecutive ticks with nothing raised, and independently 70 ticks with no
+    worker at all). This drives the real `_notify_inbox_items` through the
+    countdown and asserts the latch is clear afterwards and the countdown moved.
     """
-    from local_operator.tui import app as app_module
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # The kill switch is not what this test measures, and the harness's own
+    # settings can turn it off; pin it ON so the countdown path is reachable.
+    from local_operator.tui import notify as tui_notify
 
-    wait = 0
-    schedule: list[int] = []
-    for _ in range(8):
-        wait = min(max(1, wait * 2), app_module._BACKGROUND_NOTIFY_MAX_RETRY_TICKS)
-        schedule.append(wait)
-    assert schedule == [1, 2, 4, 8, 16, 32, 64, 64], schedule
-    # Progress resets it: a partly-working backend drains at full speed.
-    wait = 0
-    assert min(max(1, wait * 2), app_module._BACKGROUND_NOTIFY_MAX_RETRY_TICKS) == 1
+    monkeypatch.setattr(tui_notify, "notifications_enabled", lambda: True)
+    app = _app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        # The app's own 1 s poll also drives this leg; wait for any pass already
+        # in flight, or the call under test returns at the latch and proves
+        # nothing.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and app._inbox_notify_pending:
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+        assert app._inbox_notify_pending is False
+        app._inbox_notify_retry_ticks = 3
+        app._notify_inbox_items()
+        assert app._inbox_notify_retry_ticks == 2, "the countdown ran"
+        assert app._inbox_notify_pending is False, "and the latch was never armed"
+        # Drain it, then a pass is allowed again — the leg is not stuck.
+        app._notify_inbox_items()
+        app._notify_inbox_items()
+        assert app._inbox_notify_retry_ticks == 0
+        assert app._inbox_notify_pending is False
 
 
 def test_the_header_states_no_counts_for_an_errored_snapshot() -> None:

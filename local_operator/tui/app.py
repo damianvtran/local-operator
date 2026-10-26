@@ -5225,7 +5225,10 @@ class OperatorApp(App[None]):
         #: (``None`` so the FIRST tick always looks), and the first-visible
         #: stamp per on-screen notify card for in-view reads.
         self._inbox_notify_pending = False
-        self._inbox_notify_stamp: tuple[int, int, int, int] | None = None
+        #: The store doorbell's last-scanned tuple. Its arity grew when the ask
+        #: index joined it (T7), so the annotation is opaque rather than a
+        #: fixed-width tuple that a future column would have to chase.
+        self._inbox_notify_stamp: tuple[int, ...] | None = None
         self._inbox_seen_pending = False
         self._inbox_card_seen_at: dict[str, int] = {}
         #: Retry backoff for a banner whose spawn reported nothing (T4): the
@@ -32819,6 +32822,18 @@ class OperatorApp(App[None]):
 
         if not notifications_enabled():
             return
+        if self._inbox_notify_retry_ticks > 0:
+            # A barren attempt asked for a delay: count it down here rather than
+            # scanning again, so a host that cannot deliver does one pass per
+            # interval instead of one per second (T4, the completion leg's M2).
+            #
+            # BEFORE THE LATCH IS ARMED, not after (R2-1). Round 1 set
+            # ``_inbox_notify_pending`` first and returned from further down, so
+            # the latch was never cleared: after ONE barren pass this surface
+            # raised no banner again for the life of the process — 140
+            # consecutive ticks measured with nothing delivered.
+            self._inbox_notify_retry_ticks -= 1
+            return
         self._inbox_notify_pending = True
 
         def collect() -> None:
@@ -32861,13 +32876,15 @@ class OperatorApp(App[None]):
                 self._inbox_notify_stamp = None
             elif tick.raised or tick.digested:
                 self._inbox_notify_retry_wait = 0
-
-        if self._inbox_notify_retry_ticks > 0:
-            # A barren attempt asked for a delay: count it down here rather than
-            # scanning again, so a host that cannot deliver does one pass per
-            # interval instead of one per second (T4, the completion leg's M2).
-            self._inbox_notify_retry_ticks -= 1
-            return
+            if tick.held:
+                # A HELD ROW IS NOT A COVERED ROW (R2-1). It is inside its
+                # BANNER_GRACE_MS hold, waiting for a receipt that may cancel
+                # it — and because a hold writes nothing, the store stamp is
+                # unchanged, so the stamp gate below would skip this revision
+                # forever and it would never banner. Forget the stamp and let
+                # the next tick look again; the hold lasts 2.5 s, so this is a
+                # handful of cheap reads, not a loop.
+                self._inbox_notify_stamp = None
 
         async def run() -> None:
             try:
