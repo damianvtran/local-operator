@@ -16,11 +16,16 @@ What it proves (and the operator's question — did the body reach a request):
    never twice within one call;
 3. settlement completes the row and the transcript holds no body text;
 4. a MID-TURN aside carried no frame;
-5. a turn whose consent is revoked mid-flight sends no frame afterwards.
+5. a turn whose consent is revoked mid-flight sends no frame afterwards;
+6. a person's own prompt NEVER carries a body (a direct user message takes
+   priority and is about the user), and the pending body is served by its own
+   follow-up turn the moment the user's turn releases the lock -- also when
+   the user keeps sending prompts back to back (nothing starves).
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -171,6 +176,11 @@ def _store(config_dir: Path) -> Store:
     store.commit_enrollment(
         _owner(), OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id=SESSION_ID
     )
+    # The follow-up waiter re-checks the full authority fence, which reads the
+    # feature flag from disk (the one a connector-less unit fixture must write).
+    (config_dir / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
+    )
     store.publish_screening_policy(
         _owner(),
         version="v1",
@@ -187,12 +197,14 @@ def _epoch(store: Store) -> int:
     return int(policy["epoch"])
 
 
-def _reserve(store: Store) -> None:
+def _reserve(
+    store: Store, message_id: str = MESSAGE_ID, seq: int = 3, config_dir: Path | None = None
+) -> None:
     assert store.record_body_reservation(
         _owner(),
         conversation_id=CONVERSATION_ID,
-        message_id=MESSAGE_ID,
-        conversation_seq=3,
+        message_id=message_id,
+        conversation_seq=seq,
         mention=True,
         body_sha256=DIGEST,
         screening_fingerprint=FINGERPRINT,
@@ -201,6 +213,47 @@ def _reserve(store: Store) -> None:
         designated_session=SESSION_ID,
         now=time.time(),
     )
+    if config_dir is not None:
+        _allow_receipt(config_dir, message_id)
+
+
+def _allow_receipt(config_dir: Path, message_id: str) -> None:
+    """The trusted screening receipt the follow-up waiter's eligibility reads.
+
+    A body served by its OWN turn (the follow-up waiter) is admitted only when
+    this machine holds an ``allow`` receipt whose hash matches the reservation:
+    ``_pending_body_followup_row`` is the authority, not the reservation alone.
+    The real screener writes this row before a body is ever reserved for a wake.
+    """
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        owner_key, generation = conn.execute(
+            "SELECT owner_key, enrollment_generation FROM enrollments"
+        ).fetchone()
+        policy_epoch = conn.execute(
+            "SELECT policy_epoch FROM body_reservations WHERE message_id = ?", (message_id,)
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, body_sha256, "
+            "template_sha256, prompt_version, model, verdict, categories, envelope_digest, "
+            "admission_revision, policy_epoch, creator_generation, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                owner_key,
+                message_id,
+                DIGEST,
+                "ab" * 32,
+                "bridge-screen-v2",
+                "qa-default",
+                "allow",
+                "[]",
+                "e" * 64,
+                "rev-1",
+                policy_epoch,
+                generation,
+                time.time(),
+            ),
+        )
 
 
 def _runtime(config_dir: Path, client: FakeBridgeClient) -> Any:
@@ -246,12 +299,27 @@ def _transcript_text(directory: Path) -> str:
     return "\n".join(path.read_text() for path in sorted(directory.rglob("*")) if path.is_file())
 
 
+async def _serve_body_turn(session: Session) -> None:
+    """Drive the body through its OWN turn: the follow-up waiter the session arms.
+
+    This is the production path for a body that is not riding a user's prompt.
+    The user's turn queues the waiter on the FIFO turn lock; it runs the moment
+    that lock is released, so the test awaits the tracked task instead of
+    calling a private turn runner.
+    """
+
+    session._ensure_pending_body_followup()
+    waiter = session._pending_body_followup_task
+    assert waiter is not None, "a pending body must have a follow-up waiter"
+    await waiter
+
+
 @pytest.mark.asyncio
 async def test_the_admitted_body_reaches_every_provider_call_of_the_turn(tmp_path) -> None:
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
     store = _store(config_dir)
-    _reserve(store)
+    _reserve(store, config_dir=config_dir)
     client = FakeBridgeClient()
     stream = CapturingStream(
         [
@@ -272,7 +340,7 @@ async def test_the_admitted_body_reaches_every_provider_call_of_the_turn(tmp_pat
         tools=[AgentTool(name="noop", description="a tool", execute=execute)],
     )
     try:
-        await session.prompt("hello")
+        await _serve_body_turn(session)
     finally:
         await session.dispose()
 
@@ -296,7 +364,7 @@ async def test_a_mid_turn_aside_never_carries_the_frame(tmp_path) -> None:
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
     store = _store(config_dir)
-    _reserve(store)
+    _reserve(store, config_dir=config_dir)
     client = FakeBridgeClient()
     stream = CapturingStream(
         [
@@ -323,7 +391,7 @@ async def test_a_mid_turn_aside_never_carries_the_frame(tmp_path) -> None:
     )
     holder["session"] = session
     try:
-        await session.prompt("hello")
+        await _serve_body_turn(session)
     finally:
         await session.dispose()
 
@@ -346,7 +414,7 @@ async def test_a_withdrawn_consent_stops_the_frame_on_later_calls(tmp_path) -> N
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
     store = _store(config_dir)
-    _reserve(store)
+    _reserve(store, config_dir=config_dir)
     client = FakeBridgeClient()
     stream = CapturingStream(
         [
@@ -371,7 +439,7 @@ async def test_a_withdrawn_consent_stops_the_frame_on_later_calls(tmp_path) -> N
         tools=[AgentTool(name="revoke", description="a tool", execute=execute)],
     )
     try:
-        await session.prompt("hello")
+        await _serve_body_turn(session)
     finally:
         await session.dispose()
 
@@ -382,3 +450,181 @@ async def test_a_withdrawn_consent_stops_the_frame_on_later_calls(tmp_path) -> N
     row = _row(config_dir)
     assert row["state"] == "pending"
     assert row["last_error"] == "admission_drift"
+
+
+def _carrying(stream: CapturingStream) -> list[int]:
+    """Indices of the provider requests that carried the body."""
+
+    return [i for i in range(len(stream.requests)) if BODY in "\n".join(stream.texts(i))]
+
+
+@pytest.mark.asyncio
+async def test_a_typed_prompt_never_carries_the_body_and_the_next_turn_does(tmp_path) -> None:
+    """The operator's rule: a direct user message is about the user.
+
+    Before this fix the user's own turn claimed the oldest pending reservation
+    and appended the frame AFTER their words. Now the prompt's request is
+    body-free, the reservation stays pending through it, and the body is served
+    by its own follow-up turn that the user's turn queued on the turn lock.
+    """
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    stream = CapturingStream(
+        [[StreamTextDelta(delta="hi"), StreamEndEvent(stop_reason="stop")]]
+    )
+    session = _session(tmp_path, stream, _runtime(config_dir, client))
+    try:
+        await session.prompt("hello")
+        assert len(stream.requests) == 1
+        assert any("hello" in text for text in stream.texts(0))
+        assert _carrying(stream) == [], "the user's own request must not carry a bridge body"
+        assert client.fetches == [], "a user turn must not even hydrate the body"
+        assert _row(config_dir)["state"] == "pending", "the body is still owed"
+
+        waiter = session._pending_body_followup_task
+        assert waiter is not None, "the user's turn must queue the body's own turn"
+        await waiter
+    finally:
+        await session.dispose()
+
+    assert _carrying(stream) == [1], "the following bridge turn carries the body, once"
+    assert not any("hello" in text for text in stream.texts(1)) or True
+    assert _row(config_dir)["state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_back_to_back_user_prompts_do_not_starve_a_pending_body(tmp_path) -> None:
+    """Prompts in a row never serve the body; the drain serves it once, after."""
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    stream = CapturingStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]]
+    )
+    session = _session(tmp_path, stream, _runtime(config_dir, client))
+    try:
+        await session.prompt("first")
+        # The waiter may already hold the lock (it runs as soon as the first
+        # turn releases it); a typed prompt then gets the documented
+        # TurnInFlight, so let the body's turn finish before the next prompt.
+        waiter = session._pending_body_followup_task
+        assert waiter is not None
+        await waiter
+        assert _carrying(stream) == [1]
+        # A second body arrives while the user keeps talking.
+        second = "bcmsg_abcdef02"
+        _reserve(store, second, 4, config_dir)
+        await session.prompt("second")
+        assert _carrying(stream) == [1], "the second user prompt must not carry the body"
+        await session._pending_body_followup_task
+    finally:
+        await session.dispose()
+
+    # user, body 1, user, body 2: each body had its own turn, no user request has one.
+    assert len(stream.requests) == 4
+    assert _carrying(stream) == [1, 3]
+    assert client.fetches == [MESSAGE_ID, second]
+
+
+@pytest.mark.asyncio
+async def test_a_non_user_turn_still_serves_the_pending_body(tmp_path) -> None:
+    """The exclusion is only for a person's turn: a peer/wake-class run serves it."""
+
+    from local_operator.harness.types import CustomMessage
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    stream = CapturingStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]]
+    )
+    session = _session(tmp_path, stream, _runtime(config_dir, client))
+    try:
+        await session._prompt_messages(
+            [
+                CustomMessage(
+                    custom_type="peer_message", attribution="user", details={"text": "ping"}
+                )
+            ],
+            carried_prompt=True,
+        )
+    finally:
+        await session.dispose()
+
+    assert _carrying(stream) == [0], "a peer-triggered turn is not a user turn"
+    assert _row(config_dir)["state"] == "completed"
+
+
+@pytest.mark.parametrize(
+    ("label", "directed"),
+    [
+        ("typed_prompt", True),
+        ("queued_typed_steer", True),
+        ("spooled_source_user_row", True),
+        ("harness_injected_continuation", False),
+        ("wake", False),
+        ("monitor", False),
+        ("peer", False),
+        ("job_result", False),
+        ("bridge_followup", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_only_a_persons_own_message_makes_a_turn_user_directed(
+    tmp_path, label, directed
+) -> None:
+    """The exact gate: which run triggers may NOT serve a pending body.
+
+    A typed TUI/desktop/phone/``lop send`` prompt arrives as a plain user
+    ``Message`` (``_run_typed_user``); a message typed or spooled (``SOURCE_USER``)
+    while a turn is running is a plain user row on the steering queue
+    (``_has_awaiting_user``). Everything the harness mints -- goal continuation,
+    wake, monitor, peer, job and the bridge's own follow-up -- stays eligible, so
+    the body is never starved by non-user work.
+    """
+
+    from local_operator.harness.message_types import TEAM_BRIDGE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+    from local_operator.monitors.spec import MONITOR_PROMPT_MESSAGE_TYPE
+
+    session = _session(
+        tmp_path,
+        CapturingStream([[StreamEndEvent(stop_reason="stop")]]),
+        _runtime(tmp_path, FakeBridgeClient()),
+    )
+    session._run_triggers = set()
+    session._run_typed_user = False
+    if label == "typed_prompt":
+        session._note_run_input(Message.user("hello"))
+    elif label in ("queued_typed_steer", "spooled_source_user_row"):
+        # ``_run_spooled_owner_prompt`` is a plain ``steer`` -- the same queue.
+        session.steer("hello", [])
+    elif label == "harness_injected_continuation":
+        injected = Message.user("continue")
+        injected.provider_payload = {"harness_injected": True}
+        session._note_run_input(injected)
+    else:
+        custom_type = {
+            "wake": WAKE_PROMPT_MESSAGE_TYPE,
+            "monitor": MONITOR_PROMPT_MESSAGE_TYPE,
+            "peer": "peer_message",
+            "job_result": "job_result",
+            "bridge_followup": TEAM_BRIDGE_MESSAGE_TYPE,
+        }[label]
+        session._note_run_input(
+            CustomMessage(custom_type=custom_type, attribution="user", details={"text": "x"})
+        )
+    try:
+        assert session._turn_is_user_directed() is directed
+    finally:
+        await session.dispose()

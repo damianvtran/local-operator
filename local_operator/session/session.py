@@ -15390,6 +15390,19 @@ class Session:
                 self._run_user_text = str(getattr(message, "text", "") or "")[:USER_TEXT_MAX_CHARS]
                 self._last_typed_user_text = self._run_user_text
 
+    def _turn_is_user_directed(self) -> bool:
+        """Whether a person's own message drives this run (body-exclusion gate).
+
+        A typed prompt (TUI, desktop/phone/``lop send`` via the runtime handle,
+        or a spooled ``SOURCE_USER`` row steered into the run) is "typed" in
+        ``_run_typed_user``/``_has_awaiting_user``; a person answering an ask
+        counts too. Peer, wake, monitor, job and bridge follow-up runs are none
+        of those. The broader ``'user' in _run_triggers`` is deliberately NOT
+        the test: harness-minted continuations (goal loop, owner chrome) land in
+        that class but are not a person speaking, so they may still serve a body.
+        """
+        return self._run_typed_user or self._has_awaiting_user()
+
     def _has_awaiting_user(self) -> bool:
         """§14.2's ``awaiting_user``: a plain user message queued, unconsumed.
 
@@ -18064,7 +18077,16 @@ class Session:
                 return witness()
 
             if opened_body is None:
-                await self._open_pending_body_turn()
+                if self._turn_is_user_directed():
+                    # A person's own message is about the person: it must never
+                    # carry (or be delayed by) a Team Bridge body, which would
+                    # land after their words in the same request. The body stays
+                    # pending and is served by its own turn -- queue the finite
+                    # follow-up pass NOW, since no arrival may be coming to
+                    # rearm it. It waits on the FIFO turn lock behind this turn.
+                    self._ensure_pending_body_followup()
+                else:
+                    await self._open_pending_body_turn()
             else:
                 # The guarded same-session follow-up already claimed/fetched
                 # this immutable turn frame. Never claim a second body here.
