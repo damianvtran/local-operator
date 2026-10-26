@@ -921,3 +921,69 @@ async def test_abort_during_a_backoff_returns_promptly(context: ToolContext) -> 
 
     assert is_error is True
     assert "aborted" in preview.lower()
+
+
+def _golden_markdown_page() -> str:
+    out = ["# Golden", ""]
+    for i in range(200):
+        out += [
+            f"## Part {i}",
+            "",
+            f"Paragraph {i}: max_connections appears here as filler text {i}.",
+            "",
+        ]
+    return "\n".join(out)
+
+
+@pytest.mark.asyncio
+async def test_no_query_oversized_preview_is_byte_identical_to_pre_query_shape(
+    context: ToolContext,
+) -> None:
+    """Regression guard for the ``query`` parameter: a call WITHOUT it must
+    produce exactly the head/tail preview that shipped before it existed.
+
+    The digest was taken from the merge-base tree (7306a8295a3e, v0.90.7+1)
+    running this same fixture; text/markdown is used because it passes through
+    without a renderer, so the pin cannot drift with a markdownify upgrade. A
+    change here means every no-query fetch the model sees has changed shape —
+    re-pin only with that stated in the PR.
+    """
+    import hashlib
+
+    page = _golden_markdown_page()
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, text=page, headers={"content-type": "text/markdown"})
+    )
+    preview, _details, _is_error = await run_fetch(
+        "https://example.com/md", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert len(preview) == 8638
+    assert (
+        hashlib.sha256(preview.encode()).hexdigest()
+        == "773723657051c44d3191b32c52cc3b4e05a01d0f591ccf56c3aeea0d114a4985"
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_url_sugar_never_passes_a_query(
+    context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``read <url>`` keeps the plain head/tail shape: the sugar has no query
+    argument, and must not start sending one by default."""
+    seen: dict[str, object] = {}
+    real = tool.run_fetch
+    page = _golden_markdown_page()
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, text=page, headers={"content-type": "text/markdown"})
+    )
+
+    async def spy(url: str, **kwargs):
+        seen.update(kwargs)
+        kwargs.setdefault("transport", transport)
+        return await real(url, **kwargs)
+
+    monkeypatch.setattr(tool, "run_fetch", spy)
+    result = await execute_read("t1", {"path": "https://example.com/md"}, None, None, context)
+    assert seen.get("query") is None
+    assert "query_passages" not in (result.details or {})
+    assert "Full output" in result.content[0].text
