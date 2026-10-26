@@ -3006,6 +3006,61 @@ def _member_name(record: Any, device_id: str) -> str:
     return str(member.name) if member is not None else ""
 
 
+def _member_rm_already_revoked(args: argparse.Namespace, record: Any) -> int | None:
+    """``member rm`` on an EXACT id that is already removed: say so, and repair.
+
+    WHY. ``lop network show`` lists a removed member (``active:false``) with its id,
+    so an operator cleaning up copies that id into ``member rm`` — and used to be
+    told ``unknown_member``, while credential metadata still named the device as a
+    holder and nothing would ever prune it. The removal already happened; what is
+    left is its idempotent local repair (``relay.repair_removed_member``: no epoch
+    rotation, tombstone and burned id kept, nothing remote claimed erased).
+
+    THE RECOGNITION LIVES HERE, NOT IN ``_resolve_device``. That resolver is shared
+    with ``credential share --with`` and ``member grant|revoke``, which must stay
+    ACTIVE-ONLY — a share or a grant resolving to a removed device would be a write
+    about a device that can no longer authenticate. Removal is the one operation
+    for which "already removed" is a meaningful answer, so only this verb asks.
+
+    EXACT ID ONLY: names are cosmetic and may be reused by an active member, and a
+    tail is a convenience for live devices — the burned id is the identity. Returns
+    ``None`` when the argument is not an already-removed id, so the caller's
+    ``unknown_member`` refusal stands unchanged.
+    """
+    from local_operator.network.credentials import messages as messages_mod
+
+    wanted = str(args.device or "").strip()
+    tombstone = next((row for row in record.members if str(row.device_id) == wanted), None)
+    if not wanted or not (record.is_burned(wanted) or (tombstone and not tombstone.active)):
+        return None
+    imported = _import_relay()
+    pruned = imported.repair_removed_member(record, device_id=wanted, by=record.self_device_id)
+    name = str(tombstone.name) if tombstone is not None and tombstone.name else wanted
+    repaired = (
+        f"removed {len(pruned)} stale credential reference(s) to it: {', '.join(pruned)}"
+        if pruned
+        else "no credential references to it remained"
+    )
+    return _emit(
+        args,
+        {
+            "ok": True,
+            "code": "already_revoked",
+            "network_id": record.network_id,
+            "removed": wanted,
+            "epoch": record.epoch,
+            "rotated": False,
+            "repaired": pruned,
+        },
+        [
+            f"{name} ({wanted[:8]}) was already removed from {record.name}; "
+            f"the epoch was not rotated again (it is {record.epoch})",
+            repaired,
+            *messages_mod.COPY_CEILING_LINES,
+        ],
+    )
+
+
 def _cmd_member_rm(args: argparse.Namespace) -> int:
     """Revoke a member: tombstone, rotate, bump the epoch, fan out (R5)."""
     # THE ARGUMENT IS A DEVICE, AND EVERY OTHER SURFACE PRINTS ITS NAME — the same rule
@@ -3028,6 +3083,9 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
         # that could inform them — it is the one that matches what the write needs.)
         # Safe here because ``require_secrets`` only reads.
         store.require_secrets(record.network_id)
+        already = _member_rm_already_revoked(args, record)
+        if already is not None:
+            return already
         raise MeshRefusal(
             "unknown_member",
             f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
