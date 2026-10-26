@@ -517,6 +517,66 @@ def test_the_retired_runtimes_own_exit_writes_do_not_refuse_the_move(
     monkeypatch.setattr(mobility, "_retire_local_runtime", real_retire)
 
 
+def test_a_write_nothing_here_caused_is_absorbed_once_the_retire_is_confirmed(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE LOOSER HALF OF THE ABSORPTION (review round 1, m2), pinned on purpose.
+
+    ``_departed_runtime_explains`` asks only "did the runtime THIS CALL RETIRED leave
+    its exit record" — it never asks what changed. So a turn that lands inside the
+    retire window is absorbed too, not just the exit path's own writes. That is safe
+    for a reason the journal cannot express (the manifest is rebuilt from the
+    re-stamped set and the commit compares against a fresh digest under the epoch),
+    but the behaviour is looser than "unattributable changes are refused", and this
+    cell exists so a later reader does not tighten it back into the spurious ``busy``
+    the operator hit on 2026-10-25.
+
+    The refusal side is pinned separately by
+    ``test_a_source_that_changes_while_it_is_being_prepared_is_refused`` — that session
+    is ``cold``, so nothing explains the change at all.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    server_b.bind_control()
+    server_b.start()
+    _pair_settled(pair_devices, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+
+    def retire_while_a_turn_lands(*args: Any, **kwargs: Any) -> Any:
+        """The exit record, plus a row this call did not write."""
+        (source / "runtime-exit.json").write_text(
+            json.dumps(
+                {
+                    "v": 1,
+                    "kind": "runtime-exit",
+                    "session_id": SESSION,
+                    "pid": 4242,
+                    "started_at": 1700000000.0,
+                    "at": 1700000100.0,
+                    "reason": "socket-stop",
+                    "detail": "",
+                    "requested": True,
+                    "build": "0.90.3",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (source / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"id": "e98", "type": "user", "content": "a late turn"}) + "\n")
+        return {"result": "retired", "sentence": "", "pid": 4242}
+
+    monkeypatch.setattr(mobility, "_retire_local_runtime", retire_while_a_turn_lands)
+
+    moved = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    # ABSORBED, and the row travels with the copy rather than being silently dropped:
+    # the destination's transcript is what the source's bytes now contain.
+    assert moved["ok"] is True, moved
+    assert moved["state"] == "completed", moved
+    arrived = (server_b.root / "sessions" / SESSION / "transcript.jsonl").read_text("utf-8")
+    assert "a late turn" in arrived, arrived
+
+
 def test_a_restarted_relay_is_what_clears_a_parked_entry_on_the_shipped_build(
     root: Path,
 ) -> None:
