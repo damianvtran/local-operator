@@ -401,7 +401,11 @@ def select_passages(
                 if end - chunk.start > 12:
                     break
                 follow += 1
-        if start > end or any(n in shown_lines for n in (start, end)):
+        # A true interval test, not an endpoint test: a heading hit extended
+        # over its section can CONTAIN a passage already chosen, and showing
+        # those lines twice spends budget on a duplicate. Bounded by the chunk
+        # size (≤ _CHUNK_MAX_LINES plus the heading extension), so still linear.
+        if start > end or any(n in shown_lines for n in range(start, end + 1)):
             continue
         room = min(passage_cap, budget - used)
         if len(lines[start - 1]) > room:
@@ -430,10 +434,7 @@ def select_passages(
     more = sum(
         1
         for _score, index in scored
-        if not any(
-            p.start <= chunks[index].start <= p.end or p.start <= chunks[index].end <= p.end
-            for p in chosen
-        )
+        if not any(chunks[index].start <= p.end and p.start <= chunks[index].end for p in chosen)
     )
     chosen.sort(key=lambda p: p.start)
     return Selection(tuple(chosen), more, _search_hint(parsed, idf))

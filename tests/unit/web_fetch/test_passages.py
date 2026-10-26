@@ -329,3 +329,55 @@ async def test_more_matches_hint_resolves_through_read(context: ToolContext) -> 
     found = await execute_read("r", {"path": match.group(1)}, None, None, context)
     assert found.is_error is False
     assert "Group" in found.text
+
+
+def test_passages_never_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression from the live RFC 9110 preview: a body chunk outranked its
+    heading, then the heading's section extension CONTAINED that chosen body.
+    Endpoint-only overlap checks let both through, duplicating lines 7874-7881.
+    Scores are forced to pin this selection order without a fragile BM25 fixture.
+    """
+    # The body paragraph is long enough to close its own chunk, so the
+    # following paragraph is a SEPARATE chunk of the same section: the chosen
+    # body then sits INTERIOR to the heading's extension, where an endpoint-only
+    # overlap check is blind (both endpoints belong to other chunks).
+    body = "The 421 Misdirected Request status code is defined here. " * 9
+    lines = [
+        "# Doc",
+        "",
+        "## First matching section",
+        "",
+        "First matching body.",
+        "",
+        "## 421 Misdirected Request",
+        "",
+        body,
+        "",
+        "A following paragraph in the same section.",
+        "",
+        "## Unrelated",
+        "",
+        "No match here.",
+    ]
+    chunks = chunk_lines(lines)
+    assert [(c.start, c.end) for c in chunks] == [
+        (1, 1),
+        (3, 3),
+        (5, 5),
+        (7, 7),
+        (9, 9),
+        (11, 11),
+        (13, 13),
+        (15, 15),
+    ]
+    # First section, target body, then target heading: the exact problematic order.
+    monkeypatch.setattr(
+        passages,
+        "_score_chunks",
+        lambda _lines, _chunks, _query: ([(100.0, 1), (90.0, 4), (80.0, 3)], {}),
+    )
+    sel = select_passages(lines, "Misdirected Request status code", budget=4000)
+    assert sel is not None
+    spans = sorted((p.start, p.end) for p in sel.passages)
+    for (_a, b), (c, _d) in zip(spans, spans[1:]):
+        assert b < c, spans
