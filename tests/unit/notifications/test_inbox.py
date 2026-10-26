@@ -269,6 +269,43 @@ def test_detail_carries_session_history_and_the_conversations_asks(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
+# Lease fixtures: a live desktop lease for the BANNER tests (L1b)
+# ---------------------------------------------------------------------------
+
+
+def _lease(root: Path, *, session_id: str, **extra: Any) -> None:
+    """A live desktop lease, written through the real publisher, plus raw extras.
+
+    Used by the banner/delivery tests, which need a REAL lease (rung 4's own
+    reader) rather than a stand-in. It is not the deleted rung-0 evaluator: no
+    test here marks an item read from a lease, and ``READ_VIA`` has no
+    ``watching`` value any more.
+    """
+    import json
+
+    from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
+    from local_operator.session.runtime.presence import (
+        delivery_record_path,
+        reset_cache,
+    )
+
+    publisher = DesktopDeliveryPublisher(root)
+    publisher.update(
+        "sub-1",
+        can_notify=True,
+        can_notify_kinds=["complete"],
+        session_id=session_id,
+        window={"exists": True, "focused": True, "visible": True, "minimized": False},
+    )
+    if extra:
+        path = delivery_record_path(publisher.instance_id, root)
+        record = json.loads(path.read_text())
+        record.update(extra)
+        path.write_text(json.dumps(record))
+    reset_cache()
+
+
+# ---------------------------------------------------------------------------
 # The tool and its door (§3.1-§3.4)
 # ---------------------------------------------------------------------------
 

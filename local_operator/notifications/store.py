@@ -372,15 +372,31 @@ def _encode_cursor(updated_at: int, item_id: str) -> str:
     return f"{int(updated_at)}.{item_id}"
 
 
+#: The largest integer SQLite can bind (it stores integers as int64). A cursor
+#: stamp above this can only come from a corrupted or hostile client, and
+#: handing it to sqlite raises ``OverflowError`` from deep inside a query.
+CURSOR_STAMP_MAX = 2**63 - 1
+
+
 def _decode_cursor(cursor: str | None) -> tuple[int, str] | None:
-    """The opaque list cursor. Malformed is "from the top", never an error."""
+    """The opaque list cursor. Malformed is "from the top", never an error.
+
+    OUT OF RANGE IS MALFORMED (QA round 2): the wire refuses such a stamp with
+    a 422 (``items.cursor_in_range``), and this is the second line of defence
+    for every other caller — a value sqlite cannot bind must never reach the
+    query, because ``OverflowError`` there is not a store failure and would
+    surface as an unclassified 500.
+    """
     if not cursor:
         return None
     stamp, _, item_id = str(cursor).partition(".")
     try:
-        return int(stamp), item_id
+        value = int(stamp)
     except ValueError:
         return None
+    if not 0 <= value <= CURSOR_STAMP_MAX:
+        return None
+    return value, item_id
 
 
 class NotificationStore:

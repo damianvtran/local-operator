@@ -34,7 +34,7 @@ import re
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.i18n.keys import wire_errors_notifications as _wn
 from local_operator.i18n.messages import render
@@ -93,6 +93,13 @@ def _lapsed_window(root: pathlib.Path) -> int:
     return lapsed_visible_ms(root, poll_now=True)
 
 
+#: A list cursor: the store's own shape (``<epoch_ms>.<item_id>``) with the two
+#: wire bounds the store depends on — a length and a MAGNITUDE. Both transports
+#: validate with this one annotation, so a value sqlite cannot bind is a 422 on
+#: either surface and never reaches the query (QA round 2).
+CursorQuery = Annotated[str | None, AfterValidator(inbox.cursor_in_range)]
+
+
 class NotificationsQuery(BaseModel):
     """The list route's query, as ONE model both transports validate with.
 
@@ -108,7 +115,7 @@ class NotificationsQuery(BaseModel):
     source: Literal["notify", "ask"] | None = None
     priority: Literal["high", "normal", "low"] | None = None
     session_id: Annotated[str | None, Field(pattern=r"^[a-f0-9]{12}$")] = None
-    cursor: Annotated[str | None, Field(max_length=80)] = None
+    cursor: Annotated[CursorQuery, Field(max_length=80)] = None
     through_seq: Annotated[int | None, Field(ge=0)] = None
     limit: Annotated[int, Field(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT
 
@@ -120,7 +127,7 @@ async def list_notifications(
     source: Literal["notify", "ask"] | None = None,
     priority: Literal["high", "normal", "low"] | None = None,
     session_id: Annotated[str | None, Query(pattern=r"^[a-f0-9]{12}$")] = None,
-    cursor: Annotated[str | None, Query(max_length=80)] = None,
+    cursor: Annotated[CursorQuery, Query(max_length=80)] = None,
     through_seq: Annotated[int | None, Query(ge=0)] = None,
     limit: Annotated[int, Query(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT,
 ):

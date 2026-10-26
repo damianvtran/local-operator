@@ -323,3 +323,50 @@ def test_an_unreadable_store_answers_the_desktops_refusal() -> None:
 
 
 # -- round 1 remediation: transport parity (R7, Q5) --------------------------
+
+
+#: The cursor is bounded in LENGTH and in MAGNITUDE. The length bound alone was
+#: the round-2 defect: 79 digits fit, and sqlite could not bind them.
+CURSOR_SHAPES: list[tuple[str, str]] = [
+    ("9 x 200 characters", "9" * 200),
+    ("9 x 79 characters", "9" * 79),
+    ("9 x 40 characters", "9" * 40),
+    ("int64 max + 1", "9223372036854775808.n_aaaaaaaaaaaaaaaa"),
+    ("negative, out of range", "-" + "9" * 30),
+]
+
+
+def test_an_out_of_range_cursor_is_refused_on_the_wire() -> None:
+    """QA round 2: a magnitude bound, not a longer length bound.
+
+    Each shape below answered 500 with ``OverflowError: Python int too large to
+    convert to SQLite INTEGER`` (store.py, ``list_items``) on the previous head;
+    the length bound refused only the first. A NON-NUMERIC cursor stays the
+    documented "from the top" case and must keep answering 200.
+    """
+    client = _client()
+    for label, cursor in CURSOR_SHAPES:
+        response = client.get("/api/notifications", params={"cursor": cursor})
+        assert response.status_code == 422, (label, response.status_code, response.text)
+    # The boundary itself is a real stamp: 2**63 - 1 is bindable.
+    boundary = client.get(
+        "/api/notifications", params={"cursor": "9223372036854775807.n_aaaaaaaaaaaaaaaa"}
+    )
+    assert boundary.status_code == 200, boundary.text
+    # ...and malformed-by-contract still means "from the top", never an error.
+    top = client.get("/api/notifications", params={"cursor": "not-a-cursor"})
+    assert top.status_code == 200, top.text
+
+
+def test_the_store_refuses_an_unbindable_stamp_without_raising() -> None:
+    """The second line of defence: no caller can hand sqlite an out-of-range stamp."""
+    from local_operator.notifications.items import list_page
+    from local_operator.notifications.store import NotificationStore, _decode_cursor
+
+    for _, cursor in CURSOR_SHAPES:
+        assert _decode_cursor(cursor) is None, cursor
+    assert _decode_cursor("1.n_aaaaaaaaaaaaaaaa") == (1, "n_aaaaaaaaaaaaaaaa")
+    # And the page itself is unaffected by the value that used to kill it.
+    NotificationStore(config_dir()).notify(SID, title="x", priority="high")
+    page = list_page(config_dir(), cursor="9" * 79)
+    assert page["items"], "an unbindable cursor reads from the top rather than raising"

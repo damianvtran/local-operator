@@ -5501,6 +5501,14 @@ def _notification_refusal(error: BaseException) -> Response | None:
     from local_operator.server.routes.desktop_notifications import notifications_refusal
     from local_operator.session.store_failures import store_failure
 
+    # A cursor sqlite cannot bind is the WIRE's refusal, not a store failure:
+    # the shared `NotificationsQuery` validator answers 422 for it, and this is
+    # the backstop for any path that reaches the store first (QA round 2).
+    if isinstance(error, OverflowError):
+        return JSONResponse(
+            {"error": "cursor is out of range", "code": "invalid_cursor"},
+            status_code=422,
+        )
     failure = store_failure(error, config_dir())
     if failure is None:
         return None

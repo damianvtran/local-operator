@@ -286,6 +286,29 @@ def counts(config_dir: Path | str, store: NotificationStore | None = None) -> di
     }
 
 
+def cursor_in_range(value: str | None) -> str | None:
+    """Refuse a cursor whose stamp cannot be an epoch stamp (QA round 2).
+
+    Length was bounded and magnitude was not, so ``9`` x 79 digits passed the
+    wire and died in sqlite. The rule is the store's own: a stamp is a
+    non-negative integer inside int64 (``store.CURSOR_STAMP_MAX``). A
+    NON-NUMERIC cursor is the documented "from the top" case and stays
+    accepted; only a well-formed stamp that cannot exist is refused.
+    """
+    from local_operator.notifications.store import CURSOR_STAMP_MAX
+
+    if not value:
+        return value
+    stamp, _, _ = str(value).partition(".")
+    try:
+        magnitude = int(stamp)
+    except ValueError:
+        return value
+    if not 0 <= magnitude <= CURSOR_STAMP_MAX:
+        raise ValueError("cursor stamp is out of range")
+    return value
+
+
 def list_page(
     config_dir: Path | str,
     *,
