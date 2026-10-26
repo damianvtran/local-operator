@@ -12,7 +12,7 @@
  */
 import type { MessageKey } from "../i18n/keys.gen";
 import { messageRuntime } from "../store";
-import type { NotificationItem, NotificationsReceipt, NotificationToken } from "../types";
+import type { Capabilities, NotificationItem, NotificationsBlock, NotificationsReceipt, NotificationToken } from "../types";
 
 export type NotificationsOp = "read" | "unread" | "dismiss" | "undismiss";
 
@@ -120,6 +120,29 @@ export function mergeObserved(current: NotificationToken[], next: NotificationTo
 /** The drawer badge as it is DRAWN (design §11): nothing at zero or unknown,
     and capped at `99+` like the list's own count chips (`COUNT_CAP`). */
 export const BADGE_CAP = 99;
+/** Whether this relay serves the inbox at all — the drawer row and the
+    `#/notifications` route both ask this ONE question (QA Q6).
+
+    Two different absences must not read alike:
+    - NO INBOX: core's `features.notifications` is missing, or it is there but
+      this relay build predates the routes. Hide the row and leave a deep link
+      (review RW5): a read there would only 404.
+    - INBOX, STORE UNREADABLE: the relay serves the routes, but the list
+      frame OMITS the `notifications` block because the store could not be
+      read. The destination stays reachable so the reel can say so
+      (`store_unavailable`, with Try again) instead of silently vanishing.
+
+    The list block alone cannot tell these apart, since it is absent in both.
+    `features.notifications_seen` can: it ships in the same commit as the relay
+    routes (#2939), so it is the build fact that "this relay serves the inbox",
+    independent of whether the store answered this time. The badge reads only
+    the block, so neither case ever draws a number. */
+export function inboxServed(capabilities: Capabilities | null, block: NotificationsBlock | undefined): boolean {
+	const features = capabilities?.features;
+	if (!features?.notifications) return false;
+	return block !== undefined || Boolean(features.notifications_seen);
+}
+
 export function badgeText(count: number | undefined): string | undefined {
 	if (!count) return undefined;
 	return count > BADGE_CAP ? `${BADGE_CAP}+` : String(count);

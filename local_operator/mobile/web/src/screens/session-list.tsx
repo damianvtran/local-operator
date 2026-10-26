@@ -56,7 +56,7 @@ import { SessionTagsSheet } from "../components/session-tags-sheet";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
 import { markPendingFocus } from "../lib/pending-focus";
-import { badgeText } from "../lib/notifications";
+import { badgeText, inboxServed } from "../lib/notifications";
 import { navigate } from "../router";
 import {
 	applySessionPin,
@@ -1415,12 +1415,11 @@ export function SessionListScreen() {
 	const DRAWER_ITEMS: DrawerItem[] = [
 		{ id: "conversations", icon: "☰", label: messageRuntime.t("relay.chrome.drawer.conversations"), href: "#/", current: true },
 		{ id: "questions", icon: "?", label: messageRuntime.t("relay.chrome.drawer.questions"), onSelect: () => setQuestionsOpen(true) },
-		/* The inbox (notifications lane). Gated on BOTH facts the relay serves:
-		   core's `features.notifications` (the inbox contract exists) AND the list
-		   frame's `notifications` block (this relay build serves the routes; the
-		   two ship in one commit on core). Either absent -> no row. The count is
-		   the one badge formula (D16), omitted at zero or unknown, capped 99+. */
-		{ id: "notifications", icon: "◉", label: messageRuntime.t("relay.notifications.title"), href: "#/notifications", available: Boolean(capabilities?.features?.notifications) && notificationsBlock !== undefined, count: badgeText(notificationsBadge(notificationsBlock)) },
+		/* The inbox (notifications lane). Shown when this relay serves the inbox
+		   (`inboxServed`: no row without one; a row, and no number, when the
+		   store is unreadable). The count is the one badge formula (D16),
+		   omitted at zero or unknown, capped 99+. */
+		{ id: "notifications", icon: "◉", label: messageRuntime.t("relay.notifications.title"), href: "#/notifications", available: inboxServed(capabilities, notificationsBlock), count: badgeText(notificationsBadge(notificationsBlock)) },
 		{ id: "past", icon: "◷", label: messageRuntime.t("relay.chrome.drawer.past"), href: "#/past" },
 		{ id: "projects", icon: "▱", label: messageRuntime.t("relay.chrome.drawer.projects"), onSelect: () => setProjectsOpen(true) },
 		{ id: "library", icon: "▤", label: messageRuntime.t("relay.chrome.drawer.library"), href: "#/library", available: Boolean(capabilities?.library) },

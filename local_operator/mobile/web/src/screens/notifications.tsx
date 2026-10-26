@@ -33,7 +33,7 @@ import { Button } from "../components/ui/button";
 import { Chip } from "../components/ui/chip";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/cn";
-import { failureReason, groupByDay, mergeObserved, receiptText, tokenOf, writeFailureText, type NotificationsOp } from "../lib/notifications";
+import { failureReason, groupByDay, inboxServed, mergeObserved, receiptText, tokenOf, writeFailureText, type NotificationsOp } from "../lib/notifications";
 import { navigate, navigateUp } from "../router";
 import { messageRuntime, retainSessionListStream, useCapabilities, useNotificationsBlock, useSessions } from "../store";
 import type { NotificationItem, NotificationsReceipt, NotificationToken } from "../types";
@@ -118,8 +118,10 @@ export function NotificationsScreen() {
 	   no row there, but a bookmark or shared `#/notifications` still lands here,
 	   and its first read would 404 into "Couldn't load notifications". Once a
 	   list frame has answered (capabilities known) without the inbox, leave for
-	   the list, as an unknown route does; before that, nothing is decided. */
-	const unavailable = capabilities !== null && (!capabilities.features?.notifications || block === undefined);
+	   the list, as an unknown route does; before that, nothing is decided. An
+	   inbox whose STORE is unreadable is not this case (QA Q6): it stays, and
+	   the first read paints the relay's own `store_unavailable` sentence. */
+	const unavailable = capabilities !== null && !inboxServed(capabilities, block);
 	useEffect(() => { if (unavailable) navigateUp("/"); }, [unavailable]);
 
 	const [tab, setTab] = useState<Tab>(readTab);

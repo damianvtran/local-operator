@@ -300,3 +300,36 @@ describe("design round 1 (RW-D2, RW-D4, RW-D6)", () => {
 		expect(screen.queryByText("Failed to fetch")).toBeNull();
 	});
 });
+
+describe("QA Q6: no inbox vs an unreadable store", () => {
+	it("no inbox at all: no drawer row, no number, and a deep link leaves", async () => {
+		capability = { features: {} };
+		block = undefined;
+		render(<SessionListScreen />);
+		fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+		expect(screen.queryByRole("link", { name: /^Notifications/ })).toBeNull();
+		cleanup();
+		history.replaceState(null, "", "#/notifications");
+		render(<NotificationsScreen />);
+		await waitFor(() => expect(location.hash).toBe("#/"));
+		expect(api.getNotifications).not.toHaveBeenCalled();
+	});
+
+	it("inbox served but the store is unreadable: the row stays, without a number, and the reel says why", async () => {
+		// #2939 omits the list block when the store cannot be read, but still
+		// advertises the relay's inbox routes through features.notifications_seen.
+		capability = { features: { notifications: 1, notifications_seen: 1 } };
+		block = undefined;
+		render(<SessionListScreen />);
+		fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+		expect(screen.getByRole("link", { name: "Notifications" })).toBeTruthy();
+		cleanup();
+		history.replaceState(null, "", "#/notifications");
+		vi.mocked(api.getNotifications).mockRejectedValue(new Error("The notifications store could not be read or written."));
+		render(<NotificationsScreen />);
+		expect(await screen.findByText("Couldn't load notifications.")).toBeTruthy();
+		expect(screen.getByText("The notifications store could not be read or written.")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+		expect(location.hash).toBe("#/notifications");
+	});
+});
