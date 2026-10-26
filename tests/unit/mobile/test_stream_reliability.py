@@ -169,35 +169,62 @@ def http_scope(path):
     }
 
 
-async def cancel_parked(path, park_on: str, fixture=None):
-    """Drive one stream's response with ``send`` parked on ``park_on``, then cancel.
+async def drive_parked(response, path, park_on: str):
+    """Drive ``response`` as ASGI with ``send`` parked on ``park_on``, then cancel.
 
-    ``fixture`` is one of these scenarios with its own patched daemon; it is
-    also the reason the masking test below reads as this scenario plus a raising
-    detach rather than as a second copy of the same twenty lines.
+    Returns the exception the cancelled app call ended with, so each caller
+    asserts the outcome it cares about. One spelling for the exchange the
+    parked, masking and direct-spy tests all need.
     """
-    daemon, entry = fixture if fixture is not None else fixture_daemon()
-    response = await response_for(build_app(daemon), path)
-    scope = http_scope(path)
+    from starlette.types import Message
+
     parked = asyncio.Event()
 
-    async def receive():
+    async def receive() -> Message:
         await asyncio.Future()
+        raise AssertionError("the parked receive must never return")
 
     async def send(message):
         if message["type"] == park_on:
             parked.set()
             await asyncio.Future()
 
-    task = asyncio.create_task(response(scope, receive, send))
+    task = asyncio.create_task(response(http_scope(path), receive, send))
     await asyncio.wait_for(parked.wait(), 2)
     task.cancel()
-    outcome: BaseException | None = None
     try:
         await task
     except BaseException as exc:  # noqa: BLE001 - the test asserts the exact type
-        outcome = exc
-    return daemon, entry, outcome
+        return exc
+    return None
+
+
+async def cancel_parked(path, park_on: str, fixture=None):
+    """Drive one ROUTE's response through :func:`drive_parked`, then cancel it.
+
+    ``fixture`` is the ``(daemon, entry)`` pair from :func:`fixture_daemon`,
+    supplied only when the caller has already patched that daemon.
+    """
+    daemon, entry = fixture if fixture is not None else fixture_daemon()
+    response = await response_for(build_app(daemon), path)
+    return daemon, entry, await drive_parked(response, path, park_on)
+
+
+@pytest.mark.parametrize("path", STREAM_ROUTES)
+@pytest.mark.asyncio
+async def test_every_stream_route_hands_its_response_a_release(path):
+    """The route wiring, which no behavioural test can see today.
+
+    Every route here attaches inside its generator, so deleting one
+    ``release=`` keyword changes nothing observable — that is exactly why
+    R5-1's claim ("the suite would pass with the keywords deleted") stayed true
+    after the class branch was pinned. The wiring is still load-bearing for any
+    future route that attaches earlier, so it is pinned structurally.
+    """
+    daemon, _ = fixture_daemon()
+    response = await response_for(build_app(daemon), path)
+    assert callable(getattr(response, "_release", None))
+    await daemon.close_phone_views()
 
 
 @pytest.mark.parametrize("path", STREAM_ROUTES)
@@ -239,22 +266,8 @@ async def test_the_response_release_runs_when_the_body_never_starts():
 
     release = Mock()
     response = response_type(body(), release=release)
-    path = "/api/sessions/events"
-    parked = asyncio.Event()
-
-    async def receive():
-        await asyncio.Future()
-
-    async def send(message):
-        if message["type"] == "http.response.start":
-            parked.set()
-            await asyncio.Future()
-
-    task = asyncio.create_task(response(http_scope(path), receive, send))
-    await asyncio.wait_for(parked.wait(), 2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    outcome = await drive_parked(response, "/api/sessions/events", "http.response.start")
+    assert isinstance(outcome, asyncio.CancelledError)
     assert release.call_count == 1
     assert pulled == []
 
@@ -275,25 +288,14 @@ async def test_a_raising_release_is_logged_at_warning_and_keeps_the_cancellation
         yield "data: never\n\n"
 
     response = response_type(body(), release=release)
-    path = "/api/sessions/events"
-    parked = asyncio.Event()
-
-    async def receive():
-        await asyncio.Future()
-
-    async def send(message):
-        if message["type"] == "http.response.start":
-            parked.set()
-            await asyncio.Future()
-
     with caplog.at_level(logging.WARNING, logger="local_operator.mobile.daemon"):
-        task = asyncio.create_task(response(http_scope(path), receive, send))
-        await asyncio.wait_for(parked.wait(), 2)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        outcome = await drive_parked(response, "/api/sessions/events", "http.response.start")
+    assert isinstance(outcome, asyncio.CancelledError)
     assert release.call_count == 1
-    assert [record.getMessage() for record in caplog.records] == ["stream cleanup failed"]
+    assert [
+        (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+        for record in caplog.records
+    ] == [("local_operator.mobile.daemon", logging.WARNING, "stream cleanup failed", True)]
 
 
 @pytest.mark.asyncio
@@ -316,6 +318,9 @@ async def test_a_failing_stream_cleanup_does_not_replace_the_cancellation(monkey
             "/api/sessions/{session_id:str}/events", "http.response.body", fixture
         )
     assert isinstance(outcome, asyncio.CancelledError)
-    assert [record.getMessage() for record in caplog.records] == ["stream cleanup failed"]
+    assert [
+        (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+        for record in caplog.records
+    ] == [("local_operator.mobile.daemon", logging.WARNING, "stream cleanup failed", True)]
     assert entry.record.session_id not in daemon.table.session_subscribers
     await daemon.close_phone_views()

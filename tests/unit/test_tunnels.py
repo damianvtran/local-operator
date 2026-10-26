@@ -3902,7 +3902,17 @@ async def test_a_failing_origin_close_does_not_mask_the_cancellation(
             with pytest.raises(asyncio.CancelledError):
                 await task
         assert closed.is_set()
-        assert [record.getMessage() for record in caplog.records] == ["stream cleanup failed"]
+        assert [
+            (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+            for record in caplog.records
+        ] == [
+            (
+                "local_operator.tunnels.gateway",
+                logging.WARNING,
+                "stream cleanup failed",
+                True,
+            )
+        ]
 
 
 @pytest.mark.asyncio

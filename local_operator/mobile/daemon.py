@@ -114,6 +114,10 @@ from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 logger = logging.getLogger(__name__)
 #: The gateway's own spelling (``tunnels.gateway.STREAM_CLEANUP_FAILED``): one
 #: name for the one failure class, with the logger name carrying the surface.
+#: COPIED rather than imported on purpose — ``tunnels.gateway`` imports httpx,
+#: jwt and starlette at module scope, while this module defers starlette into
+#: ``build_app`` so a ``lop`` installed without the server extra never imports
+#: it. Importing the constant would put that whole stack on every CLI start.
 STREAM_CLEANUP_FAILED = "stream cleanup failed"
 
 #: How often the record directory is scanned. Records change rarely (a
