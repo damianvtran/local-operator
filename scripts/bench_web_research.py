@@ -264,12 +264,11 @@ def write_config(config_dir: Path, providers: list[str]) -> Path:
             "providers": providers,
             "excluded_providers": excluded,
         },
-        # Notifications off: an unwatched child must not put its last line on
-        # the operator's lock screen (harness_child_env also disables them).
-        "notifications": {"enabled": False},
     }
-    # JSON is valid YAML, and keeps this script free of a yaml import.
-    path.write_text(json.dumps({"version": 1, "values": values}, indent=2) + "\n")
+    # Notifications are silenced by ``harness_child_env`` (env switch), not
+    # here. JSON is valid YAML, and keeps this script free of a yaml import;
+    # ``version``/``metadata`` are left for the product to stamp.
+    path.write_text(json.dumps({"values": values}, indent=2) + "\n")
     return path
 
 
