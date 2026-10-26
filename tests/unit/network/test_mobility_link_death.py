@@ -328,6 +328,16 @@ def test_a_re_dial_during_a_copy_releases_the_source_and_the_retry_completes(
     failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
     assert failed["ok"] is False, failed
     assert redialed, "the copy never reached its fetch"
+    # Drive the retry even if the journal is still wedged: the old rebind control
+    # must expose the user-facing in_progress refusal, not stop at an empty-journal
+    # assertion before reaching the recovery path. The fixed path still requires
+    # the journal to clear and the retry to complete below.
+    if read_handoff_journal(server_a.root):
+        monkeypatch.setattr(mobility.LinkTransport, "ask", real)
+        wedged_retry = _move(server_b, SESSION, monkeypatch=monkeypatch)
+        assert wedged_retry["ok"] is True, wedged_retry
+        assert wedged_retry["state"] == "completed", wedged_retry
+        assert not (server_b.root / "sessions" / SESSION).exists(), "the failed copy must be swept"
     assert wait_for(lambda: read_handoff_journal(server_a.root) == {}, 15), read_handoff_journal(
         server_a.root
     )
