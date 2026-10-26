@@ -318,6 +318,41 @@ window.measureRelay = function(win) {
     return { label: (child.getAttribute('aria-label') || child.innerText || child.tagName).trim().slice(0, 28),
       x: Math.round(r.left), w: Math.round(r.width), need: child.scrollWidth, have: child.clientWidth };
   }) : null;
+  /* WHERE THE SPEND READING ACTUALLY ENDS, and whether the model control exists
+     at all (QA round 3 Q3-2 and C3-3). `meta_row` reports boxes; a box says nothing
+     about the ink inside it, and at a short viewport the model box can be absent
+     without anyone noticing. Both are distances from the composer's own box. */
+  const composerEdges = (() => {
+    if (!composerEl) return null;
+    const box = composerEl.getBoundingClientRect();
+    const spend = composerEl.querySelector('button[aria-label^="Spend"]');
+    const model = composerEl.querySelector('button[aria-label^="Model"]');
+    /* A Range belongs to the document whose nodes it selects. This whole audit
+       runs in the PHONE frame's context, so it is `document`; `doc` above is the
+       host page's documentElement and has no `createRange` — using it threw and
+       killed the entire audit silently. */
+    const rightOfInk = (el) => {
+      if (!el) return null;
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const rect = range.getBoundingClientRect();
+      return rect.width ? +(box.right - rect.right).toFixed(1) : null;
+    };
+    const spendText = spend?.innerText?.trim() || null;
+    return {
+      spend_text: spendText,
+      spend_text_right: rightOfInk(spend),
+      spend_box_right: spend && spend.getBoundingClientRect().width
+        ? +(box.right - spend.getBoundingClientRect().right).toFixed(1) : null,
+      /* PRESENT means RENDERED. A `[@media(max-height:480px)]:hidden` control is
+         still in the DOM with a zero box, and a DOM-presence check called that
+         "present" on a short viewport where no user could see or tap it. */
+      model_present: Boolean(model && model.getBoundingClientRect().width > 0),
+      model_text: model && model.getBoundingClientRect().width > 0
+        ? (model.innerText || "").trim() || null : null,
+      model_text_right: rightOfInk(model),
+    };
+  })();
   const composer = composerEl ? {
     /* THE FOUR OPTICAL INSETS, from the composer's own box (operator finding,
        round 2): the placeholder is painted at the textarea's content origin, while
@@ -351,6 +386,7 @@ window.measureRelay = function(win) {
       };
     })(),
     meta_row,
+    edges: composerEdges,
     rect: (() => { const r = composerEl.getBoundingClientRect();
       return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; })(),
     pad: { top: cs.paddingTop, bottom: cs.paddingBottom, left: cs.paddingLeft, right: cs.paddingRight },

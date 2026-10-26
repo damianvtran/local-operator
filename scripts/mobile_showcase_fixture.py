@@ -246,6 +246,21 @@ def _showcase_transcript() -> list[TranscriptEntry]:
                 "| conversation view | 390 | 56 px | 680 px | 0 | 0 under 44 px |\n"
             ),
         ),
+        # THE 13-vs-14 px BAND TABLE (code review round 3, C3-1): two long single
+        # words whose min-content total sits BETWEEN the total measured at the cell
+        # font and the total at the wrapper's inherited font, so a verdict taken
+        # with the wrong font lands on the other side of the line. The showcase's
+        # "Check table band" control reports the totals at both sizes and the form
+        # the component chose, so the fix is checkable rather than asserted.
+        TranscriptEntry(
+            id="sc-8d",
+            kind="assistant",
+            text=(
+                "Band check:\n\n"
+                "| counterreconciliation | acknowledgementledger |\n|---|---|\n"
+                "| settled | confirmed |\n"
+            ),
+        ),
         # A TWO-COLUMN table in its OWN message: the stacked fallback has to be
         # checked against a table that FITS and therefore must stay a real table
         # (design review round 2, D4). Two tables in one message merge into one
@@ -751,7 +766,14 @@ def showcase_app(daemon: MobileDaemon):
             out.mkdir(parents=True, exist_ok=True)
             path = out / "metrics.json"
             entries = json.loads(path.read_text()) if path.exists() else {}
-            metrics = data["metrics"]
+            # A POST is evidence, not control: a malformed one is REFUSED with a
+            # 400 and logged, never raised. This rig used to die on a body without
+            # `metrics` (the band check posted its own shape), which took the whole
+            # fixture down mid-run and left a stale metrics.json looking fresh.
+            metrics = data.get("metrics")
+            if not isinstance(metrics, dict) or "viewport" not in metrics or "theme" not in metrics:
+                print("showcase: refused a /showcase/metrics POST without a metrics object", flush=True)
+                return JSONResponse({"error": "metrics object required"}, status_code=400)
             width, height = metrics["viewport"]
             entries[f"{state}-{width}x{height}-{metrics['theme']}"] = metrics
             path.write_text(json.dumps(entries, indent=2) + "\n")

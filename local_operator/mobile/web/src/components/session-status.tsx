@@ -174,7 +174,13 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 		return <>
 			<button type="button" onClick={() => setExpanded(true)}
 				aria-label={messageRuntime.t("relay.chrome.composer.spend_label", { label })}
-				className="flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap text-meta tabular-nums text-ink-dim active:text-ink">{label}</button>
+				/* THE READING ENDS ON THE SAME 15 px INSET AS EVERYTHING ELSE (QA round 3,
+				   Q3-2). The slot is still 96 px — the fixed width that keeps the model
+				   label's truncation point from moving as the numbers change (D1) — but
+				   `pe-[7px]` moves the TEXT 7 px in from the composer's 8 px padding, so
+				   the reading's right edge lands at 15 px like the field's left inset.
+				   The slot's own outer edge still lines up with the stop/send discs. */
+				className="flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap pe-[7px] text-meta tabular-nums text-ink-dim active:text-ink">{label}</button>
 			<Sheet open={expanded} onClose={() => setExpanded(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
 				<SessionStatus projection={projection} detail />
 			</Sheet>

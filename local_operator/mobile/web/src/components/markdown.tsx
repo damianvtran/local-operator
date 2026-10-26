@@ -14,6 +14,7 @@
  */
 import { useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { cn } from "../lib/cn";
 
 let keySeq = 0;
 function key(): string {
@@ -254,6 +255,26 @@ const HEADING_CLASSES = [
 const CELL_PADDING = 16;
 const TABLE_RULE = 2;
 
+/**
+ * THE ONE FONT BOTH FORMS ARE MEASURED AND DRAWN IN (code review round 3, C3-1).
+ *
+ * The fit verdict is a text-measurement, so the font it is measured in must be
+ * the font the cells are drawn in — and it must not depend on which branch is
+ * currently mounted, or the same table gets two answers and can oscillate. One
+ * class, on both wrappers, read back by the measurement.
+ */
+export const TABLE_FONT_CLASS = "lo-table-font text-body-sm";
+
+/** ONE canvas for every table's measurement (code review round 3, C3-6): a new
+ *  context per `decide()` put an allocation on a path that runs per streamed
+ *  frame and per observed resize. */
+let tableProbe: CanvasRenderingContext2D | null | undefined;
+function tableContext(): CanvasRenderingContext2D | null {
+	if (tableProbe !== undefined) return tableProbe;
+	tableProbe = typeof document === "undefined" ? null : document.createElement("canvas").getContext("2d");
+	return tableProbe;
+}
+
 /** A cell's VISIBLE text: inline-markdown markers are syntax, not content. */
 export function markdownTableText(cell: string): string {
 	return cell
@@ -314,7 +335,15 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 	const [header, ...rest] = lines;
 	const head = splitTableRow(header ?? "");
 	const rows = rest.map((row) => splitTableRow(row));
+	/* BOTH FORMS RENDER THE SAME CELLS (code review round 3, C3-5). The stacked
+	   branch used to iterate the header while the table branch iterated the row, so
+	   a row with more cells than its header silently lost the extras in the form a
+	   phone actually shows. One column count, decided once, for both. */
+	const columns = Math.max(head.length, ...rows.map((row) => row.length), 0);
 	const box = useRef<HTMLDivElement>(null);
+	/* The width this table was last judged at: an unchanged width cannot change a
+	   width-based verdict, so the observer's other box changes are ignored. */
+	const lastWidth = useRef(0);
 	const [fits, setFits] = useState(true);
 	/* The table's CONTENT, as one string: a streamed table whose cells grow must
 	   re-decide, while the arrays themselves are new on every render and cannot
@@ -328,18 +357,39 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 			const available = node.clientWidth;
 			/* A host with no layout engine (the vitest tree) reports 0. Keeping the
 			   table form there is the honest default: "not measured" is not evidence
-			   that the columns do not fit, and the two pure helpers above carry the
-			   unit coverage for the decision itself. */
-			if (available <= 0) {
+			   that the columns do not fit, and the pure helpers carry that coverage. */
+			/* `!(available > 0)` rather than `<= 0`: an engine that reports the
+			   property as absent (undefined) must take the same "not measured" path
+			   as one that reports 0, instead of falling through to a comparison
+			   against undefined — which is silently false and stacks every table. */
+			if (!(available > 0)) {
 				setFits(true);
 				return;
 			}
-			const probe = document.createElement("canvas").getContext("2d");
+			/* THE WIDTH IS THE ONLY TRIGGER THAT CAN CHANGE THE ANSWER (code review
+			   round 3, C3-1). The old code re-decided on ANY observed box change,
+			   and switching forms changes the wrapper's HEIGHT — so a table near the
+			   boundary could oscillate table → stacked → table, one observer callback
+			   per switch. A decision that depends on width must not be re-run because
+			   of a change the decision itself caused; measured widths are remembered
+			   and an unchanged width short-circuits. */
+			if (available === lastWidth.current) return;
+			lastWidth.current = available;
+			/* MEASURE THE FONT THE CELLS ARE DRAWN IN (C3-1). `getComputedStyle(node)`
+			   read the WRAPPER's font, which differed by branch (14 px inheriting in
+			   the table branch vs the stacked branch's own 13 px) and from the cells'
+			   own `text-body-sm`. The verdict was ~7.7 % wide in the table branch —
+			   over-stacking tables that fit — and not idempotent. `TABLE_FONT_CLASS`
+			   is applied to both wrappers AND read here, so the metric cannot drift
+			   from the drawn text again. */
+			const probe = tableContext();
 			if (!probe) {
 				setFits(true);
 				return;
 			}
-			probe.font = getComputedStyle(node).font;
+			const sample = node.querySelector<HTMLElement>(".lo-table-font") ?? node;
+			const style = getComputedStyle(sample);
+			probe.font = style.font || `${style.fontSize} ${style.fontFamily}`;
 			setFits(tableFitsIn(minContentWidths(head, rows, (text) => probe.measureText(text).width), available));
 		};
 		decide();
@@ -355,7 +405,7 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 			<div
 				ref={box}
 				role="table"
-				className="max-w-full overflow-hidden rounded-sm border border-hairline text-body-sm"
+				className={cn("max-w-full overflow-hidden rounded-sm border border-hairline", TABLE_FONT_CLASS)}
 			>
 				{rows.map((row, rowIndex) => (
 					<div
@@ -363,11 +413,15 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 						role="row"
 						className={rowIndex > 0 ? "border-t border-hairline px-2 py-1.5" : "px-2 py-1.5"}
 					>
-						{head.map((label, column) => (
-							<div key={`${label}-${column}`} role="cell" className="flex min-w-0 gap-2">
-								<span aria-hidden className="shrink-0 break-words text-ink-dim">
-									{markdownTableText(label)}:
-								</span>
+						{Array.from({ length: columns }, (_, column) => (
+							/* THE HEADER IS PART OF THE CELL (code review round 3, C3-4). The
+							   label used to be `aria-hidden`, so a screen reader heard the
+							   value alone and nothing tied it to its column — the `<th>` form
+							   it replaces supplied that natively, so hiding it was a
+							   regression in the form that claims to preserve the table.
+							   Visible text in the same cell IS the association. */
+							<div key={`${head[column] ?? ""}-${column}`} role="cell" className="flex min-w-0 gap-2">
+								<span className="shrink-0 break-words text-ink-dim">{markdownTableText(head[column] ?? "")}:</span>
 								{/* `break-words` splits ONLY a token too long to fit a line by
 								    itself (a URL, a hash). An ordinary word always fits, so it
 								    is never cut mid-word. */}
@@ -381,16 +435,16 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 	}
 
 	return (
-		<div ref={box} className="max-w-full overflow-hidden rounded-sm border border-hairline">
-			<table className="w-full table-auto border-collapse text-body-sm">
+		<div ref={box} className={cn("max-w-full overflow-hidden rounded-sm border border-hairline", TABLE_FONT_CLASS)}>
+			<table className="w-full table-auto border-collapse">
 				<thead>
 					<tr className="bg-sunken">
-						{head.map((cell, column) => (
+						{Array.from({ length: columns }, (_, column) => (
 							<th
-								key={`${cell}-${column}`}
+								key={`${head[column] ?? ""}-${column}`}
 								className="border-b border-hairline px-2 py-1 text-left font-semibold text-ink"
 							>
-								{renderInline(cell)}
+								{renderInline(head[column] ?? "")}
 							</th>
 						))}
 					</tr>
@@ -398,12 +452,12 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 				<tbody>
 					{rows.map((row, rowIndex) => (
 						<tr key={`${signature}-row-${rowIndex}`}>
-							{row.map((cell, column) => (
+							{Array.from({ length: columns }, (_, column) => (
 								<td
-									key={`${cell}-${column}`}
+									key={`${row[column] ?? ""}-${column}`}
 									className="border-b border-hairline px-2 py-1 align-top text-ink-muted last:border-b-0"
 								>
-									{renderInline(cell)}
+									{renderInline(row[column] ?? "")}
 								</td>
 							))}
 						</tr>

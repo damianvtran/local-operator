@@ -1515,12 +1515,16 @@ export function Composer({
 				    routing or the pending-envelope lifetime. */}
 				<div className={COMPOSER_CHIP_ROW}>
 					<div className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
-					{/* SHORT VIEWPORTS DROP THE MODEL LABEL (design review round 2, D6):
-					   at 844x390 the 152 px composer took 39 % of the height and left the
-					   conversation 130 px. The model is one tap away in the same meta row's
-					   sheet, and the folder and spend facts stay. A height query, not a
-					   width one: the cost is vertical, so the fix is too. */}
-					<button type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink [@media(max-height:480px)]:hidden")}
+					{/* SHORT VIEWPORTS KEEP THE MODEL CONTROL (design round 2 D6, corrected in
+					   code round 3 C3-3). D6's saving is VERTICAL — the meta facts stop
+					   taking a line of their own — so hiding the model button on top of
+					   that bought no height and cost two things: the active-model fact,
+					   and the only touch door to the model/effort sheet (this button is
+					   `onOpenModels`' sole caller; the sheet's other opener lives inside
+					   the sheet). The button now stays, `min-w-0 truncate` and all, so a
+					   narrow-and-short viewport truncates the NAME rather than losing the
+					   control. */}
+					<button type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
 						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
