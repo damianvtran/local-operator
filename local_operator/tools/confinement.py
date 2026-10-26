@@ -61,6 +61,62 @@ all of this: an episode drives its VM through the apparatus (the action
 bridge, the adapter worker), and the only caller of :meth:`ToolConfinement.
 wrap` is the ``bash`` tool, so no apparatus process is inside the jail.
 
+MACH SERVICES (landed 2026-10-26 -- the same boundary, closed on the IPC
+side). The profile used to carry an unrestricted ``(allow mach-lookup)``, and
+that one line reached around the filesystem and network denials into the
+operator's GUI session: measured from inside the real profile,
+``pbpaste`` exited 0 READING the operator's clipboard, ``pbcopy`` exited 0
+OVERWRITING it, and ``security list-keychains`` reached securityd. It was
+not hypothetical: across 180 recorded benchmark episodes, 13 ``pbpaste``
+calls in 4 episodes read the operator's clipboard (none wrote it). The
+allowance is now an allowlist of Mach GLOBAL NAMES
+(``_MACH_LOOKUP_GLOBAL_NAMES``), DERIVED by measurement rather than copied
+from Apple's ``system.sb``:
+
+1. a representative confined workload (``python3`` incl. ``venv``/``ssl``/
+   ``sqlite3``/locale/tz, ``git`` init/commit/clone/status, ``uv``,
+   ``clang``/``cc``/``make``/``ld``, ``xcrun --find``/``--show-sdk-path``,
+   ``node``, ``perl``, ``ruby``, ``swift``, ``pdftotext``, coreutils,
+   ``tar``/``gzip``, ``curl`` and ``getaddrinfo`` for DNS) was run under the
+   old allow-all profile and under a profile with NO mach allowance, and the
+   outputs were diffed;
+2. every lookup the no-mach run was refused was read back from launchd's
+   ``denied lookup ... Sandbox restriction`` log lines (the kernel logs
+   nothing for these; launchd does);
+3. each candidate was then ABLATED one at a time against the allow-all
+   output.
+
+Only TWO names changed observable behaviour, so only two are allowed:
+``com.apple.system.opendirectoryd.libinfo`` (user/group NAME resolution --
+without it ``getpwuid`` raises ``KeyError`` and ``id``/``ls -l``/``whoami``
+print bare numbers) and ``com.apple.system.opendirectoryd.membership``
+(without it ``confstr(_CS_DARWIN_USER_TEMP_DIR)`` stops resolving, so
+``clang`` fails "unable to make temporary file" and the ``/usr/bin`` xcrun
+shims print "couldn't create cache file" on every ``python3``/``git`` when
+``TMPDIR`` is unset; the ``bash`` tool sets it, a script may not). With those two the
+workload's output is identical to the allow-all run's. Everything else the
+machinery asked for is denied and changed nothing measurable: ``logd``,
+``system.logger``, ``notification_center`` (notifyd), ``bsd.dirhelper``,
+``analyticsd``, ``SystemConfiguration.configd`` (curl's proxy probe; DNS
+still fails FAST), ``coreservicesd``/``diskarbitrationd`` (swift-driver).
+The denied set the brief named is pinned by tests with a ctypes
+``bootstrap_look_up`` that only LOOKS UP a name and never messages it:
+``com.apple.pasteboard.1``, ``com.apple.SecurityServer``,
+``com.apple.securityd.xpc``, ``com.apple.coreservices.launchservicesd``,
+``com.apple.lsd.open``/``.mapdb``, ``com.apple.coreservices.appleevents``,
+``com.apple.windowserver.active``, ``com.apple.tccd`` all return
+``BOOTSTRAP_NOT_PRIVILEGED`` (1100) from inside the jail.
+
+Residuals of the Mach side, stated rather than implied: the opendirectoryd
+libinfo service answers DIRECTORY records (local user and group names, home
+paths, memberships) -- account metadata, not file content, and the price of
+``getpwuid`` working; the confined child's own ``os_log`` output is dropped
+(logd is denied); ``mdls`` (Spotlight via ``metadata.mds``) and
+``defaults`` (cfprefsd) no longer answer, the latter already failing under
+the old profile; and the allowlist was measured on the build host's macOS
+(27.0), so a future release that moves libinfo behind another name would show
+up as "uid not found" in a confined child, not as a leak.
+
 WHAT THIS DOES NOT COVER, stated rather than implied:
 
 * Reads of SYSTEM paths stay allowed -- ``/usr``, ``/System``, ``/Library``,
@@ -109,11 +165,9 @@ WHAT THIS DOES NOT COVER, stated rather than implied:
   ancestors, and without it ordinary commands break (see :meth:`profile`). A
   confined child can therefore learn that a path EXISTS and its size/mtime;
   it cannot read file CONTENT or list directories outside the allowlist.
-* Mach services stay reachable (``mach-lookup`` is allowed: the runtime needs
-  it to function at all), so credential stores and daemons behind Mach --
-  securityd included -- answer requests under their OWN access controls.
-  Ordering Mach service registration is a follow-up; this module makes no
-  claim about it.
+* Mach services beyond the two-name allowlist are denied (see MACH SERVICES
+  above); the directory records the allowed libinfo service answers are the
+  residual.
 * DAEMON-MEDIATED SPAWN AND AUTOMATION -- the family where a request leaves the
   jail through a host service rather than a syscall. **Tested:** ``launchctl
   submit`` is refused inside the jail (rc=1, no job registered); ``launchctl
@@ -197,6 +251,21 @@ _SYSTEM_WRITE_LITERALS: tuple[str, ...] = (
     "/dev/tty",
     "/dev/stdout",
     "/dev/stderr",
+)
+
+#: The ONLY Mach services a confined child may look up. Derived by measurement
+#: (allow-all vs no-mach diff, launchd's ``denied lookup`` log, then one-at-a-
+#: time ablation -- see the module docstring's MACH SERVICES section): these
+#: two are the whole set whose denial changed an ordinary command's output.
+#: Exact names, never a regex or prefix: a ``com.apple.system.*`` pattern would
+#: quietly readmit notifyd and logd today and whatever Apple registers there
+#: tomorrow. Adding a name here widens the jail into the operator's session;
+#: it needs its own measurement, and must never be a pasteboard, security/
+#: keychain, window server/display, launchservices/lsd, AppleEvents or TCC
+#: service.
+_MACH_LOOKUP_GLOBAL_NAMES: tuple[str, ...] = (
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
 )
 
 
@@ -408,7 +477,7 @@ class ToolConfinement:
     def profile(self) -> str:
         """The seatbelt profile for this root, as sandbox-exec's ``-p`` text.
 
-        ``deny default`` plus an explicit allowlist, with FOUR structural
+        ``deny default`` plus an explicit allowlist, with FIVE structural
         pieces worth stating because each was measured while building this.
         The first: reading the ROOT DIRECTORY itself is allowed
         (``literal "/"``). Without it every command aborts before exec;
@@ -440,6 +509,13 @@ class ToolConfinement:
         too: TCP (internet and loopback), UDP and AF_UNIX connects all fail
         with ``EPERM``, and DNS fails fast, while in-scratch file work is
         untouched (see the module docstring's network section).
+
+        The fifth: the Mach line. ``mach-lookup`` is allowed for the exact
+        ``_MACH_LOOKUP_GLOBAL_NAMES`` only, REPLACING the bare
+        ``(allow mach-lookup)`` that let a confined child read and overwrite
+        the operator's clipboard and reach securityd. The allowlist is the
+        whole grant -- like the network line, no broader mach allow may ride
+        beside it, or the narrow one stops meaning anything.
         """
 
         read_subpaths = (
@@ -449,13 +525,14 @@ class ToolConfinement:
         )
         reads = " ".join(f'(subpath "{path}")' for path in read_subpaths)
         writes = " ".join(f'(literal "{path}")' for path in _SYSTEM_WRITE_LITERALS)
+        mach = " ".join(f'(global-name "{name}")' for name in _MACH_LOOKUP_GLOBAL_NAMES)
         return (
             "(version 1)\n"
             "(deny default)\n"
             "(allow process-fork)\n"
             "(allow process-exec)\n"
             "(allow sysctl-read)\n"
-            "(allow mach-lookup)\n"
+            f"(allow mach-lookup {mach})\n"
             "(deny network*)\n"
             '(allow file-read-metadata (subpath "/"))\n'
             f'(allow file-read* (literal "/") {reads})\n'
