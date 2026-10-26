@@ -86,6 +86,7 @@ from local_operator.evaluation.session_arm import (
     declare_action_server,
     open_episode_session,
     prose_claims_completion,
+    render_prompt_header,
     run_session_episode,
     session_tool_names,
     split_prompt_content,
@@ -3508,6 +3509,110 @@ class TestAgentStopOutcome:
         # The abort went through the session's normal stop path; nothing ran.
         assert session.aborts == ["episode wall budget"]
         assert adapter.calls.count("execute") == 0
+
+    @pytest.mark.asyncio
+    async def test_the_first_prompt_states_the_machine_topology(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # The REAL arm path: the prompt the session receives is rendered from
+        # the live inventory the arm read, not from a constant. A session that
+        # holds local tools beside the action tool is told they are on a
+        # different machine with no shared path.
+        run, session, _adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[[{"kind": "wait", "duration_ms": 10}]],
+            terminal_message=Message(role="assistant", content=[], stop_reason="stop"),
+            terminal_end=AgentEndEvent(),
+        )
+        session._tools = [
+            SimpleNamespace(name=name)
+            for name in ("bash", "write", "task", "mcp__episode_actions_apply_actions")
+        ]
+        await run()
+
+        first = session.prompts[0][0]
+        assert first.startswith("Act on the remote computer by calling")
+        assert "share no filesystem, clipboard or network path" in first
+        assert "Your other tools (`bash`, `write`) run in a local workspace" in first
+        assert "cannot reach the remote computer" in first
+
+
+class TestRenderPromptHeader:
+    """The first prompt's topology note states only facts the arm holds.
+
+    Measured defect (task_001, 2026-10-25): the header said "this computer"
+    and nothing said the local tools run elsewhere, so the model ran a
+    locally-written script inside the remote terminal and then probed for a
+    shared channel for 54 calls. See ``REMOTE_TOPOLOGY_NOTE``.
+    """
+
+    TOOL = "mcp__episode_actions_apply_actions"
+
+    def _render(self, *, surface: ActionSurface, tools: tuple[str, ...], confined: bool) -> str:
+        return render_prompt_header(
+            tool_name=self.TOOL, surface=surface, tool_names=tools, confined=confined
+        )
+
+    def test_the_pinned_episode_surface_is_told_there_is_no_shared_path(self) -> None:
+        text = self._render(
+            surface=ActionSurface(paste_text=False), tools=EPISODE_TOOL_SURFACE, confined=True
+        )
+        assert "on a different machine, not on the remote computer" in text
+        assert "share no filesystem, clipboard or network path" in text
+        assert "does not exist on the remote computer" in text
+        assert "an isolated scratch workspace" in text
+        # Every filesystem-reach tool the pinned surface holds, in the note's order.
+        assert "(`bash`, `read`, `write`, `edit`, `glob`, `grep`)" in text
+        assert "Agents you delegate to run in that same workspace" in text
+
+    def test_paste_text_is_named_only_when_the_surface_offers_it(self) -> None:
+        without = self._render(
+            surface=ActionSurface(paste_text=False), tools=EPISODE_TOOL_SURFACE, confined=True
+        )
+        with_paste = self._render(
+            surface=ActionSurface(paste_text=True), tools=EPISODE_TOOL_SURFACE, confined=True
+        )
+        assert "paste_text" not in without
+        assert "(typing text)" in without
+        assert "(typing text, or `paste_text`)" in with_paste
+
+    def test_no_benchmark_or_task_vocabulary_reaches_the_model(self) -> None:
+        for paste in (False, True):
+            # The tool's own minted name carries the action server's name
+            # (``episode-actions``); that identifier predates this note and is
+            # not prose, so the check reads the text with it removed.
+            text = (
+                self._render(
+                    surface=ActionSurface(paste_text=paste),
+                    tools=EPISODE_TOOL_SURFACE,
+                    confined=True,
+                )
+                .replace(self.TOOL, "<tool>")
+                .lower()
+            )
+            for word in ("osworld", "benchmark", "episode", "task_", "vm", "guest", "score"):
+                assert word not in text, word
+
+    def test_unconfined_sessions_do_not_claim_isolation(self) -> None:
+        text = self._render(surface=ActionSurface(), tools=EPISODE_TOOL_SURFACE, confined=False)
+        assert "isolated" not in text
+        assert "run in a local workspace on a different machine" in text
+
+    def test_no_delegation_sentence_without_the_task_tool(self) -> None:
+        text = self._render(surface=ActionSurface(), tools=("bash", self.TOOL), confined=True)
+        assert "Your other tools (`bash`)" in text
+        assert "delegate" not in text
+
+    def test_a_session_with_no_local_tools_gets_the_bare_header(self) -> None:
+        text = self._render(surface=ActionSurface(), tools=(self.TOOL, "todo"), confined=True)
+        assert text == (
+            f"Act on the remote computer by calling `{self.TOOL}`: each call carries ONE "
+            "batch of actions for the screen you were just shown and returns the state "
+            "that results. Send exactly one call per turn. When the task is complete, "
+            f"call `{self.TOOL}` with a single finish action.\n"
+        )
 
 
 # ---------------------------------------------------------------------------

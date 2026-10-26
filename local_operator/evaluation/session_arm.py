@@ -192,11 +192,100 @@ SESSION_APPROVALS = ApprovalPolicy.auto()
 #: as, and how the episode ends. Everything else the model needs is on the
 #: schema.
 PROMPT_HEADER = (
-    "Act on this computer by calling `{tool_name}`: each call carries ONE batch "
-    "of actions for the screen you were just shown and returns the state that "
-    "results. Send exactly one call per turn. When the task is complete, call "
-    "`{tool_name}` with a single finish action.\n"
+    "Act on the remote computer by calling `{tool_name}`: each call carries ONE "
+    "batch of actions for the screen you were just shown and returns the state "
+    "that results. Send exactly one call per turn. When the task is complete, "
+    "call `{tool_name}` with a single finish action.\n"
 )
+
+#: The local tools whose reach is a FILESYSTEM/shell (the ones a model could
+#: mistake for acting on the remote computer), in the order the topology note
+#: names them. Filtered by the session's LIVE inventory at render time, so the
+#: note never names a tool the session does not have.
+_LOCAL_REACH_TOOLS: tuple[str, ...] = ("bash", "read", "write", "edit", "glob", "grep")
+
+#: The machine topology of a session that drives a remote computer through
+#: one action tool while ALSO holding local tools. Stated as environment
+#: facts, never as task advice.
+#:
+#: WHY. The header used to say only "Act on this computer", and nothing said
+#: that the session's local tools run somewhere else. Measured on the session
+#: engagement (task_001, run 2026-10-25, deepseek-v4.1-flash): the model wrote
+#: a parser with the local ``write`` tool, then typed ``python3 /tmp/g3.py
+#: --create`` into the REMOTE terminal ("No such file or directory"). It then
+#: spent 54 calls probing for a shared channel (mounts, ``netstat``, ``nc -z``,
+#: ``/etc/hosts``, ``pbpaste``, writing host paths from inside the remote
+#: shell), left the remote state unchanged and still declared success. Across
+#: 180 recorded episodes those host-probing calls came to 48 / 72 / 61 on
+#: 2026-10-22 / 10-23 / 10-25.
+#:
+#: WHY HERE, AND ONLY HERE (the single source of truth). Not in
+#: ``ACTION_TOOL_DESCRIPTION``: that text is shared with the loop-driven runner,
+#: which has no local tools, so the contrast would be false there. It is also
+#: built in the action-server process, which cannot see the session's
+#: inventory or its confinement. The arm knows all three facts at the moment
+#: it writes the first prompt (``render_prompt_header``). Delegated children
+#: are covered by the same note, not by a second copy in ``harness/subagent``:
+#: a child never inherits the action tool (``ownTurnOnly``) and runs under the
+#: parent's confinement, so the fact a child's task depends on is whether its
+#: parent knows the child cannot reach the remote computer. The delegation
+#: sentence below tells the parent exactly that.
+#:
+#: WHAT IT DELIBERATELY DOES NOT DO. No task hints, no benchmark or
+#: environment names, and no change to tool availability: the local tools
+#: stay, because native tool use (computing, drafting and checking text
+#: locally) is the engagement being measured. It describes the topology and
+#: leaves strategy to the model.
+REMOTE_TOPOLOGY_NOTE = (
+    "Your other tools ({local_tools}) run in {workspace} on a different machine, "
+    "not on the remote computer. The two share no filesystem, clipboard or "
+    "network path: a file or program you create locally does not exist on the "
+    "remote computer. The only way to put data into the remote computer is a "
+    "`{tool_name}` action ({entry}); the only way to read from it is the state "
+    "`{tool_name}` returns. Local tools remain useful for computing, drafting "
+    "and checking text before you enter it.{delegation}\n"
+)
+
+
+def render_prompt_header(
+    *,
+    tool_name: str,
+    surface: ActionSurface,
+    tool_names: Sequence[str],
+    confined: bool,
+) -> str:
+    """The first prompt's protocol paragraph, plus the topology when it applies.
+
+    Every variable part is DERIVED from what the arm already holds, so the text
+    cannot claim a capability the episode does not have: ``paste_text`` is named
+    only when the negotiated ``surface`` offers it, the local tools are the
+    live inventory's own names, "isolated scratch workspace" appears only when
+    a confinement root is installed, and the delegation sentence appears only
+    when ``task`` is in the inventory. A session with no local tools gets the
+    bare header: with nothing to confuse the remote computer with, there is
+    no topology to state (see ``REMOTE_TOPOLOGY_NOTE`` for the why).
+    """
+
+    header = PROMPT_HEADER.format(tool_name=tool_name)
+    present = set(tool_names)
+    local = [name for name in _LOCAL_REACH_TOOLS if name in present]
+    if not local:
+        return header
+    entry = "typing text, or `paste_text`" if surface.paste_text else "typing text"
+    delegation = (
+        " Agents you delegate to run in that same workspace and cannot reach the "
+        "remote computer."
+        if "task" in present
+        else ""
+    )
+    return header + REMOTE_TOPOLOGY_NOTE.format(
+        local_tools=", ".join(f"`{name}`" for name in local),
+        workspace="an isolated scratch workspace" if confined else "a local workspace",
+        tool_name=tool_name,
+        entry=entry,
+        delegation=delegation,
+    )
+
 
 #: The sentence a terminal batch's tool result carries. Stated as the reason
 #: the episode is ending rather than as a refusal, because a ``finish`` batch
@@ -2984,7 +3073,16 @@ async def run_session_episode(
             # so rendering again here would append a duplicate turn to the
             # transcript the model is shown.
             text, images = split_prompt_content(bridge.initial_blocks)
-            prompt = PROMPT_HEADER.format(tool_name=declaration.tool_name) + "\n" + text
+            prompt = (
+                render_prompt_header(
+                    tool_name=declaration.tool_name,
+                    surface=surface,
+                    tool_names=tool_names,
+                    confined=confinement_root is not None,
+                )
+                + "\n"
+                + text
+            )
             wall_timer: asyncio.TimerHandle | None = None
 
             def _on_wall() -> None:
