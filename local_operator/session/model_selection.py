@@ -512,7 +512,17 @@ def read_model_selection(directory: Path) -> StoredModelSelection | None:
 
 
 def _read_selection(directory: Path) -> StoredModelSelection | None:
-    """The uncached read behind :func:`read_model_selection` (settle, then fold)."""
+    """Read source evidence, falling back to the unchanged settle/fold scans.
+
+    The ledger is registry-independent: re-run the same fold so removed or
+    reclassified providers, recovery flags and legacy birth provenance retain
+    exactly their current meaning. Readers never create or repair the sidecar.
+    """
+    from local_operator.session.tail_anchor import read_selection_payloads
+
+    payloads = read_selection_payloads(directory)
+    if payloads is not None:
+        return selection_from_payloads(payloads)
     settled = _settled_selection(directory)
     if settled is not None:
         return settled

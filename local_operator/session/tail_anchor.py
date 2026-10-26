@@ -1,4 +1,13 @@
-"""A sidecar recording that a journal carries NO frontend checkpoint row.
+"""Validated checkpoint-absence and model-selection evidence for a journal.
+
+The optional selection ledger shares this module's inode, complete-row boundary,
+digest, atomic publication and suffix-needle validation. It stores only the input
+to the existing selection fold, never a provider verdict. A writer can publish a
+selection-only record (checkpoint_absent=False); that is NOT permission to shorten
+replay. Version 2 absence-only records remain readable, and prewarm still owns
+building an absence proof. Missing evidence always falls back to the exact scan.
+
+A sidecar originally recorded that a journal carries NO frontend checkpoint row.
 
 THE COST THIS REMOVES. A journal with no ``frontend_state_checkpoint_v1`` row
 anywhere puts ``read_replay_suffix`` back at BOF: the reader must reach the newest
@@ -52,8 +61,9 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
@@ -67,6 +77,8 @@ ANCHOR_FILENAME = "tail-anchor.v1.json"
 
 #: Sidecar schema version. A file from another version is ignored.
 #:
+#: Version 3 adds selection evidence and an explicit checkpoint-absence flag.
+#: Version 2 remains readable as an absence-only proof; v1 is still refused.
 #: 2 since review round 2 (M1). Version 1 also carried a recorded offset for
 #: journals that DO hold the checkpoint row; this reader ignores fields it does not
 #: know, so such a record — which says "a row exists at N" — would be read as the
@@ -75,7 +87,7 @@ ANCHOR_FILENAME = "tail-anchor.v1.json"
 #: store that ran it keeps the file forever, because the selector sees a matching
 #: size and never revisits the journal, so the version moves and those records are
 #: ignored rather than reinterpreted.
-ANCHOR_VERSION = 2
+ANCHOR_VERSION = 3
 
 #: The custom type this sidecar answers for. One type, deliberately: it is the one
 #: the cold open requires and cannot bound without.
@@ -115,6 +127,15 @@ class TailAnchor:
     #: suffix scan sees only bytes the record never claimed. The digest pins the row
     #: that ends at ``size``, so a boundary that moved under the record is refused.
     tail_digest: str
+    # Source evidence, not a resolved provider verdict: registry changes must
+    # still be evaluated by the selection fold on every fresh process.
+    selection_payloads: tuple[dict[str, Any], ...] | None = None
+    checkpoint_absent: bool = True
+    # The selection prefix can change without moving the terminal row. Ordinary
+    # in-place edits change these stamps; the absence-only legacy proof never
+    # claimed to validate such edits. Missing stamps mean untrusted selection.
+    selection_mtime_ns: int | None = None
+    selection_ctime_ns: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -123,6 +144,10 @@ class TailAnchor:
             "inode": self.inode,
             "size": self.size,
             "tail_digest": self.tail_digest,
+            "selection_payloads": self.selection_payloads,
+            "checkpoint_absent": self.checkpoint_absent,
+            "selection_mtime_ns": self.selection_mtime_ns,
+            "selection_ctime_ns": self.selection_ctime_ns,
         }
 
 
@@ -137,7 +162,7 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
             raw = json.load(handle)
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict) or raw.get("version") != ANCHOR_VERSION:
+    if not isinstance(raw, dict) or raw.get("version") not in (2, ANCHOR_VERSION):
         return None
     if raw.get("custom_type") != ANCHOR_CUSTOM_TYPE:
         return None
@@ -148,7 +173,27 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
         return None
     if not isinstance(digest, str):
         return None
-    return TailAnchor(inode=inode, size=size, tail_digest=digest)
+    payloads = raw.get("selection_payloads")
+    absent = (
+        raw.get("checkpoint_absent", True) if raw["version"] == 2 else raw.get("checkpoint_absent")
+    )
+    if not isinstance(absent, bool):
+        return None
+    if payloads is not None and (
+        not isinstance(payloads, list) or not all(isinstance(item, dict) for item in payloads)
+    ):
+        return None
+    mtime = raw.get("selection_mtime_ns")
+    ctime = raw.get("selection_ctime_ns")
+    return TailAnchor(
+        inode,
+        size,
+        digest,
+        None if payloads is None else tuple(payloads),
+        absent,
+        mtime if type(mtime) is int else None,
+        ctime if type(ctime) is int else None,
+    )
 
 
 def write_anchor(directory: str | Path, anchor: TailAnchor) -> bool:
@@ -272,7 +317,7 @@ def build_anchor(directory: str | Path) -> TailAnchor | None:
     )
 
 
-def _needle_absent(path: Path, start: int, end: int) -> bool:
+def _needle_absent(path: Path, start: int, end: int, needle: bytes | None = None) -> bool:
     """Whether the checkpoint spelling is absent from ``[start, end)``.
 
     The windows OVERLAP by one needle length (review round 1, F2): a marker written
@@ -280,7 +325,7 @@ def _needle_absent(path: Path, start: int, end: int) -> bool:
     halves of it, and this scan is the only thing standing between a stale record
     and a reader that skips a real checkpoint row.
     """
-    needle = _needle()
+    needle = _needle() if needle is None else needle
     overlap = len(needle) - 1
     position = end
     # ONE handle for the whole scan (review round 2, N3): the loop re-reads a
@@ -304,7 +349,12 @@ def _needle_absent(path: Path, start: int, end: int) -> bool:
     return True
 
 
-def validate_anchor(directory: str | Path, anchor: TailAnchor | None) -> TailAnchor | None:
+def validate_anchor(
+    directory: str | Path,
+    anchor: TailAnchor | None,
+    *,
+    needles: tuple[bytes, ...] | None = None,
+) -> TailAnchor | None:
     """``anchor`` when it still describes the journal on disk, else ``None``.
 
     THE READER'S GATE, and the whole reason a hint is safe. It refuses when the file
@@ -313,7 +363,7 @@ def validate_anchor(directory: str | Path, anchor: TailAnchor | None) -> TailAnc
     size on contain the checkpoint type's own spelling (a row appeared, or a torn
     row completed into one).
     """
-    if anchor is None:
+    if anchor is None or (needles is None and not anchor.checkpoint_absent):
         return None
     path = Path(directory) / TRANSCRIPT_FILENAME
     try:
@@ -332,12 +382,12 @@ def validate_anchor(directory: str | Path, anchor: TailAnchor | None) -> TailAnc
     if stat.st_size == anchor.size:
         # Nothing was appended since the scan; the record describes the file.
         return anchor
-    needle = _needle()
     # Start a needle length below the recorded size: a marker written across that
     # offset has its first bytes in the scanned window and the rest after it.
-    start = max(0, anchor.size - (len(needle) - 1))
-    if not _needle_absent(path, start, stat.st_size):
-        return None
+    for needle in (_needle(),) if needles is None else needles:
+        start = max(0, anchor.size - (len(needle) - 1))
+        if not _needle_absent(path, start, stat.st_size, needle):
+            return None
     return anchor
 
 
@@ -346,7 +396,8 @@ def proves_absent(directory: str | Path) -> bool:
 
     The one question the reader asks, and the only one this module answers.
     """
-    return validate_anchor(directory, read_anchor(directory)) is not None
+    anchor = validate_anchor(directory, read_anchor(directory))
+    return anchor is not None and anchor.checkpoint_absent
 
 
 __all__ = [
@@ -361,3 +412,203 @@ __all__ = [
     "validate_anchor",
     "write_anchor",
 ]
+
+
+_SELECTION_NEEDLES = (b'"custom_type":"selected_model"', _needle())
+
+
+def read_selection_payloads(directory: str | Path) -> tuple[dict[str, Any], ...] | None:
+    """Source ledger validated with the existing inode/boundary/suffix gate."""
+    anchor = _validated_selection_anchor(directory, read_anchor(directory))
+    return None if anchor is None else anchor.selection_payloads
+
+
+def _validated_selection_anchor(
+    directory: str | Path, anchor: TailAnchor | None
+) -> TailAnchor | None:
+    anchor = validate_anchor(directory, anchor, needles=_SELECTION_NEEDLES)
+    try:
+        source = (Path(directory) / TRANSCRIPT_FILENAME).stat()
+    except OSError:
+        return None
+    # Check generation AFTER the bounded boundary/suffix reads, so an ordinary
+    # mutation during those reads also refuses this evidence.
+    return anchor if _selection_generation_matches(anchor, source) else None
+
+
+def _selection_generation_matches(anchor: TailAnchor | None, source: os.stat_result) -> bool:
+    """Bounded proof for ordinary edits, not adversarial restored timestamps.
+
+    Both stamps are required: bookkeeping restores mtime, while ctime still
+    changes. An unobserved generation change is not assumed append-only. Readers
+    fall back; writers may reuse a prefix only against their PRE-append stat.
+    """
+    return (
+        anchor is not None
+        and anchor.selection_payloads is not None
+        and anchor.inode == source.st_ino
+        and anchor.selection_mtime_ns == source.st_mtime_ns
+        and anchor.selection_ctime_ns == source.st_ctime_ns
+    )
+
+
+def preserve_selection_evidence(directory: str | Path, anchor: TailAnchor) -> TailAnchor:
+    """Keep compatible source evidence when prewarm publishes an absence proof.
+
+    Neither artifact grants the other's privilege: the new absence proof comes
+    from build_anchor's real scan; selection is copied only from a currently
+    validated record naming that SAME complete-row boundary. A racing append or
+    incompatible proof loses the optimization, never changes an answer.
+    """
+    # Validate ONE captured record. Re-reading its payload separately could mix
+    # a racing writer's new payload with the first record's old boundary/stamps.
+    saved = _validated_selection_anchor(directory, read_anchor(directory))
+    if saved is None:
+        return anchor
+    if (saved.inode, saved.size, saved.tail_digest) != (
+        anchor.inode,
+        anchor.size,
+        anchor.tail_digest,
+    ):
+        return anchor
+    return replace(
+        anchor,
+        selection_payloads=saved.selection_payloads,
+        selection_mtime_ns=saved.selection_mtime_ns,
+        selection_ctime_ns=saved.selection_ctime_ns,
+    )
+
+
+def update_selection_after_commit(
+    directory: str | Path,
+    *,
+    previous_source: os.stat_result | None = None,
+    appended_end: int | None = None,
+    tail_row: bytes | None = None,
+) -> None:
+    """Persist expendable selection evidence only after the journal's fsync.
+
+    ``previous_source`` / ``appended_end`` / ``tail_row`` are the DURABLE WRITER's
+    own facts: the file as it was immediately before this append, the size it
+    reached, and the last complete row's bytes. Supplying them keeps the refresh
+    proportional to the bytes just written. Without them the refresh must
+    re-derive the boundary from disk, which is a whole-journal read on the first
+    commit that meets an unledgered journal — paid once, never per message.
+
+    A crash before replace leaves an older prefix; the suffix needle scan refuses
+    it when selection evidence changed. Truncation and compaction use the existing
+    size/inode/digest gates. This never changes replay's checkpoint-absence proof:
+    L3b is deliberately deferred. Failure must never reject a durable append.
+    """
+    try:
+        _update_selection_after_commit(Path(directory), previous_source, appended_end, tail_row)
+    except Exception:  # noqa: BLE001 — derived data cannot reject durable work
+        logger.debug("selection ledger not written for %s", directory, exc_info=True)
+
+
+def _update_selection_after_commit(
+    directory: Path,
+    previous_source: os.stat_result | None,
+    appended_end: int | None,
+    tail_row: bytes | None,
+) -> None:
+    from local_operator.session.transcript import _iter_complete_lines_forward
+
+    path = directory / TRANSCRIPT_FILENAME
+    # Writer-only: consume ALL new rows rather than claiming their needles absent.
+    # No read-path writer and no migration of a journal nobody is writing.
+    saved = read_anchor(directory)
+    # THE STEADY PATH. Only the durable writer can attest which source generation
+    # preceded its append, so its pre-append stat is what lets this reuse the
+    # stored prefix without re-reading it. Comparing a stored record to POST-append
+    # stamps instead would either force a whole-journal read every turn or bless an
+    # in-place edit; the stamps therefore never validate the prefix on their own.
+    tail_payload = tail_row or b""
+    incremental = (
+        saved is not None
+        and saved.selection_payloads is not None
+        and previous_source is not None
+        and appended_end is not None
+        and tail_row
+        and appended_end >= previous_source.st_size
+        and _selection_generation_matches(saved, previous_source)
+    )
+    with path.open("rb") as handle:
+        stat = os.fstat(handle.fileno())
+        # ONE scope for both branches: ``complete`` is the boundary the record will
+        # name, and the reader's validator pins it with the tail digest.
+        if incremental:
+            assert saved is not None and previous_source is not None and appended_end is not None
+            start = previous_source.st_size
+            complete = appended_end
+            payloads = list(saved.selection_payloads or ())
+            # Carrying the absence proof forward is sound only because the validated
+            # generation proves nothing outside this append changed, so the appended
+            # rows themselves are the whole question. A checkpoint row in them costs
+            # the proof, never the answer.
+            absent = bool(saved.checkpoint_absent)
+            digest = hashlib.sha256(tail_payload).hexdigest()[:16]
+        else:
+            start = 0
+            complete = _complete_row_end(path, stat.st_size)
+            payloads = []
+            row_bytes = _last_complete_row(path, complete)
+            if not row_bytes:
+                return
+            digest = hashlib.sha256(row_bytes).hexdigest()[:16]
+            # Bootstrap only: the absence proof is about the WHOLE file, so it is
+            # re-derived by the existing validator rather than assumed.
+            proof = validate_anchor(directory, saved)
+            absent = proof is not None and proof.checkpoint_absent
+        for raw in _iter_complete_lines_forward(handle, start, end_of_file=complete):
+            if b'"custom_type"' not in raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except (ValueError, UnicodeError):
+                continue
+            if not isinstance(row, dict) or row.get("type") != "custom":
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            details = payload.get("details")
+            if not isinstance(details, dict):
+                continue
+            kind = payload.get("custom_type")
+            if kind == "selected_model":
+                reduced = {
+                    key: details[key]
+                    for key in ("version", "selector", "effort", "boot", "fast")
+                    if key in details
+                }
+            elif kind == ANCHOR_CUSTOM_TYPE:
+                absent = False
+                state = details.get("state")
+                model = state.get("selected_model") if isinstance(state, dict) else None
+                if not isinstance(model, dict):
+                    continue
+                reduced = {
+                    "state": {
+                        "selected_model": {
+                            key: model[key]
+                            for key in ("provider", "model_id", "reasoning_effort")
+                            if key in model
+                        }
+                    }
+                }
+            else:
+                continue
+            payloads.append({"custom_type": kind, "details": reduced})
+    write_anchor(
+        directory,
+        TailAnchor(
+            stat.st_ino,
+            complete,
+            digest,
+            tuple(payloads),
+            absent,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+        ),
+    )

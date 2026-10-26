@@ -1397,26 +1397,40 @@ async def test_message_batch_fsyncs_once_off_loop_and_indexes_after_commit(tmp_p
     real_fsync = os.fsync
 
     def fsync(fd):
-        calls.append(threading.get_ident())
+        calls.append((threading.get_ident(), os.fstat(fd).st_ino))
         real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", fsync)
     # Production async constructors use a worker: birth is durable before
-    # live discovery, while each later journal batch still has ONE fsync.
+    # live discovery, while each later JOURNAL batch still has ONE fsync.
+    # A derived selection sidecar fsyncs separately, after the journal; counting
+    # those together would confuse cache publication with duplicate row commits.
     transcript = await asyncio.to_thread(Transcript, tmp_path / "batch")
     assert len(calls) == 1
-    assert all(thread != loop_thread for thread in calls)
+    assert all(thread != loop_thread for thread, _inode in calls)
+    # The FIRST append materialises the journal (the rebuild branch). It is
+    # measured separately because the steady-state branch below is the one every
+    # later turn takes, and a test that only ever rebuilt would pin the wrong one
+    # (found by a negative control: a duplicated journal fsync in the append
+    # branch went unnoticed while this batch still rebuilt).
+    birth = Message.user("birth")
+    await transcript.append_messages([birth])
+    journal_inode = transcript.path.stat().st_ino
+    assert sum(inode == journal_inode for _thread, inode in calls) == 1
+    assert all(thread != loop_thread for thread, _inode in calls)
     calls.clear()
     messages = [Message.user(str(index)) for index in range(12)]
     rows = await transcript.append_messages(messages)
-    assert len(calls) == 1
-    assert all(thread != loop_thread for thread in calls)
+    assert sum(inode == journal_inode for _thread, inode in calls) == 1
+    assert calls[0][1] == journal_inode, "derived cache publication follows journal durability"
+    assert all(thread != loop_thread for thread, _inode in calls)
     assert [row.id for row in rows] == [message.id for message in messages]
     assert all(transcript.has_entry(message.id) for message in messages)
     newest = transcript.latest_user_entry()
     assert newest is not None and newest.id == messages[-1].id
     assert [row.id for row in Transcript(transcript.directory).entries()] == [
-        m.id for m in messages
+        birth.id,
+        *(m.id for m in messages),
     ]
 
 

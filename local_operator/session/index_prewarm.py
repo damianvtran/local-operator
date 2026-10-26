@@ -78,6 +78,7 @@ from local_operator.session.replay_cache import (
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.tail_anchor import (
     build_anchor,
+    preserve_selection_evidence,
     read_anchor,
     validate_anchor,
     write_anchor,
@@ -433,7 +434,7 @@ def _anchor_current(directory: Path) -> bool:
     anchor = read_anchor(directory)
     if anchor is None:
         return False
-    return anchor.inode == stat.st_ino and anchor.size == stat.st_size
+    return anchor.checkpoint_absent and anchor.inode == stat.st_ino and anchor.size == stat.st_size
 
 
 async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> int:
@@ -621,7 +622,7 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
                 return False
             _NO_ANCHOR_NEEDED[key] = (stat.st_ino, stat.st_size)
             return False
-        return write_anchor(directory, anchor)
+        return write_anchor(directory, preserve_selection_evidence(directory, anchor))
     finally:
         with _ANCHOR_LOCK:
             _ANCHOR_IN_FLIGHT.discard(key)

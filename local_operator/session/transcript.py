@@ -2835,6 +2835,8 @@ class Transcript:
         opening a second writer.
         """
         written: os.stat_result | None = None
+        previous: os.stat_result | None = None
+        appended_tail = ""
         # A VANISHED PLAIN FILE WITH AN ARCHIVE BESIDE IT IS NOT A MISSING
         # JOURNAL. The rebuild below writes this object's in-memory rows over the
         # plain name; when the file went away because a compression pass replaced
@@ -2872,7 +2874,11 @@ class Transcript:
                 try:
                     with self.path.open("a", encoding="utf-8") as handle:
                         for entry in entries:
-                            handle.write(entry.to_json() + "\n")
+                            # Retain the LAST row's bytes: the selection ledger's
+                            # boundary digest is otherwise a 2 MB backward read of
+                            # a file this writer already holds in memory, per turn.
+                            appended_tail = entry.to_json() + "\n"
+                            handle.write(appended_tail)
                         handle.flush()
                         os.fsync(handle.fileno())
                         written = os.fstat(handle.fileno())
@@ -2923,6 +2929,16 @@ class Transcript:
             current = written
         if (current.st_ino, current.st_size) == (written.st_ino, written.st_size):
             written = current
+        # Shared by _append and append_imported, after journal fsync. A failed
+        # sidecar write cannot reject committed rows; stale hints fail validation.
+        from local_operator.session.tail_anchor import update_selection_after_commit
+
+        update_selection_after_commit(
+            self.directory,
+            previous_source=None if rebuild else previous,
+            appended_end=None if rebuild else written.st_size,
+            tail_row=None if rebuild else appended_tail.encode("utf-8"),
+        )
         return _page_source_signature(written)
 
     def _restore_mtime(self, previous_mtime: float | None) -> None:
