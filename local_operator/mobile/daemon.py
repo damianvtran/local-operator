@@ -2372,13 +2372,18 @@ def _lapsed_window(config_dir: Path) -> int:
     return lapsed_visible_ms(config_dir, poll_now=True)
 
 
-def _notifications_block() -> dict[str, Any]:
+def _notifications_block() -> dict[str, Any] | None:
     """The list payload's ``notifications`` block: the inbox badge, one read.
 
     A SIBLING of ``unread`` on the list payload, for that block's own reason: a
     missing key must read as "this relay has no inbox", never as a zero the
     phone could paint over a perfectly real badge. So a store that cannot be
-    read answers ``{}`` -- unknown -- rather than zeros.
+    read answers ``None`` -- and the caller OMITS the key entirely (Q4-2).
+
+    ``{}`` was the old answer and it was the wrong shape twice over: the frame
+    says absent-means-unknown, and an empty object is a PRESENT block whose
+    numbers happen to be missing -- a renderer walking the documented keys reads
+    zero. Omitting the key leaves exactly one spelling of "cannot tell".
 
     The numbers are the desktop's own (``notifications.items.counts``), never
     recomputed here: ``waiting_unread_count`` is the ask half of the badge and
@@ -2392,7 +2397,13 @@ def _notifications_block() -> dict[str, Any]:
         return dict(inbox_counts(config_dir()))
     except Exception:  # noqa: BLE001 -- absent means unknown, never zero
         logger.debug("relay: notifications block unavailable", exc_info=True)
-        return {}
+        return None
+
+
+def _notifications_frame() -> dict[str, dict[str, Any]]:
+    """The frame's inbox key, present only when the store could be read."""
+    block = _notifications_block()
+    return {} if block is None else {"notifications": block}
 
 
 def _feature_flags() -> dict[str, Any]:
@@ -5775,8 +5786,11 @@ def build_app(daemon: MobileDaemon):
             "unread": daemon.table.unread_block(),
             # The inbox badge (docs/design/notifications-inbox.md §5.4), read
             # per frame like ``unread``: a stale badge is the one thing a phone
-            # must not show, and this answer is cheap beside it.
-            "notifications": _notifications_block(),
+            # must not show, and this answer is cheap beside it. AN UNREADABLE
+            # STORE OMITS THE KEY (Q4-2): the wire's contract is that a missing
+            # block reads as "this relay has no inbox", and a present ``{}``
+            # would let a renderer paint a zero over a real badge.
+            **_notifications_frame(),
             "capabilities": {
                 # D11: the relay's own inbox receipt door, advertised so native
                 # can turn its receipt feed on instead of probing a refusal.

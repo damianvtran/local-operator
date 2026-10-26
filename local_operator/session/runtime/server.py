@@ -1201,6 +1201,7 @@ _SYNC_LOCAL_OPS = frozenset(
         "desktop_watch",
         "desktop_withdraw",
         "viewer_watch",
+        "activity",
         "event_mute",
         "event_unmute",
     }
@@ -1762,6 +1763,15 @@ class _ClientConn:
     #: explicitly declares it switched away is discounted, so the change can
     #: never invent a silent session out of an older viewer.
     terminal_displaying: bool = True
+    #: EPOCH MILLISECONDS of the newest REAL key/mouse edge the attached
+    #: terminal reported through the ``activity`` op, or 0 for "never reported".
+    #:
+    #: A TIMESTAMP, NEVER THE EVENT. The inbox needs to know whether the
+    #: operator is at the keyboard (docs/notifications/contract §6.3) — whether a
+    #: banner would be raised over a card they are already reading. What was
+    #: typed is none of the runtime's business, so the message carries one
+    #: integer and nothing else; a keystroke's content never leaves the UI.
+    tui_input_at_ms: int = 0
     #: Which action-carrying slash receipts this client renders itself (see
     #: ``SLASH_ACTION_RECEIPTS``). ``None`` means the auth frame omitted the
     #: field, i.e. a client built before it existed — the runtime then
@@ -5721,6 +5731,41 @@ class RuntimeServer:
         except RuntimeError:
             logger.debug("no running loop to nudge the session from", exc_info=True)
 
+    def tui_input_age_s(self) -> float | None:
+        """Seconds since the newest REAL input edge a DISPLAYING terminal reported.
+
+        THE READER BEHIND THE RUNG-4 STAND-DOWN (R6-1). ``serving.
+        _tui_viewer_active`` reads this name; before it existed the probe always
+        answered ``None`` and the runtime kept bannering the conversation the
+        operator was reading, so the ladder's rung 3 and rung 4 disagreed.
+
+        ``None`` is the honest answer for every case this cannot prove, and every
+        caller treats it as "raise the banner" (contract §6.3):
+        ``None`` when no attach connection ever reported an edge, when the only
+        reporters have declared they are showing something else
+        (``terminal_displaying`` False), or when the clock cannot be read.
+
+        ONLY THE AGE. The connection keeps one epoch millisecond per the
+        ``activity`` op; nothing about what was typed is stored or returned.
+        """
+        stale: float | None = None
+        try:
+            now = time.time()
+            for conn in list(self._clients.values()):
+                if getattr(conn, "kind", "") != "attach":
+                    continue
+                if not getattr(conn, "terminal_displaying", True):
+                    continue
+                stamp = int(getattr(conn, "tui_input_at_ms", 0) or 0)
+                if stamp <= 0:
+                    continue
+                age = max(0.0, now - stamp / 1000.0)
+                stale = age if stale is None else min(stale, age)
+        except Exception:  # noqa: BLE001 — an unreadable table is "cannot tell"
+            logger.debug("could not read the TUI input age", exc_info=True)
+            return None
+        return stale
+
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.
 
@@ -6316,6 +6361,29 @@ class RuntimeServer:
                 self._desktop_attach_seen = 0.0
                 self._republish_detached()
                 detail = "desktop lease withdrawn"
+            elif op == "activity":
+                # THE INPUT HALF OF "IS THE OPERATOR HERE?" (contract §6.1/§6.3).
+                # ``viewer_watch`` says WHICH conversation a terminal is showing;
+                # this says whether anyone is still at the keyboard. Together
+                # they are the watched-AND-active predicate the item ladder's
+                # rung 4 stands down for — without it the runtime bannered a
+                # conversation the operator was demonstrably reading (R6-1).
+                #
+                # Throttled at the SENDER (one per 10 s) because this is a
+                # freshness claim, not an event stream; an out-of-order beat is
+                # harmless since only the maximum is read.
+                #
+                # ONLY A TIMESTAMP. No keycodes, no text, no counts: the age of
+                # the newest edge is the entire information the ladder needs, and
+                # anything more would put keystroke content on a socket for a
+                # routing decision that never needs it.
+                if conn.kind != "attach" or id(conn.writer) not in self._clients:
+                    raise ValueError("activity requires a live attach connection")
+                stamp = frame.get("input_at_ms")
+                if type(stamp) is not int or stamp <= 0:
+                    raise ValueError("activity input_at_ms must be a positive integer")
+                conn.tui_input_at_ms = max(conn.tui_input_at_ms, stamp)
+                detail = "activity noted"
             elif op == "viewer_watch":
                 # A MULTIPLEXING TERMINAL SAYS WHETHER IT IS STILL SHOWING US.
                 #

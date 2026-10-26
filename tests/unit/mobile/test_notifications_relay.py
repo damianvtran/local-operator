@@ -462,3 +462,29 @@ def test_the_store_refuses_an_unbindable_stamp_without_raising() -> None:
     NotificationStore(config_dir()).notify(SID, title="x", priority="high")
     page = list_page(config_dir(), cursor="9" * 79)
     assert page["items"], "an unbindable cursor reads from the top rather than raising"
+
+
+def test_an_unreadable_store_omits_the_block_instead_of_sending_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q4-2: unknown is an ABSENT key, not a present empty object.
+
+    The frame's own contract is that a missing ``notifications`` block reads as
+    "this relay has no inbox". ``{}`` is a PRESENT block whose documented keys
+    are missing, which a renderer walking them reads as zero — a painted zero
+    over a real badge. The native client tolerates both, so only the relay had
+    to change.
+    """
+    from local_operator.mobile import daemon as mobile_daemon
+
+    def _boom(*_args: object, **_kwargs: object) -> dict[str, int]:
+        raise OSError("database disk image is malformed")
+
+    monkeypatch.setattr("local_operator.notifications.items.counts", _boom)
+    assert mobile_daemon._notifications_block() is None
+    assert mobile_daemon._notifications_frame() == {}, "the key must be absent"
+
+    # The control: a readable store still sends the block.
+    monkeypatch.undo()
+    frame = mobile_daemon._notifications_frame()
+    assert "notifications" in frame and "unread_count" in frame["notifications"]

@@ -3583,6 +3583,13 @@ class Session:
         #: already put a banner on the operator's screen does not also raise the
         #: completion banner for itself (contract §3.4).
         self._run_notified_banner: bool = False
+        #: Installed by the serving handle when this session runs under a
+        #: `RuntimeServer` (`serving.py`, `_tui_viewer_active`). It answers
+        #: whether an attached terminal is BOTH showing this conversation and
+        #: being typed in — the rung-4 stand-down's evidence. Absent (None) for a
+        #: session with no runtime, which every caller reads as "cannot tell" and
+        #: so notifies (contract §6.3).
+        self._notify_tui_probe: Callable[[], Any] | None = None
         #: Background raises of this run's held `high` item banners (the
         #: runtime rung's grace), settled before the run's end is judged.
         self._pending_item_banners: list[asyncio.Task[Any]] = []
@@ -16464,6 +16471,12 @@ class Session:
         generation = self._item_banner_generation
 
         async def raise_after_grace() -> None:
+            # THE PROBE IS RE-READ HERE, not inherited from the write-time
+            # route (R6-2). The grace exists so an in-view receipt can cancel
+            # the banner, which means the operator may well have switched to
+            # this conversation while it ran; carrying the write-time answer
+            # would raise the banner over the screen they moved to. Unknown
+            # (None) still notifies — the fail-open direction of §6.3.
             result = await asyncio.to_thread(
                 _delivery.deliver_item,
                 root,
@@ -16475,6 +16488,7 @@ class Session:
                 title=title,
                 body=body,
                 store=store,
+                tui_watching=self._notify_tui_evidence(),
             )
             logger.info(
                 "notify: item %s banner after grace rung=%s (%s)",

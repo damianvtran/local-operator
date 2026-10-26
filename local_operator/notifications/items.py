@@ -120,16 +120,26 @@ class SessionFacts:
         if cached is None:
             title = ""
             live = False
+            cwd = ""
             try:
                 from local_operator.resume import live_runtime_pid, stored_session_title
 
                 directory = self.config_dir / "sessions" / session_id
                 if directory.is_dir():
                     title = stored_session_title(directory)
+                    # THE WORKSPACE DIRECTORY BELONGS ON THE SESSION BLOCK (R3-1).
+                    # Every surface already receives this block, and a row with no
+                    # stored title has nothing else to name it but the bare session
+                    # id — the TUI fell back to `row["cwd"]`, which a notify row
+                    # never carried, so the fallback could not fire on a real row.
+                    # Resolved HERE, where the directory is already in hand.
+                    from local_operator.session_files.service import session_cwd
+
+                    cwd = session_cwd(self.config_dir, session_id, directory)
                 live = live_runtime_pid(self.config_dir, session_id) is not None
             except Exception:  # noqa: BLE001 — chrome; the snapshot title stands in
                 logger.debug("notifications: session facts unavailable", exc_info=True)
-            cached = {"title": title, "live": live}
+            cached = {"title": title, "live": live, "cwd": cwd}
             self._cache[session_id] = cached
         return {
             "id": session_id,
@@ -137,6 +147,10 @@ class SessionFacts:
             "agent_id": agent_id,
             "live": bool(cached["live"]),
             "live_state": "idle" if cached["live"] else "",
+            # ADDED KEY, never a default: a session with no recorded directory
+            # omits it, so a reader's own fallback (the id) still applies and no
+            # consumer has to disbelieve an empty string.
+            **({"cwd": cached["cwd"]} if cached.get("cwd") else {}),
         }
 
 
@@ -244,6 +258,12 @@ def ask_item(
         "dismissed": False,
         "repeat_count": 1,
         "session": sessions.get(session_id),
+        # THE ASK ROW'S OWN WORKSPACE DIRECTORY, carried through the shape
+        # (R3-2). ``asks/store.py`` sets ``row["cwd"]``, and the normalizer used
+        # to drop it — so a rendered row with no stored title fell back to the
+        # bare session id and the TUI's directory-name fallback could never fire
+        # on a real row. The detail route reads the same value from this key.
+        "cwd": str(row.get("cwd") or ""),
         "projects": projects.get(session_id),
         "ask": {
             "ask_id": ask_id,

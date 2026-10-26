@@ -2137,6 +2137,25 @@ class AttachClient:
         """
         return await self._request("viewer_watch", displaying=displaying)
 
+    async def activity(self, *, input_at_ms: int) -> str:
+        """Report the newest real Key/MouseDown edge on this terminal's screen.
+
+        The input half of the runtime's "watched AND active" predicate (the item
+        ladder's rung 4 stands down for it). ``viewer_watch`` says which
+        conversation is on screen; this says someone is still at the keyboard.
+
+        ONE INTEGER AND NOTHING ELSE — no keycodes, no text, no counts. What was
+        typed is not the runtime's business; the age of the newest edge is the
+        whole of what a routing decision needs, and the TUI throttles it to one
+        report per 10 s.
+
+        Best-effort by contract, like ``viewer_watch``: an owner too old to know
+        the op answers with an error frame, and the caller swallows it — the
+        parameter is an optimisation of the banner ladder, never a feature whose
+        absence breaks a turn.
+        """
+        return await self._request("activity", input_at_ms=int(input_at_ms))
+
     async def abort(self) -> str:
         return await self._request("abort")
 

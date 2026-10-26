@@ -551,6 +551,51 @@ def store_of(root: Path) -> NotificationStore:
     return NotificationStore(root)
 
 
+def test_the_post_grace_raise_re_reads_the_input_probe(tmp_path: Path, monkeypatch) -> None:
+    """R6-2: the grace window must not freeze the write-time answer.
+
+    The hold is 2.5 s precisely so an in-view receipt can cancel the banner —
+    which means the operator may switch TO this conversation while it runs. The
+    raise used to inherit the write-time route and would then banner the screen
+    they had moved to; it re-reads the probe instead. Unknown still notifies: the
+    first answer here is `None` (no report yet) and only the raise sees `True`.
+    """
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    session = make_session(tmp_path, ScriptedStream([]))
+    session._config_dir = tmp_path / "root"
+    answers = [None, True, True, True]  # write time, then the raise
+    session._notify_tui_probe = lambda: answers.pop(0) if answers else True
+    seen: list[Any] = []
+
+    def fake_route(*args: Any, **kwargs: Any) -> delivery.DeliveryResult:
+        # The write-time route sees None and therefore decides on its own.
+        return delivery.DeliveryResult(rung=RUNG_DETACHED, detail="runtime will raise")
+
+    def fake_deliver(*args: Any, **kwargs: Any) -> delivery.DeliveryResult:
+        seen.append(kwargs.get("tui_watching"))
+        if kwargs.get("tui_watching") is True:
+            return delivery.DeliveryResult(
+                raised=False, rung=delivery.RUNG_TUI_VIEWER, detail="watched"
+            )
+        return delivery.DeliveryResult(raised=True, rung=RUNG_DETACHED, claimed=True)
+
+    monkeypatch.setattr(delivery, "route_item", fake_route)
+    monkeypatch.setattr(delivery, "deliver_item", fake_deliver)
+    door = session._notify_inbox_callable()
+    assert door is not None
+
+    async def turn() -> None:
+        await door(
+            title="Outside PR", body="b", priority="high", key="pr", links=[], anchor_id="c1"
+        )
+        await session._settle_item_banners()
+
+    _run_awaitable(turn())
+    assert seen == [True], "the raise carried the FRESH probe, not the write's None"
+    assert session._run_notified_banner is False, "no banner went out, so nothing is suppressed"
+
+
 def test_the_session_door_banners_a_high_item_and_suppresses_its_completion_banner(
     tmp_path: Path, monkeypatch
 ) -> None:

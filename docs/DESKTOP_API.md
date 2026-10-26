@@ -562,6 +562,22 @@ that fallback, so one gate does not produce both an Electron and runtime toast.
 sends it once the last live lease has run out (45 s with no beat), never at a
 transient stream end.
 
+`activity` is the terminal's input half of that same question, and it exists
+because `viewer_watch` alone could not answer it (R6-1). `viewer_watch` says
+WHICH conversation a multiplexing terminal is displaying; a conversation can be
+on screen while the operator is away from the keyboard. The item ladder stands
+its rung 4 down only for a conversation that is BOTH displayed and being typed
+in, so an attached TUI sends `{"op": "activity", "input_at_ms": <epoch ms>}` on a
+real `Key`/`MouseDown` edge, throttled by the client to one report per 10 s. The
+payload is one positive integer and nothing else: the age of the newest edge is
+the whole of what routing needs, and keystroke content never leaves the UI. A
+runtime keeps, per attach connection, the newest stamp; the rung-4 check reads
+the newest stamp among connections that have not declared they are away, and
+answers `None` — "cannot tell" — when no such connection ever reported. `None`
+falls through to notifying, so an old client, a silent client and a stale stamp
+all keep today's behaviour. A frame whose `input_at_ms` is not a positive
+integer is refused, and a refused frame is never stored.
+
 A lease is also the one signal that CREATES residency rather than only
 preserving it. While a live lease says `visible`, the HTTP bridge starts the
 session's runtime in the background (`refresh_watch`), because that is term 3 of

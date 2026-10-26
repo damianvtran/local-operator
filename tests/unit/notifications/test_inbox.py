@@ -657,6 +657,43 @@ def test_detail_ids_use_the_patch_regex(client) -> None:
         assert answer.status_code == 422, (bad, answer.status_code)
 
 
+def test_an_open_ask_row_carries_its_workspace_directory(tmp_path: Path) -> None:
+    """R3-2: the ask's ``cwd`` survives normalization.
+
+    ``asks/store.py`` puts the workspace directory on the row; the inbox shape
+    used to drop it, so a rendered row with no stored title fell back to the bare
+    session id and the TUI's directory fallback could never fire on a real row.
+    """
+    from local_operator.asks import store as ask_store
+
+    # The index sweep keeps an entry only while its conversation directory
+    # exists (`entry_is_stale`), which is the real shape: an ask outlives a
+    # stopped conversation, not a deleted one.
+    (tmp_path / "sessions" / SID).mkdir(parents=True, exist_ok=True)
+    ask_store.write_entry(
+        tmp_path,
+        SID,
+        cwd="/Users/damian/workspace/repos/lo-notifications-l1",
+        asks=[
+            {
+                "ask_id": "ask_cwd",
+                "session_id": SID,
+                "status": "open",
+                "created_at": int(time.time() * 1000),
+                "questions": [{"question": "Ship it?", "header": "Ship"}],
+            }
+        ],
+    )
+    page = list_page(tmp_path, state="all")
+    asks = [row for row in (page.get("waiting") or []) if row.get("source") == "ask"]
+    assert asks, "the open ask must be listed"
+    assert asks[0]["cwd"] == "/Users/damian/workspace/repos/lo-notifications-l1"
+    # And the detail route agrees with the list row.
+    answered = detail(tmp_path, asks[0]["id"])
+    assert answered is not None
+    assert answered["item"]["cwd"] == asks[0]["cwd"]
+
+
 def test_a_store_written_by_the_previous_head_opens_and_serves(tmp_path: Path) -> None:
     """R5-1 MAJOR: `CREATE TABLE IF NOT EXISTS` never adds a column.
 

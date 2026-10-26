@@ -6413,7 +6413,7 @@ class ServingSessionHandle(SessionHandle):
         # probe answers None — unknown, which notifies rather than suppresses
         # (contract §6.3). Installed here so the answer is live, not captured.
         try:
-            self._session._notify_tui_probe = lambda: self._tui_viewer_active()
+            self._session._notify_tui_probe = self._tui_viewer_active
         except Exception:  # noqa: BLE001 — an unsettable slot keeps its default
             logger.debug("could not install the inbox TUI probe", exc_info=True)
         holder = getattr(self._session, "_goal_state", None)
@@ -6448,7 +6448,9 @@ class ServingSessionHandle(SessionHandle):
             age = reader()
         except Exception:  # noqa: BLE001 — an unreadable probe is unknown
             return None
-        if age is None:
+        if not isinstance(age, (int, float)) or isinstance(age, bool):
+            # A registrant whose probe answers something other than a number is
+            # "cannot tell", not "active": the fail-open direction is to notify.
             return None
         # Imported here, not at module scope: `tui.attention` is a UI-tier
         # module and this file must stay importable without it (same rule as
