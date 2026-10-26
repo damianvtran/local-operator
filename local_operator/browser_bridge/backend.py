@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -450,6 +451,32 @@ def _element_not_found_copy(error: BridgeError) -> str:
     return f"{message}. Take a new snapshot and retry with a fresh ref."
 
 
+#: An http(s) URL inside free text, up to the first whitespace or quote.
+_MESSAGE_URL = re.compile(r"https?://[^\s\"'<>]+")
+
+
+def _redact_message_urls(text: str) -> str:
+    """Reduce every URL in an untrusted message to its safe, value-free shape."""
+
+    def _safe(match: re.Match[str]) -> str:
+        from urllib.parse import urlparse, urlunsplit
+
+        from local_operator.tools.builtin import _network_safe_url
+
+        try:
+            parsed = urlparse(match.group(0))
+        except ValueError:
+            return "(a URL was withheld)"
+        # `_network_safe_url` is the ONE renderer of a network URL in this
+        # codebase; reusing it is what stops this path inventing a second rule.
+        safe = _network_safe_url(
+            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+        )
+        return safe or "(a URL was withheld)"
+
+    return _MESSAGE_URL.sub(_safe, text)
+
+
 def format_error(
     error: BridgeError, *, action: str = "", surface: str = "", host: str = HOST_EXTENSION
 ) -> str:
@@ -512,7 +539,13 @@ def format_error(
         # an approval that does not exist (QA finding, 2026-10-26), so the host's
         # own message is rendered when it has one for these actions.
         if action.startswith("network_") and str(error.message or "").strip():
-            return f"{error.message} Nothing was captured by this call."
+            # Host copy is untrusted input on this path, so any URL it carries is
+            # reduced to the same safe shape the metadata renderer uses: scheme,
+            # host, path and query KEYS, never a value or a fragment. Today's
+            # host messages are fixed strings; this is what keeps the contract
+            # true if one ever quotes the refused URL (agent review round 4,
+            # R4-1).
+            return f"{_redact_message_urls(str(error.message))} Nothing was captured by this call."
         origin = str(error.data.get("origin") or _origin(str(error.data.get("url", ""))))
         return (
             f"navigation to {origin or '(unknown origin)'} was denied by the user (or the "

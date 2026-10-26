@@ -25470,7 +25470,8 @@ def _network_metadata_result(payload: dict[str, Any]) -> dict[str, Any]:
             # (`body_dropped`) silently deleted the real counter from every
             # result — a counter nobody can read is the same as no counter, and
             # it hid an oversize body being discarded (real-path probe,
-            # 2026-10-26).
+            # 2026-10-26). Exactly this set and no wider: a key the host never
+            # sends is dead weight that reads like a contract.
             "active",
             "count",
             "dropped",
@@ -25479,9 +25480,6 @@ def _network_metadata_result(payload: dict[str, Any]) -> dict[str, Any]:
             "body_bytes",
             "dropped_bodies",
             "entries",
-            "truncated",
-            "capture_id",
-            "next_after_id",
         }
     }
     entries: list[dict[str, Any]] = []

@@ -358,3 +358,20 @@ def test_host_drop_counters_survive_the_metadata_allowlist(monkeypatch, tmp_path
     assert payload["dropped_entries"] == 3
     assert payload["dropped_bodies"] == 2
     assert payload["body_bytes"] == 0
+
+
+def test_a_network_refusal_never_echoes_a_url_with_values():
+    """Host copy is untrusted; a URL inside it is reduced to the safe shape."""
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    error = BridgeError(
+        code=ErrorCode.ORIGIN_DENIED,
+        message=(
+            "refused https://example.test/acs?code=query-secret#fragment-secret " "for this capture"
+        ),
+    )
+    rendered = format_error(error, action="network_read", host="ui")
+    assert "query-secret" not in rendered
+    assert "fragment-secret" not in rendered
+    assert "https://example.test/acs?code=" in rendered
