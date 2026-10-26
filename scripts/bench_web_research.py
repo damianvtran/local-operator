@@ -102,10 +102,19 @@ class Task:
     slug: str
     kind: str  # "long": the answer sits deep in a long page; "short": snippet-answerable
     prompt: str
-    grade: str  # regex over the final answer (case-insensitive)
+    grade: str  # preview regex; NOT the correctness grader (see validate_answer)
     url: str = ""  # primary source; long tasks are fetched by --offline
     query: str = ""  # the fixed, realistic query --offline uses
     preview: str = ""  # regex proving the ANSWER (not just the topic) is in a preview
+    # Correctness is deliberately NOT the bare ``grade`` regex: an unanchored
+    # match calls "the default is 50, not 100" correct. ``expected`` holds the
+    # accepted literal answers (any one suffices); ``distractors`` holds wrong
+    # values that must NOT be treated as the answer. ``validate_answer``
+    # requires an expected value that is not negated, and rejects the run when
+    # a distractor appears. Both are matched as whole tokens, so "100" does not
+    # fire inside "1000" or "10000".
+    expected: tuple[str, ...] = ()
+    distractors: tuple[str, ...] = ()
 
 
 TASKS: tuple[Task, ...] = (
@@ -117,6 +126,8 @@ TASKS: tuple[Task, ...] = (
         "https://www.postgresql.org/docs/current/runtime-config-connection.html",
         "max_connections default",
         r"default is typically 100",
+        expected=("100",),
+        distractors=("1000", "10000", "50", "200", "500"),
     ),
     Task(
         "sqlite-max-column",
@@ -126,6 +137,8 @@ TASKS: tuple[Task, ...] = (
         "https://www.sqlite.org/limits.html",
         "SQLITE_MAX_COLUMN default",
         r"default setting for SQLITE\\?_MAX\\?_COLUMN is 2000",
+        expected=("2000", "2,000"),
+        distractors=("32767", "1000", "4000", "200"),
     ),
     Task(
         "h2-initial-window",
@@ -135,6 +148,8 @@ TASKS: tuple[Task, ...] = (
         "https://www.rfc-editor.org/rfc/rfc9113.html",
         "SETTINGS_INITIAL_WINDOW_SIZE initial value",
         r"initial value is 2\^?16-1 \(65,535\)|initial value is 216-1 \(65,535\)",
+        expected=("65535", "65,535"),
+        distractors=("65536", "65534", "655350"),
     ),
     Task(
         "git-gc-auto",
@@ -144,6 +159,8 @@ TASKS: tuple[Task, ...] = (
         "https://git-scm.com/docs/git-gc",
         "gc.auto default value",
         r"default value is 6700",
+        expected=("6700", "6,700"),
+        distractors=("670", "67000", "256"),
     ),
     Task(
         "pep8-docstring-length",
@@ -153,6 +170,8 @@ TASKS: tuple[Task, ...] = (
         "https://peps.python.org/pep-0008/",
         "docstrings comments line length limit",
         r"limited to 72",
+        expected=("72",),
+        distractors=("79", "80", "88", "120"),
     ),
     Task(
         "rfc9110-misdirected",
@@ -162,6 +181,8 @@ TASKS: tuple[Task, ...] = (
         "https://www.rfc-editor.org/rfc/rfc9110.html",
         "Misdirected Request status code",
         r"The 421 \(Misdirected Request\) status code indicates",
+        expected=("421",),
+        distractors=("420", "422", "400", "404", "429"),
     ),
     # Snippet-answerable: a regression guard — the change must not slow these down.
     Task(
@@ -170,6 +191,8 @@ TASKS: tuple[Task, ...] = (
         "What port does PostgreSQL listen on by default?",
         r"\b5432\b",
         "https://www.postgresql.org/docs/current/runtime-config-connection.html",
+        expected=("5432",),
+        distractors=("5433", "54321", "54320"),
     ),
     Task(
         "python-creator",
@@ -177,6 +200,8 @@ TASKS: tuple[Task, ...] = (
         "Who created the Python programming language?",
         r"guido",
         "https://docs.python.org/3/faq/general.html",
+        expected=("guido van rossum", "guido"),
+        distractors=("rossum not", "van rossum is not"),
     ),
     Task(
         "git-first-release",
@@ -184,6 +209,8 @@ TASKS: tuple[Task, ...] = (
         "What year was Git first created?",
         r"\b2005\b",
         "https://git-scm.com/book/en/v2/Getting-Started-A-Short-History-of-Git",
+        expected=("2005",),
+        distractors=("2006", "2007", "2010", "2004"),
     ),
     Task(
         "https-default-port",
@@ -191,6 +218,8 @@ TASKS: tuple[Task, ...] = (
         "What's the default TCP port for HTTPS?",
         r"\b443\b",
         "https://www.rfc-editor.org/rfc/rfc9110.html",
+        expected=("443",),
+        distractors=("444", "80", "8443", "4433"),
     ),
 )
 
@@ -224,6 +253,60 @@ class RunRecord:
     correct: bool = False
     root: str = ""
     error: str = ""
+
+
+# -- correctness -------------------------------------------------------------
+
+#: A wrong answer stated as a correction ("50, not 100") must not grade correct.
+_NEGATION_RE = re.compile(
+    r"(?:\bnot\b|\bnever\b|\bisn't\b|\bwasn't\b|\bno\b|\binstead of\b|\brather than\b)"
+)
+
+
+def _literal_pattern(value: str) -> re.Pattern[str]:
+    """Whole-token literal match: '100' does not match inside '1000'/'10000'.
+
+    A value that is mostly digits gets digit boundaries (so '65,535' matches
+    but not '165,535'); words get ordinary word boundaries.
+    """
+    if any(ch.isdigit() for ch in value):
+        return re.compile(rf"(?<![\d.,]){re.escape(value)}(?![\d])", re.IGNORECASE)
+    return re.compile(rf"\b{re.escape(value)}\b", re.IGNORECASE)
+
+
+def validate_answer(task: Task, answer: str) -> bool:
+    """Whether ``answer`` states the task's answer, without contradicting it.
+
+    Presence of the expected value is necessary but not sufficient — that is
+    the false-positive this replaces. A distractor value anywhere in the
+    answer fails it, and an expected value that is negated ("not 100") does
+    not count. This is a lexical grader, so it is conservative: an answer that
+    is correct but also mentions a distractor (e.g. PEP 8's "72 for docstrings,
+    79 for code") is marked incorrect rather than risk a false pass. The A/B
+    comparison is about round trips, and both arms are graded identically.
+    """
+    if not answer.strip() or not task.expected:
+        return False
+    for wrong in task.distractors:
+        if _literal_pattern(wrong).search(answer):
+            return False
+    matches = (m for value in task.expected for m in _literal_pattern(value).finditer(answer))
+    for match in matches:
+        window = answer[max(0, match.start() - 24) : match.end()]
+        if not _NEGATION_RE.search(window):
+            return True
+    return False
+
+
+def is_valid(record: RunRecord) -> bool:
+    """A run eligible for correctness AND performance comparison.
+
+    A failed/crashed/timed-out run (exit != 0) or one with no final answer is
+    not a data point: it is usually fast, so including it would flatter wall
+    time, and its answer (often empty or an apology) says nothing about
+    correctness. Such runs are still recorded and reported, separately.
+    """
+    return record.exit == 0 and not record.error and bool(record.answer.strip())
 
 
 # -- isolation ---------------------------------------------------------------
@@ -470,7 +553,12 @@ def parse_capture(stdout: str, record: RunRecord, grade: str) -> None:
             answer = "\n".join(texts)
     record.cost_usd = round(cost, 5) if priced else None
     record.answer = answer.strip()
-    record.correct = bool(re.search(grade, record.answer, re.IGNORECASE))
+    # Validity first: an exit != 0 / empty-answer run is never "correct".
+    # ``grade`` is the task slug; validators live on the Task, so look it up.
+    task = next((t for t in TASKS if t.slug == grade), None)
+    record.correct = bool(
+        task is not None and is_valid(record) and validate_answer(task, record.answer)
+    )
 
 
 def run_live(arm: Arm, task: Task, rep: int, args: argparse.Namespace) -> RunRecord:
@@ -534,10 +622,15 @@ def _median(xs: list[float]) -> float | None:
 
 
 def summarise(records: list[RunRecord], arms: list[Arm], tasks: list[Task]) -> dict[str, Any]:
+    # Invalid runs are reported separately and NEVER averaged into wall time,
+    # correctness or the paired ratios (a crashed run is fast and would flatter
+    # whichever arm crashed more).
+    invalid = [r for r in records if not is_valid(r)]
+    eligible = [r for r in records if is_valid(r)]
     per: dict[str, dict[str, Any]] = {}
     for task in tasks:
         for arm in arms:
-            rs = [r for r in records if r.task == task.slug and r.arm == arm.name]
+            rs = [r for r in eligible if r.task == task.slug and r.arm == arm.name]
             if not rs:
                 continue
             costs = [r.cost_usd for r in rs if r.cost_usd is not None]
@@ -546,6 +639,7 @@ def summarise(records: list[RunRecord], arms: list[Arm], tasks: list[Task]) -> d
                 "kind": task.kind,
                 "arm": arm.name,
                 "n": len(rs),
+                "attempted": sum(1 for r in records if r.task == task.slug and r.arm == arm.name),
                 "wall_mean": _mean([r.wall_s for r in rs]),
                 "wall_median": _median([r.wall_s for r in rs]),
                 "correct": sum(r.correct for r in rs),
@@ -581,13 +675,25 @@ def summarise(records: list[RunRecord], arms: list[Arm], tasks: list[Task]) -> d
     }
     totals = {
         arm.name: {
-            "runs": sum(1 for r in records if r.arm == arm.name),
-            "correct": sum(r.correct for r in records if r.arm == arm.name),
+            "runs": sum(1 for r in eligible if r.arm == arm.name),
+            "attempted": sum(1 for r in records if r.arm == arm.name),
+            "invalid": sum(1 for r in invalid if r.arm == arm.name),
+            "correct": sum(r.correct for r in eligible if r.arm == arm.name),
             "cost": round(sum(r.cost_usd or 0.0 for r in records if r.arm == arm.name), 4),
         }
         for arm in arms
     }
-    return {"per": per, "ratios": ratios, "geomean_ratio": geo, "totals": totals}
+    invalid_report = [
+        {"arm": r.arm, "task": r.task, "rep": r.rep, "exit": r.exit, "error": r.error}
+        for r in invalid
+    ]
+    return {
+        "per": per,
+        "ratios": ratios,
+        "geomean_ratio": geo,
+        "totals": totals,
+        "invalid_runs": invalid_report,
+    }
 
 
 def live_markdown(summary: dict[str, Any], arms: list[Arm]) -> str:
@@ -603,6 +709,15 @@ def live_markdown(summary: dict[str, Any], arms: list[Arm]) -> str:
             " {input_tokens_mean} | {output_tokens_mean} | {cost_mean} |".format(**row)
         )
     lines.append("")
+    if summary.get("invalid_runs"):
+        lines.append(
+            "Invalid runs (excluded from every mean/ratio/correctness figure): "
+            + "; ".join(
+                f"{r['arm']}/{r['task']} rep {r['rep']} exit {r['exit']}"
+                for r in summary["invalid_runs"]
+            )
+        )
+        lines.append("")
     for name, rs in summary["ratios"].items():
         lines.append(
             f"Paired wall ratio {name}/{arms[0].name} (median per task): "

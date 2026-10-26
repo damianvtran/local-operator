@@ -205,8 +205,24 @@ async def test_query_without_match_falls_back_to_head_tail_and_says_so(
     )
     assert "No passage matched the query" in fallback
     header, body = plain.split("\n\n", 1)
-    assert fallback.endswith(body), "fallback keeps the exact head/tail body"
+    # R2: the notice is added framing, so the fallback body is re-elided to
+    # make room for it. It must fit the SAME cap as every other preview (it
+    # previously appended the notice to an already-maximal body), and it must
+    # keep a usable footer rather than slicing it off.
+    assert len(fallback) <= TOOL_OUTPUT_LIMIT_CHARS
+    assert fallback.rstrip().endswith("]")
+    assert "read(path=" in fallback
     assert details["query_passages"] == []
+    # No query on the SAME fixture stays byte-identical (the re-elision is
+    # confined to the query fallback branch).
+    again, _d2, _e2 = await run_fetch(
+        "https://example.com/c",
+        tool_name="web_fetch",
+        context=context,
+        transport=_transport(page),
+        refresh=True,
+    )
+    assert again == plain
 
 
 @pytest.mark.asyncio

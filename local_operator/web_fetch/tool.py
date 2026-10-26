@@ -37,6 +37,7 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import (
     TOOL_OUTPUT_LIMIT_CHARS,
+    _elide_inline,
     _spill_footer,
     spill_truncate,
     validation_error_result,
@@ -410,9 +411,28 @@ def _shape_from_content(
             # Say WHY the middle is missing: without this the model cannot tell
             # "nothing matched" from "the query was ignored", and would retry
             # the same query instead of searching the handle with a regex.
-            preview = (
-                f"{header}\n\n[No passage matched the query; showing the start and end.]\n{body}"
-            )
+            # The notice is ADDED framing, so the body must give that room
+            # back: appending it to the already-truncated head/tail body would
+            # push the query fallback past the preview cap the no-query shape
+            # is sized to. Re-elide the content under limit - header - notice;
+            # the no-query path above is untouched (byte-identical by pin).
+            notice = "[No passage matched the query; showing the start and end.]"
+            meta = get_store().stat(spill_details["spill"]["handle"])
+            # Two passes, mirroring _elide_inline: the footer's suggested range
+            # depends on where the body was clipped, which depends on the
+            # footer's length. Pass one learns the real footer size, pass two
+            # sizes the body against it, so the assembled preview fits the cap
+            # by construction rather than by a guard that cuts the footer off.
+            budget = TOOL_OUTPUT_LIMIT_CHARS - len(header) - 2 - len(notice) - 1
+            fallback_body, span = _elide_inline(content, max(0, budget))
+            footer = _spill_footer(meta, span) if meta is not None else ""
+            fallback_body, span = _elide_inline(content, max(0, budget - len(footer)))
+            footer = _spill_footer(meta, span) if meta is not None else ""
+            preview = f"{header}\n\n{notice}\n{fallback_body}{footer}"
+            if len(preview) > TOOL_OUTPUT_LIMIT_CHARS:
+                # Defensive only (span wording can shift by a few chars): the
+                # cap is the contract, but a well-sized preview never needs it.
+                preview = preview[:TOOL_OUTPUT_LIMIT_CHARS]
             details["query_passages"] = []
     # A re-fetch of the same URL in the same rendition supersedes this result:
     # both describe the live state of one resource. Scoped by ``cache_variant``
