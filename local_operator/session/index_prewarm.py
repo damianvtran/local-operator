@@ -688,6 +688,94 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
             _ANCHOR_IN_FLIGHT.discard(key)
 
 
+#: How many of the newest journals the model-metadata warm resolves. The replay
+#: pass's bound, because it targets the same "opened first after a restart" set;
+#: in practice the answer is the same handful of models, so every journal after the
+#: first few costs only its (memoised) selection read.
+PREWARM_MODELS = PREWARM_REPLAYS
+
+
+def _newest_journals(root: str | Path, *, limit: int) -> list[str]:
+    """The ``limit`` most recently modified, unarchived journals, newest first."""
+    sessions_dir = Path(root) / "sessions"
+    try:
+        entries = list(sessions_dir.iterdir())
+    except OSError:
+        return []
+    journals: list[tuple[float, str]] = []
+    for entry in entries:
+        if _is_archived(entry):
+            continue
+        try:
+            journals.append(((entry / TRANSCRIPT_FILENAME).stat().st_mtime, entry.name))
+        except OSError:
+            continue
+    journals.sort(reverse=True)
+    return [session_id for _mtime, session_id in journals[:limit]]
+
+
+def _resolve_model(root: str | Path, session_id: str) -> None:
+    """Run the cold open's model resolution once, discarding the answer.
+
+    The SAME call ``cold_model.synthesise_cold_state`` makes, so whatever it
+    caches is exactly what the open will look up — the import graph, the
+    metadata memo, the listing document or its failure backoff, and the
+    selection memo. Imported here rather than at module scope: ``cold_model``
+    pulls the model-config stack, and this module is imported on daemon startup.
+    """
+    from local_operator.session.cold_model import resolve_conversation_model
+
+    resolve_conversation_model(Path(root), Path(root) / "sessions" / session_id)
+
+
+async def warm_model_metadata(root: str | Path, *, limit: int = PREWARM_MODELS) -> int:
+    """Resolve the newest journals' models off the request path; returns how many ran.
+
+    WHY (l9-first-open-warm). The first cold open in a fresh daemon spent
+    188-363 ms in ``synthesise_cold_state`` against 1-30 ms on every later open.
+    The cost was not the journal: it was process warmup inside the model
+    resolution. Measured on the 51.7 MB fixture (cProfile, fresh process):
+    a SYNCHRONOUS ``GET /v1/models`` for the saved provider (~130-220 ms, from
+    ``spec_for_target`` -> ``resolve_model_info`` -> discovery, run when no
+    current listing document exists) plus ~25-40 ms of lazy imports
+    (``providers.failover``, ``model.prices``, ``httpcore``, ``h11``). Both are paid once
+    per process and then memoised (``configure._resolve_model_info_cached``,
+    the listing document or ``catalogue``'s failure backoff), so the daemon can
+    pay them at boot rather than on the user's first click.
+
+    WHY NOT A NARROWER WARM. Importing the modules alone left the fetch on the
+    open (measured 62-200 ms), and the fetch's target depends on the journal's
+    SAVED selection, so the honest warm is the open's own resolution over the
+    journals most likely to be opened. Any answer it caches is the one the open
+    would have computed itself a moment later, so the first frame is unchanged.
+
+    OFF THE LOOP and SEQUENTIAL: each resolution runs in a worker thread (it
+    reads config and the journal's selection, and may touch the network under
+    discovery's own timeout), with the loop given a turn between journals. Paced
+    by the same load guard as the other passes; a failure skips that journal.
+    """
+    reason = skip_reason(root)
+    if reason is not None:
+        logger.debug("model prewarm skipped (%s)", reason)
+        return 0
+    candidates = await asyncio.to_thread(_newest_journals, root, limit=limit)
+    resolved = 0
+    for position, session_id in enumerate(candidates):
+        later = pace_reason() if position else None
+        if later is not None:
+            logger.debug("model prewarm dropped after %d journals (%s)", resolved, later)
+            break
+        try:
+            await asyncio.to_thread(_resolve_model, root, session_id)
+        except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+            logger.debug("model prewarm failed for %s", session_id, exc_info=True)
+        else:
+            resolved += 1
+        await asyncio.sleep(0)
+    logger.debug("model prewarm resolved %d journal(s)", resolved)
+    return resolved
+
+
 def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:
     """Spawn :func:`warm_index_cache` off the hot path; ``None`` when skipped.
 
@@ -703,10 +791,17 @@ def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:
         if reason is not None:
             logger.debug("index prewarm not started (%s)", reason)
             return None
-        task = asyncio.get_running_loop().create_task(warm_index_cache(root))
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(warm_index_cache(root))
+        # ITS OWN TASK, not a step of the index queue: the index and replay passes
+        # take seconds on a real store, and the model warm is mostly a network
+        # wait that overlaps them for free. Queued behind them, a first click a
+        # few seconds after boot would still pay the fetch.
+        model_task = loop.create_task(warm_model_metadata(root))
     except Exception:  # noqa: BLE001 — a warm-up must never be the failure
         logger.debug("index prewarm unavailable at startup", exc_info=True)
         return None
-    _TASKS.add(task)
-    task.add_done_callback(_TASKS.discard)
+    for held in (task, model_task):
+        _TASKS.add(held)
+        held.add_done_callback(_TASKS.discard)
     return task

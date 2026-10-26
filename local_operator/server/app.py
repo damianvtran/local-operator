@@ -182,6 +182,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # daemon STARTUP (the thing an attach waits on), and a raise inside a FastAPI
     # ``lifespan`` fails startup. The warm skips itself on a full disk or a busy
     # host, and drops the rest of its queue when the host gets busy mid-warm.
+    # It also starts the cold open's MODEL warm (``warm_model_metadata``): the
+    # first open in a fresh daemon otherwise paid a provider listing fetch plus
+    # the model-config imports inside its first frame.
     try:
         from local_operator.session.index_prewarm import start_index_prewarm
 

@@ -525,3 +525,96 @@ async def test_a_reader_joining_an_in_flight_preheat_does_not_parse_twice(tmp_pa
     await asyncio.gather(preheat, open_read())
     assert builds["count"] == 1, f"the journal was parsed {builds['count']} times"
     assert replay_cache.cached_replay(key) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_resolves_the_newest_journals_newest_first(tmp_path, monkeypatch):
+    """The model warm runs the open's own resolution over the journals opened next.
+
+    The resolution itself is stubbed: what is pinned here is WHICH journals reach
+    it and in what order, plus the bound. That the resolution is the open's own
+    call is pinned by the next test.
+    """
+    root = tmp_path
+    for index in range(5):
+        journal(root, f"s{index}", mtime=1_000.0 + index)
+    seen: list[str] = []
+    monkeypatch.setattr(prewarm, "_resolve_model", lambda _root, sid: seen.append(sid))
+
+    assert await prewarm.warm_model_metadata(root, limit=3) == 3
+    assert seen == ["s4", "s3", "s2"]
+
+
+def test_the_model_warm_runs_the_cold_opens_resolution(tmp_path, monkeypatch):
+    """``_resolve_model`` is ``resolve_conversation_model`` on the session's directory.
+
+    The same call ``cold_model.synthesise_cold_state`` makes, so the memo entries
+    the warm leaves behind are the ones the first open looks up.
+    """
+    from local_operator.session import cold_model
+
+    calls: list[tuple[Path, Path | None]] = []
+    monkeypatch.setattr(
+        cold_model,
+        "resolve_conversation_model",
+        lambda config_dir, session_dir=None, **_kw: calls.append((config_dir, session_dir)),
+    )
+    prewarm._resolve_model(tmp_path, "s1")
+    assert calls == [(tmp_path, tmp_path / "sessions" / "s1")]
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_honours_the_guards_and_survives_a_failure(tmp_path, monkeypatch):
+    """Disk refuses it outright, load drops the rest, and one failure skips one journal."""
+    root = tmp_path
+    for index in range(3):
+        journal(root, f"s{index}", mtime=1_000.0 + index)
+
+    def boom(_root, sid):
+        if sid == "s2":
+            raise RuntimeError("listing exploded")
+
+    monkeypatch.setattr(prewarm, "_resolve_model", boom)
+    # The newest journal fails; the warm carries on and counts only what resolved.
+    assert await prewarm.warm_model_metadata(root, limit=3) == 2
+
+    monkeypatch.setattr(prewarm, "load_per_cpu", lambda: 5.0)
+    # Busy host: the first journal is still allowed, the rest are dropped.
+    monkeypatch.setattr(prewarm, "_resolve_model", lambda *_a: None)
+    assert await prewarm.warm_model_metadata(root, limit=3) == 1
+
+    monkeypatch.setattr(
+        prewarm, "free_bytes", lambda _root=None: prewarm.PREWARM_MIN_FREE_BYTES - 1
+    )
+    assert await prewarm.warm_model_metadata(root, limit=3) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_startup_prewarm_also_starts_the_model_warm(tmp_path, monkeypatch):
+    """The daemon's one startup call schedules the model warm as its OWN task.
+
+    Its own task rather than a step of the index queue: queued behind the index
+    and replay passes, a first click seconds after boot would still pay the fetch.
+    """
+    root = tmp_path
+    journal(root, "s1", mtime=1_000.0)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def held_index(_root):
+        await release.wait()
+        return 0
+
+    async def model_warm(_root):
+        started.set()
+        return 1
+
+    monkeypatch.setattr(prewarm, "warm_index_cache", held_index)
+    monkeypatch.setattr(prewarm, "warm_model_metadata", model_warm)
+    task = prewarm.start_index_prewarm(root)
+    assert task is not None
+    # The index pass is still parked, and the model warm has already run.
+    await asyncio.wait_for(started.wait(), 1)
+    assert not task.done()
+    release.set()
+    await task
