@@ -206,6 +206,8 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # English labels stay untouched while all seven locales join the wave.
         "relay.chrome",
         "relay.session.tags",
+        # Audited relay condensation copy adds 19 keys; keep this census exact.
+        "relay.transcript",
         "tui.asks",
         "tui.authoring",
         "tui.notices",
