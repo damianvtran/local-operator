@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.90.12"
+version = "0.90.14"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -410,6 +410,11 @@ local_operator = [
     # later and only in the shipped tree's own suite. It still ships, because a
     # source snapshot that is missing files it references is not one.
     "mobile/web/src/lib/*.json",
+    # The chrome brand artwork, imported by components/ui/brand-mark.tsx and the
+    # chrome test. One directory, one extension: the `.png` glob is deliberate so
+    # a future non-image asset (or a stray editor file) still needs review rather
+    # than riding a `*` into the wheel.
+    "mobile/web/src/assets/*.png",
     # The login page's LO mark, served unauthenticated at /mark.png from
     # mobile/static/. Missing it shows a broken image on sign-in.
     "mobile/static/*",

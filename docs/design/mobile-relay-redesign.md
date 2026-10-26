@@ -4,9 +4,10 @@ Design direction for the phone relay web client (`local_operator/mobile/web`).
 Author: designer (lopdev team). Audit base: `origin/main` = **`bc7dbea188`**;
 the BEFORE frames were rendered from that tree's built bundle.
 
-Status: **implementation contract for the borderless relay redesign.**
-The PR carries implementation, current gate results and rendered evidence;
-measurements below describe the audited base unless explicitly labelled AFTER.
+Status: **historical implementation record for the borderless relay redesign.**
+Current changes follow [Mobile relay: design and UX guidelines](mobile-relay-guidelines.md).
+This record retains the original rationale and evidence; measurements below describe
+its audited base unless explicitly labelled AFTER, not a current-screen guarantee.
 
 ## The ask, verbatim intent
 

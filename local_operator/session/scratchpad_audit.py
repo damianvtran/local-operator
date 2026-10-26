@@ -52,8 +52,10 @@ the entries counted.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from local_operator.scratchpad import SCRATCHPAD_DIRNAME, scratchpad_budget_bytes
 
@@ -150,10 +152,18 @@ class PadAudit:
 
 @dataclass
 class ScratchpadAudit:
-    """Every pad in one store, largest first."""
+    """Every pad in one store, largest first.
+
+    ``total_pads`` is how many pads the store holds and ``stopped_early`` says a
+    ``budget_s`` ended the walk before all were audited (``len(pads)`` is then
+    the audited count). A truncated audit must be STATED by whoever prints it:
+    its totals are a lower bound and its ordering covers only the audited pads.
+    """
 
     cap: int
     pads: list[PadAudit] = field(default_factory=list)
+    total_pads: int = 0
+    stopped_early: bool = False
 
     @property
     def total_bytes(self) -> int:
@@ -168,7 +178,7 @@ class ScratchpadAudit:
         return sum(1 for pad in self.pads if pad.truncated)
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "cap": self.cap,
             "count": len(self.pads),
             "bytes": self.total_bytes,
@@ -176,6 +186,13 @@ class ScratchpadAudit:
             "truncated": self.truncated,
             "pads": [pad.as_dict() for pad in self.pads],
         }
+        if self.stopped_early:
+            # Present ONLY when a budget cut the audit short, so a complete
+            # audit's JSON is byte-identical to what it always was while a
+            # partial one can never be mistaken for the whole store.
+            payload["budget_exhausted"] = True
+            payload["total_pads"] = self.total_pads
+        return payload
 
 
 class _Walk:
@@ -368,8 +385,32 @@ def _audit_pad(pad: Path, session: str, origin: str, user_visible: bool, cap: in
     )
 
 
-def audit_scratchpads(sessions_dir: Path, *, cap: int | None = None) -> ScratchpadAudit:
+#: Wall-clock budget for the audit that rides along ``lop sessions cleanup
+#: --dry-run``. The full audit measured 319 s over 4,716 pads (each pad is a
+#: bounded walk, but there are thousands), and it ran on EVERY dry run after the
+#: delegated preview, so the command looked hung for minutes. 20 s is long enough
+#: to audit a few hundred pads (a typical store) completely and short enough that
+#: the dry run returns; ``--scratchpads-only --dry-run`` IS the audit and runs
+#: unbudgeted. Checked between pads, so one pad's bounded walk can overshoot it.
+DRY_RUN_AUDIT_BUDGET_S = 20.0
+
+
+def audit_scratchpads(
+    sessions_dir: Path,
+    *,
+    cap: int | None = None,
+    budget_s: float | None = None,
+    on_pad: Callable[[PadAudit, int, int], None] | None = None,
+) -> ScratchpadAudit:
     """Audit every session pad under ``sessions_dir``; nothing is modified.
+
+    ``budget_s`` bounds the walk in wall-clock seconds (``None`` = unbounded).
+    It is consulted BEFORE each pad, after the first, so a tiny budget still
+    audits one pad and never returns nothing; when it ends the walk
+    ``stopped_early`` is set and ``total_pads`` still holds the store's count so
+    the caller can say "audited N of M". ``on_pad(pad, done, total)`` is invoked
+    as each pad is audited (display only: a failing callback is ignored) so a
+    terminal can stream rows during a long audit.
 
     ``cap`` defaults to the configured pad cap (:func:`scratchpad_budget_bytes`)
     and is copied onto every row, so a report stays readable after the
@@ -387,6 +428,9 @@ def audit_scratchpads(sessions_dir: Path, *, cap: int | None = None) -> Scratchp
             entries = sorted(scan, key=lambda entry: entry.name)
     except OSError:
         return audit
+    # Which directories HAVE a pad is one stat each and settles the total before
+    # the expensive walks start, so a budget can report "N of M" truthfully.
+    targets: list[tuple[os.DirEntry[str], Path]] = []
     for entry in entries:
         if entry.name.startswith("."):
             continue
@@ -401,10 +445,21 @@ def audit_scratchpads(sessions_dir: Path, *, cap: int | None = None) -> Scratchp
                 continue
         except OSError:
             continue
+        targets.append((entry, pad))
+    audit.total_pads = len(targets)
+    started = time.monotonic()
+    for done, (entry, pad) in enumerate(targets, start=1):
+        if budget_s is not None and done > 1 and time.monotonic() - started > budget_s:
+            audit.stopped_early = True
+            break
         origin = session_origin(Path(entry.path))
-        audit.pads.append(
-            _audit_pad(pad, entry.name, origin, is_user_session_origin(origin), limit)
-        )
+        row = _audit_pad(pad, entry.name, origin, is_user_session_origin(origin), limit)
+        audit.pads.append(row)
+        if on_pad is not None:
+            try:
+                on_pad(row, done, len(targets))
+            except Exception:  # noqa: BLE001 — display only; never ends the audit
+                pass
     audit.pads.sort(key=lambda item: (-item.bytes, item.session))
     return audit
 
@@ -412,6 +467,7 @@ def audit_scratchpads(sessions_dir: Path, *, cap: int | None = None) -> Scratchp
 __all__ = [
     "AUDIT_MAX_DEPTH",
     "AUDIT_MAX_ENTRIES",
+    "DRY_RUN_AUDIT_BUDGET_S",
     "GitMarker",
     "PadAudit",
     "ScratchpadAudit",

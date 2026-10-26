@@ -1,0 +1,21 @@
+{
+  "relay.transcript.turn.condensed": "संक्षिप्त चरण",
+  "relay.transcript.turn.took": "{duration} लगे",
+  "relay.transcript.turn.actions": "{label, select, other {{count, plural, one {{label} क्रिया} other {{label} क्रियाएँ}}}}",
+  "relay.transcript.turn.completed": "पूर्ण",
+  "relay.transcript.fold.unit": "{kind, select, files {{count, plural, one {# फ़ाइल} other {# फ़ाइलें}}} searches {{count, plural, one {# खोज} other {# खोजें}}} web {{count, plural, one {# वेब खोज} other {# वेब खोजें}}} shell {{count, number} shell} python {{count, number} python} edits {{count, plural, one {# संपादन} other {# संपादन}}} tasks {{count, plural, one {# कार्य} other {# कार्य}}} incoming {{count, plural, one {# आया संदेश} other {# आए संदेश}}} wakes {{count, plural, one {# जागृति रसीद} other {# जागृति रसीदें}}} other {{count, number} {name}}}",
+  "relay.transcript.fold.shell": "{count, plural, one {# shell} other {# shell}}",
+  "relay.transcript.fold.python": "{count, plural, one {# python} other {# python}}",
+  "relay.transcript.fold.more": "{count, plural, one {और # अन्य क्रिया} other {और # अन्य क्रियाएँ}}",
+  "relay.transcript.fold.failed_label": "इसमें एक विफल क्रिया शामिल है",
+  "relay.transcript.fold.partial_label": "{count, plural, one {कम से कम # क्रिया — पिछले संदेश अभी लोड नहीं हुए} other {कम से कम # क्रियाएँ — पिछले संदेश अभी लोड नहीं हुए}}",
+  "relay.transcript.older.failed": "पिछले संदेश लोड नहीं हो सके",
+  "relay.transcript.label.steered": "दिशा बदली गई",
+  "relay.transcript.label.wake": "जागृति",
+  "relay.transcript.label.peer": "दूसरे सत्र का संदेश",
+  "relay.transcript.label.job": "जॉब परिणाम",
+  "relay.transcript.label.ask": "प्रश्न",
+  "relay.transcript.label.messages": "संदेश",
+  "relay.transcript.composer.queued": "{count, plural, one {# कतार में} other {# कतार में}}",
+  "relay.transcript.session.unread_refused": "अपठित स्थिति पढ़ी नहीं जा सकी — कुछ भी साफ़ नहीं किया गया। फिर कोशिश करें।"
+}

@@ -1102,6 +1102,8 @@ class TeamBridgeClient:
         body: Mapping[str, Any] | None,
         content: bytes | None = None,
         max_response_bytes: int | None = None,
+        identity_response_only: bool = False,
+        if_none_match: str | None = None,
         timeout: float = REQUEST_TIMEOUT_S,
     ) -> httpx.Response:
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
@@ -1115,6 +1117,8 @@ class TeamBridgeClient:
             follow_redirects=False,
         ) as http:
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            if if_none_match is not None:
+                headers["If-None-Match"] = if_none_match
             if max_response_bytes is not None:
                 # The attachment byte read: STREAM and stop at the bound, so an
                 # oversized (or endless) answer is refused after at most
@@ -1131,6 +1135,19 @@ class TeamBridgeClient:
                 async with http.stream(
                     method, self._base_url + path, params=params, headers=headers
                 ) as streamed:
+                    # Avatar reads need a hard allocation bound as well as a
+                    # decoded-size bound. Refuse an ignored identity request
+                    # before httpx can inflate a compressed image-sized bomb.
+                    if (
+                        identity_response_only
+                        and streamed.headers.get("content-encoding", "identity").strip().lower()
+                        != "identity"
+                    ):
+                        raise BridgeRefusal(
+                            "bridge_invalid_response",
+                            "Radient returned an invalid response.",  # i18n: ignore, no code
+                            http_status=502,
+                        )
                     chunks: list[bytes] = []
                     size = 0
                     async for chunk in streamed.aiter_bytes():
@@ -2620,6 +2637,113 @@ class TeamBridgeClient:
             raise _refusal(response)
         # 204 carries no envelope; a 200 {msg} acknowledgement is equally final.
         return {}
+
+    async def fetch_avatar(
+        self,
+        target_account_id: str,
+        *,
+        v: str,
+        size: int,
+        expected_account_id: str,
+    ) -> tuple[bytes, str]:
+        """Closed account image read, fenced by the durable login incarnation.
+
+        Account equality alone misses A→B→A. AuthStore's incarnation changes
+        on interactive login, not token refresh; capture it BEFORE awaiting
+        refresh, then check both sides of the bounded byte read. Cached entities
+        have zero freshness lifetime: every reuse requires upstream membership
+        authorization and a matching conditional 304 under that same login.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.team_bridge.avatar_cache import AVATAR_CACHE, Entity
+        from local_operator.team_bridge.types import is_account_id
+
+        if (
+            not is_account_id(target_account_id)
+            or not is_account_id(expected_account_id)
+            or re.fullmatch(r"[0-9a-f]{16}", v) is None
+            or type(size) is not int
+            or size not in (64, 256)
+        ):
+            raise ValueError("invalid avatar request")
+        self._require_destination()
+        store = self._auth_store()
+        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+        row = self._pinned_row()
+        if row is None:
+            AVATAR_CACHE.admit(scope, None)
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        incarnation = store.native_login_incarnation(row.id)
+
+        def check_owner() -> None:
+            current = self._pinned_row()
+            if (
+                not incarnation
+                or current is None
+                or current.id != row.id
+                or current.data.get("account_id") != expected_account_id
+                or store.native_login_incarnation(row.id) != incarnation
+            ):
+                AVATAR_CACHE.admit(scope, None)
+                raise BridgeRefusal(
+                    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
+                )
+
+        check_owner()
+        authority = (row.id, expected_account_id, incarnation)
+        AVATAR_CACHE.admit(scope, authority)
+        key = (scope, authority, target_account_id, v, size)
+        try:
+            access = await self._guarded_access(expected_account_id)
+        except (BridgeRefusal, BridgeSignInRequired):
+            AVATAR_CACHE.admit(scope, None)
+            raise
+        check_owner()
+        if access is None or access.credential_id != row.id:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        cached = AVATAR_CACHE.get(key)
+        try:
+            response = await self._dispatch(
+                "GET",
+                f"/accounts/{target_account_id}/avatar",
+                access.access_token,
+                params={"v": v, "size": size},
+                body=None,
+                max_response_bytes=1024 * 1024,
+                identity_response_only=True,
+                if_none_match=cached.etag if cached else None,
+            )
+        except httpx.HTTPError as failure:
+            AVATAR_CACHE.discard(key)
+            raise BridgeUnreachable() from failure
+        except BridgeRefusal:
+            AVATAR_CACHE.discard(key)
+            raise
+        check_owner()
+        # Remove before interpreting the response: errors, malformed 304s and
+        # no-store must never leave an entity available for a later retry.
+        AVATAR_CACHE.discard(key)
+        if response.status_code >= 400:
+            raise _refusal(response)
+        etag = response.headers.get("etag")
+        storable = "no-store" not in response.headers.get("cache-control", "").lower()
+        if response.status_code == 304 and cached is not None:
+            if (etag is None or etag == cached.etag) and not response.content:
+                if storable:
+                    AVATAR_CACHE.put(key, cached)
+                return cached.body, cached.mime
+        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if response.status_code != 200 or mime not in ATTACHMENT_MIME_TYPES or not response.content:
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                "Radient returned an invalid response.",  # i18n: ignore, no code
+                http_status=502,
+            )
+        # Only a bounded HTTP entity-tag can authorize conditional reuse. No
+        # synthetic validators: an upstream without ETag simply cold-fetches.
+        if storable and etag and re.fullmatch(r'(?:W/)?"[\x21\x23-\x7e]{0,254}"', etag):
+            AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
+        return response.content, mime
 
     async def fetch_attachment(
         self,

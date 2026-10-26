@@ -1058,6 +1058,11 @@ class _RetireOutcome(TypedDict):
     result: str
     #: The runtime's own words, verbatim, when it kept itself.
     sentence: str
+    #: The pid of the runtime this call RETIRED, when it retired one. The prepare
+    #: uses it to tell a write the departed runtime's OWN exit path made from a
+    #: write nothing accounts for (see the re-digest below); absent for ``cold``,
+    #: where no process existed to explain anything.
+    pid: NotRequired[int]
 
 
 def _retire_local_runtime(
@@ -1140,7 +1145,7 @@ def _retire_local_runtime(
                     "try again in a moment"
                 ),
             }
-        return {"result": "retired", "sentence": ""}
+        return {"result": "retired", "sentence": "", "pid": int(getattr(record, "pid", 0) or 0)}
     sentence = answer[len("kept:") :].strip() if answer.startswith("kept:") else answer
     from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
 
@@ -1278,6 +1283,31 @@ def _lease_refusal(root: Path, session_id: str, record_pid: int | None) -> str:
         "published no runtime record, so it was not moved; close that process "
         "(or let it finish) and try again"
     )
+
+
+def _departed_runtime_explains(directory: Path, pid: int) -> bool:
+    """Whether ``pid``'s own exit record is on disk for this session.
+
+    THE ATTRIBUTION THE PREPARE'S RE-CHECK NEEDS. ``stamps_valid`` compares size and
+    mtime per member, so the runtime's own departure — the exit record it writes and
+    the closing checkpoint row it appends — reads exactly like a concurrent writer.
+    The exit record is that process's attestation that it reached its own exit path,
+    and it names the run (pid + start), so its presence turns "something moved" into
+    "the process we just retired finished leaving". Absent, unreadable, or naming
+    another run, this answers False and the caller refuses as it always has.
+
+    Best-effort by contract: a reader on a refusal path must never raise, and the
+    fail-closed direction here is ``False`` — one retry, exactly the old behaviour.
+    """
+    if not pid:
+        return False
+    try:
+        from local_operator.session.runtime import journal
+
+        record = journal.read_exit_record(directory)
+    except Exception:  # noqa: BLE001 — an unreadable record is no evidence
+        return False
+    return record is not None and int(getattr(record, "pid", 0) or 0) == pid
 
 
 def _await_record_gone(root: Path, session_id: str, *, deadline_s: float) -> bool:
@@ -1769,6 +1799,7 @@ def _destination_move(
     except sync_mod.SyncRefused as refusal:
         # A ROLLBACK, not a failure (§6.3 step 12): the source still holds an intact
         # directory and no writer, so the honest report is "nothing moved".
+        _report_destination_rollback(transport, session_id, lease_epoch, refusal.code)
         _roll_back_destination(server, session_id, staging)
         return (
             None,
@@ -1790,6 +1821,11 @@ def _destination_move(
         # ``SyncRefused`` is. The sentence has to say the SOURCE still holds the
         # conversation: that is what makes a retry safe, and why the source's own
         # journal may need its relay restarted before it can be re-prepared.
+        # THE SOURCE MUST BE TOLD, and this is the half that fixes the wedge: without
+        # it the source keeps a ``prepared`` entry whose only reaper is its own relay
+        # restarting (the instance rule skips a live writer), so every retry answers
+        # ``in_progress`` about a move that no longer exists anywhere.
+        _report_destination_rollback(transport, session_id, lease_epoch, refusal.code)
         _roll_back_destination(server, session_id, staging)
         dest = str(server._own_label())  # noqa: SLF001
         holder = owner_name or owner_device or "the source"
@@ -1831,8 +1867,26 @@ def _destination_move(
         # that ANSWERED with code unreachable (a build that does not understand the
         # op, a refusal it composed itself) did not stop answering, and claiming it
         # did would be a false diagnosis of a working link.
+        # THE CAUSE NAMES WHAT WAS OBSERVED, NOT A GUESS ABOUT THE PEER (2026-10-25).
+        # "``<holder>`` stopped answering during the copy (no answer on its link)" was
+        # FALSE on the live failure that produced it: the source's relay was up, PID
+        # unchanged, NRestarts=0, listening, and it had answered ``prepare`` 40 s
+        # earlier. What actually happened was LOCAL to this device — the plan it sent
+        # back was over the link's record limit, so this side's own writer thread
+        # closed the link (``cause=error`` in both audit logs, milliseconds apart) and the
+        # waiting request was failed by ``fail_replies``. A move's copy can fail with
+        # no peer fault at all, and a sentence that asserts silence sends the operator
+        # to restart a healthy service. So the cause now says only what is known, and
+        # the recovery is what the fix makes possible: run the move again.
+        # ONLY THE TRANSPORT'S OWN SILENCE SENTENCE IS REWORDED. A peer that ANSWERED
+        # (an error frame, a build too old to know the op) composed its own words about
+        # another machine's silence, and rewriting those would be this device inventing
+        # a cause it never observed — the R4-2 rule that already governs the cause here.
         if refusal.code == "unreachable" and "no answer on its link" in cause:
-            cause = f"{holder} stopped answering during the copy (no answer on its link)"
+            cause = (
+                "the copy could not be completed over this link (it closed before the "
+                "transfer finished)"
+            )
         if keep:
             # A COPY LEAVES THE SOURCE RUNNING AND JOURNALS NOTHING (U8), so
             # "paused" and "restart" would be false: there is no handoff to
@@ -1843,13 +1897,16 @@ def _destination_move(
                 "running). Run the copy again."
             )
         else:
-            # U9: the restart is spelled with the DEVICE IT RUNS ON first, so a
-            # reader does not run a local command expecting it to act remotely.
+            # NO RESTART IS PRESCRIBED, because none is needed once the destination's
+            # rollback reaches the source (``_source_rollback``): the source clears its
+            # own ``prepared`` entry, keeps the conversation, and the next attempt
+            # re-prepares. Where the entry survives — an older source, or a link that
+            # died before the report crossed — the source's own ``prepare`` names the
+            # entry, its phase and its age and carries the remedy in ITS sentence, which
+            # is the one place that can see the entry.
             sentence = (
                 f"{cause}. {dest} discarded its partial copy; {holder} "
-                "still has the conversation, paused for this move. On "
-                f"{holder}, restart the relay (`lop network restart`), then run "
-                "the move again."
+                "still has the conversation. Run the move again."
             )
         return (
             None,
@@ -2756,6 +2813,135 @@ def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path
     except OSError:
         logger.debug("mobility: could not sweep %s", staging, exc_info=True)
     _audit(server, AUDIT_ROLLED_BACK, session_id, "")
+
+
+def _report_destination_rollback(
+    transport: "LinkTransport", session_id: str, lease_epoch: str, code: str
+) -> None:
+    """Tell the OWNER this device rolled its copy back, so its journal does not park.
+
+    THE ONE-SIDED ROLLBACK THIS CLOSES (live 2026-10-25): the destination swept its
+    staging and cleared its own entry, and the source kept
+    ``{"role": "source", "phase": "prepared"}`` forever — its only reapers are a
+    relay that reconciles an entry written by ANOTHER instance (the instance rule
+    exists so a slow peer does not lose a live handoff), so a healthy relay cannot
+    clear its own entry, and every later attempt is refused ``in_progress`` naming a
+    phase nobody will advance. ``mesh-session-mobility.md`` §6.5's table has no row
+    for "the destination gave up" because it assumed the source would hear of it.
+
+    BEST EFFORT AND BOUNDED SHORT, exactly like the ``refused`` report: the owner
+    answers from memory in microseconds, a miss leaves today's state (the entry, and
+    the source's own ``prepare`` sentence naming it), and this thread has already
+    decided to sweep its bytes — a report that cannot be sent must not keep the
+    staging alive or fail the refusal the user is waiting on.
+
+    ``lease_epoch`` IS SENT BECAUSE AN ENTRY IS NOT ENOUGH TO CLEAR. A report can
+    cross a later move of the same id on the same link; the epoch is what the source
+    compares, so a stale report can never clear a newer handoff.
+    """
+    try:
+        transport.ask(
+            {
+                "op": "net_session_move",
+                "phase": "rollback",
+                "session_id": session_id,
+                "lease_epoch": lease_epoch,
+                "code": code,
+            },
+            timeout=REFUSAL_REPORT_TIMEOUT_S,
+        )
+    except Exception:  # noqa: BLE001 — an unreported rollback is the old behaviour
+        logger.debug(
+            "mobility: could not report the rolled-back copy of %s to its owner",
+            session_id,
+            exc_info=True,
+        )
+
+
+def expire_for_peer(
+    root: Path,
+    session_id_hint: str,
+    *,
+    instance: str,
+    to_device: str,
+    link_id: str = "",
+    release_unbound: bool = True,
+) -> list[str]:
+    """Clear entries a dead link stranded: this instance's ``prepared``, that device.
+
+    THE SOURCE'S OWN REAPER, and the second half of §6.5's missing row. A ``prepared``
+    entry is normally left alone — it is the state of a copy happening right now, and
+    the instance rule exists to protect exactly that — but a copy cannot outlive the
+    link it travels over: every phase of a move arrives as a frame on that link, so
+    once it is closed, nothing can advance the entry on that transport — not
+    ``ready``, not the destination's ``rollback``, not
+    ``done``. Leaving it parks the conversation: the engage guard refuses it and
+    ``prepare`` refuses every retry ``in_progress`` naming a phase nobody will
+    advance, until a relay restart clears it (measured 2026-09-26 and again
+    2026-10-25 on ``81b9f802851d``).
+
+    WHICH LINK, NOT WHICH DEVICE (QA round 1, Q1). ``link_id`` is the link whose
+    death this is, and only an entry that RECORDED that link is released by it: two
+    links to one peer are a normal state on this mesh (both ends may dial), and the
+    copy rides exactly one of them, so a device-level rule kept a dead move's entry
+    alive whenever any OTHER link happened to exist — the wedge this reaper exists to
+    close, reached on a healthy relay. An entry with NO recorded link was written
+    before the binding existed (an older build, or a journal edited by hand), and can
+    only answer the device-level question, so ``release_unbound`` decides it: the
+    caller passes ``True`` only when no link to that device remains.
+
+    THREE CONDITIONS, ALL REQUIRED, each a way this could otherwise do damage:
+
+    * the entry is ``prepared`` — after ``handing-off`` the commit is monotone by
+      rule, and a rollback there is the one thing the protocol forbids (§6.5);
+    * the entry's ``to_device`` is the device the dead link carried;
+    * the entry was written by THIS relay instance — another instance's in-flight
+      move is not ours to abandon, the same rule ``reconcile`` applies.
+
+    Clears the journal only: no byte of the session directory is touched, which is
+    what makes ``prepared → rollback`` free (nothing was moved yet). The conversation
+    stays here, cold, and the next attempt prepares it again.
+    """
+    from local_operator.session.placement import (
+        HANDOFF_PHASE_PREPARED,
+        clear_handoff_entry,
+        read_handoff_journal,
+    )
+
+    if not to_device:
+        return []
+    try:
+        entries = read_handoff_journal(Path(root))
+    except Exception:  # noqa: BLE001 — an unreadable journal is the guard's refusal
+        return []
+    cleared: list[str] = []
+    for session_id, entry in sorted(entries.items()):
+        if session_id_hint and session_id != session_id_hint:
+            continue
+        if str(entry.get("role") or "source") != "source":
+            continue
+        if str(entry.get("phase") or "") != HANDOFF_PHASE_PREPARED:
+            continue
+        if str(entry.get("to_device") or "") != to_device:
+            continue
+        if str(entry.get("instance_id") or "") != instance:
+            continue
+        if link_id:
+            recorded = str(entry.get("link_id") or "")
+            if recorded and recorded != link_id:
+                # THE MOVE RIDES ANOTHER LINK; this death is not its business.
+                continue
+            if not recorded and not release_unbound:
+                continue
+        try:
+            clear_handoff_entry(Path(root), session_id)
+        except OSError:
+            logger.debug(
+                "mobility: could not clear the prepared entry for %s", session_id, exc_info=True
+            )
+            continue
+        cleared.append(session_id)
+    return cleared
 
 
 # ---------------------------------------------------------------------------
@@ -3818,7 +4004,13 @@ def _source_prepare(
         keep_answer: dict[str, Any] = {
             "result": "prepared",
             "phase": "prepared",
-            "lease_epoch": "",
+            # A REAL EPOCH, NOT "" (review round 1, m1; QA round 1, Q2). A keep copy
+            # journals nothing on this device, so an empty epoch was "correct" here
+            # and travelled to the destination's rollback report — where the source
+            # used to read an empty epoch as a WILDCARD. Minting one keeps every
+            # epoch-carrying frame non-empty, so the source can require a match
+            # without any sender having to special-case a copy.
+            "lease_epoch": new_lease_epoch(),
             "mode": "keep",
             "manifest": manifest,
             # The destination states what stayed behind, in the receipt it builds
@@ -4012,19 +4204,66 @@ def _source_prepare(
         Path(server.root) / "attachments",
         stamps,
     ):
-        # A TURN LANDED BETWEEN THE DIGEST AND THE RETIRE. Nothing has been journaled and
-        # nothing has been deleted, so the honest answer is "ask again": the retry digests
-        # the session as it now is. Re-digesting here instead would double the stopped
-        # window for a race the caller can simply repeat, and ``--wait`` already re-probes.
-        return {
-            "result": "refused",
-            "code": "busy",
-            "message": (
-                "the conversation changed while this device was preparing to hand it over, "
-                "so nothing was changed; try again"
-            ),
-            "session_id": session_id,
-        }
+        # THE RETIRE ITSELF MOVES THE COPY SET, so a stale stamp here can be this
+        # operation's OWN doing rather than a concurrent writer. Measured live
+        # 2026-10-25 (81b9f802851d on lop-remote-node-2): the digest was taken at
+        # 20:04:07, the runtime was retired, and ITS exit path then wrote
+        # ``runtime-exit.json`` and appended a closing ``frontend_state_checkpoint_v1``
+        # row at 20:05:16.235 — the row's mtime is restored (``preserve_mtime``) but its
+        # SIZE is not, and ``stamps_valid`` compares both. The move therefore refused
+        # ``busy`` ("the conversation changed…") for a change it had caused itself, on
+        # a session whose turn had finished 30 s earlier.
+        #
+        # ABSORBED ONCE THE RETIRE IS CONFIRMED, AND THAT IS WIDER THAN "ATTRIBUTED"
+        # (review round 1, m2). The re-digest runs when the runtime THIS CALL RETIRED
+        # left its own exit record — an attribution the journal supports — but the
+        # re-stamp then covers whatever is on disk NOW, which can include a write this
+        # call did not cause. That is deliberate rather than an oversight, and it is
+        # safe for a reason the journal cannot express: nothing here decides what gets
+        # copied. The manifest is rebuilt from the re-stamped set, and the commit
+        # compares the destination's ``content_digest`` against a FRESH digest of these
+        # bytes under the handoff epoch — so a write that lands in the window is either
+        # inside the copy or refused at commit. Refusing here instead only moves the
+        # refusal earlier, and it cost the operator a ``busy`` on a session whose turn
+        # had finished 30 s earlier.
+        #
+        # WHAT IS STILL REFUSED: a change nothing can account for at all — no runtime
+        # was retired (``cold``), or the exit record does not cover that run — which is
+        # the pre-existing ``busy`` path, pinned by
+        # ``test_a_source_that_changes_while_it_is_being_prepared_is_refused``.
+        # ``test_a_write_nothing_here_caused_is_absorbed_once_the_retire_is_confirmed``
+        # pins this looser half so a later reader does not "fix" it back.
+        if not sync_mod.stamps_valid(
+            Path(server.root) / "sessions" / session_id,
+            session_id,
+            Path(server.root) / "attachments",
+            stamps,
+        ) and _departed_runtime_explains(
+            Path(server.root) / "sessions" / session_id, int(outcome.get("pid") or 0)
+        ):
+            stamps = sync_mod.member_stamps(
+                server.root,
+                session_id,
+                attachments_dir=Path(server.root) / "attachments",
+                whole_transcript=sync_mod.whole_transcript_for(sync_mod.COPY_PURPOSE_MOVE),
+            )
+        if not sync_mod.stamps_valid(
+            Path(server.root) / "sessions" / session_id,
+            session_id,
+            Path(server.root) / "attachments",
+            stamps,
+        ):
+            # NOTHING HAS BEEN JOURNALED AND NOTHING DELETED, so the honest answer is
+            # still "ask again": ``--wait`` already re-probes.
+            return {
+                "result": "refused",
+                "code": "busy",
+                "message": (
+                    "the conversation changed while this device was preparing to hand it "
+                    "over, so nothing was changed; try again"
+                ),
+                "session_id": session_id,
+            }
     lease_epoch = new_lease_epoch()
     manifest = sync_mod.build_manifest(
         server.root,
@@ -4045,6 +4284,12 @@ def _source_prepare(
             "lease_epoch": lease_epoch,
             "mode": "move",
             "requester": link.device_id,
+            # THE TRANSPORT IS BOUND TO THIS LINK (QA Q1/Q4), not merely this peer.
+            # A replacement cannot continue its copy; closing this link releases
+            # prepared so a retry can start afresh, even while another link is alive.
+            # A real PeerLink always has this id. Do not default a missing attribute
+            # to an unbound entry: that would silently restore the device-wide rule.
+            "link_id": str(link.link_id),
             "plan_id": str(manifest.get("plan_id") or ""),
             # WHAT THE SOURCE WILL COMPARE THE DESTINATION'S COPY AGAINST, recorded
             # now and recomputed at the commit. ``sync.copy_content_digest`` derives
@@ -4402,6 +4647,130 @@ def _source_commit(
         "lease_epoch": str(entry.get("lease_epoch") or ""),
         "session_id": session_id,
     }
+
+
+def _source_rollback(
+    server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
+) -> dict[str, Any]:
+    """The DESTINATION says it threw its copy away; clear the ``prepared`` entry.
+
+    WHY THIS PHASE EXISTS (the other half of the wedge, 2026-10-25). §6.5's table
+    rolls a source back when IT reconciles, but only for an entry a DIFFERENT relay
+    instance wrote — the instance rule that stops a merely slow peer losing a live
+    handoff. A destination whose copy failed on a live link therefore left the source
+    holding ``prepared`` with no way out: the source could not clear its own entry
+    (health), and the destination's retry was refused ``in_progress``. Measured
+    2026-10-25: the destination rolled back and the source stayed parked for hours.
+
+    IT ONLY CLEARS WHAT IT CAN PROVE IS THE SAME MOVE: ``lease_epoch`` must be present
+    and equal to the entry's, the entry must still be ``prepared`` (a ``handing-off``
+    entry is monotone, §6.5 — a commit may already own the bytes), it must name THIS
+    device as the destination, and it must be this relay instance's own entry. Every
+    mismatch answers ``kept`` rather than an error: this is a notification, and a
+    stale one must not surface as a failure of the move that superseded it.
+
+    The reply says ``cleared``/``kept`` rather than ``refused`` on purpose —
+    ``refused`` is ``LinkTransport.ask``'s sentinel for a refused op.
+    """
+    from local_operator.session.placement import (
+        HANDOFF_PHASE_PREPARED,
+        clear_handoff_entry,
+        handoff_in_flight,
+    )
+
+    session_id = str(frame.get("session_id") or "")
+    device_id = str(getattr(link, "device_id", "") or "")
+    try:
+        entry = handoff_in_flight(server.root, session_id)
+    except Exception:  # noqa: BLE001 — an unreadable journal is not a reason to fail this
+        logger.debug("mobility: could not read the journal for %s", session_id, exc_info=True)
+        return {"result": "kept", "session_id": session_id}
+    if not entry:
+        return {"result": "cleared", "session_id": session_id}
+    if str(entry.get("phase") or "") != HANDOFF_PHASE_PREPARED:
+        return {"result": "kept", "phase": str(entry.get("phase") or ""), "session_id": session_id}
+    if str(entry.get("to_device") or "") not in ("", device_id):
+        return {"result": "kept", "session_id": session_id}
+    if str(entry.get("instance_id") or "") not in ("", str(server.instance_id)):
+        return {"result": "kept", "session_id": session_id}
+    epoch = str(frame.get("lease_epoch") or "")
+    # AN EMPTY EPOCH IS NOT A WILDCARD (review round 1, m1; QA round 1, Q2). The
+    # comparison used to be ``if epoch and epoch != entry_epoch``, so a frame that
+    # carried NO epoch passed it — and an empty epoch was reachable: a ``--keep``
+    # prepare answered ``lease_epoch: ""`` and both failure branches of
+    # ``_destination_move`` reported a rollback for keep copies too. A keep copy and
+    # a move of the same id to the same device at once therefore let the keep's
+    # epoch-less report empty the live move's journal. The epoch is what makes a
+    # report provable, so a frame without one is now refused like a wrong one.
+    if not epoch or epoch != str(entry.get("lease_epoch") or ""):
+        return {"result": "kept", "session_id": session_id}
+    try:
+        clear_handoff_entry(server.root, session_id)
+    except OSError:
+        return {"result": "kept", "session_id": session_id}
+    progress_for(server).note(session_id, "prepared")
+    _audit(
+        server,
+        AUDIT_ROLLED_BACK,
+        session_id,
+        device_id,
+        cause=str(frame.get("code") or "destination_rolled_back"),
+    )
+    logger.info("mobility: %s released by %s's rollback", session_id, device_id)
+    return {"result": "cleared", "session_id": session_id}
+
+
+def _on_link_closed(server: "RelayServer", link: Any, reason: str) -> None:
+    """A peer link closed: release the ``prepared`` move that was riding it.
+
+    THE MOVE'S OWN LINK IS THE QUESTION (QA round 1, Q1). "Is any link to that device
+    alive?" answers the wrong thing: the transport is bound to ONE ``PeerLink``, and
+    its outstanding frames fail when that link closes even if a second link is alive.
+    The entry records the link it rides (see ``_source_prepare``), and only that
+    link's death releases it.
+
+    ``replaced`` IS ALSO THE DEATH OF THE COPY (QA round 2, Q4). A newer link from the
+    same peer proves reachability, not continuity: ``LinkTransport`` still holds the
+    evicted link, so the copy fails and its best-effort ``rollback`` cannot arrive on
+    a replacement. Rebinding the journal therefore parks ``prepared`` forever behind
+    a link that carries no move. Releasing it is reversible: the source keeps its
+    bytes and a retry starts a fresh prepare over a live link.
+
+    A RELAY THAT IS STOPPING IS NOT ASKED, and that is the same rule ``link_closed``
+    itself applies before it reports a lost peer: every link goes at shutdown, and
+    releasing entries here would turn an ordinary restart into a rollback of a move
+    that was merely interrupted. The next instance reconciles them as another
+    instance's leftovers, which is the recovery that already exists.
+    """
+    device_id = str(getattr(link, "device_id", "") or "")
+    # THE PRECEDENCE IS SPELLED, not left to ``and`` binding over a mixed condition.
+    stopping = getattr(server, "_stop", None)
+    if not device_id or (stopping is not None and stopping.is_set()):  # noqa: SLF001
+        return
+    # STRICT, LIKE THE WRITER IN ``_source_prepare``: every caller is
+    # ``RelayServer.link_closed`` handing a real ``PeerLink``, which always has an id.
+    # A tolerated absence would read as ``""``, and ``expire_for_peer`` treats ``""``
+    # as "no link given" and falls back to the device-level release — the rule Q1
+    # replaced. A missing id must fail loudly in the hook runner, which logs it.
+    link_id = str(link.link_id)
+    cleared = expire_for_peer(
+        server.root,
+        "",
+        instance=str(server.instance_id),
+        to_device=device_id,
+        link_id=link_id,
+        # NO LINK LEFT: the only case where an entry written before the binding
+        # existed can be answered at all.
+        release_unbound=server._link_for(device_id) is None,  # noqa: SLF001
+    )
+    if cleared:
+        logger.warning(
+            "mobility: released %s after the link to %s closed (%s): the copy could not "
+            "have finished; the conversation stays here, cold",
+            ", ".join(cleared),
+            device_id,
+            reason,
+        )
 
 
 def _source_done(server: "RelayServer", link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
@@ -5403,6 +5772,8 @@ def make_handler(
             return _source_commit(server, link, frame)
         if phase == "done":
             return _source_done(server, link, frame)
+        if phase == "rollback":
+            return _source_rollback(server, link, frame)
         raise _peer_error("bad_request", f"unknown move phase {phase!r}")
 
     def _lifecycle(link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
@@ -6564,6 +6935,14 @@ def install(server: "RelayServer") -> None:
             "net_session_lifecycle": LIFECYCLE_OP_DEADLINE_S,
         },
         on_start={"mobility-recovery": lambda: _start_recovery(server)},
+        # A LINK THAT DIES STRANDS ITS MOVE (§6.5's missing row). Registered here
+        # rather than detected on the next attempt because nothing else runs in the
+        # meantime: the source's own engage guard refuses the conversation and its
+        # ``prepare`` refuses a retry, so without this hook the wedge is permanent
+        # until a relay restart.
+        on_link_closed={
+            "mobility-stranded-move": lambda link, reason: _on_link_closed(server, link, reason)
+        },
     )
 
 

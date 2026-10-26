@@ -1664,3 +1664,66 @@ def test_install_warns_about_a_foreign_system_unit_before_writing(
     assert result["ok"] is True
     assert any("lop-net-relay.service" in step for step in result["steps"]), result
     assert result["conflicts"][0]["code"] == "system_unit"
+
+
+# ---------------------------------------------------------------------------
+# The supervised log's parent (#2918 lane audit, 2026-10-25)
+# ---------------------------------------------------------------------------
+
+
+def test_the_log_parent_exists_before_an_existing_unit_is_started(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """systemd opens ``StandardOutput=append:`` BEFORE exec, so the relay cannot.
+
+    The normal install created this parent; the REFRESH and the existing-unit
+    start/restart did not, and on systemd 240+ a missing parent means the start fails
+    outright ("Failed to set up standard output") or the service comes up with no
+    log at all. Measured as the shape behind a remote node whose ``network.log`` was
+    0 bytes while its relay had been running for hours.
+
+    Fails on the old code: nothing created the parent on this path.
+    """
+    _unit(linux_host).parent.mkdir(parents=True, exist_ok=True)
+    _unit(linux_host).write_text(relay.render_systemd(4097), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    log_parent = relay.log_path().parent
+    assert not log_parent.exists()
+
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    relay.service_action("start")
+
+    assert log_parent.is_dir(), "the unit's append-log parent was not created before start"
+
+
+def test_the_log_parent_exists_before_a_linux_refresh_reloads_the_unit(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``lop update``'s roll reaches this path, and it reloads the unit from here.
+
+    ``meshupdate``'s own roll inherits whatever this arm does, so the parent is
+    created before ``daemon-reload``/restart and not merely by the installer.
+    Fails on the old code: the reload ran with no log parent.
+    """
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    # THE SHIM FIRST: the unit is rendered from ``procname.supervised_image``, so the
+    # rig has to be in place before the file is written or the image guard declines.
+    _shim_rig(linux_host, monkeypatch)
+    unit.write_text(_migratable_unit(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    monkeypatch.setattr(relay, "_managed_service_pid", lambda: None)
+    log_parent = relay.log_path().parent
+    assert not log_parent.exists()
+
+    relay.refresh_unit_if_stale()
+
+    assert ("daemon-reload",) in calls, calls
+    assert log_parent.is_dir(), "the refresh reloaded a unit whose log parent was missing"

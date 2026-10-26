@@ -158,9 +158,13 @@ class ColdMetadata:
     The four state fields are the load-bearing part and are named as
     ``ColdReplay`` names them, because a caller installs them into the same four
     attributes (``_cold_checkpoint``, ``_cold_spend``, ``_cold_order``,
-    ``_cold_seed_usage``). ``bytes_read`` is the ORIGINAL parse's evidence — the
-    journal bytes that produced this record — kept so a hit can report the work
-    it avoided rather than inventing one.
+    ``_cold_seed_usage``). ``bytes_read`` is the evidence of the read that
+    produced this record, and has two provenances: a record filed by the eager
+    replay holds that replay's full journal read, while one filed by the bounded
+    tail (``replay_cache.build_cold_tail_metadata``) holds only the tail's scan
+    window (at most 4 MiB from EOF), NOT a full parse. Kept so a hit can report
+    the work behind it rather than inventing one; nothing reads it back for a
+    decision today, so do not treat it as the journal's size.
     """
 
     witness: ColdMetadataWitness

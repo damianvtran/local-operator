@@ -182,6 +182,22 @@ def _record_path(config: Path, session_id: str = SESSION_ID) -> Path:
     return cold_metadata.cold_metadata_path(config, session_id)
 
 
+def assert_record_miss(config: Path) -> None:
+    """A fresh tail proof must not mask a regression in record rejection."""
+    key = replay_key(
+        _session_dir(config),
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE,),
+        opportunistic_types=(SESSION_SPEND_CUSTOM_TYPE,),
+    )
+    assert key is not None
+    assert (
+        cold_metadata.read_cold_metadata(_record_path(config), cold_metadata.witness_for(key))
+        is None
+    )
+
+
 def counting_replay(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Journal bytes read, per ``read_replay_suffix`` call, for this test."""
     calls: list[int] = []
@@ -197,33 +213,43 @@ def counting_replay(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 
 # --------------------------------------------------------------------------
-# The first open stays eager, and it is the write
+# The first open proves tail facts and files the record
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_first_open_of_a_journal_is_eager_and_writes_the_record(
+async def test_the_first_open_defers_from_tail_facts_and_writes_the_record(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A NEW record is a write-behind: the first open pays today's read.
-
-    This is the honest boundary of the change. Nothing makes a journal's
-    first-ever open cheap; the record that makes later opens cheap is a
-    by-product of that first read.
-    """
+    """A record MISS need not replay messages when tail facts prove the frame."""
     await seed_journal(isolated_config)
     assert not _record_path(isolated_config).exists()
     calls = counting_replay(monkeypatch)
 
     facade = await cold_open(isolated_config, deferred=True)
     try:
-        assert facade._deferred_history is None, "no record yet, so nothing to defer"
-        assert facade._history_hydrated is True
+        assert facade._deferred_history is not None, "tail facts defer even the first open"
+        assert facade._history_hydrated is False
+        assert calls == [], "the first frame must not replay the message list"
+        await facade.hydrate_deferred_history()
         assert len(facade.history()) == 8
-        assert sum(calls) > 0, "the first open reads the journal"
         assert _record_path(isolated_config).exists()
     finally:
         await facade.dispose()
+
+    replay_cache.replay_cache().clear()
+    calls.clear()
+
+    def no_second_tail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the freshly filed record must HIT without another tail read")
+
+    monkeypatch.setattr(replay_cache, "read_cold_tail", no_second_tail)
+    again = await cold_open(isolated_config, deferred=True)
+    try:
+        assert again._deferred_history is not None
+        assert calls == []
+    finally:
+        await again.dispose()
 
 
 @pytest.mark.asyncio
@@ -418,10 +444,12 @@ async def test_a_stale_record_for_a_moved_journal_is_a_miss(
         staged.replace(journal)
 
     expected_payload, expected_rows = await _eager_reference(isolated_config)
+    assert_record_miss(isolated_config)
     facade = await cold_open(isolated_config, deferred=True)
     try:
-        assert facade._deferred_history is None, f"{damage} must not be served from a record"
+        assert (facade._deferred_history is None) == (damage == "truncate")
         assert frontend_payload(facade) == expected_payload
+        await facade.hydrate_deferred_history()
         assert [m.id for m in facade.history()] == expected_rows
     finally:
         await facade.dispose()
@@ -462,10 +490,12 @@ async def test_an_unusable_record_is_a_miss(isolated_config: Path, damage: str) 
         record.write_text(json.dumps(payload), encoding="utf-8")
 
     expected_payload, expected_rows = await _eager_reference(isolated_config)
+    assert_record_miss(isolated_config)
     facade = await cold_open(isolated_config, deferred=True)
     try:
-        assert facade._deferred_history is None, f"{damage} must not defer"
+        assert facade._deferred_history is not None, f"{damage} is rebuilt from tail facts"
         assert frontend_payload(facade) == expected_payload
+        await facade.hydrate_deferred_history()
         assert [m.id for m in facade.history()] == expected_rows
     finally:
         await facade.dispose()
@@ -530,11 +560,14 @@ async def test_a_record_whose_usage_no_longer_validates_is_a_miss(
     # ``Usage``'s fields are optional and a merely-odd payload would validate.
     payload["seed_usage"] = {"input_tokens": [1, 2]}
     record.write_text(json.dumps(payload), encoding="utf-8")
+    assert_record_miss(isolated_config)
 
     replay_cache.replay_cache().clear()
     facade = await cold_open(isolated_config, deferred=True)
     try:
-        assert facade._deferred_history is None
+        assert facade._deferred_history is not None
+        rewritten = json.loads(record.read_text(encoding="utf-8"))
+        assert rewritten["seed_usage"]["input_tokens"] == 11
     finally:
         await facade.dispose()
 
@@ -729,7 +762,8 @@ async def test_a_cache_write_failure_never_fails_the_open(
 
     facade = await cold_open(isolated_config, deferred=True)
     try:
-        assert facade._deferred_history is None, "nothing was stored, so nothing defers"
+        assert facade._deferred_history is not None, "filing failure does not invalidate tail facts"
+        await facade.hydrate_deferred_history()
         assert len(facade.history()) == 8
     finally:
         await facade.dispose()
@@ -737,7 +771,8 @@ async def test_a_cache_write_failure_never_fails_the_open(
     replay_cache.replay_cache().clear()
     again = await cold_open(isolated_config, deferred=True)
     try:
-        assert again._deferred_history is None
+        assert again._deferred_history is not None
+        await again.hydrate_deferred_history()
         assert len(again.history()) == 8
     finally:
         await again.dispose()
@@ -966,12 +1001,13 @@ async def test_a_selection_appended_after_the_record_is_never_hidden_by_it(
     await _append_selection(isolated_config, {"version": 2, "selector": SELECTED, "effort": "max"})
     reads = counting_selection_reads(monkeypatch)
     replay_cache.replay_cache().clear()
+    assert_record_miss(isolated_config)
     after = await cold_open(isolated_config, deferred=True)
     try:
-        assert after._deferred_history is None, "the append must turn the record into a MISS"
+        assert after._deferred_history is not None, "append rebuilds the invalidated record"
         model = _model(after)
         assert (model.provider, model.model_id) == ("deepseek", "deepseek-flash")
-        assert reads, "the miss resolves the selection from the journal"
+        assert not reads, "tail metadata already resolved the new journal selection"
     finally:
         await after.dispose()
     # And the rewritten record now carries the NEW answer for the new version.
@@ -1025,13 +1061,15 @@ async def test_an_unusable_selection_falls_back_exactly(isolated_config: Path, d
     else:
         payload["witness"]["ctime_ns"] += 1
     record.write_text(json.dumps(payload), encoding="utf-8")
+    assert_record_miss(isolated_config)
 
     expected_payload, _rows = await _eager_reference(isolated_config)
     replay_cache.replay_cache().clear()
     facade = await cold_open(isolated_config, deferred=True)
     try:
-        assert facade._deferred_history is None, f"{damage} must not defer"
+        assert facade._deferred_history is not None, f"{damage} is rebuilt from tail facts"
         assert frontend_payload(facade) == expected_payload
+        await facade.hydrate_deferred_history()
         assert _model(facade).model_id == "deepseek-flash"
     finally:
         await facade.dispose()
@@ -1191,11 +1229,12 @@ async def test_a_same_size_rewrite_with_mtime_restored_is_a_miss(
     )
     replay_cache.replay_cache().clear()
     reads = counting_selection_reads(monkeypatch)
+    assert_record_miss(isolated_config)
     after = await cold_open(isolated_config, deferred=True)
     try:
-        assert after._deferred_history is None, "a same-size rewrite must not HIT"
+        assert after._deferred_history is not None, "a same-size rewrite rebuilds from tail facts"
         assert _model(after).reasoning_effort == "max", "the rewritten selection is served"
-        assert reads, "the miss resolves the selection from the journal"
+        assert not reads, "tail metadata already resolved the new journal selection"
     finally:
         await after.dispose()
     expected_payload, _rows = await _eager_reference(isolated_config)
@@ -1206,3 +1245,214 @@ async def test_a_same_size_rewrite_with_mtime_restored_is_a_miss(
         assert frontend_payload(again) == expected_payload
     finally:
         await again.dispose()
+
+
+@pytest.mark.asyncio
+async def test_tail_scan_is_bounded_and_matches_eager_facts(isolated_config: Path) -> None:
+    from local_operator.session.transcript import read_cold_tail
+
+    directory = await seed_journal(isolated_config)
+    wanted = (FRONTEND_CHECKPOINT_CUSTOM_TYPE, SESSION_SPEND_CUSTOM_TYPE)
+    tail = read_cold_tail(directory, checkpoint_types=wanted)
+    assert tail is not None
+    assert tail.bytes_read <= 4 * 1024 * 1024
+    assert tail.rows_read <= 4096
+    assert read_cold_tail(directory, checkpoint_types=wanted, max_bytes=16) is None
+    assert read_cold_tail(directory, checkpoint_types=wanted, max_rows=1) is None
+    key = replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=wanted[:1],
+        opportunistic_types=wanted[1:],
+    )
+    assert key is not None
+    eager = replay_cache.build_cold_replay(
+        directory, key=key, want_checkpoint=True, through_id=None, strict_cut=False
+    )
+    assert tail.checkpoint == eager.checkpoint
+    assert tail.checkpoints == eager.checkpoints
+    assert tail.checkpoint_order == eager.order
+
+
+def test_backward_byte_bound_includes_giant_unterminated_rows() -> None:
+    import io
+
+    from local_operator.session.transcript import _iter_complete_lines_backward
+
+    class Counted(io.BytesIO):
+        bytes_read = 0
+
+        def read(self, size: int | None = -1) -> bytes:
+            result = super().read(size)
+            self.bytes_read += len(result)
+            return result
+
+    handle = Counted(b"x" * 100_000)
+    assert list(_iter_complete_lines_backward(handle, 100_000, chunk_bytes=13, max_bytes=101)) == []
+    assert handle.bytes_read == 101
+
+
+_SHRINK_BOUNDARIES = ["prune", "compaction", "folded", "legacy_folded"]
+
+
+def _shrink_row(boundary: str) -> dict[str, Any]:
+    """One WELL-FORMED journal row of each shrink spelling the tail refuses.
+
+    ``ts`` is a number on purpose. ``TranscriptEntry.from_json`` drops a row
+    whose ``ts`` will not ``float()``, and the tail declines on ANY dropped row
+    as damage. An ISO-string ``ts`` here (as the first version of this test
+    had) therefore declined for the wrong reason: the shrink refusal could be
+    deleted and the test stayed green (review of #2974, MINOR-1).
+    """
+    from local_operator.session.transcript import SHRUNK_KEY
+
+    if boundary in {"prune", "compaction"}:
+        return {"id": f"boundary-{boundary}", "type": boundary, "ts": 1.0, "payload": {}}
+    return {
+        "id": f"boundary-{boundary}",
+        "type": "message",
+        "ts": 1.0,
+        "payload": {
+            "role": "tool",
+            "content": [],
+            "provider_payload": {SHRUNK_KEY if boundary == "folded" else "pruned": True},
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", _SHRINK_BOUNDARIES)
+async def test_tail_never_seeds_across_a_shrink(isolated_config: Path, boundary: str) -> None:
+    from local_operator.session.transcript import TranscriptEntry, read_cold_tail
+
+    directory = await seed_journal(isolated_config)
+    row = _shrink_row(boundary)
+    # Guard against regressing into the malformed-row decline described above.
+    assert TranscriptEntry.from_json(json.dumps(row)) is not None
+    with (directory / "transcript.jsonl").open("a") as out:
+        out.write(json.dumps(row) + "\n")
+    assert (
+        read_cold_tail(
+            directory, checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE, SESSION_SPEND_CUSTOM_TYPE)
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", _SHRINK_BOUNDARIES)
+async def test_tail_declines_a_shrink_straddling_the_needed_facts(
+    isolated_config: Path, boundary: str
+) -> None:
+    """A shrink BETWEEN the facts the frame needs makes the tail decline outright.
+
+    Layout, oldest first: spend receipts, turns (usage on the last assistant),
+    the shrink, then a fresh checkpoint. The checkpoint is found after the
+    boundary; spend and the usage seed only before it. Without the refusal in
+    ``read_cold_tail`` the walk crosses the boundary, finds all three and
+    returns a suffix — this test pins that it returns ``None`` instead, so the
+    open takes the exact eager path.
+
+    The second half records what the OTHER guard does: ``usages_since_newest_shrink``
+    over those same entries yields no reading, so the seed would still be
+    refused downstream. That is why the refusal is conservatism (it keeps the
+    tail from reasoning about pre-shrink facts at all), not the seed's
+    soundness guard — and why only a direct ``is None`` can pin it.
+    """
+    from local_operator.session.transcript import (
+        read_cold_tail,
+        read_replay_suffix,
+        usages_since_newest_shrink,
+    )
+
+    directory = await seed_journal(isolated_config)
+    with (directory / "transcript.jsonl").open("a") as out:
+        out.write(json.dumps(_shrink_row(boundary)) + "\n")
+    await Transcript(directory).append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "after-shrink"}
+    )
+    wanted = (FRONTEND_CHECKPOINT_CUSTOM_TYPE, SESSION_SPEND_CUSTOM_TYPE)
+
+    assert read_cold_tail(directory, checkpoint_types=wanted) is None
+
+    whole = read_replay_suffix(directory, checkpoint_types=wanted)
+    assert usages_since_newest_shrink(whole.entries) == []
+
+    replay_cache.replay_cache().clear()
+    facade = await cold_open(isolated_config, deferred=True)
+    try:
+        assert facade._deferred_history is None, "a declined tail opens eagerly"
+    finally:
+        await facade.dispose()
+
+
+@pytest.mark.asyncio
+async def test_tail_filing_rechecks_the_journal_witness(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = await seed_journal(isolated_config)
+    key = replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE,),
+        opportunistic_types=(SESSION_SPEND_CUSTOM_TYPE,),
+    )
+    assert key is not None
+    original = replay_cache.read_selection_reading
+
+    def moved(directory: Path) -> Any:
+        reading = original(directory)
+        with (directory / "transcript.jsonl").open("ab") as out:
+            out.write(b"\n")
+        return reading
+
+    monkeypatch.setattr(replay_cache, "read_selection_reading", moved)
+    assert replay_cache.build_cold_tail_metadata(key, _record_path(isolated_config)) is None
+    assert not _record_path(isolated_config).exists()
+
+
+@pytest.mark.asyncio
+async def test_first_miss_hydration_is_exact_and_idempotent(isolated_config: Path) -> None:
+    await seed_journal(isolated_config, turns=12)
+    eager = await cold_open(isolated_config, deferred=False)
+    expected = [message.model_dump(mode="json") for message in eager.history()]
+    await eager.dispose()
+    _record_path(isolated_config).unlink()
+    replay_cache.replay_cache().clear()
+    tail = await cold_open(isolated_config, deferred=True)
+    try:
+        assert tail._deferred_history is not None
+        with pytest.raises(RuntimeError, match="hydrate_deferred_history"):
+            tail.history()
+        await tail.hydrate_deferred_history()
+        await tail.hydrate_deferred_history()
+        assert [message.model_dump(mode="json") for message in tail.history()] == expected
+        assert len({message.id for message in tail.history()}) == len(expected)
+    finally:
+        await tail.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["checkpoint", "spend", "usage"])
+async def test_missing_tail_facts_keep_exact_eager_fallback(
+    isolated_config: Path, missing: str
+) -> None:
+    directory = await seed_journal(
+        isolated_config, checkpoint=missing != "checkpoint", spend=missing != "spend"
+    )
+    if missing == "usage":
+        path = directory / "transcript.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        for row in rows:
+            row["payload"].pop("usage", None)
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    expected_payload, expected_rows = await _eager_reference(isolated_config)
+    tail = await cold_open(isolated_config, deferred=True)
+    try:
+        assert tail._deferred_history is None
+        assert frontend_payload(tail) == expected_payload
+        assert [message.id for message in tail.history()] == expected_rows
+    finally:
+        await tail.dispose()

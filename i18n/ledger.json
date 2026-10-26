@@ -6346,6 +6346,286 @@
       },
       "status": "passed",
       "note": "French backfill. Copy authored by i18n-translator on the harness route radient/auto \u2014 a selector, not a vendor model id; the served model is not exposed and is not inferred. Independent i18n-auditor session 2674212bee8a (different session from the translator) re-read every key at its raise site in static.py/desktop.py: passed, 0 blocker, 0 major, 1 minor (sign_auth names the HTTP bearer scheme in English; recorded instead as a kept-English entry in i18n/style-guides/fr.md, so this row's target bytes are what ships). Evidence: i18n/audits/evidence/fr/wire.errors.files/wf26a1/record.json, receipt 84393fdc1ce87ff63a3196ec77342405f80f9c68b83ccc03cfa158c5c945c5c2."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
     }
   ]
 }

@@ -43,6 +43,7 @@
  */
 
 import type { PeerSender, TranscriptEntry } from "../types";
+import { messageRuntime } from "../store";
 
 /** The family word's set (design §5): the trigger kinds that can compose a
  * group, plus `mixed` for more than one. `monitor`/`job` are kept because
@@ -404,6 +405,6 @@ export function quietGroupLabel(family: QuietGroupFamily): string {
 		case "job":
 			return "Job results";
 		default:
-			return "Messages";
+			return messageRuntime.t("relay.transcript.label.messages");
 	}
 }

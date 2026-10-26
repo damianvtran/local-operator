@@ -531,7 +531,7 @@ LOCAL_OPS: tuple[str, ...] = (
 #: §6.5 recovery — the destination asks the source what happened), and ``invite``
 #: reaches the DESTINATION, which by definition does not own the id yet. See
 #: ``authorizer.Authorizer._session_scope`` for the carve-outs.
-MOVE_PHASES: tuple[str, ...] = ("status", "prepare", "ready", "done", "invite")
+MOVE_PHASES: tuple[str, ...] = ("status", "prepare", "ready", "done", "invite", "rollback")
 
 #: Move phases the SOURCE must answer for an id it has already handed away. A
 #: ``prepare`` is deliberately absent: preparing a session this device no longer

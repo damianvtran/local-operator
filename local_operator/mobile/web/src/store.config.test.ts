@@ -53,6 +53,7 @@ describe("retainConfigStream", () => {
 			"relay.session",
 			"relay.session.tags",
 			"relay.shell",
+			"relay.transcript",
 		]);
 		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: ownedNamespaces.length });
 		expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");

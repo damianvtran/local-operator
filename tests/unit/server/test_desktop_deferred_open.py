@@ -24,9 +24,11 @@ because its id-referencing payload is exactly what the index reads for
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -248,8 +250,10 @@ async def test_the_first_events_frame_is_the_same_frame_either_way(
     ConfigManager(config_dir=root)
     await _seed(root, **shape)
 
-    eager = await _open(root, SESSION_ID)
-    assert eager["deferred"] is False, "the first open of a journal is eager"
+    # Hold only the new optimization off: this is the pre-tail exact path.
+    with patch("local_operator.session.attached.build_cold_tail_metadata", return_value=None):
+        eager = await _open(root, SESSION_ID)
+    assert eager["deferred"] is False
     assert cold_metadata.cold_metadata_path(
         root, SESSION_ID
     ).exists(), "the eager open is the write"
@@ -274,7 +278,7 @@ async def test_the_first_events_frame_is_the_same_frame_either_way(
 
 
 @pytest.mark.asyncio
-async def test_an_open_after_the_journal_changed_is_eager_and_paints_the_new_row(
+async def test_an_open_after_the_journal_changed_defers_and_paints_the_new_row(
     tmp_path: Path,
 ) -> None:
     """The record is for the journal version it describes, and no other.
@@ -288,7 +292,7 @@ async def test_an_open_after_the_journal_changed_is_eager_and_paints_the_new_row
     directory = await _seed(root, turns=2)
 
     first = await _open(root, SESSION_ID)
-    assert first["deferred"] is False
+    assert first["deferred"] is True
 
     transcript = Transcript(directory)
     await transcript.append_message(
@@ -298,7 +302,7 @@ async def test_an_open_after_the_journal_changed_is_eager_and_paints_the_new_row
 
     replay_cache.replay_cache().clear()
     second = await _open(root, SESSION_ID)
-    assert second["deferred"] is False, "a moved journal must not be served from a record"
+    assert second["deferred"] is True, "a moved journal rebuilds its record from fresh tail facts"
     assert second["rows"] == first["rows"] + 1
 
 
@@ -318,16 +322,45 @@ def _app(root: Path) -> tuple[FastAPI, Any]:
     return app, pool
 
 
+async def _settle_index(root: Path) -> ti.TranscriptIndex | None:
+    """Run this session's transcript-index refresh to completion; await any in flight.
+
+    WHY: a frame's ``runs``/``runs_state`` come from the background transcript
+    index, not from the facade under test. An open that finds no resident index
+    starts a scan and, inside its 0.12 s snapshot budget, answers ``building``;
+    the scan then lands whenever the thread pool gets to it. Two arms opened in
+    sequence against the same root therefore compared two snapshots of a moving
+    background state (CI run 40353003484: one arm ``building, runs: []``, the
+    other ``ready`` with a run) -- a race unrelated to the eager-vs-tail claim.
+
+    Settling through the module's own single-flight entry point (which also
+    makes the result resident, the state ``fresh_resident`` answers from) gives
+    every arm the same settled index, and draining what an arm left in flight
+    keeps the next arm from observing a transition the previous one caused. No
+    sleep and no retry: the task is awaited, not timed.
+    """
+    loop = asyncio.get_running_loop()
+    for owner, task in list(ti._IN_FLIGHT.values()):
+        if owner is loop:
+            await task
+    task, _started = ti.start_refresh(root, SESSION_ID)
+    return await task
+
+
 async def _page_then_frame(root: Path) -> dict[str, Any]:
     """``/history`` over the REAL route, then the ``/events`` handshake.
 
     That is the order the renderer asks in: the journal page paints first and the
     event stream follows it. The facts are sampled inside both handovers, because
     the facade a page builds is disposed when its bridge is released.
+
+    The transcript index is settled before the arm and drained after it (see
+    :func:`_settle_index`), so two calls compare the facades, not the index's
+    progress. ``facts["index_ready"]`` records whether a settled index existed.
     """
+    facts: dict[str, Any] = {"index_ready": await _settle_index(root) is not None}
     app, pool = _app(root)
     transport = ASGITransport(app=app)
-    facts: dict[str, Any] = {}
     async with AsyncClient(
         transport=transport,
         base_url="http://localhost",
@@ -346,9 +379,10 @@ async def _page_then_frame(root: Path) -> dict[str, Any]:
         facts["history_hydrated_after_page"] = facade._history_hydrated
         sub = bridge.subscribe()
         stream = bridge.events(sub, epoch=bridge.epoch, after_seq=bridge.sequence)
-        await anext(stream)
+        facts["open"] = _canonical(await anext(stream))
         facts["frame"] = _canonical(await anext(stream))
         await stream.aclose()
+    await _settle_index(root)
     return facts
 
 
@@ -375,12 +409,14 @@ async def test_the_history_page_before_events_needs_no_hydrated_history(
     ConfigManager(config_dir=root)
     await _seed(root)
 
-    eager = await _page_then_frame(root)
+    with patch("local_operator.session.attached.build_cold_tail_metadata", return_value=None):
+        eager = await _page_then_frame(root)
     assert cold_metadata.cold_metadata_path(root, SESSION_ID).exists()
 
     replay_cache.replay_cache().clear()
     _reset_replay_calls()
     deferred = await _page_then_frame(root)
+    assert eager["index_ready"] and deferred["index_ready"], "both arms read one settled index"
 
     assert (
         deferred["deferred_after_page"] is True
@@ -432,7 +468,7 @@ async def test_hydration_reads_the_journal_as_of_the_hydration_not_the_open(
         deferred_history=True,
     )
     try:
-        assert first._deferred_history is None, "no record yet, so nothing to defer"
+        assert first._deferred_history is not None, "tail facts defer even a record MISS"
     finally:
         await first.dispose()
     replay_cache.replay_cache().clear()
@@ -476,3 +512,83 @@ async def test_hydration_reads_the_journal_as_of_the_hydration_not_the_open(
         assert [m.id for m in eager.history()] == rows
     finally:
         await eager.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "unchanged",
+        "append",
+        "checkpoint",
+        "compaction",
+        "archive",
+        "truncated",
+        "corrupt",
+        "legacy",
+    ],
+)
+async def test_tail_miss_wire_matrix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """Compare the real history route and event handshake to the exact eager path."""
+    from local_operator.session import compression
+
+    root = tmp_path / "config"
+    root.mkdir()
+    ConfigManager(config_dir=root)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    directory = await _seed(root, turns=5, checkpoint=shape != "legacy")
+    journal = directory / TRANSCRIPT_FILENAME
+    transcript = Transcript(directory)
+    if shape == "append":
+        await transcript.append_message(
+            Message(id="tail-new", role="user", content=[TextContent(text="new append")])
+        )
+    elif shape == "checkpoint":
+        await transcript.append_custom(
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            {
+                "checkpoint_id": "new",
+                "state": {
+                    "session_id": SESSION_ID,
+                    "epoch": "new",
+                    "conversation_title": "newest title",
+                },
+            },
+        )
+    elif shape == "compaction":
+        kept = next(
+            entry.id
+            for entry in reversed(transcript.entries())
+            if entry.type == "message" and entry.payload.get("role") == "user"
+        )
+        await transcript.append_compaction("new summary", kept, 2000)
+    transcript.flush()
+    transcript.close()
+    if shape == "archive":
+        outcome = compression.compress_session(directory)
+        assert outcome.status == "compressed", outcome
+    elif shape == "truncated":
+        with journal.open("ab") as out:
+            out.write(b'{"type":"custom"')
+    elif shape == "corrupt":
+        with journal.open("ab") as out:
+            out.write(b"{not json}\n")
+
+    with patch("local_operator.session.attached.read_cold_metadata", return_value=None):
+        with patch("local_operator.session.attached.build_cold_tail_metadata", return_value=None):
+            eager = await _page_then_frame(root)
+        replay_cache.replay_cache().clear()
+        tail = await _page_then_frame(root)
+    # Both arms opened over the same settled index, so the page's run facts
+    # compare facades rather than how far a background scan had got. An
+    # archived session has no plain journal for the index to read, so it
+    # settles to "no index" on both arms instead.
+    assert eager["index_ready"] is tail["index_ready"] is (shape != "archive")
+    assert tail["page"] == eager["page"]
+    assert tail["open"] == eager["open"]
+    assert tail["frame"] == eager["frame"]
+    assert tail["deferred_after_page"] == (shape in {"unchanged", "append", "checkpoint"})
+    if shape == "checkpoint":
+        assert "newest title" in str(tail["frame"])
