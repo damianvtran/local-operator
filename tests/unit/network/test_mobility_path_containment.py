@@ -224,3 +224,58 @@ def test_legitimate_move_still_uses_the_contained_paths(
     assert not source.exists()
     assert (server_b.root / "sessions" / "9f3ac1e0b7d2").is_dir()
     assert not sync.staging_dir(server_b.root, "9f3ac1e0b7d2").exists()
+
+
+def test_handoff_paths_accept_a_symlinked_config_root(tmp_path: Path) -> None:
+    """The configured root may itself be reached through a link (mktemp on macOS).
+
+    Everything BELOW the root is still checked with ``lstat``: only the root's own
+    spelling is normalised.
+    """
+    real = tmp_path / "root"
+    (real / "network" / "staging" / "abc123").mkdir(parents=True)
+    (real / "sessions" / "abc123").mkdir(parents=True)
+    linked = tmp_path / "config"
+    linked.symlink_to(real, target_is_directory=True)
+
+    staging = mobility._contained_handoff_path(  # noqa: SLF001
+        linked,
+        linked / "network" / "staging" / "abc123",
+        parent_parts=("network", "staging"),
+        leaf="abc123",
+    )
+    sessions = mobility._contained_handoff_path(  # noqa: SLF001
+        linked,
+        linked / "sessions" / "abc123",
+        parent_parts=("sessions",),
+        leaf="abc123",
+    )
+
+    assert staging == real / "network" / "staging" / "abc123"
+    assert sessions == real / "sessions" / "abc123"
+
+
+def test_a_rollback_sweeps_its_staging_through_a_symlinked_config_root(
+    pair: Devices,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--keep`` stages under a MINTED id, which is not the source's session id.
+
+    The sweep must validate the directory it was actually handed — beside being
+    reachable through a link-spelled root — or a refused copy leaves its partial
+    tree behind while telling the reader it discarded it.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    real = server_b.root
+    linked = real.parent / "cfg-link"
+    linked.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(server_b, "root", linked)
+    staging = sync.staging_dir(linked, "minted-under-keep")
+    staging.mkdir(parents=True)
+    (staging / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+
+    mobility._roll_back_destination(server_b, "abc123", staging)  # noqa: SLF001
+
+    assert not staging.exists(), "the refused copy's partial staging was left behind"
+    assert not (real / "network" / "staging" / "minted-under-keep").exists()

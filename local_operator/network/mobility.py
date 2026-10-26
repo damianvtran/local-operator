@@ -2447,12 +2447,17 @@ def _contained_handoff_path(
     except MeshRefusal:
         return None
     try:
-        anchor = Path(root).resolve(strict=True)
+        lexical = Path(os.path.abspath(root))
+        # THE ROOT'S OWN SPELLING IS NOT A TRUST QUESTION (macOS /var -> /private/var,
+        # an isolation mktemp root): resolve the anchor once and compare the caller's
+        # spelling against it. Everything BELOW the anchor is still checked by lstat,
+        # so a link there refuses exactly as before.
+        anchor = lexical.resolve(strict=True)
         if not stat.S_ISDIR(anchor.stat().st_mode):
             return None
         parent = anchor.joinpath(*parent_parts)
         candidate = parent / leaf
-        if Path(os.path.abspath(path)) != candidate:
+        if Path(os.path.abspath(path)) != lexical.joinpath(*parent_parts) / leaf:
             return None
         current = anchor
         for component in parent_parts:
@@ -2731,7 +2736,11 @@ def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path
         Path(server.root),
         staging,
         parent_parts=("network", "staging"),
-        leaf=session_id,
+        # THE DIRECTORY ACTUALLY HANDED OVER. A ``--keep`` copy stages under a MINTED
+        # id, so validating the SOURCE session id here refused the sweep of every
+        # failed copy while the refusal sentence said the copy was discarded. The
+        # leaf is what this call is about; ``session_id`` stays the journal key.
+        leaf=Path(staging).name,
     )
     if safe_staging is None:
         logger.error(
@@ -4474,17 +4483,6 @@ def _destination_invite(
     drop_session_roles = bool(frame.get("drop_session_roles") or False)
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
-    from local_operator.network.types import MeshRefusal
-
-    try:
-        _validated_session_id(session_id)
-    except MeshRefusal as exc:
-        return {
-            "result": "refused",
-            "code": "bad_request",
-            "message": str(exc),
-            "session_id": session_id,
-        }
     if not keep and _owned_here(server, session_id):
         return {
             "result": "refused",

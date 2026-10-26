@@ -2135,9 +2135,17 @@ def pull(
     anchor = _common_anchor(Path(root), dest_dir, attachments_root)
     session_scope = _write_scope(anchor, dest_dir)
     attachment_scope = _write_scope(anchor, attachments_root / ATTACHMENTS_DIRNAME)
-    # Capture before ANY plan request or mutation: a refused plan must leave both
-    # the archive and the previous plain transcript byte-for-byte unchanged.
-    transcript_state = _capture_transcript_state(dest_dir) if dest_dir.is_dir() else {}
+    from local_operator.session import compression
+
+    # Capture before ANY plan request or mutation: a refused plan must leave both the
+    # archive and the previous plain transcript byte-for-byte unchanged. ONLY a
+    # compressed destination can be changed before plan validation (the temporary
+    # restore), so an ordinary replica refresh must not read its whole transcript.
+    transcript_state = (
+        _capture_transcript_state(dest_dir)
+        if dest_dir.is_dir() and compression.archive_path(dest_dir) is not None
+        else {}
+    )
     dest_dir.mkdir(parents=True, exist_ok=True)
     restored = False
     # THE PLAN IS ASKED FOR AGAIN WHEN IT CANNOT DESCRIBE THIS DESTINATION. An
@@ -2146,7 +2154,6 @@ def pull(
     # about a copy that is no longer on disk, and continuing would splice. One
     # extra round trip re-plans as a full copy.
     plan: dict[str, Any] = {}
-    from local_operator.session import compression
 
     for _ in range(2):
         if restored:
@@ -2301,8 +2308,11 @@ def _apply_validated_plan(
     prune: list[tuple[Path, _WriteScope]] = []
     if complete_members is not None:
         source_members, source_links = complete_members
-        # The cursor's attachment field is a count; all held member digests,
-        # including attachments, are already represented in files.
+        # HELD MEMBER DIGESTS for the prune below. ``held_report`` reports the shared
+        # attachment store in its own ``attachments`` map and copy-set/tree/link members
+        # in ``files``, so ``previous`` is exactly the set a replica's cursor owns. The
+        # shared store is content-addressed and used by every session on this device, so
+        # a pull never prunes it; only names ``files`` carries can be removed here.
         previous = dict(have.get("files") or {})
         for name in sorted(previous):
             if name == TRANSCRIPT_NAME or name in source_members:
@@ -2623,22 +2633,61 @@ def _refuse_io(name: str, reason: str) -> SyncRefused:
 
 @dataclass(frozen=True)
 class _WriteScope:
-    """A trusted anchor plus the one descendant root a writer may mutate."""
+    """A trusted anchor plus the one descendant root a writer may mutate.
+
+    ``anchor``/``allowed_root`` are PHYSICAL: the configured root is resolved ONCE,
+    so a config directory reached through a symbolic link — macOS ``/var`` is
+    ``/private/var``, and an isolation ``mktemp`` root is exactly that — is spelled
+    the way the kernel walks it. ``lexical_*`` keep the caller's spelling so a path
+    built from it maps onto the physical root. Components BELOW the anchor are never
+    resolved: a link there is refused, by :func:`_assert_contained` and by
+    ``O_NOFOLLOW`` in :func:`_open_directory`.
+    """
 
     anchor: Path
     allowed_root: Path
+    lexical_anchor: Path
+    lexical_root: Path
+
+    def physical(self, path: Path) -> Path:
+        """Map a caller-spelled path onto this scope's physical roots."""
+        absolute = Path(os.path.abspath(path))
+        for base, target in (
+            (self.allowed_root, self.allowed_root),
+            (self.anchor, self.anchor),
+            (self.lexical_root, self.allowed_root),
+            (self.lexical_anchor, self.anchor),
+        ):
+            try:
+                return target / absolute.relative_to(base)
+            except ValueError:
+                continue
+        raise _refuse_io(path.name, "its destination escapes the allowed root.")
+
+    def relative_in(self, directory: Path) -> Path:
+        """``directory`` as a path relative to the physical allowed root."""
+        return self.physical(directory).relative_to(self.allowed_root)
 
 
 def _write_scope(anchor: Path, allowed_root: Path) -> _WriteScope:
-    scope = _WriteScope(Path(os.path.abspath(anchor)), Path(os.path.abspath(allowed_root)))
+    lexical_anchor = Path(os.path.abspath(anchor))
+    lexical_root = Path(os.path.abspath(allowed_root))
     try:
-        scope.allowed_root.relative_to(scope.anchor)
+        relative = lexical_root.relative_to(lexical_anchor)
     except ValueError:
         raise _refuse_io(
             allowed_root.name, "its allowed root escapes the trusted anchor."
         ) from None
-    # A configured root may be newly created, but NONE of its existing components
-    # may be a link: checking only allowed_root would bless network/replica -> out.
+    # THE ROOT'S OWN SPELLING IS NOT A TRUST QUESTION. Resolving the anchor once is
+    # what makes a configured directory reached through a link work; every component
+    # BELOW it is still checked, so network/replica -> out refuses exactly as before.
+    physical_anchor = lexical_anchor.resolve()
+    scope = _WriteScope(
+        anchor=physical_anchor,
+        allowed_root=physical_anchor / relative,
+        lexical_anchor=lexical_anchor,
+        lexical_root=lexical_root,
+    )
     _assert_contained(scope, scope.allowed_root, leaf_link=False)
     return scope
 
@@ -2654,14 +2703,10 @@ def _common_anchor(*paths: Path) -> Path:
 
 
 def _assert_contained(scope: _WriteScope, path: Path, *, leaf_link: bool) -> None:
-    """Check every component from the stable anchor, not from a derived root."""
-    lexical = Path(os.path.abspath(path))
-    allowed = scope.allowed_root
-    try:
-        relative = lexical.relative_to(allowed)
-        from_anchor = lexical.relative_to(scope.anchor)
-    except ValueError:
-        raise _refuse_io(path.name, "its destination escapes the allowed root.") from None
+    """Check every component from the resolved anchor, not from a derived root."""
+    physical = scope.physical(path)
+    relative = physical.relative_to(scope.allowed_root)
+    from_anchor = physical.relative_to(scope.anchor)
     probe = scope.anchor
     for index, part in enumerate(from_anchor.parts):
         probe = probe / part
@@ -2670,8 +2715,11 @@ def _assert_contained(scope: _WriteScope, path: Path, *, leaf_link: bool) -> Non
             raise _refuse_io(str(path), f"path component {part!r} is a symbolic link.")
         if not is_leaf and probe.exists() and not probe.is_dir():
             raise _refuse_io(str(path), f"parent component {part!r} is not a directory.")
-    resolved = path.resolve(strict=False)
-    physical_root = allowed.resolve()
+    # ``physical`` is already physical down to the anchor; the component walk above
+    # refused any link below it, and this comparison catches a destination reached
+    # by a route the walk did not name.
+    resolved = physical.resolve(strict=False)
+    physical_root = scope.allowed_root
     if resolved != physical_root and physical_root not in resolved.parents:
         raise _refuse_io(str(relative), "its resolved destination escapes the allowed root.")
 
@@ -2692,6 +2740,8 @@ def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
     flags = os.O_RDONLY | _O_BINARY | _O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
     _assert_contained(scope, scope.allowed_root / relative, leaf_link=False)
     scope.allowed_root.mkdir(parents=True, exist_ok=True)
+    # The anchor is already resolved, so its own spelling is not a link question;
+    # only a root that is not a real directory (or was swapped for one) refuses.
     if scope.anchor.is_symlink() or not scope.anchor.is_dir():
         raise _refuse_io(name, "the trusted anchor is not a real directory.")
     try:
@@ -2726,7 +2776,7 @@ def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
 
 def _open_for_read(path: Path, scope: _WriteScope) -> int:
     _assert_contained(scope, path, leaf_link=False)
-    parent = _open_directory(scope, path.parent.relative_to(scope.allowed_root), path.name)
+    parent = _open_directory(scope, scope.relative_in(path.parent), path.name)
     try:
         try:
             before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
@@ -2745,7 +2795,7 @@ def _open_for_read(path: Path, scope: _WriteScope) -> int:
 
 def _open_stage(path: Path, scope: _WriteScope, flags: int, *, suffix: str) -> tuple[int, Path]:
     _assert_contained(scope, path, leaf_link=False)
-    parent = _open_directory(scope, path.parent.relative_to(scope.allowed_root), path.name)
+    parent = _open_directory(scope, scope.relative_in(path.parent), path.name)
     stage_name = f".{path.name}.{os.getpid()}.{os.urandom(4).hex()}.{suffix}"
     try:
         try:
@@ -2761,7 +2811,7 @@ def _open_stage(path: Path, scope: _WriteScope, flags: int, *, suffix: str) -> t
 
 def _unlink_at(root: Path, name: str, scope: _WriteScope) -> None:
     try:
-        parent = _open_directory(scope, root.relative_to(scope.allowed_root), name)
+        parent = _open_directory(scope, scope.relative_in(root), name)
     except SyncRefused:
         return
     try:
@@ -2781,9 +2831,7 @@ def _replace_at(
     # A file may replace a just-created honest link, but an existing unrelated link
     # is refused. The rename itself is dirfd-relative and never follows the leaf.
     _assert_contained(scope, destination, leaf_link=replacing_link)
-    parent = _open_directory(
-        scope, destination.parent.relative_to(scope.allowed_root), destination.name
-    )
+    parent = _open_directory(scope, scope.relative_in(destination.parent), destination.name)
     try:
         try:
             if destination.is_symlink() and not replacing_link:
@@ -2801,18 +2849,11 @@ def _replace_at(
 
 def _symlink_at(target: str, root: Path, name: str, scope: _WriteScope) -> None:
     _assert_contained(scope, root / name, leaf_link=True)
-    parent = _open_directory(scope, root.relative_to(scope.allowed_root), name)
+    parent = _open_directory(scope, scope.relative_in(root), name)
     try:
         os.symlink(target, name, dir_fd=parent)
     finally:
         os.close(parent)
-
-
-def _unlink_relative(root: Path, relative: str) -> None:
-    path = root / relative
-    scope = _write_scope(root, root)
-    _assert_contained(scope, path, leaf_link=False)
-    _unlink_at(path.parent, path.name, scope)
 
 
 def _copy_contained(source: Path, destination: Path, scope: _WriteScope) -> None:
@@ -2991,8 +3032,7 @@ def _fetch_item(
 
 
 def _write_link(scope: _WriteScope, name: str, target: str, digest: str) -> None:
-    dest_dir = scope.allowed_root
-    """Write the carried symlink ``name`` under ``dest_dir``, pointing at ``target``.
+    """Write the carried symlink ``name`` under the scope, pointing at ``target``.
 
     ``target`` is the RELATIVE text the owner computed (``_portable_link_target``), never
     the source's absolute spelling, which is what makes the link mean the same thing on
@@ -3004,6 +3044,7 @@ def _write_link(scope: _WriteScope, name: str, target: str, digest: str) -> None
     Staged and ``os.replace``d like every other member, so a reader of this directory sees
     the previous link or the new one and never a half-written one.
     """
+    dest_dir = scope.allowed_root
     path = _tree_entry_path(Path(dest_dir), name, landed=True)
     if path is None:
         raise SyncRefused("unknown_item", f"{name} is not part of a session copy")

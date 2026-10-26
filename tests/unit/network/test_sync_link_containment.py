@@ -755,3 +755,128 @@ def test_valid_plan_still_restores_compressed_transcript(tmp_path: Path) -> None
     _pull(tmp_path, _plan([]))
     assert (dest / "transcript.jsonl").read_bytes() == b"{}\n"
     assert compression.archive_path(dest) is None
+
+
+# ---------------------------------------------------------------------------
+# A configured root reached through a symbolic link
+# ---------------------------------------------------------------------------
+
+
+def _owner_ask(root: Path, session_id: str = "abc123") -> Any:
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame["phase"] == "plan":
+            return sync.build_manifest(root, session_id, have=frame.get("have") or {})
+        if frame["phase"] == "fetch":
+            return sync.serve_fetch(
+                root,
+                session_id,
+                plan=frame["plan_id"],
+                name=frame["name"],
+                offset=frame.get("offset", 0),
+                limit=frame.get("limit", sync.SYNC_CHUNK_BYTES),
+            )
+        return sync.serve_verify(
+            root,
+            session_id,
+            plan=frame["plan_id"],
+            name=frame["name"],
+            prefix_bytes=frame["prefix_bytes"],
+            prefix_digest=frame["prefix_digest"],
+        )
+
+    return ask
+
+
+def test_pull_into_a_symlinked_configured_root_succeeds(tmp_path: Path) -> None:
+    """The operator's configured root may itself be reached through a link.
+
+    A macOS ``mktemp`` root is ``/var/...`` whose real path is ``/private/var/...``:
+    resolving the root once must not turn that spelling into a refusal, while a link
+    BELOW the root is still refused (the sibling cells above).
+    """
+    real = tmp_path / "root"
+    real.mkdir()
+    linked = tmp_path / "config"
+    linked.symlink_to(real, target_is_directory=True)
+    dest = linked / "network" / "replicas" / "session"
+
+    sync.pull(linked, "session", ask=_plan([]), dest_dir=dest, attachments_root=linked)
+
+    assert (real / "network" / "replicas" / "session" / "transcript.jsonl").read_bytes() == b"{}\n"
+
+
+def test_sync_from_into_a_symlinked_configured_root_succeeds(tmp_path: Path) -> None:
+    owner = tmp_path / "owner"
+    session = owner / "sessions" / "abc123"
+    session.mkdir(parents=True)
+    (session / "transcript.jsonl").write_bytes(b"{}\n")
+    real = tmp_path / "root"
+    real.mkdir()
+    linked = tmp_path / "config"
+    linked.symlink_to(real, target_is_directory=True)
+
+    result = sync.sync_from(linked, "abc123", ask=_owner_ask(owner))
+
+    assert result["mode"] == "replace"
+    assert (real / "network" / "replicas" / "abc123" / "transcript.jsonl").is_file()
+
+
+def test_recovery_through_a_symlinked_configured_root_succeeds(tmp_path: Path) -> None:
+    real = tmp_path / "holder"
+    real.mkdir()
+    _recovered_replica(real)
+    linked = tmp_path / "config"
+    linked.symlink_to(real, target_is_directory=True)
+
+    promoted = sync.promote_replica(linked, "abc123", new_id="recovered")
+
+    assert promoted["session_id"] == "recovered"
+    assert (real / "sessions" / "recovered" / "transcript.jsonl").is_file()
+
+
+def test_a_plain_pull_does_not_snapshot_the_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a compressed replica can be changed by the temporary restore."""
+    calls: list[Path] = []
+    original = sync._capture_transcript_state  # noqa: SLF001 — the call under test
+    monkeypatch.setattr(
+        sync,
+        "_capture_transcript_state",
+        lambda directory: calls.append(directory) or original(directory),
+    )
+    dest = tmp_path / "replica"
+    dest.mkdir()
+    (dest / "transcript.jsonl").write_bytes(b"{}\n")
+    plan = _plan([])
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame["phase"] == "verify":
+            return {"matches": False}
+        return plan(frame)
+
+    sync.pull(tmp_path / "config", "session", ask=ask, dest_dir=dest, attachments_root=dest)
+
+    assert calls == []
+
+
+def test_a_compressed_pull_still_snapshots_before_restoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session import compression
+
+    calls: list[Path] = []
+    original = sync._capture_transcript_state  # noqa: SLF001 — the call under test
+    monkeypatch.setattr(
+        sync,
+        "_capture_transcript_state",
+        lambda directory: calls.append(directory) or original(directory),
+    )
+    dest = tmp_path / "replica"
+    dest.mkdir()
+    (dest / "transcript.jsonl").write_bytes(b'{"old":true}\n')
+    assert compression.compress_session(dest, codec="gzip").status == "compressed"
+
+    _pull(tmp_path, _plan([]))
+
+    assert calls == [dest]
