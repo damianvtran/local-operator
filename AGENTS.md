@@ -1264,11 +1264,16 @@ the job is the reviewer's missing memory, not a lock.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
 that is nothing but the `version =` line as a release bump, and a release
-bump runs *only* `changes` and `version-bump-guard` — two checks, not a
-matrix. That is the intended disposition (the classifier's `release_bump`
-rule is asserted in `tests/unit/test_ci_hygiene.py`), but it means "CI is
-green" on a release PR is evidence about the version line and nothing else.
-The code being released was gated on the PR that landed it, not on this one.
+bump runs six checks, not the matrix: `changes` and `version-bump-guard`
+from `ci.yml`, plus `Release invariants` and `Build and start the release
+artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (which runs
+on pushes to `release-next`/`release-next-*`, the bump PR's head branch).
+Every other `ci.yml` job reports skipping. That is the intended disposition
+(the classifier's `release_bump` rule is asserted in
+`tests/unit/test_ci_hygiene.py`), but it means "CI is green" on a release PR
+is evidence about the version line, the release invariants and the built
+wheel starting — not about the code. The code being released was gated on
+the PR that landed it, not on this one.
 
 Note that `gh api repos/<owner>/<repo>/branches/main/protection` answers
 `404 Branch not protected` here. That endpoint reports only **legacy** branch
@@ -1409,13 +1414,22 @@ it landed.
    that also carries code is a defect — the code belongs in a reviewed PR
    of its own.
 
-   **Expect two checks on this PR, not a matrix.** A version-only
-   `pyproject.toml` diff classifies as a release bump, so only `changes` and
-   `version-bump-guard` run — the whole job set would be gating code this PR
-   does not touch. Do not read that short check list as a truncated pipeline,
-   and do not "fix" it by adding an always-run job: the narrow green is the
-   design (`scripts/ci_scope.py`, `release_bump`), and the code being released
-   was gated on the PR that landed it.
+   **Expect six checks on this PR, not a matrix.** A version-only
+   `pyproject.toml` diff classifies as a release bump, so from `ci.yml` only
+   `changes` and `version-bump-guard` run and every other job reports
+   skipping — the whole job set would be gating code this PR does not touch.
+   The other four come from `.github/workflows/release-gate.yml`, which fires
+   on the push to `release-next`: `Release invariants` (the pushed commit is
+   the one checked out, the declared version parses as PEP 440, and the i18n
+   `generate.py --check` and `check.py` pass) and `Build and start the release
+   artifact` on Python 3.12, 3.13 and 3.14 (`scripts/smoke_wheel.py` against
+   the built wheel). That split is the point: the gate proves the thing being
+   cut builds, installs and starts on every declared interpreter, which is
+   what a version bump can break, while the suite is skipped because the diff
+   is pyproject-only. Do not read the short check list as a truncated
+   pipeline, and do not "fix" it by adding an always-run job: the narrow green
+   is the design (`scripts/ci_scope.py`, `release_bump`), and the code being
+   released was gated on the PR that landed it.
    **Before cutting the tag, prove the combined target, not just each PR.** In
    the release owner's clean worktree checked out at the exact bump merge SHA,
    verify `git rev-parse HEAD` equals that intended target. With Python 3.12 and
