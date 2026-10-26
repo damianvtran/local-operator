@@ -1871,11 +1871,23 @@ def read_cold_tail(
 
     This is NOT replay: entries are only the evidence for the newest usage
     receipt, never a message-list substitute. Checkpoint, spend, their order
-    and the usage seed must all be found within 4 MiB / 256 rows, without an
-    observed compaction/shrink boundary leaving an earlier fact unresolved.
-    Earlier bytes cannot change those latest facts. Bound exhaustion, damaged
-    or incomplete lines, archives and unresolved shrink boundaries deliberately
-    keep the exact eager path; no absence is inferred from a bound.
+    and the usage seed must all be found within 4 MiB / 256 rows. Earlier bytes
+    cannot change those latest facts. Bound exhaustion, damaged or incomplete
+    lines, archives and ANY shrink row met by the walk keep the exact eager
+    path; no absence is inferred from a bound.
+
+    What each guard protects, because two of them look alike:
+
+    * The usage SEED's soundness is owned by :func:`usages_since_newest_shrink`,
+      which the caller runs over these entries: it drops every reading older
+      than the newest shrink, so a pre-shrink context figure can never be
+      seeded whether or not this function refuses.
+    * The shrink refusal below is deliberate CONSERVATISM on top of that. It
+      declines any window containing a shrink rather than reasoning about
+      which facts survive one, so the deferred path only ever serves journals
+      with no shrink near EOF. Removing it would not make a seed wrong; it
+      would make the tail serve opens it is not tested for. Pinned by
+      ``test_tail_declines_a_shrink_straddling_the_needed_facts``.
     """
     from local_operator.session.compression import transcript_source
 
@@ -1911,6 +1923,8 @@ def read_cold_tail(
                     provider = entry.payload.get("provider_payload") or {}
                     if not isinstance(provider, dict):
                         return None
+                    # Conservatism, not the seed's boundary (see docstring):
+                    # every shrink spelling usages_since_newest_shrink honours.
                     if (
                         entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE)
                         or provider.get(SHRUNK_KEY)
@@ -1925,6 +1939,13 @@ def read_cold_tail(
                     if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict):
                         have_usage = True
                     if have_usage and all(name in checkpoints for name in checkpoint_types):
+                        # A SYNTHETIC suffix: ``through_present=True`` is not a
+                        # cursor search (this reader takes no cursor), only the
+                        # field's required value. Nothing consumes it from a
+                        # tail result today — the caller reads the checkpoints,
+                        # their order, the entries' usage and ``bytes_read`` —
+                        # so never hand this to a replay consumer as if it were
+                        # a :func:`read_replay_suffix` result.
                         return ReplaySuffix(
                             entries=tuple(reversed(parsed)),
                             through_present=True,

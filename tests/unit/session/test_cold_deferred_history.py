@@ -1293,25 +1293,43 @@ def test_backward_byte_bound_includes_giant_unterminated_rows() -> None:
     assert handle.bytes_read == 101
 
 
+_SHRINK_BOUNDARIES = ["prune", "compaction", "folded", "legacy_folded"]
+
+
+def _shrink_row(boundary: str) -> dict[str, Any]:
+    """One WELL-FORMED journal row of each shrink spelling the tail refuses.
+
+    ``ts`` is a number on purpose. ``TranscriptEntry.from_json`` drops a row
+    whose ``ts`` will not ``float()``, and the tail declines on ANY dropped row
+    as damage. An ISO-string ``ts`` here (as the first version of this test
+    had) therefore declined for the wrong reason: the shrink refusal could be
+    deleted and the test stayed green (review of #2974, MINOR-1).
+    """
+    from local_operator.session.transcript import SHRUNK_KEY
+
+    if boundary in {"prune", "compaction"}:
+        return {"id": f"boundary-{boundary}", "type": boundary, "ts": 1.0, "payload": {}}
+    return {
+        "id": f"boundary-{boundary}",
+        "type": "message",
+        "ts": 1.0,
+        "payload": {
+            "role": "tool",
+            "content": [],
+            "provider_payload": {SHRUNK_KEY if boundary == "folded" else "pruned": True},
+        },
+    }
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ["prune", "compaction", "folded", "legacy_folded"])
+@pytest.mark.parametrize("boundary", _SHRINK_BOUNDARIES)
 async def test_tail_never_seeds_across_a_shrink(isolated_config: Path, boundary: str) -> None:
-    from local_operator.session.transcript import SHRUNK_KEY, read_cold_tail
+    from local_operator.session.transcript import TranscriptEntry, read_cold_tail
 
     directory = await seed_journal(isolated_config)
-    if boundary in {"prune", "compaction"}:
-        row = {"id": "boundary", "type": boundary, "ts": "2026-10-26T00:00:00Z", "payload": {}}
-    else:
-        row = {
-            "id": "boundary",
-            "type": "message",
-            "ts": "2026-10-26T00:00:00Z",
-            "payload": {
-                "role": "tool",
-                "content": [],
-                "provider_payload": {SHRUNK_KEY if boundary == "folded" else "pruned": True},
-            },
-        }
+    row = _shrink_row(boundary)
+    # Guard against regressing into the malformed-row decline described above.
+    assert TranscriptEntry.from_json(json.dumps(row)) is not None
     with (directory / "transcript.jsonl").open("a") as out:
         out.write(json.dumps(row) + "\n")
     assert (
@@ -1320,6 +1338,53 @@ async def test_tail_never_seeds_across_a_shrink(isolated_config: Path, boundary:
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", _SHRINK_BOUNDARIES)
+async def test_tail_declines_a_shrink_straddling_the_needed_facts(
+    isolated_config: Path, boundary: str
+) -> None:
+    """A shrink BETWEEN the facts the frame needs makes the tail decline outright.
+
+    Layout, oldest first: spend receipts, turns (usage on the last assistant),
+    the shrink, then a fresh checkpoint. The checkpoint is found after the
+    boundary; spend and the usage seed only before it. Without the refusal in
+    ``read_cold_tail`` the walk crosses the boundary, finds all three and
+    returns a suffix — this test pins that it returns ``None`` instead, so the
+    open takes the exact eager path.
+
+    The second half records what the OTHER guard does: ``usages_since_newest_shrink``
+    over those same entries yields no reading, so the seed would still be
+    refused downstream. That is why the refusal is conservatism (it keeps the
+    tail from reasoning about pre-shrink facts at all), not the seed's
+    soundness guard — and why only a direct ``is None`` can pin it.
+    """
+    from local_operator.session.transcript import (
+        read_cold_tail,
+        read_replay_suffix,
+        usages_since_newest_shrink,
+    )
+
+    directory = await seed_journal(isolated_config)
+    with (directory / "transcript.jsonl").open("a") as out:
+        out.write(json.dumps(_shrink_row(boundary)) + "\n")
+    await Transcript(directory).append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "after-shrink"}
+    )
+    wanted = (FRONTEND_CHECKPOINT_CUSTOM_TYPE, SESSION_SPEND_CUSTOM_TYPE)
+
+    assert read_cold_tail(directory, checkpoint_types=wanted) is None
+
+    whole = read_replay_suffix(directory, checkpoint_types=wanted)
+    assert usages_since_newest_shrink(whole.entries) == []
+
+    replay_cache.replay_cache().clear()
+    facade = await cold_open(isolated_config, deferred=True)
+    try:
+        assert facade._deferred_history is None, "a declined tail opens eagerly"
+    finally:
+        await facade.dispose()
 
 
 @pytest.mark.asyncio
