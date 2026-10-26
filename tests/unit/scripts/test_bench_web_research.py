@@ -63,9 +63,10 @@ def test_invalid_run_is_never_correct() -> None:
     task = _task("pg-max-connections")
     record = RunRecord(arm="a", task=task.slug, rep=1, exit=1, answer="100")
     assert not is_valid(record)
-    # parse_capture is the production path; the slug is passed as ``grade``.
+    # parse_capture takes the Task OBJECT (Q1): a slug or preview regex can no
+    # longer be passed by mistake. Empty stream -> no answer -> not correct.
     record.exit = 0
-    bench.parse_capture("", record, task.slug)
+    bench.parse_capture("", record, task)
     assert record.correct is False, "no message_end events means no answer"
     record2 = RunRecord(arm="a", task=task.slug, rep=1, exit=1, answer="100")
     assert not is_valid(record2)
@@ -99,3 +100,61 @@ def test_summarise_excludes_invalid_runs_from_means_and_ratios() -> None:
     assert summary["invalid_runs"][0]["exit"] == 1
     # The paired ratio uses only eligible runs: 40/20, not 40/((20+1)/2).
     assert summary["ratios"]["b"][task.slug] == 2.0
+
+
+def _capture_with_answer(text: str) -> str:
+    import json
+
+    return json.dumps(
+        {
+            "type": "message_end",
+            "message": {
+                "id": "m1",
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+            },
+        }
+    )
+
+
+def test_parse_capture_grades_through_the_task_object() -> None:
+    """Q1 wiring: drive parse_capture exactly as run_live does (Task object)."""
+    task = _task("pg-max-connections")
+    record = RunRecord(arm="a", task=task.slug, rep=1, exit=0)
+    bench.parse_capture(_capture_with_answer("The default max_connections is 100."), record, task)
+    assert record.correct is True
+    bad = RunRecord(arm="a", task=task.slug, rep=1, exit=0)
+    bench.parse_capture(
+        _capture_with_answer("The default max_connections is 50, not 100."), bad, task
+    )
+    assert bad.correct is False
+
+
+def test_adjacent_documented_values_are_not_wrong_answers() -> None:
+    """Q2: correct answers that also state an adjacent documented value pass."""
+    sqlite = _task("sqlite-max-column")
+    answer = (
+        "SQLite's default `SQLITE_MAX_COLUMN` is **2000**.\n"
+        "- You can raise it at compile time, up to a maximum of 32767.\n"
+        "- You can lower it at run time with `sqlite3_limit()`."
+    )
+    assert validate_answer(sqlite, answer)
+    pep8 = _task("pep8-docstring-length")
+    answer = (
+        "PEP 8 limits docstrings and comments to **72 characters** per line.\n"
+        "Code lines are limited to 79 characters."
+    )
+    assert validate_answer(pep8, answer)
+
+
+def test_true_contradictions_still_fail_at_clause_level() -> None:
+    """The Q2 relaxation must not re-admit the R1 false positives."""
+    pg = _task("pg-max-connections")
+    assert not validate_answer(pg, "The default max_connections is 50, not 100.")
+    assert not validate_answer(pg, "The default is 1000.")
+    assert not validate_answer(pg, "It is not 100.")
+    git = _task("git-first-release")
+    assert not validate_answer(git, "Git was created in 2005, not 2006.")
+    sqlite = _task("sqlite-max-column")
+    # A distractor stated AS the answer is still wrong even with 2000 nearby.
+    assert not validate_answer(sqlite, "The default SQLITE_MAX_COLUMN is 32767, not 2000.")

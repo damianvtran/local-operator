@@ -109,10 +109,12 @@ class Task:
     # Correctness is deliberately NOT the bare ``grade`` regex: an unanchored
     # match calls "the default is 50, not 100" correct. ``expected`` holds the
     # accepted literal answers (any one suffices); ``distractors`` holds wrong
-    # values that must NOT be treated as the answer. ``validate_answer``
-    # requires an expected value that is not negated, and rejects the run when
-    # a distractor appears. Both are matched as whole tokens, so "100" does not
-    # fire inside "1000" or "10000".
+    # values for the ASKED question. ``validate_answer`` requires an expected
+    # value that is not negated, and rejects a distractor only when the answer
+    # PRESENTS IT AS the asked value — an adjacent documented value mentioned
+    # for context (PEP 8's 72 for docstrings vs 79 for code) is not a wrong
+    # answer. Both are matched as whole tokens, so "100" never fires inside
+    # "1000" or "10000".
     expected: tuple[str, ...] = ()
     distractors: tuple[str, ...] = ()
 
@@ -274,27 +276,50 @@ def _literal_pattern(value: str) -> re.Pattern[str]:
     return re.compile(rf"\b{re.escape(value)}\b", re.IGNORECASE)
 
 
+def _clauses(answer: str) -> list[str]:
+    """Split into answer-sized clauses: sentences, bullets and contrast joins.
+
+    "72 for docstrings, while code lines are 79" is two statements about two
+    subjects; grading the whole sentence as one unit would read the aside as a
+    contradiction. "2005, not 2006" deliberately stays ONE clause, because the
+    negation is exactly what makes it a wrong answer.
+    """
+    parts = re.split(
+        r"(?<=[.!?;])\s+|\n+|\s+[—–]\s+" r"|\s+(?:while|whereas|but|although|though)\s+",
+        answer,
+        flags=re.IGNORECASE,
+    )
+    return [p.strip() for p in parts if p.strip()]
+
+
 def validate_answer(task: Task, answer: str) -> bool:
     """Whether ``answer`` states the task's answer, without contradicting it.
 
-    Presence of the expected value is necessary but not sufficient — that is
-    the false-positive this replaces. A distractor value anywhere in the
-    answer fails it, and an expected value that is negated ("not 100") does
-    not count. This is a lexical grader, so it is conservative: an answer that
-    is correct but also mentions a distractor (e.g. PEP 8's "72 for docstrings,
-    79 for code") is marked incorrect rather than risk a false pass. The A/B
-    comparison is about round trips, and both arms are graded identically.
+    Clause-level. Only a clause that CONTAINS an expected value is judged:
+    - the expected value must not be negated ("not 100" does not count);
+    - no distractor may share that clause ("2005, not 2006", "50, not 100"
+      and "the default is 32767, not 2000" all fail).
+    A distractor in a clause with no expected value is adjacent context, not
+    the asked answer — PEP 8's "code lines are limited to 79" next to
+    "docstrings are 72", or SQLite's "you can raise it up to 32767" next to
+    "the default is 2000". That is the false-REJECT the document-level grader
+    had; the R1 false-POSITIVES stay rejected because their wrong value shares
+    the expected value's clause. Both arms are graded identically.
     """
     if not answer.strip() or not task.expected:
         return False
-    for wrong in task.distractors:
-        if _literal_pattern(wrong).search(answer):
-            return False
-    matches = (m for value in task.expected for m in _literal_pattern(value).finditer(answer))
-    for match in matches:
-        window = answer[max(0, match.start() - 24) : match.end()]
-        if not _NEGATION_RE.search(window):
-            return True
+    for clause in _clauses(answer):
+        expected_hits = [
+            match for value in task.expected for match in _literal_pattern(value).finditer(clause)
+        ]
+        if not expected_hits:
+            continue
+        if any(_literal_pattern(wrong).search(clause) for wrong in task.distractors):
+            continue
+        for match in expected_hits:
+            window = clause[max(0, match.start() - 24) : match.end()]
+            if not _NEGATION_RE.search(window):
+                return True
     return False
 
 
@@ -490,7 +515,7 @@ def offline_markdown(rows: list[dict[str, Any]], arms: list[Arm]) -> str:
 # -- live mode ---------------------------------------------------------------
 
 
-def parse_capture(stdout: str, record: RunRecord, grade: str) -> None:
+def parse_capture(stdout: str, record: RunRecord, task: Task) -> None:
     """Fill ``record`` from an ``exec --json`` event stream.
 
     ``message_end`` and ``turn_end`` carry the same final Message, so one
@@ -554,11 +579,10 @@ def parse_capture(stdout: str, record: RunRecord, grade: str) -> None:
     record.cost_usd = round(cost, 5) if priced else None
     record.answer = answer.strip()
     # Validity first: an exit != 0 / empty-answer run is never "correct".
-    # ``grade`` is the task slug; validators live on the Task, so look it up.
-    task = next((t for t in TASKS if t.slug == grade), None)
-    record.correct = bool(
-        task is not None and is_valid(record) and validate_answer(task, record.answer)
-    )
+    # The Task OBJECT is passed (not its slug or preview regex): taking the
+    # object makes the Q1 wiring mix-up — a preview regex where a slug was
+    # expected, silently grading every run False — unrepresentable.
+    record.correct = bool(is_valid(record) and validate_answer(task, record.answer))
 
 
 def run_live(arm: Arm, task: Task, rep: int, args: argparse.Namespace) -> RunRecord:
@@ -609,7 +633,7 @@ def run_live(arm: Arm, task: Task, rep: int, args: argparse.Namespace) -> RunRec
         # The tail only: stderr carries log lines, never the key (it is read
         # from the environment and never logged by the product).
         record.error = stderr.strip()[-400:]
-    parse_capture(stdout, record, task.grade)
+    parse_capture(stdout, record, task)
     return record
 
 
