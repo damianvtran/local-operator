@@ -3821,13 +3821,6 @@ class SessionStreamFn:
         # harmless: the API answers ``previous_message_not_found``); deferred
         # on PR #2984 (QA Q1).
         self._cache_diagnostics_previous_id: str | None = None
-        # This conversation's Anthropic prompt-cache TTL decision, carried on
-        # every turn request (``ChatRequest.cache_ttl_latch``) so the wire
-        # client can keep it stable across turns: a flip rewrites the whole
-        # cached prefix. Per stream, so a fork starts its own (see ``fork``).
-        from local_operator.providers.anthropic_cache_ttl import CacheTtlLatch
-
-        self._cache_ttl_latch = CacheTtlLatch()
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
         # ``_observation_root`` is a reference to the ROOT stream of this fork
@@ -6778,15 +6771,10 @@ class SessionStreamFn:
                 "context_binding": binding,
                 # Who is asking, for the Anthropic cache-TTL policy: only this
                 # stream knows it is a delegated child (``fork`` sets the
-                # parent link, the same edge analytics records). The latch is
-                # handed over only for turns -- a one-shot errand must never
-                # move the conversation's TTL decision.
+                # parent link, the same edge analytics records).
                 "cache_role": cache_role(
                     request.purpose if not request.isolated else "isolated",
                     delegated=bool(getattr(self, "_parent_session_id", None)),
-                ),
-                "cache_ttl_latch": (
-                    getattr(self, "_cache_ttl_latch", None) if tracks_context else None
                 ),
                 "preparation_ms": request.preparation_ms
                 + (time.perf_counter() - preparation_started) * 1000,

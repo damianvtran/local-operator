@@ -4501,7 +4501,7 @@ class AnthropicClient:
         """Pick the prompt-cache TTL for this request: ``"1h"`` or None (5m).
 
         The policy lives in ``providers/anthropic_cache_ttl.py`` (measured
-        numbers, Claude Code parity, overage and latching); this method feeds
+        numbers, Claude Code parity, overage); this method feeds
         it the facts only the wire client has — whether the credential is a
         subscription (``oauth``), whose overage state applies (``account``),
         and the body to size when no hint exists:
@@ -4531,13 +4531,11 @@ class AnthropicClient:
         request — system blocks and message breakpoints alike — never to a
         subset.
 
-        A size-gated decision is latched per conversation
-        (``CacheTtlLatch``): context does shrink without compaction — frame
-        and capture elision drop a few percent — and a flip back to 5m there
-        would rewrite a 150k+ prefix for nothing. Once at 1h it holds until
-        the context falls below half the threshold, which in practice only
-        compaction does; the compacted prefix is new content written either
-        way, and a smaller context is exactly where the cheaper rate wins.
+        No hysteresis is needed: a request whose TTL differs from the one
+        that wrote the prefix still reads that prefix in full (measured live,
+        PR #2985 review round 1), so crossing the threshold in either
+        direction changes only the rate of NEW writes, never re-writes the
+        cached prefix.
 
         Two size sources, in preference order:
 
@@ -4568,7 +4566,6 @@ class AnthropicClient:
             main_min_context_tokens=self._cache_ttl_1h_min_context_tokens,
             subagent_min_context_tokens=self._subagent_cache_ttl_1h_min_context_tokens,
             context_size=size,
-            latch=request.cache_ttl_latch,
         )
 
     @classmethod

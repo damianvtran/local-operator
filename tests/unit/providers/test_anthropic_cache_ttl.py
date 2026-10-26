@@ -2,7 +2,7 @@
 
 Every branch of ``providers/anthropic_cache_ttl.decide_cache_ttl`` and its two
 producers: the wire client (credential kind, overage headers, body markers) and
-``SessionStreamFn`` (role and latch stamping). Measured rationale lives in the
+``SessionStreamFn`` (role stamping). Measured rationale lives in the
 policy module's docstring; these tests pin the decisions, not the numbers.
 """
 
@@ -18,7 +18,6 @@ import pytest
 from local_operator.harness.types import ChatRequest, Message, ModelSpec
 from local_operator.providers import anthropic_cache_ttl as policy
 from local_operator.providers.anthropic_cache_ttl import (
-    CacheTtlLatch,
     cache_role,
     decide_cache_ttl,
     observe_unified_headers,
@@ -43,7 +42,6 @@ def _decide(**overrides: Any) -> str | None:
         "main_min_context_tokens": 150_000,
         "subagent_min_context_tokens": 0,
         "context_size": lambda: 1_000,
-        "latch": None,
     }
     args.update(overrides)
     return decide_cache_ttl(**args)
@@ -129,39 +127,14 @@ def test_overage_drops_the_subscription_main_to_the_api_key_policy() -> None:
     assert _decide(overage=True, context_size=lambda: 150_000) == "1h"
 
 
-# -- latching ------------------------------------------------------------------
-
-
-def test_latch_holds_1h_through_a_small_shrink_and_releases_after_compaction() -> None:
-    latch = CacheTtlLatch()
-    metered = {"subscription": False, "latch": latch}
-    assert _decide(**metered, context_size=lambda: 160_000) == "1h"
-    # Frame elision trims a few percent: must NOT flip (would rewrite 140k+).
-    assert _decide(**metered, context_size=lambda: 140_000) == "1h"
-    assert _decide(**metered, context_size=lambda: 75_000) == "1h"
-    # Compaction lands far below half the threshold: release.
-    assert _decide(**metered, context_size=lambda: 30_000) is None
-    # And re-acquiring needs the full threshold again, not the release floor.
-    assert _decide(**metered, context_size=lambda: 100_000) is None
-    assert _decide(**metered, context_size=lambda: 150_000) == "1h"
-
-
-def test_without_a_latch_the_decision_is_stateless() -> None:
+def test_size_gate_is_stateless_in_both_directions() -> None:
+    """No hysteresis: a TTL change never re-writes the cached prefix (measured
+    live in review round 1), so a shrink below the threshold simply returns
+    the cheaper rate for new writes, and leaving overage restores 1h."""
     assert _decide(subscription=False, context_size=lambda: 160_000) == "1h"
     assert _decide(subscription=False, context_size=lambda: 140_000) is None
-
-
-def test_overage_flip_resets_the_latch_basis() -> None:
-    """Entering overage moves the main thread from the size-free subscription
-    plan to the size-gated metered one; a held subscription 1h must not count
-    as a held metered 1h (the hysteresis floor applies only within one plan)."""
-    latch = CacheTtlLatch()
-    assert _decide(latch=latch, context_size=lambda: 100_000) == "1h"
-    assert latch.plan == "subscription"
-    assert _decide(latch=latch, overage=True, context_size=lambda: 100_000) is None
-    assert latch.plan == "metered"
-    # Leaving overage restores 1h immediately.
-    assert _decide(latch=latch, context_size=lambda: 100_000) == "1h"
+    assert _decide(overage=True, context_size=lambda: 100_000) is None
+    assert _decide(context_size=lambda: 100_000) == "1h"
 
 
 # -- overage detection ---------------------------------------------------------
@@ -403,37 +376,33 @@ async def _stamped(stream: Any, request: ChatRequest) -> ChatRequest:
 
 
 @pytest.mark.asyncio
-async def test_session_stream_stamps_main_role_and_its_latch() -> None:
+async def test_session_stream_stamps_main_role() -> None:
     stream = _session_stream()
     try:
         stamped = await _stamped(stream, _request())
         assert stamped.cache_role == "main"
-        assert stamped.cache_ttl_latch is stream._cache_ttl_latch
     finally:
         await stream.close()
 
 
 @pytest.mark.asyncio
-async def test_session_stream_fork_stamps_subagent_with_its_own_latch() -> None:
+async def test_session_stream_fork_stamps_subagent() -> None:
     parent = _session_stream()
     child = parent.fork("s-child")
     try:
         stamped = await _stamped(child, _request())
         assert stamped.cache_role == "subagent"
-        assert stamped.cache_ttl_latch is child._cache_ttl_latch
-        assert child._cache_ttl_latch is not parent._cache_ttl_latch
     finally:
         await child.close()
         await parent.close()
 
 
 @pytest.mark.asyncio
-async def test_session_stream_errands_are_auxiliary_and_never_touch_the_latch() -> None:
+async def test_session_stream_errands_are_auxiliary() -> None:
     stream = _session_stream()
     try:
         for update in ({"purpose": "compaction"}, {"purpose": "naming", "isolated": True}):
             stamped = await _stamped(stream, _request(**update))
             assert stamped.cache_role == "auxiliary"
-            assert stamped.cache_ttl_latch is None
     finally:
         await stream.close()

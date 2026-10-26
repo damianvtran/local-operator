@@ -4382,11 +4382,6 @@ class ChatRequest(BaseModel):
     #: outside a session stream) derives the role from ``purpose`` alone, as a
     #: top-level conversation. Transport policy, never wire content.
     cache_role: str | None = Field(default=None, exclude=True, repr=False)
-    #: The conversation's ``CacheTtlLatch``: its last TTL decision, shared BY
-    #: REFERENCE across retry/fallback clones so a turn's attempts agree and a
-    #: size-gated decision does not flip on small context changes. Never
-    #: serialized; ``None`` decides statelessly.
-    cache_ttl_latch: Any = Field(default=None, exclude=True, repr=False)
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:

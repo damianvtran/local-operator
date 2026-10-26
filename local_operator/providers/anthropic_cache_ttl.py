@@ -42,25 +42,20 @@ response is the only place the fact appears; every subscription response
 re-states it, so a reset window self-corrects on the next call. API-key
 responses do not carry these headers and never set it.
 
-LATCHING. Changing the TTL of a marker re-keys the cached prefix (Claude Code's
-own cache-break detector lists ``cacheControlHash`` and ``overageChanged`` as
-break causes), so a conversation must not oscillate. ``CacheTtlLatch`` is
-owned by the conversation (``SessionStreamFn``) and rides each turn request:
-
-* subscription main: the decision has no size input, so it cannot oscillate;
-  it moves only when overage flips (a billing change worth one rewrite) or the
-  operator edits config.
-* size-gated decisions (API-key / overage main, opted-in subagents): once a
-  conversation reaches 1h it keeps 1h until the context falls below HALF the
-  threshold. Pruning that elides a few frames therefore never flips it back;
-  compaction, which rewrites the prefix anyway, does.
+NO LATCH. A TTL change does not re-key the cached prefix: measured live
+(PR #2985 review round 1, ``claude-sonnet-5-5``, ~30k unique prefix), a 1h
+write is read in full by a following 5m-marked request and vice versa, and a
+5m-marked read does not shorten a 1h entry's life. So each request takes its
+own TTL with no per-conversation state; the only wire constraint is one TTL
+per request (a 1h marker may not follow a 5m one). The same fact is why the
+auxiliary 5m errands (asides, clearance) still read the main thread's 1h
+prefix.
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from typing import Literal
 
 CacheRole = Literal["main", "subagent", "auxiliary"]
@@ -72,33 +67,12 @@ UNIFIED_STATUS_HEADER = "anthropic-ratelimit-unified-status"
 UNIFIED_OVERAGE_STATUS_HEADER = "anthropic-ratelimit-unified-overage-status"
 _OVERAGE_SERVING = frozenset({"allowed", "allowed_warning"})
 
-#: A size-gated 1h decision is released only below this fraction of its
-#: threshold. 0.5 because the shrinkers that matter differ by an order of
-#: magnitude: frame/capture elision removes a few percent of a large context
-#: (a flip there would rewrite a 150k+ prefix for nothing), while compaction
-#: lands far below half and rewrites the prefix regardless.
-RELEASE_FRACTION = 0.5
-
 
 def cache_role(purpose: str, delegated: bool) -> CacheRole:
     """Classify a request for the TTL policy from facts the request carries."""
     if purpose != "turn":
         return "auxiliary"
     return "subagent" if delegated else "main"
-
-
-@dataclass
-class CacheTtlLatch:
-    """One conversation's last TTL decision; see the module docstring.
-
-    Mutable and shared by reference across the retry/fallback clones of a
-    request (``model_copy`` is shallow), so every attempt of one turn reads
-    the same state. Owned by ``SessionStreamFn``; a request without one (a
-    bare client in a test or script) decides statelessly.
-    """
-
-    plan: str | None = None
-    ttl: str | None = None
 
 
 def decide_cache_ttl(
@@ -109,35 +83,25 @@ def decide_cache_ttl(
     main_min_context_tokens: int,
     subagent_min_context_tokens: int,
     context_size: Callable[[], int],
-    latch: CacheTtlLatch | None = None,
 ) -> str | None:
     """``"1h"`` or None (the 5m default) for one request.
 
     ``main_min_context_tokens`` is ``providers.anthropic.cache_ttl_1h_min_context_tokens``:
-    the API-key / overage main-thread size threshold, and its ``0`` keeps the
-    meaning it always had — no 1h TTL at all — which therefore also turns the
-    subscription main-thread 1h off. ``subagent_min_context_tokens`` is
+    the API-key / overage main-thread size threshold. Its ``0`` turns every
+    MAIN-THREAD 1h TTL off, the subscription one included, so an operator who
+    set it before this policy existed does not start paying 2x writes; the
+    subagent key is an independent opt-in. ``subagent_min_context_tokens`` is
     ``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`` (0 =
     never). ``context_size`` is called only when a size gate applies.
     """
     if role == "auxiliary":
         return None
-    plan = "subscription" if subscription and not overage else "metered"
-    if role == "main" and plan == "subscription":
-        ttl: str | None = "1h" if main_min_context_tokens > 0 else None
-    else:
-        threshold = main_min_context_tokens if role == "main" else subagent_min_context_tokens
-        if threshold <= 0:
-            ttl = None
-        else:
-            size = context_size()
-            held = latch is not None and latch.plan == plan and latch.ttl == "1h"
-            floor = threshold * RELEASE_FRACTION if held else threshold
-            ttl = "1h" if size >= floor else None
-    if latch is not None:
-        latch.plan = plan
-        latch.ttl = ttl
-    return ttl
+    if role == "main" and subscription and not overage:
+        return "1h" if main_min_context_tokens > 0 else None
+    threshold = main_min_context_tokens if role == "main" else subagent_min_context_tokens
+    if threshold <= 0:
+        return None
+    return "1h" if context_size() >= threshold else None
 
 
 # -- overage state -----------------------------------------------------------

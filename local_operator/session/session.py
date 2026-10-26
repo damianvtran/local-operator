@@ -25096,9 +25096,12 @@ class Session:
             # ahead of the last request the turn actually sent.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL: the session stamps its
+            # Same prefix as the turn, so the same size: the session stamps its
             # own hint here because the shared stream fn holds none (a child
             # would overwrite it — see ``ChatRequest.context_tokens_hint``).
+            # On Anthropic the hint no longer picks the TTL: an aside is an
+            # auxiliary errand and goes out at 5m, and a 5m-marked request still
+            # reads the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
@@ -25227,8 +25230,10 @@ class Session:
             # would change position 0 and force a full re-process.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL — the session stamps its
-            # own hint because the shared stream fn holds none.
+            # Same prefix as the turn, so the same size — the session stamps its
+            # own hint because the shared stream fn holds none. On Anthropic a
+            # clearance is an auxiliary errand at 5m regardless, and still reads
+            # the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
             # Nothing here reaches a screen until the whole answer is parsed, so
             # a stalled read may be discarded and retried whole (the advisor's

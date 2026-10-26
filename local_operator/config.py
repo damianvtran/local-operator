@@ -809,14 +809,15 @@ DEFAULT_CONFIG = Config(
             # rewrites of >150k contexts cost 89.5M write tokens (~112M
             # base-equivalent), while the incremental writes on those contexts
             # were only 14.7M (~11M base-equivalent extra at 2×). 150k is the
-            # size above which the rewrite dominates; 0 disables the feature.
+            # size above which the rewrite dominates.
             # Since the subscription-aware policy (`providers/anthropic_cache_ttl.py`)
             # this threshold governs the API-key main thread, and a Claude
             # subscription's main thread once it draws on overage credits. A
             # subscription within plan limits sends its main thread at 1h at
             # ANY size, as Claude Code does: over 7 days (2026-10-26, 59k calls)
             # that was ~75M base-equivalent cheaper than 5m above 150k and still
-            # ~0.8M cheaper below it. 0 still turns every 1h TTL off.
+            # ~0.8M cheaper below it. 0 disables every main-thread 1h TTL,
+            # the subscription one included; subagents follow their own key.
             #
             # `providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`:
             # the same size gate for DELEGATED turns (subagents), on any
