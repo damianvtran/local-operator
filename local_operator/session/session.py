@@ -628,8 +628,9 @@ ATTENTION_REPUBLISH_DELAYS_S: tuple[float, ...] = (1.0, 5.0, 20.0, 60.0)
 #:
 #: DEFINED IN THE IMPORT-FREE LEAF, re-exported here: ``harness.rows`` has to
 #: RECOGNISE this text on every replayed row, and reading it from this module made
-#: the renderer import the session and its tool stack (measured: 231 modules,
-#: 1.154 s, on the first ``is_harness_chrome`` call). One literal, two spellings.
+#: the renderer import the session and its tool stack — 231 ``local_operator``
+#: modules, against 5 read from the leaf (module counts, not timings: the clock moves
+#: with host load, the graph does not). One literal, two spellings.
 _CONTINUATION_PROMPT = _chrome_prompts.CONTINUATION_AFTER_COMPACTION
 
 #: Cap on auto-continuation turns within one user turn

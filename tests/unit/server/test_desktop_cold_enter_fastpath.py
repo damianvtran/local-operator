@@ -445,9 +445,11 @@ def test_the_chrome_prompts_are_one_literal_behind_two_spellings() -> None:
 
     ``harness.rows`` asks "is this row the harness's own words" on every replayed
     user row, in both renderers. Reading the strings straight out of ``harness.loop``
-    and ``session.session`` made that question import the tool stack (measured: 231
-    modules, 1.154 s on the first call). The producers re-export the leaf's objects, so
-    identity — not equality — is what keeps one literal behind both spellings.
+    and ``session.session`` made that question import the tool stack: 231
+    ``local_operator`` modules against 5 read from the leaf — module counts, not
+    timings, because the graph is what decides and the clock moves with host load.
+    The producers re-export the leaf's objects, so identity, not equality, is what
+    keeps one literal behind both spellings.
     """
     from local_operator.harness import chrome_prompts, loop
     from local_operator.harness.rows import harness_chrome_prompts

@@ -6,11 +6,16 @@ both renderers ask it — the TUI's replay loop and the phone fold. To answer it
 the exact strings the producers mint, and those lived beside the loop that writes
 them (``harness.loop``) and the compaction that writes the compaction continuation
 (``session.session``). Importing either to READ A STRING is what cost a cold desktop
-open its first paint: measured on this tree, the first
-``harness.rows.is_harness_chrome()`` call pulled **231 modules in 1.154 s**, including
-``session.session`` and ``tools.builtin``, because the constants sat inside the two
-heaviest modules in the application. Read from here, the same call imports **4
-modules in 0.113 s**.
+open its first paint. Measured on this tree in a fresh interpreter, the first
+``harness.rows.is_harness_chrome()`` call imported **231 ``local_operator`` modules**
+(473 modules in all) and cost roughly a second of CPU on an idle host — 1.5-8.7 s
+under fleet load — with ``session.session`` and ``tools.builtin`` among them, because
+the constants sat inside the two heaviest modules in the application. Read from here,
+the same call imports **5 ``local_operator`` modules** (about 82-86 in all) in tens to
+a few hundred milliseconds, with neither of those two modules reachable at all. The
+NAMESPACE COUNTS are the stable fact — a module graph, not a stopwatch — so they are
+what this file is judged by; the millisecond ranges are context, and they move with
+whatever else the host is doing.
 
 So this file keeps the rule ``session/roster_sidecar.py`` keeps for the subagent
 roster: STDLIB ONLY, no ``local_operator`` imports at all. A string a renderer has to

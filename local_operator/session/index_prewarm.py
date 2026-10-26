@@ -468,7 +468,7 @@ def _rewritten_since_record(directory: Path, journal: os.stat_result) -> bool:
     RESIDUAL, disclosed rather than papered over: on a filesystem too coarse to
     separate the journal's ctime from the newly written record's mtime, the rebuilt
     record still cannot be trusted, so those journals pay one ``build_anchor`` scan
-    per prewarm pass instead of one. That is a bounded, off-hot-path cost and it is
+    per prewarm pass instead of once. That is a bounded, off-hot-path cost and it is
     paid rather than weakening the reader; stamping the validated ctime into a new
     record field would settle it if it ever proves measurable.
 
