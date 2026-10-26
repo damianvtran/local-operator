@@ -324,8 +324,21 @@ def build_detail(
     says to take ``detail[:body_length]`` instead (a 1 MiB SKILL.md was a 417 KB
     response, QA Q4). When it does not (a concurrent edit between the two reads),
     the body is inlined so the pair can never disagree.
+
+    ``body_length`` is in UTF-16 CODE UNITS, i.e. a JavaScript string's
+    ``length``, because its only consumer slices ``detail`` with it in JS. A
+    Python ``len`` counts code points, which diverges from that for every
+    astral-plane character (any emoji counts 1 there, 2 in JS) and would cut
+    the body short; BMP-only text hides the difference, so a test must use an
+    emoji. It measures the body text EXCLUDING the reader's truncation marker:
+    ``body_truncated`` already says the body was cut, and the marker is the
+    resolver's prose, not part of the file.
     """
-    from local_operator.skills.protocol import MAX_READ_BYTES, _read_text_capped
+    from local_operator.skills.protocol import (
+        _TRUNCATION_MARKER,
+        MAX_READ_BYTES,
+        _read_text_capped,
+    )
 
     if row.get("source") != "hub":
         link = None
@@ -346,7 +359,12 @@ def build_detail(
         # The reader cuts at ``MAX_READ_BYTES``; say so rather than make a
         # client compare ``body_bytes`` with the string length.
         body_truncated = body_bytes is not None and body_bytes > MAX_READ_BYTES
-        body_length = len(text)
+        if body_truncated and text.endswith(_TRUNCATION_MARKER):
+            text = text[: -len(_TRUNCATION_MARKER)]
+        # ``utf-16-le`` has no BOM; two bytes per unit, four per astral pair.
+        body_length = len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+        # ``startswith`` is a code-point comparison on Python strings, so it is
+        # independent of the UTF-16 unit count reported to the client.
         if resolver_text is not None and resolver_text.startswith(text):
             body_in_detail = True
         else:

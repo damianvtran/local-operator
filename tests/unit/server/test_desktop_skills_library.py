@@ -429,3 +429,81 @@ async def test_files_total_reports_the_whole_set_past_the_listing_cap(env) -> No
 
     assert len(detail["files"]) == MAX_FILES
     assert detail["files_total"] == MAX_FILES + 6 and detail["files_truncated"] is True
+
+
+def _js_slice(text: str, units: int) -> str:
+    """``text.slice(0, units)`` as JavaScript does it: by UTF-16 code unit."""
+    raw = text.encode("utf-16-le", errors="surrogatepass")
+    return raw[: units * 2].decode("utf-16-le", errors="surrogatepass")
+
+
+async def test_body_length_is_utf16_units_so_a_js_slice_reproduces_the_body(env) -> None:
+    """Review F1: ``detail[:body_length]`` is evaluated in JS, which counts UTF-16 units.
+
+    The body mixes a BMP accent, CJK and two astral emoji: code points and
+    UTF-16 units differ by exactly the astral count, so a code-point ``len``
+    would cut the last characters off (BMP-only text would hide that).
+    """
+    project = env.tmp / "proj"
+    skill = _write_skill(env.config_dir / "skills", "unicode")
+    body = "---\nname: unicode\ndescription: Unicode.\n---\n# é 漢字 🚀 ok 🎉\n"
+    (skill / "SKILL.md").write_text(body, encoding="utf-8")
+    (skill / "references").mkdir()
+    (skill / "references" / "n.md").write_text("ref", encoding="utf-8")
+
+    data = await _list(env, project, name="unicode")
+
+    detail = data["skill_detail"]
+    units = len(body.encode("utf-16-le")) // 2
+    assert units == len(body) + 2  # two astral characters, one extra unit each
+    assert detail["body_length"] == units
+    assert detail["body_in_detail"] is True and detail["body"] is None
+    # The resolver text carries a reference listing after the body; the JS-style
+    # slice must stop exactly at the body's end, not before or after.
+    assert len(data["detail"]) > len(body)
+    assert _js_slice(data["detail"], detail["body_length"]) == body
+
+
+async def test_a_concurrent_edit_inlines_the_body_and_does_not_claim_detail(
+    env, monkeypatch
+) -> None:
+    """Review F2: when ``detail`` does not start with the body, the body is sent inline."""
+    project = env.tmp / "proj"
+    _write_skill(env.config_dir / "skills", "racy")
+    from local_operator.skills import api as skills_api
+
+    # The route imports the resolver inside ``_read_skills``, so the module
+    # attribute it resolves at call time is the one to replace.
+    real = skills_api.resolve_skill_url
+
+    def stale(url, skills, **kwargs):
+        return "SOMETHING ELSE ENTIRELY\n" + str(real(url, skills, **kwargs))
+
+    monkeypatch.setattr(skills_api, "resolve_skill_url", stale)
+
+    data = await _list(env, project, name="racy")
+
+    detail = data["skill_detail"]
+    assert detail["body_in_detail"] is False
+    assert detail["body"].startswith("---\nname: racy")
+    assert detail["body_length"] == len(detail["body"].encode("utf-16-le")) // 2
+
+
+async def test_body_length_excludes_the_truncation_marker(env) -> None:
+    """Review F3: the length is the file's text, not the resolver's cut-off notice."""
+    from local_operator.skills.protocol import _TRUNCATION_MARKER, MAX_READ_BYTES
+
+    project = env.tmp / "proj"
+    skill = _write_skill(env.config_dir / "skills", "cut")
+    head = "---\nname: cut\ndescription: Cut.\n---\n"
+    (skill / "SKILL.md").write_text(head + "z" * (MAX_READ_BYTES * 2), encoding="utf-8")
+
+    data = await _list(env, project, name="cut")
+
+    detail = data["skill_detail"]
+    assert detail["body_truncated"] is True
+    assert data["detail"].startswith(head) and _TRUNCATION_MARKER in data["detail"]
+    assert detail["body_length"] == MAX_READ_BYTES  # ASCII: bytes == units, marker excluded
+    sliced = _js_slice(data["detail"], detail["body_length"])
+    assert sliced == head + "z" * (MAX_READ_BYTES - len(head))
+    assert _TRUNCATION_MARKER not in sliced
