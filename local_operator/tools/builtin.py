@@ -20067,6 +20067,7 @@ _LOG_LEVELS = frozenset({"error", "warning", "info", "log", "all"})
 #: peer from turning a read into an unbounded transcript payload.
 NETWORK_MAX_ENTRIES = 200
 NETWORK_MAX_BODY_BYTES = 64 * 1024
+NETWORK_MAX_READ_BODY_BYTES = 256 * 1024
 _NETWORK_ACTIONS = frozenset({"network_start", "network_stop", "network_read", "network_clear"})
 
 #: Style property names ``styles`` accepts as caller-requested extras. The
@@ -25463,19 +25464,33 @@ def _network_metadata_result(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _store_network_body(encoded: object, context: ToolContext | None) -> dict[str, Any]:
-    """Write one explicitly approved body without exposing it to tool rendering.
+def _decode_network_body(encoded: object) -> bytes:
+    """Validate and decode one body WITHOUT touching the filesystem.
 
-    The base64 bridge payload is consumed before ToolResult construction. Files
-    are randomized, exclusive, bounded to 64 KiB, and verified mode 0600.
+    Decoding is separated from writing so a read that turns out to be malformed
+    cannot leave the earlier bodies of the same read behind: every byte is
+    proven valid before the first file exists.
     """
     if not isinstance(encoded, str) or not encoded:
         raise ValueError("the host returned no request body")
+    # Bounds-check the ENCODED length first, so a hostile host cannot make this
+    # allocate a 100 MB buffer only to reject it afterwards.
     if len(encoded) > ((NETWORK_MAX_BODY_BYTES + 2) // 3) * 4 + 4:
         raise ValueError("the host request body exceeds the 64 KiB limit")
     data = base64.b64decode(encoded, validate=True)
     if not data or len(data) > NETWORK_MAX_BODY_BYTES:
         raise ValueError("the host request body is empty or exceeds the 64 KiB limit")
+    return data
+
+
+def _write_network_body(data: bytes, context: ToolContext | None) -> dict[str, Any]:
+    """Write one decoded body to a randomised, private session scratch file.
+
+    Existence and mode are verified rather than assumed: ``mkstemp`` already
+    creates 0600, and the re-read is what turns "should be private" into a fact
+    this function can report. A failure removes the file it created and never
+    returns a path to material it could not secure.
+    """
     from local_operator.scratchpad import ensure_scratchpad_dir, scratchpad_dir_of
 
     directory = ensure_scratchpad_dir(scratchpad_dir_of(context))
@@ -25533,22 +25548,31 @@ async def _browser_network(
     if problem is not None:
         return problem
     raw = result if isinstance(result, dict) else {}
+    written: list[Path] = []
     try:
         entries = result.get("entries", []) if isinstance(result, dict) else []
         if not isinstance(entries, list):
             raise ValueError("the host returned an invalid network entry list")
+        include_body = action == "network_read" and params.include_request_body
+        pending: list[tuple[dict[str, Any], bytes]] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             # Remove the body unconditionally, including metadata-only reads:
             # an old/hostile host cannot turn a response into a secret leak.
             encoded = entry.pop(_NETWORK_BODY_KEY, None)
-            if (
-                encoded is not None
-                and action == "network_read"
-                and params.include_request_body
-            ):
-                entry.update(_store_network_body(encoded, context))
+            if encoded is not None and include_body:
+                pending.append((entry, _decode_network_body(encoded)))
+        # ALL bodies are decoded before the FIRST file is written, so a
+        # malformed or oversized entry persists nothing for the whole read
+        # (agent review round 1, R1-2). The same rule is why the total is
+        # bounded here rather than accumulated as files appear.
+        if sum(len(data) for _entry, data in pending) > NETWORK_MAX_READ_BODY_BYTES:
+            raise ValueError("the read's combined request bodies exceed the 256 KiB limit")
+        for entry, data in pending:
+            facts = _write_network_body(data, context)
+            written.append(Path(facts["request_body_file"]))
+            entry.update(facts)
         safe = _network_metadata_result(raw)
         if action == "network_read" and params.include_request_body:
             files = [
@@ -25565,6 +25589,10 @@ async def _browser_network(
         return _text(tool_call_id, "browser", json.dumps(safe, indent=2, default=str))
     except Exception as exc:
         # Never include the host payload in an error: it may contain body bytes.
+        # A read that failed part-way leaves no artefact behind, so "nothing was
+        # persisted" is true of the failure as well as of the success path.
+        for path in written:
+            path.unlink(missing_ok=True)
         logger.warning("browser network action failed: %s", type(exc).__name__)
         return _error(tool_call_id, "browser", f"{action} failed: {type(exc).__name__}: {exc}")
 

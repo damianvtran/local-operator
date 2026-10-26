@@ -222,3 +222,80 @@ def test_body_capture_escalates_to_exec_and_metadata_stays_write():
     assert tier({"action": "network_clear"}) == "write"
     assert tier({"action": "network_start", "include_request_body": True}) == "exec"
     assert tier({"action": "network_read", "include_request_body": True}) == "exec"
+
+
+def _allow_body(monkeypatch, entries):
+    async def fake_bridge(tool_call_id, action, wire, *, surface="", client=None):
+        return {"active": True, "entries": entries}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
+
+
+def _body_read(ctx):
+    return asyncio.run(
+        builtin._browser_network(
+            "call",
+            ctx.browser,
+            "network_read",
+            _params(
+                url="https://sso.example.test/auth/saml/acs",
+                include_request_body=True,
+                approved=True,
+            ),
+            ctx,
+        )
+    )
+
+
+def test_a_malformed_body_persists_nothing_for_the_whole_read(monkeypatch, tmp_path):
+    good = base64.b64encode(b"first-synthetic-body").decode()
+    _allow_body(
+        monkeypatch,
+        [
+            {"id": 1, "request_body_base64": good},
+            {"id": 2, "request_body_base64": "!!!not-base64!!!"},
+        ],
+    )
+    ctx = _ctx(tmp_path)
+    result = _body_read(ctx)
+    assert result.is_error
+    scratch = tmp_path / "scratch"
+    assert not scratch.exists() or not list(scratch.glob("network-request-*.body"))
+    assert "first-synthetic-body" not in result.text
+
+
+def test_an_oversized_second_body_persists_nothing(monkeypatch, tmp_path):
+    good = base64.b64encode(b"first-synthetic-body").decode()
+    huge = base64.b64encode(b"x" * (64 * 1024 + 1)).decode()
+    _allow_body(
+        monkeypatch,
+        [
+            {"id": 1, "request_body_base64": good},
+            {"id": 2, "request_body_base64": huge},
+        ],
+    )
+    ctx = _ctx(tmp_path)
+    result = _body_read(ctx)
+    assert result.is_error
+    scratch = tmp_path / "scratch"
+    assert not scratch.exists() or not list(scratch.glob("network-request-*.body"))
+
+
+def test_combined_bodies_over_the_read_cap_persist_nothing(monkeypatch, tmp_path):
+    chunk = base64.b64encode(b"y" * (60 * 1024)).decode()
+    _allow_body(
+        monkeypatch,
+        [
+            {"id": 1, "request_body_base64": chunk},
+            {"id": 2, "request_body_base64": chunk},
+            {"id": 3, "request_body_base64": chunk},
+            {"id": 4, "request_body_base64": chunk},
+            {"id": 5, "request_body_base64": chunk},
+        ],
+    )
+    ctx = _ctx(tmp_path)
+    result = _body_read(ctx)
+    assert result.is_error
+    assert "256" in result.text
+    scratch = tmp_path / "scratch"
+    assert not scratch.exists() or not list(scratch.glob("network-request-*.body"))
