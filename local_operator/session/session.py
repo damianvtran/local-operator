@@ -4315,6 +4315,10 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        # One tracked waiter coalesces admitted arrivals behind the current
+        # turn. The reservation, not this task or the card text, owes the work.
+        self._pending_body_followup_task: asyncio.Task[Any] | None = None
+        self._pending_body_followup_again = False
         #: The turn's terminal verdict, captured where the loop's agent_end is
         #: handled. Settlement runs in the ``finally``, after ``_flush_held_end``
         #: has already released that event, so the verdict must be captured
@@ -10297,7 +10301,25 @@ class Session:
             self._spawn_background(self._prompt_messages([message], carried_prompt=True))
             return receipt("delivered (opened a turn)")
         # mode == "mailbox"
-        if wake and not busy:
+        body_waiter = self._pending_body_followup_task
+        joins_body_waiter = (
+            wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+            and body_waiter is not None
+            and not body_waiter.done()
+        )
+        if joins_body_waiter:
+            # Hydration owns the turn lock BEFORE is_streaming becomes true.
+            # Rearm the live finite pass before any append await can let it
+            # retire, retaining its attempted exclusions. A second ordinary
+            # idle wake would retry failed A and strand newly admitted B.
+            self._ensure_pending_body_followup()
+        native_body_wake = (
+            wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+            and (joins_body_waiter or self._pending_body_followup_row() is not None)
+        )
+        if wake and not busy and not native_body_wake:
             # _prompt_messages persists the row through the pipeline — a
             # separate transcript/context append here would double-write.
             await self._emit_peer_receipt(message, sender)
@@ -10333,6 +10355,14 @@ class Session:
                 # durable; a degraded store must not abort the receive.
                 logger.warning("bridge ask: hook failed on the record-only append", exc_info=True)
         self._append_or_park_journal(message)
+        if not joins_body_waiter and (
+            native_body_wake or (busy and wake and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE)
+        ):
+            # Idle admitted bodies need the SAME finite pass as busy arrivals:
+            # an ordinary oldest-only prompt could retry retained failed A and
+            # strand new B after the prior waiter exited. Persist the card first;
+            # the helper rechecks native authority before starting a new waiter.
+            self._ensure_pending_body_followup()
         await self._emit_peer_receipt(message, sender)
         # LAST, deliberately: this wakes a blocking `wait`, and the woken tool
         # returns into the loop's injection boundary where _drain_steering
@@ -16826,6 +16856,8 @@ class Session:
         guard: Callable[[], bool] | None = None,
         guard_note: str = "",
         drain_steering_on_open: bool = False,
+        pending_body_only: bool = False,
+        pending_body_selected: tuple[str, str] | None = None,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
         handling so it can REJECT reentrants instead of queueing).
@@ -16971,12 +17003,25 @@ class Session:
             # instead of publishing the ``error|disposed`` its own rationale
             # promises (repro: peer_carried_prompt.py; the cell is
             # ``test_a_peer_prompt_cut_with_zero_round_trips_still_errors``).
+            opened_body = None
+            if pending_body_only:
+                # The normal guard ran under the lock. Hydrate before opening
+                # a turn, so a refused body costs no empty model request.
+                await self._open_pending_body_turn(selected=pending_body_selected)
+                opened_body = self._pending_body_turn
+                if opened_body is None:
+                    return
             await self._run_turn_pipeline(
                 initial,
                 carried_prompt=carried_prompt,
                 drain_steering_on_open=drain_steering_on_open,
+                opened_body=opened_body,
             )
         finally:
+            if pending_body_only:
+                # Cancellation between hydration and pipeline entry still
+                # releases our claim; normal settlement already cleared it.
+                self._settle_pending_body()
             # Release in its own ``finally`` (R2-1): see the helper.
             try:
                 await self._flush_queued_before_release()
@@ -16993,6 +17038,7 @@ class Session:
         may_drop: bool = True,
         carried_prompt: bool = False,
         drain_steering_on_open: bool = False,
+        opened_body: Any = None,
     ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
 
@@ -17159,6 +17205,7 @@ class Session:
                 producer_command_id=producer_command_id,
                 may_drop=may_drop,
                 drain_steering_on_open=drain_steering_on_open,
+                opened_body=opened_body,
             )
             await self._drain_continuation()
         except ImportError as exc:
@@ -17316,7 +17363,107 @@ class Session:
             sender_kind=kind if isinstance(kind, str) else "unknown",
         )
 
-    async def _open_pending_body_turn(self) -> None:
+    def _pending_body_followup_row(
+        self,
+        *,
+        selected: tuple[str, str] | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+        admitted_before: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Local authority for a body-only wake; a metadata card is not authority."""
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None or self._disposed or self._leaving_deliveries or self._one_shot_exit:
+            return None
+        if self._abort_requested or self._graceful_cancel_requested:
+            return None
+        from local_operator.team_bridge.host import owner_fence_refusal
+        from local_operator.team_bridge.store import Store
+
+        try:
+            if owner_fence_refusal(runtime) is not None:
+                return None
+            store = Store(runtime.config_dir)
+            skipped = set(exclude)
+            while True:
+                row = store.pending_body_reservation_for(
+                    runtime.owner,
+                    runtime.session_id,
+                    selected=selected,
+                    exclude=frozenset(skipped),
+                    admitted_before=admitted_before,
+                )
+                if row is None:
+                    return None
+                facts = store.per_call_admission_state(runtime.owner, runtime.session_id)
+                receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
+                if (
+                    facts
+                    and facts.get("designation_matches")
+                    and facts.get("consent_version") == row["consent_version"]
+                    and facts.get("policy_epoch") == row["policy_epoch"]
+                    and receipt
+                    and receipt.get("verdict") == "allow"
+                    and receipt.get("body_sha256") == row["body_sha256"]
+                ):
+                    return row
+                if selected is not None:
+                    return None
+                # Stale admission is not permission to consume or quarantine
+                # the row, nor to hide independently valid neighbors behind it.
+                skipped.add((row["conversation_id"], row["message_id"]))
+        except Exception:  # noqa: BLE001 — no readable authority means no automatic work
+            logger.debug("bridge: follow-up authority unavailable")
+            return None
+
+    def _ensure_pending_body_followup(self) -> None:
+        """Coalesce busy arrivals without cancelling work or creating a session.
+
+        Like the steering wake, this uses the normal guarded prompt lock. Unlike
+        a card-only wake, it must open a verified body before any provider call.
+        Each finite admission-horizon pass tries an identity at most once,
+        leaving failed rows pending with their existing reason while allowing
+        valid neighbors through. New arrivals rearm the same waiter, excluding
+        identities it already tried: no timer or same-row retry/spend loop.
+        Pending rows survive crashes under the existing claim lease; this never
+        resurrects a new runtime.
+        """
+        task = self._pending_body_followup_task
+        if task is not None and not task.done():
+            self._pending_body_followup_again = True
+            return
+        if self._pending_body_followup_row() is None:
+            return
+
+        async def drain() -> None:
+            attempted: set[tuple[str, str]] = set()
+            while True:
+                self._pending_body_followup_again = False
+                horizon = time.time()
+                while (
+                    row := self._pending_body_followup_row(
+                        exclude=frozenset(attempted),
+                        admitted_before=horizon,
+                    )
+                ) is not None:
+                    identity = (row["conversation_id"], row["message_id"])
+                    attempted.add(identity)
+                    await self._prompt_messages(
+                        [],
+                        guard=lambda identity=identity: (
+                            self._pending_body_followup_row(selected=identity) is not None
+                        ),
+                        guard_note="selected admitted bridge body no longer eligible",
+                        pending_body_only=True,
+                        pending_body_selected=identity,
+                    )
+                    # Each attempt releases the ordinary turn lock. Selecting
+                    # B explicitly prevents failed A being hydrated again here.
+                if not self._pending_body_followup_again:
+                    return
+
+        self._pending_body_followup_task = self._spawn_background(drain())
+
+    async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
         ONLY a session the bridge runtime already admitted reaches here (owner
@@ -17335,9 +17482,28 @@ class Session:
         try:
             from local_operator.team_bridge.pending_turn import PendingTurn
 
-            turn = PendingTurn(runtime.owner, runtime.session_id, config_dir=runtime.config_dir)
+            captured_owner = runtime.owner
+            captured_scope = (Path(runtime.config_dir), runtime.session_id, runtime.tenant_id)
+
+            def binding_guard() -> bool:
+                current = getattr(self, "bridge_runtime", None)
+                return (
+                    current is runtime
+                    and current.owner == captured_owner
+                    and (Path(current.config_dir), current.session_id, current.tenant_id)
+                    == captured_scope
+                )
+
+            turn = PendingTurn(
+                captured_owner,
+                runtime.session_id,
+                config_dir=runtime.config_dir,
+                binding_guard=binding_guard,
+            )
             won = await turn.open(
-                budget=self._pending_body_budget(), fetch=self._fetch_pending_body
+                budget=self._pending_body_budget(),
+                fetch=self._fetch_pending_body,
+                selected=selected,
             )
         except Exception:  # noqa: BLE001 — an ordinary request is the fallback
             logger.debug("bridge: pending body unavailable", exc_info=True)
@@ -17409,6 +17575,7 @@ class Session:
         producer_command_id: str | None = None,
         may_drop: bool = True,
         drain_steering_on_open: bool = False,
+        opened_body: Any = None,
     ) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``.
 
@@ -17672,16 +17839,35 @@ class Session:
             def marking_stream_fn(
                 request: ChatRequest, stream_signal: AbortSignal | None = None
             ) -> AsyncIterator[StreamEvent]:
+                frame = self._pending_body_turn
+                if frame is not None and not frame.binding_intact():
+                    # The prepared request may already contain the old owner's
+                    # frame. Refuse dispatch, rather than just stopping future
+                    # transforms after these bytes have crossed the boundary.
+                    raise RuntimeError("bridge body authority changed before dispatch")
                 inner = base_stream_fn(request, stream_signal)
 
                 async def witness() -> AsyncIterator[StreamEvent]:
+                    # Lazy provider generators may start only after another
+                    # await. Carry the same guard to that first I/O boundary.
+                    if frame is not None and not frame.binding_intact():
+                        raise RuntimeError("bridge body authority changed before dispatch")
                     self._attention_run_request_dispatched = True
                     async for event in inner:
                         yield event
 
                 return witness()
 
-            await self._open_pending_body_turn()
+            if opened_body is None:
+                await self._open_pending_body_turn()
+            else:
+                # The guarded same-session follow-up already claimed/fetched
+                # this immutable turn frame. Never claim a second body here.
+                # Pipeline awaits (notably attention_started) may have rebound
+                # the Session while the captured owner's SQLite row stayed live.
+                if not opened_body.binding_intact():
+                    return
+                self._pending_body_turn = opened_body
             config = LoopConfig(
                 # The conversation BODY goes in HERE and nowhere else: the loop
                 # calls this once per PHYSICAL request, so a turn that makes

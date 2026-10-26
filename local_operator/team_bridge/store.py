@@ -2144,7 +2144,14 @@ class Store:
             )
 
     def pending_body_reservation_for(
-        self, owner: OwnerSnapshot, designated_session: str, *, now: float | None = None
+        self,
+        owner: OwnerSnapshot,
+        designated_session: str,
+        *,
+        now: float | None = None,
+        selected: tuple[str, str] | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+        admitted_before: float | None = None,
     ) -> dict[str, Any] | None:
         """The OLDEST pending reservation this session is designated to serve.
 
@@ -2167,9 +2174,32 @@ class Store:
         its message forever, and the CAS's reclaim arm could never be reached
         through this reader. A live claim belongs to another turn and is
         excluded; a completed or retired row owes nothing.
+
+        Follow-up passes may exclude already-attempted identities and freeze an
+        admission horizon, without rewriting a failed row's FIFO timestamp or
+        losing its retry reason. Hydration names the selected identity through
+        this SAME query so an explicit selection cannot bypass owner, session,
+        generation or live-claim fencing.
         """
 
         moment = time.time() if now is None else float(now)
+        filters: list[str] = []
+        bindings: list[Any] = [
+            _owner_key(owner),
+            owner.credential_id,
+            owner.enrollment_generation,
+            designated_session,
+            moment,
+        ]
+        if selected is not None:
+            filters.append("AND conversation_id = ? AND message_id = ? ")
+            bindings.extend(selected)
+        for conversation_id, message_id in sorted(exclude):
+            filters.append("AND NOT (conversation_id = ? AND message_id = ?) ")
+            bindings.extend((conversation_id, message_id))
+        if admitted_before is not None:
+            filters.append("AND created_at <= ? ")
+            bindings.append(float(admitted_before))
 
         with self._connect_readonly() as conn:
             if conn is None:
@@ -2183,14 +2213,9 @@ class Store:
                     "AND designated_session = ? AND (state = 'pending' OR "
                     "(state = 'claimed' AND claim_expires_at IS NOT NULL "
                     "AND claim_expires_at < ?)) "
-                    "ORDER BY created_at ASC, rowid ASC LIMIT 1",
-                    (
-                        _owner_key(owner),
-                        owner.credential_id,
-                        owner.enrollment_generation,
-                        designated_session,
-                        moment,
-                    ),
+                    + "".join(filters)
+                    + "ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                    bindings,
                 ).fetchone()
             )
 

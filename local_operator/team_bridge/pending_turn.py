@@ -26,6 +26,7 @@ reservation's own state transitions, which carry ids, digests and closed codes
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -111,7 +112,12 @@ class PendingTurn:
         config_dir: Path,
         store: Store | None = None,
         lease_ttl_seconds: float | None = None,
+        binding_guard: Callable[[], bool] | None = None,
     ) -> None:
+        # SQLite proves the captured owner's standing, not that the Session
+        # still serves that owner after an await. The host supplies this live
+        # identity guard; standalone consumers retain their own store fencing.
+        self._binding_guard = binding_guard
         self._owner = owner
         self._session_id = session_id
         self._store = store if store is not None else Store(config_dir)
@@ -146,11 +152,24 @@ class PendingTurn:
     def appended_calls(self) -> int:
         return self._fence.appended_calls
 
+    def binding_intact(self) -> bool:
+        """Refuse host rebinding without releasing another claimant's token."""
+        try:
+            intact = self._binding_guard is None or self._binding_guard()
+        except Exception:  # noqa: BLE001 — unavailable host authority fails closed
+            intact = False
+        if not intact:
+            self._drifted = True
+            self._drift_reason = "admission_drift"
+            self._release("admission_drift")
+        return intact
+
     async def open(
         self,
         *,
         budget: BodyBudget,
         fetch: Callable[[str, str], Awaitable[FetchedBody | None]],
+        selected: tuple[str, str] | None = None,
     ) -> bool:
         """Claim this session's oldest pending reservation and cache its frame.
 
@@ -164,7 +183,11 @@ class PendingTurn:
         is never converted into a silently lost message.
         """
 
-        row = self._store.pending_body_reservation_for(self._owner, self._session_id)
+        if not self.binding_intact():
+            return False
+        row = self._store.pending_body_reservation_for(
+            self._owner, self._session_id, selected=selected
+        )
         if row is None:
             return False
         claim_token = f"pt:{uuid.uuid4().hex}"
@@ -196,8 +219,16 @@ class PendingTurn:
 
         try:
             fetched = await fetch(row["conversation_id"], str(row["message_id"]))
+        except asyncio.CancelledError:
+            # A queued body-only wake may be disposed during hydration, before
+            # Session owns its turn object. Release here rather than pinning
+            # that reservation for the entire crash-recovery lease.
+            self._release("binding_drift")
+            raise
         except Exception:  # noqa: BLE001 — one closed code, never a provider echo
             fetched = None
+        if not self.binding_intact():
+            return False
         if fetched is None:
             self._release("binding_drift")
             return False
@@ -272,6 +303,8 @@ class PendingTurn:
         injecting, which `settle` records as `claim_lost`.
         """
 
+        if not self.binding_intact():
+            return False
         if self._claim_token is None or self._injected is None or self._drifted:
             return False
         if self._conversation_id is None or self._message_id is None:
@@ -306,6 +339,8 @@ class PendingTurn:
         store hiccup can never fail a turn.
         """
 
+        if not self.binding_intact():
+            return None
         if self._injected is None or self._claim_token is None or self._drifted:
             return None
         if self._conversation_id is None or self._message_id is None:

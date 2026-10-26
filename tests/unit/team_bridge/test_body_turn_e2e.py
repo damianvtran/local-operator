@@ -29,6 +29,9 @@ from typing import Any
 
 import pytest
 
+from local_operator.analytics import recorder as analytics_recorder
+from local_operator.analytics.recorder import AnalyticsRecorder
+from local_operator.analytics.store import AnalyticsStore
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -61,6 +64,22 @@ DIGEST = __import__("hashlib").sha256(BODY.encode("utf-8")).hexdigest()
 FINGERPRINT = "aa11" * 16
 FRAME_MARKER = "body_representation:"
 HEADER_MARKER = "VERIFIED SOURCE"
+
+
+@pytest.fixture(autouse=True)
+def telemetry_off(tmp_path, monkeypatch):
+    # Local analytics is a process singleton, not session-owned. Close an
+    # isolated recorder BEFORE any turns: its documented closed fence refuses
+    # writes and thread starts, unlike suppressing the leak warning afterwards.
+    owned = AnalyticsRecorder(store=AnalyticsStore(tmp_path / "analytics.sqlite3"))
+    owned.close()
+    monkeypatch.setattr(analytics_recorder, "_recorder", owned)
+    monkeypatch.setenv("ANONYMIZED_TELEMETRY", "false")
+    try:
+        yield
+    finally:
+        owned.close()
+        assert owned._thread is None, "fixture analytics writer must not survive"
 
 
 class CapturingStream:
