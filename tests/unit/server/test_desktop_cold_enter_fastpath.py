@@ -477,6 +477,9 @@ def test_the_chrome_prompts_are_one_literal_behind_two_spellings() -> None:
     )
     assert loop.CONTINUE_TRUNCATED_ANSWER_PROMPT is chrome_prompts.CONTINUE_TRUNCATED_ANSWER_PROMPT
     assert loop.LENGTH_STOP_RECOVERY_PROMPT is chrome_prompts.LENGTH_STOP_RECOVERY_PROMPT
+    assert (
+        loop.DEGENERATE_STREAM_RECOVERY_PROMPT is chrome_prompts.DEGENERATE_STREAM_RECOVERY_PROMPT
+    )
     assert loop.NAMELESS_CALL_RECOVERY_PROMPT is chrome_prompts.NAMELESS_CALL_RECOVERY_PROMPT
     assert loop.WORDLESS_STOP_RECOVERY_PROMPT is chrome_prompts.WORDLESS_STOP_RECOVERY_PROMPT
     assert loop.is_connectivity_continuation_instruction is (
