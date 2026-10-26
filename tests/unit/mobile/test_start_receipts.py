@@ -22,7 +22,10 @@ import re
 import sqlite3
 from pathlib import Path
 
-import httpx
+# ``httpx2`` under the familiar name, as tests/unit/mcp/test_grant_diagnostics.py does:
+# Starlette's ``TestClient`` is built on ``httpx2``, so one ``Response`` type covers
+# both the TestClient cells and the streamed ``ASGITransport`` cells.
+import httpx2 as httpx
 import pytest
 from starlette.testclient import TestClient
 
@@ -72,10 +75,10 @@ class Rig:
     def receipts_path(self) -> Path:
         return self.root / RECEIPTS_NAME
 
-    def start(self, body: dict, **kwargs):
+    def start(self, body: dict[str, object], **kwargs):
         return self.client.post("/api/sessions/start", json=body, **kwargs)
 
-    def rows(self) -> list[tuple]:
+    def rows(self) -> list[tuple[str, str, str, str | None]]:
         """Read the journal WITHOUT creating it: a stray 0-byte file would make
         the daemon's own O_EXCL creation path see an uninitialised store."""
         if not self.receipts_path.exists():
@@ -89,6 +92,14 @@ class Rig:
             return []
         finally:
             connection.close()
+
+
+def completed(row: tuple[str, str, str, str | None]) -> dict[str, object]:
+    """The recorded completion of one receipt row; ``result`` is NULL until the
+    start completes, so a cell reading it asserts completion first."""
+    result = row[3]
+    assert result is not None, f"receipt {row[0]} has no recorded completion"
+    return json.loads(result)
 
 
 def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, capacity: int | None = None) -> Rig:
@@ -113,8 +124,8 @@ def spawn_adapter(daemon: MobileDaemon):
     return spawn
 
 
-def body(**over) -> dict:
-    payload = {
+def body(**over: object) -> dict[str, object]:
+    payload: dict[str, object] = {
         "create_request_id": KEY,
         "cwd": "~",
         "provider": "openai",
@@ -229,7 +240,7 @@ def test_completed_replay_reconciles_current_owner_not_the_recorded_pid(tmp_path
     r = rig(tmp_path, monkeypatch)
     assert r.start(body()).status_code == 200
     (row,) = r.rows()
-    recorded = json.loads(row[3])
+    recorded = completed(row)
     assert recorded["pid"] == 970123
 
     async def current_owner(session_id):
@@ -247,7 +258,7 @@ def test_completed_replay_without_a_live_owner_holds_the_sid(tmp_path, monkeypat
     r = rig(tmp_path, monkeypatch)
     assert r.start(body()).status_code == 200
     (row,) = r.rows()
-    recorded = json.loads(row[3])
+    recorded = completed(row)
 
     async def no_owner(_session_id):
         return None
@@ -295,7 +306,7 @@ def test_pending_claim_adopts_only_a_verified_exact_owner(tmp_path, monkeypatch)
     assert adopted.json() == {"ok": True, "pid": 972222, "session_id": sid}
     assert seen["sid"] == sid
     assert r.calls == 0
-    assert json.loads(r.rows()[0][3])["session_id"] == sid
+    assert completed(r.rows()[0])["session_id"] == sid
 
 
 def test_pending_claim_with_no_owner_stays_unresolved_without_spawning(tmp_path, monkeypatch):
@@ -323,6 +334,9 @@ def test_cancelled_request_leaves_a_queryable_receipt(tmp_path, monkeypatch):
     released: list[str] = []
 
     async def slow(cwd, provider=None, model_id=None, resume=None):
+        # The receipt path always resumes under the SID it claimed; a missing
+        # one would be the defect this cell exists to catch.
+        assert resume is not None
         released.append(resume)
         await gate.wait()
         return 970123
@@ -355,7 +369,7 @@ def test_cancelled_request_leaves_a_queryable_receipt(tmp_path, monkeypatch):
 
     sid = asyncio.run(scenario())
     assert released == [sid]
-    assert json.loads(r.rows()[0][3])["session_id"] == sid
+    assert completed(r.rows()[0])["session_id"] == sid
 
     async def owner(_session_id):
         return 970123
@@ -408,7 +422,7 @@ def test_authentication_and_origin_precede_claim_and_replay(tmp_path, monkeypatc
 TOO_LARGE = {"error": "start_request_too_large", "code": "start_request_too_large"}
 
 
-def at_size(payload: dict, size: int) -> bytes:
+def at_size(payload: dict[str, object], size: int) -> bytes:
     """``payload`` as JSON padded to exactly ``size`` bytes.
 
     The padding is insignificant whitespace, so the parsed body is unchanged and
