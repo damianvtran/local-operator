@@ -1269,15 +1269,30 @@ class _NoProgressGuard:
             self.reset()
             return 1, 0
         # Include all arguments, with canonical dictionary ordering. Content
-        # includes image/document bytes or digests: equal text beside a changing
-        # screenshot is progress too. Renderer details and execution duration
-        # are deliberately absent because they are not the model's observation.
+        # includes media content and its type, never capture provenance: a new
+        # revision can still show identical pixels. Whitelist the provider's
+        # media fields so future capture IDs/timestamps cannot disguise a loop.
+        # Hash the inline base64 content without retaining another payload copy;
+        # textual observations keep their existing serialization.
         payload = json.dumps(
             [
                 call.name,
                 call.arguments,
                 result.is_error,
-                [block.model_dump(mode="json") for block in result.content],
+                [
+                    (
+                        {
+                            "type": block.type,
+                            "mime_type": block.mime_type,
+                            "sha256": hashlib.sha256(
+                                block.data.encode("utf-8", "surrogatepass")
+                            ).hexdigest(),
+                        }
+                        if block.type in ("image", "audio", "document")
+                        else block.model_dump(mode="json")
+                    )
+                    for block in result.content
+                ],
             ],
             sort_keys=True,
             default=str,

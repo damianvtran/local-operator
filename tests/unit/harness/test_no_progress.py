@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -19,6 +20,7 @@ from local_operator.harness.rows import is_harness_chrome
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentTool,
+    CapturedFrame,
     ImageContent,
     Message,
     MessageEndEvent,
@@ -150,6 +152,76 @@ async def test_changing_results_are_progress_with_live_guard_control(media):
     )
     assert len(nudges) == 1
     assert end.error is None
+
+
+def captured_image(*, revision=0, data=b"same image", mime_type="image/png"):
+    return [
+        ImageContent(
+            data=base64.b64encode(data).decode("ascii"),
+            mime_type=mime_type,
+            captured_frame=CapturedFrame(
+                stream_id="synthetic-stream",
+                revision_id=str(revision),
+                producer_scope="synthetic-producer",
+            ),
+        )
+    ]
+
+
+async def assert_unchanged_capture_stops(*, advancing_revision):
+    count = NO_PROGRESS_LIMIT * 3
+    stream, executed, nudges, end = await run_calls(
+        cycle(1, count),
+        results=[
+            captured_image(revision=index if advancing_revision else 0) for index in range(count)
+        ],
+    )
+    assert len(executed) == NO_PROGRESS_LIMIT
+    assert len(stream.requests) == NO_PROGRESS_LIMIT
+    assert len(nudges) == 1
+    assert end.error is not None
+    assert "No progress: repeated tool action or short cycle" in end.error
+    recovery_requests = [
+        index
+        for index, request in enumerate(stream.requests)
+        if any(message.text == NO_PROGRESS_RECOVERY_PROMPT for message in request.messages)
+    ]
+    assert recovery_requests[0] == NO_PROGRESS_WARNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advancing_revision", [True, False], ids=["advancing", "fixed"])
+async def test_identical_image_content_stops_despite_capture_metadata(advancing_revision):
+    await assert_unchanged_capture_stops(advancing_revision=advancing_revision)
+    if not advancing_revision:
+        # A fixed-metadata case alone also passes the old, provenance-sensitive
+        # implementation. Pair it with the measured defect as a live control.
+        await assert_unchanged_capture_stops(advancing_revision=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_field", ["bytes", "media_type"])
+async def test_changed_image_content_is_progress_with_identical_metadata(changed_field):
+    count = NO_PROGRESS_LIMIT * 3
+    if changed_field == "bytes":
+        results = [captured_image(data=f"image-{index}".encode()) for index in range(count)]
+    else:
+        # One type transition immediately before the warning boundary must
+        # reset the streak. Alternating two types forever would legitimately
+        # form a period-2 cycle, not demonstrate forward progress.
+        count = 2 * (NO_PROGRESS_WARNING - 1)
+        results = [
+            captured_image(mime_type="image/png" if index < count // 2 else "image/jpeg")
+            for index in range(count)
+        ]
+    stream, executed, nudges, end = await run_calls(cycle(1, count), results=results)
+    assert len(executed) == count
+    assert len(stream.requests) == count + 1
+    assert nudges == []
+    assert end.error is None
+    # The no-stop assertions alone would pass with a dead detector (or the old
+    # composition). This control must fail if capture revisions mask stasis.
+    await assert_unchanged_capture_stops(advancing_revision=True)
 
 
 @pytest.mark.asyncio
