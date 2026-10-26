@@ -211,7 +211,10 @@ class NotificationsView(Vertical):
         self._cursor_index = 0
         self._detail_timer: Timer | None = None
         self._poll_timer: Timer | None = None
-        self._stamp: tuple[int, int, int, int] | None = None
+        #: The store doorbell's last-seen tuple. Opaque, not a fixed-width tuple:
+        #: `_store_stamp` grew when the ask index joined it (T7), and a column
+        #: added later must not need this annotation chased.
+        self._stamp: tuple[int, ...] | None = None
         #: ``(prompt, run)`` while a y/n confirm owns the keyboard.
         self._confirm: tuple[str, Callable[[], None]] | None = None
         self.notice = ""

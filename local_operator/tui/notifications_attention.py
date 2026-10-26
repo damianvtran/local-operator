@@ -102,6 +102,15 @@ def announce_items(
     stamp = now_ms if now_ms is not None else int(time.time() * 1000)
     owed = list(store.undelivered(priority="high", limit=BURST_LIMIT + 1))
     held_rows = [row for row in owed if grace_remaining_ms(row, stamp) > 0]
+    # THE WATCHED SESSION'S ROWS ARE HELD, NOT COVERED (R3-1). They were skipped
+    # outright, so a pass that saw only them reported nothing held, the caller
+    # kept its store stamp, and the item was never re-examined after the operator
+    # switched away — the same silence the grace fix removed, one filter earlier.
+    watched_rows = [
+        row
+        for row in owed
+        if held_session_id and str(row.get("session_id") or "") == held_session_id
+    ]
     pending = [
         row
         for row in owed
@@ -109,7 +118,7 @@ def announce_items(
         and not (held_session_id and str(row.get("session_id") or "") == held_session_id)
     ]
     if not pending:
-        return BannerTick(held=len(held_rows))
+        return BannerTick(held=len(held_rows) + len(watched_rows))
     claimed: list[Mapping[str, Any]] = []
     for row in pending:
         try:
@@ -134,7 +143,12 @@ def announce_items(
             for row in overflow:
                 _release(store, row, claimant)
                 released.append(str(row["id"]))
-    return BannerTick(tuple(raised), tuple(digested), tuple(released), held=len(held_rows))
+    return BannerTick(
+        tuple(raised),
+        tuple(digested),
+        tuple(released),
+        held=len(held_rows) + len(watched_rows),
+    )
 
 
 def _attempt(spawn: Callable[[], bool]) -> bool:

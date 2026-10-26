@@ -1242,6 +1242,13 @@ def _frontend_revision(session: Any) -> Any:
 #: deliberately not half-built here.
 _BACKGROUND_NOTIFY_MAX_PER_TICK = 3
 
+#: Seconds between two ``activity`` reports to the session's owner (R6-1).
+#: Contract §6.1's throttle for the TUI's input evidence: the runtime keeps one
+#: stamp and asks only "is the operator here NOW", so a report per keystroke
+#: would add a socket write to the typing path and buy nothing. Ten seconds is
+#: well inside the 120 s freshness window the reader applies.
+TUI_ACTIVITY_REPORT_S = 10.0
+
 
 def _announceable_kind(entry: CatalogEntry) -> str:
     """The notification kind a catalog row is announced under.
@@ -9892,6 +9899,43 @@ class OperatorApp(App[None]):
         # so without this a gate parked on the session the user just left waits
         # in silence, its card painted into a viewer showing something else.
         self._note_viewer_watching(outgoing, displaying=False)
+
+    def _note_viewer_activity(self, *, monotonic_at: float) -> None:
+        """Tell the session's owner that a REAL input edge just landed (R6-1).
+
+        The runtime's item ladder stands its own rung 4 down for a conversation
+        this terminal is BOTH showing and being typed in, so it has to know the
+        second half. ``viewer_watch`` already carries the first.
+
+        THROTTLED TO ONE REPORT PER ``TUI_ACTIVITY_REPORT_S``: the runtime keeps
+        only the newest stamp, so a per-keystroke frame would buy nothing and put
+        a socket write on the typing path. This runs on ``on_event`` for every
+        Key/MouseDown, so the guard is the cheap comparison below, not a timer.
+
+        ONLY AN EPOCH MILLISECOND CROSSES THE WIRE. No keycode, no text: the age
+        of the newest edge is all the ladder reads (contract §6.1).
+        """
+        last = getattr(self, "_activity_reported_at", 0.0)
+        if monotonic_at - last < TUI_ACTIVITY_REPORT_S:
+            return
+        session = self._session
+        client = getattr(session, "_client", None)
+        report = getattr(client, "activity", None)
+        if report is None:
+            return
+        self._activity_reported_at = monotonic_at
+        stamp = int(time.time() * 1000)
+
+        async def _signal() -> None:
+            try:
+                await report(input_at_ms=stamp)
+            except Exception:  # noqa: BLE001 — routing chrome never breaks typing
+                logger.debug("viewer activity signal failed", exc_info=True)
+
+        try:
+            self.run_worker(_signal(), exclusive=False, exit_on_error=False)
+        except Exception:  # noqa: BLE001 — nor does failing to schedule it
+            logger.debug("viewer activity signal could not be scheduled", exc_info=True)
 
     def _note_viewer_watching(self, source: SessionInteraction, *, displaying: bool) -> None:
         """Tell a source's owner whether this terminal still shows its session.
@@ -33128,6 +33172,9 @@ class OperatorApp(App[None]):
         if isinstance(event, events.InputEvent) and not event.is_forwarded:
             if isinstance(event, (events.Key, events.MouseDown)):
                 self._attention_input_at = time.monotonic()
+                # The runtime's rung-4 stand-down reads this (PROBE-2): a
+                # throttled epoch stamp, never the event itself.
+                self._note_viewer_activity(monotonic_at=self._attention_input_at)
                 # Snapshot only evidence already observed BEFORE dispatch. A key
                 # cannot authorize a future token, even inside the expiry window.
                 # Only what is ALREADY observed: the poll's rendered receipt or

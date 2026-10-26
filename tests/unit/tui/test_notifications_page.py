@@ -463,6 +463,92 @@ def test_source_name_prefers_the_directory_over_the_bare_id() -> None:
     assert model.source_name({"session": {"id": "x", "title": "Named"}}) == "Named"
 
 
+def test_the_watched_sessions_rows_count_as_held(tmp_path: Path) -> None:
+    """R3-1: skipping a watched row is a HOLD, not a pass that covered it.
+
+    They were filtered out entirely, so a pass that saw only the watched
+    session's items reported nothing held, the app kept its store stamp, and the
+    item was never re-examined after the operator switched away — the same
+    silence the grace fix removed, one filter earlier.
+    """
+    store = NotificationStore(tmp_path)
+    watched = store.notify(S1, title="on screen", priority="high")
+    _age(tmp_path)
+    raised: list[str] = []
+    tick = attention.announce_items(
+        tmp_path,
+        raise_one=lambda row: raised.append(str(row["id"])) or True,
+        raise_digest=lambda rows: True,
+        desktop_delivers_update=lambda: False,
+        held_session_id=S1,
+    )
+    assert raised == [], "a watched conversation is not bannered"
+    assert tick.held == 1, "but it IS held, so the caller re-examines it"
+    # And once the operator switches away (no hold), it raises.
+    later = attention.announce_items(
+        tmp_path,
+        raise_one=lambda row: raised.append(str(row["id"])) or True,
+        raise_digest=lambda rows: True,
+        desktop_delivers_update=lambda: False,
+    )
+    assert raised == [watched.item_id] and later.held == 0
+
+
+def test_a_titleless_notify_row_shows_its_workspace_directory(tmp_path: Path) -> None:
+    """R3-1: the fallback fires on a real NOTIFY row, through the session block.
+
+    `source_name` has read `row["cwd"]` since T10, but a notify row never carried
+    it: the session block is what every surface receives, and it held no
+    directory — so a conversation with no stored title painted a bare session id.
+    The directory is resolved where the session's own directory is already in
+    hand (`notifications.items.SessionFacts`), so the fix reaches the desktop and
+    the relay too, not only this page.
+    """
+    session_id = "0000000000a1"
+    journal = tmp_path / "sessions" / session_id
+    journal.mkdir(parents=True)
+    (journal / "desktop.json").write_text(
+        '{"cwd": "/Users/damian/workspace/repos/lo-notifications-l1"}', encoding="utf-8"
+    )
+    store = NotificationStore(tmp_path)
+    item = store.notify(session_id, title="a thing happened", priority="normal")
+    page = inbox.list_page(tmp_path, state="all")
+    row = next(row for row in page["items"] if row["id"] == item.item_id)
+    assert row["session"]["cwd"] == "/Users/damian/workspace/repos/lo-notifications-l1"
+    assert model.source_name(row) == "lo-notifications-l1"
+
+
+def test_a_real_ask_row_shows_its_workspace_directory(tmp_path: Path) -> None:
+    """R3-2: the fallback fires on a REAL row, not only on a hand-built one.
+
+    The row comes out of the core normalizer (`notifications.items.ask_item`),
+    which used to drop the ask's ``cwd`` — so the directory-name fallback could
+    never trigger in production and every title-less ask painted a bare id.
+    """
+    from local_operator.asks import store as ask_store
+    from tests.unit.notifications.test_inbox import SID as ASK_SID
+
+    (tmp_path / "sessions" / ASK_SID).mkdir(parents=True, exist_ok=True)
+    ask_store.write_entry(
+        tmp_path,
+        ASK_SID,
+        cwd="/Users/damian/workspace/repos/lo-notifications-l1",
+        asks=[
+            {
+                "ask_id": "ask_dir",
+                "session_id": ASK_SID,
+                "status": "open",
+                "created_at": int(time.time() * 1000),
+                "questions": [{"question": "Ship it?", "header": "Ship"}],
+            }
+        ],
+    )
+    page = inbox.list_page(tmp_path, state="all")
+    asks = [row for row in (page.get("waiting") or []) if row.get("source") == "ask"]
+    assert asks, "the open ask must be listed"
+    assert model.source_name(asks[0]) == "lo-notifications-l1"
+
+
 def test_rung_three_holds_a_fresh_revision_for_the_grace(tmp_path: Path) -> None:
     """T2: the desktop feed's grace, on the TUI's rung.
 
