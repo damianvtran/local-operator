@@ -67,10 +67,17 @@ def pair(request: pytest.FixtureRequest) -> Devices:
 
 
 class _Link:
-    """The one attribute ``_source_prepare`` reads from a peer link."""
+    """The two attributes ``_source_prepare`` reads from a peer link.
 
-    def __init__(self, device_id: str) -> None:
+    ``link_id`` IS REQUIRED, not defaulted: the prepare journals the link the move
+    rides (PR #2950, QA round 1, Q1), and a real ``PeerLink`` always carries one. A
+    stub that defaulted it would test an unbound entry, which is the wedge that
+    binding exists to prevent.
+    """
+
+    def __init__(self, device_id: str, link_id: str) -> None:
         self.device_id = device_id
+        self.link_id = link_id
 
 
 def _prepare_frame(to_device: str) -> dict[str, Any]:
@@ -82,6 +89,34 @@ def _prepare_frame(to_device: str) -> dict[str, Any]:
         "mode": "move",
         "have": {},
     }
+
+
+def test_keep_prepare_mints_an_epoch_without_parking_the_source(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep's rollback must never inherit an epoch-less wildcard (review R2-3).
+
+    Exercise the real prepare branch: the token is minted even though a keep copy
+    has no ownership handoff to journal, and repeated copies get different tokens.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    destination = server_b.identity.device_id
+    epochs: list[str] = []
+    for link_id in ("l_keep_first", "l_keep_second"):
+        answer = mobility._source_prepare(  # noqa: SLF001
+            server_a,
+            cast(Any, _Link(destination, link_id)),
+            {**_prepare_frame(destination), "mode": "keep"},
+        )
+        assert answer["result"] == "prepared", answer
+        epoch = answer["lease_epoch"]
+        assert isinstance(epoch, str) and epoch, answer
+        epochs.append(epoch)
+        assert read_handoff_journal(server_a.root) == {}
+    assert epochs[0] != epochs[1]
+    assert source.is_dir()
 
 
 def _lose_the_second_fetch(
@@ -202,12 +237,20 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     dest = str(server_b._own_label())  # noqa: SLF001
     holder = str(server_a._own_label())  # noqa: SLF001
     assert message == (
-        f"{holder} stopped answering during the copy (no answer on its link). "
-        f"{dest} discarded its "
-        f"partial copy; {holder} still has the conversation, paused for this move. "
-        f"On {holder}, restart the relay (`lop network restart`), then run the move "
-        "again."
+        "the copy could not be completed over this link (it closed before the transfer "
+        f"finished). {dest} discarded its partial copy; {holder} still has the "
+        "conversation. Run the move again."
     ), message
+    # THE REMEDY DOES NOT SEND THE OPERATOR TO RESTART A RELAY THAT IS ANSWERING
+    # (2026-10-25). The old sentence claimed the holder "stopped answering" and
+    # prescribed a restart; on the live failure the holder's relay was up the whole
+    # time (PID unchanged, NRestarts=0) and the link had been closed by THIS device's
+    # own writer, because the plan it was sent was over the record limit. What
+    # actually recovers the source is its own rollback report (``_source_rollback``),
+    # so the retry is the whole remedy and a restart is never mentioned.
+    assert "stopped answering" not in message, message
+    assert "restart" not in message, message
+    assert "paused for this move" not in message, message
     assert "this device" not in message, message
     assert "nothing was lost" not in message, message
     assert "nothing was changed" not in message, message
@@ -217,13 +260,14 @@ def test_a_copy_phase_link_failure_refuses_and_sweeps_the_destination(
     assert not staging.exists(), "the partial copy was left staged"
     assert read_handoff_journal(server_b.root) == {}, "the destination kept a journal entry"
     assert not (server_b.root / "sessions" / SESSION).exists()
-    # THE SOURCE STILL HOLDS THE CONVERSATION, byte for byte, with its journal at the
-    # phase the failure left it in (the destination could not reach it to clear it).
+    # THE SOURCE STILL HOLDS THE CONVERSATION, byte for byte — and its journal entry
+    # is GONE, because the destination reported its rollback (§6.5's missing row).
+    # Before that report existed this cell pinned ``phase == "prepared"``, which is
+    # the wedge: a live relay cannot clear its own entry, so the source stayed parked
+    # until a restart. The bytes are what must never be lost, and they are all here.
     assert source.is_dir()
     assert _transcript(server_a.root, SESSION) == before
-    source_entry = read_handoff_journal(server_a.root)[SESSION]
-    assert source_entry["role"] == "source", source_entry
-    assert source_entry["phase"] == "prepared", source_entry
+    assert read_handoff_journal(server_a.root) == {}, read_handoff_journal(server_a.root)
 
 
 def test_a_keep_copy_failure_leaves_the_source_running(
@@ -257,11 +301,11 @@ def test_a_keep_copy_failure_leaves_the_source_running(
     holder = str(server_a._own_label())  # noqa: SLF001
     message = str(failed["message"])
     assert message == (
-        f"{holder} stopped answering during the copy (no answer on its link). "
-        f"{dest} discarded its "
-        f"partial copy; {holder} still has the conversation and was not paused "
-        "(a copy leaves it running). Run the copy again."
+        "the copy could not be completed over this link (it closed before the transfer "
+        f"finished). {dest} discarded its partial copy; {holder} still has the "
+        "conversation and was not paused (a copy leaves it running). Run the copy again."
     ), message
+    assert "stopped answering" not in message, message
     assert "restart" not in message, message
     assert "nothing was changed" not in message, message
     assert "nothing has changed" not in message, message
@@ -306,11 +350,9 @@ def test_the_copy_failure_sentence_disambiguates_identical_names(
     dest = f"{same_name} (this move's destination)"
     holder = f"{same_name} (the source)"
     assert message == (
-        f"{holder} stopped answering during the copy (no answer on its link). "
-        f"{dest} discarded its "
-        f"partial copy; {holder} still has the conversation, paused for this move. "
-        f"On {holder}, restart the relay (`lop network restart`), then run the move "
-        "again."
+        "the copy could not be completed over this link (it closed before the transfer "
+        f"finished). {dest} discarded its partial copy; {holder} still has the "
+        "conversation. Run the move again."
     ), message
     assert "nothing was changed" not in message, message
     assert "nothing has changed" not in message, message
@@ -343,9 +385,8 @@ def test_a_peer_supplied_unreachable_cause_is_not_reworded_as_silence(
     message = str(failed["message"])
     assert message == (
         "answered something this build does not understand. "
-        f"{dest} discarded its partial copy; {holder} still has the conversation, "
-        "paused for this move. "
-        f"On {holder}, restart the relay (`lop network restart`), then run the move again."
+        f"{dest} discarded its partial copy; {holder} still has the conversation. "
+        "Run the move again."
     ), message
     assert "stopped answering" not in message, message
     assert "nothing was changed" not in message, message
@@ -451,18 +492,24 @@ def test_the_move_handler_turns_a_peer_refusal_into_a_refusal(
 # ---------------------------------------------------------------------------
 
 
-def test_a_retry_after_a_failed_copy_is_refused_until_the_source_relay_restarts(
+def test_a_failed_copy_releases_the_source_so_a_retry_needs_no_restart(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R1-1: ``prepared`` is NOT a licence for the same destination to re-prepare.
+    """THE ONE-SIDED ROLLBACK, and the wedge it used to leave (live 2026-10-25).
 
-    ``prepared`` is precisely the phase in which the SAME destination's copy may
-    still be live: the destination writes its own role entry only after the copy,
-    so two prepares from one device can share the staging directory, and clearing
-    on the second lets the loser's rollback delete the winner's verified copy after
-    the source committed — the only copy. So the retry is refused with the source's
-    sentence, and only a source relay restart (a fresh reconcile instance, which
-    makes the entry stale) clears it before a retry prepares.
+    Old behaviour, pinned by the previous version of this cell: the destination
+    swept its staging and cleared its own entry, and the source kept
+    ``prepared`` forever — its only reapers were a reconcile of ANOTHER instance's
+    entry (the instance rule that protects a live handoff), so a healthy relay could
+    not clear its own, every retry was refused ``in_progress`` naming a phase nobody
+    would advance, and only a relay restart recovered it. Measured on
+    ``81b9f802851d``: the destination rolled back at 20:06:18 and the source was
+    still parked hours later.
+
+    The destination now REPORTS its rollback (§6.5's missing row), so the source
+    clears the entry itself and the very next attempt prepares and completes with no
+    restart anywhere. This cell fails on the old code: ``retried["ok"]`` was False
+    with ``code == "in_progress"``.
     """
     server_a, server_b, _host, _port = pair
     _pair_settled(pair, monkeypatch, role="admin")
@@ -476,36 +523,97 @@ def test_a_retry_after_a_failed_copy_is_refused_until_the_source_relay_restarts(
     assert fetches["n"] == 2, fetches
     monkeypatch.setattr(mobility.LinkTransport, "ask", real_ask)
 
-    # THE SAME DESTINATION ASKING AGAIN IS REFUSED, and the sentence names the
-    # SOURCE whose relay has to be restarted — not the destination that read it.
-    retried = _move(server_b, SESSION, monkeypatch=monkeypatch)
-    assert retried["ok"] is False, retried
-    assert retried["code"] == "in_progress", retried
-    holder = str(server_a._own_label())  # noqa: SLF001
-    message = str(retried["message"])
-    assert f"already in progress on {holder}" in message, message
-    assert (
-        f"so nothing was changed. If the move does not finish on its own, restart the "
-        f"relay on {holder} (`lop network restart`), then try the move again."
-    ) in message, message
-    assert "this device" not in message, message
-    assert "other device" not in message, message
+    # THE SOURCE IS NOT PARKED. No relay restart, no manual reconcile, no `--wait`:
+    # the destination's rollback report cleared the entry on the way out.
+    assert read_handoff_journal(server_a.root) == {}, read_handoff_journal(server_a.root)
     assert source.is_dir()
     assert _transcript(server_a.root, SESSION) == before
-    assert read_handoff_journal(server_a.root)[SESSION]["phase"] == "prepared"
-
-    # THE SOURCE RELAY RESTART: a fresh instance makes the live writer stale, which
-    # is the one recovery reconcile applies to a prepared entry.
-    report = mobility.reconcile(server_a.root, server=server_a, own_instance="restarted-a")
-    assert [row["action"] for row in report] == ["rolled_back"], report
-    assert read_handoff_journal(server_a.root) == {}
 
     retried = _move(server_b, SESSION, monkeypatch=monkeypatch)
     assert retried["ok"] is True, retried
     assert retried["state"] == "completed", retried
     assert _transcript(server_b.root, SESSION) == before
     assert not source.exists()
-    assert read_handoff_journal(server_a.root) == {}
+
+
+def test_a_rollback_report_never_clears_a_handing_off_entry(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``handing-off`` is monotone (§6.5): a late rollback report must not undo it.
+
+    Once the source has advanced past ``prepared`` the destination may already be
+    the only holder of the bytes, so a report that crosses the commit is refused by
+    the source and answers ``kept`` rather than deleting a commit in flight.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    destination = server_b.identity.device_id
+    write_handoff_entry(
+        server_a.root,
+        SESSION,
+        {
+            "role": "source",
+            "phase": HANDOFF_PHASE_HANDING_OFF,
+            "to_device": destination,
+            "lease_epoch": "e_current",
+            "mode": "move",
+            "instance_id": str(server_a.instance_id),
+        },
+    )
+
+    answer = mobility._source_rollback(  # noqa: SLF001
+        server_a,
+        cast(Any, _Link(destination, "l_1")),
+        {
+            "op": "net_session_move",
+            "phase": "rollback",
+            "session_id": SESSION,
+            "lease_epoch": "e_current",
+            "code": "unreachable",
+        },
+    )
+
+    assert answer["result"] == "kept", answer
+    still = read_handoff_journal(server_a.root)[SESSION]
+    assert still["phase"] == HANDOFF_PHASE_HANDING_OFF, still
+
+
+def test_a_rollback_report_from_another_epoch_is_ignored(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A report can cross a LATER move of the same id; the epoch is what stops it."""
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    destination = server_b.identity.device_id
+    write_handoff_entry(
+        server_a.root,
+        SESSION,
+        {
+            "role": "source",
+            "phase": HANDOFF_PHASE_PREPARED,
+            "to_device": destination,
+            "lease_epoch": "e_new",
+            "mode": "move",
+            "instance_id": str(server_a.instance_id),
+        },
+    )
+
+    answer = mobility._source_rollback(  # noqa: SLF001
+        server_a,
+        cast(Any, _Link(destination, "l_2")),
+        {
+            "op": "net_session_move",
+            "phase": "rollback",
+            "session_id": SESSION,
+            "lease_epoch": "e_stale",
+            "code": "unreachable",
+        },
+    )
+
+    assert answer["result"] == "kept", answer
+    assert read_handoff_journal(server_a.root)[SESSION]["lease_epoch"] == "e_new"
 
 
 def test_a_prepared_handoff_for_another_destination_still_refuses_and_names_the_source(
@@ -525,13 +633,13 @@ def test_a_prepared_handoff_for_another_destination_still_refuses_and_names_the_
     destination = server_b.identity.device_id
 
     first = mobility._source_prepare(
-        server_a, cast(Any, _Link(destination)), _prepare_frame(destination)
+        server_a, cast(Any, _Link(destination, "l_3")), _prepare_frame(destination)
     )  # noqa: SLF001
     assert first["result"] == "prepared", first
     journal_before = read_handoff_journal(server_a.root)[SESSION]
 
     refused = mobility._source_prepare(  # noqa: SLF001
-        server_a, cast(Any, _Link("device-c")), _prepare_frame("device-c")
+        server_a, cast(Any, _Link("device-c", "l_4")), _prepare_frame("device-c")
     )
 
     assert refused["result"] == "refused", refused
@@ -578,7 +686,7 @@ def test_a_handing_off_entry_is_never_cleared_by_a_retry(
     )
 
     refused = mobility._source_prepare(  # noqa: SLF001
-        server_a, cast(Any, _Link(destination)), _prepare_frame(destination)
+        server_a, cast(Any, _Link(destination, "l_5")), _prepare_frame(destination)
     )
 
     assert refused["result"] == "refused", refused

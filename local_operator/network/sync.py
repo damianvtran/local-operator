@@ -3382,17 +3382,46 @@ def held_report(dest_dir: Path, attachments_root: Path) -> dict[str, Any]:
             continue
         files[name] = sha256_bytes(target.encode("utf-8"))
         stats[name] = (facts.st_size, facts.st_mtime_ns, facts.st_dev, facts.st_ino)
+    # THE BLOBS THIS COPY CAN ACTUALLY SKIP, NEVER THE WHOLE SHARED STORE.
+    # A move points ``attachments_root`` at the install's SHARED content-addressed
+    # store, so globbing it reported — and hashed — every attachment of every
+    # conversation on the device. Measured on the operator's Mac 2026-10-25: 122,101
+    # blobs (5.2 GB) hashed in 80.8 s, and the plan request that carried the report
+    # was 13.67 MB against the link's 8 MiB ``wire.MAX_RECORD_BYTES``. ``PeerCodec.seal``
+    # refused it inside the writer thread, the link closed with ``cause=error`` ~40 s
+    # after the source prepared, and the move read as "the source stopped answering"
+    # while the source sat parked in ``prepared``.
+    #
+    # TWO SOURCES, and the split is the fact that decides ownership: a copy that holds
+    # its OWN store (a replica, whose ``attachments_root`` IS its directory) is fully
+    # enumerable — everything in it is this copy's business, whether or not the
+    # transcript still references it (a truncated or compacted transcript references
+    # fewer blobs than it holds). A store shared with the whole device is NOT this
+    # copy's to enumerate, so only the blobs its own transcript references are
+    # reported. Both are "what can I skip", and neither can be the other's set.
     blobs: dict[str, str] = {}
-    store = Path(attachments_root) / ATTACHMENT_PREFIX
-    for pattern, keyed_by_stem in (("*.bin", True), (f"*{ATTACHMENT_SIDECAR_SUFFIX}", False)):
+    own_store = Path(dest_dir) / ATTACHMENT_PREFIX
+    store = own_store if own_store.is_dir() else Path(attachments_root) / ATTACHMENT_PREFIX
+    refs = set(referenced_attachments_in(Path(dest_dir)))
+    if store == own_store:
         try:
-            for candidate in sorted(store.glob(pattern)):
-                key = candidate.stem if keyed_by_stem else candidate.name
-                facts = os.lstat(candidate)
-                blobs[key] = sha256_bytes(candidate.read_bytes())
-                stats[key] = (facts.st_size, facts.st_mtime_ns, facts.st_dev, facts.st_ino)
+            refs.update(candidate.stem for candidate in own_store.glob("*.bin"))
         except OSError:
             pass
+    for ref in sorted(refs):
+        for suffix, keyed_by_stem in ((".bin", True), (ATTACHMENT_SIDECAR_SUFFIX, False)):
+            candidate = store / f"{ref}{suffix}"
+            try:
+                # The report's digest AND its stat facts describe one member, or
+                # neither is published: a rewrite between them fails attestation
+                # rather than pairing new bytes with the old identity.
+                facts = os.lstat(candidate)
+                digest = _stream_digest(candidate)
+            except OSError:
+                continue
+            key = candidate.stem if keyed_by_stem else candidate.name
+            blobs[key] = digest
+            stats[key] = (facts.st_size, facts.st_mtime_ns, facts.st_dev, facts.st_ino)
     return {"files": files, "attachments": blobs, "stats": stats}
 
 

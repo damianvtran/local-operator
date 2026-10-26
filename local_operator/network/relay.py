@@ -4364,10 +4364,17 @@ class PeerLink:
             self.sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
-        try:
-            self.sock.close()
-        except OSError:
-            pass
+        # The reader owns the descriptor until it leaves recv. On macOS, closing
+        # immediately after shutdown can strand an already-waiting timed recv until
+        # its original deadline (CPython #154224; measured here with a closed fd and
+        # a surviving mesh reader at the 120s idle timeout). Shutdown wakes the read;
+        # its finally block releases the descriptor. A link never started, or whose
+        # reader already exited, has no owner left to perform that release.
+        if self._reader is None or not self._reader.is_alive():
+            try:
+                self.sock.close()
+            except OSError:
+                pass
         self.server.link_closed(self, reason)
 
     # -- threads ------------------------------------------------------------
@@ -4394,12 +4401,55 @@ class PeerLink:
         except TimeoutError:
             self.server.audit_idle(self)
             self.close("timeout")
-        except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError):
+        except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError) as exc:
             # Every failure here is fatal to the LINK and none is repaired: there is
             # no resynchronisation and no partial-trust phase.
+            if not self._closed.is_set():
+                self._log_link_error("reader", exc)
             self.close("error")
-        except Exception:  # noqa: BLE001 — a handler must not kill the accept loop
+        except Exception as exc:  # noqa: BLE001 — a handler must not kill the accept loop
+            if not self._closed.is_set():
+                self._log_link_error("reader", exc)
             self.close("error")
+        finally:
+            # No other thread may release/reuse this descriptor while our recv is
+            # still waiting. This also covers reader-initiated and concurrent close.
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
+    def _log_link_error(self, side: str, exc: BaseException) -> None:
+        """Say WHY a link died, ONCE, with the cause that actually ended it.
+
+        THE AUDIT ROW CARRIES ONLY ``cause=error``, and that was the whole record of
+        the 2026-10-25 move failure: the Mac's writer refused a 13.67 MB frame over
+        the 8 MiB record limit, the link closed, and both ends' logs said nothing,
+        so the destination's "the source stopped answering" was the only story
+        anyone could read. One WARNING per link death — never per frame — is the
+        volume a supervised log can carry, and the exception text is the evidence.
+
+        ONLY WHEN THIS SIDE'S TEARDOWN DID NOT START IT (review round 1, m3; QA
+        round 1, Q3). ``close`` sets ``_closed`` before it shuts the socket down, so
+        a reader that loses the race with its own ``sock.close()`` raises EBADF and
+        used to log a SECOND line — `closed by its reader: OSError: [Errno 9] Bad
+        file descriptor` — after the writer's real cause, and even on a deliberate
+        ``replaced``/``we-closed`` close where there was no failure at all. A line
+        that points at the socket teardown instead of the cause is worse than no
+        line: it is the one an operator reads first. Callers therefore skip this
+        once ``_closed`` is set; the guard is repeated here so no future caller can
+        reintroduce the noise.
+        """
+        if self._closed.is_set():
+            return
+        logger.warning(
+            "mesh link %s to %s closed by its %s: %s: %s",
+            self.link_id,
+            self.device_id,
+            side,
+            type(exc).__name__,
+            exc,
+        )
 
     def _handle(self, frame: dict[str, Any]) -> None:
         if wire.is_keepalive(frame):
@@ -4480,7 +4530,9 @@ class PeerLink:
                     self._write(wire.keepalive_frame(record.pid if record else 0))
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
-        except (OSError, wire.LinkCryptoError):
+        except (OSError, wire.LinkCryptoError) as exc:
+            if not self._closed.is_set():
+                self._log_link_error("writer", exc)
             self.close("error", flush_s=0.0)
 
     def _drain(self) -> bool:
@@ -5056,6 +5108,11 @@ class RelayServer:
         #: (QA round 5, Q-R5-1) — and an asynchronous hop here would hand the
         #: caller that same race back.
         self._slice_stop_hooks: list[tuple[str, Callable[[], Any]]] = []
+        #: Slice callbacks run when a peer link closes (``register_ops``'s
+        #: ``on_link_closed``): a slice holding state keyed to ONE link — the move's
+        #: source parks a session ``prepared`` for the link that asked — must learn
+        #: that the link is gone, because no frame will ever arrive to say so.
+        self._slice_link_closed_hooks: list[tuple[str, Callable[[PeerLink, str], Any]]] = []
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
@@ -6976,6 +7033,19 @@ class RelayServer:
         # more, so they are resolved here rather than left to time out (``fail_replies``).
         self.fail_replies(link)
         self.identity_use.released(link.device_id, link.link_id)
+        # AFTER the waiters are failed, so a slice reading "is that link gone?" from
+        # its hook sees the same answer every requester on it already got. Inline on
+        # the closing thread and best-effort: a hook is a small journal edit, and one
+        # slice's failure must not stop the audit row below or another slice's hook.
+        # ``getattr`` BECAUSE A REDUCED SERVER IS A REAL SHAPE HERE: two resilience
+        # cells build one with ``__new__`` and drive ``link_closed`` directly, and a
+        # relay whose slices never installed has no hook list. Absent means "no slice
+        # state keyed to a link", which is exactly a server with no slices.
+        for label, hook in getattr(self, "_slice_link_closed_hooks", ()):
+            try:
+                hook(link, reason)
+            except Exception as exc:  # noqa: BLE001 — see above
+                logger.warning("mesh relay: link-closed hook %s failed (%s)", label, exc)
         self.audit.record(
             AuditEvent(
                 event="link_closed",
@@ -7447,6 +7517,7 @@ class RelayServer:
         replace: bool = False,
         on_start: Mapping[str, Callable[[], Any]] | None = None,
         on_stop: Mapping[str, Callable[[], Any]] | None = None,
+        on_link_closed: Mapping[str, Callable[[PeerLink, str], Any]] | None = None,
     ) -> None:
         """Let a slice module serve its ops without editing this file.
 
@@ -7457,7 +7528,9 @@ class RelayServer:
         reader (see :data:`SLOW_OP_WORKERS`). ``on_start`` maps a LABEL to a
         callable run once when the relay starts, on its own daemon thread;
         ``on_stop`` maps a LABEL to a callable run when the relay stops, INLINE
-        on the stopping thread.
+        on the stopping thread. ``on_link_closed`` maps a LABEL to a callable run
+        with ``(link, reason)`` each time a peer link closes, inline on the closing
+        thread after that link's waiters have been failed.
 
         WHY ``on_start`` EXISTS. Some slice state can only be settled by a relay
         that is up: the move's crash recovery has to run when a relay starts on a
@@ -7529,6 +7602,14 @@ class RelayServer:
                 raise TypeError(f"stop hook {label!r} is not callable")
             if any(label == existing for existing, _hook in self._slice_stop_hooks):
                 raise ValueError(f"a stop hook named {label!r} is already registered")
+        for label, hook in (on_link_closed or {}).items():
+            if not callable(hook):
+                raise TypeError(f"link-closed hook {label!r} is not callable")
+            if any(label == existing for existing, _hook in self._slice_link_closed_hooks):
+                raise ValueError(f"a link-closed hook named {label!r} is already registered")
+        self._slice_link_closed_hooks.extend(
+            (label, hook) for label, hook in (on_link_closed or {}).items()
+        )
         self._slice_start_hooks.extend((label, hook) for label, hook in (on_start or {}).items())
         self._slice_stop_hooks.extend((label, hook) for label, hook in (on_stop or {}).items())
         self._handlers.update(handlers)
@@ -14239,6 +14320,40 @@ def log_path() -> Path:
     return log_dir() / "network.log"
 
 
+def ensure_log_parent(*, strict: bool = True) -> None:
+    """Create the directory the supervisor appends the relay's stdout/stderr to.
+
+    THE SUPERVISOR OPENS THE FILE, NOT THE RELAY, and it does so BEFORE exec:
+    systemd 240+ resolves ``StandardOutput=append:<config>/logs/network.log`` in
+    the manager, and launchd's ``StandardOutPath`` likewise. A missing parent
+    therefore never reaches Python, which could create it — the start fails
+    (systemd: "Failed to set up standard output") or the output is lost. The first
+    install created the parent, but the REFRESH (``refresh_unit_if_stale``,
+    reached from ``lop update`` and the mesh roll in ``meshupdate``) and the
+    existing-unit start/restart (``service_action``, reached from a peer restart
+    through ``meshrestart``) did not, so a provisioned unit — or one whose
+    ``logs/`` was removed afterwards — came up with no log (#2918 lane audit).
+    EVERY path that starts, restarts or reloads the unit calls this, so the
+    invariant has one owner.
+
+    ``strict`` IS THE ONE DIFFERENCE BETWEEN THE ARMS, and it preserves each arm's
+    existing contract. An INSTALL (``_install_systemd``, ``_install_launchd``) is
+    the one moment a refusal is still cheap, which is what
+    ``test_systemd_log_parent_failure_never_starts_service`` pins: the error
+    propagates, so no unit is written over a log nobody can create. A REFRESH, or
+    a start of an ALREADY-INSTALLED unit, is the opposite case — a directory that
+    cannot be made must not abort an upgrade that has otherwise succeeded, and the
+    supervisor's own refusal is then the honest report — so those pass
+    ``strict=False``.
+    """
+    try:
+        log_path().parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        if strict:
+            raise
+        logger.debug("relay: could not create %s", log_path().parent, exc_info=True)
+
+
 def plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
@@ -14412,6 +14527,8 @@ def refresh_plist_if_stale() -> Any:
         if not launchd.is_own_plist(path, LABEL):
             return launchd.PlistRefresh(name=name, kind="not-addressable")
         port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
+        # A rewrite reloads the job, which reopens its log: see ``ensure_log_parent``.
+        ensure_log_parent(strict=False)
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
         if outcome.kind == "current":
             # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
@@ -14505,6 +14622,8 @@ def refresh_unit_if_stale() -> Any:
             # rewrite could repoint a tree this refresh does not own. The F10
             # discipline — an unanswered question declines; it does not guess.
             return launchd.PlistRefresh(name=name, kind="not-addressable")
+        # Before any reload or restart below: see ``ensure_log_parent``.
+        ensure_log_parent(strict=False)
         rendered = render_systemd(_service_port())
         try:
             current = path.read_text(encoding="utf-8", errors="replace")
@@ -14640,6 +14759,8 @@ def _install_launchd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
         }
     plist_path().parent.mkdir(parents=True, exist_ok=True)
     if not dry_run:
+        # launchd opens ``StandardOutPath`` itself; see ``ensure_log_parent``.
+        ensure_log_parent()
         plist_path().write_bytes(plistlib.dumps(render_plist(port)))
         durability["persistent"] = _launchd_boot_persistent()
     steps.append(f"wrote {plist_path()}")
@@ -14713,7 +14834,7 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
         }
     # systemd opens append-log targets before Python starts, so a fresh HOME
     # needs this parent before enable --now; the daemon cannot create it in time.
-    log_path().parent.mkdir(parents=True, exist_ok=True)
+    ensure_log_parent()
     # Lingering BEFORE enable --now (mobile's ordering): without a user manager
     # the enable itself fails with the bus error, and enabling linger is what
     # spawns one. Best-effort — a refusal must not fail the install.
@@ -15874,6 +15995,8 @@ def _service_action_launchd(action: str) -> dict[str, Any]:
         # no job to kickstart yet. The installer verifies the managed process.
         return _install_launchd()
     if action in ("start", "restart") and plist_path().exists():
+        # launchd opens ``StandardOutPath`` before exec; see ``ensure_log_parent``.
+        ensure_log_parent(strict=False)
         printed = _launchctl("print", f"{_domain()}/{LABEL}")
         if printed.returncode != 0:
             bootstrap = _launchctl("bootstrap", _domain(), str(plist_path()))
@@ -15913,6 +16036,9 @@ def _service_action_systemd(action: str) -> dict[str, Any]:
         return refused
     starting = action in ("start", "restart")
     if starting:
+        # An EXISTING unit appends to a log whose parent may be gone; systemd
+        # opens it before exec, so it must exist first (``ensure_log_parent``).
+        ensure_log_parent(strict=False)
         # Repair existing units too: installation may predate linger, and a
         # successful start alone cannot promise restart-on-boot durability.
         supervisors.enable_linger()
