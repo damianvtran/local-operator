@@ -53,9 +53,18 @@ A delegated session is kept when ANY of these holds:
 3. PARENT STILL ACTIVE. Parents reach children through ``hub peek/resume``, which
    read the child's directory as recorded in the PARENT's
    ``subagent-roster.v1.json`` (``records[].session_dir``); ``origin.json`` has no
-   parent link for legacy children. A delegated session is protected when ANY
-   session listing it in its roster is live OR has activity inside the window
-   (so a child outlives its newest parent by at most ``max_age_hours``). An idle
+   parent link for legacy children. The roster is the parent's LIFETIME LEDGER
+   (last 256 records), not a resumption set, so a record protects its child only
+   while it is IN FLIGHT or PAUSED (``settled_at`` absent/unreadable, or
+   ``paused`` truthy); a SETTLED, unpaused child is history: the parent keeps the
+   record and ``result_text``, the child's transcript is reaped like any other
+   once idle past the window, and a later ``hub resume`` gets the existing
+   "transcript is gone from disk" refusal. A delegated session is protected when
+   ANY session listing it with such a record in its roster is live OR has activity
+   inside the window (so a child outlives its newest parent by at most
+   ``max_age_hours``). A settled child that survives for another reason (pin,
+   hold, open project, …) still keeps ITS OWN in-flight children
+   (:func:`_protect_through_survivors`). An idle
    parent older than the window protects nothing. The set is built only from
    rosters of sessions that are live or recent — never all of them (the real store
    has ~800, some 6 MB) — and followed transitively through protected delegated
@@ -342,9 +351,11 @@ from local_operator.session.cleanup import (
     DEFAULT_DELEGATED_MAX_AGE_HOURS,
     MAX_DELEGATED_MAX_AGE_HOURS,
     MIN_DELEGATED_MAX_AGE_HOURS,
+    PINNED_REASON,
     Candidate,
     CleanupPolicy,
     CleanupResult,
+    GuardUnavailable,
     HoldsUnreadable,
     _append_cleanup_log,
     _claimed,
@@ -360,6 +371,7 @@ from local_operator.session.cleanup import (
     _lease_runtime_alive,
     _write_record,
     hold_for,
+    pinned_session_ids,
     policy_from_config,
     remove_scratchpad_entry,
     remove_session_dir,
@@ -532,9 +544,16 @@ ROSTER_NAME = "subagent-roster.v1.json"
 #: enough that the callback is not the cost.
 SCAN_PROGRESS_EVERY = 256
 
-#: The content phase costs ~14 ms a pad (measured: ~48 s over 3,436 pads), so a
-#: heartbeat every 32 pads is a line about every half second.
-CONTENT_PROGRESS_EVERY = 32
+#: Content-phase heartbeat. The phase averages ~14 ms a pad but a single pad can
+#: cost seconds (a git probe, a 20,000-entry walk), so a coarse count hid 14 s
+#: behind one "32/1770" frame on the live store; every 4 pads keeps the counter
+#: moving between the slow ones. Only the CLI's one rewritten line consumes it.
+CONTENT_PROGRESS_EVERY = 4
+
+#: The record loop's heartbeat. Decisions cost ~1 ms each except a scratchpad git
+#: probe (up to GIT_TIMEOUT_S), so every 16 keeps the counter moving between the
+#: slow ones; only the CLI's one rewritten line consumes it.
+DECIDE_PROGRESS_EVERY = 16
 
 #: ``(phase, done, total_or_None, elapsed_s)``: a coarse heartbeat for a caller
 #: that wants to show motion during a pass (``lop sessions cleanup`` on a TTY).
@@ -3346,7 +3365,13 @@ def _record_in_flight(record: dict[str, Any]) -> bool:
     settled_at = record.get("settled_at")
     if isinstance(settled_at, bool) or not isinstance(settled_at, (int, float)):
         return True
-    return not math.isfinite(settled_at)
+    try:
+        return not math.isfinite(settled_at)
+    except OverflowError:
+        # JSON allows an integer too large for a float ("1" and 400 zeros). It is
+        # not a timestamp anyone wrote, so it is no proof of settlement: protect,
+        # and do not let a hand-damaged roster crash the pass.
+        return True
 
 
 def roster_children(roster: Path) -> set[str]:
@@ -3357,8 +3382,19 @@ def roster_children(roster: Path) -> set[str]:
     — retention rule 3 (:func:`_protected_children`) and
     :func:`active_parent_sessions` (compression keeps a child's transcript
     uncompressed "while its parent could still resume it") — so they answer the
-    same question: a settled child cannot be resumed. A child named by SEVERAL
-    records is protected if ANY of them is in flight.
+    same question.
+
+    WHAT THIS DOES AND DOES NOT CLAIM. A settled child is still resumable by its
+    parent for as long as its transcript is on disk (``comms.py`` lists
+    completed/failed/cancelled/gone as resumable). What changes is that a parent's
+    roster no longer KEEPS that transcript past the delegated window: once a
+    settled child has been idle that long it is reaped like any other, the parent
+    keeps the record and its ``result_text``, and a later ``hub op='resume'`` gets
+    the existing, graceful "transcript … is gone from disk; launch a new one"
+    refusal (``test_comms.py::test_resume_refuses_when_the_transcript_is_gone_from_disk``;
+    the roster row reads ``gone``, ``resumable=False``).
+
+    A child named by SEVERAL records is protected if ANY of them is in flight.
 
     FAILS CLOSED on a record that is not an object: it cannot say which child it
     describes, so it could be hiding an in-flight one, and the roster is
@@ -3369,22 +3405,35 @@ def roster_children(roster: Path) -> set[str]:
     Raises :class:`_Unknowable` for a roster that exists but cannot be read or is
     not an object — the caller must not treat that as "no children".
     """
+    return _roster_ledger(roster)[0]
+
+
+def _roster_ledger(roster: Path) -> tuple[set[str], set[str]]:
+    """``(actionable, settled_only)`` child ids a roster names.
+
+    ``actionable`` is what :func:`roster_children` returns. ``settled_only`` is
+    every other child the ledger names: history, but its DIRECTORY may still
+    survive for another reason, and then its own roster still matters
+    (:func:`_protected_children`). Same fail-closed reads as the public wrapper.
+    """
     payload = _cached_json(roster)
     if not isinstance(payload, dict):
         raise _Unknowable(f"{roster.parent.name}/{ROSTER_NAME}: not an object")
     records = payload.get("records")
     if records is None:
-        return set()
+        return set(), set()
     if not isinstance(records, list):
         raise _Unknowable(f"{roster.parent.name}/{ROSTER_NAME}: records is not a list")
-    names: set[str] = set()
+    actionable: set[str] = set()
+    settled: set[str] = set()
     for record in records:
         if not isinstance(record, dict):
             raise _Unknowable(f"{roster.parent.name}/{ROSTER_NAME}: a record is not an object")
         directory = record.get("session_dir")
-        if isinstance(directory, str) and directory and _record_in_flight(record):
-            names.add(os.path.basename(directory.rstrip("/\\")))
-    return names
+        if isinstance(directory, str) and directory:
+            name = os.path.basename(directory.rstrip("/\\"))
+            (actionable if _record_in_flight(record) else settled).add(name)
+    return actionable, settled - actionable
 
 
 def open_project_sessions(config_dir: Path) -> set[str]:
@@ -3495,7 +3544,9 @@ def _scan(
         ):
             scan.stopped = True
             return scan
-        if index and index % SCAN_PROGRESS_EVERY == 0:
+        if index % SCAN_PROGRESS_EVERY == 0:
+            # Index 0 included: the FIRST frame already carries the total, so the
+            # operator sees "0/4700" at once instead of a bare "scanning…".
             _notify(on_progress, "scan", index, len(entries), time.monotonic() - began)
         try:
             if not entry.is_dir(follow_symlinks=False):
@@ -3579,30 +3630,83 @@ def _scan(
     return scan
 
 
-def _protected_children(scan: _Scan) -> set[str]:
-    """Rule 3: every session named in the roster of a live/recent session, transitively.
+def _protected_children(
+    scan: _Scan,
+    survives: Callable[[str, Path], bool] | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> set[str]:
+    """Rule 3: every IN-FLIGHT or PAUSED child named by a live/recent session, transitively.
 
-    Transitive through protected DELEGATED sessions: a kept child's own children
-    are reachable by resuming it, so they are kept too. Rosters are read only for
-    sources and for newly protected hidden sessions.
+    A settled child is not named (:func:`roster_children`): the roster is a
+    lifetime ledger, so it no longer keeps a finished child's transcript past the
+    window. Transitive through protected DELEGATED sessions: a kept child's own
+    children are reachable by resuming it, so they are kept too. Rosters are read
+    only for sources and for newly protected hidden sessions.
+
+    ``survives(name, path)`` closes the gap the narrowing would otherwise open: a
+    SETTLED child that this pass will nevertheless leave on disk (pinned, held, an
+    open project, a live claim, a git hazard, unread mail, …) is still a
+    directory whose own roster can name paused or in-flight children, and those
+    were protected before the narrowing because the settled child was. So a
+    settled child that survives is walked too — its in-flight children are
+    protected — WITHOUT being added to the result itself (its own reason, e.g.
+    "pinned by the operator", stays the one reported). Evaluated lazily, only for
+    a settled hidden child that has a roster, and iterated to a fixpoint because
+    a newly protected child can name further settled children. ``None`` (the
+    compression caller, which has no keep rules) skips it; compression is
+    reversible, retention is not.
+
+    ``on_progress("rosters", read, None, elapsed)`` fires after each roster is
+    read: on the operator's store this phase is ~4-9 s (hidden parents alone hold
+    ~220 MB of rosters), the one stretch of a dry run with no other heartbeat.
     """
+    began = time.monotonic()
+    read = 0
     protected: set[str] = set()
     queue = list(scan.sources.items())
     seen = {name for name, _ in queue}
-    while queue:
-        name, path = queue.pop()
-        roster = path / ROSTER_NAME
-        if not os.path.exists(roster):
-            continue
-        for child in roster_children(roster):
-            protected.add(child)
-            if child in scan.hidden and child not in seen:
+    settled_named: dict[str, Path] = {}
+    #: Settled children already judged to go: that answer cannot change (the
+    #: callback judges them without ``parents``), and the judgement can include a
+    #: git walk, so it is asked once.
+    going: set[str] = set()
+    while True:
+        while queue:
+            name, path = queue.pop()
+            roster = path / ROSTER_NAME
+            if not os.path.exists(roster):
+                continue
+            actionable, settled = _roster_ledger(roster)
+            read += 1
+            _notify(on_progress, "rosters", read, None, time.monotonic() - began)
+            for child in actionable:
+                protected.add(child)
+                if child in scan.hidden and child not in seen:
+                    seen.add(child)
+                    queue.append((child, path.parent / child))
+            for child in settled:
+                if child in scan.hidden:
+                    settled_named.setdefault(child, path.parent / child)
+        if survives is None:
+            return protected
+        grew = False
+        for child, child_path in list(settled_named.items()):
+            if child in seen or child in protected or child in going:
+                continue
+            if not os.path.exists(child_path / ROSTER_NAME):
+                continue
+            if survives(child, child_path):
                 seen.add(child)
-                queue.append((child, path.parent / child))
-    return protected
+                queue.append((child, child_path))
+                grew = True
+            else:
+                going.add(child)
+        if not grew:
+            return protected
 
 
-#: Rule 3: every session named in the roster of a live/recent session, transitively.
+#: Rule 3: every in-flight/paused child named in the roster of a live/recent
+#: session, transitively (phase one only; see ``_protected_children``).
 #:
 #: Factored out of the delegated pass so a SECOND consumer can ask the same
 #: question without copying the answer: ``session.compression`` keeps a child's
@@ -3621,7 +3725,12 @@ def active_parent_sessions(
     *,
     window_hours: float = float(DEFAULT_DELEGATED_MAX_AGE_HOURS),
 ) -> set[str]:
-    """Session ids a live or recently active session still names in its roster."""
+    """Session ids a live or recently active session names as in-flight or paused.
+
+    Settled children are not named: their transcripts are no longer kept past the
+    window by a parent's roster, so compression treats them like any other old
+    transcript (reversible: a resume restores it before reading).
+    """
     scan = _scan(
         Path(config_dir) / SESSIONS_DIRNAME,
         now - float(window_hours) * 3600.0,
@@ -3641,27 +3750,16 @@ def active_parent_sessions(
 
 _WARNED_KEEP: set[tuple[str, str]] = set()
 
-#: The reason a pinned session is kept (record and content layers alike).
-PINNED_REASON = "pinned by the operator"
-
 
 def _pinned_sessions(config_dir: Path) -> frozenset[str]:
-    """Session ids the operator pinned in the sidebar; raises :class:`_Unknowable`.
+    """The pinned set for this pass (:func:`cleanup.pinned_session_ids`) as ``_Unknowable``.
 
-    The standing rule is "never remove a parent session, a PINNED session, or
-    anything with a live runtime", and until now pins were consulted nowhere in
-    the cleanup path. Uses the strict reader (``load_pin_ids``), not
-    ``read_pins``: the latter turns an unreadable file into ``[]``, which here
-    would mean "reap everything the operator pinned". Imported lazily because
-    ``local_operator.tui`` is heavy and this module must stay light for the
-    runtime child.
+    An unreadable pin file skips the whole pass, like an unreadable roster.
     """
-    from local_operator.tui.sidebar_pins import load_pin_ids
-
     try:
-        return frozenset(load_pin_ids(config_dir))
-    except (OSError, ValueError) as exc:
-        raise _Unknowable(f"sidebar-pins.json: {exc}") from exc
+        return pinned_session_ids(config_dir)
+    except GuardUnavailable as exc:
+        raise _Unknowable(str(exc)) from exc
 
 
 def _evaluate(
@@ -3843,13 +3941,39 @@ def run_delegated_pass(
         result.skipped = "stopped during the scan"
         return result
     try:
-        parents = _protected_children(scan)
         projects = open_project_sessions(config_dir)
         # ONCE per pass, never per candidate: thousands of candidates must not
         # each re-read the pin file. A pin file that exists and cannot be read
         # skips the whole pass (like an unreadable roster) rather than reading
-        # as "nothing is pinned".
+        # as "nothing is pinned". Once is also safe for a REAL run's removal
+        # moment: pins only ever grow the protected set, a pin placed during the
+        # pass is honoured by the next one, and the CLI's apply pass re-reads the
+        # file at its own start, after the operator has confirmed the preview.
         pinned = _pinned_sessions(config_dir)
+        by_name = {cand.path.name: cand for cand in scan.candidates}
+
+        def survives(name: str, path: Path) -> bool:
+            """Will the pass leave this settled child on disk? (:func:`_protected_children`)"""
+            cand = by_name.get(name)
+            if cand is None:
+                # In the window, no usable clock, or an origin retention never
+                # reaps: not a candidate, so it stays.
+                return True
+            return (
+                _evaluate(
+                    cand,
+                    config_dir=config_dir,
+                    now=moment,
+                    cutoff=cutoff,
+                    parents=set(),
+                    projects=projects,
+                    pinned=pinned,
+                    live_resolved=live_resolved,
+                )
+                is not None
+            )
+
+        parents = _protected_children(scan, survives, on_progress)
     except _Unknowable as exc:
         logger.warning("session cleanup: delegated pass skipped, cannot read %s", exc)
         result.skipped = f"skipped: cannot read {exc}"
@@ -3911,10 +4035,7 @@ def run_delegated_pass(
             if not live.delegated_enabled and not force:
                 result.skipped = "disabled during the pass"
                 break
-            hours = max(
-                MIN_DELEGATED_MAX_AGE_HOURS,
-                min(MAX_DELEGATED_MAX_AGE_HOURS, live.delegated_max_age_hours),
-            )
+            hours = effective_window_hours(live)
             if hours > result.hours:
                 # A WIDER window only ever protects more: tighten the cutoff.
                 result.hours = hours
@@ -3922,6 +4043,10 @@ def run_delegated_pass(
             in_batch = 0
         cand = todo[position]
         position += 1
+        if position % DECIDE_PROGRESS_EVERY == 0:
+            # Keeps a terminal moving once the caller has stopped printing rows
+            # (the text cap): ~4-9 s of decisions would otherwise be silent.
+            _notify(on_progress, "decide", position, len(todo), time.monotonic() - started)
         if cand.clock >= cutoff:
             result.protected.append((cand.path.name, "inside the (widened) window"))
             _notify(on_kept, cand.path.name, "inside the (widened) window")

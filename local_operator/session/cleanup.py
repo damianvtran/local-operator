@@ -2744,6 +2744,28 @@ class _Entry:
     size: int
 
 
+#: The reason a pinned session is kept, by the parent class and the delegated pass.
+PINNED_REASON = "pinned by the operator"
+
+
+def pinned_session_ids(config_dir: Path) -> frozenset[str]:
+    """Session ids the operator pinned in the sidebar; raises :class:`GuardUnavailable`.
+
+    The standing rule is "never remove a pinned session", and no cleanup path
+    consulted pins before. Uses the strict reader (``load_pin_ids``), not
+    ``read_pins``: the latter turns an unreadable file into ``[]``, which here
+    would mean "remove everything the operator pinned". An ABSENT file is "nothing
+    pinned". Read once per pass by each caller. Lazy import: ``local_operator.tui``
+    is heavy and this module must stay light for the runtime child.
+    """
+    from local_operator.tui.sidebar_pins import load_pin_ids
+
+    try:
+        return frozenset(load_pin_ids(config_dir))
+    except (OSError, ValueError) as exc:
+        raise GuardUnavailable(f"sidebar-pins.json: {exc}") from exc
+
+
 class GuardUnavailable(Exception):
     """A guard could not be evaluated, so the run must not proceed.
 
@@ -2977,6 +2999,7 @@ def run_cleanup(
             result.scanned += 1
             if live_resolved is not None and child.resolve() == live_resolved:
                 result.protected.append((child.name, "the current session"))
+                _observe(on_kept, child.name, "the current session")
                 continue
             entries.append(
                 _Entry(child, session_activity(child), _has_transcript(child), _dir_bytes(child))
@@ -3017,6 +3040,16 @@ def run_cleanup(
         return result
     recent = set(picker[:RECENT_KEEP])
     visible = set(picker)
+    try:
+        # Pins only ever ADD protection and apply with --force too: a pinned
+        # conversation is never listed removable. An unreadable pin file refuses
+        # the run, like an unavailable picker, rather than reading as "none".
+        pinned = pinned_session_ids(config_dir)
+    except GuardUnavailable as exc:
+        logger.warning("session cleanup: REFUSING to run, %s", exc)
+        result.skipped = f"guard unavailable: {exc}"
+        result.errors += 1
+        return result
     chosen: dict[str, Candidate] = {}
 
     # A directory several limits would take is reported once, under the first
@@ -3034,6 +3067,9 @@ def run_cleanup(
         name = entry.path.name
         if name in chosen:
             return True
+        if name in pinned:
+            protect(name, PINNED_REASON)
+            return False
         if name in recent:
             protect(name, f"one of the {RECENT_KEEP} most recent")
             return False
@@ -3145,9 +3181,21 @@ def apply_cleanup(
     result = CleanupResult(scanned=plan.scanned, protected=list(plan.protected))
     result.chosen = list(plan.chosen)
     result.skipped = plan.skipped
+    try:
+        # Re-read at APPLY time: a pin placed between the preview and the
+        # confirmation is exactly the operator changing their mind about a row.
+        pinned = pinned_session_ids(config_dir)
+    except GuardUnavailable as exc:
+        logger.warning("session cleanup: REFUSING to apply, %s", exc)
+        result.skipped = f"guard unavailable: {exc}"
+        result.errors += 1
+        return result
     for candidate in plan.chosen:
         target = sessions_dir / candidate.session
         if not target.is_dir():
+            continue
+        if candidate.session in pinned:
+            result.protected.append((candidate.session, f"{PINNED_REASON} (since the preview)"))
             continue
         guard = _guard(target, config_dir, moment)
         if guard is not None:

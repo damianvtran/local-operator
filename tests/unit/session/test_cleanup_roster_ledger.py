@@ -158,6 +158,8 @@ def test_a_child_named_by_several_records_is_protected_if_any_is_in_flight(store
         ({"settled_at": "1.0"}, True),
         ({"settled_at": True}, True),
         ({"settled_at": float("inf")}, True),
+        ({"settled_at": 10**400}, True),  # R1-2: int too large for a float
+        ({"settled_at": -(10**400)}, True),
         ({"settled_at": 1.0, "paused": "false"}, True),
         ({"settled_at": 1.0, "paused": 1}, True),
     ],
@@ -391,7 +393,7 @@ def test_the_scan_heartbeat_fires_every_256_directories_not_per_directory(tmp_pa
         None,
         lambda phase, done, total, elapsed: beats.append(done),
     )
-    assert beats == [256, 512]
+    assert beats == [0, 256, 512]
 
 
 def test_run_cleanup_announces_its_plan_as_it_decides(tmp_path: Path) -> None:
@@ -455,3 +457,206 @@ def test_a_tiny_budget_still_audits_one_pad(tmp_path: Path) -> None:
     _pads(tmp_path, 4)
     audit = audit_scratchpads(tmp_path / "sessions", budget_s=0.0)
     assert len(audit.pads) == 1 and audit.stopped_early
+
+
+# --------------------------------------------------------------------------
+# R1-1: a settled child that SURVIVES still keeps its own in-flight children
+# --------------------------------------------------------------------------
+
+
+def _nested(tmp_path: Path) -> Store:
+    """P (in-window parent) lists X as a SETTLED child; X's roster lists Y (paused,
+    settled-stamped) and Z (in flight). X is old and, depending on the test, kept
+    for a reason other than the roster."""
+    from local_operator.session.cleanup import mark_store
+
+    store = Store(root=tmp_path, now=time.time())
+    mark_store(store.sessions)
+    parent = _session(store, "P", origin=None, age_h=1)
+    x = _session(store, "X")
+    _session(store, "Y")
+    _session(store, "Z")
+    _roster(parent, [_record(store, "X")])
+    _roster(x, [_record(store, "Y", paused=True), _record(store, "Z", settled_at=None)])
+    return store
+
+
+def _removed(store: Store) -> set[str]:
+    return {row.session for row in _pass(store, dry_run=True).removed}
+
+
+def test_nothing_keeps_x_so_x_and_its_ledger_are_history(tmp_path: Path) -> None:
+    store = _nested(tmp_path)
+    assert _removed(store) == {"X", "Y", "Z"}
+
+
+def test_a_pinned_settled_child_keeps_its_paused_and_in_flight_children(tmp_path: Path) -> None:
+    store = _nested(tmp_path)
+    (store.root / "sidebar-pins.json").write_text(json.dumps(["X"]))
+    result = _pass(store, dry_run=True)
+    assert {r.session for r in result.removed} == set()
+    kept = dict(result.protected)
+    assert kept["X"] == dr.PINNED_REASON  # X keeps ITS reason
+    assert kept["Y"] == kept["Z"] == "parent session still active"
+
+
+def test_a_held_settled_child_keeps_its_paused_and_in_flight_children(tmp_path: Path) -> None:
+    from local_operator.session.cleanup import set_hold
+
+    store = _nested(tmp_path)
+    assert set_hold(store.sessions, "X", reason="evidence", by="operator", kind="evidence")
+    assert _removed(store) == set()
+
+
+def test_an_open_project_settled_child_keeps_its_children(tmp_path: Path) -> None:
+    store = _nested(tmp_path)
+    (store.root / "projects").mkdir()
+    (store.root / "projects" / "p1.json").write_text(
+        json.dumps({"id": "p1", "status": "active", "sessions": ["X"]})
+    )
+    assert _removed(store) == set()
+
+
+def test_a_settled_child_with_a_live_claim_keeps_its_children(tmp_path: Path) -> None:
+    store = _nested(tmp_path)
+    (store.sessions / "X" / ".session.pid").write_text(str(os.getpid()))
+    assert _removed(store) == set()
+
+
+def test_the_survivor_walk_follows_a_chain_of_settled_survivors(tmp_path: Path) -> None:
+    """X1 (held) names X2 as settled; X2 (pinned) names Z in flight; W is unrelated."""
+    from local_operator.session.cleanup import set_hold
+
+    store = _nested(tmp_path)
+    _session(store, "X2")
+    _session(store, "Z2")
+    _session(store, "W")
+    _roster(store.sessions / "X", [_record(store, "X2")])
+    _roster(store.sessions / "X2", [_record(store, "Z2", settled_at=None)])
+    assert set_hold(store.sessions, "X", reason="evidence", by="operator", kind="evidence")
+    (store.root / "sidebar-pins.json").write_text(json.dumps(["X2"]))
+    # X's roster now names only X2, so Y and Z are unreachable history; X2 survives
+    # (pinned) and keeps Z2 even though the chain runs through two settled survivors.
+    assert _removed(store) == {"Y", "Z", "W"}
+    # ... and with X2 NOT kept, X2 is history and Z2 goes with it.
+    (store.root / "sidebar-pins.json").unlink()
+    assert _removed(store) == {"X2", "Z2", "Y", "Z", "W"}
+
+
+def test_a_survivor_without_a_roster_costs_no_judgement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The keep rules (a git walk among them) run only for a settled child that HAS a roster."""
+    store = _nested(tmp_path)
+    (store.sessions / "X" / dr.ROSTER_NAME).unlink()
+    asked: list[str] = []
+    real = dr._evaluate
+    monkeypatch.setattr(
+        dr, "_evaluate", lambda cand, **kw: (asked.append(cand.path.name), real(cand, **kw))[1]
+    )
+    _pass(store, dry_run=True)
+    assert "X" in asked  # judged once as a candidate, never as a survivor probe
+    assert asked.count("X") == 1
+
+
+def test_compression_has_no_keep_rules_and_asks_only_the_actionable_question(
+    tmp_path: Path,
+) -> None:
+    store = _nested(tmp_path)
+    dr._FILE_CACHE.clear()
+    assert dr.active_parent_sessions(store.root, store.now) == set()
+
+
+# --------------------------------------------------------------------------
+# R1-2: an absurd settled_at fails closed instead of crashing
+# --------------------------------------------------------------------------
+
+
+def test_a_huge_integer_settled_at_keeps_the_child_in_pass_and_compression(tmp_path: Path) -> None:
+    store = _nested(tmp_path)
+    # JSON allows an integer no float can hold; json.dumps writes it verbatim.
+    _roster(store.sessions / "P", [_record(store, "X", settled_at=10**400)])
+    result = _pass(store, dry_run=True)
+    assert result.skipped is None and "X" not in {r.session for r in result.removed}
+    assert dict(result.protected)["X"] == "parent session still active"
+    dr._FILE_CACHE.clear()
+    # X, and (transitively, X being kept) its own paused and in-flight children.
+    assert dr.active_parent_sessions(store.root, store.now) == {"X", "Y", "Z"}
+
+
+# --------------------------------------------------------------------------
+# Q2/R1-6: the PARENT class honours pins too
+# --------------------------------------------------------------------------
+
+
+def _parent_class_store(tmp_path: Path) -> Store:
+    from local_operator.session.cleanup import mark_store
+
+    store = Store(root=tmp_path, now=time.time())
+    mark_store(store.sessions)
+    for index in range(14):
+        _session(store, f"u{index:02d}", origin=None, age_h=24 * 30 + index)
+    return store
+
+
+def test_the_parent_class_never_lists_a_pinned_session_even_forced(tmp_path: Path) -> None:
+    store = _parent_class_store(tmp_path)
+    (store.root / "sidebar-pins.json").write_text(json.dumps(["u13"]))
+    policy = CleanupPolicy(enabled=True, max_inactive_days=7)
+    for force in (False, True):
+        result = run_cleanup(store.root, policy, dry_run=True, force=force, now=store.now)
+        assert "u13" not in {r.session for r in result.removed}
+        assert dict(result.protected)["u13"] == dr.PINNED_REASON
+
+
+def test_the_parent_class_does_not_apply_a_pin_placed_after_the_preview(tmp_path: Path) -> None:
+    from local_operator.session.cleanup import apply_cleanup
+
+    store = _parent_class_store(tmp_path)
+    policy = CleanupPolicy(enabled=True, max_inactive_days=7)
+    plan = run_cleanup(store.root, policy, dry_run=True, now=store.now)
+    assert "u13" in {r.session for r in plan.removed}
+    (store.root / "sidebar-pins.json").write_text(json.dumps(["u13"]))
+    done = apply_cleanup(store.root, plan, actor="cli", now=store.now)
+    assert (store.sessions / "u13").is_dir()
+    assert "u13" not in {r.session for r in done.removed}
+    assert (
+        "u13",
+        f"{dr.PINNED_REASON} (since the preview)",
+    ) in done.protected
+
+
+def test_an_unreadable_pin_file_refuses_the_parent_class_run(tmp_path: Path) -> None:
+    store = _parent_class_store(tmp_path)
+    (store.root / "sidebar-pins.json").write_text("{truncated")
+    result = run_cleanup(
+        store.root, CleanupPolicy(enabled=True, max_inactive_days=7), dry_run=True, now=store.now
+    )
+    assert result.skipped and "sidebar-pins.json" in result.skipped and result.removed == []
+
+
+def test_the_current_session_row_is_announced_like_every_other_kept_row(tmp_path: Path) -> None:
+    """R1-5: the streamed head must equal the list head."""
+    store = _parent_class_store(tmp_path)
+    seen: list[tuple[str, str]] = []
+    result = run_cleanup(
+        store.root,
+        CleanupPolicy(enabled=True, max_inactive_days=7),
+        live_dir=store.sessions / "u00",
+        dry_run=True,
+        now=store.now,
+        on_kept=lambda name, why: seen.append((name, why)),
+    )
+    assert ("u00", "the current session") in seen
+    assert seen == [row for row in result.protected]
+
+
+def test_the_between_batch_window_uses_the_one_clamp(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-7: a hand-typed 10**9 hours widens to the cap the pass applies everywhere."""
+    huge = CleanupPolicy(delegated_enabled=True, delegated_max_age_hours=10**9)
+    assert dr.effective_window_hours(huge) == dr.MAX_DELEGATED_MAX_AGE_HOURS
+    assert dr.effective_window_hours(CleanupPolicy(delegated_max_age_hours=0)) == (
+        dr.MIN_DELEGATED_MAX_AGE_HOURS
+    )

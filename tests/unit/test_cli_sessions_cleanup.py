@@ -1005,6 +1005,9 @@ def test_the_copy_report_honours_the_delegated_window_override(store: Path, caps
 def _tty(monkeypatch: pytest.MonkeyPatch, capsys: Any, value: bool) -> None:
     # capsys swaps ``sys.stdout`` for a capture object that is never a tty.
     monkeypatch.setattr(sys.stdout, "isatty", lambda: value, raising=False)
+    # A CI box may have no TERM at all, which the stream (rightly) reads as "plain".
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
 
 
 def _pad(root: Path, name: str, size: int = 100) -> None:
@@ -1098,8 +1101,11 @@ def test_a_budgeted_dry_run_audit_says_it_stopped_and_where_the_full_one_is(
     _tty(monkeypatch, capsys, False)
     assert sessions_cleanup_command(_args(dry_run=True)) == 0
     out = capsys.readouterr().out
-    assert "audited 1 of 6 pads" in out and "lower bound" in out
-    assert "lop sessions cleanup --scratchpads-only --dry-run" in out
+    # D5: the HEADLINE is the partial count and a floor, not the store's total,
+    # and the full-audit command sits on its own line.
+    assert "1 of 6 session pad(s) audited (partial); at least " in out
+    assert "lower bound" in out and "ranks only the pads reached" in out
+    assert "\n  full audit: lop sessions cleanup --scratchpads-only --dry-run\n" in out
 
     assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
     audit = json.loads(capsys.readouterr().out)["scratchpads"]
@@ -1132,3 +1138,118 @@ def test_a_pinned_delegated_session_is_kept_by_the_cli_dry_run(
     out = capsys.readouterr().out
     assert "kept         kid-pinned-01  (pinned by the operator)" in out
     assert "would remove kid-old-0001" in out and "would remove kid-pinned-01" not in out
+
+
+def _many_old(store: Path, count: int) -> None:
+    for index in range(count):
+        _delegated(store, f"kid-old-{index:04d}")
+
+
+def test_the_screen_never_goes_quiet_past_the_row_cap(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1: after the text cap rows stop printing but the status keeps counting."""
+    _many_old(store, _CLEANUP_TEXT_ROWS + 130)
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    frames = [f for f in out.replace("\x1b[K", "").split("\r") if f.startswith("  deciding")]
+    assert frames, "no deciding heartbeat at all"
+    # The last frame is the last multiple of the heartbeat at or below the count.
+    total = _CLEANUP_TEXT_ROWS + 130
+    assert frames[-1].startswith(
+        f"  deciding… {total // dr.DECIDE_PROGRESS_EVERY * dr.DECIDE_PROGRESS_EVERY}/{total} ("
+    )
+    assert out.count("would remove kid-old-") == _CLEANUP_TEXT_ROWS
+
+
+def test_the_first_scan_frame_already_carries_the_total(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _many_old(store, 3)
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out.replace("\x1b[K", "")
+    assert any(f.startswith("  scanning sessions… 0/") for f in out.split("\r"))
+
+
+@pytest.mark.parametrize("env", [{"TERM": "dumb"}, {"NO_COLOR": "1"}])
+def test_a_plain_terminal_gets_no_cursor_or_erase_codes(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    """D2: TERM=dumb / NO_COLOR keep the streamed rows but print no control bytes."""
+    _many_old(store, 3)
+    _tty(monkeypatch, capsys, True)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\r" not in out
+    assert out.startswith("== Your conversations (parent sessions) ==")
+    assert out.count("would remove kid-old-0001") == 1
+
+
+def test_the_status_line_is_cut_to_the_terminal_width(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: a narrow pane must not wrap the status into stacked copies."""
+    _many_old(store, 3)
+    _tty(monkeypatch, capsys, True)
+    monkeypatch.setattr(
+        "shutil.get_terminal_size", lambda fallback=(80, 24): os.terminal_size((24, 24))
+    )
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out.replace("\x1b[K", "")
+    frames = [
+        f for f in out.split("\r") if f.startswith("  scanning") or f.startswith("  deciding")
+    ]
+    assert frames and all(len(f.split("\n")[0]) <= 23 for f in frames), frames
+
+
+def test_kept_rows_share_the_removal_rows_name_column(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: interleaved on a terminal, the reasons line up with the table."""
+    _delegated(store, "kid-old-0001")
+    _delegated(store, "kid-new-0001", age_h=1)
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "  kept         kid-new-0001  (inside the 48h window" in out  # 12-wide name + 2 spaces
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    assert "  kept         kid-new-0001  (inside the" in capsys.readouterr().out
+
+
+def test_an_interrupt_clears_the_status_line_before_the_traceback(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: Ctrl-C mid-scan must not leave ``scanning sessions…`` on the line."""
+    _many_old(store, 3)
+    _tty(monkeypatch, capsys, True)
+
+    def interrupted(*_a: Any, **kw: Any) -> Any:
+        kw["on_progress"]("scan", 256, 1000, 0.1)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dr, "run_delegated_pass", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        sessions_cleanup_command(_args(dry_run=True))
+    assert capsys.readouterr().out.endswith("\r\x1b[K")
+
+
+def test_each_phase_reports_its_own_elapsed_time(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D7: a phase's elapsed time starts at the phase, not at the pass."""
+    from local_operator.cli import _CleanupStream
+
+    clock = iter([100.0, 100.0, 150.0, 150.0])
+    monkeypatch.setattr("local_operator.cli.time.monotonic", lambda: next(clock))
+    _tty(monkeypatch, capsys, True)
+    stream = _CleanupStream(True)
+    beat = stream.progress_callback()
+    beat("content", 32, 100, 149.0)  # the pass has run 149 s; the phase just began
+    beat("content", 64, 100, 190.0)
+    frames = capsys.readouterr().out.replace("\x1b[K", "").split("\r")
+    assert "(0s)" in frames[1] and "(50s)" in frames[2], frames

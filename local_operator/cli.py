@@ -39,6 +39,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -4976,29 +4977,54 @@ class _CleanupStream:
     decisions and scratchpad-content checks ~57 s, scratchpad audit 319 s) and
     printed nothing until every pass had finished, which reads as a hang. This
     prints the policy lines before the first pass, shows ONE updating status line
-    for the scan/content/audit heartbeats, and prints each row as the pass decides
-    it. The rows are the SAME objects the final result lists hold and the final
-    block skips the head it already printed (:func:`_print_cleanup_rows`), so a
-    streamed row can never appear twice.
+    for the scan/decide/content/audit heartbeats, and prints each row as the pass
+    decides it. The rows are the SAME objects the final result lists hold and the
+    final block skips the head it already printed (:func:`_print_cleanup_rows`), so
+    a streamed row can never appear twice. Past the text cap rows are not printed
+    but the status line keeps counting, so the screen never goes quiet.
 
     A TTY affordance only: ``enabled`` is ``stdout.isatty() and not --json``. A
     pipe, a file or a script keeps the block layout and section order it always
-    had (the output is parsed), and ``--json`` stays ONE object at the end. The
-    status line uses ``\r`` + erase-line, which is meaningless anywhere but a
-    terminal.
+    had (the output is parsed), and piped output therefore prints at the END by
+    design; ``--json`` stays ONE object at the end. Non-TTY progress on stderr was
+    considered and rejected: it would put bytes on a stream scripts capture and
+    merge with ``2>&1``.
+
+    The updating line uses ``\r`` + erase-line, so it needs a terminal that
+    honours them: ``animate`` is off for ``TERM=dumb`` and when ``NO_COLOR`` is
+    set (the conventional "plain output" request), and the stream then prints a
+    plain heartbeat LINE at most every few seconds instead, with no control codes.
+    The status line is cut to the terminal width so a narrow pane never wraps it
+    into stacked copies.
     """
+
+    #: Plain-mode heartbeat spacing: a line every few seconds, never one per update.
+    PLAIN_EVERY_S = 5.0
 
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
+        self.animate = enabled and not _plain_terminal()
         self._live = False
         self._rows = 0
         self._kept = 0
+        self._phase_started: dict[str, float] = {}
+        self._plain_last = 0.0
+
+    def _fit(self, text: str) -> str:
+        columns = shutil.get_terminal_size((80, 24)).columns
+        return text if len(text) < columns else text[: max(1, columns - 2)] + "…"
 
     def status(self, text: str) -> None:
-        """Replace the single status line; never adds a line."""
+        """Replace the single status line; never adds a permanent line."""
         if not self.enabled:
             return
-        sys.stdout.write(f"\r\033[K{text}")
+        if not self.animate:
+            now = time.monotonic()
+            if now - self._plain_last >= self.PLAIN_EVERY_S:
+                self._plain_last = now
+                print(text.strip(), flush=True)
+            return
+        sys.stdout.write(f"\r\033[K{self._fit(text)}")
         sys.stdout.flush()
         self._live = True
 
@@ -5031,26 +5057,45 @@ class _CleanupStream:
     def kept_callback(self) -> Any:
         def on_kept(name: str, guard: str) -> None:
             if self._kept < _CLEANUP_TEXT_ROWS:
-                self.line(f"  kept         {name}  ({guard})")
+                # The name is padded to the removal rows' session column, so on a
+                # stream where the two interleave the reasons line up as a table.
+                # Only here: the block layout's kept rows stay byte-identical.
+                self.line(f"  kept         {name:<12}  ({guard})")
             self._kept += 1
 
         return on_kept
 
-    def progress_callback(self, label: str = "") -> Any:
-        """``on_progress`` for the scan and content phases: one updating line."""
-        names = {"scan": "scanning sessions", "content": "checking scratchpad content"}
+    def progress_callback(self) -> Any:
+        """``on_progress`` for the scan, decide and content phases: one updating line."""
+        names = {
+            "scan": "scanning sessions",
+            "rosters": "reading parent rosters",
+            "decide": "deciding",
+            "content": "checking scratchpad content",
+        }
 
-        def on_progress(phase: str, done: int, total: int | None, elapsed: float) -> None:
+        def on_progress(phase: str, done: int, total: int | None, _elapsed: float) -> None:
+            # Elapsed is PER PHASE (the pass reports time since it began, which
+            # read as "the content check took 19 s" when it had taken 3).
+            began = self._phase_started.setdefault(phase, time.monotonic())
             of = f"/{total}" if total else ""
-            self.status(f"  {names.get(phase, phase)}… {done}{of} ({elapsed:.0f}s)")
+            self.status(
+                f"  {names.get(phase, phase)}… {done}{of} ({time.monotonic() - began:.0f}s)"
+            )
 
         return on_progress
 
     def audit_callback(self) -> Any:
         def on_pad(pad: Any, done: int, total: int) -> None:
-            self.status(f"  auditing scratchpads… {done}/{total}")
+            began = self._phase_started.setdefault("audit", time.monotonic())
+            self.status(f"  auditing scratchpads… {done}/{total} ({time.monotonic() - began:.0f}s)")
 
         return on_pad
+
+
+def _plain_terminal() -> bool:
+    """Whether the terminal asked for (or cannot do) cursor/erase control codes."""
+    return os.environ.get("TERM", "") in ("dumb", "") or bool(os.environ.get("NO_COLOR"))
 
 
 def _print_cleanup_rows(rows: list[Any], verb: str, *, streamed: bool = False) -> None:
@@ -5296,23 +5341,36 @@ def _print_scratchpads(audit: Any) -> None:
     truncated = (
         f"; {audit.truncated} walk(s) truncated at the depth/entry cap" if audit.truncated else ""
     )
-    print(
-        # i18n: ignore operator CLI output, English-only; owned by the
-        # sessions-cleanup section; remove when extracted (docs/I18N.md)
-        f"{len(audit.pads)} session pad(s); {_format_bytes(audit.total_bytes)} held; "
-        f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
-    )
     if audit.stopped_early:
-        # A budgeted audit that stopped must SAY so: its totals are a lower bound
-        # and its ranking covers only the pads reached. Silence here would present
-        # a partial audit as the store's.
+        # A budgeted audit that stopped must SAY so, FIRST: the headline is the
+        # number the eye lands on, so it is the partial count and a floor, not a
+        # store total. The ranking below covers only the pads reached (the walk is
+        # in name order), and the full-audit command sits on its own line so it
+        # copies cleanly.
         print(
             # i18n: ignore operator CLI output, English-only; owned by the
             # sessions-cleanup section; remove when extracted (docs/I18N.md)
-            f"audit stopped at its {DRY_RUN_AUDIT_BUDGET_S:.0f} s dry-run budget: audited "
-            f"{len(audit.pads)} of "
-            f"{audit.total_pads} pads, so the figures above are a lower bound; run "
-            "lop sessions cleanup --scratchpads-only --dry-run for the full audit"
+            f"{len(audit.pads)} of {audit.total_pads} session pad(s) audited (partial); "
+            f"at least {_format_bytes(audit.total_bytes)} held; "
+            f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
+        )
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"audit stopped at its {DRY_RUN_AUDIT_BUDGET_S:.0f} s dry-run budget: the figures "
+            "are a lower bound and the list below ranks only the pads reached"
+        )
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            "  full audit: lop sessions cleanup --scratchpads-only --dry-run"
+        )
+    else:
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"{len(audit.pads)} session pad(s); {_format_bytes(audit.total_bytes)} held; "
+            f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
         )
     for pad in audit.pads[:_CLEANUP_TEXT_ROWS]:
         tags: list[str] = []
@@ -5541,6 +5599,22 @@ def _print_non_git_copy_report(root: Path, policy: Any, *, json_mode: bool) -> i
 
 
 def sessions_cleanup_command(args: argparse.Namespace) -> int:
+    """``lop sessions cleanup``: :func:`_sessions_cleanup_run` with a status line that cannot leak.
+
+    The updating status line is erased on EVERY way out, Ctrl-C included, so an
+    interrupt (or any exception) starts its traceback on a clean line instead of
+    after ``scanning sessions… 256/3104 (0s)``.
+    """
+    # Live output is a terminal affordance and never touches ``--json`` (see
+    # :class:`_CleanupStream`): a pipe or file gets the block layout it always had.
+    stream = _CleanupStream(sys.stdout.isatty() and not args.json)
+    try:
+        return _sessions_cleanup_run(args, stream)
+    finally:
+        stream.clear()
+
+
+def _sessions_cleanup_run(args: argparse.Namespace, stream: "_CleanupStream") -> int:
     """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
 
     TWO CLASSES, one command (``session/delegated_retention.py`` has the why):
@@ -5622,9 +5696,6 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     )
 
     root = config_dir()
-    # Live output is a terminal affordance and never touches ``--json`` (see
-    # :class:`_CleanupStream`): a pipe or file gets the block layout it always had.
-    stream = _CleanupStream(sys.stdout.isatty() and not args.json)
     policy = policy_from_config(ConfigManager(root))
     reference_overrides = tuple(
         os.path.abspath(os.path.expanduser(path))
