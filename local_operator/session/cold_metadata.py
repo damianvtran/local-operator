@@ -62,6 +62,10 @@ from typing import TYPE_CHECKING, Any
 
 from local_operator.harness.types import Usage
 from local_operator.session.compression import transcript_source
+from local_operator.session.model_selection import (
+    SelectionReading,
+    StoredModelSelection,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, the import would be a cycle
     from local_operator.session.replay_cache import ReplayKey
@@ -71,7 +75,11 @@ logger = logging.getLogger(__name__)
 #: Bumped when the record's shape changes. An older or unknown schema is a MISS,
 #: never an upgrade in place: the eager replay recomputes and rewrites it, which
 #: is the only migration that cannot produce a half-migrated record.
-COLD_METADATA_SCHEMA = 1
+#:
+#: 2: the record carries the journal's settled model SELECTION (``selection``).
+#: A schema-1 record is a miss here and a schema-2 record is a miss to a schema-1
+#: reader, so neither build can misread the other's shape.
+COLD_METADATA_SCHEMA = 2
 
 #: Beside the other derived per-session caches under ``<config>/cache`` — the
 #: one place a user or an operator can clear without touching a durable store.
@@ -157,6 +165,24 @@ class ColdMetadata:
     order: dict[str, int] = field(default_factory=dict)
     seed_usage: Usage | None = None
     bytes_read: int = 0
+    #: The journal's model selection, read for EXACTLY this witness's version.
+    #:
+    #: WHY IT IS HERE: on a record HIT the cold open no longer parses the
+    #: journal, and the selection read (settle scan + forward fold) became the
+    #: largest CPU cost left in the open — 29.0 of 79.4 ms measured on a warm
+    #: 32k-row open with no selection row. The witness already proves the journal
+    #: has not moved since this was read, so a later ``selected_model`` append
+    #: cannot be hidden by it: the append moves the size, the record misses.
+    #:
+    #: THREE STATES, and the outer ``None`` is NOT absence. ``None`` = NOT
+    #: RECORDED (the writer had no reading for this version, or could not prove
+    #: one) — the reader reads the journal exactly as before. A reading whose own
+    #: ``selection`` is ``None`` is PROVED ABSENCE — the rules ran on these bytes
+    #: and found nothing usable. A reading is also refused, back to the journal,
+    #: when its ``rules`` fingerprint differs from this process's
+    #: (``cold_model.resolve_conversation_model``): the answer depends on the
+    #: provider registry, which a later build may have changed.
+    selection: SelectionReading | None = None
 
     def to_payload(self) -> dict[str, Any]:
         witness = self.witness
@@ -181,7 +207,79 @@ class ColdMetadata:
             # trip, so the value recovered is the value stored.
             "seed_usage": self.seed_usage.model_dump(mode="json") if self.seed_usage else None,
             "bytes_read": self.bytes_read,
+            "selection": _selection_payload(self.selection),
         }
+
+
+#: Every ``StoredModelSelection`` field, serialised by name. Listed rather than
+#: taken from ``dataclasses.fields`` so a field added there is a deliberate
+#: decision here (and a schema bump), not a silently-null column.
+_SELECTION_FIELDS = (
+    "provider",
+    "model_id",
+    "effort",
+    "authoritative",
+    "recovered",
+    "boot_selector",
+    "fast",
+)
+
+
+def _selection_payload(reading: SelectionReading | None) -> dict[str, Any] | None:
+    if reading is None:
+        return None
+    value = reading.selection
+    return {
+        "rules": reading.rules,
+        "source": list(reading.source) if reading.source is not None else None,
+        "value": (
+            None if value is None else {name: getattr(value, name) for name in _SELECTION_FIELDS}
+        ),
+    }
+
+
+class _Invalid(Exception):
+    """A stored selection whose shape this build does not write."""
+
+
+def _selection_of(raw: Any, witness: ColdMetadataWitness) -> SelectionReading | None:
+    """The stored reading, ``None`` when not recorded; ``_Invalid`` for a bad shape.
+
+    STRICT, because a reading served from here replaces a journal read: every
+    field must carry exactly the type the writer emits, and the reading's own
+    source must name the witness's journal version (the writer only files one
+    that does, so anything else is a record this build did not write).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"rules", "source", "value"}:
+        raise _Invalid
+    rules = raw["rules"]
+    source = raw["source"]
+    value = raw["value"]
+    if not isinstance(rules, str):
+        raise _Invalid
+    if source != [witness.inode, witness.size, witness.mtime_ns]:
+        raise _Invalid
+    if value is None:
+        return SelectionReading(None, rules, (witness.inode, witness.size, witness.mtime_ns))
+    if not isinstance(value, dict) or set(value) != set(_SELECTION_FIELDS):
+        raise _Invalid
+    if not isinstance(value["provider"], str) or not isinstance(value["model_id"], str):
+        raise _Invalid
+    for name in ("effort", "boot_selector"):
+        if value[name] is not None and not isinstance(value[name], str):
+            raise _Invalid
+    for name in ("authoritative", "recovered"):
+        if not isinstance(value[name], bool):
+            raise _Invalid
+    if value["fast"] is not None and not isinstance(value["fast"], bool):
+        raise _Invalid
+    return SelectionReading(
+        StoredModelSelection(**{name: value[name] for name in _SELECTION_FIELDS}),
+        rules,
+        (witness.inode, witness.size, witness.mtime_ns),
+    )
 
 
 def witness_for(key: "ReplayKey") -> ColdMetadataWitness:
@@ -297,6 +395,11 @@ def read_cold_metadata(path: Path, expected: ColdMetadataWitness) -> ColdMetadat
         logger.debug("cold metadata: usage no longer validates in %s", path, exc_info=True)
         return None
     bytes_read = payload.get("bytes_read")
+    try:
+        selection = _selection_of(payload.get("selection"), witness)
+    except _Invalid:
+        logger.debug("cold metadata: selection no longer validates in %s", path)
+        return None
     return ColdMetadata(
         witness=witness,
         checkpoint=checkpoint,
@@ -304,12 +407,22 @@ def read_cold_metadata(path: Path, expected: ColdMetadataWitness) -> ColdMetadat
         order={str(key): int(value) for key, value in order.items()},
         seed_usage=seed_usage,
         bytes_read=bytes_read if isinstance(bytes_read, int) else 0,
+        selection=selection,
     )
 
 
 #: The keys this build's records always carry. See the guard that uses them.
 _REQUIRED_FIELDS = frozenset(
-    {"schema", "witness", "checkpoint", "checkpoints", "order", "seed_usage", "bytes_read"}
+    {
+        "schema",
+        "witness",
+        "checkpoint",
+        "checkpoints",
+        "order",
+        "seed_usage",
+        "bytes_read",
+        "selection",
+    }
 )
 
 
