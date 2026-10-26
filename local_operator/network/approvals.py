@@ -872,7 +872,13 @@ NO_SIGNING_SURFACE_SENTENCE = (
 
 
 def sign_decision(
-    *, kind: str, request_id: str, request_digest: str, decided_at: float, decision: str = "approve"
+    *,
+    kind: str,
+    request_id: str,
+    request_digest: str,
+    decided_at: float,
+    decision: str = "approve",
+    config_root: Path | None = None,
 ) -> str:
     """Sign one approval decision with the LOCAL operator key. This call PROMPTS.
 
@@ -903,7 +909,10 @@ def sign_decision(
     )
     from local_operator.paths import config_dir
 
-    root = config_dir()
+    # ``config_root`` lets a typed desktop route sign with the key of the profile it SERVES
+    # rather than the process default; those routes also refuse a backend whose root is not
+    # the ambient one (``enrollment.bound_profile``), so the two cannot name different keys.
+    root = config_root if config_root is not None else config_dir()
     signer = None
     try:
         signer = load_signer(config_root=root, backend_name=resolve_backend_name(root))
@@ -1038,12 +1047,18 @@ def _record_decision(
     signature_hex: str | None,
     root: Path | None,
     expected_digest: str | None = None,
+    changed: MeshRefusal | None = None,
 ) -> dict[str, Any]:
-    """The shared spine of approve/deny: guards, signature, write-once, audit."""
+    """The shared spine of approve/deny: guards, signature, write-once, audit.
+
+    ``expected_digest`` re-checks, under the record lock, the digest a typed surface
+    displayed and validated BEFORE its prompt (no lock spans the OS prompt). ``changed``
+    is that surface's own refusal for a mismatch; the enrollment card's is the default.
+    """
     with _record_lock(approval_id, root):
         record = _load_raw(approval_id, root)
         if expected_digest is not None and record.get("request_digest") != expected_digest:
-            raise MeshRefusal("network_enrollment_snapshot_changed", enrollment.REMEDY)
+            raise changed or MeshRefusal("network_enrollment_snapshot_changed", enrollment.REMEDY)
         moment = time.time()
         if _materialize_expiry(record, moment, root):
             raise MeshRefusal(

@@ -40,13 +40,31 @@ def summary(record: dict[str, Any]) -> str | None:
     )
 
 
-def details(record: dict[str, Any]) -> list[str]:
+#: Bumped when a field of :func:`disclosure` changes meaning. The desktop echoes the
+#: disclosure's DIGEST, so a renderer built for an older layout cannot have a newer one
+#: signed in its name: the digest it echoes would not be the one the server recomputes.
+DISCLOSURE_VERSION = 1
+
+
+def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Every fact the operator must see BEFORE signing, as DATA, from the signed record alone.
+
+    WHY A DICT AND NOT LINES. The CLI and the desktop must read ONE source, or the two
+    surfaces can disclose different things about the same signature. The desktop localizes
+    its labels (i18n: no English and no CLI command may travel in here); the CLI renders
+    this dict in :func:`details`. Every value below is either an identifier/fingerprint
+    copied from the digest-bound record or a fixed machine token, so the dict is a pure
+    function of ``request_digest``-bound fields (plus the record's own id) and its digest
+    is stable for the life of the request.
+
+    Full escaped metadata, never silent truncation: every signed withdrawal tuple,
+    revision and reference is listed, and a payload this build cannot validate raises
+    ``finite_disclosure_invalid`` (fail closed) so nothing undisclosable is ever signed.
+    ``None`` when the record is not a finite-share request.
+    """
     data = intent(record)
-    heading = summary(record)
-    if data is None or heading is None:
-        return []
-    # Full escaped metadata disclosure, not silent truncation: all signed deny
-    # selectors/revisions/references must be inspectable BEFORE the signer runs.
+    if data is None:
+        return None
     try:
         for name in ("owner_device", "network_id", "recipient_device"):
             store.safe_component(data[name])
@@ -61,28 +79,114 @@ def details(record: dict[str, Any]) -> list[str]:
         denies = data["denies"]
         if not isinstance(denies, list) or not 0 < len(denies) <= finite_journal.MAX_DENIES:
             consent.refuse("finite_disclosure_invalid")
-        lines = [heading, f"Signed policy revision: {consent._revision(data['policy_revision'])}"]
         guard = data["guard"]
         if guard:
             consent._exact(guard, {"id", "revision"}, {"id", "revision"})
-            lines.append("Recover retained fence: " + json.dumps(guard, ensure_ascii=True))
-        for number, deny in enumerate(denies, 1):
+        withdrawals = []
+        for deny in denies:
             consent._selector(deny["selector"])
             consent._revision(deny["revision"])
             consent._ref(deny["approval_ref"])
-            lines.append(
-                f"Withdrawal {number}: "
-                + json.dumps(
-                    {name: deny[name] for name in ("selector", "revision", "approval_ref")},
-                    sort_keys=True,
-                    ensure_ascii=True,
-                )
+            withdrawals.append(
+                {
+                    name: copy.deepcopy(deny[name])
+                    for name in ("selector", "revision", "approval_ref")
+                }
             )
-        if len("\n".join(lines).encode("utf-8")) > finite_journal.LIMIT:
+        fingerprint = str(data["public_key_fingerprint"])
+        raw_device = record.get("device")
+        device: dict[str, Any] = raw_device if isinstance(raw_device, dict) else {}
+        anchor = (record.get("what") or {}).get("anchor")
+        principal = str(anchor.get("key_id") or "") if isinstance(anchor, dict) else ""
+        result = {
+            "version": DISCLOSURE_VERSION,
+            "operation": OP,
+            "approval_id": str(record.get("approval_id") or ""),
+            "credential_key": data["key"],
+            "scope": data["scope"],
+            "owner_device": data["owner_device"],
+            "network_id": data["network_id"],
+            "recipient": {
+                "device_id": data["recipient_device"],
+                # Display-only and bounded: a record filed before the name was recorded on
+                # the card carries none, and the UI shows the device id alone then.
+                "name": _plain(device.get("name")),
+                "key_fingerprint": fingerprint,
+            },
+            "signing_principal": principal,
+            "policy_revision": consent._revision(data["policy_revision"]),
+            "retained_fence": copy.deepcopy(guard) if guard else None,
+            "withdrawals": withdrawals,
+            # TWO different clocks, kept apart on purpose: the request window bounds how
+            # long THIS CARD can be approved and applied; the grant lifetime is how long
+            # the restored share lasts once applied. A finite share has no expiry of its
+            # own -- it lasts until revoked -- and conflating the two is how an operator
+            # reads "one hour" as the life of the permission.
+            "request_window": {
+                "created_at": record.get("created_at"),
+                "expires_at": record.get("expires_at"),
+            },
+            "grant_lifetime": {"kind": "until_revoked"},
+            "future_logins": False,
+            "installs_or_joins": False,
+        }
+        if len(json.dumps(result, ensure_ascii=True).encode("utf-8")) > finite_journal.LIMIT:
             consent.refuse("finite_disclosure_invalid")
-        return lines
-    except (KeyError, TypeError, ValueError):
+        return result
+    except (KeyError, TypeError, ValueError, AttributeError):
         consent.refuse("finite_disclosure_invalid")
+
+
+def _plain(text: Any, limit: int = 64) -> str:
+    """A display-only label: no control characters, bounded. Never used as an identifier."""
+    clean = "".join(ch for ch in str(text or "") if ord(ch) >= 32 and not 127 <= ord(ch) <= 159)
+    return clean[:limit]
+
+
+def _when(value: Any) -> str:
+    return (
+        time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value)))
+        if isinstance(value, (int, float)) and value
+        else "its set time"
+    )
+
+
+def details(record: dict[str, Any]) -> list[str]:
+    """The CLI's rendering of :func:`disclosure` -- the SAME facts the desktop renders.
+
+    Raises (fail closed) for a record this build cannot describe, so the CLI refuses to
+    sign what it cannot state.
+    """
+    facts = disclosure(record)
+    heading = summary(record)
+    if facts is None or heading is None:
+        return []
+    recipient = facts["recipient"]
+    label = (
+        f"{recipient['name']} ({recipient['device_id']})"
+        if recipient["name"]
+        else recipient["device_id"]
+    )
+    lines = [heading, f"Signed policy revision: {facts['policy_revision']}"]
+    if facts["retained_fence"]:
+        lines.append(
+            "Recover retained fence: " + json.dumps(facts["retained_fence"], ensure_ascii=True)
+        )
+    for number, deny in enumerate(facts["withdrawals"], 1):
+        lines.append(f"Withdrawal {number}: " + json.dumps(deny, sort_keys=True, ensure_ascii=True))
+    lines += [
+        f"Recipient device: {label}",
+        f"Recipient key fingerprint: {recipient['key_fingerprint']}",
+        f"Network: {facts['network_id']}",
+        f"Signing principal: your operator key {facts['signing_principal']} on this machine",
+        "Duration: UNTIL YOU REVOKE IT. The restored share has no automatic expiry.",
+        f"Request window: this CARD can be approved and applied until "
+        f"{_when(facts['request_window']['expires_at'])}. That window only limits how long "
+        "this request stays answerable; it is NOT the lifetime of the share.",
+    ]
+    if len("\n".join(lines).encode("utf-8")) > finite_journal.LIMIT:
+        consent.refuse("finite_disclosure_invalid")
+    return lines
 
 
 def _remedy(expected: dict[str, Any]) -> str:
@@ -371,6 +475,52 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None)
     if current["public_key_fingerprint"] != data["public_key_fingerprint"]:
         consent.refuse("finite_subject_mismatch")
     run = onboard_approvals.begin_run(approval_id, root=root, operation=OP)
+    try:
+        result = _transact(approval_id, data, current, run, root)
+    except Exception as exc:
+        # DEFECT B (2026-10-26). ``begin_run`` moved the record to ``connecting`` with this
+        # process's pid as the run lease. A refusal inside the transaction (a policy
+        # revision that moved -- ``consent_conflict`` -- or withdrawals that changed --
+        # ``finite_denial_mismatch``) used to leave it there; in the long-lived desktop
+        # daemon the pid stays alive, so ``run_is_stale`` never fires and every retry read
+        # "run in flight" until the one-hour window closed. Mirror inheritance's apply:
+        # release the run as retry-eligible ``failed``. The release runs AFTER the
+        # transaction's locks are dropped (``mark_failed`` takes the record flock, which a
+        # second descriptor in this same process would wait on forever).
+        _release_run(approval_id, run.run_id, getattr(exc, "code", type(exc).__name__), root)
+        raise
+    _audit("credential.finite_applied", data, approval_id, root)
+    return result
+
+
+def _release_run(approval_id: str, run_id: str, detail: str, root: Path | None) -> None:
+    """``connecting -> failed`` for THIS run only; a no-op once the record moved on.
+
+    A refusal raised after ``_mark_connected_locked`` (the post-publish expiry/subject
+    re-checks) leaves a ``connected`` record whose compensation already ran; that record is
+    terminal and must not be rewritten here. A record another run superseded is that run's.
+    """
+    try:
+        record = approvals.load_record(approval_id, root=root)
+        raw_run = record.get("run")
+        run: dict[str, Any] = raw_run if isinstance(raw_run, dict) else {}
+        if record.get("state") != approvals.STATE_CONNECTING or run.get("run_id") != run_id:
+            return
+        approvals.mark_failed(approval_id, run_id=run_id, step=STEP, detail=detail, root=root)
+    except (MeshRefusal, OSError):
+        # The original refusal is the one the caller must see; a release that lost a race
+        # (a concurrent deny, a supersede) leaves the record in the state that race chose.
+        pass
+
+
+def _transact(
+    approval_id: str,
+    data: dict[str, Any],
+    current: dict[str, Any],
+    run: Any,
+    root: Path,
+) -> dict[str, Any]:
+    """The locked finite transaction, run inside an open run lease (see ``_apply``)."""
     authority = consent.ConsentDocument(data["network_id"], data["owner_device"], root)
     projection_path = placement.placement_path(data["network_id"], root)
     journal = finite_journal.Journal(data["network_id"], data["owner_device"], root)
@@ -553,5 +703,4 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None)
                 # Persisted original deny still withholds any partial holder.
                 consent.refuse("finite_projection_withheld")
             consent.refuse("finite_recovery_failed")
-    _audit("credential.finite_applied", data, approval_id, root)
     return result

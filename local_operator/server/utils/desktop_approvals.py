@@ -27,7 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.network import approvals as approval_store
-from local_operator.network.credentials import finite_share, inheritance
+from local_operator.network.credentials import (
+    desktop_approval,
+    finite_share,
+    inheritance,
+)
 from local_operator.network.types import MeshRefusal
 
 
@@ -48,7 +52,17 @@ def approval_rows(root: Path | None = None) -> list[dict[str, Any]]:
         extras = inheritance.row_extras(record)
         if extras is not None:
             row.update(extras)
+        # THE TYPED CREDENTIAL APPROVAL (``features.credential_approvals``): the structured
+        # disclosure, both digests to echo, the assurance level and the upgrade offer.
+        # ``can_approve_here`` stays False on purpose -- an old UI keyed on it must never
+        # offer a bodiless Approve; only a renderer that knows ``typed_approval`` can sign.
+        typed = desktop_approval.row_fields(record)
+        if typed is not None:
+            row["typed_approval"] = typed
+            row.setdefault("can_approve_here", False)
         rows.append(row)
+    # Re-reading the list is the "review it again" a cancelled prompt asks for.
+    desktop_approval.refetched(row["approval_id"] for row in rows)
     return rows
 
 

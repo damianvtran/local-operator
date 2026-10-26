@@ -560,18 +560,78 @@ def summary(record: dict[str, Any]) -> str | None:
     )
 
 
-def details(record: dict[str, Any]) -> list[str]:
-    """Every fact the operator must see BEFORE signing, from the signed record alone.
+#: Bumped when a field of :func:`disclosure` changes meaning (see ``finite_share``): the
+#: desktop echoes this dict's digest, so an older renderer cannot have a newer layout
+#: signed in its name.
+DISCLOSURE_VERSION = 1
 
-    Raises (fail closed) for a record this build cannot describe, so the CLI refuses to
-    sign what it cannot state.
+
+def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Every fact the operator must see BEFORE signing, as DATA, from the signed record alone.
+
+    ONE source for both surfaces: the CLI renders it in :func:`details`, the desktop
+    localizes its own labels over it, so no English and no CLI command travels in here
+    (i18n). Every value is an identifier/fingerprint copied from the digest-bound record or
+    a fixed machine token. Raises (fail closed, through :func:`_parse`) for a record this
+    build cannot describe; ``None`` when the record is not a credential permission.
     """
-    heading = summary(record)
-    if heading is None:
-        return []
+    if intent(record) is None:
+        return None
     parsed = _parse(record)
     data = parsed["data"]
-    expires = record.get("expires_at")
+    return {
+        "version": DISCLOSURE_VERSION,
+        "operation": OP,
+        "approval_id": str(record.get("approval_id") or ""),
+        "provider": parsed["provider"],
+        "account": parsed["account"],
+        # "" means NOT constrained: any org of this account (the CLI says so in words).
+        "org": parsed["org"],
+        "owner_device": data["owner_device"],
+        "network_id": data["network_id"],
+        "recipient": {
+            "device_id": data["recipient_device"],
+            "name": parsed["recipient_name"],
+            "key_fingerprint": data["public_key_fingerprint"],
+        },
+        "signing_principal": parsed["principal"],
+        # The two clocks, kept apart (see ``finite_share.disclosure``): the card's one-hour
+        # answerable window, and the permission's own lifetime, which is until revoked.
+        "request_window": {
+            "created_at": record.get("created_at"),
+            "expires_at": record.get("expires_at"),
+        },
+        "grant_lifetime": {"kind": "until_revoked"},
+        # A later sign-in to the SAME account is covered without asking again.
+        "future_logins": True,
+        "copies_credential": False,
+        # Needed, and NOT granted by this approval: ``broker_credential`` on both rows.
+        "requires_capability": {
+            "name": "broker_credential",
+            "devices": [data["owner_device"], data["recipient_device"]],
+        },
+        "installs_or_joins": False,
+    }
+
+
+def details(record: dict[str, Any]) -> list[str]:
+    """The CLI's rendering of :func:`disclosure` -- the SAME facts the desktop renders.
+
+    Raises (fail closed) for a record this build cannot describe, so the CLI refuses to
+    sign what it cannot state. The revoke/apply commands are CLI copy and live only here.
+    """
+    facts = disclosure(record)
+    heading = summary(record)
+    if facts is None or heading is None:
+        return []
+    parsed = _parse(record)
+    recipient = facts["recipient"]
+    label = (
+        f"{recipient['name']} ({recipient['device_id']})"
+        if recipient["name"]
+        else recipient["device_id"]
+    )
+    expires = facts["request_window"]["expires_at"]
     window = (
         time.strftime("%Y-%m-%d %H:%M", time.localtime(float(expires)))
         if isinstance(expires, (int, float)) and expires
@@ -579,14 +639,14 @@ def details(record: dict[str, Any]) -> list[str]:
     )
     return [
         heading,
-        f"Provider: {parsed['provider']} (a native sign-in on THIS device; copied, borrowed, "
+        f"Provider: {facts['provider']} (a native sign-in on THIS device; copied, borrowed, "
         "device-bound, static-key and MCP logins are not covered)",
-        f"Account: {parsed['account']}",
-        "Org: " + (parsed["org"] or "not constrained (any org of this account)"),
-        f"Recipient device: {_recipient_label(parsed)}",
-        f"Recipient key fingerprint: {data['public_key_fingerprint']}",
-        f"Network: {data['network_id']}",
-        f"Signing principal: your operator key {parsed['principal']} on this machine",
+        f"Account: {facts['account']}",
+        "Org: " + (facts["org"] or "not constrained (any org of this account)"),
+        f"Recipient device: {label}",
+        f"Recipient key fingerprint: {recipient['key_fingerprint']}",
+        f"Network: {facts['network_id']}",
+        f"Signing principal: your operator key {facts['signing_principal']} on this machine",
         "Duration: UNTIL YOU REVOKE IT. This permission has no automatic expiry; a sign-in "
         "to the same account later is covered without asking again, a different account is not.",
         f"Request window: this CARD can be approved and applied until {window}. That one-hour "
@@ -595,8 +655,8 @@ def details(record: dict[str, Any]) -> list[str]:
         "What the device receives: short-lived access minted here on request. The sign-in "
         "and its refresh token stay on this device; nothing is copied.",
         "Needs, and this does not grant: broker_credential on this device's own member row "
-        f"and on the row for the recipient (lop network member grant {data['network_id']} "
-        f"{data['recipient_device']} broker_credential).",
+        f"and on the row for the recipient (lop network member grant {facts['network_id']} "
+        f"{recipient['device_id']} broker_credential).",
         f"Revoke at any time: {_revoke_command(parsed)}",
         f"Approving records your decision only. Then run: "
         f"{_apply_command(parsed, str(record.get('approval_id', '')))}",
