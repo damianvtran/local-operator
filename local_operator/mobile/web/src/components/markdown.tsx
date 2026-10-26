@@ -252,7 +252,12 @@ const HEADING_CLASSES = [
 ];
 
 /* A CELL'S OWN BOX: `px-2` on each side, plus the table's own rule. */
+/* A table cell's inline box around its text: `px-2` on each side. Only the
+   FALLBACK when no cell has been rendered yet (the unit tree); a mounted table
+   reads the real number off a cell (see `cellInlineOverflow`). */
 const CELL_PADDING = 16;
+/* The collapsed border between two columns: one 1 px rule per boundary, and
+   `border-collapse` draws it once. */
 const TABLE_RULE = 2;
 
 /**
@@ -264,6 +269,20 @@ const TABLE_RULE = 2;
  * class, on both wrappers, read back by the measurement.
  */
 export const TABLE_FONT_CLASS = "lo-table-font text-body-sm";
+
+/* The header cells' `font-semibold`, as a weight rather than a measurement fudge:
+   the header font is built from the wrapper's size and family plus this weight,
+   which is the same class the `<th>` renders with (a unit test pins the two
+   together, so they cannot drift). */
+export const TABLE_HEAD_WEIGHT = "600";
+
+/** A column's inline overhead from a rendered cell's computed style: its two
+ *  paddings plus any inline borders it draws. Read, never assumed — a class change
+ *  to the cell's padding then cannot silently break the fit verdict. */
+export function cellInlineOverflow(style: Pick<CSSStyleDeclaration, "paddingLeft" | "paddingRight" | "borderLeftWidth" | "borderRightWidth">): number {
+	const px = (value: string) => Number.parseFloat(value) || 0;
+	return Math.ceil(px(style.paddingLeft) + px(style.paddingRight) + px(style.borderLeftWidth) + px(style.borderRightWidth));
+}
 
 /** ONE canvas for every table's measurement (code review round 3, C3-6): a new
  *  context per `decide()` put an allocation on a path that runs per streamed
@@ -291,20 +310,26 @@ export function markdownTableText(cell: string): string {
 export function minContentWidths(
 	head: readonly string[],
 	rows: readonly (readonly string[])[],
-	measure: (text: string) => number,
+	measure: (text: string, isHeader: boolean) => number,
+	overhead: number = CELL_PADDING,
 ): number[] {
 	const columns = Math.max(head.length, ...rows.map((row) => row.length), 0);
 	const widths = Array.from({ length: columns }, () => 0);
-	const widestWord = (text: string, index: number) => {
+	const widestWord = (text: string, index: number, isHeader: boolean) => {
 		for (const word of markdownTableText(text).split(/\s+/)) {
 			if (!word) continue;
-			const width = measure(word);
+			const width = measure(word, isHeader);
 			if (width > (widths[index] ?? 0)) widths[index] = width;
 		}
 	};
-	head.forEach(widestWord);
-	for (const row of rows) row.forEach(widestWord);
-	return Array.from(widths, (width) => Math.ceil(width) + CELL_PADDING);
+	/* THE HEADER IS DRAWN SEMIBOLD, THE BODY IS NOT (QA round 4, Q4-1). Measuring
+	   every word at the body font under-measured each column by the header's extra
+	   advance — 13 px over two columns on the fixture table — so containers just
+	   wide enough chose `table` and clipped the right edge inside `overflow:
+	   hidden`. The header row is measured at the header's own font. */
+	head.forEach((cell, index) => widestWord(cell, index, true));
+	for (const row of rows) row.forEach((cell, index) => widestWord(cell, index, false));
+	return Array.from(widths, (width) => Math.ceil(width) + overhead);
 }
 
 /**
@@ -387,10 +412,35 @@ function MarkdownTable({ lines }: { lines: readonly string[] }) {
 				setFits(true);
 				return;
 			}
-			const sample = node.querySelector<HTMLElement>(".lo-table-font") ?? node;
-			const style = getComputedStyle(sample);
-			probe.font = style.font || `${style.fontSize} ${style.fontFamily}`;
-			setFits(tableFitsIn(minContentWidths(head, rows, (text) => probe.measureText(text).width), available));
+			/* BOTH WRAPPERS CARRY `TABLE_FONT_CLASS` THEMSELVES (round 4, C4-2), so
+			   this reads the wrapper — no descendant query and no dead fallback. The
+			   header's weight is the one thing the wrapper does not carry: header
+			   cells are `font-semibold` and the body is not, so the two row groups are
+			   measured at the fonts they are actually drawn in. A rendered `<th>`/
+			   `<td>` gives those fonts exactly; before one exists, the header font is
+			   built from the wrapper plus the same weight class the header uses. */
+			const style = getComputedStyle(node);
+			const family = `${style.fontStyle} ${style.fontSize} ${style.fontFamily}`.trim();
+			const weight = (element: Element | null, fallback: string) => {
+				if (!element) return fallback;
+				const computed = getComputedStyle(element);
+				return `${computed.fontWeight} ${computed.fontSize} ${computed.fontFamily}`;
+			};
+			const bodyFont = weight(node.querySelector("td"), family);
+			const headFont = weight(node.querySelector("th"), `${TABLE_HEAD_WEIGHT} ${style.fontSize} ${style.fontFamily}`);
+			/* The inline box a column needs beyond its text, read off a real cell
+			   (padding + its own borders). A cell that reports NO inline box is not the
+			   styled cell — a host with no stylesheet (the unit tree) or a class the
+			   build failed to emit — and falling back to the class constant keeps the
+			   verdict from ever under-estimating, which is the direction that clips. */
+			const cell: HTMLElement | null = node.querySelector("td");
+			const measured = cell ? cellInlineOverflow(getComputedStyle(cell)) : 0;
+			const overhead = measured > 0 ? measured : CELL_PADDING;
+			const measure = (text: string, isHeader: boolean) => {
+				probe.font = isHeader ? headFont : bodyFont;
+				return probe.measureText(text).width;
+			};
+			setFits(tableFitsIn(minContentWidths(head, rows, measure, overhead), available));
 		};
 		decide();
 		if (typeof ResizeObserver === "undefined" || !box.current) return;
