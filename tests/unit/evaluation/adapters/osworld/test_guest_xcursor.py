@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import ctypes.util
 import gc
 import hashlib
 import json
@@ -344,7 +345,10 @@ def test_a_stock_guest_is_patched_and_the_reload_is_proved() -> None:
     assert guest.file == guest_xcursor.patched_source()
     assert report.sha256_before == guest_xcursor.STOCK_SHA256
     assert report.sha256_after == guest_xcursor.PATCHED_SHA256
-    # A NEW serving pid is the proof the server imported the new module.
+    # A NEW serving pid is the proof the server imported the new module. On
+    # ``applied`` a post-write inspection always succeeded, so ``None`` here
+    # would itself be a defect, not a state to tolerate.
+    assert report.server_pids_after is not None, "applied without a post-write inspection"
     assert set(report.server_pids_after) - set(report.server_pids_before)
     record = report.to_json()
     assert record["applied"] is True
