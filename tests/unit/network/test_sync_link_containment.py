@@ -1119,11 +1119,11 @@ def test_an_owner_deletion_and_append_reconciles_through_the_retry(
     second = sync.sync_from(root, "abc123", ask=ask, into=replica)
 
     assert [exc.code for exc in refusals] == ["stale_plan"]
-    # WHICHEVER NAME IT CARRIES IS TRUE: this destination holds neither the member it lost
-    # inside the plan answer (``notes.md``, which the report-justified pin checks first)
-    # nor the phantom the plan declares, and the refusal owes a name rather than an
-    # anonymous retry. Pinning the phantom alone would pin an accident of member order.
-    assert any(name in refusals[0].message for name in ("scratchpad/notes.md", phantom))
+    # THE NAME IS DETERMINISTIC: the complete member set is walked in sorted order,
+    # ``scratchpad/notes.md`` sorts before the phantom the plan also declares, and its
+    # pin therefore runs first — so the refusal names the member this destination lost,
+    # and nothing here rests on an accident of member order.
+    assert "scratchpad/notes.md" in refusals[0].message
     assert [plan["transcript"]["mode"] for plan in plans] == ["append", "replace"]
     assert "scratchpad/notes.md" in [item["name"] for item in plans[1]["items"]]
     assert second["mode"] == "replace"
@@ -1287,6 +1287,118 @@ def test_an_unchanged_omitted_member_is_pinned_by_one_stat_not_a_hash(
     assert "stats" in sync.held_report(replica, replica)
     cursor = sync.read_replica_cursor(root, "abc123")
     assert cursor["files"]["scratchpad/notes.md"] == sync.sha256_bytes(b"notes")
+
+
+def test_a_report_justified_member_must_also_report_the_declared_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report's stat facts and its digest are two facts; the plan needs BOTH.
+
+    The facts prove the member the report hashed is still the one on disk; they say
+    nothing about the digest the report claims those bytes hash to. Justified on the
+    facts alone, a plan that declared a digest this device never held for an omitted
+    member was published as the copy's own, so the cursor named bytes the replica did
+    not have and a recovery refused it. A reported digest that disagrees with the
+    declaration must fall through to the disk digest, which refuses ``stale_plan`` and
+    names the member, so the existing retry repairs the copy.
+    """
+    root, owner, replica = _synced_replica_with_a_turn(tmp_path)
+    name = "scratchpad/notes.md"
+    member = replica / "scratchpad" / "notes.md"
+    plans: list[dict[str, Any]] = []
+    honest = _owner_ask(owner, "abc123", plans)
+    forged = sync.sha256_bytes(b"a digest this device never held")
+    refusals: list[sync.SyncRefused] = []
+    at_refusal: list[tuple[bytes, str]] = []
+    original_pull = sync.pull
+
+    def recording_pull(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return original_pull(*args, **kwargs)
+        except sync.SyncRefused as exc:
+            refusals.append(exc)
+            at_refusal.append(
+                (member.read_bytes(), sync.read_replica_cursor(root, "abc123")["files"][name])
+            )
+            raise
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        answer = honest(frame)
+        if frame["phase"] == "plan" and len(plans) == 1:
+            # STILL A WELL-FORMED PLAN: the member stays in the complete source set, is
+            # not transferred, and the identity is recomputed over the forged digest.
+            answer["members"][name] = forged
+            answer["plan_id"] = sync._attested_digest(
+                answer["members"], tuple(answer["member_links"]), "abc123"
+            )
+        return answer
+
+    monkeypatch.setattr(sync, "pull", recording_pull)
+    second = sync.sync_from(root, "abc123", ask=ask, into=replica)
+
+    assert [exc.code for exc in refusals] == ["stale_plan"]
+    assert name in refusals[0].message
+    # NEITHER THE BYTES NOR THE CURSOR MOVED for the refused member.
+    assert at_refusal == [(b"notes", sync.sha256_bytes(b"notes"))]
+    assert second["mode"] == "replace"
+    cursor = sync.read_replica_cursor(root, "abc123")
+    assert cursor["files"][name] == sync.sha256_bytes(b"notes")
+    assert cursor["files"][name] == sync.sha256_bytes(member.read_bytes())
+    promoted = sync.promote_replica(root, "abc123", new_id="recovered")
+    assert promoted["session_id"] == "recovered"
+    assert (root / "sessions" / "recovered" / "scratchpad" / "notes.md").read_bytes() == b"notes"
+
+
+def test_a_link_is_digested_after_the_stat_that_describes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``held_report``'s link branch must take its facts FIRST, as the other two do.
+
+    The documented order is facts, then digest, so a write between the two leaves facts
+    the live member no longer matches and the attestation refuses. The link branch read
+    its target text first, so a link swapped between the two calls reported the OLD
+    target's digest beside the NEW link's facts and the pin accepted that pairing: the
+    cursor named a target the replica had moved past, which a recovery refuses. Here the
+    walk reads ``notes.md`` and the link becomes ``other.md`` before the stat, so the
+    report may only publish the digest of the target it actually measured facts for.
+    """
+    root = tmp_path / "holder"
+    owner = root / "owner"
+    session = owner / "sessions" / "abc123"
+    (session / "scratchpad").mkdir(parents=True)
+    transcript = session / "transcript.jsonl"
+    original = b'{"line":1}\n'
+    transcript.write_bytes(original)
+    (session / "scratchpad" / "notes.md").write_bytes(b"notes")
+    (session / "scratchpad" / "link").symlink_to("notes.md")
+    replica = sync.replica_dir(root, "abc123")
+    sync.sync_from(root, "abc123", ask=_owner_ask(owner), into=replica)
+    transcript.write_bytes(original + b'{"line":2}\n')
+    link = replica / "scratchpad" / "link"
+    name = "scratchpad/link"
+    honest_walk = sync.tree_link_entries
+    swapped: list[int] = []
+
+    def swapping_walk(directory: Path) -> list[tuple[str, str]]:
+        entries = honest_walk(directory)
+        if Path(directory) == replica and not swapped:
+            # THE WINDOW: the target text has just been read by the walk, and the link
+            # changes before ``held_report`` takes the facts that describe it.
+            swapped.append(1)
+            link.unlink()
+            link.symlink_to("other.md")
+        return entries
+
+    monkeypatch.setattr(sync, "tree_link_entries", swapping_walk)
+    sync.sync_from(root, "abc123", ask=_owner_ask(owner), into=replica)
+
+    assert swapped == [1]
+    cursor = sync.read_replica_cursor(root, "abc123")
+    # THE CURSOR NAMES A TARGET THE REPLICA REALLY HOLDS: the pull either carried the
+    # link from the plan (the honest repair) or refused — it may never publish the
+    # digest of a target it read before the stat describing the link.
+    assert cursor["files"][name] == sync.sha256_bytes(b"notes.md")
+    assert sync.held_report(replica, replica)["files"][name] == cursor["files"][name]
 
 
 @pytest.mark.parametrize("honest", [True, False])

@@ -2451,7 +2451,15 @@ def _apply_validated_plan(
                 continue
             scope = attachment_scope if name.startswith(ATTACHMENT_PREFIX) else session_scope
             facts = _reported_member_facts(reported_stats, name)
-            if facts is not None:
+            # TWO FACTS, BOTH REQUIRED. The stats prove the member the report hashed is
+            # still the one on disk; the report's digest is what it claims those bytes
+            # ARE. Pinning the stats alone published whatever digest the plan declared,
+            # even one this device never held — the cursor then named bytes the replica
+            # did not have and a recovery refused it. A reported digest that disagrees
+            # with the declaration is not a member this device can attest, so it falls
+            # through to the disk digest below: that refuses ``stale_plan`` naming the
+            # member, and the retry re-plans against what is really here.
+            if facts is not None and attested.get(name) == declared:
                 _require_reported_member_unchanged(
                     dest_dir,
                     attachments_root,
@@ -3355,12 +3363,24 @@ def held_report(dest_dir: Path, attachments_root: Path) -> dict[str, Any]:
     # THE LINKS THIS DESTINATION ALREADY HOLDS, keyed and digested exactly as the plan
     # spells them, so a resume does not re-send a link it has (and so a link whose target
     # the SOURCE changed is not mistaken for one already carried).
-    for name, target in tree_link_entries(Path(dest_dir)):
-        files[name] = sha256_bytes(target.encode("utf-8"))
+    for name, _target in tree_link_entries(Path(dest_dir)):
+        path = Path(dest_dir) / name
         try:
-            facts = os.lstat(Path(dest_dir) / name)
+            # THE FACTS COME FIRST, exactly as in the file and blob loops above. The
+            # target text the digest is taken from is read AFTER this stat — not taken
+            # from the walk that found the link, which necessarily read it earlier — so
+            # a link swapped in between can never pair an old target's digest with the
+            # new link's facts: the facts then describe the current link and the digest
+            # is the current target's, or the re-read fails and the member is simply not
+            # reported (a re-send). The other order pinned a digest the link had already
+            # moved past, which the attestation then accepted.
+            facts = os.lstat(path)
+            target = _portable_link_target(Path(dest_dir), path)
         except OSError:
             continue
+        if not target:
+            continue
+        files[name] = sha256_bytes(target.encode("utf-8"))
         stats[name] = (facts.st_size, facts.st_mtime_ns, facts.st_dev, facts.st_ino)
     blobs: dict[str, str] = {}
     store = Path(attachments_root) / ATTACHMENT_PREFIX
