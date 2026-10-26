@@ -544,6 +544,13 @@ export interface SessionProjection {
 	ended: boolean;
 	/** Record fresh but socket unreachable. */
 	degraded: boolean;
+	/** The relay's "owner has gone quiet" verdict (`SessionProjection.
+	    heartbeat_stale` in `mobile/types.py`): true once BOTH the runtime's
+	    heartbeat and its frames are older than the daemon's one health window
+	    (`SESSION_HEALTH_WINDOW_S`), false while either is fresh. OPTIONAL and
+	    absent on an older daemon and on a disk rebuild — absence is "not
+	    reported", never stale (`lib/session-health.ts`). */
+	heartbeat_stale?: boolean | null;
 	transcript: TranscriptEntry[];
 	/** Todos grouped into phases. One implicit `"Todos"` phase carries a flat
 	    list and renders without a header. */

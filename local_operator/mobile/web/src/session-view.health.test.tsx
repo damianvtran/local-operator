@@ -20,7 +20,7 @@
 // captures and their measured y-stability numbers. What IS pinned here is the
 // structure that makes it true (`absolute` + `pointer-events-none` on the
 // ladder container, `pointer-events-auto` on the resume control).
-import { cleanup, fireEvent, render, screen, waitFor, act } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
 import type { SessionProjection, TranscriptEntry } from "./types";
@@ -224,83 +224,50 @@ describe.each<[string, Partial<SessionProjection>]>([
 	});
 });
 
+/* THE ENDED SESSION (U7), now the header's grey status dot (operator request:
+   the permanent banner above the composer is gone). The resume path itself —
+   acceptance line (U24), same-route survival (U16), the refusal voice (D5/U26)
+   and where it reopens (U18, #1875) — moved with its code into the dot's sheet
+   and is asserted there, in `session-view.status-dot.test.tsx`. What stays here
+   is the ladder's honesty about the state. */
 describe("an ended session (U7)", () => {
-	it("says so and offers the documented resume, which reopens the conversation", async () => {
+	/** The status dot's sheet — the one place an ended session offers Resume. */
+	function openHealthSheet(): HTMLElement {
+		fireEvent.click(document.querySelector<HTMLElement>("button[data-health]")!);
+		return screen.getByRole("dialog");
+	}
+
+	it("says so in the header and offers the documented resume from the dot", async () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		// The reader is told what happened, in the strip's own words.
-		expect(screen.getByText("Session ended · history kept")).toBeTruthy();
+		// The reader is told what happened, in the header's own word.
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("ended");
+		expect(control.getAttribute("title")).toBe("Ended");
+		expect(within(control).getByText("Ended")).toBeTruthy();
 
-		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+		fireEvent.click(within(openHealthSheet()).getByRole("button", { name: "Resume" }));
 		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledWith("s1"));
-		// The route echoes the id, so the phone lands on the SAME session route —
-		// the shape that makes U16 (below) a same-route survival problem.
 		await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith("/s/s1"));
 	});
 
 	it("an ended CUT-OFF session offers exactly ONE resume affordance (U15)", () => {
-		/* The shape the daemon serves after a mid-turn death: the terminal
-		   repaint fills the end from the durable record, so `ended` and the
-		   cut-off receipt coexist. The composer used to grow a second, prominent
-		   `turn cut off — tap to resume` whose `continue` the dead runtime can
-		   never take — the strip's resume is the one path that respawns, so it
-		   must be the only one offered. */
+		/* The shape the daemon serves after a mid-turn death: `ended` and the
+		   cut-off receipt coexist. The composer's `turn cut off — tap to resume`
+		   sends `continue` to a runtime that is gone; the dot's Resume is the one
+		   path that respawns, so it must be the only one offered — and it is not
+		   painted at rest at all, so nothing in the thumb zone competes. */
 		slot = {
 			projection: projection({ ended: true, stop_reason: "aborted", cut_off: true }),
 			connected: true,
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /tap to resume/ })).toBeNull();
 		expect(screen.queryByText("turn cut off — tap to resume")).toBeNull();
-	});
-
-	it("a SUCCEEDED resume that does not revive the session leaves the button usable (U16)", async () => {
-		/* The same-route no-op: the POST answers, the navigation lands where the
-		   component already is, and no live frame arrives. `busy` used to stay
-		   set, stranding `resuming…` disabled with no way out. */
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-
-		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
-		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledTimes(1));
-		// Retrying is safe (the daemon coalesces concurrent resumes), so the
-		// control must come back — and a second press must actually fire again.
-		const again = await screen.findByRole("button", { name: "Resume" });
-		expect((again as HTMLButtonElement).disabled).toBe(false);
-		fireEvent.click(again);
-		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledTimes(2));
-	});
-
-	it("renders the daemon's sentence when the resume is refused, in one refusal voice (D5)", async () => {
-		mocks.resumeSession.mockImplementation(async () => {
-			throw new Error("no runtime to resume into");
-		});
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-
-		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
-		await waitFor(() =>
-			expect(screen.getByRole("alert").textContent).toContain(
-				"Could not resume: no runtime to resume into",
-			),
-		);
-		// The affordance survives the refusal — retrying is the reader's call.
-		expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
-		expect(mocks.navigate).not.toHaveBeenCalled();
-	});
-
-	it("keeps the ended banner in flow above the composer, never over history", () => {
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-		const row = screen.getByText("Session ended · history kept");
-		expect(row.closest("div.absolute")).toBeNull();
-		const composer = document.querySelector(".lo-composer");
-		expect(composer).toBeTruthy();
-		expect(row.compareDocumentPosition(composer! ) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-		expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+		expect(within(openHealthSheet()).getAllByRole("button", { name: "Resume" })).toHaveLength(1);
 	});
 
 	it("reaches wide view through the session menu, with its state visible (D2, #1870)", () => {
@@ -330,73 +297,21 @@ describe("an ended session (U7)", () => {
 		expect(localStorage.getItem("lo-mobile-wide-view")).toBeNull();
 	});
 
-	it("says where an ended session reopens, and that a send does it too (U18, #1875)", () => {
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-		/* The words are spelled out, not a bare `~` (UX round 2, U25 = D8). */
-		expect(screen.getByText("A send or Resume reopens it in your home folder")).toBeTruthy();
-	});
-
-	it("a resume that succeeds without a live frame says so (U24)", async () => {
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
-		expect(
-			await screen.findByText("reopening — this can take a few seconds"),
-		).toBeTruthy();
-	});
-
-	it("and the line says what is true if the session still has not come up (U24)", async () => {
-		vi.useFakeTimers();
-		try {
-			slot = { projection: projection({ ended: true }), connected: true };
-			render(<SessionScreen sessionId="s1" />);
-			fireEvent.click(screen.getByRole("button", { name: "Resume" }));
-			// Flush the POST's promise without advancing the clock.
-			await act(async () => {
-				await Promise.resolve();
-			});
-			expect(screen.getByText("reopening — this can take a few seconds")).toBeTruthy();
-			await act(async () => {
-				vi.advanceTimersByTime(21_000);
-			});
-			expect(screen.getByText("still reopening — it has not come up yet")).toBeTruthy();
-			expect(screen.queryByText("reopening — this can take a few seconds")).toBeNull();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it("maps the resume 404 onto the reader's sentence, not the raw id (U26)", async () => {
-		const api = await import("./api");
-		mocks.resumeSession.mockImplementation(async () => {
-			throw new api.HttpError(404, "no such past session: s1");
-		});
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-		fireEvent.click(screen.getByRole("button", { name: "Resume" }));
-		await waitFor(() =>
-			expect(screen.getByRole("alert").textContent).toBe(
-				"Could not resume: this session is no longer saved",
-			),
-		);
-	});
-
-	it("keeps spend reachable from the composer while the ended banner is present", () => {
+	it("keeps spend reachable from the composer on an ended session", () => {
 		slot = { projection: projection({ ended: true, context_tokens: 12400, context_window: 200000 }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 		const spend = screen.getByRole("button", { name: /Spend & context:/ });
 		expect(spend.closest(".lo-composer")).toBeTruthy();
-		expect(screen.getByText("Session ended · history kept").closest("div.absolute")).toBeNull();
 	});
-	it("spends no transcript top inset once health is an in-flow bottom banner", () => {
+
+	it("spends no transcript top inset and no strip above the composer", () => {
 		slot = { projection: projection({ ended: true, transcript: [userRow("prompt")] }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 		expect(document.querySelector("[data-scroll-top-inset]")).toBeNull();
 		expect(screen.getByText("prompt")).toBeTruthy();
-		expect(screen.getByText("Session ended · history kept").closest("div.absolute")).toBeNull();
+		expect(screen.queryByText("Session ended · history kept")).toBeNull();
+		expect(document.querySelector("[data-above-composer]")).toBeNull();
 	});
-
 });
 
 describe("the route's tab title (U21)", () => {
@@ -416,11 +331,16 @@ describe("a degraded session (U7)", () => {
 		slot = { projection: projection({ degraded: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("Not answering — sends will wait")).toBeTruthy();
-		// `ended` and `degraded` are different facts; the degraded strip must
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("not_answering");
+		expect(within(control).getByText("Not answering")).toBeTruthy();
+		// The full sentence (sends wait) is one tap away, in the dot's sheet.
+		fireEvent.click(control);
+		expect(within(screen.getByRole("dialog")).getByText("Not answering — sends will wait")).toBeTruthy();
+		// `ended` and `degraded` are different facts; the degraded state must
 		// not drag the resume affordance (and its restart offer) in with it.
 		expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
-		expect(screen.queryByText(/session ended/)).toBeNull();
+		expect(screen.queryByText(/session ended/i)).toBeNull();
 	});
 });
 
@@ -432,17 +352,22 @@ describe("the health ladder renders exactly one rung", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("Session ended · history kept")).toBeTruthy();
-		expect(screen.queryByText("Not answering — sends will wait")).toBeNull();
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("ended");
+		expect(within(control).getByText("Ended")).toBeTruthy();
+		expect(screen.queryByText("Not answering")).toBeNull();
 		expect(screen.queryByText("Reconnecting…")).toBeNull();
+		expect(document.querySelectorAll("[data-health-dot]")).toHaveLength(1);
 	});
 
 	it("prefers degraded over the phone's own link", () => {
 		slot = { projection: projection({ degraded: true }), connected: false };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("Not answering — sends will wait")).toBeTruthy();
+		expect(document.querySelector<HTMLElement>("button[data-health]")!.dataset.health).toBe("not_answering");
+		expect(screen.getByText("Not answering")).toBeTruthy();
 		expect(screen.queryByText("Reconnecting…")).toBeNull();
+		expect(document.querySelectorAll("[data-health-dot]")).toHaveLength(1);
 	});
 });
 

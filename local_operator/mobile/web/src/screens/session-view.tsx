@@ -23,7 +23,7 @@
  * box they are bounded by, so they tighten exactly when the space does.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { resumeSession, setSessionPin } from "../api";
+import { setSessionPin } from "../api";
 import { AskDock } from "../components/ask-dock";
 import { AsksSheet } from "../components/asks-sheet";
 import { ModelSheet } from "../components/model-sheet";
@@ -35,7 +35,8 @@ import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
-import { SessionSubtitle } from "../components/session-subtitle";
+import { SessionHealthControl } from "../components/session-health";
+import { AboveComposerStack } from "../components/above-composer";
 import { Sheet } from "../components/ui/sheet";
 import { Chip } from "../components/ui/chip";
 import { cn } from "../lib/cn";
@@ -43,7 +44,6 @@ import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR } from "../lib/column";
 import { navigate, parseHash } from "../router";
 import { consumePendingFocus } from "../lib/pending-focus";
 import { pinRefusalText } from "../lib/pin-refusal";
-import { resumeRefusalText } from "../lib/refusal";
 import { useCompletionView } from "../use-completion-view";
 import { usePendingEchoes } from "../pending-echo";
 import { AgentScreen } from "./agent-view";
@@ -229,17 +229,22 @@ function Header({
 				‹
 			</button>
 			<div className="min-w-0 flex-1">
-				{/* THE NAME TRUNCATES, THE FACT DOES NOT (operator finding B): a long
-				    conversation title is cut with an ellipsis here, so the whole string
-				    stays recoverable as the element's `title` and the document title
-				    already carries it. Local truncation with the full value still
-				    reachable is truthful; a name painted in full that pushes the phone
-				    sideways is not. */}
-				<span
-					className="block truncate text-heading font-semibold"
-					title={projection.conversation_name || undefined}
-				>{projection.conversation_name || "untitled"}</span>
-				<SessionSubtitle projection={projection} connected={connected} />
+				{/* THE STATUS DOT (operator request, replacing the ended banner): the
+				    title block is the control that opens the health sheet, so its
+				    44 px target costs the 56 px header nothing (see
+				    `components/session-health.tsx`). */}
+				<SessionHealthControl sessionId={sessionId} projection={projection} connected={connected}>
+					{/* THE NAME TRUNCATES, THE FACT DOES NOT (operator finding B): a long
+					    conversation title is cut with an ellipsis here, so the whole string
+					    stays recoverable as the element's `title` and the document title
+					    already carries it. Local truncation with the full value still
+					    reachable is truthful; a name painted in full that pushes the phone
+					    sideways is not. */}
+					<span
+						className="block truncate text-heading font-semibold"
+						title={projection.conversation_name || undefined}
+					>{projection.conversation_name || "untitled"}</span>
+				</SessionHealthControl>
 			</div>
 			{/* THE OVERFLOW. Pin, wide view and approvals all have labelled rows in
 			    one sheet now: the `★`, `? N` and `[wide]` controls were each a
@@ -301,130 +306,6 @@ function Header({
 				{pinRefusal.text}
 			</p>
 		) : null}
-		</>
-	);
-}
-
-/** The documented resume affordance for an ENDED session (mobile UX batch 2,
-    U7). docs/mobile.md: "the phone card flips to *ended*, offering resume" and
-    "the session is shown as ended (its history stays resumable)". A tap reopens
-    the conversation as a NEW live session — the same route the past-sessions
-    screen uses (`POST /api/sessions/resume`: the daemon spawns a child that
-    resumes the transcript) — and the router takes the phone to it. Local state
-    so the button can say `resuming…` and a refusal renders its sentence instead
-    of a dead control. */
-
-/* THE ACCEPTANCE LINE'S TWO SPELLINGS (UX round 2, U24). The first is what a
-   cold child start honestly looks like; the second is the same fact once "a
-   few seconds" has stopped describing it — the session still has not come
-   back, which is what the reader needs to decide to wait or retry. 20s is
-   generous for the ordinary respawn (the live leg's own real child took ~2s)
-   and short enough that a stuck one is not dressed up as a normal start. */
-const REOPENING = "reopening — this can take a few seconds";
-const STILL_REOPENING = "still reopening — it has not come up yet";
-const REOPEN_REPORT_MS = 20_000;
-
-function EndedSessionStrip({ sessionId }: { sessionId: string }) {
-	const [busy, setBusy] = useState(false);
-	const [error, setError] = useState("");
-	/* THE ACCEPTANCE LINE (UX round 2, U24). A resume whose POST succeeds but
-	   whose session does not come back live ends the same way it started
-	   otherwise — one click, no word — and the reader cannot tell accepted
-	   from failed from still-coming-up. The line says which; the strip
-	   unmounting (a live frame flips `ended`, which is what removes this
-	   component and its notice) is what ends it. It is also capped: "a few
-	   seconds" stops being true long before the strip does, and a stale
-	   acceptance reads like a promise the daemon is not keeping — past the
-	   cap the sentence says what is actually true instead. */
-	const [notice, setNotice] = useState("");
-	const resume = async () => {
-		if (busy) return;
-		setBusy(true);
-		setError("");
-		setNotice("");
-		try {
-			const r = await resumeSession(sessionId);
-			/* THE SAME-ROUTE NO-OP (UX round 1, U16 / agent-review MINOR 1). The
-			   route echoes the id it was given, so this navigation usually lands on
-			   the route that is ALREADY mounted — this component, and its `busy`,
-			   survive it. Until this reset, a POST that succeeded against a session
-			   that did not come back live left `resuming…` disabled forever, with no
-			   way out short of leaving the screen. Retrying is safe: `spawn_session`
-			   coalesces concurrent resumes onto one constructor and a later attempt
-			   reattaches the same owner. */
-			setBusy(false);
-			setNotice(REOPENING);
-			navigate(`/s/${encodeURIComponent(r.session_id)}`);
-		} catch (e) {
-			/* One refusal voice (design round 1, D5): prefixed like the pin's,
-			   instead of the raw daemon string. */
-			setError(resumeRefusalText(e));
-			setBusy(false);
-		}
-	};
-	useEffect(() => {
-		if (notice !== REOPENING) return;
-		const t = setTimeout(() => setNotice(STILL_REOPENING), REOPEN_REPORT_MS);
-		return () => clearTimeout(t);
-	}, [notice]);
-	return (
-		<>
-			<div className="flex items-center gap-2 bg-elevated px-2 py-1">
-				<div className="min-w-0 flex-1">
-					{/* THE TITLE, ONE TEXT LINE AT EVERY WIDTH (design round 3, D10).
-					    `this session has ended — its history is kept` dropped its last
-					    word onto a second line at 320 and made the strip 63.17px where
-					    one line does the job; the shorter sentence keeps the promise
-					    (`history kept`) in the same register. */}
-					<p role="status" className="text-meta text-ink-muted">
-						{messageRuntime.t("relay.chrome.session.ended")}
-					</p>
-					{/* WHERE IT REOPENS (UX round 1, U18; the words in round 2, U25 =
-					    D8). The daemon resumes the transcript in the owner's home — the
-					    durable directory does not record a cwd to resume into — so the
-					    strip says so before the tap rather than letting a project session
-					    quietly come back in `~`. The PATH IS SPELLED OUT: a bare `~` is
-					    shell shorthand a phone reader should not have to decode
-					    (measured at 390 fitting beside the button, and at 320 on its own
-					    line inside the row). Inside the row's text cell: at 390 it costs
-					    no height at all beside the 44px button, and the row's growth at
-					    320 is bounded by the sentence it belongs to.
-
-					    AND THAT A SEND DOES IT TOO (issue #1875): the daemon wakes a host for
-					    a prompt to an ended session, so resume is the way to reopen WITHOUT
-					    composing, not a prerequisite for continuing. */}
-					<p className="mt-0.5 text-meta text-ink-dim">
-						{messageRuntime.t("relay.chrome.session.ended_hint")}
-					</p>
-				</div>
-				{/* A real 44px target inside a `pointer-events-none` overlay: the
-				    row's dead space passes touches through to the transcript, and
-				    only this control claims them. */}
-				<button
-					type="button"
-					disabled={busy}
-					onClick={() => void resume()}
-					className="pointer-events-auto min-h-11 shrink-0 rounded-sm border border-control px-3 text-body-sm active:bg-surface disabled:opacity-50"
-				>
-					{busy ? messageRuntime.t("relay.chrome.session.resuming") : messageRuntime.t("relay.chrome.session.resume")}
-				</button>
-			</div>
-			{notice ? (
-				<p
-					role="status"
-					className="bg-elevated px-2 py-1 text-meta text-ink-dim"
-				>
-					{notice}
-				</p>
-			) : null}
-			{error ? (
-				<p
-					role="alert"
-					className="bg-elevated px-2 py-1 text-meta break-words text-danger"
-				>
-					{error}
-				</p>
-			) : null}
 		</>
 	);
 }
@@ -881,6 +762,11 @@ export function SessionScreen({
 				/>
 			)}
 
+			{/* EVERYTHING BETWEEN THE TRANSCRIPT AND THE COMPOSER sits in ONE slot
+			    with one gap and one inset (`components/above-composer.tsx`), never
+			    its own padding — the stacked independent insets that left the old
+			    ended banner flush on the composer card. */}
+			<AboveComposerStack>
 			{blocking ? (
 				/* Key the WHOLE card on request_id + question_index so React
 				   remounts it for each question of a multi-part ask. A
@@ -915,18 +801,13 @@ export function SessionScreen({
 
 			{/* One thumb-height tray replaces three stacked disclosures. Its panels
 			    are the same content inside the shared in-flow Sheet, not new lists;
-			    a long task/agent read cannot halve the transcript permanently.
-			    An ended/degraded banner replaces this slot, never overlays history. */}
-			{/* THE BANNER NEVER OWNS THE ONLY DOOR (agent review round 1, C1-1 = QA
-			    Q1-2). This arm used to REPLACE the tray, so an ended or degraded
-			    conversation lost the only setters that open the Tasks and Agents
-			    sheets — its retained history became unreadable without restarting
-			    the runtime. The banner now sits ABOVE the tray and the tray renders
-			    on its own merits in every health state: reading finished work is not
-			    a live action, so it must not depend on liveness. */}
-			{projection.ended ? <EndedSessionStrip sessionId={sessionId} /> : projection.degraded ?
-				<p role="status" className="flex min-h-11 shrink-0 items-center bg-warning-wash px-3 text-meta text-warning">{messageRuntime.t("relay.chrome.session.degraded")}</p>
-			: null}
+			    a long task/agent read cannot halve the transcript permanently. */}
+			{/* NO HEALTH BANNER IN THIS SLOT ANY MORE (operator request): ended and
+			    not-answering are the header's status dot, whose sheet carries the
+			    sentences and the Resume action. The tray still renders on its own
+			    merits in every health state — reading finished work is not a live
+			    action, so the Tasks and Agents doors must not depend on liveness
+			    (agent review round 1, C1-1 = QA Q1-2). */}
 			{(needsApproval || (projection.asks?.length ?? 0) > 0 || projection.todos.some(p => p.items.length) || projection.subagents.length) ?
 				/* THE TRAY NEVER SCROLLS SIDEWAYS (operator finding B). It was an
 				   `overflow-x: auto` rail, so the last pill was reachable only by a
@@ -936,7 +817,7 @@ export function SessionScreen({
 				   390. `flex-wrap` is the safety net for a longer translation: a second
 				   line costs 44 px of transcript, but hides nothing and adds no tap;
 				   `gap-x-1`/`gap-y-3` keep neighbouring hit bands from touching. */
-				<div aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-3 px-3 py-1.5 min-[390px]:gap-x-2">
+				<div aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-3 py-1.5 min-[390px]:gap-x-2">
 					{needsApproval ? <Chip onClick={() => setGateOpen(true)} className="shrink-0 !bg-danger-wash !text-danger" aria-label={messageRuntime.t("relay.chrome.session.tray.approve_label")}>{messageRuntime.t("relay.chrome.session.tray.approve")}</Chip> : null}
 					<AskDock rows={projection.asks} onOpen={openAsks} compact />
 					{/* ONE CHIP, TWO PLACES (code review round 2, C2-5). It used to be two
@@ -958,6 +839,7 @@ export function SessionScreen({
 					})}</Chip> : null}
 					{agentsFailed === 0 ? agentsChip : null}
 				</div> : null}
+			</AboveComposerStack>
 			<Sheet open={tasksOpen} onClose={() => setTasksOpen(false)} title={messageRuntime.t("relay.chrome.session.tasks_title")}>
 				<TodosPanel todos={projection.todos} sheet />
 			</Sheet>

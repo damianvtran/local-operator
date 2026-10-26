@@ -424,8 +424,12 @@ export function PendingCard({
 			   320x568 state, card 341px fixed, put the composer's bottom at
 			   664 in a 568 column). The `max-height` above still caps it on
 			   tall columns — the two bounds compose (cap when there is room,
-			   shrink when there is not), which neither bound alone does. */
-			className="mx-2 flex min-h-0 flex-col rounded-lg border-s-[3px] border-accent bg-elevated p-2.5"
+			   shrink when there is not), which neither bound alone does.
+
+			   NO OUTER INSET OF ITS OWN: the session view places this card in the
+			   above-composer stack (`components/above-composer.tsx`), whose one
+			   `px-2` lines its edge up with the composer card's. */
+			className="flex min-h-0 flex-col rounded-lg border-s-[3px] border-accent bg-elevated p-2.5"
 		>
 			{/* PINNED meta row (D2). One line, fixed height, cannot outgrow
 			    anything — so pinning it costs no reachability while keeping the

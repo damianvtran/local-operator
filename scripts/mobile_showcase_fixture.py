@@ -29,9 +29,11 @@ rows (done / failed / running, a diff), markdown, a todos panel, a subagent
 roster with one running child, the spend/context glance, and an open ask, so
 one frame carries every panel the redesign has to re-home.
 
-Two more session views are reachable from the list for the state matrix:
-``Approve deploy script`` (a pending APPROVAL card) and ``Ended overnight
-batch`` (the ENDED strip with resume).
+More session views are reachable from the list for the state matrix:
+``Approve deploy script`` (a pending APPROVAL card), ``Ended overnight
+batch`` (the GREY header status dot, whose sheet offers resume), ``Watch the
+nightly build`` (YELLOW from a dropped dial) and ``Quiet overnight import``
+(YELLOW from a stale heartbeat).
 
 ISOLATION. ``scripts.probe_isolation`` re-homes HOME and the config dir before
 any ``local_operator`` import; no runtime scanner and no registrant sockets
@@ -130,6 +132,11 @@ LONG_CWD = (
     "/synthetic/home/projects/clients/northwind-traders/"
     "quarterly-reconciliation-2026/vendor-ledger-exports/raw"
 )
+
+#: The live row whose runtime has gone quiet on BOTH health clocks (its record's
+#: heartbeat backdated past ``SESSION_HEALTH_WINDOW_S``, and no frame received),
+#: so the header dot reads "Not answering" from ``heartbeat_stale`` alone.
+QUIET_SESSION_ID = "5c1a7e0b5e11"
 
 #: ``1`` serves an EMPTY store (the list's empty state); the capture sets it for
 #: one leg of its run.
@@ -578,6 +585,10 @@ def _live_rows() -> list[tuple[SessionProjection, int, bool]]:
             False,
         ),
         (_plain_projection("5c101adbcc34", 930015, "Rename photo exports"), 0, False),
+        # The YELLOW header dot from a STALE HEARTBEAT, not a dropped dial: its
+        # record's beat is backdated past the health window in ``main()`` and the
+        # daemon's own ``_sync_heartbeat_stale`` publishes the verdict.
+        (_plain_projection(QUIET_SESSION_ID, 930016, "Quiet overnight import"), 0, False),
     ]
 
 
@@ -630,6 +641,32 @@ def _conversation_dir(session_id: str, title: str | None = None) -> Path:
     if title:
         write_session_title(directory, title, user_set=True, past_names=[])
     return directory
+
+
+def _write_durable_turns(directory: Path, rows: list[TranscriptEntry]) -> None:
+    """The ended conversation's turns in ``transcript.jsonl``, in the store's own
+    line shape (``Message`` from the real type, as the overflow fixture writes it).
+
+    WHY: an ended session's frame is a DISK fold, so a placeholder ``{}`` line
+    painted "No messages yet" — and the frame this row exists for is the ended
+    composer area with the LAST TRANSCRIPT LINE clear of the composer.
+    """
+    from local_operator.harness.types import Message
+
+    lines = []
+    for row in rows:
+        message = Message.user(row.text) if row.kind == "user" else Message.assistant(row.text)
+        lines.append(
+            json.dumps(
+                {
+                    "id": f"fixture-{row.id}",
+                    "ts": time.time(),
+                    "type": "message",
+                    "payload": message.model_dump(exclude_defaults=True),
+                }
+            )
+        )
+    (directory / "transcript.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _seed_store(live: list[tuple[SessionProjection, int, bool]]) -> None:
@@ -844,18 +881,28 @@ async def main() -> None:
             subagents_running=running,  # type: ignore[call-arg]
             subagents_queued=0,  # type: ignore[call-arg]
         )
+        if projection.session_id == QUIET_SESSION_ID:
+            record.heartbeat_at = time.time() - 4 * daemon_module.SESSION_HEALTH_WINDOW_S
         entry = SessionEntry(record)
         # Through the daemon's own capture, so a roster row's DETAIL (the agent
         # view the row opens) is cached exactly as a live frame would cache it.
         projection = daemon.capture_subagent_details(projection, record=record)
         entry.projection = projection
         entry.degraded = projection.degraded
+        # A seeded frame stands in for one the owner sent, EXCEPT on the quiet
+        # row, which is the point of it. The verdict is then published by the
+        # daemon's own scan step, once: this fixture runs no scan loop, so a
+        # fresh row stays fresh for the life of the rig rather than ageing out.
+        if projection.session_id != QUIET_SESSION_ID:
+            entry.last_frame_at = time.monotonic()
+        daemon_module._sync_heartbeat_stale(entry, daemon)
         daemon.session_projections[projection.session_id] = projection
         daemon.table.entries[record.pid] = entry
     # The ENDED conversation: a durable row plus an ended entry, which is what the
     # daemon reads to set the summary's ``ended`` (the overflow fixture's recipe).
     ended = _ended_projection()
-    _conversation_dir(ended.session_id, ended.conversation_name)
+    ended_dir = _conversation_dir(ended.session_id, ended.conversation_name)
+    _write_durable_turns(ended_dir, ended.transcript)
     ended_record = SessionRecord(
         pid=ended.pid,
         kind="tui",
