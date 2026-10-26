@@ -128,9 +128,10 @@ from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 from uuid import uuid4
 
+from local_operator.session import open_trace
 from local_operator.session.runtime.engagement import TRANSCRIPT_FILENAME
 
 if TYPE_CHECKING:
@@ -2665,6 +2666,143 @@ def _key(config_dir: str | Path, session_id: str) -> tuple[str, str]:
     return (str(config_dir), session_id)
 
 
+def scan_payable_in_budget(journal_bytes: int | None, *, has_previous: bool, wait_s: float) -> bool:
+    """Whether a refresh can plausibly land inside a first-paint wait of ``wait_s``.
+
+    THE ONE RULE for "is this scan worth paying for on the paint path", shared
+    by :func:`checkpoints_view`'s first-paint wager and the paint hold below so
+    the two can never disagree about which journals are small enough. A usable
+    previous index makes the refresh incremental (milliseconds), so it is always
+    payable; otherwise the journal's size is planned against
+    :data:`_FIRST_PAINT_SCAN_BYTES_PER_S` (see that constant for the
+    measurement and why it is not a fraction of it).
+    """
+    return has_previous or (
+        journal_bytes is not None and journal_bytes <= _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
+    )
+
+
+# ---------------------------------------------------------------------------
+# The paint hold: a cold full scan never competes with a desktop first frame
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS (CORE-PROFILE L2, 2026-10-25). A cold open of an 8-100 MB
+# journal started ``_scan_full`` from inside the open itself (``_frame_index``,
+# the journal-order correction, the parallel ``/checkpoints``), and that scan
+# spent 806-1,277 ms of CPU under the GIL WHILE the snapshot was being built --
+# a scan that cannot finish inside the 120 ms snapshot budget anyway, so the
+# frame was ``building`` either way and the only effect of starting it early was
+# a slower first paint. The desktop ``/events`` route therefore holds the session
+# from its entry until the snapshot frame has been written, and a refresh that
+# would be a COLD, UNPAYABLE full scan (by :func:`scan_payable_in_budget`, the
+# same rule the manifest's wager uses) waits for that release before it starts.
+#
+# WHAT IT NEVER CHANGES. A payable refresh (small journal, or a previous index
+# that makes it incremental) is never deferred, so every frame that was
+# ``ready`` on first paint stays ``ready``; an unpayable one was ``building`` on
+# that frame already, so deferring it changes no response, only who pays the
+# CPU when. Only the desktop events route takes a hold: the TUI, the mobile
+# relay and prewarm never do, so in a process with no desktop open nothing here
+# runs (``_PAINT_HOLDS`` is empty and the check is one dict lookup).
+#
+# HOW IT CANNOT WEDGE. Holds are REFCOUNTED per session (two concurrent opens of
+# one conversation both hold; the scan starts when the LAST one releases), each
+# release function is idempotent, and the deferred task stops waiting after
+# :data:`_PAINT_HOLD_CEILING_S` whatever happens -- so a hold leaked by a path
+# nobody anticipated costs one deferral of that length, never a scan that never
+# starts. No caller ever waits UNBOUNDED on a deferred task while holding: the
+# open frame asks :func:`refresh_deferred` and answers without facts instead of
+# spending its budget on a task that cannot run until it returns, and the
+# manifest never waits on an unpayable build at all.
+
+#: The longest a deferred scan waits for a paint hold to be released. A desktop
+#: snapshot lands in tens of ms warm and a few seconds cold on a loaded host;
+#: this is the backstop for a hold whose release was somehow missed, not a
+#: budget anyone is expected to reach.
+_PAINT_HOLD_CEILING_S = 15.0
+
+#: Live hold counts per session key. LOOP-ONLY MUTATION, like ``_IN_FLIGHT``.
+_PAINT_HOLDS: dict[tuple[str, str], int] = {}
+#: The event a deferred refresh waits on, set when the key's count reaches zero.
+#: Keyed with its loop so a torn-down test loop reads as absent.
+_PAINT_RELEASED: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
+#: Keys whose in-flight refresh is currently waiting on a hold (see
+#: :func:`refresh_deferred`).
+_DEFERRED: set[tuple[str, str]] = set()
+
+
+def hold_paint(config_dir: str | Path, session_id: str) -> Callable[[], None]:
+    """Take a paint hold on one session; returns its idempotent release.
+
+    Call from the event loop. The returned function may be called any number of
+    times from any exit path (snapshot written, error, disconnect, generator
+    close) and releases exactly once, which is what lets the route call it from
+    every one of those paths without counting.
+    """
+    key = _key(config_dir, session_id)
+    loop = asyncio.get_running_loop()
+    _PAINT_HOLDS[key] = _PAINT_HOLDS.get(key, 0) + 1
+    entry = _PAINT_RELEASED.get(key)
+    if entry is None or entry[0] is not loop or entry[1].is_set():
+        _PAINT_RELEASED[key] = (loop, asyncio.Event())
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        remaining = _PAINT_HOLDS.get(key, 1) - 1
+        if remaining > 0:
+            _PAINT_HOLDS[key] = remaining
+            return
+        _PAINT_HOLDS.pop(key, None)
+        current = _PAINT_RELEASED.pop(key, None)
+        if current is not None:
+            current[1].set()
+
+    return release
+
+
+def refresh_deferred(config_dir: str | Path, session_id: str) -> bool:
+    """Whether this session's in-flight refresh is waiting on a paint hold.
+
+    The open frame's question: a task in this state cannot finish before the
+    hold its own request owns is released, so awaiting it would only spend the
+    snapshot budget idle.
+    """
+    return _key(config_dir, session_id) in _DEFERRED
+
+
+def _defer_for_paint(config_dir: str | Path, session_id: str) -> asyncio.Event | None:
+    """The hold event a NEW refresh must wait on, or ``None`` to start now.
+
+    Decided synchronously when the task is created, so :func:`refresh_deferred`
+    is already true for the caller that just started it. Costs nothing when no
+    hold is live (one dict lookup -- every non-desktop process); otherwise two
+    ``stat`` calls, the same cost ``fresh_resident`` already pays on the loop.
+    """
+    key = _key(config_dir, session_id)
+    if not _PAINT_HOLDS.get(key):
+        return None
+    entry = _PAINT_RELEASED.get(key)
+    if entry is None or entry[0] is not asyncio.get_running_loop():
+        return None
+    journal = _stat_or_none(_journal_path(config_dir, session_id))
+    if journal is None:
+        return None
+    # A cache file on disk stands in for "a previous index": parsing it here would
+    # be the very work this defers. A cache that exists but does not parse makes
+    # this answer "payable" and the scan run now -- today's behaviour, never a
+    # deferral the manifest's own rule would not have made.
+    has_previous = _stat_or_none(index_path(config_dir, session_id)) is not None
+    if scan_payable_in_budget(
+        journal.st_size, has_previous=has_previous, wait_s=_FIRST_PAINT_WAIT_S
+    ):
+        return None
+    return entry[1]
+
+
 def _remember(key: tuple[str, str], index: TranscriptIndex, cache_mtime: float | None) -> None:
     """Keep a just-built index resident (loop thread only), with the cache
     file's mtime it must still match to be served from here."""
@@ -2910,7 +3048,30 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
         if entry_loop is loop:
             _IN_FLIGHT.pop(key, None)
 
+    hold = _defer_for_paint(config_dir, session_id)
+    if hold is not None:
+        _DEFERRED.add(key)
+
     async def _run() -> TranscriptIndex | None:
+        if hold is not None:
+            # See "The paint hold" above: an unpayable cold scan starts once the
+            # desktop's first frame is written, never later than the ceiling.
+            try:
+                await asyncio.wait_for(hold.wait(), _PAINT_HOLD_CEILING_S)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "transcript index refresh for session %s waited the paint-hold "
+                    "ceiling (%.0f s); starting it anyway",
+                    session_id,
+                    _PAINT_HOLD_CEILING_S,
+                )
+            finally:
+                _DEFERRED.discard(key)
+        if open_trace.enabled():
+            # The evidence row for the paint hold: its timestamp against the
+            # route's ``a.wire.frame kind=snapshot`` row says whether the scan
+            # started before or after the first frame was written.
+            open_trace.mark("index.refresh_start", session=session_id, deferred=hold is not None)
         return await asyncio.to_thread(refresh_index, config_dir, session_id)
 
     async def _wrapped() -> TranscriptIndex | None:
@@ -2939,6 +3100,10 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
         current = _IN_FLIGHT.get(key)
         if current is not None and current[1] is settled:
             _IN_FLIGHT.pop(key, None)
+            # A task cancelled before its body ran never reached the ``finally``
+            # that clears the deferred mark; a stale mark would make the open
+            # frame skip a wait it could pay.
+            _DEFERRED.discard(key)
 
     task.add_done_callback(_drop)
     return task, True
@@ -3067,11 +3232,10 @@ async def checkpoints_view(
         # `ready` — which the consumer does not re-read. So the size gate is for
         # the COLD case only, where the build is a full scan and the wait really
         # does cost the whole budget.
-        payable = probe.index is not None or (
-            probe.journal_bytes is not None
-            and probe.journal_bytes <= _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
+        payable = scan_payable_in_budget(
+            probe.journal_bytes, has_previous=probe.index is not None, wait_s=wait_s
         )
-        if payable:
+        if payable and not refresh_deferred(config_dir, session_id):
             done, _pending = await asyncio.wait({task}, timeout=wait_s)
             settled = task in done
         else:
@@ -3129,3 +3293,6 @@ def _reset_for_tests() -> None:
     _RESIDENT.clear()
     _RESIDENT_STAMP.clear()
     _FAILURES.clear()
+    _PAINT_HOLDS.clear()
+    _PAINT_RELEASED.clear()
+    _DEFERRED.clear()

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -4182,9 +4183,12 @@ class DesktopSessionBridge:
            ``building``, the refresh runs on, and the next frame — or the
            ``/history`` that follows inside the same open — carries the facts.
 
-        The refresh is STARTED either way, which is the promise that makes that
-        follow-up read cheap: by the time the client asks again the index is
-        resident, or its cache file exists so the refresh costs 3-62 ms.
+        The refresh task is REGISTERED either way, which makes that follow-up
+        read cheap. During a desktop events open the index module's paint hold
+        postpones a cold full scan that cannot fit its existing first-paint
+        budget until the snapshot has been written; a deferred task is not
+        awaited here (it cannot finish while this request owns the hold). With
+        no hold -- standalone history, TUI or mobile -- scheduling is unchanged.
         """
         from local_operator.session import transcript_index as index_module
 
@@ -4198,6 +4202,12 @@ class DesktopSessionBridge:
             return None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            return None
+        if index_module.refresh_deferred(self.root, self.session_id):
+            # A cold, unpayable scan waiting on the paint hold this very open
+            # owns (``transcript_index``'s "The paint hold"): it cannot start
+            # until the snapshot is written, so waiting here would spend the
+            # budget idle for the same ``building`` answer.
             return None
         done, _pending = await asyncio.wait({task}, timeout=remaining)
         if task not in done:
@@ -9157,6 +9167,136 @@ class DesktopSessions:
             raise ValueError("Too many active desktop sessions")
         return victim
 
+    def _locate(self, session_id: str) -> _LocatedSession:
+        """This session's opening directory — or the PEER that holds it.
+
+        The marker element is provenance, not decoration: it is what
+        lets the caller ask
+        :func:`_cwd_is_unconfirmed` whether the directory is a
+        durable claim a failed move could have written (the marker),
+        or the checkpoint fallback for a pre-checkpoint transcript,
+        which has no marker to doubt.
+
+        THE REMOTE ARM IS HERE, and this is the ONLY place the pool
+        decides that a session is another device's: every desktop
+        route resolves a session through this method, so one
+        decision covers the snapshot, the history page, the event
+        stream, the send path and the control verbs — the same
+        argument ``_ensure_facade`` makes for holding the only
+        bridge construction in the tree.
+
+        WHAT IT DOES NOT COST. A LOCAL ID NEVER DIALS: the
+        directory is checked first, and that is the order the
+        session's own durability asks for (a conversation moved home
+        has a directory HERE, and the peer cache can still hold a
+        listing for it for one TTL). ``remote_row_for`` is
+        cache-first, so the row the sidebar's poll already read is a
+        tuple scan, and a miss pays ONE cached projection read —
+        which is the read the route in front of this method used to
+        make on EVERY snapshot call, including the local ones. On a
+        machine in no network it answers ``None`` without opening a
+        socket, so an unknown id still costs one ``is_dir`` and still
+        answers the shared 404.
+        """
+        path = self.root / "sessions" / session_id
+        if path.is_dir() and _door_may_open(path):
+            # Through the TOLERANT reader, not ``json.loads``: a marker this
+            # code cannot parse (a hand edit, an interrupted write, a
+            # directory where the document should be) is a document with no
+            # cwd, and a session whose marker has no readable cwd still opens
+            # here — on the checkpoint fallback below — instead of failing the
+            # open with a 409/404 raised out of a parse error. Round 1 of
+            # #1110 wrote the coverage for a malformed marker and found the
+            # strict read behind it (R3).
+            stored = read_desktop_marker(path)
+            if not (path / DESKTOP_MARKER_NAME).exists() and session_activity(path) is None:
+                # M1's SECOND LEG (round-1 review): a directory with NO
+                # marker document at all, no transcript and no mail
+                # spool must not open as a session. That is what a
+                # draft's engage leaves behind (residue measured as
+                # ``.execution-lease`` + ``.session.pid``, or the empty
+                # directory a drained runtime leaves), and before this
+                # check the checkpoint fallback below answered such a
+                # directory with a phantom bridge on ``root.parent`` —
+                # 200s on every door for an id no create can ever make
+                # a session again (measured: ``probe_residue_locate``).
+                #
+                # EXISTENCE OF THE MARKER PATH, not readability: a
+                # marker that is present but unreadable — garbage, an
+                # interrupted write, a directory where the document
+                # should be — keeps its own contract (the tolerant
+                # reader answers it on the fallback below, review
+                # round 1 of #1110), so only the document's total
+                # ABSENCE is evidence of nothing.
+                raise KeyError("Unknown session")
+            marker_cwd = (stored or {}).get("cwd")
+            if isinstance(marker_cwd, str) and marker_cwd:
+                return _LocatedSession(marker_cwd, marker_cwd)
+            # The cold facade restores cwd from the durable canonical
+            # checkpoint. This fallback is only used by pre-checkpoint
+            # transcripts, whose historical launch directory is unknown.
+            from local_operator.session.frontend_state import (
+                FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            )
+
+            # A ONE-ROW read, not a ``Transcript(path)``: constructing the
+            # transcript JSON-decodes the whole journal (2059.5 ms on the
+            # operator's 261 MB conversation — the A/B table in
+            # ``docs/evidence/session-load-central-cache``), and this branch
+            # runs on every bridge creation for a session that carries no
+            # ``desktop.json`` marker. The reader answers from the tail
+            # backward and never creates the directory.
+            checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+            return _LocatedSession(
+                str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
+                None,
+            )
+        from local_operator.session.remote_open import (
+            PeerSessionUnresolved,
+            remote_row_and_silence,
+        )
+
+        row, silent = remote_row_and_silence(session_id, self.root)
+        if row is None:
+            # A MISS IS ONLY "UNKNOWN" WHEN SOMEBODY ANSWERED.
+            # ``remote_row_and_silence`` ends in a genuine read
+            # (``ttl_s=0``) precisely so a just-created peer id
+            # resolves; that SAME read also reports the devices
+            # that did NOT reply, and this is the one place that
+            # fact is turned into an answer for a route. ONE READ,
+            # BOTH HALVES: the pair comes back from a single call,
+            # so no second dial can be paid and no silence older
+            # than the read that missed can be reported (agent
+            # review round 1, R-1 — the two-call shape re-dialled
+            # whenever the listing spent its own documented budget
+            # and threw away the rows that read had fetched).
+            #
+            # WHY IT MATTERS HERE AND NOT ONLY IN THE ROUTE: the
+            # shared 404 is what the renderer turns into
+            # "missing" — "This conversation is no longer on this
+            # machine", composer refused. That is a deletion claim
+            # this device cannot support while a peer is silent,
+            # so the two cases must not arrive as one KeyError
+            # (mesh-wire-honesty.md §S2).
+            if silent:
+                raise PeerSessionUnresolved(session_id, silent)
+            raise KeyError("Unknown session")
+        if not row.reachable:
+            # REFUSED BEFORE ANYTHING IS BUILT, and with the SAME
+            # sentence the TUI refuses the same state with (the
+            # composer lives in ``remote_open``): a viewer built for
+            # an unreachable peer can never bind, so the honest
+            # answer is the one that names the device, the reason and
+            # the diagnosing command. The route maps it to the same
+            # 409 ``session_is_remote`` this id answered before the
+            # open path existed.
+            raise PeerSessionUnreachable(session_id, row)
+        # cwd="" and NOT a local path: a directory on this machine
+        # means nothing on the peer, and an empty cwd is what lets the
+        # peer default to its own (``RemoteOwner.engage`` forwards
+        # nothing when the caller supplied nothing).
+        return _LocatedSession("", None, row)
+
     def _locate_flight(
         self, session_id: str, locate: Callable[[], _LocatedSession]
     ) -> asyncio.Task[_LocatedSession]:
@@ -9495,143 +9635,6 @@ class DesktopSessions:
                     )
                     self.bridges[session_id] = bridge
                 else:
-                    path = self.root / "sessions" / session_id
-
-                    def locate() -> _LocatedSession:
-                        """This session's opening directory — or the PEER that holds it.
-
-                        The marker element is provenance, not decoration: it is what
-                        lets the caller ask
-                        :func:`_cwd_is_unconfirmed` whether the directory is a
-                        durable claim a failed move could have written (the marker),
-                        or the checkpoint fallback for a pre-checkpoint transcript,
-                        which has no marker to doubt.
-
-                        THE REMOTE ARM IS HERE, and this is the ONLY place the pool
-                        decides that a session is another device's: every desktop
-                        route resolves a session through this method, so one
-                        decision covers the snapshot, the history page, the event
-                        stream, the send path and the control verbs — the same
-                        argument ``_ensure_facade`` makes for holding the only
-                        bridge construction in the tree.
-
-                        WHAT IT DOES NOT COST. A LOCAL ID NEVER DIALS: the
-                        directory is checked first, and that is the order the
-                        session's own durability asks for (a conversation moved home
-                        has a directory HERE, and the peer cache can still hold a
-                        listing for it for one TTL). ``remote_row_for`` is
-                        cache-first, so the row the sidebar's poll already read is a
-                        tuple scan, and a miss pays ONE cached projection read —
-                        which is the read the route in front of this method used to
-                        make on EVERY snapshot call, including the local ones. On a
-                        machine in no network it answers ``None`` without opening a
-                        socket, so an unknown id still costs one ``is_dir`` and still
-                        answers the shared 404.
-                        """
-                        if path.is_dir() and _door_may_open(path):
-                            # Through the TOLERANT reader, not ``json.loads``: a marker this
-                            # code cannot parse (a hand edit, an interrupted write, a
-                            # directory where the document should be) is a document with no
-                            # cwd, and a session whose marker has no readable cwd still opens
-                            # here — on the checkpoint fallback below — instead of failing the
-                            # open with a 409/404 raised out of a parse error. Round 1 of
-                            # #1110 wrote the coverage for a malformed marker and found the
-                            # strict read behind it (R3).
-                            stored = read_desktop_marker(path)
-                            if (
-                                not (path / DESKTOP_MARKER_NAME).exists()
-                                and session_activity(path) is None
-                            ):
-                                # M1's SECOND LEG (round-1 review): a directory with NO
-                                # marker document at all, no transcript and no mail
-                                # spool must not open as a session. That is what a
-                                # draft's engage leaves behind (residue measured as
-                                # ``.execution-lease`` + ``.session.pid``, or the empty
-                                # directory a drained runtime leaves), and before this
-                                # check the checkpoint fallback below answered such a
-                                # directory with a phantom bridge on ``root.parent`` —
-                                # 200s on every door for an id no create can ever make
-                                # a session again (measured: ``probe_residue_locate``).
-                                #
-                                # EXISTENCE OF THE MARKER PATH, not readability: a
-                                # marker that is present but unreadable — garbage, an
-                                # interrupted write, a directory where the document
-                                # should be — keeps its own contract (the tolerant
-                                # reader answers it on the fallback below, review
-                                # round 1 of #1110), so only the document's total
-                                # ABSENCE is evidence of nothing.
-                                raise KeyError("Unknown session")
-                            marker_cwd = (stored or {}).get("cwd")
-                            if isinstance(marker_cwd, str) and marker_cwd:
-                                return _LocatedSession(marker_cwd, marker_cwd)
-                            # The cold facade restores cwd from the durable canonical
-                            # checkpoint. This fallback is only used by pre-checkpoint
-                            # transcripts, whose historical launch directory is unknown.
-                            from local_operator.session.frontend_state import (
-                                FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-                            )
-
-                            # A ONE-ROW read, not a ``Transcript(path)``: constructing the
-                            # transcript JSON-decodes the whole journal (2059.5 ms on the
-                            # operator's 261 MB conversation — the A/B table in
-                            # ``docs/evidence/session-load-central-cache``), and this branch
-                            # runs on every bridge creation for a session that carries no
-                            # ``desktop.json`` marker. The reader answers from the tail
-                            # backward and never creates the directory.
-                            checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-                            return _LocatedSession(
-                                str(
-                                    (checkpoint or {}).get("state", {}).get("cwd")
-                                    or self.root.parent
-                                ),
-                                None,
-                            )
-                        from local_operator.session.remote_open import (
-                            PeerSessionUnresolved,
-                            remote_row_and_silence,
-                        )
-
-                        row, silent = remote_row_and_silence(session_id, self.root)
-                        if row is None:
-                            # A MISS IS ONLY "UNKNOWN" WHEN SOMEBODY ANSWERED.
-                            # ``remote_row_and_silence`` ends in a genuine read
-                            # (``ttl_s=0``) precisely so a just-created peer id
-                            # resolves; that SAME read also reports the devices
-                            # that did NOT reply, and this is the one place that
-                            # fact is turned into an answer for a route. ONE READ,
-                            # BOTH HALVES: the pair comes back from a single call,
-                            # so no second dial can be paid and no silence older
-                            # than the read that missed can be reported (agent
-                            # review round 1, R-1 — the two-call shape re-dialled
-                            # whenever the listing spent its own documented budget
-                            # and threw away the rows that read had fetched).
-                            #
-                            # WHY IT MATTERS HERE AND NOT ONLY IN THE ROUTE: the
-                            # shared 404 is what the renderer turns into
-                            # "missing" — "This conversation is no longer on this
-                            # machine", composer refused. That is a deletion claim
-                            # this device cannot support while a peer is silent,
-                            # so the two cases must not arrive as one KeyError
-                            # (mesh-wire-honesty.md §S2).
-                            if silent:
-                                raise PeerSessionUnresolved(session_id, silent)
-                            raise KeyError("Unknown session")
-                        if not row.reachable:
-                            # REFUSED BEFORE ANYTHING IS BUILT, and with the SAME
-                            # sentence the TUI refuses the same state with (the
-                            # composer lives in ``remote_open``): a viewer built for
-                            # an unreachable peer can never bind, so the honest
-                            # answer is the one that names the device, the reason and
-                            # the diagnosing command. The route maps it to the same
-                            # 409 ``session_is_remote`` this id answered before the
-                            # open path existed.
-                            raise PeerSessionUnreachable(session_id, row)
-                        # cwd="" and NOT a local path: a directory on this machine
-                        # means nothing on the peer, and an empty cwd is what lets the
-                        # peer default to its own (``RemoteOwner.engage`` forwards
-                        # nothing when the caller supplied nothing).
-                        return _LocatedSession("", None, row)
-
                     # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
                     # daemon too: that is what lets "the 503 is the LATCH answering" be
                     # read as a control in the evidence rather than as an artefact of
@@ -9640,7 +9643,9 @@ class DesktopSessions:
                     # second request for the same cold session awaits this one read
                     # instead of paying a second full parse, and one session therefore
                     # cannot be built twice.
-                    flight = self._locate_flight(session_id, locate)
+                    flight = self._locate_flight(
+                        session_id, functools.partial(self._locate, session_id)
+                    )
             if doomed is not None:
                 # M1's close, outside the pool lock (``forget``'s rule): the
                 # draft this bridge was born of is gone and the id never became
@@ -9766,6 +9771,93 @@ class DesktopSessions:
         finally:
             with CancelScope(shield=True):
                 await bridge.release()
+
+    def _checkpoint_row(self, session_id: str) -> SessionRow | None:
+        """The manifest's placement, without the door's unused cwd reconstruction.
+
+        A journal without a desktop marker is still a session under the SAME
+        door predicate. The full ``_locate`` then reads a frontend checkpoint
+        to derive its cwd -- an entire journal pass when that marker is absent
+        (measured on the marker-less gate8 fixture). The manifest never uses
+        cwd, so a local admissible directory stops here instead. The peer arm
+        delegates to ``_locate`` unchanged: reachability, unresolved-peer and
+        unknown-id refusals must remain the door's own answers.
+        """
+        path = self.root / "sessions" / session_id
+        if path.is_dir() and _door_may_open(path):
+            if not (path / DESKTOP_MARKER_NAME).exists() and session_activity(path) is None:
+                raise KeyError("Unknown session")
+            return None
+        return self._locate(session_id).remote_row
+
+    async def checkpoints(self, session_id: str) -> dict[str, Any]:
+        """The checkpoint rail's manifest, answered WITHOUT taking a bridge.
+
+        WHY NOT ``session()`` (CORE-PROFILE L1, 2026-10-25). The manifest needs
+        two facts -- "is this a peer conversation?" and the index view -- and
+        ``session()`` buys a third it never reads: ``bridge.acquire`` builds the
+        whole cold facade (``AttachedSession.cold``: the cold replay parse, the
+        model-selection scan, the subagent restore) and holds the BRIDGE lock
+        while it does. Measured on a cold process: 2,494 ms CPU on an 8 MB
+        journal for a manifest whose own derivation took 6 ms, and in the app's
+        open burst the parallel ``/events`` queued behind it on that lock. The
+        index module answers by itself (the mobile relay already calls
+        ``checkpoints_view`` directly), so this asks only the questions the door
+        asks, in the door's order, and builds nothing.
+
+        THE SAME ANSWERS AS THE DOOR, ONE BY ONE, so the response bytes and every
+        refusal stay what they were through ``session(read=True,
+        allow_draft=True)`` + ``bridge.checkpoints()``:
+
+        * a malformed id, and an id the lookup cannot resolve, are the shared
+          404 -- decided BEFORE the latch, exactly as the door decides it;
+        * a latched (retiring) daemon refuses with ``DaemonRetiring`` once the
+          id is known (``assert_admitting``, the one admission predicate);
+        * a registered draft is admitted (the route always passed
+          ``allow_draft``), and a resident bridge whose draft has lapsed without
+          a marker is the same 404 the door's M1 close answers -- read here,
+          never mutated: the door owns the pool's bookkeeping;
+        * a resident bridge carries its own placement (``remote_row``); a cold
+          id uses the same directory admission predicate and the same peer
+          resolution as the door, without reconstructing an unused cwd from
+          journal checkpoints (``_checkpoint_row``). The peer answer is the
+          same ``unsupported`` the bridge gave.
+
+        The pool lock is held for the dict reads only, as ``session()`` holds it.
+        This request no longer counts as a bridge user, so the retirement poll
+        no longer waits on it -- it is a stat plus a cache read, or the 200 ms
+        first-paint wager at most, and a client retries a cut read.
+        """
+        if not SESSION_ID.fullmatch(session_id):
+            raise KeyError("Unknown session")
+        resolve_row = False
+        remote_row: SessionRow | None = None
+        async with self.lock:
+            draft = self._draft_for(session_id)
+            bridge = self.bridges.get(session_id)
+            if bridge is not None and draft is None and bridge.draft is not None:
+                if (
+                    session_id not in self._materialising
+                    and not (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file()
+                ):
+                    raise KeyError("Unknown session")
+            if bridge is not None:
+                self.assert_admitting()
+                remote_row = bridge.remote_row
+            elif draft is not None:
+                self.assert_admitting()
+            else:
+                resolve_row = True
+        if resolve_row:
+            remote_row = await asyncio.to_thread(self._checkpoint_row, session_id)
+            self.assert_admitting()
+        if remote_row is not None:
+            return {
+                "session_id": session_id,
+                "index": {"state": "unsupported"},
+                "checkpoints": [],
+            }
+        return await transcript_index.checkpoints_view(self.root, session_id)
 
     async def forget(self, session_id: str) -> bool:
         """Drop a removed conversation's resident bridge; True if one existed.

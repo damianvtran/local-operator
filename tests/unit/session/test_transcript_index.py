@@ -2160,3 +2160,146 @@ def test_journal_order_uses_complete_scanned_lines_not_visible_subset(tmp_path: 
     assert index is not None
     assert index.journal_rows == {"line-u": 0, "line-a": 2}
     assert index.scan.rows == 3
+
+
+# ---------------------------------------------------------------------------
+# The paint hold (CORE-PROFILE L2): a cold unpayable scan waits for the first
+# frame; a payable one never does.
+# ---------------------------------------------------------------------------
+
+
+def _big_journal(root: Path) -> None:
+    """A journal over the COLD gate at the manifest's own wait (~4.8 MB)."""
+    write_rows(
+        root,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1),
+            assistant("a1", 1.2, "x" * (6 << 20)),
+            marker("m1", 1.3, "t1"),
+        ],
+    )
+    assert not ti.scan_payable_in_budget(
+        journal_path(root).stat().st_size, has_previous=False, wait_s=ti._FIRST_PAINT_WAIT_S
+    ), "fixture must exceed the cold gate or these tests prove nothing"
+
+
+def _count_scans(monkeypatch) -> list[str]:
+    starts: list[str] = []
+    real = ti.refresh_index
+
+    def counting(config_dir, session_id):
+        starts.append(session_id)
+        return real(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", counting)
+    return starts
+
+
+def test_the_payable_rule_is_the_manifest_rule() -> None:
+    """One predicate: a previous index is always payable; otherwise bytes vs rate."""
+    rate = ti._FIRST_PAINT_SCAN_BYTES_PER_S
+    assert ti.scan_payable_in_budget(10**12, has_previous=True, wait_s=0.2)
+    assert ti.scan_payable_in_budget(int(rate * 0.2), has_previous=False, wait_s=0.2)
+    assert not ti.scan_payable_in_budget(int(rate * 0.2) + 1, has_previous=False, wait_s=0.2)
+    assert not ti.scan_payable_in_budget(None, has_previous=False, wait_s=0.2)
+
+
+@pytest.mark.asyncio
+async def test_a_held_cold_unpayable_scan_waits_for_the_release(tmp_path, monkeypatch):
+    """The scan does not start while the hold is live, and starts on release."""
+    _big_journal(tmp_path)
+    scans = _count_scans(monkeypatch)
+    release = ti.hold_paint(tmp_path, SID)
+    task, started = ti.start_refresh(tmp_path, SID)
+    assert started and ti.refresh_deferred(tmp_path, SID)
+    await asyncio.sleep(0.2)
+    assert scans == [] and not task.done(), "the scan ran under a live paint hold"
+    release()
+    built = await asyncio.wait_for(task, 30)
+    assert built is not None and len(scans) == 1
+    assert not ti.refresh_deferred(tmp_path, SID)
+
+
+@pytest.mark.asyncio
+async def test_a_small_journal_is_never_deferred(tmp_path):
+    """Payable scans run under a hold exactly as without one (ready on first frame)."""
+    write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert not ti.refresh_deferred(tmp_path, SID)
+        assert await asyncio.wait_for(task, 30) is not None
+        view = await ti.checkpoints_view(tmp_path, SID)
+        assert view["index"]["state"] == "ready"
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_cache_on_disk_makes_the_held_refresh_run_now(tmp_path, monkeypatch):
+    """A previous index (incremental refresh) is payable, so it is not deferred."""
+    _big_journal(tmp_path)
+    refreshed(tmp_path)  # writes the cache file
+    write_rows(tmp_path, [user("late", 3.0)])
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert not ti.refresh_deferred(tmp_path, SID)
+        assert await asyncio.wait_for(task, 30) is not None
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_holds_are_refcounted_and_release_is_idempotent(tmp_path, monkeypatch):
+    """Two opens of one session: the scan waits for the LAST release, and a
+    release called twice (snapshot written, then teardown) counts once."""
+    _big_journal(tmp_path)
+    scans = _count_scans(monkeypatch)
+    first, second = ti.hold_paint(tmp_path, SID), ti.hold_paint(tmp_path, SID)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    first()
+    first()  # idempotent: must not release the second open's hold
+    await asyncio.sleep(0.2)
+    assert scans == [] and ti.refresh_deferred(tmp_path, SID)
+    second()
+    assert await asyncio.wait_for(task, 30) is not None
+    assert len(scans) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_hold_is_bounded_by_the_ceiling(tmp_path, monkeypatch):
+    """A release nobody called costs one ceiling, never a scan that never runs."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_PAINT_HOLD_CEILING_S", 0.1)
+    ti.hold_paint(tmp_path, SID)  # never released
+    task, _ = ti.start_refresh(tmp_path, SID)
+    assert await asyncio.wait_for(task, 30) is not None
+    assert not ti.refresh_deferred(tmp_path, SID)
+
+
+@pytest.mark.asyncio
+async def test_the_manifest_never_waits_on_a_deferred_build(tmp_path, monkeypatch):
+    """No deadlock: a /checkpoints racing a held open answers ``building`` at
+    once (it is unpayable, so main answered that too) and ``ready`` after."""
+    _big_journal(tmp_path)
+    release = ti.hold_paint(tmp_path, SID)
+    view = await asyncio.wait_for(ti.checkpoints_view(tmp_path, SID), 5)
+    assert view["index"]["state"] == "building"
+    release()
+    deadline = asyncio.get_running_loop().time() + 30
+    while view["index"]["state"] != "ready":
+        assert asyncio.get_running_loop().time() < deadline, view
+        await asyncio.sleep(0.02)
+        view = await ti.checkpoints_view(tmp_path, SID)
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1"]
+
+
+@pytest.mark.asyncio
+async def test_no_hold_means_no_deferral(tmp_path):
+    """The TUI, mobile relay and prewarm take no hold: today's behaviour exactly."""
+    _big_journal(tmp_path)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    assert not ti.refresh_deferred(tmp_path, SID)
+    assert await asyncio.wait_for(task, 30) is not None
