@@ -22,26 +22,27 @@ them.
 
 WHAT THE WITNESS PROVES, AND WHAT IT DOES NOT — read this before trusting a hit.
 The witness is the replay cache's own: the session directory, plus the journal's
-``(st_ino, st_size, st_mtime_ns)`, plus the request's cut and wanted custom
-types. Equality of that tuple means *this codebase's writers* have not touched
-the file since the record was written — they either append (which moves size) or
-replace atomically (which moves the inode). The reader also re-stats the journal
-AFTER reading the record, and refuses the record if the file moved meanwhile, so
-a record read is never combined with a journal that changed underneath it.
+``(st_ino, st_size, st_mtime_ns, st_ctime_ns)``, plus the request's cut and wanted
+custom types. Equality of that tuple means the file has not been written since
+the record was: an append moves size, an atomic replace moves the inode, and ANY
+write — including a same-size interior rewrite whose mtime was then restored
+(``Transcript._write_entries``' ``preserve_mtime``, or its rollback, which
+truncates and restores both mtime and size) — moves ``st_ctime_ns``, which an
+unprivileged process cannot set back. ctime is in the witness for exactly that
+case: since the record carries the model SELECTION (``ColdMetadata.selection``),
+a missed rewrite would serve a stale model, not merely stale roster facts
+(review of #2960 reproduced it before ctime was added). The reader also
+re-stats the journal AFTER reading the record, and refuses the record if the
+file moved meanwhile, so a record read is never combined with a journal that
+changed underneath it.
 
-It does NOT prove the bytes are unchanged. ``Transcript._write_entries``
-RESTORES the file's mtime after a bookkeeping batch (``preserve_mtime``, the
-activity clock) and its rollback truncates and restores both mtime and size, so
-a same-size interior rewrite inside one mtime instant is UNREACHABLE FROM THIS
-CODEBASE'S WRITERS BUT NOT DETECTED HERE. That residual is named, not papered
-over: this record is NOT the strong warm-paint validator the supplement's §1
-describes, it carries no durable writer-maintained generation and no content
-digest, and nothing may present a metadata hit as content-verified. The blast
-radius is bounded and it is the reason the payload is metadata only: a missed
-rewrite can restore stale roster/todo/spend FACTS, never a wrong transcript,
-and the history a deferred facade paints comes from the journal reader itself.
-Closing the residual properly needs a durable generation committed with the
-journal and is a separate, larger change.
+It is still NOT a byte proof. ctime is a kernel stamp, not a content digest: a
+privileged writer can reset the clock, a filesystem may coarsen the stamp, and a
+copy/restore tool can carry foreign stamps. Those are OUTSIDE this product's
+writers and are not detected here. This record carries no durable
+writer-maintained generation and no content digest, and nothing may present a
+metadata hit as content-verified. Closing that residual properly needs a durable
+generation committed with the journal and is a separate, larger change.
 
 WRITE-BEHIND, NEVER LOAD-BEARING. The record is written by
 :func:`~local_operator.session.replay_cache.build_cold_replay` after a replay
@@ -138,6 +139,9 @@ class ColdMetadataWitness:
     inode: int
     size: int
     mtime_ns: int
+    #: See the module docstring: the stamp that catches a same-size rewrite
+    #: whose mtime was restored. A stored witness without it is a MISS.
+    ctime_ns: int
     through_id: str | None
     strict_cut: bool
     checkpoint_types: tuple[str, ...]
@@ -193,6 +197,7 @@ class ColdMetadata:
                 "inode": witness.inode,
                 "size": witness.size,
                 "mtime_ns": witness.mtime_ns,
+                "ctime_ns": witness.ctime_ns,
                 "through_id": witness.through_id,
                 "strict_cut": witness.strict_cut,
                 "checkpoint_types": list(witness.checkpoint_types),
@@ -259,10 +264,11 @@ def _selection_of(raw: Any, witness: ColdMetadataWitness) -> SelectionReading | 
     value = raw["value"]
     if not isinstance(rules, str):
         raise _Invalid
-    if source != [witness.inode, witness.size, witness.mtime_ns]:
+    stamp = (witness.inode, witness.size, witness.mtime_ns, witness.ctime_ns)
+    if source != list(stamp):
         raise _Invalid
     if value is None:
-        return SelectionReading(None, rules, (witness.inode, witness.size, witness.mtime_ns))
+        return SelectionReading(None, rules, stamp)
     if not isinstance(value, dict) or set(value) != set(_SELECTION_FIELDS):
         raise _Invalid
     if not isinstance(value["provider"], str) or not isinstance(value["model_id"], str):
@@ -278,7 +284,7 @@ def _selection_of(raw: Any, witness: ColdMetadataWitness) -> SelectionReading | 
     return SelectionReading(
         StoredModelSelection(**{name: value[name] for name in _SELECTION_FIELDS}),
         rules,
-        (witness.inode, witness.size, witness.mtime_ns),
+        stamp,
     )
 
 
@@ -299,6 +305,7 @@ def witness_for(key: "ReplayKey") -> ColdMetadataWitness:
         inode=key.inode,
         size=key.size,
         mtime_ns=key.mtime_ns,
+        ctime_ns=key.ctime_ns,
         through_id=key.through_id,
         strict_cut=key.strict_cut,
         checkpoint_types=tuple(key.checkpoint_types),
@@ -398,6 +405,12 @@ def read_cold_metadata(path: Path, expected: ColdMetadataWitness) -> ColdMetadat
     try:
         selection = _selection_of(payload.get("selection"), witness)
     except _Invalid:
+        # THE WHOLE RECORD is discarded, not just the selection, deliberately:
+        # this writer never emits a malformed selection, so one here means the
+        # file was written by another build or damaged, and its other fields
+        # carry no better provenance than this one. Taking the eager path costs
+        # one parse; trusting the rest of a record we cannot account for could
+        # serve facts nobody computed for this journal.
         logger.debug("cold metadata: selection no longer validates in %s", path)
         return None
     return ColdMetadata(
@@ -434,6 +447,7 @@ def _witness_of(raw: Any) -> ColdMetadataWitness | None:
     inode = raw.get("inode")
     size = raw.get("size")
     mtime_ns = raw.get("mtime_ns")
+    ctime_ns = raw.get("ctime_ns")
     through_id = raw.get("through_id")
     strict_cut = raw.get("strict_cut")
     checkpoint_types = raw.get("checkpoint_types")
@@ -457,11 +471,17 @@ def _witness_of(raw: Any) -> ColdMetadataWitness | None:
         return None
     if not isinstance(mtime_ns, int) or isinstance(mtime_ns, bool):
         return None
+    # A record from a build whose witness had no ctime (an unreleased schema-2
+    # shape) is refused rather than defaulted: without the stamp the record
+    # cannot rule out the same-size rewrite the stamp exists to catch.
+    if not isinstance(ctime_ns, int) or isinstance(ctime_ns, bool):
+        return None
     return ColdMetadataWitness(
         journal_dir=journal_dir,
         inode=inode,
         size=size,
         mtime_ns=mtime_ns,
+        ctime_ns=ctime_ns,
         through_id=through_id,
         strict_cut=strict_cut,
         checkpoint_types=tuple(checkpoint_types),
@@ -491,6 +511,7 @@ def _journal_still_at(witness: ColdMetadataWitness) -> bool:
         stat.st_ino == witness.inode
         and stat.st_size == witness.size
         and stat.st_mtime_ns == witness.mtime_ns
+        and stat.st_ctime_ns == witness.ctime_ns
     )
 
 

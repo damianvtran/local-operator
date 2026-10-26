@@ -982,13 +982,24 @@ async def test_a_selection_appended_after_the_record_is_never_hidden_by_it(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "damage",
-    ["schema_one", "missing_selection", "wrong_source", "bad_value", "extra_key"],
+    [
+        "schema_one",
+        "missing_selection",
+        "wrong_source",
+        "bad_value",
+        "extra_key",
+        "missing_ctime",
+        "corrupt_ctime",
+        "wrong_ctime",
+    ],
 )
 async def test_an_unusable_selection_falls_back_exactly(isolated_config: Path, damage: str) -> None:
-    """A record whose selection this build did not write is a whole-record MISS.
+    """A record whose selection or witness this build did not write is a MISS.
 
     ``schema_one`` is the record an older build wrote: no ``selection`` key and
     schema 1, refused by the schema check before the field is ever looked at.
+    ``missing_ctime`` is the unreleased schema-2 shape without the ctime stamp:
+    it must MISS rather than hit on the three fields it does carry.
     """
     await seed_journal(isolated_config)
     await _append_selection(isolated_config, {"version": 2, "selector": SELECTED, "effort": "low"})
@@ -1005,8 +1016,14 @@ async def test_an_unusable_selection_falls_back_exactly(isolated_config: Path, d
         payload["selection"]["source"][1] += 1
     elif damage == "bad_value":
         payload["selection"]["value"]["authoritative"] = "yes"
-    else:
+    elif damage == "extra_key":
         payload["selection"]["value"]["extra"] = 1
+    elif damage == "missing_ctime":
+        payload["witness"].pop("ctime_ns")
+    elif damage == "corrupt_ctime":
+        payload["witness"]["ctime_ns"] = "now"
+    else:
+        payload["witness"]["ctime_ns"] += 1
     record.write_text(json.dumps(payload), encoding="utf-8")
 
     expected_payload, _rows = await _eager_reference(isolated_config)
@@ -1098,7 +1115,9 @@ def test_a_reading_from_another_journal_version_is_not_recorded(
     monkeypatch.setattr(
         replay_cache,
         "read_selection_reading",
-        lambda _d: SelectionReading(None, "x", (key.inode, key.size + 1, key.mtime_ns)),
+        lambda _d: SelectionReading(
+            None, "x", (key.inode, key.size + 1, key.mtime_ns, key.ctime_ns)
+        ),
     )
     path = _record_path(isolated_config)
     replay_cache._record_cold_metadata(path, key, {})
@@ -1107,7 +1126,83 @@ def test_a_reading_from_another_journal_version_is_not_recorded(
     monkeypatch.setattr(
         replay_cache,
         "read_selection_reading",
-        lambda _d: SelectionReading(None, "x", (key.inode, key.size, key.mtime_ns)),
+        lambda _d: SelectionReading(None, "x", (key.inode, key.size, key.mtime_ns, key.ctime_ns)),
     )
     replay_cache._record_cold_metadata(path, key, {})
     assert json.loads(path.read_text(encoding="utf-8"))["selection"]["value"] is None
+
+
+def _rewrite_in_place_keeping_mtime(journal: Path, old: bytes, new: bytes) -> None:
+    """Rewrite ``old`` to ``new`` (same length) inside ``journal``, mtime restored.
+
+    The shape a stat-tuple witness without ctime cannot see: same inode, same
+    size, same mtime — only the bytes and the inode change time moved. It is
+    what ``Transcript._write_entries``' ``preserve_mtime`` makes possible for its
+    own bookkeeping, done here to a selection row to prove the stale-model case.
+    """
+    import os
+    import time
+
+    assert len(old) == len(new), "the rewrite must keep the size"
+    before = journal.stat()
+    data = journal.read_bytes()
+    assert data.count(old) == 1, "the fixture must name the row exactly once"
+    # A ctime that ticks within the clock's resolution would make this test
+    # depend on luck; let it advance first.
+    time.sleep(0.01)
+    with journal.open("r+b") as handle:
+        handle.seek(data.index(old))
+        handle.write(new)
+    os.utime(journal, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = journal.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ), "precondition: the three pre-ctime witness fields are unchanged"
+    assert after.st_ctime_ns != before.st_ctime_ns, "precondition: ctime moved"
+
+
+@pytest.mark.asyncio
+async def test_a_same_size_rewrite_with_mtime_restored_is_a_miss(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's repro: HIT, interior rewrite of the selection, mtime restored.
+
+    Without ctime in the witness the next open HIT and served the OLD model from
+    the record. With it, the open MISSES and resolves the rewritten selection —
+    exactly what an eager open of the same bytes resolves.
+    """
+    directory = await seed_journal(isolated_config)
+    # Two effort spellings of equal length, so the rewrite keeps the size.
+    await _append_selection(isolated_config, {"version": 2, "selector": SELECTED, "effort": "low"})
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    replay_cache.replay_cache().clear()
+    hit = await cold_open(isolated_config, deferred=True)
+    try:
+        assert hit._deferred_history is not None, "precondition: a record HIT"
+        assert _model(hit).reasoning_effort == "low"
+    finally:
+        await hit.dispose()
+
+    _rewrite_in_place_keeping_mtime(
+        directory / "transcript.jsonl", b'"effort":"low"', b'"effort":"max"'
+    )
+    replay_cache.replay_cache().clear()
+    reads = counting_selection_reads(monkeypatch)
+    after = await cold_open(isolated_config, deferred=True)
+    try:
+        assert after._deferred_history is None, "a same-size rewrite must not HIT"
+        assert _model(after).reasoning_effort == "max", "the rewritten selection is served"
+        assert reads, "the miss resolves the selection from the journal"
+    finally:
+        await after.dispose()
+    expected_payload, _rows = await _eager_reference(isolated_config)
+    replay_cache.replay_cache().clear()
+    again = await cold_open(isolated_config, deferred=True)
+    try:
+        assert again._deferred_history is not None, "the rewrite re-recorded the new version"
+        assert frontend_payload(again) == expected_payload
+    finally:
+        await again.dispose()

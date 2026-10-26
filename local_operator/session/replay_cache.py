@@ -130,6 +130,14 @@ class ReplayKey:
     inode: int
     size: int
     mtime_ns: int
+    #: The inode CHANGE time. ``mtime`` is not enough on its own: the journal
+    #: writer restores mtime after a bookkeeping batch (``preserve_mtime``), so
+    #: a same-size interior rewrite with a restored mtime would leave the other
+    #: three fields equal. ``st_ctime_ns`` moves on every data or metadata write
+    #: and no unprivileged process can set it back, which is why the selection
+    #: ledger (``tail_anchor``) already validates on it. Part of equality, so the
+    #: post-read re-stat below also refuses a read the file changed under.
+    ctime_ns: int
     through_id: str | None
     #: Whether an absent ``through_id`` is an error (the negotiated cut) or a
     #: legacy fallback. Part of the REQUEST rather than the file: the same bytes
@@ -262,6 +270,7 @@ def replay_key(
         inode=stat.st_ino,
         size=stat.st_size,
         mtime_ns=stat.st_mtime_ns,
+        ctime_ns=stat.st_ctime_ns,
         through_id=through_id,
         strict_cut=strict_cut,
         checkpoint_types=_normalised(checkpoint_types),
@@ -461,7 +470,12 @@ def _record_cold_metadata(path: Path | None, key: "ReplayKey", values: dict[str,
     except Exception:  # noqa: BLE001 — write-behind: a failed read is "not recorded"
         logger.debug("cold metadata: selection not recorded", exc_info=True)
         selection = None
-    if selection is not None and selection.source != (key.inode, key.size, key.mtime_ns):
+    if selection is not None and selection.source != (
+        key.inode,
+        key.size,
+        key.mtime_ns,
+        key.ctime_ns,
+    ):
         selection = None
     write_cold_metadata(
         path,

@@ -55,7 +55,8 @@ class SelectionReading:
     the time of the read, so a persisted reading can be refused by a process whose
     rules differ (a provider added, removed or reclassified since).
 
-    ``source`` is the PLAIN journal's ``(st_ino, st_size, st_mtime_ns)``, stat'd
+    ``source`` is the PLAIN journal's ``(st_ino, st_size, st_mtime_ns,
+    st_ctime_ns)``, stat'd
     before the read and again after it, or ``None`` when the two disagreed, the
     journal is archived, or it could not be stat'd. It is what lets a persister
     prove the reading describes the journal version it is filed under: the cold
@@ -66,7 +67,7 @@ class SelectionReading:
 
     selection: StoredModelSelection | None
     rules: str
-    source: tuple[int, int, int] | None = None
+    source: tuple[int, int, int, int] | None = None
 
 
 def selection_rules_fingerprint() -> str:
@@ -127,8 +128,15 @@ def selection_rules_fingerprint() -> str:
 #: an answer that costs one stat once warm. The path half of the key is the
 #: path AS GIVEN, not ``realpath``: the budget is one stat per call, and two
 #: spellings of one store cost one extra entry each rather than a wrong answer.
-_SELECTION_MEMO: "OrderedDict[str, tuple[tuple[int, int, int], Any]]" = OrderedDict()
-_SELECTION_REFUSAL_MEMO: "OrderedDict[str, tuple[tuple[int, int, int], Any]]" = OrderedDict()
+#:
+#: The stat key includes ``st_ctime_ns``: the journal writer restores mtime after
+#: a bookkeeping batch, so ``(ino, size, mtime)`` alone can stay equal across a
+#: same-size interior rewrite, and the durable cold record
+#: (``cold_metadata.ColdMetadata.selection``) persists whatever this memo answers.
+#: A stale memo hit would therefore outlive the process. ctime cannot be restored
+#: by an unprivileged writer, and the selection ledger already validates on it.
+_SELECTION_MEMO: "OrderedDict[str, tuple[tuple[int, int, int, int], Any]]" = OrderedDict()
+_SELECTION_REFUSAL_MEMO: "OrderedDict[str, tuple[tuple[int, int, int, int], Any]]" = OrderedDict()
 
 #: Bound on each memo above, in entries. Why a bound: a long-lived daemon can
 #: be asked about every session in a store over its lifetime. Why 128: the
@@ -523,7 +531,7 @@ def _journal_for_read(directory: Path) -> Path | None:
 
 
 def _memoised(
-    memo: "OrderedDict[str, tuple[tuple[int, int, int], Any]]",
+    memo: "OrderedDict[str, tuple[tuple[int, int, int, int], Any]]",
     path: Path,
     compute: Callable[[], Any],
 ) -> Any:
@@ -537,13 +545,13 @@ def _memoised(
     file's bytes (the direction ``session_uses_test_hosting`` documents for its
     walk). What IS cached, deliberately: a ``None``, found or folded.
     """
-    stat_key: tuple[int, int, int] | None = None
+    stat_key: tuple[int, int, int, int] | None = None
     try:
         info = path.stat()
     except OSError:
         pass
     else:
-        stat_key = (info.st_ino, info.st_size, info.st_mtime_ns)
+        stat_key = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
     key = str(path)
     if stat_key is not None:
         with _SELECTION_MEMO_GUARD:
@@ -598,7 +606,7 @@ def read_selection_reading(directory: Path) -> SelectionReading:
     """
     from local_operator.session import compression
 
-    def stat_key() -> tuple[int, int, int] | None:
+    def stat_key() -> tuple[int, int, int, int] | None:
         path, codec = compression.transcript_source(Path(directory))
         if codec is not None:
             return None
@@ -606,7 +614,7 @@ def read_selection_reading(directory: Path) -> SelectionReading:
             info = path.stat()
         except OSError:
             return None
-        return (info.st_ino, info.st_size, info.st_mtime_ns)
+        return (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
     rules = selection_rules_fingerprint()
     before = stat_key()
