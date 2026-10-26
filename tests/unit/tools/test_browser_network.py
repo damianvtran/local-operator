@@ -375,3 +375,59 @@ def test_a_network_refusal_never_echoes_a_url_with_values():
     assert "query-secret" not in rendered
     assert "fragment-secret" not in rendered
     assert "https://example.test/acs?code=" in rendered
+
+
+def test_redirect_correlation_survives_the_metadata_allowlist(monkeypatch, tmp_path):
+    """The host's redirect ids and `finished` are the correlation contract."""
+
+    async def fake_bridge(tool_call_id, action, wire, *, surface="", client=None):
+        return {
+            "active": True,
+            "count": 2,
+            "entries": [
+                {
+                    "id": 1,
+                    "request_id": "r1",
+                    "method": "GET",
+                    "url": "https://e.test/a",
+                    "status": 302,
+                    "redirect_to_id": 2,
+                    "finished": True,
+                    # A field the host strips; a future host must not leak it.
+                    "started_at": 123.5,
+                },
+                {
+                    "id": 2,
+                    "request_id": "r1",
+                    "method": "GET",
+                    "url": "https://e.test/b",
+                    "status": 200,
+                    "redirect_from_id": 1,
+                    "finished": True,
+                },
+            ],
+        }, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
+    ctx = _ctx(tmp_path)
+    result = asyncio.run(
+        builtin._browser_network("call", _surface(), "network_read", _params(), ctx)
+    )
+    entries = json.loads(result.text)["entries"]
+    assert entries[0]["redirect_to_id"] == 2
+    assert entries[1]["redirect_from_id"] == 1
+    assert entries[0]["finished"] is True
+    assert "started_at" not in entries[0]
+
+
+def test_uppercase_schemes_are_redacted_too():
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    error = BridgeError(
+        code=ErrorCode.ORIGIN_DENIED,
+        message="refused HTTPS://example.test/acs?code=secret-s8 for this capture",
+    )
+    rendered = format_error(error, action="network_start", host="ui")
+    assert "secret-s8" not in rendered
+    assert "example.test/acs?code=" in rendered

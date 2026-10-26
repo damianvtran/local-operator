@@ -452,7 +452,7 @@ def _element_not_found_copy(error: BridgeError) -> str:
 
 
 #: An http(s) URL inside free text, up to the first whitespace or quote.
-_MESSAGE_URL = re.compile(r"https?://[^\s\"'<>]+")
+_MESSAGE_URL = re.compile(r"https?://[^\s\"'<>()\[\],;]+", re.IGNORECASE)
 
 
 def _redact_message_urls(text: str) -> str:

@@ -25415,29 +25415,37 @@ async def execute_browser(
 _NETWORK_BODY_KEY = "request_body_base64"
 _NETWORK_METADATA_KEYS = frozenset(
     {
+        # EXACTLY the keys the desktop host's `network_read` emits per entry.
+        # Kept as a copy rather than a pass-through because this is the allowlist
+        # that stops a future host field reaching a model unvetted — but a copy
+        # that is wrong in both directions is worse than no copy: the first
+        # version dropped `finished` and all three redirect ids, so redirect
+        # correlation was invisible on the agent path while looking fine on the
+        # wire, and it kept `started_at` (the host deliberately strips it) plus
+        # seven other keys no host ever sends (agent review round 5, R5-1).
         "id",
         "request_id",
-        "loader_id",
-        "frame_id",
         "method",
         "url",
         "status",
         "duration_ms",
         "resource_type",
+        "loader_id",
+        "frame_id",
         "wall_time",
-        "started_at",
-        "finished_at",
+        "redirect_request_id",
+        "redirect_from_id",
+        "redirect_to_id",
         "encoded_data_length",
-        "decoded_body_length",
         "from_cache",
-        "failed",
         "error_text",
         "canceled",
-        "redirected_from",
-        "redirect_count",
+        "finished",
+        # Added BY THIS MODULE, not by the host: the private file each body was
+        # written to and its byte count. The body itself is never a key here —
+        # it is popped into a file before this filter runs.
         "request_body_file",
         "request_body_bytes",
-        "request_body_truncated",
     }
 )
 
