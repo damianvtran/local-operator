@@ -9,7 +9,7 @@
   "tui.notifications.banner_digest_body": "Nhập /notifications để xem.",
   "tui.notifications.banner_digest_title": "{count, plural, other {Thêm # thông báo ưu tiên cao}}",
   "tui.notifications.chip_high": "cao",
-  "tui.notifications.confirm_dismiss_session": "Ẩn {count, plural, other {# cập nhật}} từ {source}? y/n",
+  "tui.notifications.confirm_dismiss_session": "Ẩn {count, plural, other {# thông báo}} ({updates, plural, other {# cập nhật}}) từ {source}? y/n",
   "tui.notifications.confirm_mark_all": "Đánh dấu {count} mục là đã đọc? y/n",
   "tui.notifications.dismissed": "Đã ẩn {count, plural, other {# cập nhật}}.",
   "tui.notifications.empty_caught_up_body": "Không có gì đang chờ bạn trong các cuộc trò chuyện. Nhấn f để hiện tất cả.",
@@ -70,5 +70,8 @@
   "tui.notifications.unread_mark_these": "/unread read đánh dấu các mục này là đã đọc",
   "tui.notifications.update_kind": "cập nhật",
   "tui.notifications.updates_since": "{count, plural, other {# cập nhật kể từ {time}}}",
-  "tui.notifications.write_failed": "Không cập nhật được thông báo — không có thay đổi nào khác: {error}"
+  "tui.notifications.write_failed": "Không cập nhật được thông báo — không có thay đổi nào khác: {error}",
+  "tui.notifications.hint_mark_all": "đã đọc hết",
+  "tui.notifications.hint_confirm": "xác nhận",
+  "tui.notifications.hint_cancel": "hủy"
 }

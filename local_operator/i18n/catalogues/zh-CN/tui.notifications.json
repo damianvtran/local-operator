@@ -9,7 +9,7 @@
   "tui.notifications.banner_digest_body": "输入/notifications即可查看。",
   "tui.notifications.banner_digest_title": "{count, plural, other {另有#条高优先级通知}}",
   "tui.notifications.chip_high": "高",
-  "tui.notifications.confirm_dismiss_session": "清除{count, plural, other {来自{source}的#条更新}}？y/n",
+  "tui.notifications.confirm_dismiss_session": "{count, plural, other {{updates, plural, other {清除来自{source}的{count, number}条通知（#条更新）？}}}}y/n",
   "tui.notifications.confirm_mark_all": "将{count}条标为已读？y/n",
   "tui.notifications.dismissed": "已清除{count, plural, other {#条更新}}。",
   "tui.notifications.empty_caught_up_body": "所有对话中都没有待你处理的内容。按f显示全部。",
@@ -70,5 +70,8 @@
   "tui.notifications.unread_mark_these": "/unread read将这些通知标为已读",
   "tui.notifications.update_kind": "更新",
   "tui.notifications.updates_since": "{count, plural, other {自{time}起更新#次}}",
-  "tui.notifications.write_failed": "无法更新通知——未做其他更改：{error}"
+  "tui.notifications.write_failed": "无法更新通知——未做其他更改：{error}",
+  "tui.notifications.hint_mark_all": "全部标为已读",
+  "tui.notifications.hint_confirm": "确认",
+  "tui.notifications.hint_cancel": "取消"
 }

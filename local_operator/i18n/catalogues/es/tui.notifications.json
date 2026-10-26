@@ -9,7 +9,7 @@
   "tui.notifications.banner_digest_body": "Escribe /notifications para verlas.",
   "tui.notifications.banner_digest_title": "{count, plural, one {# notificación más de prioridad alta} many {# de notificaciones más de prioridad alta} other {# notificaciones más de prioridad alta}}",
   "tui.notifications.chip_high": "alta",
-  "tui.notifications.confirm_dismiss_session": "¿Descartar {count, plural, one {# actualización} many {# de actualizaciones} other {# actualizaciones}} de {source}? y/n",
+  "tui.notifications.confirm_dismiss_session": "¿Descartar {count, plural, one {# notificación} many {# de notificaciones} other {# notificaciones}} ({updates, plural, one {# actualización} many {# de actualizaciones} other {# actualizaciones}}) de {source}? y/n",
   "tui.notifications.confirm_mark_all": "¿Marcar {count} como leídas? y/n",
   "tui.notifications.dismissed": "{count, plural, one {# actualización descartada.} many {# de actualizaciones descartadas.} other {# actualizaciones descartadas.}}",
   "tui.notifications.empty_caught_up_body": "No tienes nada pendiente en tus conversaciones. Pulsa f para verlo todo.",
@@ -70,5 +70,8 @@
   "tui.notifications.unread_mark_these": "/unread read marca estos como leídos",
   "tui.notifications.update_kind": "novedad",
   "tui.notifications.updates_since": "{count, plural, one {# actualización desde {time}} many {# de actualizaciones desde {time}} other {# actualizaciones desde {time}}}",
-  "tui.notifications.write_failed": "No se pudieron actualizar las notificaciones — no se modificó nada más: {error}"
+  "tui.notifications.write_failed": "No se pudieron actualizar las notificaciones — no se modificó nada más: {error}",
+  "tui.notifications.hint_mark_all": "todo leído",
+  "tui.notifications.hint_confirm": "confirmar",
+  "tui.notifications.hint_cancel": "cancelar"
 }

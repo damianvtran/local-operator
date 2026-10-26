@@ -9,7 +9,7 @@
   "tui.notifications.banner_digest_body": "इन्हें देखने के लिए /notifications टाइप करें।",
   "tui.notifications.banner_digest_title": "{count, plural, one {# और उच्च प्राथमिकता वाली सूचना} other {# और उच्च प्राथमिकता वाली सूचनाएँ}}",
   "tui.notifications.chip_high": "उच्च",
-  "tui.notifications.confirm_dismiss_session": "{count, plural, one {{source} का # अपडेट हटाएँ?} other {{source} के # अपडेट हटाएँ?}} y/n",
+  "tui.notifications.confirm_dismiss_session": "{count, plural, one {{updates, plural, one {{source} की {count, number} सूचना (# अपडेट) हटाएँ?} other {{source} की {count, number} सूचना (# अपडेट) हटाएँ?}}} other {{updates, plural, one {{source} की {count, number} सूचनाएँ (# अपडेट) हटाएँ?} other {{source} की {count, number} सूचनाएँ (# अपडेट) हटाएँ?}}}} y/n",
   "tui.notifications.confirm_mark_all": "{count} को पढ़ा हुआ मानें? y/n",
   "tui.notifications.dismissed": "{count, plural, one {# अपडेट हटाया गया।} other {# अपडेट हटाए गए।}}",
   "tui.notifications.empty_caught_up_body": "आपकी किसी भी बातचीत में कुछ भी आपके इंतज़ार में नहीं है। सब कुछ दिखाने के लिए f दबाएँ।",
@@ -70,5 +70,8 @@
   "tui.notifications.unread_mark_these": "/unread read से इन्हें पढ़ा हुआ मानें",
   "tui.notifications.update_kind": "अपडेट",
   "tui.notifications.updates_since": "{count, plural, one {{time} से अब तक # अपडेट} other {{time} से अब तक # अपडेट}}",
-  "tui.notifications.write_failed": "सूचनाएँ अपडेट नहीं हो सकीं — और कुछ नहीं बदला: {error}"
+  "tui.notifications.write_failed": "सूचनाएँ अपडेट नहीं हो सकीं — और कुछ नहीं बदला: {error}",
+  "tui.notifications.hint_mark_all": "सभी को पढ़ा मानें",
+  "tui.notifications.hint_confirm": "पुष्टि करें",
+  "tui.notifications.hint_cancel": "रद्द करें"
 }

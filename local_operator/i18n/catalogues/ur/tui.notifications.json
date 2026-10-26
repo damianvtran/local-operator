@@ -9,7 +9,7 @@
   "tui.notifications.banner_digest_body": "انہیں دیکھنے کے لیے /notifications لکھیں۔",
   "tui.notifications.banner_digest_title": "{count, plural, one {# مزید اعلیٰ ترجیح والی اطلاع} other {# مزید اعلیٰ ترجیح والی اطلاعات}}",
   "tui.notifications.chip_high": "اعلیٰ",
-  "tui.notifications.confirm_dismiss_session": "{count, plural, one {{source} کی # اپ ڈیٹ ہٹائیں؟} other {{source} کی # اپ ڈیٹس ہٹائیں؟}} y/n",
+  "tui.notifications.confirm_dismiss_session": "{count, plural, one {{updates, plural, one {{source} کی {count, number} اطلاع (# اپ ڈیٹ) ہٹائیں؟} other {{source} کی {count, number} اطلاع (# اپ ڈیٹس) ہٹائیں؟}}} other {{updates, plural, one {{source} کی {count, number} اطلاعات (# اپ ڈیٹ) ہٹائیں؟} other {{source} کی {count, number} اطلاعات (# اپ ڈیٹس) ہٹائیں؟}}}} y/n",
   "tui.notifications.confirm_mark_all": "{count} کو پڑھا ہوا نشان زد کریں؟ y/n",
   "tui.notifications.dismissed": "{count, plural, one {# اپ ڈیٹ ہٹا دی گئی} other {# اپ ڈیٹس ہٹا دی گئیں}}۔",
   "tui.notifications.empty_caught_up_body": "آپ کی کسی گفتگو میں کچھ بھی آپ کا منتظر نہیں۔ سب کچھ دکھانے کے لیے f دبائیں۔",
@@ -70,5 +70,8 @@
   "tui.notifications.unread_mark_these": "/unread read سے انہیں پڑھا ہوا نشان زد کریں۔",
   "tui.notifications.update_kind": "اپ ڈیٹ",
   "tui.notifications.updates_since": "{count, plural, one {{time} سے # اپ ڈیٹ} other {{time} سے # اپ ڈیٹس}}",
-  "tui.notifications.write_failed": "اطلاعات اپ ڈیٹ نہیں ہو سکیں — کچھ بھی نہیں بدلا: {error}"
+  "tui.notifications.write_failed": "اطلاعات اپ ڈیٹ نہیں ہو سکیں — کچھ بھی نہیں بدلا: {error}",
+  "tui.notifications.hint_mark_all": "سب پڑھا ہوا",
+  "tui.notifications.hint_confirm": "تصدیق",
+  "tui.notifications.hint_cancel": "منسوخ"
 }

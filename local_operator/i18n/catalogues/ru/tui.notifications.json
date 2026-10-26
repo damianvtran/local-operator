@@ -9,7 +9,7 @@
   "tui.notifications.banner_digest_body": "Введите /notifications, чтобы их увидеть.",
   "tui.notifications.banner_digest_title": "{count, plural, one {Ещё # уведомление с высоким приоритетом} few {Ещё # уведомления с высоким приоритетом} many {Ещё # уведомлений с высоким приоритетом} other {Ещё # уведомления с высоким приоритетом}}",
   "tui.notifications.chip_high": "выс.",
-  "tui.notifications.confirm_dismiss_session": "Скрыть {count, plural, one {# обновление} few {# обновления} many {# обновлений} other {# обновления}} из «{source}»? y/n",
+  "tui.notifications.confirm_dismiss_session": "Скрыть {count, plural, one {# уведомление} few {# уведомления} many {# уведомлений} other {# уведомления}} ({updates, plural, one {# обновление} few {# обновления} many {# обновлений} other {# обновления}}) из «{source}»? y/n",
   "tui.notifications.confirm_mark_all": "Отметить все ({count}) прочитанными? y/n",
   "tui.notifications.dismissed": "Скрыто {count, plural, one {# обновление} few {# обновления} many {# обновлений} other {# обновления}}.",
   "tui.notifications.empty_caught_up_body": "Ни в одном разговоре ничего не ждёт вашего внимания. Нажмите f, чтобы показать всё.",
@@ -70,5 +70,8 @@
   "tui.notifications.unread_mark_these": "/unread read помечает эти прочитанными",
   "tui.notifications.update_kind": "обновл.",
   "tui.notifications.updates_since": "{count, plural, one {# обновление с {time}} few {# обновления с {time}} many {# обновлений с {time}} other {# обновления с {time}}}",
-  "tui.notifications.write_failed": "Не удалось обновить уведомления — ничего не изменилось: {error}"
+  "tui.notifications.write_failed": "Не удалось обновить уведомления — ничего не изменилось: {error}",
+  "tui.notifications.hint_mark_all": "всё прочтено",
+  "tui.notifications.hint_confirm": "подтв.",
+  "tui.notifications.hint_cancel": "отмена"
 }
