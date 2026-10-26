@@ -65,8 +65,9 @@ static replay, an old screenshot or an intended interaction as current live proo
   (operator-reviewed; larger than the legacy text glyph but optically restrained,
   not the oversized 24 px silhouette), consistent stroke and optical weight, inside
   **at least 44 × 44 px independent tap targets**. Keep the paths in the shared
-  24-unit viewBox: search's longest stroked diagonal is approximately **18.33 px**
-  at this scale. The brand mark is deliberately different and remains 24 px.
+  24-unit viewBox: search's stroked **path-bounds diagonal** is approximately
+  **18.33 px** at this scale (the axis-aligned bounding box is 16.67 × 16.67 px).
+  The brand mark is deliberately different and remains 24 px.
   Enlarging only the button does not enlarge the glyph. Verify actual path/ink
   extent as well as SVG and target rectangles in a rendered frame.
 - Icons inside named buttons are `aria-hidden`, unfocusable and non-interactive.

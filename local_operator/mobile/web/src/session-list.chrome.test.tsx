@@ -21,7 +21,8 @@ function expectChromeIcon(button: HTMLElement) {
 	expect(icon).not.toBeNull();
 	// Operator-reviewed optical size: 20px is larger than the legacy text glyph
 	// without the oversized 24px chrome silhouette. The path geometry remains in
-	// a 24-unit viewBox, so search's 22-unit stroked diagonal renders at 18.33px.
+	// a 24-unit viewBox, so search's 22-unit stroked path-bounds diagonal renders
+	// at 18.33px; its axis-aligned ink bounding box is 16.67px.
 	expect(icon?.getAttribute("width")).toBe("20");
 	expect(icon?.getAttribute("height")).toBe("20");
 	expect(icon?.getAttribute("viewBox")).toBe("0 0 24 24");
