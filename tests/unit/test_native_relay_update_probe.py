@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -249,3 +250,44 @@ def test_readiness_diagnostics_redact_secret_shaped_tails(
     receipt = json.loads(artifact)
     assert receipt["redaction"]["replacements"] >= 2
     assert receipt["last_observation"] == {"pid": 0}
+
+
+def test_identity_accepts_an_unpublished_install_root_and_rejects_a_wrong_one(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relay publishes no install_root; a build that DOES must name the tree.
+
+    The third privileged run died demanding a field ``RelayServer._record`` never
+    passes to ``PeerRecord``. The generation is proven by the process's own
+    generation and the record's source_ref; the root check applies only when a
+    build actually publishes one.
+    """
+    generation = root / "generations" / "head"
+    install_root = root / "generation-install"
+    sha = "c" * 40
+    monkeypatch.setattr(probe.update, "_generation_install_root", lambda _g: install_root)
+
+    def observation(advertised_root: str) -> dict[str, Any]:
+        return {
+            "pid": 4321,
+            "loaded_generation": str(generation),
+            "loaded_stale": True,
+            "advertised_record_pid": 4321,
+            "advertised_source_ref": sha,
+            "advertised_install_root": advertised_root,
+            "answering": True,
+        }
+
+    # The real relay's shape: the field is absent, so it must not fail.
+    probe._assert_identity(  # noqa: SLF001
+        observation(""), generation, sha, "unpublished", expected_stale=True
+    )
+    # A published root that names another tree still fails loudly.
+    with pytest.raises(probe.ProbeFailure, match="advertised install root"):
+        probe._assert_identity(  # noqa: SLF001
+            observation(str(root / "elsewhere")),
+            generation,
+            sha,
+            "wrong-root",
+            expected_stale=True,
+        )

@@ -198,9 +198,19 @@ def _assert_identity(
         raise ProbeFailure(
             f"{label}: advertised source {observed['advertised_source_ref']!r}, expected {sha}"
         )
-    install_root = str(update._generation_install_root(generation))  # noqa: SLF001
-    if observed["advertised_install_root"] != install_root:
-        raise ProbeFailure(f"{label}: advertised install root is not the expected generation")
+    # THE RELAY DOES NOT PUBLISH install_root. ``PeerRecord`` declares the field
+    # (network/types.py) but ``RelayServer._record`` never passes it, so a live
+    # relay advertises "" for its whole life — measured on a real relay, and the
+    # probe's third run died here asking for a value that cannot exist. The
+    # generation is already proven twice above: the process's own generation and
+    # the record's source_ref. Enforce this only for a build that DOES publish a
+    # root, so a future regression that names the wrong tree still fails loudly.
+    expected_root = str(update._generation_install_root(generation))  # noqa: SLF001
+    advertised_root = str(observed["advertised_install_root"])
+    if advertised_root and advertised_root != expected_root:
+        raise ProbeFailure(
+            f"{label}: advertised install root {advertised_root!r} is not {expected_root!r}"
+        )
     if not observed["answering"]:
         raise ProbeFailure(f"{label}: relay did not answer its real loopback health probe")
 
