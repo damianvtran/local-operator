@@ -67,13 +67,23 @@ const FIXTURE = JSON.parse(FIXTURE_BYTES) as {
 	desktop: { commit: string; permutations: string[] };
 	cases: Case[];
 };
+/**
+ * The pin for each copied fixture. `sha256` is the exact bytes beside this file;
+ * `sourceHash` is the desktop MODEL SOURCE hash those bytes came from (see
+ * `parity-sources.json`). There is deliberately no commit field: a commit cannot
+ * contain its own SHA, and one recorded at generation time names a tree that need
+ * not have produced these bytes (C0-B1).
+ */
 const SOURCES = JSON.parse(readFileSync(join(HERE, "parity-sources.json"), "utf8")) as Record<
 	string,
-	{ sha256: string; commit: string }
+	{ sha256: string; sourceHash?: string }
 >;
 
 /** The token shapes this wire cannot carry (see the header). */
 const NOT_EXPRESSIBLE_TOKENS = new Set(["Z", "R"]);
+
+/** The same two tokens, for the independent derivation above. */
+const QUIET_TOKENS = new Set(["R", "Z"]);
 
 const optionOf = (token: string) => {
 	const [mode, live, older] = token.split("|");
@@ -203,7 +213,38 @@ const RECORDS: Record<string, (id: string, i: number) => CondenseRecord> = {
 	}),
 	O: (id, i) => ({ kind: "notice", id, ts: TS + i, text: "n", level: "info", complete: false }),
 	C: (id, i) => ({ kind: "compaction", id, ts: TS + i, text: "Context", before: null }),
+	/*
+	 * THE DESKTOP'S TOOL-VARIETY TOKENS, mirrored from
+	 * `scripts/fixtures/record-tokens.mjs`. Without them the corpus pinned one
+	 * `kind:` key, so the count line's class ordering, the failure tally and `Took`
+	 * were not compared at all (round 1, C0-M2).
+	 */
+	Rd: (id, i) => foldTool(id, i, "read"),
+	Wr: (id, i) => foldTool(id, i, "write"),
+	Sr: (id, i) => foldTool(id, i, "web_fetch"),
+	Wb: (id, i) => foldTool(id, i, "web_search"),
+	Mc: (id, i) => foldTool(id, i, "mcp__datadog_search_datadog_metrics"),
+	Ag: (id, i) => foldTool(id, i, "task"),
+	Py: (id, i) => foldTool(id, i, "eval"),
+	Ak: (id, i) => foldTool(id, i, "agent"),
+	Td: (id, i) => foldTool(id, i, "todo"),
+	Fa: (id, i) => ({ ...foldTool(id, i, "bash"), isError: true }),
+	Du: (id, i) => ({ ...foldTool(id, i, "bash"), durationS: 7 }),
 };
+
+/** A settled tool record, as the desktop's token grammar builds them. */
+const foldTool = (id: string, i: number, toolName: string): CondenseRecord => ({
+	kind: "tool",
+	id,
+	ts: TS + i,
+	toolName,
+	phase: "done",
+	isError: false,
+	stopped: false,
+	neverSent: false,
+	notRunReason: null,
+	durationS: null,
+});
 
 const seq = (spec: string): CondenseRecord[] =>
 	spec
@@ -310,20 +351,51 @@ describe("the condense parity fixture", () => {
 	it("is the copy the manifest pins, byte for byte", () => {
 		const digest = createHash("sha256").update(FIXTURE_BYTES).digest("hex");
 		expect(SOURCES["condense.parity.json"].sha256).toBe(digest);
-		expect(SOURCES["condense.parity.json"].commit).toBe(FIXTURE.desktop.commit);
+		/*
+		 * THE PIN IS THE MODEL SOURCE HASH, not a commit (C0-B1 on the desktop side:
+		 * a commit cannot contain its own SHA, and one that did may name a tree that
+		 * never produced these bytes). The desktop's generator hashes the model files
+		 * it bundled; this manifest records that hash, so the pair is comparable
+		 * without a git lookup on either side. `scripts/check-condense-parity-latest.mjs`
+		 * is what compares it against the desktop's OWN manifest when that checkout is
+		 * present.
+		 */
+		expect(SOURCES["condense.parity.json"].sourceHash).toBe(
+			(FIXTURE.desktop as { sourceHash?: string }).sourceHash,
+		);
+		expect(SOURCES["condense.parity.json"].sourceHash).toMatch(/^[0-9a-f]{64}$/);
 	});
 
 	it("skips exactly the cases this wire cannot express, and no others", () => {
-		const want = FIXTURE.cases.filter(skipped).map((entry) => `${entry.tokens} ${entry.options}`);
-		const got = FIXTURE.cases.filter(skipped).map((entry) => `${entry.tokens} ${entry.options}`);
-		expect(want).toEqual(got);
 		/*
-		 * The skipped set must be a PROPERTY OF THE TOKENS, not a hand-kept list: a
-		 * desktop case that introduces a shape this surface cannot carry has to fail
-		 * here, which it does because its expectation is never compared. This
-		 * assertion states the contract in the one place a reader looks.
+		 * AN INDEPENDENT DERIVATION, not the same expression twice. The left side
+		 * re-derives "unexpressible" from the TOKENS the way the wire does - a case
+		 * is skipped iff it carries the quiet call the projector never mints - and
+		 * the right side is the file's own `skipped()`. Round 1 compared two
+		 * identical expressions, which cannot fail.
 		 */
-		expect(FIXTURE.cases.length - want.length).toBeGreaterThan(100);
+		const fromTokens = FIXTURE.cases.filter((entry) =>
+			entry.tokens
+				.trim()
+				.split(/\s+/)
+				.some((token) => QUIET_TOKENS.has(token)),
+		);
+		const fromHelper = FIXTURE.cases.filter(skipped);
+		expect(fromHelper.map((entry) => entry.tokens)).toEqual(
+			fromTokens.map((entry) => entry.tokens),
+		);
+		/*
+		 * AND THE SIZE IS PINNED, so a desktop change that adds a wall of quiet
+		 * cases shows up as a diff in review instead of quietly shrinking what this
+		 * suite proves. `-27` is read from the corpus this copy pins.
+		 */
+		expect(fromHelper.length).toBe(27);
+		/* Every skip carries the quiet pair, and none is skipped for another reason:
+		 * an unbuilt token would throw inside `seq`, never be filtered quietly. */
+		for (const entry of fromHelper) {
+			const tokens = entry.tokens.split(/\s+/);
+			expect(tokens.some((token) => QUIET_TOKENS.has(token))).toBe(true);
+		}
 	});
 
 	for (const entry of FIXTURE.cases.filter((candidate) => !skipped(candidate)))
@@ -418,5 +490,165 @@ describe("the wire-to-record mapping (the one relay-specific file)", () => {
 		expect(records).toHaveLength(2);
 		expect(records[0]).toMatchObject({ kind: "assistant", streaming: true, text: "" });
 		expect(records[1]).toMatchObject({ kind: "user" });
+	});
+});
+
+/*
+ * ------------------------- THE WIRE-LEVEL REPLAY -------------------------
+ *
+ * WHY THIS EXISTS BESIDE THE RECORD REPLAY (round 1, C1-m3). The replay above
+ * asks the PORTED MODEL the desktop's question over desktop-vocabulary records -
+ * which is what makes it comparable to the fixture. It therefore skips this
+ * surface's one relay-specific layer, `toCondenseRecords`, which had six unit
+ * tests and no parity coverage: mapper drift would leave the model replay green
+ * and the phone wrong. Here every expressible case is built as the WIRE ROWS the
+ * projector actually emits, pushed through the mapper, and compared to the same
+ * expectation. `Z`/`R` are absent because the projector never mints that row.
+ */
+type WireToken = (id: string, i: number) => TranscriptEntry;
+
+const wireEntry = (over: Partial<TranscriptEntry>): TranscriptEntry =>
+	({
+		id: "e",
+		kind: "assistant",
+		text: "",
+		tool_call_id: "",
+		tool_name: "",
+		tool_state: "done",
+		summary: "",
+		intent: "",
+		diff_added: 0,
+		diff_removed: 0,
+		elapsed_s: 0,
+		error: "",
+		details: {},
+		final: true,
+		...over,
+	}) as TranscriptEntry;
+
+const wireTool = (toolName: string, over: Partial<TranscriptEntry> = {}): TranscriptEntry =>
+	wireEntry({ kind: "tool", tool_name: toolName, tool_call_id: String(over.id ?? toolName), ...over });
+
+/**
+ * THE WIRE ROWS FOR EACH TOKEN, built the way the PROJECTOR builds them:
+ * the four condensation facts (`stop_reason`, `calls_tools`, `custom_type`,
+ * `terminal`) are the only channels a fact has, so this table is a second reading
+ * of the same mapping the desktop's token grammar encodes.
+ */
+const WIRE: Record<string, WireToken> = {
+	U: (id) => wireEntry({ id, kind: "user", text: "hi" }),
+	T: (id) => wireTool("bash", { id }),
+	Rd: (id) => wireTool("read", { id }),
+	Wr: (id) => wireTool("write", { id }),
+	Sr: (id) => wireTool("web_fetch", { id }),
+	Wb: (id) => wireTool("web_search", { id }),
+	Mc: (id) => wireTool("mcp__datadog_search_datadog_metrics", { id }),
+	Ag: (id) => wireTool("task", { id }),
+	Py: (id) => wireTool("eval", { id }),
+	Ak: (id) => wireTool("agent", { id }),
+	Td: (id) => wireTool("todo", { id }),
+	Fa: (id) => wireTool("bash", { id, tool_state: "failed" }),
+	Du: (id) => wireTool("bash", { id, elapsed_s: 7 }),
+	N: (id) => wireEntry({ id, kind: "assistant", text: "text", calls_tools: true }),
+	F: (id) => wireEntry({ id, kind: "assistant", text: "text" }),
+	A: (id) => wireEntry({ id, kind: "assistant", text: "text", stop_reason: "stop" }),
+	L: (id) =>
+		wireEntry({ id, kind: "assistant", text: "text", stop_reason: "toolUse", calls_tools: true }),
+	S: (id) => wireEntry({ id, kind: "assistant", text: "text", final: false }),
+	E: (id) => wireEntry({ id, kind: "assistant", text: "", calls_tools: true }),
+	W: (id) => wireEntry({ id, kind: "notice", text: "wake", custom_type: "wake_prompt" }),
+	P: (id) =>
+		wireEntry({ id, kind: "peer_message", text: "peer", details: { sender: {} } }),
+	J: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "job_result" }),
+	H: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "hub_message" }),
+	X: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "monitor_prompt" }),
+	Q: (id) =>
+		wireEntry({ id, kind: "notice", text: "t", custom_type: "session_mcp_unavailable" }),
+	I: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "session_incident" }),
+	M: (id) =>
+		wireEntry({ id, kind: "notice", text: "n", details: { severity: "error" }, terminal: true }),
+	K: (id) => wireEntry({ id, kind: "notice", text: "n", terminal: true }),
+	O: (id) => wireEntry({ id, kind: "notice", text: "n" }),
+	C: (id) => wireEntry({ id, kind: "compaction", text: "Context" }),
+};
+
+/** The wire rows for one token line, through the mapper. */
+const seqWire = (spec: string): CondenseRecord[] =>
+	toCondenseRecords(
+		spec
+			.trim()
+			.split(/\s+/)
+			.map((token, index) => WIRE[token](`${token}${index}`, index)),
+	);
+
+/**
+ * IDS COMPARED MODULO THE DOCUMENTED CALL KEY.
+ *
+ * The fixture's ids are the desktop's record ids; this surface deliberately keys a
+ * tool row by its CALL id (`rowKey`, gap G9), so the same row is `T1` there and
+ * `call:T1` here. That difference is the mapping's stated design, not a decision,
+ * so the comparison strips the prefix on both sides - INCLUDING inside a segment key
+ * (`qg:call:T1` vs `qg:T1`), which is where it hides once a span names its own
+ * first row. The replay still exercises `rowKey`: a mapper that lost it would
+ * produce `T1` throughout and pass, which is what the six mapper unit tests own.
+ */
+const CALL_KEY = "call:";
+
+const normalizeIds = (value: unknown): unknown => {
+	if (typeof value === "string") return value.split(CALL_KEY).join("");
+	if (Array.isArray(value)) return value.map(normalizeIds);
+	if (typeof value === "object" && value !== null)
+		return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, normalizeIds(inner)]));
+	return value;
+};
+
+describe("every expressible case, replayed through the WIRE mapper", () => {
+	for (const entry of FIXTURE.cases.filter((candidate) => !skipped(candidate)))
+		it(`${entry.tokens} [${entry.options}]`, () => {
+
+			expect(normalizeIds(decide(seqWire(entry.tokens), entry.options))).toEqual(
+				normalizeIds(entry.expected),
+			);
+		});
+});
+
+/*
+ * ------------------- THE QUIET-CLOSED FALLBACK, PINNED -------------------
+ *
+ * The skip-list says a quiet-closed run "reads as Steered" here. That is a claim
+ * about this surface's decisions, so it is asserted rather than described (round
+ * 1, C1-m2): the quiet call's row never arrives, so the exchange before it cannot
+ * close on it, and the user row that follows becomes a STEER inside the same run
+ * instead of a new turn's opener.
+ */
+describe("the quiet-closed fallback the skip-list names", () => {
+	/*
+	 * WHAT THE GAP ACTUALLY IS, measured rather than described. A quiet `no_reply`
+	 * call is a CLOSE on the desktop: it ends the turn, so the next user row opens a
+	 * NEW run. This wire never mints that row, so the close never lands and the two
+	 * user turns stay in ONE run - the first turn's rows condense only when the
+	 * merged run settles, and the second prompt reads as a steer inside it.
+	 *
+	 * (Round 1's claim - "its bar is labelled `Steered`" - was wrong: the bar over
+	 * the first turn's work is the run's own, and a user row is PINNED (V3), so no
+	 * segment is labelled for it. The run SPLIT is the difference, and it is what
+	 * this test asserts.)
+	 */
+	it("the turn does not split where the desktop's quiet close would end it", () => {
+		const planOf = (records: CondenseRecord[]) =>
+			collapsePlan(buildRows(records, []), {
+				live: false,
+				mode: "by-turn",
+				olderRowsExist: false,
+			});
+		/* Desktop shape: the settled `no_reply` close ends the turn - two runs. */
+		const desktop = planOf(seq("U T Z U A"));
+		/* This surface: no such row exists, so one run holds both prompts. */
+		const wire = planOf(seq("U T U A"));
+		expect(desktop.runs.length).toBe(2);
+		expect(wire.runs.length).toBe(1);
+		/* And the settled merged run still condenses: the first turn's work is not
+		 * lost, only deferred to the merged run's settlement. */
+		expect(wire.runs[0].segments.length).toBeGreaterThan(0);
 	});
 });

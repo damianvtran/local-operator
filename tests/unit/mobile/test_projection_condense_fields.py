@@ -32,6 +32,8 @@ The tests below are about the CONTRACT, not about the model:
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.harness.types import (
@@ -54,6 +56,8 @@ from local_operator.mobile.types import (
 HUB_MESSAGE_TYPE = "hub_message"
 JOB_RESULT_TYPE = "job_result"
 WAKE_PROMPT_TYPE = "wake_prompt"
+MONITOR_PROMPT_TYPE = "monitor_prompt"
+TEAM_BRIDGE_TYPE = "team_bridge_message"
 SESSION_INCIDENT_TYPE = "session_incident"
 
 
@@ -75,7 +79,9 @@ def make_fold() -> ProjectionFold:
     return ProjectionFold(SessionProjection(session_id="s1", pid=1))
 
 
-def assistant(text: str, *, stop_reason: str | None = None, calls: list | None = None) -> Message:
+def assistant(
+    text: str, *, stop_reason: str | None = None, calls: list[Any] | None = None
+) -> Message:
     """An assistant message with the phase declaration the provider sends."""
     message = Message.assistant()
     message.id = "m-assistant"
@@ -86,8 +92,8 @@ def assistant(text: str, *, stop_reason: str | None = None, calls: list | None =
     return message
 
 
-def custom(custom_type: str, message_id: str, text: str = "payload") -> CustomMessage:
-    return CustomMessage(id=message_id, custom_type=custom_type, details={"text": text}, content=[])
+def custom(custom_type: str, message_id: str, text: str = "payload") -> Any:
+    return CustomMessage(id=message_id, custom_type=custom_type, details={"text": text})
 
 
 def history_fold(messages: list[AgentMessage]) -> dict[str, TranscriptEntry]:
@@ -168,32 +174,62 @@ def test_the_stop_notice_is_terminal_in_the_history_arm() -> None:
     assert all(row.terminal for row in stops)
 
 
-def test_a_session_incident_is_terminal_in_both_arms() -> None:
-    """``session_incident`` is the one custom family that ends a turn.
+def test_a_session_incident_is_terminal_in_the_history_arm() -> None:
+    """`session_incident` is the one custom family that ends a turn.
 
-    Read through the generic notice fallback, which is why the flag is set from
-    the custom type there rather than in an arm of its own.
+    Read through the generic notice fallback, which is why the flag is set from the
+    custom type there rather than in an arm of its own.
+
+    WHY ONLY THE HISTORY ARM IS ASSERTED (agent review round 1, C1-m4). These
+    families reach the phone through the history refold, not through the live fold:
+    production calls ``note_nonpeer_delivery`` only from a
+    ``PeerMessageDeliveredEvent``, and that path admits ``peer_message`` and
+    ``team_bridge_message`` alone. Driving an incident through it in a test would be
+    asserting a path production refuses - so the live arm's coverage is the family
+    it actually carries (the ``team_bridge_message`` case below), and the incident's
+    terminality is pinned here, on the arm that produces it.
     """
-    messages: list[AgentMessage] = [custom(SESSION_INCIDENT_TYPE, "c-incident")]
+    durable = history_fold([custom(SESSION_INCIDENT_TYPE, "c-incident")])
+    assert durable["c-incident"].custom_type == SESSION_INCIDENT_TYPE
+    assert durable["c-incident"].terminal is True
+
+
+def test_a_bridge_delivery_carries_its_family_in_both_arms() -> None:
+    """The one receipt family the LIVE path really delivers.
+
+    ``team_bridge_message`` is admitted by the live delivery path and folded by the
+    history path, so it is the family where "both arms agree" is a claim about
+    production rather than about a fixture. Round 1 measured the two arms matching
+    on this type (notice + custom_type on each), which is what this pins.
+    """
+    messages: list[AgentMessage] = [custom(TEAM_BRIDGE_TYPE, "c-bridge")]
     durable = history_fold(messages)
     live = live_fold(messages)
-    assert durable["c-incident"].custom_type == SESSION_INCIDENT_TYPE
-    assert live["c-incident"].custom_type == SESSION_INCIDENT_TYPE
+    assert durable["c-bridge"].custom_type == TEAM_BRIDGE_TYPE
+    assert live["c-bridge"].custom_type == TEAM_BRIDGE_TYPE
+    assert durable["c-bridge"].terminal is False
+    assert live["c-bridge"].terminal is False
+
+
+def test_a_job_result_and_a_monitor_prompt_keep_their_family_in_the_history_arm() -> None:
+    """ "Every family the fold groups by" is a READER of `custom_type`, and the
+    history arm is where those rows are built."""
+    durable = history_fold(
+        [custom(JOB_RESULT_TYPE, "c-job"), custom(MONITOR_PROMPT_TYPE, "c-monitor")]
+    )
+    assert durable["c-job"].custom_type == JOB_RESULT_TYPE
+    assert durable["c-monitor"].custom_type == MONITOR_PROMPT_TYPE
+    assert durable["c-job"].terminal is False
+    assert durable["c-monitor"].terminal is False
 
 
 def test_a_wake_notice_is_not_terminal_and_keeps_its_family() -> None:
-    """A wake opens a cycle; it does not close the turn."""
+    """A wake opens a cycle; it does not close the turn.
+
+    HISTORY ARM ONLY - a wake reaches the phone through the refold, never through
+    the live delivery path (see the incident test's note)."""
     fold = make_fold()
-    fold.fold_history(
-        [
-            CustomMessage(
-                id="c-wake",
-                custom_type=WAKE_PROMPT_TYPE,
-                details={"text": "Scheduled wake w-1\n\nDo the thing."},
-                content=[],
-            )
-        ]
-    )
+    fold.fold_history([custom(WAKE_PROMPT_TYPE, "c-wake", "Scheduled wake w-1\n\nDo the thing.")])
     rows = [row for row in fold.projection.transcript if row.id == "c-wake"]
     assert rows, "a wake must paint a row"
     assert rows[0].custom_type == WAKE_PROMPT_TYPE

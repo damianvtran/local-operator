@@ -1318,6 +1318,20 @@ def _stop_reason_of(message: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _calls_tools_of(message: Any) -> bool:
+    """Whether an assistant message carried calls of its own (the fold's fact).
+
+    ONE spelling for both arms, and tolerant of the event type: a
+    ``MessageEndEvent`` carries a ``Message`` and its ``tool_calls`` list today, but
+    a ``CustomMessage`` travels the same union in other arms, so the attribute is
+    read through ``getattr`` rather than assumed. A message that has no calls at
+    all answers ``False``, which is the desktop's "unknown is absent" for the
+    pre-V5 wire.
+    """
+    calls = getattr(message, "tool_calls", None)
+    return bool(calls)
+
+
 def fold_messages_to_entries(
     history: list[AgentMessage],
     *,
@@ -1713,7 +1727,7 @@ def fold_messages_to_entries(
                         # ``tests/unit/mobile/test_projection.py`` pins the two
                         # arms equal for the same history.
                         stop_reason=_stop_reason_of(message),
-                        calls_tools=bool(message.tool_calls),
+                        calls_tools=_calls_tools_of(message),
                     )
                 )
             for call in message.tool_calls:
@@ -2319,7 +2333,7 @@ class ProjectionFold:
                     # history fold reads, so a row cannot change meaning when a
                     # reconnect re-seeds it (the equivalence test pins it).
                     stop_reason=_stop_reason_of(event.message),
-                    calls_tools=bool(event.message.tool_calls),
+                    calls_tools=_calls_tools_of(event.message),
                 )
                 self._append(entry)
                 self._open_message_id = event.message.id
@@ -2352,7 +2366,7 @@ class ProjectionFold:
                 # distinguishable from a real close once this field is on the
                 # row.
                 row.stop_reason = _stop_reason_of(event.message)
-                row.calls_tools = bool(event.message.tool_calls)
+                row.calls_tools = _calls_tools_of(event.message)
             self._close_reasoning_row()
             self._open_message_id = None
         elif isinstance(event, ToolCallComposeEvent):

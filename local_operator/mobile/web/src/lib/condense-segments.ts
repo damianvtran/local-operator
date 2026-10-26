@@ -1,6 +1,6 @@
 /**
  * THE TURN SEGMENTS AND THE VISIBLE ROW SET, ported from the desktop.
- * Ported from damianvtran/local-operator-ui@PARITY_SHA:src/renderer/src/features/chat/canonical/turn-segments.ts:71-1090
+ * Ported from `damianvtran/local-operator-ui` at sourceHash 243bcbf9c2a42e93…:src/renderer/src/features/chat/canonical/turn-segments.ts:71-1145
  *
  * WHAT THIS PORT IS FOR. The phone must condense a settled turn the way the
  * desktop does: which row is the turn's ANSWER (the last RESPONSE cycle's close,

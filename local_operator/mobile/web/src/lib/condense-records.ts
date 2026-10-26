@@ -174,7 +174,13 @@ function phaseOf(entry: TranscriptEntry): "composing" | "queued" | "running" | "
  */
 export function toCondenseRecord(entry: TranscriptEntry): CondenseRecord | null {
 	const id = rowKey(entry);
-	const ts = typeof entry.elapsed_s === "number" ? undefined : undefined;
+	/*
+	 * NO PER-ROW TIME ON THIS WIRE (gap G1): `ts` stays absent, so every model
+	 * reader of a time answers null and the fold states no wall-clock span. The
+	 * field is left off rather than set to a placeholder, because "absent" is the
+	 * desktop's own durable-row shape too.
+	 */
+	const ts: number | undefined = undefined;
 	switch (entry.kind) {
 		case "user":
 		case "steer":

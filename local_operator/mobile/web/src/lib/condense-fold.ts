@@ -1,6 +1,6 @@
 /**
  * THE TOOL-GROUP TIER (Tier A), ported from the desktop.
- * Ported from damianvtran/local-operator-ui@PARITY_SHA:src/renderer/src/features/chat/canonical/trace-fold-model.ts:64-1249
+ * Ported from `damianvtran/local-operator-ui` at sourceHash 243bcbf9c2a42e93… (desktop MODEL SOURCES, see `parity-sources.json`):src/renderer/src/features/chat/canonical/trace-fold-model.ts:64-1324
  *
  * WHAT IT DECIDES, and why the phone needs the decision rather than a flat list:
  * which consecutive runs of a turn's actions fold into ONE line (`FOLD_MIN_ACTIONS`

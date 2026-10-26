@@ -1,6 +1,6 @@
 /**
  * THE COLLAPSE PLAN (Tier B), ported from the desktop.
- * Ported from damianvtran/local-operator-ui@PARITY_SHA:src/renderer/src/features/chat/canonical/turn-collapse-model.ts:128-3280
+ * Ported from `damianvtran/local-operator-ui` at sourceHash 243bcbf9c2a42e93…:src/renderer/src/features/chat/canonical/turn-collapse-model.ts:128-3335
  *
  * WHAT IT DECIDES: which rows of a settled turn stay on screen and which hide
  * behind ONE bar per contiguous span, what each bar states (duration, action
