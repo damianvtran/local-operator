@@ -32,6 +32,7 @@ import contextlib
 import copy
 import gzip
 import html
+import inspect
 import json
 import logging
 import os
@@ -119,6 +120,32 @@ logger = logging.getLogger(__name__)
 #: ``build_app`` so a ``lop`` installed without the server extra never imports
 #: it. Importing the constant would put that whole stack on every CLI start.
 STREAM_CLEANUP_FAILED = "stream cleanup failed"
+
+
+async def _cleanup_stream(close: Callable[..., Any] | None) -> None:
+    """Run one stream cleanup, reporting a failure instead of raising it.
+
+    Every phone stream cleans up in two places, and both can be running with an
+    exception already in flight: the response's ``finally`` (a cancellation
+    parked on ``send``) and the body generator's own ``finally`` (a plain client
+    disconnect cancels the generator mid-await, where the response never sees
+    the failure). The second shape is why the generator routes through here too
+    — an exception escaping its cleanup replaces the request's CancelledError
+    and surfaces as uvicorn's "Exception in ASGI application" for what is only
+    a failed detach. ``CancelledError`` is a BaseException and still propagates.
+
+    Both shapes are accepted because the two callers differ: a route detaches
+    its subscriber synchronously, while the response closes an async generator.
+    """
+    if close is None:
+        return
+    try:
+        outcome = close()
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:
+        logger.warning(STREAM_CLEANUP_FAILED, exc_info=True)
+
 
 #: How often the record directory is scanned. Records change rarely (a
 #: session starts or dies); the scan is cheap, and 2 s makes a new terminal
@@ -5185,20 +5212,8 @@ def build_app(daemon: MobileDaemon):
                 # async-for does not close its generator when sending a chunk
                 # raises. Explicit closure also covers cancelled proxy streams;
                 # otherwise their unseen subscriber can pin a viewer forever.
-                close = getattr(self.body_iterator, "aclose", None)
-                if close is not None:
-                    try:
-                        await close()
-                    except Exception:
-                        # The in-flight exception belongs to the request — the
-                        # CancelledError that brought us here — and a failing
-                        # detach must not replace it.
-                        logger.warning(STREAM_CLEANUP_FAILED, exc_info=True)
-                if self._release is not None:
-                    try:
-                        self._release()
-                    except Exception:
-                        logger.warning(STREAM_CLEANUP_FAILED, exc_info=True)
+                await _cleanup_stream(getattr(self.body_iterator, "aclose", None))
+                await _cleanup_stream(self._release)
 
     # -- auth helpers -----------------------------------------------------------
 
@@ -5643,7 +5658,7 @@ def build_app(daemon: MobileDaemon):
                     yield _sse("projection", _latest_projection_frame(queue, frame))
                     sent_at = loop.time()
             finally:
-                release()
+                await _cleanup_stream(release)
 
         return SessionEventResponse(
             stream(),
@@ -5761,7 +5776,7 @@ def build_app(daemon: MobileDaemon):
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
-                release()
+                await _cleanup_stream(release)
 
         return SessionEventResponse(
             stream(),
@@ -5861,7 +5876,7 @@ def build_app(daemon: MobileDaemon):
                     yield event
                     wrote_at = loop.time()
             finally:
-                release()
+                await _cleanup_stream(release)
 
         return SessionEventResponse(
             stream(),

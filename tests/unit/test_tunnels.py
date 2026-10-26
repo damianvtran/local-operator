@@ -3916,6 +3916,60 @@ async def test_a_failing_origin_close_does_not_mask_the_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_a_failed_origin_close_does_not_replace_the_cancellation_while_reading(
+    connection, signing_key, caplog
+):
+    """The generator's own cleanup, which the response guard cannot reach.
+
+    A plain client disconnect cancels the read loop while it is awaiting the
+    next origin chunk, so ``stream()``'s ``finally`` closes the origin with the
+    CancelledError already in flight. Unguarded, that close's failure escaped
+    the generator and became the request's outcome — uvicorn logged "Exception
+    in ASGI application" and the reason the stream ended was lost (QA Q1-1,
+    measured identically at ``c8ba60e299`` and at ``d6a2c9dea45``).
+    """
+
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"data: " + b"x" * 65536 + b"\n\n"
+            # Park the read loop: the disconnect must land inside ``anext``.
+            await asyncio.Future()
+
+        async def aclose(self):
+            raise RuntimeError("origin close failed")
+
+    def origin(request):
+        return httpx.Response(200, stream=Broken(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        scope, receive = _relay_stream_exchange(signing_key)
+        first = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first.set()
+
+        with caplog.at_level(logging.WARNING, logger="local_operator.tunnels.gateway"):
+            task = asyncio.create_task(gateway.app()(scope, receive, send))
+            await asyncio.wait_for(first.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert [
+            (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+            for record in caplog.records
+        ] == [
+            (
+                "local_operator.tunnels.gateway",
+                logging.WARNING,
+                "stream cleanup failed",
+                True,
+            )
+        ]
+
+
+@pytest.mark.asyncio
 async def test_a_lease_ending_under_backpressure_still_completes_the_response(
     connection, signing_key, monkeypatch
 ):

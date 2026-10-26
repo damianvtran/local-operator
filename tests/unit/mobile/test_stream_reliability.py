@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -149,6 +150,44 @@ STREAM_ROUTES = [
     "/api/sessions/events",
     "/api/config/events",
 ]
+
+
+async def drop_while_awaiting(path, fixture=None):
+    """Cancel a route's stream the way a plain client disconnect does.
+
+    ``send`` returns at once and the cancel lands once the generator is parked
+    on its next frame — inside the generator's own ``await``, where its
+    ``finally`` runs with the CancelledError in flight. That is the shape
+    :func:`drive_parked` cannot produce: parking on a send puts the cancellation
+    in the response's ``finally`` instead, so the two helpers cover the two
+    halves of the cleanup that share ``_cleanup_stream``.
+    """
+    from starlette.types import Message
+
+    daemon, entry = fixture if fixture is not None else fixture_daemon()
+    response = await response_for(build_app(daemon), path)
+    started = asyncio.Event()
+
+    async def receive() -> Message:
+        await asyncio.Future()
+        raise AssertionError("the parked receive must never return")
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            started.set()
+
+    task = asyncio.create_task(response(http_scope(path), receive, send))
+    await asyncio.wait_for(started.wait(), 5)
+    # Yield until the generator is suspended on its next frame (queue, pacing
+    # sleep or keepalive wait) so the cancellation genuinely lands inside it.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    task.cancel()
+    try:
+        await task
+    except BaseException as exc:  # noqa: BLE001 - the test asserts the exact type
+        return daemon, entry, exc
+    return daemon, entry, None
 
 
 def http_scope(path):
@@ -323,4 +362,87 @@ async def test_a_failing_stream_cleanup_does_not_replace_the_cancellation(monkey
         for record in caplog.records
     ] == [("local_operator.mobile.daemon", logging.WARNING, "stream cleanup failed", True)]
     assert entry.record.session_id not in daemon.table.session_subscribers
+    await daemon.close_phone_views()
+
+
+class _FailingDiscard(set[Any]):
+    """A subscriber set whose detach does its work and then raises once.
+
+    This is the shape the real failures have: the projection release removes the
+    queue and *then* dies inside ``leave_phone_view``, so the response's second
+    cleanup attempt finds nothing left to do. A set that raised before removing
+    would instead model a failure that repeats on every retry, which is why the
+    raise sits after the ``discard``.
+    """
+
+    def __init__(self, items):
+        super().__init__(items)
+        self._raised = False
+
+    def discard(self, item):
+        super().discard(item)
+        if not self._raised:
+            self._raised = True
+            raise RuntimeError("release failed")
+
+
+def _projection_release_failure(monkeypatch, daemon, entry):
+    """Fail the projection detach after its queue has left the table."""
+    monkeypatch.setattr(
+        daemon, "leave_phone_view", Mock(side_effect=RuntimeError("release failed"))
+    )
+
+
+def _list_release_failure(monkeypatch, daemon, entry):
+    """Fail the list detach after its queue has left the table."""
+    monkeypatch.setattr(
+        daemon.table, "list_subscribers", _FailingDiscard(daemon.table.list_subscribers)
+    )
+
+
+def _config_release_failure(monkeypatch, daemon, entry):
+    """Fail the config detach after the real detach has run."""
+    real = daemon.detach_config_subscriber
+    raised: list[bool] = []
+
+    def detach(queue):
+        real(queue)
+        if not raised:
+            raised.append(True)
+            raise RuntimeError("release failed")
+
+    monkeypatch.setattr(daemon, "detach_config_subscriber", detach)
+
+
+PLAIN_DISCONNECT_FAILURES = [
+    ("/api/sessions/{session_id:str}/events", _projection_release_failure),
+    ("/api/sessions/events", _list_release_failure),
+    ("/api/config/events", _config_release_failure),
+]
+
+
+@pytest.mark.parametrize("path,break_release", PLAIN_DISCONNECT_FAILURES)
+@pytest.mark.asyncio
+async def test_a_failed_cleanup_on_a_plain_disconnect_keeps_the_cancellation(
+    path, break_release, monkeypatch, caplog
+):
+    """A dropped phone must not turn a failed detach into a server error.
+
+    A plain disconnect cancels the generator inside its own ``await``, so the
+    detach raises in the GENERATOR's ``finally`` — the response's guard never
+    sees it. Unguarded, that exception replaced the CancelledError and reached
+    the operator as uvicorn's "Exception in ASGI application" for what was only
+    a failed detach (QA Q1-1, measured identically at ``c8ba60e299`` and at
+    ``d6a2c9dea45``). The record is pinned whole: after the message rename the
+    logger name is what tells the two surfaces apart.
+    """
+    daemon, entry = fixture_daemon()
+    break_release(monkeypatch, daemon, entry)
+    with caplog.at_level(logging.WARNING, logger="local_operator.mobile.daemon"):
+        _, _, outcome = await drop_while_awaiting(path, (daemon, entry))
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert [
+        (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+        for record in caplog.records
+    ] == [("local_operator.mobile.daemon", logging.WARNING, "stream cleanup failed", True)]
     await daemon.close_phone_views()
