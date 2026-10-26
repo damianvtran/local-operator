@@ -205,6 +205,10 @@ async def test_the_librarian_is_derived_from_her_session_and_organizes(two_asset
     tagged = MetadataStore(root).asset(ids["plan"])
     assert tagged is not None
     assert tagged["organized_by"] == "librarian" and tagged["organized_at"]
+    # The FORWARD contract for tag provenance: her own tag set is recorded as
+    # hers. This is the half the backfill deliberately does not repair, so it is
+    # pinned here rather than left to be rediscovered.
+    assert [row["source"] for row in MetadataStore(root).asset_tags(ids["plan"])] == ["librarian"]
     assert tagged["name_source"] == "derived", "organizing must not claim a name she never wrote"
     # The tag's own confidence column is where confidence belongs; the asset
     # keeps none, because a tag set says nothing about the asset's.

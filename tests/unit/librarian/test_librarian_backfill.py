@@ -75,8 +75,8 @@ def her_calls(tag_name: str) -> list[dict[str, Any]]:
     The tags cell is her REAL shape, verified against her journal: ``sets`` holds
     the tag NAME, and the id is resolved at runtime from a ``tags list`` call
     (``idm={t['name']:t['id'] …}``, ``tags=[idm[x] for x in t]``), so no id
-    literal reaches the journal on that path. The pass matches a tag by name or
-    by id, which is why this cell moves the row on the name alone.
+    literal reaches the journal on that path. The row it tags keeps its agent
+    provenance — this pass re-attributes names and descriptions only.
     """
     return [
         {
@@ -155,7 +155,8 @@ def seed(root: Path) -> MetadataStore:
     # E: her call names the id but never held the value that stands on the row.
     store.ensure_asset(E, "p:/e", derived_name="e.png")
     store.update_fields(E, {"name": "an agent's own title"}, actor="agent", at=800.0)
-    # T: tagged by her, in a call that also names the asset and its title.
+    # T: she named it and tagged it first; only the NAME moves — the tag row
+    # keeps its agent provenance, which this pass does not re-attribute.
     store.ensure_asset(T, "p:/t", derived_name="t.png")
     store.update_fields(T, {"name": NAME_T}, actor="agent")
     tag = store.create_tag("hyundai-poc")
@@ -172,7 +173,7 @@ def attributed(isolated_root) -> tuple[Path, MetadataStore]:
 
 
 def test_matched_rows_flip_with_her_own_timestamp(attributed) -> None:
-    """The matched rows move, dated by the edit that made them, tags and all."""
+    """The matched rows move, dated by the edit that made them."""
     root, store = attributed
     edits_before = len(store.edits(A, limit=500))
 

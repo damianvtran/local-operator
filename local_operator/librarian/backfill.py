@@ -79,8 +79,7 @@ def _escaped(value: str) -> str:
 
     Quotes stay the caller's business: an argument reaches a journal either as
     part of a JSON object (plain quotes) or inside an eval cell's code string
-    (escaped ones), so only the escaped CONTENT is form-independent. That is
-    also why the tag op is read structurally rather than by one literal.
+    (escaped ones), so only the escaped CONTENT is form-independent.
     """
     return json.dumps(value)[1:-1]
 
