@@ -33,8 +33,9 @@ from pathlib import Path
 import pytest
 
 from local_operator.harness.types import Message
+from local_operator.server.utils import desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
-from local_operator.session import roster_sidecar, tail_anchor
+from local_operator.session import index_prewarm, roster_sidecar, tail_anchor
 from local_operator.session import transcript as transcript_module
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.transcript import Transcript
@@ -298,6 +299,18 @@ async def test_a_same_size_middle_rewrite_falls_back_to_the_walk(
     assert lines[-1] == journal.read_bytes().splitlines(keepends=True)[-1]
     assert tail_anchor.proves_absent(directory), "validate_anchor now catches this itself"
 
+    # COARSE-TICK SIMULATION (#2941 CI, shard test(3.12,2)). On a filesystem whose
+    # ctime/mtime granularity is coarse, a same-tick rewrite leaves the journal's
+    # ctime EQUAL to the record's mtime. Pin that state here so this reproduction
+    # fails on a fine-grained host exactly the way CI failed, rather than passing
+    # by ten microseconds of luck.
+    record = directory / tail_anchor.ANCHOR_FILENAME
+    journal_ctime_ns = journal.stat().st_ctime_ns
+    os.utime(record, ns=(journal_ctime_ns, journal_ctime_ns))
+    assert journal.stat().st_ctime_ns == record.stat().st_mtime_ns  # the CI tick
+    assert not desktop_sessions._checkpoint_proven_absent(directory)
+    assert index_prewarm._rewritten_since_record(directory, journal.stat())
+
     calls = _count_walks(monkeypatch)
     assert await _bridge_cwd(root) == planted_cwd
     assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
@@ -308,7 +321,7 @@ async def test_an_ordinary_append_after_the_proof_keeps_the_fast_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The rewrite guard must not cost the append path its skip: a journal that grew
-    with ordinary rows (ctime moved) is still proven by the suffix scan."""
+    with ordinary rows is still proven by the suffix scan, whatever its ctime."""
     root = tmp_path / "store"
     directory = root / "sessions" / SESSION_ID
     directory.mkdir(parents=True)
@@ -320,7 +333,11 @@ async def test_an_ordinary_append_after_the_proof_keeps_the_fast_path(
     await transcript.append_message(Message.user("appended after the proof"))
     journal = directory / "transcript.jsonl"
     assert journal.stat().st_size > anchor.size
-    assert journal.stat().st_ctime_ns > (directory / tail_anchor.ANCHOR_FILENAME).stat().st_mtime_ns
+    # Derived from the guard itself, not from a timestamp ordering the fixture
+    # cannot guarantee on a coarse-tick filesystem: a grown journal is the append
+    # path, so the same-size rewrite rule does not apply to it at all.
+    assert desktop_sessions._checkpoint_proven_absent(directory)
+    assert not index_prewarm._rewritten_since_record(directory, journal.stat())
     calls = _count_walks(monkeypatch)
     assert await _bridge_cwd(root) == str(root.parent)
     assert calls == []
@@ -334,8 +351,6 @@ async def test_a_metadata_only_change_is_rebuilt_once_by_prewarm(
     the desktop guard refuses the record. Prewarm must then call the record stale
     and republish it ONCE, after which the cold open skips the walk again and the
     selector stops re-queueing the journal."""
-    from local_operator.session import index_prewarm
-
     root = tmp_path / "store"
     directory = root / "sessions" / SESSION_ID
     directory.mkdir(parents=True)
@@ -345,7 +360,12 @@ async def test_a_metadata_only_change_is_rebuilt_once_by_prewarm(
     journal = directory / "transcript.jsonl"
     journal.chmod(0o600)
     record = directory / tail_anchor.ANCHOR_FILENAME
-    assert journal.stat().st_ctime_ns > record.stat().st_mtime_ns
+    # The question is the guard's, not this host's clock: a metadata-only change
+    # leaves the journal at or past the record, and either way it must not be
+    # trusted. Both predicates are asserted so they cannot drift apart.
+    assert journal.stat().st_ctime_ns >= record.stat().st_mtime_ns
+    assert index_prewarm._rewritten_since_record(directory, journal.stat())
+    assert not desktop_sessions._checkpoint_proven_absent(directory)
 
     calls = _count_walks(monkeypatch)
     assert await _bridge_cwd(root) == str(root.parent)
@@ -362,11 +382,59 @@ async def test_a_metadata_only_change_is_rebuilt_once_by_prewarm(
     assert not index_prewarm._anchor_current(directory)
     assert index_prewarm.write_tail_anchor(root, SESSION_ID)
     assert len(builds) == 1
-    # Settled: the selector calls it current and a second pass builds nothing.
+    # SETTLE THE TICK, do not assume it. The rebuilt record's mtime is "now"; on a
+    # coarse-tick filesystem that is EQUAL to the journal's ctime, and equality must
+    # keep refusing (see `_rewritten_since_record`'s residual note). Stamp the
+    # ordering a fine-grained filesystem produces naturally, so the assertions below
+    # test the settlement rule rather than this host's clock granularity.
+    if record.stat().st_mtime_ns <= journal.stat().st_ctime_ns:
+        later = journal.stat().st_ctime_ns + 1
+        os.utime(record, ns=(later, later))
     assert index_prewarm._anchor_current(directory)
     assert not index_prewarm.write_tail_anchor(root, SESSION_ID)
     assert len(builds) == 1
 
+    calls.clear()
+    assert await _bridge_cwd(root) == str(root.parent)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_equal_tick_record_refuses_and_a_later_one_hits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CI tick, driven by hand: equal timestamps must fail SAFE, and only a
+    strictly later record may skip the walk.
+
+    ``os.utime`` puts the record's mtime exactly on the journal's ctime, the state a
+    coarse-granularity filesystem produces with no rewrite at all. "Cannot tell" has
+    to mean the walk, so a same-tick record is refused — and pushing the record one
+    nanosecond later (what a fine-grained filesystem gives naturally) restores the
+    fast path, which proves the refusal is about ordering and not a lost record.
+    """
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    await _journal(directory)
+    anchor = tail_anchor.build_anchor(directory)
+    assert anchor is not None
+    assert tail_anchor.write_anchor(directory, anchor)
+    journal = directory / "transcript.jsonl"
+    record = directory / tail_anchor.ANCHOR_FILENAME
+    ctime_ns = journal.stat().st_ctime_ns
+
+    os.utime(record, ns=(ctime_ns, ctime_ns))
+    assert journal.stat().st_ctime_ns == record.stat().st_mtime_ns
+    assert tail_anchor.proves_absent(directory), "validate_anchor alone still says absent"
+    assert not desktop_sessions._checkpoint_proven_absent(directory)
+    assert index_prewarm._rewritten_since_record(directory, journal.stat())
+    calls = _count_walks(monkeypatch)
+    assert await _bridge_cwd(root) == str(root.parent)
+    assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
+
+    os.utime(record, ns=(ctime_ns + 1, ctime_ns + 1))
+    assert desktop_sessions._checkpoint_proven_absent(directory)
+    assert not index_prewarm._rewritten_since_record(directory, journal.stat())
     calls.clear()
     assert await _bridge_cwd(root) == str(root.parent)
     assert calls == []

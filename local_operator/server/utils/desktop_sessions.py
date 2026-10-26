@@ -472,6 +472,19 @@ def _checkpoint_proven_absent(path: Path) -> bool:
     path; its ctime moves by construction, so it keeps the suffix scan as its proof
     — the fast path for a live, appended-to journal is preserved.
 
+    THE COMPARISON IS ``>=``, NOT ``>``, AND THAT IS A CORRECTNESS REQUIREMENT
+    (CI, #2941 shard test(3.12,2)). Where the journal and the record land in the
+    same timestamp tick — a filesystem with coarse ctime/mtime granularity — a
+    rewrite's ctime comes out EQUAL to the record's mtime. ``>`` read that as "not
+    rewritten" and answered the fallback cwd where the walk answers the planted
+    row's: a wrong answer, not merely a slow one. So the fast path is taken only
+    when the record is STRICTLY newer than the journal's last metadata change
+    (``ctime < mtime``); equality means "cannot tell", and "cannot tell" refuses.
+    ``index_prewarm._rewritten_since_record`` carries the SAME predicate — the two
+    are one decision seen from the reader's and the rebuilder's side, and if they
+    disagree the record is either trusted when it should not be or rebuilt
+    forever.
+
     RESIDUAL, stated rather than hidden: a middle rewrite FOLLOWED by an append, or
     one landing between the prewarm scan and the record's publication, is not
     caught. Nothing in this repo writes a journal that way (it is append-only;
@@ -501,7 +514,9 @@ def _checkpoint_proven_absent(path: Path) -> bool:
         record = os.stat(anchor_path(path))
     except OSError:
         return False
-    if journal.st_size == anchor.size and journal.st_ctime_ns > record.st_mtime_ns:
+    # ``>=``: equal ticks cannot distinguish a rewrite from an untouched journal,
+    # so equality refuses and the walk answers (see the docstring).
+    if journal.st_size == anchor.size and journal.st_ctime_ns >= record.st_mtime_ns:
         return False
     return True
 
