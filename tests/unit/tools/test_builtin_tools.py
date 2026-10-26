@@ -4489,9 +4489,11 @@ async def test_glob_sorts_before_slicing(tools, context, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_glob_rejects_absolute_and_parent_patterns(tools, context) -> None:
-    # RT-14: clean is_error results, never a ValueError escape.
-    for pattern in ("/etc/passwd", "../secrets/*", ".."):
+async def test_glob_rejects_parent_patterns(tools, context) -> None:
+    # RT-14: clean is_error results, never a ValueError escape. An ABSOLUTE
+    # pattern is no longer refused (it becomes a base directory — see the
+    # absolute-pattern tests below), but '..' inside a pattern still is.
+    for pattern in ("../secrets/*", "..", "/etc/../etc/passwd"):
         result = await _call(tools, "glob", {"pattern": pattern}, context)
         assert result.is_error is True
         assert "relative" in result.text.lower()
@@ -4522,8 +4524,10 @@ async def test_glob_does_not_redirect_skill_md_suffix(tools, context) -> None:
         context,
     )
 
+    # A non-SKILL.md absolute pattern is served now (its parent is the base), so
+    # this one fails only because the directory is absent — and, above all, never
+    # grows the skill:// redirect.
     assert result.is_error is True
-    assert "relative" in result.text.lower()
     assert "skill://" not in result.text
     assert "Do not scan" not in result.text
 
@@ -4593,8 +4597,11 @@ async def test_grep_skips_oversized_files_with_footer(tools, context, tmp_path) 
     (tmp_path / "big.py").write_text("needle\n" * 200000)  # > 1MB
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
     assert "small.py:1:needle" in result.text
-    assert "big.py" not in result.text.split(":\n", 1)[1]
+    # Never SEARCHED (no match line for it) but NAMED, with the way to reach it.
+    assert "big.py:" not in result.text
     assert "1 file(s) skipped" in result.text
+    assert "not searched (largest first): big.py (" in result.text
+    assert "max_filesize_mb=2" in result.text
 
 
 @pytest.mark.asyncio
@@ -6038,8 +6045,10 @@ def test_count_oversized_files_walks_the_tree_exactly_once(tmp_path, monkeypatch
         ),
     )
 
-    # ``(skipped, incomplete)``: one oversized file, and the count is complete.
-    assert builtin._count_oversized_files(tmp_path) == (1, False)
+    # ``(skipped, incomplete, largest)``: one oversized file, count complete.
+    counted = builtin._count_oversized_files(tmp_path)
+    assert counted[:2] == (1, False)
+    assert [path for _size, path in counted.largest] == ["big.py"]
     assert len(calls) == 1
 
 
@@ -6060,7 +6069,7 @@ def test_a_file_whose_size_cannot_be_read_makes_the_count_incomplete(tmp_path, m
     assert walked.unsized == 1
     # The count itself has nothing over the cap — but "nothing" here is only
     # known-so-far, so it is reported as incomplete rather than as zero.
-    assert builtin._count_oversized_files(tmp_path) == (0, True)
+    assert builtin._count_oversized_files(tmp_path)[:2] == (0, True)
 
 
 def test_python_grep_scan_stops_when_the_caller_aborts(tmp_path) -> None:
@@ -6192,7 +6201,11 @@ async def test_grep_keeps_a_non_zero_lower_bound_visible(
 
     monkeypatch.setattr(builtin, "_use_ripgrep", lambda: True)
     monkeypatch.setattr(builtin, "_ripgrep_scan", _scan)
-    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+    monkeypatch.setattr(
+        builtin,
+        "_count_oversized_files",
+        lambda target, **kwargs: builtin._OversizedCount(12, True),
+    )
 
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
@@ -6226,7 +6239,11 @@ async def test_the_floor_count_survives_a_real_ripgrep_scan(
     if not builtin._use_ripgrep():
         pytest.skip("ripgrep not on PATH; the real-engine arm cannot run")
     (tmp_path / "hit.py").write_text("needle\n")
-    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+    monkeypatch.setattr(
+        builtin,
+        "_count_oversized_files",
+        lambda target, **kwargs: builtin._OversizedCount(12, True),
+    )
 
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
@@ -6236,7 +6253,11 @@ async def test_the_floor_count_survives_a_real_ripgrep_scan(
     # And the floor is CONDITIONAL: a count that finished prints its exact number
     # with no `at least`, so the wording tracks the count's completeness and not
     # the engine.
-    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, False))
+    monkeypatch.setattr(
+        builtin,
+        "_count_oversized_files",
+        lambda target, **kwargs: builtin._OversizedCount(12, False),
+    )
     complete = await _call(tools, "grep", {"pattern": "needle"}, context)
 
     assert "(12 file(s) skipped over the 1MB cap)" in complete.text
@@ -6268,7 +6289,11 @@ async def test_the_no_match_count_clause_rides_with_the_stop(
 
     monkeypatch.setattr(builtin, "_use_ripgrep", lambda: True)
     monkeypatch.setattr(builtin, "_ripgrep_scan", _scan)
-    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+    monkeypatch.setattr(
+        builtin,
+        "_count_oversized_files",
+        lambda target, **kwargs: builtin._OversizedCount(12, True),
+    )
 
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
@@ -6373,7 +6398,7 @@ def test_ripgrep_keeps_the_records_a_stop_produced_even_with_no_returncode(
     bug reopened through a narrower door, so the guard is now the stop itself. The
     process below never reports a returncode at all.
     """
-    proc = _StubbornProc([b"src/a.py:1:needle\n"])
+    proc = _StubbornProc([b"src/a.py:1:1:needle\n"])
     monkeypatch.setattr(builtin, "_rg_binary", lambda: "/fake/rg")
 
     async def _spawn(*args, **kwargs):
@@ -9104,3 +9129,314 @@ async def test_touch_through_an_in_pad_symlink_is_refused(tmp_path, monkeypatch)
 
     assert result.is_error is True, result.text
     assert "Scratchpad over cap" in result.text
+
+
+# ---------------------------------------------------------------------------
+# grep: long lines, skipped-file disclosure, max_filesize_mb (scout friction)
+# ---------------------------------------------------------------------------
+#
+# The scout subagent greping Claude.app's Resources hit three tool failures in
+# one session: (1) a minified one-line bundle crashed the ripgrep engine with
+# ``LimitOverrunError`` (asyncio's 64 KiB StreamReader default) so the whole call
+# died as "failed unexpectedly"; (2) ``No matches (28 file(s) skipped over the
+# 1MB cap)`` read as a negative answer though 28 files were never read; (3) glob
+# refused an absolute path. These pin the fixes, under BOTH engines where the
+# behaviour is shared.
+
+_MINIFIED_LINE_BYTES = 200_000  # > 64 KiB (the StreamReader default that crashed)
+
+
+def _write_minified(path: Path, needle: str = "cache_control") -> None:
+    path.write_text("var a=1;" + "x" * 100_000 + needle + "y" * 100_000 + "\n")
+
+
+async def _grep_on_engine(tools, context, monkeypatch, engine: str, args: dict[str, Any]):
+    """Run grep pinned to ``engine`` ('rg' skips when ripgrep is absent)."""
+    if engine == "rg":
+        monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+        if not builtin._use_ripgrep():
+            pytest.skip("ripgrep not on PATH")
+    else:
+        monkeypatch.setenv("LOCAL_OPERATOR_GREP_ENGINE", "python")
+    return await _call(tools, "grep", args, context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_survives_and_clips_a_line_over_the_pipe_limit(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """A >64 KiB single line neither crashes the call nor floods the result, and
+    the clipped window still CONTAINS the match (a head-only preview would show
+    the first N bytes of the minified line and usually miss it)."""
+    _write_minified(tmp_path / "min.js")
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "cache_control"}
+    )
+
+    assert result.is_error is False, result.text
+    assert "failed unexpectedly" not in result.text
+    assert "min.js:1:" in result.text
+    assert "cache_control" in result.text, "the clipped window lost the match"
+    # Bounded: nowhere near the 200 KB line (window + spill footer + header).
+    assert len(result.text) < 3_000, len(result.text)
+    # And it says how much it dropped, so the model knows the line continues.
+    assert "chars]" in result.text and "[\u2026" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_clips_a_multibyte_line_around_the_match(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """rg's column is a BYTE offset and the window is cut in characters: a line of
+    multi-byte text before the match must still land the match in the window."""
+    (tmp_path / "u.txt").write_text("é" * 5_000 + "NEEDLE" + "é" * 5_000 + "\n")
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "NEEDLE"})
+    assert result.is_error is False, result.text
+    assert "NEEDLE" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_short_lines_are_untouched_by_clipping(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    (tmp_path / "s.txt").write_text("a" * 400 + "needle\n")  # 406 chars: under the clip
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "needle"})
+    assert f"s.txt:1:{'a' * 400}needle" in result.text
+    assert "chars]" not in result.text
+
+
+def test_clip_grep_line_keeps_the_hit_whatever_its_offset() -> None:
+    line = "p" * 3_000 + "HIT" + "q" * 3_000
+    clipped = builtin._clip_grep_line(line, 3_000)
+    assert "HIT" in clipped
+    assert clipped.startswith("[\u2026") and clipped.endswith("chars\u2026]")
+    # A hit at the very start has nothing to drop before it.
+    assert not builtin._clip_grep_line("HIT" + "q" * 3_000, 0).startswith("[")
+    assert builtin._clip_grep_line("short", 0) == "short"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_names_the_skipped_files_and_calls_a_no_match_inconclusive(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    (tmp_path / "small.txt").write_text("nothing here\n")
+    (tmp_path / "bundle.js").write_text("z" * (2 * 1024 * 1024) + "\n")
+    (tmp_path / "huge.js").write_text("z" * (3 * 1024 * 1024) + "\n")
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "absent"})
+
+    assert result.is_error is False
+    assert "INCONCLUSIVE" in result.text
+    assert "2 file(s) skipped over the 1MB cap" in result.text
+    # Largest first, with sizes, and the parameter that reaches them.
+    assert result.text.index("huge.js") < result.text.index("bundle.js")
+    assert "huge.js (3.0MB)" in result.text
+    # 3 MiB + the newline is just over 3 MB, so the suggested cap rounds UP to 4:
+    # a suggestion of 3 would still skip the file it names.
+    assert "max_filesize_mb=4" in result.text
+    # Not marked ``useless``: the unread-file list is worth keeping through compaction.
+    assert result.useless is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_max_filesize_mb_searches_the_big_file_and_drops_the_caveat(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    big = tmp_path / "bundle.js"
+    big.write_text("z" * (2 * 1024 * 1024) + "TOKEN" + "z" * 1000 + "\n")
+    default = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "TOKEN"})
+    assert "INCONCLUSIVE" in default.text and "bundle.js" in default.text
+
+    raised = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "TOKEN", "max_filesize_mb": 4}
+    )
+    assert raised.is_error is False, raised.text
+    assert "bundle.js:1:" in raised.text and "TOKEN" in raised.text
+    assert "skipped" not in raised.text and "INCONCLUSIVE" not in raised.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_skipped_list_is_bounded_but_the_count_is_complete(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    total = builtin.GREP_SKIPPED_LIST_LIMIT + 4
+    for i in range(total):
+        (tmp_path / f"f{i:02d}.js").write_bytes(b"z" * (1024 * 1024 + 1 + i))
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "absent"})
+    assert f"{total} file(s) skipped" in result.text
+    assert "and 4 more" in result.text
+    # The largest file is f<total-1>; the smallest four are the ones left unnamed.
+    assert f"f{total - 1:02d}.js" in result.text and "f00.js" not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_does_not_name_a_big_file_its_own_include_filter_excluded(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    (tmp_path / "a.py").write_text("needle\n")
+    (tmp_path / "huge.json").write_text("z" * (2 * 1024 * 1024))
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "needle", "include": "*.py"}
+    )
+    assert "a.py:1:needle" in result.text
+    assert "huge.json" not in result.text and "skipped" not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_a_named_oversized_file_is_disclosed_too(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """Grepping ONE file over the cap used to fall back to the Python engine and
+    skip it with a count of 1 and no name; it is the same inconclusive answer."""
+    big = tmp_path / "big.js"
+    big.write_text("z" * (2 * 1024 * 1024))
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "absent", "path": "big.js"}
+    )
+    assert "INCONCLUSIVE" in result.text and "big.js (2.0MB)" in result.text
+
+
+@pytest.mark.asyncio
+async def test_grep_rejects_a_max_filesize_above_the_ceiling(tools, context) -> None:
+    result = await _call(tools, "grep", {"pattern": "x", "max_filesize_mb": 65}, context)
+    assert result.is_error is True
+
+
+def test_ripgrep_line_limit_covers_the_largest_searchable_file(tmp_path) -> None:
+    """The pipe's line limit is sized from the cap, so no file under it can overrun
+    the reader — the invariant the crash fix rests on. Checked at the ceiling."""
+    assert (
+        builtin.GREP_FILE_CEILING_BYTES + builtin._RG_LINE_OVERHEAD_BYTES
+        > builtin.GREP_FILE_CEILING_BYTES
+    )
+    assert builtin.GREP_LINE_CLIP_LEAD_CHARS < builtin.GREP_LINE_CLIP_CHARS
+
+
+# ---------------------------------------------------------------------------
+# glob: `path` and absolute patterns
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_glob_path_lists_an_absolute_directory_outside_the_workspace(tmp_path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "app" / "Resources"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "a.js").write_text("x")
+    (outside / "sub" / "b.js").write_text("x")
+    (outside / "c.txt").write_text("x")
+
+    approved = _context_with_approval(workspace, approve=True)
+    tools = {t.name: t for t in create_tools(approved)}
+    result = await tools["glob"].execute(
+        "c", {"pattern": "**/*.js", "path": str(outside)}, None, None, approved
+    )
+    assert result.is_error is False, result.text
+    # Relative to the base, with the base named so the reader can rebuild a path.
+    assert "a.js" in result.text and "sub/b.js" in result.text and "c.txt" not in result.text
+    assert str(outside.resolve()) in result.text
+    # Outside the workspace: the same escalation grep takes.
+    tier, description = approved.recorder.requests[0]
+    assert tier == "read" and description.startswith("[outside workspace] glob:")
+
+    denied = _context_with_approval(workspace, approve=False)
+    tools = {t.name: t for t in create_tools(denied)}
+    blocked = await tools["glob"].execute(
+        "c", {"pattern": "*.js", "path": str(outside)}, None, None, denied
+    )
+    assert blocked.is_error is True and "declined" in blocked.text
+
+
+@pytest.mark.asyncio
+async def test_glob_path_inside_the_workspace_never_prompts(tmp_path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "m.py").write_text("x")
+    context = _context_with_approval(tmp_path, approve=True)
+    tools = {t.name: t for t in create_tools(context)}
+    result = await tools["glob"].execute(
+        "c", {"pattern": "*.py", "path": "src"}, None, None, context
+    )
+    assert result.is_error is False and "m.py" in result.text
+    assert context.recorder.requests == []
+
+
+@pytest.mark.asyncio
+async def test_glob_absolute_pattern_splits_at_its_static_prefix(tmp_path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "res"
+    (outside / "assets").mkdir(parents=True)
+    (outside / "assets" / "one.js").write_text("x")
+    (outside / "assets" / "two.css").write_text("x")
+    context = _context_with_approval(workspace, approve=True)
+    tools = {t.name: t for t in create_tools(context)}
+
+    result = await tools["glob"].execute(
+        "c", {"pattern": f"{outside}/assets/*.js"}, None, None, context
+    )
+    assert result.is_error is False, result.text
+    assert "one.js" in result.text and "two.css" not in result.text
+
+    # A wildcard-free absolute pattern names one entry: its parent is the base.
+    exact = await tools["glob"].execute(
+        "c", {"pattern": f"{outside}/assets/two.css"}, None, None, context
+    )
+    assert exact.is_error is False and "two.css" in exact.text
+
+
+def test_split_absolute_glob_splits_on_component_boundaries() -> None:
+    assert builtin._split_absolute_glob("/a/b/*.js") == ("/a/b", "*.js")
+    assert builtin._split_absolute_glob("/a/b*/c") == ("/a", "b*/c")
+    assert builtin._split_absolute_glob("/a/**/x.js") == ("/a", "**/x.js")
+    assert builtin._split_absolute_glob("/a/b/c.txt") == ("/a/b", "c.txt")
+    assert builtin._split_absolute_glob("/*") == ("/", "*")
+
+
+@pytest.mark.asyncio
+async def test_glob_path_errors_are_clean(tools, context, tmp_path) -> None:
+    (tmp_path / "f.txt").write_text("x")
+    missing = await _call(tools, "glob", {"pattern": "*", "path": "nope"}, context)
+    assert missing.is_error is True and "does not exist" in missing.text
+    a_file = await _call(tools, "glob", {"pattern": "*", "path": "f.txt"}, context)
+    assert a_file.is_error is True and "must be a directory" in a_file.text
+    both = await _call(tools, "glob", {"pattern": f"{tmp_path}/*", "path": str(tmp_path)}, context)
+    assert both.is_error is True and "not both" in both.text
+    # '..' in the PATTERN stays refused even with a legitimate explicit base.
+    escape = await _call(tools, "glob", {"pattern": "../*", "path": str(tmp_path)}, context)
+    assert escape.is_error is True and "relative" in escape.text.lower()
+    # A scheme in either argument is still refused, never walked as a relative path.
+    scheme = await _call(tools, "glob", {"pattern": "scratchpad://*.md"}, context)
+    assert scheme.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_glob_absolute_skill_md_is_still_redirected(tools, context) -> None:
+    """The virtual-resource hint survives absolute patterns now being served: a
+    SKILL.md search is the filesystem scan skill:// exists to replace."""
+    result = await _call(tools, "glob", {"pattern": "/Users/x/**/some-skill/SKILL.md"}, context)
+    assert result.is_error is True
+    assert "`skill://some-skill`" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("python_engine")
+async def test_grep_with_every_match_on_screen_writes_no_spill_footer(
+    tools, context, tmp_path
+) -> None:
+    """Two matches in two files render with a ``--`` separator, which made the body
+    differ from the match-only spill, so a spill was written and its footer named
+    the impossible range ``4-2``. Everything fits, so nothing is spilled."""
+    (tmp_path / "a.txt").write_text("needle one\n")
+    (tmp_path / "b.txt").write_text("needle two\n")
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+    assert "a.txt:1:needle one" in result.text and "b.txt:1:needle two" in result.text
+    assert "SAVED at" not in result.text and "range=" not in result.text
+    assert not (result.details or {}).get("spill")

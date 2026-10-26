@@ -46,6 +46,7 @@ import codecs
 import contextlib
 import difflib
 import fnmatch
+import heapq
 import json
 import logging
 import mimetypes
@@ -418,8 +419,32 @@ INTERNAL_READ_SHAPE_SLACK_CHARS = 4 * 1024
 #: printed call SUCCEEDS: a suggestion whose own answer gets truncated teaches
 #: the model that expansion does not work.
 SPILL_PAGE_LINES = 200
-#: Per-file size cap for grep; bigger files are skipped and counted.
+#: Per-file size cap for grep; bigger files are skipped, counted AND NAMED (see
+#: ``GREP_SKIPPED_LIST_LIMIT``). This is the DEFAULT of the ``max_filesize_mb``
+#: parameter, not a wall: a model that learns a "no match" was inconclusive for
+#: named files re-runs with a larger cap, up to :data:`GREP_FILE_CEILING_BYTES`.
 GREP_FILE_LIMIT_BYTES = 1 * 1024 * 1024
+#: The hard ceiling ``max_filesize_mb`` can raise the cap to. It bounds the two
+#: things a bigger file costs: the Python engine holds a whole file in memory
+#: (read + decode + split), and ripgrep hands a matching line back whole before
+#: it is clipped (the pipe's line limit is sized from this, so ONE minified
+#: bundle line can never overrun it). 64 MB covers the shipped JS bundles that
+#: motivated the knob (a 3-20 MB renderer chunk) without making a stray
+#: database dump a one-call memory spike.
+GREP_FILE_CEILING_BYTES = 64 * 1024 * 1024
+#: How many skipped files a grep answer NAMES (largest first). The count is
+#: always complete; the names are bounded so a tree of thousands of oversized
+#: files cannot flood the result.
+GREP_SKIPPED_LIST_LIMIT = 8
+#: A matched line longer than this is shown as a window around the match, not in
+#: full. One minified bundle is a single multi-hundred-KB line: unclipped it
+#: floods the context (and the spill) with bytes the reader cannot use, which is
+#: what the pre-fix tool did on the lines it survived long enough to print.
+GREP_LINE_CLIP_CHARS = 500
+#: Characters kept BEFORE the match inside that window; the rest of
+#: ``GREP_LINE_CLIP_CHARS`` follows the match start, so the hit is always inside
+#: the window whatever the pattern's own length.
+GREP_LINE_CLIP_LEAD_CHARS = 200
 
 #: Directory names never worth walking during grep (VCS internals, vendored
 #: trees, build output). Dotdirs are pruned wholesale in addition.
@@ -11507,6 +11532,23 @@ class _WalkOutcome(NamedTuple):
     #: ago, so this is rare, which is exactly why an undisclosed gap in a
     #: number would survive.
     unsized: int = 0
+    #: The ``GREP_SKIPPED_LIST_LIMIT`` LARGEST oversized files as
+    #: ``(size_bytes, path relative to the walk root)``, largest first, collected
+    #: in the same pass as ``oversized`` (and only when it is). A count alone made
+    #: "no matches" unactionable: the model could not tell WHICH files were never
+    #: read, nor whether they were the ones it needed (a 28-file skip over an app
+    #: bundle read as a negative answer). Bounded by a heap, so a tree of
+    #: thousands of big files costs N entries, not thousands.
+    oversized_largest: tuple[tuple[int, str], ...] = ()
+
+
+class _OversizedCount(NamedTuple):
+    """``_count_oversized_files``'s answer: the count, whether it is a floor, and
+    the largest offenders by name (see ``_WalkOutcome.oversized_largest``)."""
+
+    skipped: int
+    incomplete: bool
+    largest: tuple[tuple[int, str], ...] = ()
 
 
 class _SearchStop(NamedTuple):
@@ -11619,6 +11661,8 @@ def _walk_entries(
     respect_ignore: bool = True,
     deadline: float | None = None,
     count_oversized: bool = False,
+    oversize_limit: int = GREP_FILE_LIMIT_BYTES,
+    oversize_filter: Callable[[str], bool] | None = None,
     stop_requested: Callable[[], bool] | None = None,
 ) -> _WalkOutcome:
     """Depth-first walk pruning VCS/vendor/build trees, dotdirs, symlinks and
@@ -11652,6 +11696,8 @@ def _walk_entries(
     unsized = 0
     truncated = False
     seen = 0
+    #: Min-heap of the ``GREP_SKIPPED_LIST_LIMIT`` largest oversized files.
+    largest: list[tuple[int, str]] = []
 
     def _stop_now() -> bool:
         """Stop before doing any more work: budget spent, or a stop requested.
@@ -11751,8 +11797,19 @@ def _walk_entries(
                         # holding, which is the whole point: the count used to
                         # be recovered by a second traversal of the same tree
                         # whose only job was to stat these files.
-                        if entry.stat(follow_symlinks=False).st_size > GREP_FILE_LIMIT_BYTES:
+                        size = entry.stat(follow_symlinks=False).st_size
+                        # ``oversize_filter`` is grep's ``include``: a file the
+                        # search would never have opened is not "skipped", and
+                        # naming it would send the model after a file its own
+                        # filter excluded.
+                        if size > oversize_limit and (
+                            oversize_filter is None or oversize_filter(rel)
+                        ):
                             oversized += 1
+                            if len(largest) < GREP_SKIPPED_LIST_LIMIT:
+                                heapq.heappush(largest, (size, rel))
+                            else:
+                                heapq.heappushpop(largest, (size, rel))
                     except OSError:
                         # Counted, not silently dropped: the file was listed a
                         # moment ago, so a failed stat means the count the caller
@@ -11761,7 +11818,13 @@ def _walk_entries(
                         unsized += 1
 
     _walk(root, "", [])
-    return _WalkOutcome(files=files, truncated=truncated, oversized=oversized, unsized=unsized)
+    return _WalkOutcome(
+        files=files,
+        truncated=truncated,
+        oversized=oversized,
+        unsized=unsized,
+        oversized_largest=tuple(sorted(largest, key=lambda item: (-item[0], item[1]))),
+    )
 
 
 def _walk_files(root: Path, *, stop_requested: Callable[[], bool] | None = None) -> _WalkOutcome:
@@ -11802,10 +11865,18 @@ def _grep_file_set(
 
 
 def _count_oversized_files(
-    target: Path, *, stop_requested: Callable[[], bool] | None = None
-) -> tuple[int, bool]:
-    """``(skipped, incomplete)`` for the files over ``GREP_FILE_LIMIT_BYTES``
-    under a DIRECTORY ``target``.
+    target: Path,
+    *,
+    stop_requested: Callable[[], bool] | None = None,
+    limit_bytes: int = GREP_FILE_LIMIT_BYTES,
+    include: str | None = None,
+) -> _OversizedCount:
+    """``(skipped, incomplete, largest)`` for the files over ``limit_bytes``
+    (default ``GREP_FILE_LIMIT_BYTES``) under a DIRECTORY ``target``.
+
+    ``include`` is grep's own filter, applied with the SAME matcher the Python
+    engine uses, so both engines name the same files. ``largest`` is the bounded
+    by-name list the answer prints (see ``_WalkOutcome.oversized_largest``).
 
     The ripgrep engine applies ``--max-filesize`` silently, and the footer
     contract promises the skipped count either way — this recovers it. ONE
@@ -11830,17 +11901,47 @@ def _count_oversized_files(
         target,
         deadline=time.monotonic() + SEARCH_WALK_DEADLINE_S,
         count_oversized=True,
+        oversize_limit=limit_bytes,
+        oversize_filter=(lambda rel: _glob_matches(rel, include)) if include else None,
         stop_requested=stop_requested,
     )
-    return walked.oversized, walked.truncated or bool(walked.unsized)
+    return _OversizedCount(
+        walked.oversized, walked.truncated or bool(walked.unsized), walked.oversized_largest
+    )
 
 
 class GlobParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    pattern: str = Field(
-        description="Glob pattern relative to the working directory ('**/*.py' supported)."
-    )
+    pattern: str = Field(description="Glob pattern ('**/*.py' supported); relative to path or cwd.")
+    path: str = ""
+
+
+def _split_absolute_glob(pattern: str) -> tuple[str, str]:
+    """``(base_dir, relative_pattern)`` for an ABSOLUTE glob pattern.
+
+    The base is the longest run of leading components with no glob metacharacter
+    (the "static prefix"), the rest is the pattern relative to it. A pattern with
+    no wildcard names one entry, so its base is the parent and the pattern is the
+    final component. Split on the component boundary, never inside one, so
+    ``/a/b*/c`` becomes ``("/a", "b*/c")`` — the same match set pathlib would
+    produce for the whole absolute pattern.
+
+    WHY it exists: the old refusal made ``glob`` the one reader that could not be
+    pointed outside the working directory, while ``read`` and ``grep`` both take
+    absolute paths — so a model exploring an app bundle fell back to guessing at
+    relative spellings. Accepting the spelling the model naturally writes is the
+    cheap fix; the walk, ignore rules, confinement and the outside-workspace
+    approval then run exactly as for an explicit ``path``.
+    """
+    parts = Path(pattern).parts  # ('/', 'a', 'b*', 'c')
+    anchor, rest = parts[0], list(parts[1:])
+    static: list[str] = []
+    while len(rest) > 1 and not any(ch in rest[0] for ch in "*?["):
+        static.append(rest.pop(0))
+    # The loop keeps the LAST component out of the base even when it is literal,
+    # so a wildcard-free pattern still leaves a directory as the base.
+    return str(Path(anchor, *static)), "/".join(rest) if rest else "*"
 
 
 def _literal_prefix(pattern: str) -> str:
@@ -12198,10 +12299,10 @@ async def execute_glob(
     # path-taking tools refuse. Found while sweeping for the tools that take a
     # path string (round 1, per-tool refusal).
     if "://" in pattern:
-        # Its own remedy, not the shared one: this tool's patterns are relative to
-        # the working directory and an absolute pattern is refused below, so
-        # "pass the absolute path read prints" is a route glob cannot take
-        # (round 2, Q7).
+        # Its own remedy, not the shared one: a scratchpad file's absolute path
+        # is a route glob CAN take now, but only as a base directory, never as the
+        # file itself — "pass the absolute path read prints" would send the model
+        # to list a file (round 2, Q7).
         refusal = _scheme_refusal(
             tool_call_id,
             "glob",
@@ -12215,14 +12316,30 @@ async def execute_glob(
         )
         if refusal is not None:
             return refusal
-    if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+    # An absolute pattern is split into a base directory and a relative pattern
+    # (``_split_absolute_glob``) instead of being refused. ``..`` is still refused
+    # inside the PATTERN — the base is what ``path`` is for, and an explicit
+    # ``path`` is operator-intent exactly as it is for grep, whereas a ``..``
+    # smuggled into a pattern is an escape the model did not name as a target.
+    explicit_base: str | None = params.path.strip() or None
+    is_absolute = Path(pattern).is_absolute()
+    if is_absolute and explicit_base is not None:
+        return _error(
+            tool_call_id,
+            "glob",
+            "pass an absolute pattern OR path, not both: with `path` set the pattern is "
+            "relative to it.",
+        )
+    if (is_absolute and Path(pattern).name.casefold() == "skill.md") or ".." in Path(pattern).parts:
         message = (
-            "pattern must be a relative glob within the working directory "
-            "(no absolute paths, no '..')."
+            "pattern must be relative to its base directory (no '..'); to search "
+            "elsewhere pass path=<directory>."
         )
         # Skills are virtual resources, not files the model should discover.
         # Correct only this observed misuse so every ordinary glob error keeps
-        # its concise, generic diagnostic.
+        # its concise, generic diagnostic. It stays a REFUSAL even though other
+        # absolute patterns are now served: a SKILL.md search is the filesystem
+        # scan the skill:// scheme exists to replace.
         if Path(pattern).is_absolute() and Path(pattern).name.casefold() == "skill.md":
             # A conservative resource segment avoids reflecting path syntax or
             # prose into a URL while still covering normal catalog names.
@@ -12247,6 +12364,38 @@ async def execute_glob(
         cwd_denial = confinement.cwd_denial(str(root))
         if cwd_denial is not None:
             return _error(tool_call_id, "glob", cwd_denial)
+    if Path(pattern).is_absolute():
+        explicit_base, pattern = _split_absolute_glob(pattern)
+    if explicit_base is not None:
+        # The same resolution, confinement verdict and outside-workspace approval
+        # grep applies to its ``path`` — one rule for "a tool reads somewhere else".
+        target, inside, resolvable = _resolve_workspace_path(
+            normalise_path_argument(explicit_base), str(root)
+        )
+        denial = _confinement_denial(target, context, resolvable=resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "glob", denial)
+        if not target.exists():
+            return _error(tool_call_id, "glob", f"Path does not exist: {target}")
+        if not target.is_dir():
+            return _error(
+                tool_call_id,
+                "glob",
+                f"path must be a directory: {target} (read or grep take a file).",
+            )
+        if not inside:
+            description = _approval_description(target, inside, "glob", resolvable)
+            try:
+                approved = await _check_approval(context, "read", description)
+            except ApprovalUnavailableError as exc:
+                return _error(
+                    tool_call_id,
+                    "glob",
+                    APPROVAL_UNAVAILABLE_NOTICE.format(tool="glob", reason=exc.reason),
+                )
+            if not approved:
+                return _error(tool_call_id, "glob", "User declined to list this path.")
+        root = target
     # An unbounded ``**`` walk is filesystem work that can freeze the session;
     # off the event loop and raced against abort like the grep scan, and under
     # the same wall-clock budget as every other search walk. ``stop_requested``
@@ -12330,6 +12479,10 @@ async def execute_glob(
     header = f"{len(shown)} match(es) for '{params.pattern}'"
     if total > len(shown):
         header += f" of {total} (capped at {GLOB_RESULT_LIMIT})"
+    if explicit_base is not None:
+        # Paths are printed relative to the base, so a result that does not name
+        # the base cannot be turned back into a file by the reader.
+        header += f" in {root}"
     if stops:
         # Additive to the header contract above, never a replacement for it: the
         # non-truncated spellings ('N match(es)', 'of T (capped at 500)') are
@@ -12397,6 +12550,12 @@ class GrepParams(BaseModel):
         default=0,
         ge=0,
         description="Skip the first N matches (pagination for large result sets).",
+    )
+    max_filesize_mb: int = Field(
+        default=GREP_FILE_LIMIT_BYTES // (1024 * 1024),
+        ge=1,
+        le=GREP_FILE_CEILING_BYTES // (1024 * 1024),
+        description="File size cap, MB.",
     )
 
 
@@ -12486,6 +12645,36 @@ class _GrepScan(NamedTuple):
     stops: tuple[_SearchStop, ...] = ()
     files_searched: int = 0
     files_skipped: int = 0
+    #: The Python engine's by-name list of what ``files_skipped`` counted (largest
+    #: first, ``GREP_SKIPPED_LIST_LIMIT`` entries); the ripgrep engine's comes from
+    #: ``_count_oversized_files`` instead, for the same reason its count does.
+    skipped_largest: tuple[tuple[int, str], ...] = ()
+
+
+def _clip_grep_line(line: str, hit_start: int | None) -> str:
+    """``line`` itself, or a ``GREP_LINE_CLIP_CHARS`` window around its match.
+
+    WHY: a minified bundle is ONE line of hundreds of KB. Unclipped, a single hit
+    floods the context, and on the ripgrep pipe it overran asyncio's 64 KiB line
+    limit and crashed the whole call (``LimitOverrunError`` surfaced as "Tool
+    'grep' failed unexpectedly"). The window keeps the match visible — a head-only
+    preview, which is what ``rg --max-columns-preview`` gives, would show the
+    first N bytes of the minified line and usually NOT the match — and says how
+    much it dropped on each side, so the model knows the line continues and can
+    page the real file with ``read`` instead of guessing.
+
+    ``hit_start`` is the match's character offset in ``line`` (``None`` for a
+    context line, which has no match of its own, so it clips from the start). Both
+    engines call this with the same constants, so one file renders identically
+    under either.
+    """
+    if len(line) <= GREP_LINE_CLIP_CHARS:
+        return line
+    start = max((hit_start or 0) - GREP_LINE_CLIP_LEAD_CHARS, 0)
+    end = min(start + GREP_LINE_CLIP_CHARS, len(line))
+    before = f"[\u2026{start} chars] " if start else ""
+    after = f" [{len(line) - end} chars\u2026]" if end < len(line) else ""
+    return f"{before}{line[start:end]}{after}"
 
 
 def _python_grep_scan(
@@ -12495,6 +12684,7 @@ def _python_grep_scan(
     include: str | None,
     context_lines: int,
     stop_requested: Callable[[], bool] | None = None,
+    max_filesize: int = GREP_FILE_LIMIT_BYTES,
 ) -> _GrepScan:
     """The pure-Python scan, run in a worker thread.
 
@@ -12518,6 +12708,7 @@ def _python_grep_scan(
     records: list[tuple[str, int, str, str]] = []
     files_searched = 0
     files_skipped = 0
+    largest_skipped: list[tuple[int, str]] = []
     stops: tuple[_SearchStop, ...] = ()
     for file_path in files:
         if stop_requested is not None and stop_requested():
@@ -12540,8 +12731,14 @@ def _python_grep_scan(
         if include and not _glob_matches(rel, include):
             continue
         try:
-            if file_path.stat().st_size > GREP_FILE_LIMIT_BYTES:
+            size = file_path.stat().st_size
+            if size > max_filesize:
                 files_skipped += 1
+                # Named, not just counted: see ``_WalkOutcome.oversized_largest``.
+                if len(largest_skipped) < GREP_SKIPPED_LIST_LIMIT:
+                    heapq.heappush(largest_skipped, (size, rel))
+                else:
+                    heapq.heappushpop(largest_skipped, (size, rel))
                 continue
             data = file_path.read_bytes()
         except OSError:
@@ -12554,7 +12751,10 @@ def _python_grep_scan(
         except UnicodeDecodeError:
             text = data.decode("utf-8", errors="replace")
         lines = text.splitlines()
-        hit_lines = [n for n, line in enumerate(lines, start=1) if regex.search(line)]
+        # The first hit's offset is kept per matched line: ``_clip_grep_line`` needs
+        # it to centre the window, and the search already paid for it.
+        hits = {n: m.start() for n, line in enumerate(lines, start=1) if (m := regex.search(line))}
+        hit_lines = list(hits)
         if not hit_lines:
             continue
         wanted: set[int] = set()
@@ -12565,8 +12765,8 @@ def _python_grep_scan(
                     range(max(1, n - context_lines), min(len(lines), n + context_lines) + 1)
                 )
         for n in sorted(wanted):
-            kind = "m" if n in hit_lines else "c"
-            records.append(_match_record(rel, n, lines[n - 1], kind))
+            kind = "m" if n in hits else "c"
+            records.append(_match_record(rel, n, _clip_grep_line(lines[n - 1], hits.get(n)), kind))
         if sum(1 for r in records if r[3] == "m") >= GREP_SPILL_MATCH_LIMIT:
             # A deliberate collector cap, not a budget stop: the header renders
             # it as ``N+`` (see the ``GREP_SPILL_MATCH_LIMIT`` comment), so it
@@ -12577,10 +12777,19 @@ def _python_grep_scan(
         stops=stops,
         files_searched=files_searched,
         files_skipped=files_skipped,
+        skipped_largest=tuple(sorted(largest_skipped, key=lambda item: (-item[0], item[1]))),
     )
 
 
-_RG_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<text>.*)$")
+#: A ripgrep match line under ``--column``: ``path:line:column:text``. The column
+#: (1-based, in BYTES) is the first match's offset, which is what lets a clipped
+#: line keep its match without a second, Python-flavoured regex run over text rg
+#: already matched (rg's regex dialect is not ``re``'s, and a hostile pattern on a
+#: multi-MB line is exactly the cost this tool bounds elsewhere).
+_RG_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<col>\d+):(?P<text>.*)$")
+#: What one ripgrep output line carries beyond the file's own line: the path and
+#: the ``:line:col:`` prefix. Added to ``max_filesize`` to size the pipe's line limit.
+_RG_LINE_OVERHEAD_BYTES = 64 * 1024
 _RG_CONTEXT_RE = re.compile(r"^(?P<path>.+?)-(?P<line>\d+)-(?P<text>.*)$")
 
 
@@ -12592,6 +12801,7 @@ async def _ripgrep_scan(
     case: bool,
     context_lines: int,
     signal: AbortSignal | None,
+    max_filesize: int = GREP_FILE_LIMIT_BYTES,
 ) -> _GrepScan | None:
     """Native ripgrep scan; None means "fall back to the Python engine".
 
@@ -12618,7 +12828,19 @@ async def _ripgrep_scan(
     # -H forces the path prefix even for a single explicitly-named file
     # (rg otherwise prints bare "lineno:text", which this parser and the
     # shared path:line:text grammar both expect to carry a path).
-    argv = [rg, "--no-heading", "--color", "never", "--max-filesize", "1M", "-n", "-H"]
+    # --column is what keeps a clipped long line's MATCH in view (see
+    # ``_RG_LINE_RE``). --max-filesize is the caller's cap in plain bytes.
+    argv = [
+        rg,
+        "--no-heading",
+        "--color",
+        "never",
+        "--max-filesize",
+        str(max_filesize),
+        "-n",
+        "-H",
+        "--column",
+    ]
     if not case:
         argv.append("-i")
     if context_lines:
@@ -12630,11 +12852,21 @@ async def _ripgrep_scan(
     argv += ["--", pattern, rel_target]
 
     try:
+        # ``limit`` is the StreamReader's longest line, and its 64 KiB DEFAULT was
+        # the crash: one minified-bundle line is bigger, ``readline`` raised
+        # ``LimitOverrunError`` (as ValueError) and the whole call died as "Tool
+        # 'grep' failed unexpectedly" — reproduced on the Claude.app renderer
+        # chunks. rg only ever prints lines from files under ``max_filesize``, so
+        # that cap (plus a path/prefix allowance) is a true upper bound on one
+        # line and the pipe can never overrun again; the line is then clipped to
+        # ``GREP_LINE_CLIP_CHARS`` before it is stored, so the big buffer is
+        # transient, one line at a time.
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(base),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            limit=max_filesize + _RG_LINE_OVERHEAD_BYTES,
         )
     except (OSError, ValueError):
         return None
@@ -12674,9 +12906,13 @@ async def _ripgrep_scan(
                 path = match.group("path")
                 if path.startswith("./"):
                     path = path[2:]
-                records.append(
-                    _match_record(path, int(match.group("line")), match.group("text"), "m")
-                )
+                text = match.group("text")
+                if len(text) > GREP_LINE_CLIP_CHARS:
+                    # rg's column is a 1-based BYTE offset; the window is cut in
+                    # characters, so convert (only paid for the long lines).
+                    lead = text.encode("utf-8", errors="replace")[: int(match.group("col")) - 1]
+                    text = _clip_grep_line(text, len(lead.decode("utf-8", errors="ignore")))
+                records.append(_match_record(path, int(match.group("line")), text, "m"))
                 continue
             context = _RG_CONTEXT_RE.match(line)
             if context:
@@ -12684,7 +12920,12 @@ async def _ripgrep_scan(
                 if path.startswith("./"):
                     path = path[2:]
                 records.append(
-                    _match_record(path, int(context.group("line")), context.group("text"), "c")
+                    _match_record(
+                        path,
+                        int(context.group("line")),
+                        _clip_grep_line(context.group("text"), None),
+                        "c",
+                    )
                 )
         if len(records) >= output_cap:
             # The collector cap, not a budget stop — hence a stop record with no
@@ -12862,9 +13103,12 @@ async def execute_grep(
     target_is_file = target.is_file()
     base = target.parent if target_is_file else target
     use_rg = _use_ripgrep()
+    max_filesize = params.max_filesize_mb * 1024 * 1024
+    # The by-name list behind the skipped count; filled by whichever engine ran.
+    skipped_largest: tuple[tuple[int, str], ...] = ()
     if use_rg and target_is_file:
         try:
-            if target.stat().st_size > GREP_FILE_LIMIT_BYTES:
+            if target.stat().st_size > max_filesize:
                 use_rg = False
         except OSError:
             use_rg = False
@@ -12891,6 +13135,7 @@ async def execute_grep(
             params.case,
             params.context_lines,
             signal,
+            max_filesize,
         )
     if scan_result is not None:
         records = scan_result.records
@@ -12906,7 +13151,13 @@ async def execute_grep(
         # (review F2).
         if not target_is_file:
             counted, aborted = await _run_with_abort(
-                asyncio.to_thread(_count_oversized_files, target, stop_requested=_stop_requested),
+                asyncio.to_thread(
+                    _count_oversized_files,
+                    target,
+                    stop_requested=_stop_requested,
+                    limit_bytes=max_filesize,
+                    include=params.include,
+                ),
                 signal,
                 lambda: None,
             )
@@ -12918,7 +13169,7 @@ async def execute_grep(
             # checker instead of an `or 0` that would silently launder a
             # future internal failure into a zero (review N1).
             assert counted is not None
-            files_skipped, count_incomplete = counted
+            files_skipped, count_incomplete, skipped_largest = counted
     else:
         if signal and signal.aborted:
             return _error(tool_call_id, "grep", "Search aborted.")
@@ -12938,6 +13189,7 @@ async def execute_grep(
                 params.include,
                 params.context_lines,
                 stop_requested=_stop_requested,
+                max_filesize=max_filesize,
             )
             # One stop list, both hops: a file set the walk budget cut short makes
             # the scan's own completeness claim false, so the two stops are
@@ -12962,9 +13214,11 @@ async def execute_grep(
         records = py_result.records
         files_searched = py_result.files_searched
         files_skipped = py_result.files_skipped
+        skipped_largest = py_result.skipped_largest
         stops.extend(py_result.stops)
 
     matches = [r for r in records if r[3] == "m"]
+    cap_label = f"{params.max_filesize_mb}MB"
 
     def _skipped_clause() -> str:
         """The footer's ``file(s) skipped`` suffix, or "" when there is none.
@@ -12981,12 +13235,42 @@ async def execute_grep(
             # (review round 2, R2-4). Zero keeps the bare form: a count that only
             # knows "none so far" has nothing to report as a floor.
             if files_skipped:
-                return f" (at least {files_skipped} file(s) skipped over the 1MB cap)"
-            return " (files over the 1MB cap not fully counted)"
+                return f" (at least {files_skipped} file(s) skipped over the {cap_label} cap)"
+            return f" (files over the {cap_label} cap not fully counted)"
         if not files_skipped:
             return ""
-        return f" ({files_skipped} file(s) skipped over the 1MB cap)"
+        return f" ({files_skipped} file(s) skipped over the {cap_label} cap)"
 
+    def _skipped_names() -> str:
+        """The by-name half of the skipped-files disclosure, or "" when none.
+
+        WHY: the bare count was read as a negative answer — "No matches (28
+        file(s) skipped)" left the model unable to tell which files were never
+        read or what to do about it, and a "no match" about an app bundle's
+        minified chunks is exactly the claim it could not make. Names (largest
+        first, bounded), the sizes that show whether a raise will reach them, and
+        the one parameter that does are what make the footer actionable.
+        """
+        if not skipped_largest:
+            return ""
+        shown = ", ".join(
+            f"{path} ({size / (1024 * 1024):.1f}MB)" for size, path in skipped_largest
+        )
+        more = files_skipped - len(skipped_largest)
+        if more > 0:
+            shown += f", and {more} more"
+        biggest_mb = -(-skipped_largest[0][0] // (1024 * 1024))
+        ceiling_mb = GREP_FILE_CEILING_BYTES // (1024 * 1024)
+        if biggest_mb <= ceiling_mb:
+            remedy = f"re-run with max_filesize_mb={biggest_mb} to search them all"
+        else:
+            remedy = (
+                f"re-run with max_filesize_mb={ceiling_mb} (the ceiling) to search those up "
+                f"to {ceiling_mb}MB; the largest is beyond grep's reach, so read it in ranges"
+            )
+        return f"not searched (largest first): {shown}; {remedy}"
+
+    skipped_names = _skipped_names()
     if not matches:
         if stops:
             # The honesty contract, and the reason this change exists: "no
@@ -13009,10 +13293,22 @@ async def execute_grep(
                 f"for '{params.pattern}' was found in the part of the tree that "
                 "was read, and the rest was not — so this is not an absence of "
                 "matches. Narrow the search with path=<subdirectory> or "
-                f"include=<glob> and re-run{engine_note}.",
+                f"include=<glob> and re-run{engine_note}."
+                + (f" Also {_skipped_names()}." if skipped_names else ""),
                 details=_partial_details(stops, None),
             )
         where = f" in {files_searched} file(s)" if not engine_note else ""
+        if skipped_names:
+            # INCONCLUSIVE, not "no matches": files were never read, so the answer
+            # covers only part of the tree. Not ``useless`` either — that flag
+            # tells compaction the result carries nothing worth keeping, and the
+            # list of unread files is the one thing here worth keeping.
+            return _text(
+                tool_call_id,
+                "grep",
+                f"No matches for '{params.pattern}'{where}{_skipped_clause()}{engine_note}"
+                f" — INCONCLUSIVE: {skipped_names}.",
+            )
         return _text(
             tool_call_id,
             "grep",
@@ -13029,9 +13325,17 @@ async def execute_grep(
     # The join and spill ride a thread: multi-MB string joins plus the
     # spill's disk write were the loop-bound tail that froze the frame when
     # several searches settled together.
-    body_text, spill_details = await asyncio.to_thread(
-        _spilled_list_body, spill_lines, shown_block, "grep", context
-    )
+    if total <= shown and len(shown_block) <= TOOL_OUTPUT_LIMIT_CHARS:
+        # Every match is already on screen and fits: a spill would only be a copy of
+        # it. It used to be written anyway whenever the body carried a ``--`` group
+        # separator or context lines (the spill holds matches only, so the two never
+        # compare equal), and its footer then pointed at an impossible range — a
+        # two-line spill advertised as ``range="4-2"``.
+        body_text, spill_details = shown_block, None
+    else:
+        body_text, spill_details = await asyncio.to_thread(
+            _spilled_list_body, spill_lines, shown_block, "grep", context
+        )
     header = f"{shown} match(es) for '{params.pattern}'"
     if total > shown:
         header += f" of {total}{'+' if total >= GREP_SPILL_MATCH_LIMIT else ''}"
@@ -13058,7 +13362,10 @@ async def execute_grep(
             "path=<subdirectory> or include=<glob> to search further"
         )
         details = _partial_details(stops, spill_details)
-    return _text(tool_call_id, "grep", text + ":\n" + body_text + engine_note, details=details)
+    tail = f"\n[{skipped_names}]" if skipped_names else ""
+    return _text(
+        tool_call_id, "grep", text + ":\n" + body_text + engine_note + tail, details=details
+    )
 
 
 def build_grep_tool() -> AgentTool:
