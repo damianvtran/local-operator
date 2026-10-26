@@ -131,6 +131,11 @@ OWNED_SPA_NAMESPACES = (
     # keys must not change relay.chrome's frozen English bytes, which would stale
     # every locale's passed ledger row for that namespace.
     "relay.health",
+    # The phone inbox (`#/notifications`, docs/design/notifications-inbox.md §9):
+    # reel, item detail, receipts and confirmations. Its own namespace for the
+    # `relay.chrome` reason: adding keys there would stale every locale's passed
+    # ledger row for a redesign another lane owns.
+    "relay.notifications",
 )
 
 GENERATED_HEADER = (

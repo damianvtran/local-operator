@@ -61,10 +61,12 @@ import {
 	applySessionPin,
 	clearSessionPinMark,
 	messageRuntime,
+	notificationsBadge,
 	publishMarkNotice,
 	retainSessionListStream,
 	useCapabilities,
 	useMarkNotice,
+	useNotificationsBlock,
 	usePinMarks,
 	useSessions,
 } from "../store";
@@ -757,6 +759,7 @@ function usePaintedRows(
 export function SessionListScreen() {
 	const { sessions, connected, revision } = useSessions();
 	const capabilities = useCapabilities();
+	const notificationsBlock = useNotificationsBlock();
 	/* FLIP settle state: per session id, the card ELEMENT measured last time and
 	   its top in LAYOUT space (see `layoutTop`). The element is part of the
 	   record because a pin LIFT remounts a card under another section — a new
@@ -1411,7 +1414,12 @@ export function SessionListScreen() {
 	const DRAWER_ITEMS: DrawerItem[] = [
 		{ id: "conversations", icon: "☰", label: messageRuntime.t("relay.chrome.drawer.conversations"), href: "#/", current: true },
 		{ id: "questions", icon: "?", label: messageRuntime.t("relay.chrome.drawer.questions"), onSelect: () => setQuestionsOpen(true) },
-		// Notifications is inserted here by its capability owner; no copy/key until then.
+		/* The inbox (notifications lane). Gated on BOTH facts the relay serves:
+		   core's `features.notifications` (the inbox contract exists) AND the list
+		   frame's `notifications` block (this relay build serves the routes; the
+		   two ship in one commit on core). Either absent -> no row. The count is
+		   the one badge formula (D16) and is omitted while unknown. */
+		{ id: "notifications", icon: "◉", label: messageRuntime.t("relay.notifications.title"), href: "#/notifications", available: Boolean(capabilities?.features?.notifications) && notificationsBlock !== undefined, count: notificationsBadge(notificationsBlock) },
 		{ id: "past", icon: "◷", label: messageRuntime.t("relay.chrome.drawer.past"), href: "#/past" },
 		{ id: "projects", icon: "▱", label: messageRuntime.t("relay.chrome.drawer.projects"), onSelect: () => setProjectsOpen(true) },
 		{ id: "library", icon: "▤", label: messageRuntime.t("relay.chrome.drawer.library"), href: "#/library", available: Boolean(capabilities?.library) },
