@@ -1,7 +1,7 @@
 {
   "relay.transcript.turn.condensed": "Turn condensed",
   "relay.transcript.turn.took": "Took {duration}",
-  "relay.transcript.turn.actions": "{label, select, other {{count, plural, one {# action} other {# actions}}}}",
+  "relay.transcript.turn.actions": "{label, select, other {{count, plural, one {{label} action} other {{label} actions}}}}",
   "relay.transcript.turn.completed": "completed",
   "relay.transcript.fold.unit": "{kind, select, files {{count, plural, one {# file} other {# files}}} searches {{count, plural, one {# search} other {# searches}}} web {{count, plural, one {# web search} other {# web searches}}} shell {{count, number} shell} python {{count, number} python} edits {{count, plural, one {# edit} other {# edits}}} tasks {{count, plural, one {# task} other {# tasks}}} incoming {{count, plural, one {# incoming message} other {# incoming messages}}} wakes {{count, plural, one {# wake receipt} other {# wake receipts}}} other {{count, number} {name}}}",
   "relay.transcript.fold.shell": "{count, plural, one {# shell} other {# shell}}",

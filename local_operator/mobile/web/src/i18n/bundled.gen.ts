@@ -323,7 +323,7 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, stri
     "relay.transcript.label.wake": "Wake",
     "relay.transcript.older.failed": "Couldn\u2019t load earlier messages",
     "relay.transcript.session.unread_refused": "Could not read what is unread \u2014 nothing was cleared. Try again.",
-    "relay.transcript.turn.actions": "{label, select, other {{count, plural, one {# action} other {# actions}}}}",
+    "relay.transcript.turn.actions": "{label, select, other {{count, plural, one {{label} action} other {{label} actions}}}}",
     "relay.transcript.turn.completed": "completed",
     "relay.transcript.turn.condensed": "Turn condensed",
     "relay.transcript.turn.took": "Took {duration}",

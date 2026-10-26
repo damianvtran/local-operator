@@ -4,10 +4,14 @@ import type { FoldCountSegment } from "./condense-fold";
 import type { SegmentLabelKind } from "./condense-segments";
 import { quietGroupLabel } from "./quiet-groups";
 
-export function actionCount(count: number, partial = false): string {
+export function countLabel(count: number, partial: boolean, locale: string): string {
+	return `${new Intl.NumberFormat(locale).format(count)}${partial ? "+" : ""}`;
+}
+
+export function actionCount(count: number, partial = false, label?: string): string {
 	return messageRuntime.t("relay.transcript.turn.actions", {
 		count,
-		label: `${count}${partial ? "+" : ""}`,
+		label: label ?? countLabel(count, partial, "en"),
 	});
 }
 

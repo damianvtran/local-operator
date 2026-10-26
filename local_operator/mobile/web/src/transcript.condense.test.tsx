@@ -75,10 +75,29 @@ describe("condensed transcript rendering", () => {
 		const group = document.querySelector("[data-condense-fold]");
 		expect(group).not.toBeNull();
 		expect(group?.textContent).toContain("Includes a failed action");
+		expect(group?.querySelector("[data-failed-count]")?.textContent).toBe("1");
 		expect(group?.querySelector(".text-danger")?.textContent).toBe("✗");
 		fireEvent.click(group!.querySelector("button")!);
 		fireEvent.click(screen.getByText("run b").closest("button")!);
 		expect(screen.getByText("exit 1")).toBeTruthy();
+	});
+
+	it("anchors a toggled bar in the scroller's coordinate frame", () => {
+		const { container } = render(<Transcript pid="s" entries={settledTurn()} />);
+		const scroller = container.querySelector<HTMLElement>(".lo-scroll")!;
+		const header = container.querySelector<HTMLElement>("[data-condense-header]")!;
+		Object.defineProperty(scroller, "scrollHeight", { value: 2000, configurable: true });
+		Object.defineProperty(scroller, "clientHeight", { value: 500, configurable: true });
+		scroller.scrollTop = 200;
+		vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({ top: 100 } as DOMRect);
+		/* The tap reads 400; expansion moves the bar to 500. Relative to the
+		   scroller that is 300 → 400, so follow must add 100. Comparing the
+		   second viewport-relative top to the first one would add nothing. */
+		vi.spyOn(header, "getBoundingClientRect")
+			.mockReturnValueOnce({ top: 400 } as DOMRect)
+			.mockReturnValue({ top: 500 } as DOMRect);
+		fireEvent.click(header);
+		expect(scroller.scrollTop).toBe(300);
 	});
 
 	it("does not paint a blank notice with an empty custom type", () => {

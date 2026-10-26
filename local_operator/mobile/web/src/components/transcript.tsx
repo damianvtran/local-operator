@@ -744,7 +744,10 @@ export function Transcript({
 	const toggleCondensed = (item: Extract<CondenseEntry, { kind: "turn" | "fold" }>, open: boolean) => {
 		const id = item.kind === "turn" ? item.segment.key : item.key;
 		const header = scrollRef.current?.querySelector(`[data-condense-header="${CSS.escape(item.key)}"]`);
-		if (header) pressedHeaderRef.current = { id: item.key, top: header.getBoundingClientRect().top };
+		if (header && scrollRef.current) pressedHeaderRef.current = {
+			id: item.key,
+			top: header.getBoundingClientRect().top - scrollRef.current.getBoundingClientRect().top,
+		};
 		pinnedRef.current = false;
 		setOpenRuns((current) => {
 			const next = new Set(current);

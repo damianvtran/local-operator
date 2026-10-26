@@ -1,9 +1,9 @@
 /** One-line chrome for condensed turns and tool folds (design PR C §2). */
 import type { ReactNode } from "react";
 import { cn } from "../lib/cn";
-import { messageRuntime } from "../store";
+import { messageRuntime, useLocaleSnapshot } from "../store";
 import { formatElapsed } from "../lib/format";
-import { actionCount, foldUnits, receiptUnits, segmentLabel } from "../lib/condense-copy";
+import { actionCount, countLabel, foldUnits, receiptUnits, segmentLabel } from "../lib/condense-copy";
 import type { CondenseEntry } from "../lib/condense-view";
 import { Chevron } from "./ui/disclosure";
 
@@ -25,6 +25,7 @@ function Header({
 	open,
 	onToggle,
 	failed,
+	failedCount = 0,
 	live,
 	children,
 	label,
@@ -33,6 +34,7 @@ function Header({
 	open: boolean;
 	onToggle: () => void;
 	failed: boolean;
+	failedCount?: number;
 	live?: boolean;
 	children: ReactNode;
 	label?: string;
@@ -56,6 +58,7 @@ function Header({
 				{failed ? "✗" : live ? "⟳" : ""}
 			</span>
 			{children}
+			{failedCount > 0 ? <span data-failed-count={failedCount} className="shrink-0 font-mono text-mono-sm text-danger">{failedCount}</span> : null}
 			{failureLabel ? <span className="sr-only">{failureLabel}</span> : null}
 		</button>
 	);
@@ -74,17 +77,19 @@ export function TurnBar({
 }) {
 	const { segment } = entry;
 	const group = segment.facts.group;
+	const { uiLocale } = useLocaleSnapshot();
+	const formatCount = (count: number, partial = false) => countLabel(count, partial, uiLocale);
 	const units: string[] = [];
 	const label = segmentLabel(segment.labelKind);
 	if (label) units.push(label);
 	if (group) {
 		units.push(String(group.count));
-		if (group.actions > 0) units.push(actionCount(group.actions, segment.facts.partial));
+		if (group.actions > 0) units.push(actionCount(group.actions, segment.facts.partial, formatCount(group.actions, segment.facts.partial)));
 	} else {
 		if (segment.facts.durationS !== null) {
 			units.push(messageRuntime.t("relay.transcript.turn.took", { duration: formatElapsed(segment.facts.durationS) }));
 		}
-		if (segment.facts.actions > 0) units.push(actionCount(segment.facts.actions, segment.facts.partial));
+		if (segment.facts.actions > 0) units.push(actionCount(segment.facts.actions, segment.facts.partial, formatCount(segment.facts.actions, segment.facts.partial)));
 		if (units.length === 0) units.push(...foldUnits(segment.facts.countUnits));
 		if (units.length === 0) units.push(messageRuntime.t("relay.transcript.turn.condensed"));
 	}
@@ -93,7 +98,7 @@ export function TurnBar({
 		: undefined;
 	return (
 		<div data-condensed-turn={entry.run.key} data-condense-segment={segment.key}>
-			<Header id={entry.key} open={open} onToggle={onToggle} failed={segment.facts.failed > 0} label={[...units, partialTitle].filter(Boolean).join(" · ")}>
+			<Header id={entry.key} open={open} onToggle={onToggle} failed={segment.facts.failed > 0} failedCount={segment.facts.failed} label={[...units, partialTitle].filter(Boolean).join(" · ")}>
 				<span title={partialTitle} className="contents">
 					<Units units={units} className="text-meta text-ink-dim" />
 				</span>
@@ -116,18 +121,20 @@ export function FoldBar({
 	children: ReactNode;
 }) {
 	const { group } = entry;
+	const { uiLocale } = useLocaleSnapshot();
+	const totalActions = actionCount(group.actions.length, false, countLabel(group.actions.length, false, uiLocale));
 	const liveRow = group.live === null ? null : group.rows.find((row) => row.record.kind === "tool" && row.record.phase === "running");
 	const units = [...foldUnits(group.summary.countUnits), ...receiptUnits(group.rows.filter((row) => row.record.kind !== "tool"))];
 	if (liveRow && !open) {
 		return (
 			<div data-condense-fold={group.id}>
-				<Header id={entry.key} open={open} onToggle={onToggle} failed={group.failedCount > 0} live>
+				<Header id={entry.key} open={open} onToggle={onToggle} failed={group.failedCount > 0} failedCount={group.failedCount} live>
 					<span className="flex min-w-0 flex-1 flex-col justify-center">
 						<span className="flex min-w-0 items-center gap-1.5 text-body-sm">
 							<span className="shrink truncate text-ink-muted">{liveRow.record.kind === "tool" ? liveRow.record.toolName : ""}</span>
 							<span className="min-w-0 flex-1 truncate font-mono text-ink-dim">{liveRow.record.kind === "tool" ? liveRow.record.summary : ""}</span>
 						</span>
-						<span className="truncate text-meta text-ink-dim">{actionCount(group.actions.length)}</span>
+						<span className="truncate text-meta text-ink-dim">{totalActions}</span>
 					</span>
 				</Header>
 			</div>
@@ -135,7 +142,7 @@ export function FoldBar({
 	}
 	return (
 		<div data-condense-fold={group.id}>
-			<Header id={entry.key} open={open} onToggle={onToggle} failed={group.failedCount > 0}>
+			<Header id={entry.key} open={open} onToggle={onToggle} failed={group.failedCount > 0} failedCount={group.failedCount}>
 				<Units units={units.length ? units : [actionCount(group.actions.length)]} className="text-body-sm text-ink-muted" />
 			</Header>
 			{open ? <div id={`${entry.key}:body`} className="flex flex-col ps-[22px]">{children}</div> : null}
