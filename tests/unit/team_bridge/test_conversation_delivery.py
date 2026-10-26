@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 import time
@@ -48,7 +49,7 @@ HISTORY_AT = "2026-10-20T00:00:00Z"
 # A root card names the in-conversation reply route (see the root reply route
 # tests below for why).
 ROOT_REPLY_LINE = (
-    "if you reply: bridge channel_post with this conversation_id; "
+    "if you reply: bridge channel_post with channel_id = this conversation_id; "
     "legacy send/reply never appears in a conversation"
 )
 
@@ -1410,3 +1411,40 @@ def test_a_thread_reply_card_keeps_only_its_thread_route() -> None:
     ]
     assert ROOT_REPLY_LINE not in lines
     assert not any(line.startswith("if you reply: ") for line in lines)
+
+
+# The route lines are instructions the agent executes literally, and the bridge
+# schema is extra="forbid": a card naming a key the tool does not accept fails
+# the agent's first call, which pushes it back to legacy send (R1-01). So the
+# key is PARSED from the rendered card, not restated here, and a rename on
+# either side fails this test.
+_ROUTE = re.compile(r"bridge (?P<op>\w+) with (?:(?P<key>\w+) = )?this (?P<named>\w+)")
+
+
+@pytest.mark.parametrize("thread_root_id", [None, ROOT_ID], ids=["root", "thread"])
+def test_the_card_route_names_arguments_the_bridge_tool_accepts(thread_root_id) -> None:
+    from local_operator.team_bridge.tool import BridgeToolParams
+
+    card = build_conversation_card(
+        ConversationCardMetadata(
+            conversation_id=CONVERSATION_ID,
+            tenant_id="ten_1",
+            conversation_label="#agents",
+            sender_label="Ada",
+            sender_kind="human",
+            mention=False,
+            message_id=MESSAGE_ID,
+            conversation_seq=2,
+            thread_root_id=thread_root_id,
+        )
+    )
+    fields = dict(line.split(": ", 1) for line in card.splitlines() if ": " in line)
+    routes = [m for line in card.splitlines() if (m := _ROUTE.search(line))]
+    assert len(routes) == 1, card
+    route = routes[0]
+    key = route["key"] or route["named"]
+    args = {"op": route["op"], key: fields[route["named"]], "body": "ok"}
+    if thread_root_id:
+        args["channel_id"] = CONVERSATION_ID
+    params = BridgeToolParams.model_validate(args)
+    assert getattr(params, key) == fields[route["named"]]

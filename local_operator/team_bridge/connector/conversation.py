@@ -149,7 +149,7 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # headroom, while this card costs only when a conversation message
         # arrives — exactly when the choice between the two routes is made.
         lines.append(
-            "if you reply: bridge channel_post with this conversation_id; "
+            "if you reply: bridge channel_post with channel_id = this conversation_id; "
             "legacy send/reply never appears in a conversation"
         )
     lines.append(f"guidance: {GUIDANCE_VERSION}")
