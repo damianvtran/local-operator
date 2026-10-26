@@ -25,6 +25,8 @@ import pytest
 from local_operator.harness.message_types import TEAM_BRIDGE_MESSAGE_TYPE
 from local_operator.harness.types import (
     AgentTool,
+    CustomMessage,
+    Message,
     StreamEndEvent,
     StreamTextDelta,
     TextContent,
@@ -583,6 +585,210 @@ async def test_card_parked_during_hydration_is_read_by_exactly_one_turn(tmp_path
             finish_hydration.set()
             if not working.done():
                 await asyncio.wait_for(working, 10)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_of_a_request_carrying_the_card_settles_its_wake(tmp_path, monkeypatch):
+    """PR #2951 round 3 MINOR-R3-2: the dispatch settle, isolated from the guard.
+
+    Same hydration-window shape as the round-2 regression, but the debt is
+    sampled INSIDE the provider call that carries the card, after dispatch and
+    before the waiter's fallback guard can run. Only the dispatch settle can
+    have emptied it there; the guard-only path would leave it owed.
+    """
+    tool_entered, finish_tool = asyncio.Event(), asyncio.Event()
+    hydration_entered, finish_hydration = asyncio.Event(), asyncio.Event()
+    owed_at_card_dispatch: list[int] = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        if tool_call_id == "held-1":
+            tool_entered.set()
+            await finish_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="held_work",
+            content=[TextContent(text="done")],
+        )
+
+    tool = AgentTool(name="held_work", description="bounded test work", execute=execute)
+    async with runtime_rig(tmp_path, monkeypatch, tools=[tool]) as rig:
+        answer = [StreamTextDelta(delta="answered"), StreamEndEvent(stop_reason="stop")]
+        rig.stream.scripted = [
+            [],
+            _tool_call("held-1", "held_work"),
+            [StreamTextDelta(delta="settled"), StreamEndEvent(stop_reason="stop")],
+            _tool_call("body-1", "held_work"),
+            answer,
+        ]
+        capture = rig.stream.__call__
+
+        def sampling(request, signal):
+            inner = capture(request, signal)
+            carries = any("CARD-AT-DISPATCH-31" in text for text in rig.stream.texts(-1))
+
+            async def gen():
+                # The first event is pulled only after the session's witness
+                # has passed its dispatch checks, i.e. after the settle point.
+                async for event in inner:
+                    if carries and not owed_at_card_dispatch:
+                        owed_at_card_dispatch.append(len(rig.session._bridge_cards_owed_wake))
+                    yield event
+
+            return gen()
+
+        rig.session._stream_fn = sampling
+        working = asyncio.create_task(rig.session.prompt("finish existing work"))
+        try:
+            await asyncio.wait_for(tool_entered.wait(), 5)
+            assert (await deliver(rig))["handled"][0]["action"] == "delivered"
+            rig.body_gates[MESSAGE_ID] = (hydration_entered, finish_hydration)
+            finish_tool.set()
+            await asyncio.wait_for(working, 10)
+            await asyncio.wait_for(hydration_entered.wait(), 5)
+            assert not rig.session._is_streaming and rig.session._turn_lock.locked()
+            await send_peer_message(
+                rig.record,
+                text="CARD-AT-DISPATCH-31",
+                mode="mailbox",
+                wake=True,
+                sender={},
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            )
+            assert len(rig.session._bridge_cards_owed_wake) == 1
+            finish_hydration.set()
+            await settle(rig.session)
+            assert owed_at_card_dispatch == [0], owed_at_card_dispatch
+        finally:
+            finish_tool.set()
+            finish_hydration.set()
+            if not working.done():
+                await asyncio.wait_for(working, 10)
+
+
+@pytest.mark.asyncio
+async def test_unread_card_behind_an_adopted_aside_still_gets_its_wake(tmp_path, monkeypatch):
+    """PR #2951 round 3 MINOR-R3-1: an unrelated assistant tail must not drop an unread card.
+
+    Retained failed A; an idle card wakes the session and goes on the live
+    context; while the pass re-hydrates A the operator adopts an aside, whose
+    user/assistant pair lands AFTER the card. A fails again. The card was never
+    in any request, so the fallback must still open a turn that carries it,
+    and that request must not end on the model's own reply.
+    """
+    tool_entered, finish_tool = asyncio.Event(), asyncio.Event()
+    hydration_entered, finish_hydration = asyncio.Event(), asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        tool_entered.set()
+        await finish_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="held_work",
+            content=[TextContent(text="done")],
+        )
+
+    tool = AgentTool(name="held_work", description="bounded test work", execute=execute)
+    async with runtime_rig(tmp_path, monkeypatch, tools=[tool]) as rig:
+        rig.stream.scripted = [
+            [],
+            _tool_call("held-1", "held_work"),
+            [StreamTextDelta(delta="settled"), StreamEndEvent(stop_reason="stop")],
+        ]
+        working = asyncio.create_task(rig.session.prompt("finish existing work"))
+        try:
+            await asyncio.wait_for(tool_entered.wait(), 5)
+            assert (await deliver(rig))["handled"][0]["action"] == "delivered"
+            rig.unavailable.add(MESSAGE_ID)
+            finish_tool.set()
+            await asyncio.wait_for(working, 10)
+            await settle(rig.session)
+            assert len(rig.stream.requests) == 3
+            rig.body_gates[MESSAGE_ID] = (hydration_entered, finish_hydration)
+            result = await send_peer_message(
+                rig.record,
+                text="UNREAD-CARD-9090",
+                mode="mailbox",
+                wake=True,
+                sender={},
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            )
+            assert str(result) == "delivered and woke the session"
+            await asyncio.wait_for(hydration_entered.wait(), 5)
+            adopted = await rig.session.adopt_aside(
+                [
+                    Message(role="user", content=[TextContent(text="aside question")]),
+                    Message(role="assistant", content=[TextContent(text="aside answer")]),
+                ]
+            )
+            assert adopted == "queued"
+            finish_hydration.set()
+            await settle(rig.session)
+
+            reading = [
+                i
+                for i in range(3, len(rig.stream.requests))
+                if "UNREAD-CARD-9090" in "\n".join(rig.stream.texts(i))
+            ]
+            assert reading, "the woken card never reached the model"
+            for request in rig.stream.requests[3:]:
+                assert getattr(request.messages[-1], "role", None) != "assistant"
+            assert rig.session._bridge_cards_owed_wake == []
+            first = rig.store.body_reservation(rig.owner, CONVERSATION_ID, MESSAGE_ID)
+            assert first["state"] == "pending" and first["last_error"] == "binding_drift"
+        finally:
+            finish_tool.set()
+            finish_hydration.set()
+            if not working.done():
+                await asyncio.wait_for(working, 10)
+
+
+@pytest.mark.asyncio
+async def test_fallback_keeps_unread_cards_and_never_ends_on_a_reply(tmp_path, monkeypatch):
+    """PR #2951 round 3 MINOR-R3-2: the fallback guard and its input, isolated from the settle.
+
+    The guard trusts only the dispatch settle: an owed card is unread whatever
+    the context's tail is. The fallback's input re-presents a card stranded
+    behind a reply so the request ends on that card, never on the reply.
+    """
+
+    def card(text):
+        return CustomMessage(
+            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            attribution="user",
+            details={"text": text, "body": text, "sender": {}},
+        )
+
+    async with runtime_rig(tmp_path, monkeypatch) as rig:
+        session = rig.session
+        base = list(session._context.messages)
+        assert session._bridge_card_wake_still_owed() is False
+        assert session._fallback_card_wake_initial() == []
+
+        stranded = card("STRANDED")
+        aside = [
+            Message(role="user", content=[TextContent(text="aside question")]),
+            Message(role="assistant", content=[TextContent(text="aside answer")]),
+        ]
+        session._context.messages.extend([stranded, *aside])
+        session._bridge_cards_owed_wake = [stranded]
+        # A trailing reply is NOT proof of reading: the card keeps its wake.
+        assert session._bridge_card_wake_still_owed() is True
+        assert session._bridge_cards_owed_wake == [stranded]
+        # The fallback input moves the card behind the reply, once.
+        assert session._fallback_card_wake_initial() == [stranded]
+        assert all(m is not stranded for m in session._context.messages)
+        assert session._context.messages[-1] is aside[-1]
+
+        # A card already last needs no re-presentation.
+        session._context.messages[:] = [*base, *aside, stranded]
+        assert session._fallback_card_wake_initial() == []
+        # A card still parked: the opening flush puts it last.
+        session._context.messages[:] = [*base, *aside]
+        session._pending_context_journal.append(stranded)
+        assert session._fallback_card_wake_initial() == []
+        session._pending_context_journal.clear()
+        session._bridge_cards_owed_wake = []
+        session._context.messages[:] = base
 
 
 @pytest.mark.asyncio

@@ -16880,6 +16880,7 @@ class Session:
         drain_steering_on_open: bool = False,
         pending_body_only: bool = False,
         pending_body_selected: tuple[str, str] | None = None,
+        initial_after_guard: Callable[[], list[AgentMessage]] | None = None,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
         handling so it can REJECT reentrants instead of queueing).
@@ -16950,6 +16951,11 @@ class Session:
                     f" ({guard_note})" if guard_note else "",
                 )
                 return
+            if initial_after_guard is not None:
+                # Input that depends on the context as the guard saw it, so it
+                # is computed under the same lock hold (the bridge card
+                # fallback re-presents a card stranded behind a reply).
+                initial = [*initial, *initial_after_guard()]
             # A newly ARRIVING unit of work is a fresh intent, exactly like a
             # typed prompt, so it clears the sticky abort the same way
             # ``prompt()`` does — see that method for the flag's contract.
@@ -17492,6 +17498,7 @@ class Session:
                         carried_prompt=True,
                         guard=self._bridge_card_wake_still_owed,
                         guard_note="woken bridge card already read by a later turn",
+                        initial_after_guard=self._fallback_card_wake_initial,
                     )
                 if not self._pending_body_followup_again:
                     return
@@ -17523,23 +17530,43 @@ class Session:
         assistant message, which current Claude models reject as a prefill.
         """
 
-        if not self._bridge_cards_owed_wake:
-            return False
-        # Every unread owed card is on the context or parked behind it, so the
-        # admitted turn's request ends on a card, never on the model's reply.
-        # A context ending on an assistant message with nothing parked means
-        # some path delivered the cards without a dispatch this session saw:
-        # opening a turn would re-answer them from a request a provider
-        # rejects as a prefill, so the debt is dropped instead.
-        last = self._context.messages[-1] if self._context.messages else None
-        if getattr(last, "role", None) == "assistant" and not self._pending_context_journal:
-            logger.warning(
-                "bridge card wake: %d owed card(s) with nothing unread to send; dropped",
-                len(self._bridge_cards_owed_wake),
-            )
-            self._bridge_cards_owed_wake = []
-            return False
-        return True
+        # Only the dispatch settle proves a card was read. The context's shape
+        # does not: an adopted aside's user/assistant pair can land behind a
+        # still-unread card (PR #2951 round 3, MINOR-R3-1), so a trailing
+        # assistant message says nothing about the card. An owed card here is
+        # unread and keeps its wake; ``_fallback_card_wake_initial`` makes the
+        # turn's request end on input.
+        return bool(self._bridge_cards_owed_wake)
+
+    def _fallback_card_wake_initial(self) -> list[AgentMessage]:
+        """The fallback turn's input: owed cards already behind a reply.
+
+        A card the context holds BEFORE a later assistant message would
+        otherwise leave the request ending on that reply, which current Claude
+        models reject as a prefill. Re-presenting the durable card as the
+        turn's input moves it to the tail without a second transcript row
+        (``_run_turn`` journals only initials the transcript lacks) and adds no
+        new model-facing text. Cards still parked, or already last, need
+        nothing: the opening flush or the context already ends on them.
+        """
+
+        messages = self._context.messages
+        last_reply = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if getattr(messages[index], "role", None) == "assistant"
+            ),
+            -1,
+        )
+        if last_reply < 0 or self._pending_context_journal:
+            return []
+        behind = {id(message) for message in messages[:last_reply]}
+        stranded = [card for card in self._bridge_cards_owed_wake if id(card) in behind]
+        if not stranded:
+            return []
+        self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
+        return stranded
 
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
