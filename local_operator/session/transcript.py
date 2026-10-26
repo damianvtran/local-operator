@@ -1880,10 +1880,16 @@ ABSENCE_SCAN_MAX_BYTES = 128 << 20
 #: chunk so the scan costs the same per byte as the walk it replaces.
 _ABSENCE_SCAN_WINDOW_BYTES = 1 << 20
 
-#: The byte spelling every persisted usage receipt carries: the message payload
-#: key ``usage`` holding an object, compact separators (see
-#: :func:`read_cold_tail` on why that spelling is invariant).
-_USAGE_SPELLING = b'"usage":{'
+#: The ``key: value`` separators a JSON row can carry around a needle. The
+#: repo's one writer is compact; ``json.dumps``' default is ``": "``. Both are
+#: searched for, so absence does not rest on which writer produced the row
+#: (review round 1, MAJOR-1). A JSONL row cannot hold a raw newline, so an
+#: indented writer cannot produce a third spelling inside one row.
+_KEY_SEPARATORS = (b":", b": ")
+
+#: The byte spellings every persisted usage receipt carries: the message payload
+#: key ``usage`` holding an object (see :func:`read_cold_tail`).
+_USAGE_SPELLINGS = tuple(b'"usage"' + sep + b"{" for sep in _KEY_SEPARATORS)
 
 
 def _spellings_absent(
@@ -1921,8 +1927,8 @@ def _spellings_absent(
     return True
 
 
-def _custom_type_spelling(custom_type: str) -> bytes | None:
-    """``"custom_type":"<type>"`` as the writer emits it, or ``None``.
+def _custom_type_spellings(custom_type: str) -> tuple[bytes, ...] | None:
+    """``"custom_type":"<type>"`` under every separator in ``_KEY_SEPARATORS``.
 
     ``None`` when the type's JSON-escaped spelling differs from its literal
     one, because then no fixed byte string is safe to search for. Same rule
@@ -1931,7 +1937,7 @@ def _custom_type_spelling(custom_type: str) -> bytes | None:
     encoded = json.dumps(custom_type)
     if encoded != f'"{custom_type}"':
         return None
-    return b'"custom_type":' + encoded.encode("utf-8")
+    return tuple(b'"custom_type"' + sep + encoded.encode("utf-8") for sep in _KEY_SEPARATORS)
 
 
 def read_cold_tail(
@@ -1976,7 +1982,10 @@ def read_cold_tail(
     * A checkpoint type is ``"custom_type":"<type>"``, a custom row's payload
       key followed by the type literal in quotes. The ``"type":"custom"``
       envelope is deliberately not matched. The type string is the one piece
-      no format change can move. A usage receipt is ``"usage":{``.
+      no format change can move. A usage receipt is ``"usage":{``. Each is
+      ALSO searched with ``json.dumps``' default ``": "`` separator, so a row
+      written by a writer that forgot ``separators=`` is still seen (review
+      round 1, MAJOR-1). That costs only false presences, which decline.
     * Every journal row is written by :meth:`TranscriptEntry.to_json`, whose
       ``json.dumps(..., separators=(",", ":"))`` with the default
       ``ensure_ascii`` has been unchanged since the format was introduced
@@ -1995,11 +2004,15 @@ def read_cold_tail(
       "present" and the tail declines to eager. A conversation that merely
       quotes the type inside message TEXT does not even match, because the
       quotes in a JSON string are escaped as ``\\"``.
-    * The assumption this rests on: a journal row is never written by
-      something other than ``to_json``, with spaced separators for example.
-      A new writer (import, sync, migration) must go through ``to_json`` or
-      this proof becomes unsound. ``tail_anchor`` and
-      :func:`find_row_for_custom_type` rest on the same assumption.
+    * The assumption that remains: a row's key/value separator is ``:`` or
+      ``": "``, the only two ``json.dumps`` produces on one line (a JSONL row
+      holds no raw newline, so ``indent=`` cannot appear). A writer emitting
+      other whitespace (``" : "``, tabs) would defeat it; none exists, and
+      ``to_json`` is still the repo's only row writer.
+    * The spend type does not need special handling: it reaches this function
+      as one of ``checkpoint_types`` (``build_cold_tail_metadata`` passes the
+      required AND opportunistic types), so a spend row below the tail is
+      scanned for like the checkpoint and declines when present.
 
     Bounds: the scan covers ``[0, low + longest - 1)``, where ``low`` is the
     start of the oldest row the tail consumed. The overlap is redundant,
@@ -2035,7 +2048,7 @@ def read_cold_tail(
     path, codec = transcript_source(Path(directory))
     if codec is not None:
         return None
-    spellings = {name: _custom_type_spelling(name) for name in checkpoint_types}
+    spellings = {name: _custom_type_spellings(name) for name in checkpoint_types}
     checkpoints: dict[str, dict[str, Any]] = {}
     order: dict[str, int] = {}
     parsed: list[TranscriptEntry] = []
@@ -2137,9 +2150,9 @@ def read_cold_tail(
                 spelling = spellings[name]
                 if spelling is None:
                     return None
-                needles.append(spelling)
+                needles.extend(spelling)
             if not have_usage:
-                needles.append(_USAGE_SPELLING)
+                needles.extend(_USAGE_SPELLINGS)
             scan_end = min(end, low + max(len(n) for n in needles) - 1)
             if scan_end > max_scan_bytes:
                 return None

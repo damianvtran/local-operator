@@ -34,7 +34,7 @@ from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import (
     Transcript,
     TranscriptEntry,
-    _custom_type_spelling,
+    _custom_type_spellings,
     _spellings_absent,
     read_cold_tail,
     read_replay_suffix,
@@ -113,9 +113,25 @@ async def test_a_legacy_journal_is_claimed_with_eager_facts(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("buried", ["checkpoint", "usage"])
+@pytest.mark.parametrize("buried", ["checkpoint", "usage", "spend"])
 async def test_a_fact_buried_below_the_tail_declines(tmp_path: Path, buried: str) -> None:
-    """The one false absence the design must make impossible."""
+    """The one false absence the design must make impossible.
+
+    ``spend`` pins QA round 1 Q1: the spend type reaches the scan because
+    ``build_cold_tail_metadata`` passes the opportunistic types too.
+    """
+    if buried == "spend":
+        directory = tmp_path / "session"
+        transcript = Transcript(directory)
+        await transcript.append_custom(SESSION_SPEND_CUSTOM_TYPE, {"usd": 4.2, "calls": 7})
+        for turn in range(300):
+            await transcript.append_message(
+                Message(id=f"m{turn}", role="user", content=[TextContent(text="x")])
+            )
+        transcript.flush()
+        assert eager_facts(directory)["spend"] == {"usd": 4.2, "calls": 7}
+        assert read_cold_tail(directory, checkpoint_types=WANTED) is None
+        return
     directory = await _journal(
         tmp_path,
         turns=400,
@@ -139,10 +155,10 @@ async def test_the_type_name_inside_message_text_is_not_a_row(tmp_path: Path) ->
     text = f'see "custom_type":"{FRONTEND_CHECKPOINT_CUSTOM_TYPE}" in the docs'
     directory = await _journal(tmp_path, turns=400, text=text)
     raw = (directory / "transcript.jsonl").read_bytes()
-    spelling = _custom_type_spelling(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-    assert spelling is not None
+    spellings = _custom_type_spellings(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    assert spellings is not None
     assert FRONTEND_CHECKPOINT_CUSTOM_TYPE.encode() in raw
-    assert spelling not in raw
+    assert not any(spelling in raw for spelling in spellings)
     assert read_cold_tail(directory, checkpoint_types=WANTED) is not None
     assert tail_facts(directory) == eager_facts(directory)
 
@@ -170,11 +186,14 @@ async def test_an_unescaped_spelling_in_another_row_is_a_safe_false_presence(
     assert read_cold_tail(directory, checkpoint_types=WANTED) is None
 
 
+@pytest.mark.parametrize("spaced", [False, True])
 @pytest.mark.parametrize("split", range(1, 30))
-def test_a_spelling_split_across_a_window_boundary_is_found(split: int) -> None:
+def test_a_spelling_split_across_a_window_boundary_is_found(split: int, spaced: bool) -> None:
     """Every split point of the needle across the window edge is still a hit."""
-    needle = _custom_type_spelling(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-    assert needle is not None and split < len(needle)
+    spellings = _custom_type_spellings(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    assert spellings is not None
+    needle = spellings[int(spaced)]
+    assert split < len(needle)
     window = 64
     data = b"x" * (window - split) + needle + b"x" * 200
     handle = io.BytesIO(data)
@@ -384,3 +403,80 @@ async def test_a_proven_usage_free_journal_files_a_record_with_no_seed(tmp_path:
     assert record is not None
     assert record.seed_usage is None and record.checkpoint is None
     assert (tmp_path / "record.json").exists()
+
+
+def _spaced_row(row: TranscriptEntry) -> bytes:
+    """The row as ``json.dumps`` writes it with its DEFAULT separators.
+
+    No repo writer does this today (every row goes through ``to_json``); the
+    point is that soundness must not rest on that convention (review round 1,
+    MAJOR-1). A spaced row the scan cannot see would be "proven absent" and its
+    wrong facts filed as a durable record.
+    """
+    return (
+        json.dumps({"id": row.id, "ts": row.ts, "type": row.type, "payload": row.payload}) + "\n"
+    ).encode("utf-8")
+
+
+async def _journal_with_spaced_row_below_the_tail(tmp_path: Path, buried: str) -> Path:
+    directory = tmp_path / "session"
+    directory.mkdir(parents=True)
+    if buried == "usage":
+        row = TranscriptEntry(
+            id="buried",
+            ts=1.0,
+            type="message",
+            payload={
+                "role": "assistant",
+                "content": [],
+                "usage": {"input_tokens": 111, "output_tokens": 222},
+            },
+        )
+    else:
+        row = TranscriptEntry(
+            id="buried",
+            ts=1.0,
+            type="custom",
+            payload={"custom_type": buried, "details": {"checkpoint_id": "buried"}},
+        )
+    spaced = _spaced_row(row)
+    assert b'": ' in spaced and row.to_json().encode() not in spaced
+    (directory / "transcript.jsonl").write_bytes(spaced)
+    transcript = Transcript(directory)
+    for turn in range(300):
+        await transcript.append_message(
+            Message(id=f"m{turn}", role="user", content=[TextContent(text="x")])
+        )
+    transcript.flush()
+    return directory
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "buried", ["usage", FRONTEND_CHECKPOINT_CUSTOM_TYPE, SESSION_SPEND_CUSTOM_TYPE]
+)
+async def test_a_spaced_separator_row_below_the_tail_is_never_proven_absent(
+    tmp_path: Path, buried: str
+) -> None:
+    directory = await _journal_with_spaced_row_below_the_tail(tmp_path, buried)
+    eager = eager_facts(directory)
+    assert eager != tail_facts_if_absent(directory), "eager sees the buried row"
+    facts = tail_facts(directory)
+    assert facts is None or facts == eager
+    key = replay_cache.replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=WANTED[:1],
+        opportunistic_types=WANTED[1:],
+    )
+    assert key is not None
+    record_path = tmp_path / "record.json"
+    record = replay_cache.build_cold_tail_metadata(key, record_path)
+    assert record is None and not record_path.exists(), "no record of wrong facts is filed"
+
+
+def tail_facts_if_absent(directory: Path) -> dict[str, Any]:
+    """What the tail answered on b3fc4d605d8 for every case above: the buried
+    row "proven absent". Eager must differ from it, or the test proves nothing."""
+    return {"checkpoint": None, "spend": None, "order": {}, "seed": None}
