@@ -37,7 +37,9 @@ export function NotificationRow({
 	item: NotificationItem;
 	selecting: boolean;
 	selected: boolean;
-	/** A refresh failed: the list stays readable but every write is held. */
+	/** A refresh failed or a write is in flight: the list stays readable but
+	    writes are held. A real `disabled` (review RW10): with `aria-disabled`
+	    the tap still fired and was dropped without a word. */
 	writesPaused: boolean;
 	onOpen: () => void;
 	onToggleSelect: () => void;
@@ -132,7 +134,7 @@ export function NotificationRow({
 				<button type="button" onClick={onAnswer} aria-label={messageRuntime.t("relay.notifications.row.answer", { title: item.title })}
 					className="absolute end-1 top-1/2 flex size-11 -translate-y-1/2 items-center justify-center rounded-md text-ink-muted active:bg-surface">›</button>
 			) : item.actions.dismiss ? (
-				<button type="button" onClick={onDismiss} aria-disabled={writesPaused}
+				<button type="button" onClick={onDismiss} disabled={writesPaused}
 					aria-label={messageRuntime.t("relay.notifications.row.dismiss", { title: item.title })}
 					className={cn("absolute end-1 top-1/2 flex size-11 -translate-y-1/2 items-center justify-center rounded-md active:bg-surface",
 						writesPaused ? "text-ink-disabled" : "text-ink-muted")}>✕</button>

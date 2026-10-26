@@ -22,10 +22,18 @@ import { Markdown } from "../components/markdown";
 import { NotificationReceipt } from "../components/notification-receipt";
 import { Button } from "../components/ui/button";
 import { Sheet } from "../components/ui/sheet";
-import { ageText, sourceName, tokenOf } from "../lib/notifications";
+import { ageText, receiptText, sourceName, tokenOf, writeFailureText } from "../lib/notifications";
 import { navigate, navigateUp } from "../router";
 import { messageRuntime, retainSessionListStream, useSessions } from "../store";
-import type { NotificationDetail } from "../types";
+import type { NotificationDetail, NotificationsReceipt } from "../types";
+
+/** `NotificationsPatch.observed` max_length on #2939: a larger set is batched. */
+const OBSERVED_MAX = 500;
+/** The write op, held outside the receipt expression for the relay copy gate. */
+const DISMISS = "dismiss";
+/* Links are http(s) on the wire (`normalize_links`); this guard keeps a future
+   wire change from turning into a `javascript:` href (review RW8). */
+const SAFE_LINK = /^https?:\/\//i;
 import { runWrite, type Receipt } from "./notifications";
 
 /** The ICU `select` token for the From card (a machine value, not copy). */
@@ -99,12 +107,25 @@ export function NotificationDetailScreen({ itemId }: { itemId: string }) {
 	const prepareSessionDismiss = async () => {
 		const sessionId = detail?.session.id;
 		if (!sessionId) return;
+		/* EVERY PAGE, ONE READ (review RW2). A watcher conversation easily holds
+		   more than a page; reading only the first left the rest behind while the
+		   confirm said "all". Later pages are pinned to the first page's
+		   `high_water`, so the set is one consistent read and an update raised
+		   meanwhile is not in it. The server accepts at most 500 observed tokens per
+		   write, so a larger set is sent in batches of that size. */
 		try {
-			const page = await getNotifications({ state: "all", session_id: sessionId, limit: 100 });
-			const observed = page.items.filter(row => row.actions.dismiss).map(tokenOf);
-			setConfirmSession({ count: observed.length, through: page.high_water, observed });
+			const first = await getNotifications({ state: "all", session_id: sessionId, limit: 100 });
+			const rows = [...first.items];
+			let cursor = first.next_cursor;
+			while (cursor) {
+				const more = await getNotifications({ state: "all", session_id: sessionId, limit: 100, cursor, through_seq: first.high_water });
+				rows.push(...more.items.filter(item => !rows.some(row => row.id === item.id)));
+				cursor = more.next_cursor;
+			}
+			const observed = rows.filter(row => row.actions.dismiss).map(tokenOf);
+			setConfirmSession({ count: observed.length, through: first.high_water, observed });
 		} catch (error) {
-			setReceipt({ text: messageRuntime.t("relay.notifications.error.write", { reason: error instanceof Error ? error.message : String(error) }), danger: true });
+			setReceipt({ text: writeFailureText(error), danger: true });
 		}
 	};
 	const dismissSession = async () => {
@@ -113,8 +134,23 @@ export function NotificationDetailScreen({ itemId }: { itemId: string }) {
 		setConfirmSession(null);
 		if (!plan || !sessionId) return;
 		setWriting(true);
-		const { receipt: next } = await runWrite("dismiss", { op: "dismiss", session_id: sessionId, through_seq: plan.through, observed: plan.observed }, plan.observed);
-		setReceipt(next);
+		const changed: string[] = [];
+		const skipped: NotificationsReceipt["skipped"] = [];
+		let failure: Receipt | null = null;
+		for (let start = 0; start < plan.observed.length; start += OBSERVED_MAX) {
+			const batch = plan.observed.slice(start, start + OBSERVED_MAX);
+			const { receipt: part, answer } = await runWrite("dismiss", { op: "dismiss", session_id: sessionId, through_seq: plan.through, observed: batch }, batch);
+			if (!answer) { failure = part; break; }
+			changed.push(...answer.changed);
+			skipped.push(...answer.skipped);
+		}
+		/* One receipt for the whole act. A failed batch says so, and still names
+		   what the earlier batches changed rather than hiding a partial. */
+		const summary = receiptText(DISMISS, { changed, skipped });
+		const undoTokens = plan.observed.filter(token => changed.includes(token.id));
+		setReceipt(failure
+			? { text: changed.length ? `${summary} · ${failure.text}` : failure.text, danger: true, undo: undoTokens.length ? { op: "undismiss", ids: undoTokens } : undefined }
+			: { text: summary, danger: false, undo: undoTokens.length ? { op: "undismiss", ids: undoTokens } : undefined });
 		setWriting(false);
 		await refetch();
 	};
@@ -160,7 +196,11 @@ export function NotificationDetailScreen({ itemId }: { itemId: string }) {
 					</p>
 					{item.dismissed ? <p role="status" className="rounded-md bg-surface px-3 py-2 text-body-sm text-ink-muted">{messageRuntime.t("relay.notifications.detail.dismissed")}</p> : null}
 					<div className="flex flex-col gap-2 pt-1">
-						{detail.session.id ? <Button variant="primary" className="w-full" onClick={() => navigate(`/s/${encodeURIComponent(detail.session.id)}`)}>
+						{/* A conversation with neither a live runtime nor a durable transcript
+						    cannot be opened (review RW7; #2939 adds both flags per row for
+						    exactly this). Absent flags are an older relay: no claim, offer it. */}
+						{detail.session.id ? <Button variant="primary" className="w-full" disabled={item.runtime_live === false && item.durable === false}
+							onClick={() => navigate(`/s/${encodeURIComponent(detail.session.id)}`)}>
 							{messageRuntime.t("relay.notifications.detail.open_conversation")}</Button> : null}
 						<div className="flex gap-2">
 							<Button className="flex-1" disabled={writing} onClick={() => void act(item.read ? "unread" : "read")}>
@@ -173,7 +213,7 @@ export function NotificationDetailScreen({ itemId }: { itemId: string }) {
 					{item.body_md ? <div className="pt-2 text-body text-ink"><Markdown text={item.body_md} /></div> : item.excerpt ? <p className="pt-2 text-body text-ink">{item.excerpt}</p> : null}
 					{item.links && item.links.length > 0 ? <section>
 						<h3 className={sectionClass}>{messageRuntime.t("relay.notifications.detail.section.links")}</h3>
-						<ul className="flex flex-col">{item.links.map(link => <li key={link.url}>
+						<ul className="flex flex-col">{item.links.filter(link => SAFE_LINK.test(link.url)).map((link, index) => <li key={`${index}:${link.url}`}>
 							{/* http(s) only: the store's `normalize_links` drops anything else. */}
 							<a href={link.url} target="_blank" rel="noopener noreferrer" className="flex min-h-11 items-center break-all text-body-sm text-accent underline">{link.label}</a>
 						</li>)}</ul>

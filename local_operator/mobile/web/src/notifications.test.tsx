@@ -175,9 +175,10 @@ describe("reel", () => {
 			op: "read",
 			all: true,
 			through_seq: 7,
+			// The unread rows on screen when the sheet opened (pinned asks first).
 			observed: [
-				{ id: "n_aaaaaaaaaaaaaaaa", revision: 1 },
 				{ id: "ask:abcdefabcdef:q1", revision: 1 },
+				{ id: "n_aaaaaaaaaaaaaaaa", revision: 1 },
 			],
 		});
 		expect(await screen.findByText("Marked 2 read")).toBeTruthy();

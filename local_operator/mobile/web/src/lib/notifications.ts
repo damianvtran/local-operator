@@ -104,3 +104,18 @@ export function sourceName(
 export function tokenOf(item: Pick<NotificationItem, "id" | "revision">): NotificationToken {
 	return { id: item.id, revision: item.revision };
 }
+
+/** Union of observed tokens across pages, first token per id wins. A bulk
+    write names exactly this set: a row published after the read is not in it. */
+export function mergeObserved(current: NotificationToken[], next: NotificationToken[]): NotificationToken[] {
+	const seen = new Set(current.map(token => token.id));
+	return [...current, ...next.filter(token => !seen.has(token.id))];
+}
+
+/** The drawer badge as it is DRAWN (design §11): nothing at zero or unknown,
+    and capped at `99+` like the list's own count chips (`COUNT_CAP`). */
+export const BADGE_CAP = 99;
+export function badgeText(count: number | undefined): string | undefined {
+	if (!count) return undefined;
+	return count > BADGE_CAP ? `${BADGE_CAP}+` : String(count);
+}

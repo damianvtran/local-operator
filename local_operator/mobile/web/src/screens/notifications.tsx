@@ -32,9 +32,9 @@ import { NotificationRow } from "../components/notification-row";
 import { Button } from "../components/ui/button";
 import { Chip } from "../components/ui/chip";
 import { Sheet } from "../components/ui/sheet";
-import { groupByDay, receiptText, tokenOf, writeFailureText, type NotificationsOp } from "../lib/notifications";
+import { groupByDay, mergeObserved, receiptText, tokenOf, writeFailureText, type NotificationsOp } from "../lib/notifications";
 import { navigate, navigateUp } from "../router";
-import { messageRuntime, retainSessionListStream, useNotificationsBlock, useSessions } from "../store";
+import { messageRuntime, retainSessionListStream, useCapabilities, useNotificationsBlock, useSessions } from "../store";
 import type { NotificationItem, NotificationsReceipt, NotificationToken } from "../types";
 
 type Tab = "unread" | "all";
@@ -65,6 +65,8 @@ type Loaded = {
 	/** The first page's boundary; every later page and every bulk write uses it. */
 	highWater: number;
 	nextCursor: string | null;
+	/** Pages read so far, the depth a refresh re-reads to (RW3). */
+	pages: number;
 	unreadCount: number;
 	waitingCount: number;
 };
@@ -108,6 +110,14 @@ export function NotificationsScreen() {
 	useEffect(() => retainSessionListStream(), []);
 	const block = useNotificationsBlock();
 	const { sessions } = useSessions();
+	const capabilities = useCapabilities();
+	/* A DEEP LINK ON A RELAY WITHOUT THE INBOX (review RW5). The drawer offers
+	   no row there, but a bookmark or shared `#/notifications` still lands here,
+	   and its first read would 404 into "Couldn't load notifications". Once a
+	   list frame has answered (capabilities known) without the inbox, leave for
+	   the list, as an unknown route does; before that, nothing is decided. */
+	const unavailable = capabilities !== null && (!capabilities.features?.notifications || block === undefined);
+	useEffect(() => { if (unavailable) navigateUp("/"); }, [unavailable]);
 
 	const [tab, setTab] = useState<Tab>(readTab);
 	const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -118,7 +128,12 @@ export function NotificationsScreen() {
 	const [paging, setPaging] = useState(false);
 	const [selecting, setSelecting] = useState(false);
 	const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-	const [confirmMarkAll, setConfirmMarkAll] = useState(false);
+	/* The exact set Mark all read will send, FROZEN WHEN THE SHEET OPENS (review
+	   RW1). The sheet covers the list, so a frame landing while it is up must not
+	   widen the write to rows the reader never saw; the snapshot is what the
+	   title counts and what the PATCH carries. Unread rows only (RW6), so the
+	   title, the body and the receipt describe one set. */
+	const [confirmMarkAll, setConfirmMarkAll] = useState<{ tokens: NotificationToken[]; highWater: number } | null>(null);
 	const [writing, setWriting] = useState(false);
 	const [receipt, setReceipt] = useState<Receipt | null>(null);
 	const [asksOpen, setAsksOpen] = useState(false);
@@ -135,17 +150,46 @@ export function NotificationsScreen() {
 		return () => clearInterval(timer);
 	}, []);
 
+	/* RE-READ TO THE SAME DEPTH (review RW3). Every notify anywhere moves the
+	   frame and lands here; replacing the list with page one alone collapsed a
+	   reader who had loaded more back to the first 50 rows, and left bulk acts
+	   covering only those. So the refresh re-reads page one, then follows
+	   `next_cursor` (pinned to the NEW page one's `high_water`, one consistent
+	   read) until every row that was on screen is accounted for, or the list
+	   ends. Counting rows instead was wrong: arrivals at the top fill page one
+	   and stop the walk before the reader's tail (measured in this PR's test).
+	   A row that left the store is simply not found, so the walk also stops at
+	   the old page count. The whole set is replaced at once, never merged with
+	   rows from an older read: a merged tail could carry tokens the new
+	   boundary no longer vouches for. */
 	const loadFirst = useCallback(async () => {
 		const mine = ++seq.current;
+		const previous = loadedRef.current;
+		const wanted = new Set(previous?.items.map(row => row.id) ?? []);
+		const pages = previous?.pages ?? 1;
 		try {
 			const page = await getNotifications({ state: tab });
 			if (mine !== seq.current) return;
+			let items = page.items;
+			let observed = page.observed;
+			let nextCursor = page.next_cursor;
+			let read = 1;
+			const missing = () => [...wanted].some(id => !items.some(row => row.id === id));
+			while (nextCursor && read < pages + 1 && missing()) {
+				read += 1;
+				const more = await getNotifications({ state: tab, cursor: nextCursor, through_seq: page.high_water });
+				if (mine !== seq.current) return;
+				items = [...items, ...more.items.filter(item => !items.some(row => row.id === item.id))];
+				observed = mergeObserved(observed, more.observed);
+				nextCursor = more.next_cursor;
+			}
 			setLoaded({
-				items: page.items,
+				items,
 				waiting: page.waiting ?? [],
-				observed: page.observed,
+				observed,
 				highWater: page.high_water,
-				nextCursor: page.next_cursor,
+				nextCursor,
+				pages: read,
 				unreadCount: page.unread_count,
 				waitingCount: page.waiting_count,
 			});
@@ -162,7 +206,7 @@ export function NotificationsScreen() {
 	   fingerprints `notifications.db`), so its numbers are the refetch signal;
 	   no second stream and no poll. */
 	const signal = block ? `${block.high_water}:${block.unread_count}:${block.waiting_count}:${block.waiting_unread_count}` : "";
-	useEffect(() => { void loadFirst(); }, [loadFirst, signal]);
+	useEffect(() => { if (!unavailable) void loadFirst(); }, [loadFirst, signal, unavailable]);
 
 	const loadMore = async () => {
 		if (!loaded?.nextCursor || paging) return;
@@ -174,8 +218,9 @@ export function NotificationsScreen() {
 			setLoaded(current => current && {
 				...current,
 				items: [...current.items, ...page.items.filter(item => !current.items.some(row => row.id === item.id))],
-				observed: [...current.observed, ...page.observed.filter(token => !current.observed.some(row => row.id === token.id))],
+				observed: mergeObserved(current.observed, page.observed),
 				nextCursor: page.next_cursor,
+				pages: current.pages + 1,
 			});
 		} catch {
 			if (mine === seq.current) setRefreshFailedAt(Date.now());
@@ -245,10 +290,15 @@ export function NotificationsScreen() {
 	};
 	const endSelect = () => { setSelecting(false); setSelected(new Set()); };
 
-	const markAll = async () => {
-		setConfirmMarkAll(false);
+	const openMarkAll = () => {
 		if (!loaded) return;
-		await write("read", { op: "read", all: true, through_seq: loaded.highWater, observed: loaded.observed }, loaded.observed);
+		setConfirmMarkAll({ tokens: unreadLoaded.map(tokenOf), highWater: loaded.highWater });
+	};
+	const markAll = async () => {
+		const plan = confirmMarkAll;
+		setConfirmMarkAll(null);
+		if (!plan || plan.tokens.length === 0) return;
+		await write("read", { op: "read", all: true, through_seq: plan.highWater, observed: plan.tokens }, plan.tokens);
 	};
 
 	const renderRow = (item: NotificationItem) => (
@@ -292,8 +342,8 @@ export function NotificationsScreen() {
 					<button type="button" className="ms-2 min-h-11 font-semibold underline" onClick={() => void loadFirst()}>{messageRuntime.t("relay.notifications.error.retry")}</button>
 				</p> : null}
 				{!selecting && unreadLoaded.length > 0 ? <div className="sticky top-0 z-20 bg-canvas">
-					<button type="button" onClick={() => setConfirmMarkAll(true)} aria-disabled={writing || writesPaused} aria-busy={writing}
-						className="min-h-11 w-full px-4 text-start text-body-sm text-ink-muted active:bg-surface">{messageRuntime.t("relay.notifications.mark_all")}</button>
+					<button type="button" onClick={openMarkAll} disabled={writing || writesPaused} aria-busy={writing}
+						className="min-h-11 w-full px-4 text-start text-body-sm text-ink-muted active:bg-surface disabled:text-ink-disabled">{messageRuntime.t("relay.notifications.mark_all")}</button>
 				</div> : null}
 				{loaded === null ? loadError ? <div role="alert" className="flex min-h-[55vh] flex-col items-center justify-center gap-3 px-6 text-center">
 					<h2 className="text-heading font-semibold">{messageRuntime.t("relay.notifications.error.load")}</h2>
@@ -331,11 +381,11 @@ export function NotificationsScreen() {
 					{messageRuntime.t("relay.notifications.select.dismiss", { count: selectedDismissible.length })}</Button>
 			</div> : null}
 			<NotificationReceipt text={receipt?.text ?? ""} danger={receipt?.danger} onUndo={receipt?.undo ? () => void undo() : undefined} onDismiss={() => setReceipt(null)} />
-			<Sheet open={confirmMarkAll} onClose={() => setConfirmMarkAll(false)} title={messageRuntime.t("relay.notifications.confirm.mark_all", { count: unreadLoaded.length })}>
+			<Sheet open={confirmMarkAll !== null} onClose={() => setConfirmMarkAll(null)} title={messageRuntime.t("relay.notifications.confirm.mark_all", { count: confirmMarkAll?.tokens.length ?? 0 })}>
 				<div className="flex flex-col gap-3 p-3">
 					<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.notifications.confirm.mark_all_body")}</p>
 					<div className="flex justify-end gap-2">
-						<Button variant="ghost" onClick={() => setConfirmMarkAll(false)}>{messageRuntime.t("relay.notifications.confirm.cancel")}</Button>
+						<Button variant="ghost" onClick={() => setConfirmMarkAll(null)}>{messageRuntime.t("relay.notifications.confirm.cancel")}</Button>
 						<Button variant="primary" onClick={() => void markAll()}>{messageRuntime.t("relay.notifications.confirm.read")}</Button>
 					</div>
 				</div>
