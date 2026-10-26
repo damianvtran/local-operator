@@ -131,7 +131,7 @@ describe("the phone's resume button", () => {
 		expect(screen.queryByRole("button", { name: "turn cut off — tap to resume" })).toBeNull();
 		expect(screen.queryByRole("button", { name: /tap to resume/ })).toBeNull();
 		// The one affordance left is the strip's.
-		expect(screen.getByRole("button", { name: "resume" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
 	});
 
 	it("an ended session's failed send names the resume path, not 'Try again' (U20)", async () => {

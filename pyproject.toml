@@ -379,6 +379,10 @@ local_operator = [
     "mobile/web/src/*.tsx",
     "mobile/web/src/components/*.tsx",
     "mobile/web/src/components/ui/*.tsx",
+    # The modal layer's own hook (`ui/use-modal-layer.ts`): drawer and sheet both
+    # import it, and an omitted `.ts` glob here is the same omission class as the
+    # library block below — the installed tree cannot compile without it.
+    "mobile/web/src/components/ui/*.ts",
     # The Library surface's own components: `screens/library.tsx` and
     # `screens/library-asset.tsx` import them, and the installed source tree
     # compiles every file under src, so an omitted glob breaks the documented

@@ -6,7 +6,7 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
-type Variant = "primary" | "outline" | "quiet" | "danger";
+type Variant = "primary" | "tonal" | "ghost" | "icon" | "danger";
 
 const VARIANTS: Record<Variant, string> = {
 	/* The disabled treatment is COLOUR, never opacity — `styles/index.css`
@@ -15,14 +15,14 @@ const VARIANTS: Record<Variant, string> = {
 	   D2), so a tap on an inert control read as a broken one; the pattern is
 	   the composer's own (`components/composer.tsx`). */
 	primary: "bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled",
-	outline:
-		"border border-control bg-surface text-ink active:bg-elevated",
-	quiet: "text-ink-muted active:bg-elevated disabled:text-ink-disabled",
-	danger: "border border-danger-border bg-danger-wash text-danger",
+	tonal: "bg-surface text-ink active:bg-elevated disabled:text-ink-disabled",
+	ghost: "text-ink-muted active:bg-surface disabled:text-ink-disabled",
+	icon: "size-11 shrink-0 !px-0 text-ink-muted active:bg-surface disabled:text-ink-disabled",
+	danger: "bg-danger-wash text-danger active:bg-elevated disabled:text-ink-disabled",
 };
 
 export function Button({
-	variant = "outline",
+	variant = "tonal",
 	className,
 	children,
 	...rest

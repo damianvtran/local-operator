@@ -51,6 +51,7 @@ export function Disclosure({
 	className,
 	headerClassName,
 	hintClassName,
+	bodyOnly = false,
 }: {
 	/** The header's content: a static node, or a FUNCTION of the open state for
 	    a header whose WORDS toggle with it — the supplement disclosures swap
@@ -75,9 +76,12 @@ export function Disclosure({
 	/** Extra classes for the held-shut hint — see its own note below; the
 	    subagents roster passes a stand-down width, nothing else does. */
 	hintClassName?: string;
+	/** The same body inside an already labelled modal needs no second disclosure. */
+	bodyOnly?: boolean;
 }) {
 	const [open, setOpen] = useState(defaultOpen);
 	const shown = open && !forceClosed;
+	if (bodyOnly) return <>{children}</>;
 	return (
 		<div className={className}>
 			<button
@@ -98,7 +102,7 @@ export function Disclosure({
 				className={cn(
 					/* The compact label stays unchanged while the hit box matches the
 					   navigation controls users alternate with on a phone. */
-					"flex min-h-11 w-full items-center gap-1 text-left select-none",
+					"flex min-h-11 w-full items-center gap-1 text-start select-none",
 					headerClassName,
 				)}
 			>

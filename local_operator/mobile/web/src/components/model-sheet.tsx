@@ -23,12 +23,24 @@ export function ModelSheet({
 	onClose,
 	pid,
 	projection,
+	onOpenEffort,
+	query,
+	onQuery,
 }: {
 	open: boolean;
 	onClose: () => void;
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
 	projection: SessionProjection;
+	onOpenEffort?: () => void;
+	/** The filter, OWNED BY THE CALLER (UX review round 2, U5). It used to be
+	    local state that every opening cleared, which is right for a fresh open and
+	    wrong for the one path that is not fresh: returning from the effort view is
+	    a step BACK inside the same sheet, so the query the user typed has to still
+	    be there when they land. Ownership moves up one level, where "opening" and
+	    "coming back" are different events; `resetFilter` below is the difference. */
+	query?: string;
+	onQuery?: (value: string) => void;
 }) {
 	/* `null` means NOT RESOLVED YET, which is a different fact from "resolved
 	   and empty" and has to be told apart from it — see the render ladder below.
@@ -36,7 +48,9 @@ export function ModelSheet({
 	   `past-sessions.tsx` already states "still loading" that way; a second
 	   spelling of one idea beside an established one is the defect. */
 	const [models, setModels] = useState<ModelEntry[] | null>(null);
-	const [filter, setFilter] = useState("");
+	const [ownFilter, setOwnFilter] = useState("");
+	const filter = query ?? ownFilter;
+	const setFilter = onQuery ?? setOwnFilter;
 	const [error, setError] = useState("");
 
 	useEffect(() => {
@@ -46,7 +60,9 @@ export function ModelSheet({
 		   reopening restored the previous query and its short subset — which on a
 		   phone reads as the very bug this surface exists to fix (a short,
 		   unrepresentative list), arrived at by another route. */
-		setFilter("");
+		/* The caller resets it for a fresh open; here we only make sure a sheet
+		   that has never been opened does not inherit a stale query. */
+		if (!onQuery) setFilter("");
 		setError("");
 		/* Back to unresolved on every open, because this sheet REFETCHES per open:
 		   keeping the previous list would paint a stale catalogue as though it were
@@ -92,6 +108,9 @@ export function ModelSheet({
 	return (
 		<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.session.model.sheet_title")}>
 			<div className="flex flex-col gap-1 p-2">
+				{onOpenEffort && projection.effort_ladder.length > 0 ? <button type="button" onClick={onOpenEffort} className="flex min-h-12 items-center justify-between rounded-sm px-3 text-start text-body active:bg-surface">
+					{messageRuntime.t("relay.chrome.model.effort")}<span className="text-ink-dim">{projection.effort}</span>
+				</button> : null}
 				<input
 					value={filter}
 					onChange={(e) => setFilter(e.target.value)}
@@ -99,7 +118,7 @@ export function ModelSheet({
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="mb-1 min-h-11 rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 				{/* ONE exclusive ladder: error → loading → empty-filtered, and the rows
 				    below it. The precedence runs that way round because each rung is a
@@ -138,7 +157,7 @@ export function ModelSheet({
 							key={m.selector}
 							type="button"
 							onClick={() => void choose(m)}
-							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 						>
 							{/* The slot is always reserved so nothing shifts, but only
 							    the CURRENT row paints a dot. The inert `bg-hairline`

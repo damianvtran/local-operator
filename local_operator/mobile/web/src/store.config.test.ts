@@ -48,6 +48,7 @@ describe("retainConfigStream", () => {
 			"relay.approvals",
 			"relay.ask",
 			"relay.asks",
+			"relay.chrome",
 			"relay.library",
 			"relay.session",
 			"relay.session.tags",

@@ -22,7 +22,7 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { resumeSession, setSessionPin } from "../api";
 import { AskDock } from "../components/ask-dock";
 import { AsksSheet } from "../components/asks-sheet";
@@ -33,9 +33,11 @@ import { SessionMenu } from "../components/session-menu";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
-import { SessionStatus } from "../components/session-status";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
+import { SessionSubtitle } from "../components/session-subtitle";
+import { Sheet } from "../components/ui/sheet";
+import { Chip } from "../components/ui/chip";
 import { cn } from "../lib/cn";
 import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR } from "../lib/column";
 import { navigate, parseHash } from "../router";
@@ -107,11 +109,16 @@ const HEADER_CONTROL =
 function Header({
 	projection,
 	sessionId,
+	connected,
+	gateOpen,
+	setGateOpen,
 }: {
 	projection: SessionProjection;
 	sessionId: string;
+	connected: boolean;
+	gateOpen: boolean;
+	setGateOpen: (open: boolean) => void;
 }) {
-	const [gateOpen, setGateOpen] = useState(false);
 	const [menuOpen, setMenuOpen] = useState(false);
 	/* The opener the menu's sheet returns focus to. Held here because the ⋮
 	   button lives here and the sheet is the only consumer that needs it. */
@@ -212,33 +219,28 @@ function Header({
 	}, [pinRefusal, projection.transcript.length]);
 	return (
 		<>
-		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
+		<header className="flex h-[calc(56px+env(safe-area-inset-top))] shrink-0 items-center gap-2 px-1 pt-[env(safe-area-inset-top)]">
 			<button
 				type="button"
 				onClick={() => navigate("/")}
-				aria-label={messageRuntime.t("relay.session.view.back")}
+				aria-label={messageRuntime.t("relay.chrome.session.back")}
 				className={cn(HEADER_CONTROL, "text-ink-muted")}
 			>
 				‹
 			</button>
-			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
-				{projection.conversation_name || "untitled"}
-			</span>
-			{/* THE GATE ENTRY stays in the header, and only while it is a STATE:
-			    `needs you` appears when a gate actually blocks the turn, and its
-			    press opens the gate sheet that the menu's Approvals row also
-			    opens. The generic `approvals` word was a permanent noun where a
-			    state belongs; at rest it is menu content, not header chrome. */}
-			{blockingPending(projection.pending, projection.asks) ? (
-				<button
-					type="button"
-					onClick={() => setGateOpen(true)}
-					aria-label="needs you — approvals in this session"
-					className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-ink-muted")}
-				>
-					needs you
-				</button>
-			) : null}
+			<div className="min-w-0 flex-1">
+				{/* THE NAME TRUNCATES, THE FACT DOES NOT (operator finding B): a long
+				    conversation title is cut with an ellipsis here, so the whole string
+				    stays recoverable as the element's `title` and the document title
+				    already carries it. Local truncation with the full value still
+				    reachable is truthful; a name painted in full that pushes the phone
+				    sideways is not. */}
+				<span
+					className="block truncate text-heading font-semibold"
+					title={projection.conversation_name || undefined}
+				>{projection.conversation_name || "untitled"}</span>
+				<SessionSubtitle projection={projection} connected={connected} />
+			</div>
 			{/* THE OVERFLOW. Pin, wide view and approvals all have labelled rows in
 			    one sheet now: the `★`, `? N` and `[wide]` controls were each a
 			    second unlabelled door on a width-starved row. The ask dock above
@@ -283,7 +285,7 @@ function Header({
 			   this exists to fix. */
 			<p
 				role="status"
-				className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-muted"
+				className="bg-elevated px-2 py-1 text-meta text-ink-muted"
 			>
 				{gateReceipt}
 			</p>
@@ -294,7 +296,7 @@ function Header({
 			   control, and `role="alert"` announces it when it appears. */
 			<p
 				role="alert"
-				className="border-b border-hairline bg-elevated px-2 py-1 text-meta break-words text-danger"
+				className="bg-elevated px-2 py-1 text-meta break-words text-danger"
 			>
 				{pinRefusal.text}
 			</p>
@@ -367,7 +369,7 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 	}, [notice]);
 	return (
 		<>
-			<div className="flex items-center gap-2 border-b border-hairline bg-elevated px-2 py-1">
+			<div className="flex items-center gap-2 bg-elevated px-2 py-1">
 				<div className="min-w-0 flex-1">
 					{/* THE TITLE, ONE TEXT LINE AT EVERY WIDTH (design round 3, D10).
 					    `this session has ended — its history is kept` dropped its last
@@ -375,7 +377,7 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 					    one line does the job; the shorter sentence keeps the promise
 					    (`history kept`) in the same register. */}
 					<p role="status" className="text-meta text-ink-muted">
-						session ended — history kept
+						{messageRuntime.t("relay.chrome.session.ended")}
 					</p>
 					{/* WHERE IT REOPENS (UX round 1, U18; the words in round 2, U25 =
 					    D8). The daemon resumes the transcript in the owner's home — the
@@ -392,7 +394,7 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 					    a prompt to an ended session, so resume is the way to reopen WITHOUT
 					    composing, not a prerequisite for continuing. */}
 					<p className="mt-0.5 text-meta text-ink-dim">
-						a send or resume reopens it in your home folder
+						{messageRuntime.t("relay.chrome.session.ended_hint")}
 					</p>
 				</div>
 				{/* A real 44px target inside a `pointer-events-none` overlay: the
@@ -404,13 +406,13 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 					onClick={() => void resume()}
 					className="pointer-events-auto min-h-11 shrink-0 rounded-sm border border-control px-3 text-body-sm active:bg-surface disabled:opacity-50"
 				>
-					{busy ? "resuming…" : "resume"}
+					{busy ? messageRuntime.t("relay.chrome.session.resuming") : messageRuntime.t("relay.chrome.session.resume")}
 				</button>
 			</div>
 			{notice ? (
 				<p
 					role="status"
-					className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-dim"
+					className="bg-elevated px-2 py-1 text-meta text-ink-dim"
 				>
 					{notice}
 				</p>
@@ -418,7 +420,7 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 			{error ? (
 				<p
 					role="alert"
-					className="border-b border-hairline bg-elevated px-2 py-1 text-meta break-words text-danger"
+					className="bg-elevated px-2 py-1 text-meta break-words text-danger"
 				>
 					{error}
 				</p>
@@ -469,6 +471,10 @@ export function SessionScreen({
 	   outstanding set: it is what the open policy's dismissal memory records. */
 	const answerableAsks = outstandingAsks(projection?.asks);
 	const [modelsOpen, setModelsOpen] = useState(false);
+	/* The model sheet's search text lives HERE (UX round 2, U5): a fresh open
+	   clears it, while the effort view's back control returns to the same sheet
+	   with the query intact. */
+	const [modelQuery, setModelQuery] = useState("");
 	const [effortOpen, setEffortOpen] = useState(false);
 	/* THE ONE-SHOT FOCUS INTENT (see ``lib/pending-focus.ts``). Consumed at MOUNT
 	   so it cannot leak into a later mount of the same session, and consumed only
@@ -480,6 +486,9 @@ export function SessionScreen({
 	/* The asks sheet — the EXPANDED half of R7 (§5.0). Client-local interaction
 	   state with no wire meaning, exactly as the design's §5.0 states. */
 	const [asksOpen, setAsksOpen] = useState(false);
+	const [gateOpen, setGateOpen] = useState(false);
+	const [tasksOpen, setTasksOpen] = useState(false);
+	const [agentsOpen, setAgentsOpen] = useState(false);
 	/* BACK CLOSES THE SHEET, it does not leave the conversation (UX round 1, U2).
 	   On a phone the system back gesture is the primary escape from a modal, and
 	   on this surface it popped the ROUTE — `#/s/asks` → `#/` — taking the answer
@@ -644,18 +653,6 @@ export function SessionScreen({
 	   attaches the observer exactly when the node arrives. Measured instead
 	   of pinned to a constant: the ended strip wraps (52px at 390, 63px at
 	   320) and its refusal/acceptance lines have heights of their own. */
-	const [ladderEl, setLadderEl] = useState<HTMLDivElement | null>(null);
-	const [ladderInset, setLadderInset] = useState(0);
-	useLayoutEffect(() => {
-		if (!ladderEl) return;
-		const measure = () => setLadderInset(ladderEl.getBoundingClientRect().height);
-		measure();
-		if (typeof ResizeObserver === "undefined") return;
-		const ro = new ResizeObserver(measure);
-		ro.observe(ladderEl);
-		return () => ro.disconnect();
-	}, [ladderEl]);
-
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
 	/* THE LIST STREAM TOO, so the header's ☆/★ reflects the shared pin
 	   authoritatively rather than optimistically forever (review round 1, MINOR 1).
@@ -751,11 +748,11 @@ export function SessionScreen({
 				className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 			>
 				<div className="relative">
-					<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
+					<header className="flex h-[calc(56px+env(safe-area-inset-top))] shrink-0 items-center gap-2 px-1 pt-[env(safe-area-inset-top)]">
 						<button
 							type="button"
 							onClick={() => navigate("/")}
-							aria-label={messageRuntime.t("relay.session.view.back")}
+							aria-label={messageRuntime.t("relay.chrome.session.back")}
 							className={cn(HEADER_CONTROL, "text-ink-muted")}
 						>
 							‹
@@ -785,6 +782,60 @@ export function SessionScreen({
 	   prompt this device just sent makes the column non-empty the instant it
 	   leaves the composer, and hiding its row behind "no messages yet" would put
 	   the placeholder in front of the very message that proves the send worked. */
+	const needsApproval = blocking?.kind === "approval";
+	const taskItems = projection.todos.flatMap(phase => phase.items);
+	const tasksDone = taskItems.filter(task => task.status === "done" || task.status === "dropped").length;
+
+	/* THE ROSTER CHIP, ONCE (code review round 2, C2-5): defined here and rendered
+	   from the slot this conversation's state owns — before tasks when something
+	   failed, after tasks when the roster is healthy (design round 1, D2).
+	   THE FULL EXISTING SENTENCE CARRIES THE NOUN AND THE FAILURE (design D5, UX
+	   U3): the old bare failure mark (`X` plus a numeral) read as a dismiss control beside two counters and never named what
+	   failed. "Agents 1/3 · 1 failed" says the noun, the running count and the
+	   failure in the pill's own danger register, with no ✕-lookalike glyph; its
+	   accessible name is that same sentence, so nothing is lost to sighted readers
+	   or to assistive tech. No new copy — the two `tray.agents*` keys already exist. */
+	/* The roster counters the pill renders. */
+	const agentsFailed = projection.subagents.filter(agent => agent.status === "failed").length;
+	const agentsRunning = projection.subagents.filter(agent => agent.status === "running").length;
+	/* THE ROSTER CHIP, ONCE (code review round 2, C2-5): defined here and rendered
+	   from the slot this conversation's state owns — before tasks when something
+	   failed, after tasks when the roster is healthy (design round 1, D2).
+
+	   THE FULL SENTENCE, AT EVERY WIDTH (design D5 = UX U3, and UX round 3 U7).
+	   A bare failure mark plus a numeral read as a dismiss control beside two other
+	   counters and never named what failed; the shortened noun form then dropped the
+	   count that made the pill urgent on a 320 phone. Both forms cost information,
+	   so the pill shows the full existing sentence everywhere — the accessible name
+	   too — in the danger register, and the tray makes room by WRAPPING at 320
+	   (gaps 4 px below 390). No new copy: the two `tray.agents*` keys already exist. */
+	const agentsChip = projection.subagents.length ? (
+		<Chip
+			className={cn("shrink-0", agentsFailed > 0 ? "!bg-danger-wash !text-danger" : blocking && "!text-ink-dim")}
+			disabled={Boolean(blocking)}
+			aria-expanded={agentsOpen}
+			aria-label={agentsFailed > 0
+				? messageRuntime.t("relay.chrome.session.tray.agents_failed", {
+						running: agentsRunning,
+						total: projection.subagents.length,
+						failed: agentsFailed,
+					})
+				: undefined}
+			title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined}
+			onClick={() => setAgentsOpen(true)}
+		>
+			{agentsFailed > 0
+				? messageRuntime.t("relay.chrome.session.tray.agents_failed", {
+						running: agentsRunning,
+						total: projection.subagents.length,
+						failed: agentsFailed,
+					})
+				: messageRuntime.t("relay.chrome.session.tray.agents", {
+						running: agentsRunning,
+						total: projection.subagents.length,
+					})}
+		</Chip>
+	) : null;
 	const showEmptyState =
 		projection.transcript.length === 0 && !projection.streaming && pendingEchoes.length === 0;
 
@@ -801,64 +852,7 @@ export function SessionScreen({
 					connected={connected}
 				/>
 			) : <>
-			{/* THE HEADER, THE GLANCE ROW AND THE STATE LADDER SHARE ONE RELATIVE
-			    WRAPPER, because the ladder is an OVERLAY that rides UNDER both (UX
-			    round 1, U19 = design round 1, D4; anchor moved in round 2, D9).
-			    Every rung used to be an in-flow row, so each appearance/clear pushed
-			    the whole column down and back — before the overlay: +26px when the
-			    degraded/reconnect strip appeared and +53px for the ended strip, on
-			    every flap of a flaky link. Reserved space would have paid the same
-			    pixels permanently (52px on a 320-wide phone, for a strip most
-			    sessions never show); the overlay keeps the column's geometry fixed
-			    for all three rungs. Round 2 D9 moved the anchor from the header to
-			    the WRAPPER'S bottom: at the header it painted over the spend/context
-			    glance (6.2%/200k · $1.25 — the numbers a reader most wants when a
-			    session is struggling) — and round 2 U23 = D7 pays for the rest of
-			    the cover: the transcript reserves the rung's height inside its own
-			    scroller, so nothing under a rung is unreachable. `pointer-events-none`
-			    hands touches back to the transcript underneath — scrolling from the
-			    strip's own row must keep working — and the rung's interactive part
-			    (the ended strip's resume) opts back in with `pointer-events-auto`.
-			    Sheets are `fixed z-50`; this overlay sits at `z-10`, under them. */}
-			<div className="relative">
-				<Header projection={projection} sessionId={sessionId} />
-				{/* The spend + context glance (phase 1), read-only and self-hiding:
-				    it renders nothing until either reading has something to state. */}
-				<SessionStatus projection={projection} />
-				{/* SESSION HEALTH, AS ONE LADDER (mobile UX batch 2, U7 + U11). Each
-				    rung is a different fact and the later ones are only worth stating
-				    while the earlier are untrue, so at most ONE strip shows — three
-				    stacked on a 320-wide phone would spend the vertical budget the
-				    batch-1 work just bought back. `ended` (the process is gone; the
-				    resume affordance lives in the strip) outranks `degraded` (the
-				    relay's dial is down — sends will fail until it answers) outranks
-				    the phone's own link being down (`connected === false`, the store's
-				    flag; the retained view is what the reader is looking at). Each
-				    clears itself when the daemon's next projection (or the SSE's own
-				    reopen) says otherwise. */}
-				<div
-					ref={setLadderEl}
-					className="pointer-events-none absolute inset-x-0 top-full z-10"
-				>
-					{projection.ended ? (
-						<EndedSessionStrip sessionId={sessionId} />
-					) : projection.degraded ? (
-						<p
-							role="status"
-							className="border-b border-hairline bg-warning-wash px-2 py-1 text-meta text-warning"
-						>
-							not answering — showing its last synced view
-						</p>
-					) : !connected ? (
-						<p
-							role="status"
-							className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-muted"
-						>
-							reconnecting — showing the last synced view
-						</p>
-					) : null}
-				</div>
-			</div>
+			<Header projection={projection} sessionId={sessionId} connected={connected} gateOpen={gateOpen} setGateOpen={setGateOpen} />
 			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll
 				   area reads as "did it break?"; this placeholder says the
@@ -867,10 +861,10 @@ export function SessionScreen({
 				   row up). */
 				<div className="flex flex-1 flex-col items-center justify-center gap-1 px-8 text-center">
 					<p className="text-body-sm text-ink-muted">
-						{messageRuntime.t("relay.session.view.empty_title")}
+						{messageRuntime.t("relay.chrome.session.empty_title")}
 					</p>
 					<p className="text-meta text-ink-dim">
-						{messageRuntime.t("relay.session.view.empty_hint")}
+						{messageRuntime.t("relay.chrome.session.empty_hint")}
 					</p>
 				</div>
 			) : (
@@ -880,55 +874,12 @@ export function SessionScreen({
 					peerCycles={projection.peer_cycles === 1}
 					pending={pendingEchoes}
 					streaming={projection.streaming}
-					topInset={ladderInset}
+					topInset={0}
+					tailContent={projection.streaming ? <WorkingLine activity={projection.activity} startedS={projection.activity_started_s} /> : undefined}
 					supplements={projection.supplements}
 					projectionPid={projection.pid}
 				/>
 			)}
-
-			{/* The aggregate working line — pinned at the foot of the transcript
-			    like the TUI's WorkingBlock, above the panels and composer. */}
-			{projection.streaming ? (
-				<WorkingLine
-					activity={projection.activity}
-					startedS={projection.activity_started_s}
-				/>
-			) : null}
-
-			{/* The panel budget (D1). These two panels and the pending card are
-			    unshrinkable-ish siblings in a column that is `overflow-hidden`, so
-			    what they claim together comes off the bottom and is CLIPPED, not
-			    scrolled. Measured with both panels expanded beside an approval at
-			    390x844: the column reported `clientH 844 / scrollH 1427`, approve
-			    and deny were 120px below the fold with the card's own scroller
-			    already at its end, and at 360x780 the card's top landed at y=781 in
-			    a 780px viewport — entirely off screen. Real touch drags over the
-			    panels and over the card moved nothing (`colScrollTop=0` throughout);
-			    only a script assigning `scrollTop` to an `overflow:hidden` element
-			    appeared to recover it, which a finger cannot do.
-
-			    So while a request is pending the panels render COLLAPSED and hold
-			    shut. A question outranks a task list and a roster (branding §7):
-			    the card is the only thing on screen that needs a decision, and the
-			    panels are the only things that can push it off. This is a budget
-			    rather than a cap because caps compose badly — three individually
-			    bounded regions still sum past the column, which is how 40%+40%+60%
-			    overran it. Their own open state is kept, so answering restores what
-			    the user had open. With `min-h-0` on both panels (see each) the
-			    column can also always fit its children rather than clipping them. */}
-			{projection.todos.some((p) => p.items.length > 0) ? (
-				<TodosPanel
-					todos={projection.todos}
-					forceCollapsed={Boolean(blocking)}
-				/>
-			) : null}
-			{projection.subagents.length > 0 ? (
-				<SubagentsPanel
-					pid={sessionId}
-					subagents={projection.subagents}
-					forceCollapsed={Boolean(blocking)}
-				/>
-			) : null}
 
 			{blocking ? (
 				/* Key the WHOLE card on request_id + question_index so React
@@ -962,29 +913,70 @@ export function SessionScreen({
 				/>
 			) : null}
 
-			{/* THE MINIMIZED ASK BAR (§5.0, R7). It sits directly above the composer
-			    and is the persistent ask affordance on this screen: tapping it opens
-			    the asks sheet, which is where answering happens. (The sheet can also
-			    open by itself ONCE when a conversation is opened with asks already
-			    waiting, and stays shut after the user closes it; see the open-by-
-			    default block above. This bar is what remains when it is closed, and
-			    what announces an ask that arrives later.) It is absent at zero
-			    asks, and its presence CHANGES NOTHING about the composer beneath it —
-			    with the bar showing, the composer is an ordinary conversation
-			    composer, so a message typed there can never be sent as an answer.
-			    That is the WHOLE of the routing rule this screen keeps: the composer is
-			    an ordinary conversation composer, and while the sheet is open the
-			    sheet's own answer fields are the only inputs that can receive a
-			    keystroke — the sheet is modal over this column — so a message typed
-			    here can never be sent as an answer. (The old design-doc half, "while
-			    EXPANDED the composer sends the answer", described a routing the sheet
-			    makes unreachable by construction; §5.0 is amended by #2056.) */}
-			<AskDock rows={projection.asks} onOpen={openAsks} />
+			{/* One thumb-height tray replaces three stacked disclosures. Its panels
+			    are the same content inside the shared in-flow Sheet, not new lists;
+			    a long task/agent read cannot halve the transcript permanently.
+			    An ended/degraded banner replaces this slot, never overlays history. */}
+			{/* THE BANNER NEVER OWNS THE ONLY DOOR (agent review round 1, C1-1 = QA
+			    Q1-2). This arm used to REPLACE the tray, so an ended or degraded
+			    conversation lost the only setters that open the Tasks and Agents
+			    sheets — its retained history became unreadable without restarting
+			    the runtime. The banner now sits ABOVE the tray and the tray renders
+			    on its own merits in every health state: reading finished work is not
+			    a live action, so it must not depend on liveness. */}
+			{projection.ended ? <EndedSessionStrip sessionId={sessionId} /> : projection.degraded ?
+				<p role="status" className="flex min-h-11 shrink-0 items-center bg-warning-wash px-3 text-meta text-warning">{messageRuntime.t("relay.chrome.session.degraded")}</p>
+			: null}
+			{(needsApproval || (projection.asks?.length ?? 0) > 0 || projection.todos.some(p => p.items.length) || projection.subagents.length) ?
+				/* THE TRAY NEVER SCROLLS SIDEWAYS (operator finding B). It was an
+				   `overflow-x: auto` rail, so the last pill was reachable only by a
+				   swipe most phone users never try. Now: PRIORITY ORDER (approve,
+				   questions, a failing roster, tasks, then a healthy roster), with the
+				   pills sized so the worst state still fits one 44 px line at 360 and
+				   390. `flex-wrap` is the safety net for a longer translation: a second
+				   line costs 44 px of transcript, but hides nothing and adds no tap;
+				   `gap-x-1`/`gap-y-3` keep neighbouring hit bands from touching. */
+				<div aria-label={messageRuntime.t("relay.chrome.session.tray.label")} className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-3 px-3 py-1.5 min-[390px]:gap-x-2">
+					{needsApproval ? <Chip onClick={() => setGateOpen(true)} className="shrink-0 !bg-danger-wash !text-danger" aria-label={messageRuntime.t("relay.chrome.session.tray.approve_label")}>{messageRuntime.t("relay.chrome.session.tray.approve")}</Chip> : null}
+					<AskDock rows={projection.asks} onOpen={openAsks} compact />
+					{/* ONE CHIP, TWO PLACES (code review round 2, C2-5). It used to be two
+					    full copies, each carrying the other's unreachable label ternary
+					    and class branch; here the definition exists once and the state
+					    decides which of the two SLOTS renders it. A failing roster sits
+					    BEFORE tasks because the word that says why the roster matters
+					    must not be the last thing on a line (design round 1, D2).
+					    THE NOUN AND THE COUNT, NOT A LONE MARK (design D5, UX U3): a bare mark plus a numeral
+					    read as a dismiss control beside two other counters and never said
+					    what failed. The full existing `agents_failed` sentence — "Agents
+					    1/3 · 1 failed" — carries the noun, the running count and the
+					    failure, in the danger register the pill already used, with no
+					    glyph that could be mistaken for ✕. No new copy. */}
+					{agentsFailed > 0 ? agentsChip : null}
+					{projection.todos.some(p => p.items.length) ? <Chip className={cn("shrink-0", blocking && "!text-ink-dim")} disabled={Boolean(blocking)} aria-expanded={tasksOpen} title={blocking ? messageRuntime.t("relay.asks.disclosure.held_shut") : undefined} onClick={() => setTasksOpen(true)}>{messageRuntime.t("relay.chrome.session.tray.tasks", {
+						done: tasksDone,
+						total: taskItems.length,
+					})}</Chip> : null}
+					{agentsFailed === 0 ? agentsChip : null}
+				</div> : null}
+			<Sheet open={tasksOpen} onClose={() => setTasksOpen(false)} title={messageRuntime.t("relay.chrome.session.tasks_title")}>
+				<TodosPanel todos={projection.todos} sheet />
+			</Sheet>
+			<Sheet open={agentsOpen} onClose={() => setAgentsOpen(false)} title={messageRuntime.t("relay.chrome.session.agents_title")}>
+				<SubagentsPanel pid={sessionId} subagents={projection.subagents} sheet />
+			</Sheet>
 
 			<Composer
 				pid={sessionId}
 				projection={projection}
-				onOpenModels={() => setModelsOpen(true)}
+				onOpenModels={() => {
+					/* A FRESH OPEN IS A FRESH LIST: clear the query, as the sheet's own
+					   comment requires (a short stale subset on reopen reads as a bug).
+					   The effort view's back control does NOT clear it — that is the same
+					   sheet's sub-view return, not a new opening (UX round 2, U5). */
+					setModelQuery("");
+					setModelsOpen(true);
+				}}
+				onReturnToModels={() => setModelsOpen(true)}
 				onOpenEffort={() => setEffortOpen(true)}
 				effortOpen={effortOpen}
 				onCloseEffort={() => setEffortOpen(false)}
@@ -996,6 +988,9 @@ export function SessionScreen({
 				onClose={() => setModelsOpen(false)}
 				pid={sessionId}
 				projection={projection}
+				onOpenEffort={() => { setModelsOpen(false); setEffortOpen(true); }}
+				query={modelQuery}
+				onQuery={setModelQuery}
 			/>
 
 			<AsksSheet

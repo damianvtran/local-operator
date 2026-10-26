@@ -90,6 +90,6 @@ describe("past rows", () => {
 		const line = await screen.findByTestId("session-tags");
 		expect(within(line).queryByRole("button")).toBeNull();
 		expect(within(line).queryByRole("checkbox")).toBeNull();
-		expect(screen.queryByRole("button", { name: "Tags…" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Tags" })).toBeNull();
 	});
 });

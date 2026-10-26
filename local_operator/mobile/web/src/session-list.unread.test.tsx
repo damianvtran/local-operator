@@ -42,7 +42,9 @@ function summary(over: Partial<SessionSummary>): SessionSummary {
 }
 
 function cardByName(name: string): HTMLButtonElement {
-	return screen.getByRole("button", { name: new RegExp(name) });
+	const row = screen.getAllByRole("button").find(button => button.hasAttribute("aria-haspopup") && button.querySelector("span.flex-1")?.textContent === name);
+	if (!row) throw new Error(`No conversation row titled ${name}`);
+	return row as HTMLButtonElement;
 }
 
 /* The ONE reserved indicator slot: first child of the card's title row. It is
@@ -260,7 +262,7 @@ describe("SessionCard attention ladder", () => {
 			rerender(<SessionListScreen />);
 			expect(cardByName("Beta")).toBe(beta);
 			expect(document.activeElement).toBe(beta);
-			expect(beta.previousElementSibling?.textContent).toContain("Alpha");
+			expect(beta.parentElement?.previousElementSibling?.textContent).toContain("Alpha");
 		}
 		fireEvent.click(beta);
 		expect(window.location.hash).toBe("#/s/b");

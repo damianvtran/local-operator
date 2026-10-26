@@ -77,7 +77,9 @@ function summary(over: Partial<SessionSummary>): SessionSummary {
    which is the window every ★ assertion below is about. The default stays the
    strict query, so nothing else stops noticing a genuinely hidden card. */
 function cardByName(name: string, hidden = false): HTMLButtonElement {
-	return screen.getByRole("button", { name: new RegExp(name), hidden });
+	const row = screen.getAllByRole("button", { hidden }).find(button => button.hasAttribute("aria-haspopup") && button.querySelector("span.flex-1")?.textContent === name);
+	if (!row) throw new Error(`No conversation row titled ${name}`);
+	return row as HTMLButtonElement;
 }
 
 /* A long-press: pointerdown, hold past the threshold (fake timers), release.
@@ -142,7 +144,7 @@ describe("★ Pinned section", () => {
 			summary({ session_id: "a1", conversation_name: "Unpinned", section: "active" }),
 		];
 		render(<SessionListScreen />);
-		expect(screen.getByText("★ Pinned")).toBeTruthy();
+		expect(screen.getByRole("heading", { name: "Pinned", level: 2 })).toBeTruthy();
 		/* The row is rendered exactly once — the pinned copy — not also in Active. */
 		expect(screen.getAllByRole("button", { name: /Pinned/ })).toHaveLength(1);
 		expect(screen.getByRole("button", { name: /Unpinned/ })).toBeTruthy();
@@ -151,7 +153,7 @@ describe("★ Pinned section", () => {
 	it("omits the ★ Pinned heading entirely when nothing is pinned", () => {
 		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
-		expect(screen.queryByText("★ Pinned")).toBeNull();
+		expect(screen.queryByText("Pinned")).toBeNull();
 	});
 
 	it("marks a pinned card with an accessible ★", () => {
@@ -178,7 +180,7 @@ describe("the pin gesture", () => {
 		render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
 
-		const action = await screen.findByRole("button", { name: "Pin to the top" });
+		const action = await screen.findByRole("button", { name: "Pin to top" });
 		fireEvent.click(action);
 		/* The optimistic store write and the POST both go to the same row. */
 		expect(applySessionPin).toHaveBeenCalledWith("a1", true);
@@ -191,7 +193,7 @@ describe("the pin gesture", () => {
 		];
 		render(<SessionListScreen />);
 		longPress(cardByName("Pinned"));
-		expect(await screen.findByRole("button", { name: "Unpin from the top" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Unpin" })).toBeTruthy();
 	});
 
 	it("cancels the long-press when the finger moves, so a scroll opens nothing", async () => {
@@ -201,14 +203,14 @@ describe("the pin gesture", () => {
 		/* The press must NOT have opened the sheet. Proven against the positive
 		   case in the next test, which asserts the SAME query finds it — so this
 		   cannot pass merely because the flush is wrong. */
-		expect(screen.queryByRole("button", { name: "Pin to the top" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Pin to top" })).toBeNull();
 	});
 
 	it("DOES open the sheet on an unmoved press (the control for the cancel above)", async () => {
 		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
-		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Pin to top" })).toBeTruthy();
 	});
 
 	it("does not navigate when a long-press opens the sheet", async () => {
@@ -216,7 +218,7 @@ describe("the pin gesture", () => {
 		render(<SessionListScreen />);
 		const card = cardByName("Alpha");
 		longPress(card);
-		await screen.findByRole("button", { name: "Pin to the top" });
+		await screen.findByRole("button", { name: "Pin to top" });
 		/* The click that follows the release must be swallowed. */
 		fireEvent.click(card);
 		expect(window.location.hash).not.toBe("#/s/a1");
@@ -227,7 +229,7 @@ describe("the pin gesture", () => {
 		render(<SessionListScreen />);
 		const card = cardByName("Alpha");
 		longPress(card);
-		await screen.findByRole("button", { name: "Pin to the top" });
+		await screen.findByRole("button", { name: "Pin to top" });
 
 		/* The platform sequence measured in Chromium (and reported on iOS): the
 		   finger's release dispatches pointerup — implicit touch capture targets
@@ -236,7 +238,7 @@ describe("the pin gesture", () => {
 		   pointerdown of its own since mount, so it must be swallowed. */
 		fireEvent.pointerUp(card);
 		fireEvent.click(screen.getByTestId("sheet-scrim"));
-		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Pin to top" })).toBeTruthy();
 
 		/* A genuinely new press still dismisses: its own pointerdown legitimises
 		   the click that follows it. */
@@ -244,7 +246,7 @@ describe("the pin gesture", () => {
 		fireEvent.pointerDown(scrim);
 		fireEvent.pointerUp(scrim);
 		fireEvent.click(scrim);
-		expect(screen.queryByRole("button", { name: "Pin to the top" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Pin to top" })).toBeNull();
 	});
 
 	it("does not let the release click run the sheet's action either (U1)", async () => {
@@ -252,7 +254,7 @@ describe("the pin gesture", () => {
 		render(<SessionListScreen />);
 		const card = cardByName("Alpha");
 		longPress(card);
-		const action = await screen.findByRole("button", { name: "Pin to the top" });
+		const action = await screen.findByRole("button", { name: "Pin to top" });
 
 		/* Same tail click, landing on the action row this time — the release can
 		   hit anything the sheet paints at the lift coordinates, so the guard is
@@ -261,7 +263,7 @@ describe("the pin gesture", () => {
 		fireEvent.click(action);
 		expect(applySessionPin).not.toHaveBeenCalled();
 		expect(setSessionPin).not.toHaveBeenCalled();
-		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Pin to top" })).toBeTruthy();
 
 		/* An intended press still pins. */
 		fireEvent.pointerDown(action);
@@ -289,12 +291,12 @@ describe("the pin gesture", () => {
 		fireEvent.pointerDown(scrim, { pointerId: 2 });
 		fireEvent.pointerUp(card, { pointerId: 1 });
 		fireEvent.click(scrim); /* A's ghost release click — swallowed */
-		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Pin to top" })).toBeTruthy();
 
 		/* B's own release disarms the pending ghost: B's tap dismisses. */
 		fireEvent.pointerUp(scrim, { pointerId: 2 });
 		fireEvent.click(scrim);
-		expect(screen.queryByRole("button", { name: "Pin to the top" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Pin to top" })).toBeNull();
 	});
 });
 
@@ -308,89 +310,58 @@ describe("empty sections cost no heading (design round 1, D1)", () => {
 			summary({ session_id: "p1", conversation_name: "Pinned", pinned: true }),
 		];
 		render(<SessionListScreen />);
-		expect(screen.getByText("★ Pinned")).toBeTruthy();
-		expect(screen.queryByText("Active Sessions")).toBeNull();
-		expect(screen.queryByText("Previous Sessions")).toBeNull();
+		expect(screen.getByRole("heading", { name: "Pinned", level: 2 })).toBeTruthy();
+		expect(screen.queryByText("Active")).toBeNull();
+		expect(screen.queryByText("Previous")).toBeNull();
 	});
 
 	it("omits the Previous heading when there are no previous rows", () => {
 		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
-		expect(screen.getByText("Active Sessions")).toBeTruthy();
-		expect(screen.queryByText("Previous Sessions")).toBeNull();
+		expect(screen.getByText("Active")).toBeTruthy();
+		expect(screen.queryByText("Previous")).toBeNull();
 	});
 
 	it("says so when a search matches nothing at all", () => {
 		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
-		const input = screen.getByPlaceholderText("Search conversations…");
+		const input = openSearch();
 		fireEvent.change(input, { target: { value: "zzz-no-match" } });
-		expect(screen.getByText("no matching conversations")).toBeTruthy();
-		expect(screen.queryByText("Active Sessions")).toBeNull();
+		expect(screen.getByText("No matching conversations")).toBeTruthy();
+		expect(screen.queryByText("Active")).toBeNull();
 	});
 });
 
-describe("the list teaches its own pin gesture (design round 1, D2)", () => {
-	/* The caption is ALWAYS MOUNTED and collapses via grid rows (design round 2, D8
-	   — an abrupt unmount snapped the list ~23px; round 3 replaced a fixed
-	   max-height cap, which clipped a WRAPPED caption, with the 0fr/1fr track
-	   trick). So the tests read the wrapper's row class and its `aria-hidden`,
-	   which is the same signal a sighted reader and assistive tech get. */
-	function hintBox(): HTMLElement {
-		/* The grid wrapper: <div grid> > <div overflow-hidden> > <p>. The inner
-		   overflow-hidden child is asserted, not just walked past: without it a
-		   `1fr` track paints at full height and the collapse silently stops
-		   reaching zero (review round 4, MINOR 1). */
-		const wrapper = screen.getByText("touch and hold a row to pin it")
-			.parentElement as HTMLElement;
-		expect(wrapper.className).toContain("overflow-hidden");
-		return wrapper.parentElement as HTMLElement;
-	}
-
-	it("shows the hint while nothing is pinned", () => {
-		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+describe("visible row actions replace the collapsing hint", () => {
+	it("offers More before any conversation has been pinned", () => {
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
-		expect(screen.getByText("touch and hold a row to pin it")).toBeTruthy();
-		expect(hintBox().className).toContain("grid-rows-[1fr]");
-		expect(hintBox().getAttribute("aria-hidden")).toBeNull();
+		expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
+		expect(screen.queryByText("touch and hold a row to pin it")).toBeNull();
 	});
-
-	it("collapses the hint once a pin exists, whose ★ Pinned section is the discoverer", () => {
-		sessionList = [
-			summary({ session_id: "p1", conversation_name: "Pinned", pinned: true }),
-			summary({ session_id: "a1", conversation_name: "Alpha" }),
-		];
-		render(<SessionListScreen />);
-		expect(hintBox().className).toContain("grid-rows-[0fr]");
-		expect(hintBox().getAttribute("aria-hidden")).toBe("true");
-		expect(screen.getByText("★ Pinned")).toBeTruthy();
+	it("keeps More reachable after the confirmed pin frame paints", async () => {
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		const view = render(<SessionListScreen />);
+		expect(cardByName("Alpha")).toBeTruthy();
+		sessionList = [{ ...sessionList[0], pinned: true }];
+		view.rerender(<SessionListScreen />);
+		expect(cardByName("Alpha")).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Pinned", level: 2 })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
 	});
-
-	it("collapses the hint when a query matches no row at all (D5)", () => {
-		/* The caption names a row to hold, so it must never sit above
-		   "no matching conversations". */
-		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+	it("does not advertise an action for a query with no matching row", () => {
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
-		fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
-			target: { value: "zzz-no-match" },
-		});
-		expect(hintBox().className).toContain("grid-rows-[0fr]");
-		expect(screen.getByText("no matching conversations")).toBeTruthy();
+		fireEvent.change(openSearch(), { target: { value: "no-such-row" } });
+		expect(screen.queryByRole("button", { name: "More" })).toBeNull();
+		expect(screen.getByText("No matching conversations")).toBeTruthy();
 	});
-
-	it("stays collapsed when a search merely HIDES the pinned rows (D6)", () => {
-		/* A pin exists in the store but the query hides it, so `pinned` (the
-		   VISIBLE pinned list) is empty — the gate must read the store, not the
-		   filtered list, or the hint would return here. */
-		sessionList = [
-			summary({ session_id: "p1", conversation_name: "Zebra pinned", pinned: true }),
-			summary({ session_id: "a1", conversation_name: "Alpha" }),
-		];
+	it("keeps a visible action when a search hides the pinned section", () => {
+		sessionList = [summary({ session_id: "a", conversation_name: "Alpha", pinned: true }), summary({ session_id: "b", conversation_name: "Beta" })];
 		render(<SessionListScreen />);
-		fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
-			target: { value: "alpha" },
-		});
-		expect(hintBox().className).toContain("grid-rows-[0fr]");
+		fireEvent.change(openSearch(), { target: { value: "Beta" } });
+		expect(screen.queryByRole("heading", { name: "Pinned" })).toBeNull();
+		expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
 	});
 });
 
@@ -461,7 +432,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 	   because `Row 1` is a prefix of `Row 10`. */
 	function rowOrder(list: HTMLElement): string[] {
 		const longestFirst = [...NAMES].sort((a, b) => b.length - a.length);
-		return Array.from(list.querySelectorAll("button")).map(
+		return Array.from(list.querySelectorAll('button[aria-haspopup="dialog"]')).map(
 			(card) =>
 				longestFirst.find((name) => (card.textContent ?? "").includes(name)) ??
 				"?",
@@ -469,7 +440,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 	}
 
 	function pinnedSection(): boolean {
-		return screen.queryByText("★ Pinned") !== null;
+		return screen.queryByText("Pinned") !== null;
 	}
 
 	function starOn(name: string): boolean {
@@ -500,7 +471,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 			new Error("no saved messages yet — pin it after you send one"),
 		);
 		longPress(cardByName(name));
-		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to top" }));
 		expect(starOn(name)).toBe(true);
 		await waitFor(() => expect(starOn(name)).toBe(false));
 	}
@@ -518,7 +489,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		const before = rowOrder(list);
 
 		longPress(cardByName("Row 2"));
-		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to top" }));
 
 		/* Instant feedback: the ★ is drawn in the commit that handles the tap. */
 		expect(starOn("Row 2")).toBe(true);
@@ -555,7 +526,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		   answer the POST's own read-back. */
 		setSessionPin.mockResolvedValueOnce({ ok: true, pinned: false });
 		longPress(cardByName("Row 1"));
-		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to top" }));
 		expect(starOn("Row 1")).toBe(true);
 
 		await waitFor(() => expect(starOn("Row 1")).toBe(false));
@@ -627,7 +598,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 			new Error("no saved messages yet — pin it after you send one"),
 		);
 		longPress(cardByName("Row 3"));
-		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to top" }));
 		const pressed = { star: starOn("Row 3"), section: pinnedSection() };
 		await waitFor(() => expect(starOn("Row 3")).toBe(false));
 		await settled();
@@ -652,7 +623,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		   screen-wide slot holding "the row last pressed", which the dismissal had
 		   already cleared, so the re-opened sheet was LIVE — and its verb and its
 		   intent came from the ★, the reader's own unanswered mark, so it offered a
-		   live "Unpin from the top" and the press sent `false` for a row the reader
+		   live "Unpin" and the press sent `false` for a row the reader
 		   had just asked to pin. */
 		await realStoreHarness();
 		await pushFrame(rowsOf(4));
@@ -668,7 +639,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		);
 
 		longPress(cardByName("Row 1"));
-		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to top" }));
 		expect(starOn("Row 1")).toBe(true);
 		await waitFor(() => expect(setSessionPin).toHaveBeenCalledWith("r1", true));
 
@@ -700,11 +671,11 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 		/* THE SECOND FORM, AND THE ONE THAT COULD SEND THE OPPOSITE: a press on a
 		   DIFFERENT row. The pre-fix gate was one screen-wide slot holding "the row
 		   last pressed", so Row 2's press evicted Row 1's — Row 1's sheet came back
-		   LIVE, read its ★ as this row's state, and offered "Unpin from the top",
+		   LIVE, read its ★ as this row's state, and offered "Unpin",
 		   whose press sent `false` for the request still on its way. */
 		fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
 		longPress(cardByName("Row 2"));
-		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to top" }));
 		await waitFor(() => expect(setSessionPin).toHaveBeenCalledWith("r2", true));
 		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
@@ -742,7 +713,7 @@ describe("a refused pin says why, in the sheet that asked (design round 11, D25)
 		render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
 
-		const action = await screen.findByRole("button", { name: "Pin to the top" });
+		const action = await screen.findByRole("button", { name: "Pin to top" });
 		/* THE DAEMON'S OWN 409, body and all: `api.request` puts the error body's
 		   `error` on the `HttpError`'s message, so this is the sentence a reader
 		   actually gets, not a fixture invented here. */
@@ -761,7 +732,7 @@ describe("a refused pin says why, in the sheet that asked (design round 11, D25)
 		await waitFor(() => expect(document.activeElement).toBe(action));
 		/* The sheet is STILL THERE, with the action still on it. */
 		const sheet = screen.getByRole("dialog");
-		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Pin to top" })).toBeTruthy();
 		/* The reason is inside it, announced to assistive tech... */
 		expect(sheet.contains(reason)).toBe(true);
 		expect(reason.getAttribute("role")).toBe("alert");
@@ -781,7 +752,7 @@ describe("a refused pin says why, in the sheet that asked (design round 11, D25)
 		render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
 
-		const action = await screen.findByRole("button", { name: "Pin to the top" });
+		const action = await screen.findByRole("button", { name: "Pin to top" });
 		/* A 409 whose message is only the STATUS — the shape `api.request` produces
 		   when a failing response's body is not JSON, and the real spelling of "the
 		   daemon gave no reason". `HttpError` is the class the route actually
@@ -800,7 +771,7 @@ describe("a refused pin says why, in the sheet that asked (design round 11, D25)
 		const view = render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
 
-		const action = await screen.findByRole("button", { name: "Pin to the top" });
+		const action = await screen.findByRole("button", { name: "Pin to top" });
 		setSessionPin.mockResolvedValueOnce({ ok: true, pinned: true });
 		fireEvent.click(action);
 		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -812,7 +783,15 @@ describe("a refused pin says why, in the sheet that asked (design round 11, D25)
 			summary({ session_id: "a1", conversation_name: "Alpha", pinned: true }),
 		];
 		view.rerender(<SessionListScreen />);
-		await waitFor(() => expect(screen.getByText("★ Pinned")).toBeTruthy());
+		await waitFor(() => expect(screen.getByRole("heading", { name: "Pinned", level: 2 })).toBeTruthy());
 		expect(cardByName("Alpha").querySelector("[aria-label=\"pinned\"]")).toBeTruthy();
 	});
 });
+
+/** Search now expands in the app bar; exercise its real opening control. */
+function openSearch() {
+ const field = screen.queryByPlaceholderText("Search conversations…");
+ if (field) return field;
+ fireEvent.click(screen.getByRole("button", { name: "Search", hidden: true }));
+ return screen.getByPlaceholderText("Search conversations…");
+}

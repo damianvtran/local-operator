@@ -267,7 +267,7 @@ describe("SessionScreen and queued asks", () => {
 		expect(dock.textContent).toContain("1 question timed out");
 		/* The quiet register is the dock's own: no accent border for a queue with
 		   nothing to answer. */
-		expect(dock.className).toContain("border-hairline");
+		expect(dock.className).toContain("bg-surface");
 		expect(screen.queryByRole("button", { name: /queued asks in this session/ })).toBeNull();
 		expect(screen.queryByText("? 1")).toBeNull();
 	});
@@ -282,7 +282,14 @@ describe("SessionScreen and queued asks", () => {
 			connected: true,
 		};
 		render(<SessionScreen sessionId="s1" />);
-		expect(screen.getByTestId("ask-dock").textContent).toContain("1 question waiting");
+		/* The tray's pill is the COMPACT form (operator finding B: the long
+		   sentence pushed the tray past one line). Both forms still count only
+		   the OFFERED question: the visible `1 question`, and the accessible
+		   name, which keeps the full existing sentence. */
+		const dock = screen.getByTestId("ask-dock");
+		expect(dock.getAttribute("aria-label")).toBe("1 question waiting");
+		expect(dock.textContent).toContain("1 question");
+		expect(dock.textContent).not.toContain("2 question");
 		expect(screen.queryByRole("button", { name: /queued asks in this session/ })).toBeNull();
 	});
 
@@ -313,7 +320,7 @@ describe("SessionScreen header", () => {
 			Array.from(header.querySelectorAll("button")).map((button) =>
 				button.getAttribute("aria-label"),
 			),
-		).toEqual(["back to sessions", "session menu"]);
+		).toEqual(["Back to conversations", "session menu"]);
 		/* The removed controls stay removed: the star pinned, `? N` duplicated the
 		   dock, and `[wide]` was an unlabelled bordered toggle. */
 		expect(screen.queryByRole("button", { name: "wide view" })).toBeNull();
@@ -337,8 +344,8 @@ describe("SessionScreen header", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 		const needs = screen.getByRole("button", {
-			name: "needs you — approvals in this session",
+			name: "Approve — a request is waiting for you",
 		});
-		expect(needs.textContent).toBe("needs you");
+		expect(needs.textContent).toBe("Approve");
 	});
 });

@@ -38,7 +38,8 @@ describe("past sessions entry point", () => {
 	it("navigates to the past sessions route from the list footer", () => {
 		render(<SessionListScreen />);
 
-		const entry = screen.getByRole("button", { name: "past" });
+		fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+		const entry = screen.getByRole("link", { name: "Past sessions" });
 		fireEvent.click(entry);
 
 		expect(window.location.hash).toBe("#/past");

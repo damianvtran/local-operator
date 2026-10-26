@@ -228,14 +228,42 @@ and idle residency). Startup handoff remains separately bounded at sixty
 seconds; session moves still use the existing viewer for `retire_if_pristine`,
 so the relay never counts its own second connection against the move.
 
+**Borderless phone chrome** follows
+[`docs/design/mobile-relay-redesign.md`](design/mobile-relay-redesign.md): the
+52 px list app bar plus 40 px filter strip replace the persistent footer;
+Conversations, Questions, Past sessions, Projects, Library (capability-gated),
+Usage, Appearance and Settings live in the navigation drawer. New is a
+thumb-zone FAB; search expands in the bar. Appearance holds the persisted
+wide-view and group-by-tag preferences. Every row has a visible More action
+as well as its long-press and keyboard context-menu paths.
+
+The session keeps conversation space for conversation: a two-line liveness
+header replaces the separate status/working bands, a single status tray opens
+asks/tasks/agents in in-flow sheets, and the composer is one elevated object
+(field plus action/meta row). Directory, model/effort and spend/context keep
+labelled tap paths. Pending decision cards and ask auto-open policy retain
+their routing/lifetime rules. The ended/degraded banner takes the tray slot
+above the composer instead of overlaying transcript rows; offline state is a
+quiet subtitle reading the store’s `connected` flag with no extra grace.
+The transcript’s `topInset` contract remains available for overlays in other
+views, while this root view needs zero inset because it paints no health
+banner over the conversation. Scroll-follow and pending echoes are unchanged.
+
+New/changed copy is isolated in `relay.chrome`; old English values stay intact.
+Scroll edges use 24 px scroll-linked fades (zero at unclipped edges), with
+measured-bottom fallback where scroll timelines are unsupported. Sheet and
+drawer share focus trapping, inert background and opener restoration without
+portals; sheets remain visual-viewport anchored and add a decorative grabber
+with downward drag dismissal. All fields retain the 16 px focus-zoom floor.
+
 Screens, following branding.md §7's agent-output hierarchy:
 
 - **Login** — minimal, brand mark, password field, 16 px inputs.
-- **Session list** — one card per session: name, cwd, model label, streaming
-  shimmer, needs-attention badge (approval/ask pending), running-subagent
-  chip. New-session button with a cwd picker (home + recents). While any
-  conversation is unread, a **mark all as read** control rides above the
-  sections and clears the pile in one write (`POST /api/attention/seen`),
+- **Session list** — one fixed-minimum-height row per session: name, compact
+  tag/state/task/agent metadata and last folder segment (not an absolute path
+  or repeated model label). New starts directly with the daemon-resolved
+  directory. With the Unread filter selected, **Mark all read** rides above
+  its sections and clears the pile in one write (`POST /api/attention/seen`),
   answering the store's per-item verdicts.
 
   Rows are drawn in the SAME order the terminal sidebar and the desktop app use:
@@ -253,7 +281,7 @@ Screens, following branding.md §7's agent-output hierarchy:
   discovered is ranked as a live `idle` row so it lands in Active at once — the
   sidebar has no equivalent window, so no equivalent tier). The screen only
   GROUPS what it is sent:
-  **★ Pinned**, **Active Sessions**, **Previous Sessions**.
+  **Pinned**, **Active**, **Previous**.
 
   A conversation is pinned with a long-press on its row or from the ☆/★ control
   in the session view's header; either way the row ends up under **★ Pinned**,

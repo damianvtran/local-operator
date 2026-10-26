@@ -1,3 +1,4 @@
+import { useScrollCues } from "../lib/use-scroll-cues";
 /**
  * The transcript: user bubbles, assistant prose (markdown), one-line tool
  * rows, quiet notices and compaction markers. Rendered as a tail window of
@@ -135,7 +136,7 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			const images = entry.images ?? [];
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md bg-surface px-3 py-1.5">
 						{/* Attachments render inline like the TUI's image block: the
 						   picture the user sent is part of the turn, not a stripped
 						   "[image attached]" note. AttachmentImage owns the loading
@@ -178,16 +179,16 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			// The child launch/user task also uses this kind during loading/error.
 			// Without producer facts it is a visible request boundary, not hub traffic.
 			if (!isHubReceipt(entry)) return entry.kind === "parent_message" ? (
-				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
+				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
 			) : (
-				<div className="min-w-0 rounded-sm border-l-2 border-l-hairline pl-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
+				<div className="min-w-0 rounded-sm border-s-2 border-s-hairline ps-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
 			);
-			// A receipt is internal traffic, not a right-aligned human turn. Reuse
+			// A receipt is internal traffic, not a end-aligned human turn. Reuse
 			// the existing disclosure so the full body remains reachable on demand.
 			const label = hubReceiptLabel(entry);
 			const intent = [entry.details?.expects_reply === true ? "Reply requested" : "", entry.details?.steer === true ? "Steered" : ""].filter(Boolean);
 			return <Disclosure header={<span className="text-meta text-ink-dim">Hub · From {label}{intent.length ? ` · ${intent.join(" · ")}` : ""}</span>}>
-				<div className="flex flex-col gap-2 pl-3">
+				<div className="flex flex-col gap-2 ps-3">
 					<p className="text-meta text-ink-muted">{label}{entry.details?.direction ? ` · ${entry.details.direction}` : ""}{entry.details?.job_id && entry.details?.label ? ` · Job ${entry.details.job_id}` : ""}</p>
 					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{typeof entry.details?.body === "string" ? entry.details.body : entry.text}</p>
 					{media}
@@ -207,7 +208,7 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			if (sender.model_label) parts.push(sender.model_label);
 			const label = parts.length > 0 ? parts.join(" · ") : "Peer session";
 			return (
-				<div className="min-w-0 rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+				<div className="min-w-0 rounded-md bg-surface px-3 py-1.5">
 					<span className="block text-meta text-ink-dim">↔ {label}</span>
 					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
 				</div>
@@ -307,7 +308,7 @@ function PendingEchoRow({ echo, streaming }: { echo: PendingEcho; streaming: boo
 				   accent leading edge and with `text-ink-muted` in place of the settled
 				   row's full ink. Its `gap-1.5` is the settled bubble's gap, matched
 				   rather than harmonised to the 4px ramp, so the two agree (design D5). */
-				<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-body">
+				<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md bg-surface px-3 py-1.5 text-body">
 					{attachments}
 					{echo.text ? (
 						<div className="leading-normal break-words whitespace-pre-wrap text-ink-muted">
@@ -473,6 +474,7 @@ export function Transcript({
 	const [hasMore, setHasMore] = useState(true);
 	const [loadingOlder, setLoadingOlder] = useState(false);
 	const scrollRef = useRef<HTMLDivElement>(null);
+	const scrollCue = useScrollCues();
 	const pinnedRef = useRef(true);
 	/* Auto-load trigger guard: one in-flight page at a time. */
 	const loadingRef = useRef(false);
@@ -773,13 +775,13 @@ export function Transcript({
 
 	return (
 		<div
-			ref={scrollRef}
+			ref={node => { scrollRef.current = node; return scrollCue(node); }}
 			onScroll={onScroll}
 			className={cn(
 				/* overflow-x-hidden as the backstop: break-words on the rows should
 				   wrap everything, but a table or pre that still overflows scrolls
 				   INSIDE itself, never the whole chat sideways. */
-				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
+				"lo-scroll lo-fade-y flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
 				/* ONE HAND ON `scrollTop` (round 3; extended in round 4). The reserve,
 				   the live window's oldest-row removal at the cap, a prepended page and
 				   the window's own expansion are all "height above the reader" — and

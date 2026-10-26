@@ -1,0 +1,187 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<title>Isolated relay showcase</title>
+<style>body{margin:0;padding:8px;background:#ddd;font:14px system-ui}header{display:flex;gap:12px;align-items:center;margin-bottom:8px}pre{position:absolute;inset-inline-start:420px;top:50px;max-width:700px;white-space:pre-wrap}iframe{display:block;border:0;width:390px;height:844px}label{display:flex;gap:4px}</style>
+<header><label>Phone <select id="phone"><option>390x844</option><option>360x780</option><option>320x568</option><option>844x390</option></select></label>
+<label>Theme <select id="theme"><option value="localOperatorDark">Dark</option><option value="localOperatorLight">Light</option></select></label>
+<button id="phone390" onclick="document.querySelector('#phone').value='390x844';setup()">390 phone</button>
+<button id="phone360" onclick="document.querySelector('#phone').value='360x780';setup()">360 phone</button>
+<button id="phone320" onclick="document.querySelector('#phone').value='320x568';setup()">320 phone</button>
+<button id="phonelandscape" onclick="document.querySelector('#phone').value='844x390';setup()">Landscape</button>
+<button id="dark" onclick="document.querySelector('#theme').value='localOperatorDark';setup()">Dark theme</button>
+<button id="light" onclick="document.querySelector('#theme').value='localOperatorLight';setup()">Light theme</button>
+<label><input id="rtl" type="checkbox">Force RTL</label><a href="/showcase">Reset</a>
+<label>State <input id="state" value="list-populated"></label><button id="audit">Audit</button><button id="sweep" title="Fixture-only: step the container 1 px at a time across the band a fit verdict can get wrong, and report at every step the rendered overflow, the form chosen and a second sample 300 ms later (identical form and no overflow at every width is the pass)">Sweep 310-330</button><button id="mincontent" title="Fixture-only: report the band table's RENDERED min-content width, the per-cell padding/border/font the engine uses, and the same totals the component's helpers would compute, so a fit verdict can be checked against the engine rather than against an estimate">Measure min-content</button><button id="bandcheck" title="Fixture-only: report the band table's min-content width at the cell font and at the inherited font, the form the component chose, and whether that form survives 3 s of width oscillation">Check table band</button><button id="reveal" title="Fixture-only: scroll the phone's conversation so its code block and table are on screen (the capture tool cannot scroll inside a frame)">Reveal code</button></header><pre id="result"></pre><pre id="framebox" aria-hidden="true"></pre>
+<iframe title="Phone relay" id="phone-relay" src="/"></iframe>
+<script src="/showcase/metrics.js"></script><script>
+const frame=document.querySelector('iframe');
+/* The phone's CSS box, published so a capture can crop exactly the phone instead
+   of guessing where it sits (a 390-tall landscape phone leaves the page shorter
+   than the window, so "crop from the image bottom" is the wrong anchor). */
+function publishFrameBox(){const r=frame.getBoundingClientRect();document.querySelector('#framebox').textContent=JSON.stringify([Math.round(r.left),Math.round(r.top+scrollY),Math.round(r.width),Math.round(r.height)]);}
+function setup(){const [w,h]=document.querySelector('#phone').value.split('x');frame.style.width=w+'px';frame.style.height=h+'px';const doc=frame.contentDocument;if(doc){doc.documentElement.dataset.theme=document.querySelector('#theme').value;doc.documentElement.dir=document.querySelector('#rtl').checked?'rtl':'ltr';}publishFrameBox();}
+document.querySelector('#audit').addEventListener('click',async()=>{const data=JSON.parse(window.measureRelay(frame.contentWindow));data.device_pixel_ratio=frame.contentWindow.devicePixelRatio;data.theme=frame.contentDocument.documentElement.dataset.theme;data.direction=frame.contentDocument.documentElement.dir;const result={state:document.querySelector('#state').value,metrics:data};document.querySelector('#result').textContent=JSON.stringify(result);await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(result)});});
+/* THE FLIP-FLOP CHECK (code review round 3, C3-1). Fixture-only: nothing product
+   code reads.
+
+   It reports, as numbers: the band table's min-content total measured at the CELL
+   font (13 px) and at the wrapper's previously-inherited font (14 px), plus the
+   width the table is laid out in — so "this table is inside the band" is checkable
+   rather than asserted. Then, at a FIXED width where those two answers disagree, it
+   samples the rendered form and the wrapper rect every 250 ms for 3 s: one form
+   throughout is the pass (the old code re-decided on a height change the decision
+   itself caused, and could alternate). */
+/* THE 310–330 SWEEP (QA round 4, Q4-1). One pixel at a time across the band where
+   the under-measure showed: at every container width the wrapper must clip nothing
+   (`scrollWidth - clientWidth` 0), must have chosen one form, and must still have
+   that form 300 ms later — a width that fits then clips, or a form that alternates,
+   fails the step. Fixture-only: no product code reads it. */
+document.querySelector('#sweep').addEventListener('click',async()=>{
+  const doc=frame.contentDocument;
+  const find=()=>[...doc.querySelectorAll('[role="table"], table')]
+    .map(el=>el.closest('.lo-table-font')||el)
+    .find(el=>el.textContent.includes('counterreconciliation'));
+  const samples=[];
+  /* frame = container + 37 on this rig (measured), so 347..367 lands the container on 310..330 */
+  for(let frameWidth=347; frameWidth<=367; frameWidth++){
+    frame.style.width=frameWidth+'px';
+    /* settle first: a width change legitimately re-decides, and sampling inside
+       that transition would report the PREVIOUS form against the new container. */
+    await new Promise(r=>setTimeout(r,900));
+    const read=()=>{const node=find(); if(!node) return null; const r=node.getBoundingClientRect();
+      return {form:node.querySelector('table')?'table':'stacked',
+        container:node.clientWidth, content:node.scrollWidth,
+        overflow:Math.max(0,node.scrollWidth-node.clientWidth),
+        rect:[Math.round(r.width),Math.round(r.height)]};};
+    const first=read();
+    await new Promise(r=>setTimeout(r,350));
+    const second=read();
+    await new Promise(r=>setTimeout(r,350));
+    const third=read();
+    /* Three samples after the settle: the width change is allowed ONE transition,
+       and nothing may move after it. */
+    samples.push({frame:frameWidth, container:first&&first.container,
+      form:first&&first.form, overflow:first&&first.overflow,
+      stable:Boolean(first&&second&&third
+        &&first.form===second.form&&second.form===third.form
+        &&first.overflow===second.overflow&&second.overflow===third.overflow),
+      rect:first&&first.rect, secondForm:second&&second.form, thirdForm:third&&third.form});
+  }
+  frame.style.width='390px';
+  const bad=samples.filter(s=>!s.stable||s.overflow>0);
+  document.querySelector('#result').textContent=JSON.stringify({badCount:bad.length, samples});
+  try{
+    await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({state:'sweep',metrics:{viewport:[0,0],theme:'sweep',sweep:samples}})});
+  }catch(error){ /* the on-page result is the record */ }
+});
+/* RENDERED MIN-CONTENT vs THE COMPONENT'S ESTIMATE (QA round 4, Q4-1). The fit
+   verdict is only honest if its number is at least the width the engine needs; this
+   reports both, plus every per-cell quantity that makes up the difference (padding,
+   border, font weight/size), so a fix can be argued from the engine's own numbers.
+   Fixture-only: no product code reads it. */
+document.querySelector('#mincontent').addEventListener('click',async()=>{
+  const doc=frame.contentDocument;
+  const wrapper=[...doc.querySelectorAll('[role="table"], table')]
+    .map(el=>el.closest('.lo-table-font')||el)
+    .find(el=>el.textContent.includes('counterreconciliation'));
+  if(!wrapper){document.querySelector('#result').textContent='{"mincontent":"table not found"}';return;}
+  const probe=doc.createElement('canvas').getContext('2d');
+  const row=wrapper.querySelector('[role="row"]')||wrapper.querySelector('tr');
+  const cells=row?[...row.children]:[];
+  const th=wrapper.querySelector('th')||cells[0];
+  const td=wrapper.querySelector('td')||cells[cells.length-1];
+  const pick=(el)=>{const st=frame.contentWindow.getComputedStyle(el);return {
+    font:st.font||`${st.fontSize} ${st.fontFamily}`, weight:st.fontWeight, size:st.fontSize,
+    padL:parseFloat(st.paddingLeft)||0, padR:parseFloat(st.paddingRight)||0,
+    borL:parseFloat(st.borderLeftWidth)||0, borR:parseFloat(st.borderRightWidth)||0};};
+  const thS=pick(th), tdS=pick(td);
+  const wrapS=frame.contentWindow.getComputedStyle(wrapper);
+  /* the ENGINE's answer: a detached clone told to be as narrow as its content */
+  const holder=doc.createElement('div');
+  holder.style.cssText='position:absolute;left:-9999px;top:0;width:min-content';
+  const clone=wrapper.cloneNode(true);
+  clone.style.maxWidth='none'; clone.style.width='auto';
+  holder.appendChild(clone); doc.body.appendChild(holder);
+  const tableEl=clone.querySelector('table');
+  if(tableEl){tableEl.style.width='min-content';}
+  const renderedMin = clone.getBoundingClientRect().width;
+  holder.remove();
+  /* the component's helpers: ceil(longest word) + per-column overhead */
+  const words=(el)=>[...el.children].flatMap(c=>c.textContent.replace(/:$/,'').split(/\s+/)).filter(Boolean);
+  const perColumn=(st, overhead)=>{probe.font=st.font;const widths=cells.map(c=>{
+    const own=[...c.textContent.replace(/:$/,'').split(/\s+/).filter(Boolean)];
+    const w=Math.max(0,...own.map(x=>probe.measureText(x).width));
+    return Math.ceil(w)+overhead;});return {widths,total:widths.reduce((a,b)=>a+b,0)+2};};
+  const out={
+    renderedMinContent:+renderedMin.toFixed(1),
+    columns:cells.length,
+    th:thS, td:tdS,
+    wrapper:{padL:parseFloat(wrapS.paddingLeft)||0, borL:parseFloat(wrapS.borderLeftWidth)||0, borR:parseFloat(wrapS.borderRightWidth)||0},
+    estimateAtThFont_16:perColumn(thS,16),
+    estimateAtTdFont_16:perColumn(tdS,16),
+    estimateAtThFont_cellBox:perColumn(thS, thS.padL+thS.padR+thS.borL+thS.borR),
+    /* the total the component SHOULD compare against `available`: its columns at the
+       cell box plus the wrapper's own inline border (border-box vs content-box). */
+    estimatePlusWrapperBorder:(()=>{const base=perColumn(thS, thS.padL+thS.padR+thS.borL+thS.borR);
+      return {total:base.total+((parseFloat(wrapS.borderLeftWidth)||0)+(parseFloat(wrapS.borderRightWidth)||0))*2};})(),
+  };
+  document.querySelector('#result').textContent=JSON.stringify(out);
+});
+document.querySelector('#bandcheck').addEventListener('click',async()=>{
+  const doc=frame.contentDocument, win=frame.contentWindow;
+  const findWrapper=()=>[...doc.querySelectorAll('[role="table"], table')]
+    .map(el=>el.closest('.lo-table-font')||el)
+    .find(el=>el.textContent.includes('counterreconciliation'));
+  const wrapper=findWrapper();
+  if(!wrapper){document.querySelector('#result').textContent='{"band":"table not found"}';return;}
+  const probe=doc.createElement('canvas').getContext('2d');
+  const cellsOf=(node)=>{
+    const row=node.querySelector('[role="row"]')||node.querySelector('tr');
+    return row?[...row.children]:[];
+  };
+  const total=(node,px)=>{
+    const cells=cellsOf(node);
+    if(!cells.length) return null;
+    const st=win.getComputedStyle(cells[0]);
+    probe.font=`${st.fontWeight} ${px}px ${st.fontFamily}`;
+    const widths=cells.map(c=>Math.ceil(Math.max(0,...c.textContent.replace(/:$/,'').split(/\s+/)
+      .filter(Boolean).map(w=>probe.measureText(w).width)))+16);
+    return {widths, total:widths.reduce((a,b)=>a+b,0)+2};
+  };
+  /* Freeze the width where the two candidate fonts disagree (295 px = a 320 phone's
+     wrapper), so a change of form cannot be a legitimate width re-decision. */
+  /* 372 px of iframe = a 337 px wrapper: between this table's 13 px total (326)
+     and its 14 px total (346), i.e. inside the band the wrong font decided. */
+  frame.style.width='372px';
+  await new Promise(r=>setTimeout(r,1200));
+  const node=findWrapper();
+  const at13=total(node,13), at14=total(node,14);
+  const samples=[];
+  for(let i=0;i<12;i++){
+    const current=findWrapper();
+    const r=current.getBoundingClientRect();
+    samples.push({t:i*250, form:current.querySelector('table')?'table':'stacked',
+      rect:[Math.round(r.width),Math.round(r.height)]});
+    await new Promise(res=>setTimeout(res,250));
+  }
+  const out={available:Math.round(findWrapper().getBoundingClientRect().width),
+    totalAt13px:at13&&at13.total, totalAt14px:at14&&at14.total,
+    widthsAt13px:at13&&at13.widths,
+    band:Boolean(at13&&at14&&at14.total>out_width&&at13.total<=out_width),
+    finalForm:findWrapper().querySelector('table')?'table':'stacked',
+    formsSeen:[...new Set(samples.map(x=>x.form))], sampleCount:samples.length, samples};
+  var out_width=Math.round(findWrapper().getBoundingClientRect().width);
+  out.band=Boolean(at13&&at14&&at14.total>out_width&&at13.total<=out_width);
+  document.querySelector('#result').textContent=JSON.stringify(out);
+  /* Stow the numbers with the page's own evidence, under the SAME shape the audit
+     uses, so a band check cannot need a second POST contract (a body without
+     `metrics` used to kill the fixture). */
+  try{
+    await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({state:document.querySelector('#state').value+'band',metrics:{
+        viewport:[out.available,out.available],theme:'band',band:out}})});
+  }catch(error){ /* evidence is best-effort: the on-page result is the record */ }
+});
+document.querySelector('#reveal').addEventListener('click',()=>{const pre=frame.contentDocument.querySelector('pre');if(pre)pre.scrollIntoView({block:'start'});});
+frame.addEventListener('load',setup);document.querySelectorAll('#phone,#theme,#rtl').forEach(el=>el.addEventListener('change',setup));
+</script></html>

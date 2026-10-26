@@ -42,6 +42,20 @@ afterEach(() => {
 	document.documentElement.dir = "ltr";
 });
 
+/** The section headings the drawer's list view actually renders now. */
+const CHROME = {
+	"relay.chrome.list.section.active": "Active",
+	"relay.chrome.list.section.previous": "Previous",
+} as const;
+
+describe("relay.chrome section copy the redesign renders", () => {
+	it("paints the sentence-case English the sections use", () => {
+		for (const [key, text] of Object.entries(CHROME)) {
+			expect(messageRuntime.t(key as keyof typeof CHROME)).toBe(text);
+		}
+	});
+});
+
 describe("relay.shell extraction", () => {
 	it("renders byte-identical English for every owned shell key", () => {
 		for (const [key, text] of Object.entries(BEFORE)) {

@@ -62,7 +62,7 @@ function summary(over: Partial<SessionSummary>): SessionSummary {
 }
 
 function cardByName(name: string): HTMLElement {
-	const card = [...document.querySelectorAll("main button")].find((el) =>
+	const card = [...document.querySelectorAll('main button[aria-haspopup="dialog"]')].find((el) =>
 		(el.textContent ?? "").includes(name),
 	);
 	if (!card) throw new Error(`no card named ${name}`);
@@ -173,7 +173,7 @@ describe("the settle's own window", () => {
 		];
 		const view = render(<SessionListScreen />);
 		const order = () =>
-			[...document.querySelectorAll("main button")].map((el) =>
+			[...document.querySelectorAll('main button[aria-haspopup="dialog"]')].map((el) =>
 				(el.textContent ?? "").includes("Alpha") ? "Alpha" : "Beta",
 			);
 		expect(order()).toEqual(["Alpha", "Beta"]);
@@ -276,7 +276,7 @@ describe("the settle's own window", () => {
 		];
 		const view = render(<SessionListScreen />);
 		const order = () =>
-			[...document.querySelectorAll("main button")].map((el) =>
+			[...document.querySelectorAll('main button[aria-haspopup="dialog"]')].map((el) =>
 				(el.textContent ?? "").includes("Alpha")
 					? "Alpha"
 					: (el.textContent ?? "").includes("Beta")

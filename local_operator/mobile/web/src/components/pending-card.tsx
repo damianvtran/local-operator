@@ -425,7 +425,7 @@ export function PendingCard({
 			   664 in a 568 column). The `max-height` above still caps it on
 			   tall columns — the two bounds compose (cap when there is room,
 			   shrink when there is not), which neither bound alone does. */
-			className="border-accent bg-accent-wash mx-2 flex min-h-0 flex-col rounded-md border p-2.5"
+			className="mx-2 flex min-h-0 flex-col rounded-lg border-s-[3px] border-accent bg-elevated p-2.5"
 		>
 			{/* PINNED meta row (D2). One line, fixed height, cannot outgrow
 			    anything — so pinning it costs no reachability while keeping the
@@ -525,7 +525,7 @@ export function PendingCard({
 								   error is shown, so a stale option stops reading as
 								   live under the message (D7). */
 								className={cn(
-									"flex min-h-11 flex-col justify-center rounded-sm border border-l-2 border-control border-l-accent bg-elevated px-3 py-2 text-left active:bg-accent-wash disabled:opacity-50",
+									"flex min-h-11 flex-col justify-center rounded-sm bg-surface px-3 py-2 text-start active:bg-accent-wash disabled:opacity-50",
 								)}
 							>
 								<span className="text-body-sm font-medium text-ink">
@@ -551,20 +551,20 @@ export function PendingCard({
 			    landed ~26px below the fold because it is appended below wherever
 			    the user is standing.
 
-			    `pr-1.5` keeps the rows clear of the overlay scrollbar's paint band
+			    `pe-1.5` keeps the rows clear of the overlay scrollbar's paint band
 			    (D3): the thumb has no layout width, so it painted over the right
 			    edge of `deny` and `send` at `gapToContentEdge = 0`. Only the
 			    control rows carry it — over prose the overlay behaviour is the
 			    app-wide `lo-scroll` idiom and was ruled acceptable, and a gutter
 			    would cost 4px of line length on every card at 360px. */}
 			{pending.kind === "approval" ? (
-				<div className="mt-2 flex shrink-0 flex-col gap-2 pr-1.5">
+				<div className="mt-2 flex shrink-0 flex-col gap-2 pe-1.5">
 					<label className="flex min-h-11 items-center gap-2 text-body-sm text-ink-muted select-none">
 						<input
 							type="checkbox"
 							checked={remember}
 							onChange={(e) => setRemember(e.target.checked)}
-							className="size-4 accent-accent"
+							className="size-5 accent-accent"
 						/>
 						{messageRuntime.t("relay.asks.pending.remember")}
 					</label>
@@ -581,7 +581,7 @@ export function PendingCard({
 							type="button"
 							disabled={busy}
 							onClick={() => approve(false)}
-							className="flex min-h-11 flex-1 items-center justify-center rounded-sm border border-danger-border bg-danger-wash text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
+							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-danger-wash text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
 						>
 							{busy ? "…" : messageRuntime.t("relay.asks.pending.deny")}
 						</button>
@@ -656,7 +656,7 @@ export function PendingCard({
 				   second divider idiom next to the approval's row is the
 				   competing-patterns bug, and a warning about a credential is one
 				   a user should read BEFORE pasting it, not after. */
-				<div className="mt-2 flex shrink-0 flex-col gap-2 pr-1.5">
+				<div className="mt-2 flex shrink-0 flex-col gap-2 pe-1.5">
 					{pending.secret ? (
 						<p className="text-meta text-ink-dim">
 							{messageRuntime.t("relay.asks.card.secret_notice")}
@@ -683,7 +683,7 @@ export function PendingCard({
 									? messageRuntime.t("relay.asks.card.placeholder_secret")
 									: messageRuntime.t("relay.asks.card.placeholder_answer")
 							}
-							className="min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+							className="min-h-11 min-w-0 flex-1 rounded-sm  bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 						/>
 						<button
 							type="button"
@@ -698,7 +698,7 @@ export function PendingCard({
 			) : null}
 
 			{error ? (
-				<p className="mt-1 shrink-0 pr-1.5 text-body-sm text-danger">{error}</p>
+				<p className="mt-1 shrink-0 pe-1.5 text-body-sm text-danger">{error}</p>
 			) : null}
 			</div>
 		</>

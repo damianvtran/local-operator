@@ -72,7 +72,7 @@ export function AgentRow({
 					`/s/${encodeURIComponent(sessionId)}/a/${encodeURIComponent(agent.job_id)}`,
 				);
 			}}
-			className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-left active:bg-elevated"
+			className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-start active:bg-elevated"
 		>
 			<span
 				className={cn(
@@ -126,6 +126,7 @@ export function AgentRoster({
 	embedded = false,
 	label = "subagents",
 	forceCollapsed = false,
+	sheet = false,
 }: {
 	sessionId: string;
 	subagents: SubagentRow[];
@@ -135,6 +136,7 @@ export function AgentRoster({
 	/** Collapse and refuse to expand while something needs a decision — see
 	    the session view's panel-budget comment (D1). */
 	forceCollapsed?: boolean;
+	sheet?: boolean;
 }) {
 	const direct = subagents.filter((agent) => agent.parent_job_id === parentJobId);
 	/* The body's own scroll offset, kept OUTSIDE the collapsed body. `Disclosure`
@@ -158,6 +160,7 @@ export function AgentRoster({
 	);
 	return (
 		<Disclosure
+			bodyOnly={sheet}
 			/* Collapsed by default, including when agents are running: see the
 			   module docstring. `running > 0` opened the roster on arrival for
 			   every coordinating session. */
@@ -280,7 +283,7 @@ export function AgentRoster({
 				onScroll={() => {
 					scrollTopRef.current = bodyRef.current?.scrollTop ?? 0;
 				}}
-				style={columnCap(PANEL_FRACTION)}
+				style={sheet ? undefined : columnCap(PANEL_FRACTION)}
 				className="lo-scroll overflow-y-auto"
 			>
 				{rows}
@@ -294,10 +297,12 @@ export function SubagentsPanel({
 	subagents,
 	pid = "",
 	forceCollapsed = false,
+	sheet = false,
 }: {
 	subagents: SubagentRow[];
 	pid?: string;
 	forceCollapsed?: boolean;
+	sheet?: boolean;
 }) {
 	return (
 		<AgentRoster
@@ -305,6 +310,7 @@ export function SubagentsPanel({
 			subagents={subagents}
 			parentJobId={null}
 			forceCollapsed={forceCollapsed}
+			sheet={sheet}
 		/>
 	);
 }

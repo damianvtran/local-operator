@@ -278,7 +278,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 					<p role="alert" className="text-center text-body-sm text-danger">
 						{error || "Asset not found."}
 					</p>
-					<Button variant="outline" onClick={() => void load(assetId)}>
+					<Button variant="tonal" onClick={() => void load(assetId)}>
 						Try again
 					</Button>
 				</div>
@@ -358,7 +358,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 								key={`${occurrence.session_id}:${occurrence.child_id ?? ""}`}
 								type="button"
 								onClick={() => navigate(`/s/${encodeURIComponent(occurrence.session_id)}`)}
-								className="flex min-h-11 items-center justify-between gap-2 rounded-sm border border-hairline bg-surface px-2 text-left active:bg-elevated"
+								className="flex min-h-11 items-center justify-between gap-2 rounded-sm border border-hairline bg-surface px-2 text-start active:bg-elevated"
 							>
 								<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
 									{occurrence.session_title || occurrence.session_id}
@@ -373,7 +373,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 					<button
 						type="button"
 						onClick={() => navigate(`/s/${encodeURIComponent(asset.chat?.session_id ?? "")}`)}
-						className="flex min-h-11 items-center gap-2 rounded-sm border border-info-border bg-info-wash px-2 text-left text-body-sm text-info active:bg-elevated"
+						className="flex min-h-11 items-center gap-2 rounded-sm border border-info-border bg-info-wash px-2 text-start text-body-sm text-info active:bg-elevated"
 					>
 						<span aria-hidden>↳</span>
 						<span className="min-w-0 flex-1 truncate">
