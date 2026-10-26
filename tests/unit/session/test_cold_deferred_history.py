@@ -249,6 +249,7 @@ async def test_the_record_carries_no_message_list(
         "order",
         "seed_usage",
         "bytes_read",
+        "selection",
     }
     assert "question 0" not in json.dumps(payload), "no message text may be stored"
     assert payload["witness"]["through_id"] is None
@@ -840,5 +841,368 @@ async def test_a_warm_record_is_a_miss_once_the_journal_is_archived(
         assert again._deferred_history is not None, "the restored version hits its own record"
         await again.hydrate_deferred_history()
         assert [m.id for m in again.history()] == expected_rows
+    finally:
+        await again.dispose()
+
+
+# --------------------------------------------------------------------------
+# The record's model selection: a HIT skips the selection read, never its answer
+# --------------------------------------------------------------------------
+
+#: A direct-provider pair the SHIPPED registry carries metadata for, so the
+#: resolution is answered from shipped data and never from a listing fetch.
+SELECTED = "deepseek/deepseek-flash"
+
+
+async def _append_selection(
+    config: Path, row: dict[str, Any], kind: str = "selected_model"
+) -> None:
+    await Transcript(_session_dir(config)).append_custom(kind, row)
+
+
+def counting_selection_reads(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Every journal selection read the COLD MODEL RESOLUTION makes in this test.
+
+    Patched where ``cold_model`` looks it up, so the record writer's own read
+    (``replay_cache``) is not counted: the claim is about the open's resolution.
+    """
+    from local_operator.session import cold_model
+
+    calls: list[Path] = []
+    original = cold_model.read_model_selection
+
+    def counted(directory: Path) -> Any:
+        calls.append(directory)
+        return original(directory)
+
+    monkeypatch.setattr(cold_model, "read_model_selection", counted)
+    return calls
+
+
+def _model(facade: AttachedSession) -> FrontendModelSpec:
+    model = facade.frontend_state.selected_model
+    assert model is not None, "a cold frame always carries a model"
+    return model
+
+
+async def _deferred_matches_eager(config: Path) -> AttachedSession:
+    """Open deferred, assert the first frame equals a fresh eager open's; return it."""
+    expected_payload, _rows = await _eager_reference(config)
+    replay_cache.replay_cache().clear()
+    facade = await cold_open(config, deferred=True)
+    assert frontend_payload(facade) == expected_payload
+    return facade
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape", ["no_row", "v2_row", "legacy_row", "checkpoint_row", "unusable_v2_row"]
+)
+async def test_a_hit_resolves_the_model_from_the_record_exactly_as_the_eager_path(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """Every selection shape the fold distinguishes, served from the record.
+
+    The frame must equal the eager build's (model, provider, effort, fast dial,
+    and everything else) AND the open must not have read the journal's selection
+    at all — that skipped read is the whole point of carrying it.
+    """
+    await seed_journal(isolated_config)
+    if shape == "v2_row":
+        await _append_selection(
+            isolated_config, {"version": 2, "selector": SELECTED, "effort": "high", "fast": True}
+        )
+    elif shape == "legacy_row":
+        await _append_selection(isolated_config, {"selector": SELECTED, "effort": "low"})
+    elif shape == "checkpoint_row":
+        state = {"selected_model": {"provider": "deepseek", "model_id": "deepseek-flash"}}
+        await _append_selection(isolated_config, {"state": state}, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    elif shape == "unusable_v2_row":
+        await _append_selection(isolated_config, {"version": 2, "selector": "nope"})
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    stored = json.loads(_record_path(isolated_config).read_text(encoding="utf-8"))
+    assert stored["selection"] is not None, "the eager open records the selection"
+    if shape == "no_row":
+        assert stored["selection"]["value"] is None, "no row is PROVED absence, not unrecorded"
+
+    expected_payload, _rows = await _eager_reference(isolated_config)
+    if shape in ("v2_row", "legacy_row", "checkpoint_row"):
+        assert expected_payload["selected_model"]["model_id"] == "deepseek-flash", "precondition"
+    reads = counting_selection_reads(monkeypatch)
+    replay_cache.replay_cache().clear()
+    facade = await cold_open(isolated_config, deferred=True)
+    try:
+        assert facade._deferred_history is not None, "precondition: a record HIT"
+        assert frontend_payload(facade) == expected_payload
+        assert reads == [], "a HIT must not re-read the journal's selection"
+        # ``_seed_cold_usage``'s fallback reads the selection through the sink.
+        assert facade._deferred_history.selection is not None
+    finally:
+        await facade.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_selection_appended_after_the_record_is_never_hidden_by_it(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HIT, then a ``selected_model`` append: the next open MISSES and shows it.
+
+    The record's witness is the journal's stat tuple, and an append moves the
+    size, so the stored "no selection" answer cannot outlive the row that
+    contradicts it.
+    """
+    await seed_journal(isolated_config)
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    replay_cache.replay_cache().clear()
+    hit = await cold_open(isolated_config, deferred=True)
+    try:
+        assert hit._deferred_history is not None, "precondition: a record HIT"
+        assert _model(hit).model_id != "deepseek-flash"
+    finally:
+        await hit.dispose()
+
+    await _append_selection(isolated_config, {"version": 2, "selector": SELECTED, "effort": "max"})
+    reads = counting_selection_reads(monkeypatch)
+    replay_cache.replay_cache().clear()
+    after = await cold_open(isolated_config, deferred=True)
+    try:
+        assert after._deferred_history is None, "the append must turn the record into a MISS"
+        model = _model(after)
+        assert (model.provider, model.model_id) == ("deepseek", "deepseek-flash")
+        assert reads, "the miss resolves the selection from the journal"
+    finally:
+        await after.dispose()
+    # And the rewritten record now carries the NEW answer for the new version.
+    stored = json.loads(_record_path(isolated_config).read_text(encoding="utf-8"))
+    assert stored["selection"]["value"]["model_id"] == "deepseek-flash"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "schema_one",
+        "missing_selection",
+        "wrong_source",
+        "bad_value",
+        "extra_key",
+        "missing_ctime",
+        "corrupt_ctime",
+        "wrong_ctime",
+    ],
+)
+async def test_an_unusable_selection_falls_back_exactly(isolated_config: Path, damage: str) -> None:
+    """A record whose selection or witness this build did not write is a MISS.
+
+    ``schema_one`` is the record an older build wrote: no ``selection`` key and
+    schema 1, refused by the schema check before the field is ever looked at.
+    ``missing_ctime`` is the unreleased schema-2 shape without the ctime stamp:
+    it must MISS rather than hit on the three fields it does carry.
+    """
+    await seed_journal(isolated_config)
+    await _append_selection(isolated_config, {"version": 2, "selector": SELECTED, "effort": "low"})
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    record = _record_path(isolated_config)
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    if damage == "schema_one":
+        payload.pop("selection")
+        payload["schema"] = 1
+    elif damage == "missing_selection":
+        payload.pop("selection")
+    elif damage == "wrong_source":
+        payload["selection"]["source"][1] += 1
+    elif damage == "bad_value":
+        payload["selection"]["value"]["authoritative"] = "yes"
+    elif damage == "extra_key":
+        payload["selection"]["value"]["extra"] = 1
+    elif damage == "missing_ctime":
+        payload["witness"].pop("ctime_ns")
+    elif damage == "corrupt_ctime":
+        payload["witness"]["ctime_ns"] = "now"
+    else:
+        payload["witness"]["ctime_ns"] += 1
+    record.write_text(json.dumps(payload), encoding="utf-8")
+
+    expected_payload, _rows = await _eager_reference(isolated_config)
+    replay_cache.replay_cache().clear()
+    facade = await cold_open(isolated_config, deferred=True)
+    try:
+        assert facade._deferred_history is None, f"{damage} must not defer"
+        assert frontend_payload(facade) == expected_payload
+        assert _model(facade).model_id == "deepseek-flash"
+    finally:
+        await facade.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unrecorded_selection_still_hits_and_reads_the_journal(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``selection: null`` is NOT RECORDED, never "no selection": read the journal."""
+    await seed_journal(isolated_config)
+    await _append_selection(isolated_config, {"version": 2, "selector": SELECTED, "effort": "low"})
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    record = _record_path(isolated_config)
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    payload["selection"] = None
+    record.write_text(json.dumps(payload), encoding="utf-8")
+
+    reads = counting_selection_reads(monkeypatch)
+    facade = await _deferred_matches_eager(isolated_config)
+    try:
+        assert facade._deferred_history is not None, "the rest of the record still hits"
+        assert _model(facade).model_id == "deepseek-flash"
+        assert len(reads) >= 1 and reads[-1].name == SESSION_ID
+    finally:
+        await facade.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_reading_under_other_selection_rules_is_re_read(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider registry that moved since the write invalidates the stored answer.
+
+    Simulated by a record whose ``rules`` fingerprint is not this process's: the
+    open still hits for the other four values, but the selection comes from the
+    journal under THIS build's rules.
+    """
+    await seed_journal(isolated_config)
+    await _append_selection(isolated_config, {"version": 2, "selector": SELECTED, "effort": "low"})
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    record = _record_path(isolated_config)
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    payload["selection"]["rules"] = "0" * 16
+    payload["selection"]["value"] = None  # a stale "absent" this build must not trust
+    record.write_text(json.dumps(payload), encoding="utf-8")
+
+    reads = counting_selection_reads(monkeypatch)
+    facade = await _deferred_matches_eager(isolated_config)
+    try:
+        assert facade._deferred_history is not None
+        assert _model(facade).model_id == "deepseek-flash"
+        assert reads, "a foreign-rules reading is re-read from the journal"
+    finally:
+        await facade.dispose()
+
+
+def test_a_reading_from_another_journal_version_is_not_recorded(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writer files a reading only when its source IS the record's key.
+
+    An append between the replay's key and the writer's selection read leaves
+    the reading describing a newer version; filing it would let a HIT on the
+    older version serve a selection that version does not have.
+    """
+    from local_operator.session.model_selection import SelectionReading
+
+    directory = _session_dir(isolated_config)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    key = replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE,),
+        opportunistic_types=(SESSION_SPEND_CUSTOM_TYPE,),
+    )
+    assert key is not None
+    monkeypatch.setattr(
+        replay_cache,
+        "read_selection_reading",
+        lambda _d: SelectionReading(
+            None, "x", (key.inode, key.size + 1, key.mtime_ns, key.ctime_ns)
+        ),
+    )
+    path = _record_path(isolated_config)
+    replay_cache._record_cold_metadata(path, key, {})
+    assert json.loads(path.read_text(encoding="utf-8"))["selection"] is None
+
+    monkeypatch.setattr(
+        replay_cache,
+        "read_selection_reading",
+        lambda _d: SelectionReading(None, "x", (key.inode, key.size, key.mtime_ns, key.ctime_ns)),
+    )
+    replay_cache._record_cold_metadata(path, key, {})
+    assert json.loads(path.read_text(encoding="utf-8"))["selection"]["value"] is None
+
+
+def _rewrite_in_place_keeping_mtime(journal: Path, old: bytes, new: bytes) -> None:
+    """Rewrite ``old`` to ``new`` (same length) inside ``journal``, mtime restored.
+
+    The shape a stat-tuple witness without ctime cannot see: same inode, same
+    size, same mtime — only the bytes and the inode change time moved. It is
+    what ``Transcript._write_entries``' ``preserve_mtime`` makes possible for its
+    own bookkeeping, done here to a selection row to prove the stale-model case.
+    """
+    import os
+    import time
+
+    assert len(old) == len(new), "the rewrite must keep the size"
+    before = journal.stat()
+    data = journal.read_bytes()
+    assert data.count(old) == 1, "the fixture must name the row exactly once"
+    # A ctime that ticks within the clock's resolution would make this test
+    # depend on luck; let it advance first.
+    time.sleep(0.01)
+    with journal.open("r+b") as handle:
+        handle.seek(data.index(old))
+        handle.write(new)
+    os.utime(journal, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = journal.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ), "precondition: the three pre-ctime witness fields are unchanged"
+    assert after.st_ctime_ns != before.st_ctime_ns, "precondition: ctime moved"
+
+
+@pytest.mark.asyncio
+async def test_a_same_size_rewrite_with_mtime_restored_is_a_miss(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's repro: HIT, interior rewrite of the selection, mtime restored.
+
+    Without ctime in the witness the next open HIT and served the OLD model from
+    the record. With it, the open MISSES and resolves the rewritten selection —
+    exactly what an eager open of the same bytes resolves.
+    """
+    directory = await seed_journal(isolated_config)
+    # Two effort spellings of equal length, so the rewrite keeps the size.
+    await _append_selection(isolated_config, {"version": 2, "selector": SELECTED, "effort": "low"})
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    replay_cache.replay_cache().clear()
+    hit = await cold_open(isolated_config, deferred=True)
+    try:
+        assert hit._deferred_history is not None, "precondition: a record HIT"
+        assert _model(hit).reasoning_effort == "low"
+    finally:
+        await hit.dispose()
+
+    _rewrite_in_place_keeping_mtime(
+        directory / "transcript.jsonl", b'"effort":"low"', b'"effort":"max"'
+    )
+    replay_cache.replay_cache().clear()
+    reads = counting_selection_reads(monkeypatch)
+    after = await cold_open(isolated_config, deferred=True)
+    try:
+        assert after._deferred_history is None, "a same-size rewrite must not HIT"
+        assert _model(after).reasoning_effort == "max", "the rewritten selection is served"
+        assert reads, "the miss resolves the selection from the journal"
+    finally:
+        await after.dispose()
+    expected_payload, _rows = await _eager_reference(isolated_config)
+    replay_cache.replay_cache().clear()
+    again = await cold_open(isolated_config, deferred=True)
+    try:
+        assert again._deferred_history is not None, "the rewrite re-recorded the new version"
+        assert frontend_payload(again) == expected_payload
     finally:
         await again.dispose()

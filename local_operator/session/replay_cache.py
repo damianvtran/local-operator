@@ -81,6 +81,10 @@ from local_operator.session.cold_metadata import (
     write_cold_metadata,
 )
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+from local_operator.session.model_selection import (
+    SelectionReading,
+    read_selection_reading,
+)
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import (
@@ -126,6 +130,14 @@ class ReplayKey:
     inode: int
     size: int
     mtime_ns: int
+    #: The inode CHANGE time. ``mtime`` is not enough on its own: the journal
+    #: writer restores mtime after a bookkeeping batch (``preserve_mtime``), so
+    #: a same-size interior rewrite with a restored mtime would leave the other
+    #: three fields equal. ``st_ctime_ns`` moves on every data or metadata write
+    #: and no unprivileged process can set it back, which is why the selection
+    #: ledger (``tail_anchor``) already validates on it. Part of equality, so the
+    #: post-read re-stat below also refuses a read the file changed under.
+    ctime_ns: int
     through_id: str | None
     #: Whether an absent ``through_id`` is an error (the negotiated cut) or a
     #: legacy fallback. Part of the REQUEST rather than the file: the same bytes
@@ -258,6 +270,7 @@ def replay_key(
         inode=stat.st_ino,
         size=stat.st_size,
         mtime_ns=stat.st_mtime_ns,
+        ctime_ns=stat.st_ctime_ns,
         through_id=through_id,
         strict_cut=strict_cut,
         checkpoint_types=_normalised(checkpoint_types),
@@ -432,11 +445,38 @@ def _record_cold_metadata(path: Path | None, key: "ReplayKey", values: dict[str,
     preheat that wanted no custom rows -- is a request no cold open makes, so a
     record written for it could only sit on disk unread and push the record a
     cold open does use out of its single slot.
+
+    THE MODEL SELECTION RIDES ALONG (``ColdMetadata.selection``), read HERE
+    rather than handed in by a caller, for two reasons. Every writer gets it —
+    the eager cold open AND the startup prewarm, whose records would otherwise
+    never carry one and so never spare their first open the selection scan. And
+    it costs the eager open nothing: ``read_model_selection`` is stat-memoised,
+    and the cold model resolution read this same journal version moments ago, so
+    this is a memo hit there; on the prewarm it is a background scan.
+
+    FILED ONLY WHEN THE READING'S SOURCE IS THIS KEY'S JOURNAL VERSION. The
+    reading is a separate read from this replay; an append between the two leaves
+    them describing different versions, and storing it under this key would let a
+    later HIT serve a selection the journal no longer has. Anything else is stored
+    as "not recorded", which costs the next open one selection read and no more.
     """
     if path is None:
         return
     if key.through_id is not None or key.strict_cut or not key.checkpoint_types:
         return
+    selection: SelectionReading | None
+    try:
+        selection = read_selection_reading(Path(key.directory))
+    except Exception:  # noqa: BLE001 — write-behind: a failed read is "not recorded"
+        logger.debug("cold metadata: selection not recorded", exc_info=True)
+        selection = None
+    if selection is not None and selection.source != (
+        key.inode,
+        key.size,
+        key.mtime_ns,
+        key.ctime_ns,
+    ):
+        selection = None
     write_cold_metadata(
         path,
         ColdMetadata(
@@ -446,6 +486,7 @@ def _record_cold_metadata(path: Path | None, key: "ReplayKey", values: dict[str,
             order=values.get("order") or {},
             seed_usage=values.get("seed_usage"),
             bytes_read=int(values.get("bytes_read") or 0),
+            selection=selection,
         ),
     )
 

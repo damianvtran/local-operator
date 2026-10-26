@@ -120,7 +120,10 @@ from local_operator.session.frontend_state import (
     effective_identity_for,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
-from local_operator.session.model_selection import StoredModelSelection
+from local_operator.session.model_selection import (
+    SelectionReading,
+    StoredModelSelection,
+)
 from local_operator.session.naming import ConversationName
 
 #: The mesh's ONE injection point into this facade (§3.1). Imported from
@@ -1062,11 +1065,14 @@ class _DeferredHistory:
     cancel the read the bind behind it is waiting on.
     """
 
-    __slots__ = ("witness", "task")
+    __slots__ = ("witness", "task", "selection")
 
-    def __init__(self, witness: "ReplayKey") -> None:
+    def __init__(self, witness: "ReplayKey", selection: "SelectionReading | None" = None) -> None:
         self.witness = witness
         self.task: "asyncio.Task[None] | None" = None
+        #: The record's model-selection reading for ``witness``'s version, or
+        #: ``None`` when the record carried none (see ``ColdMetadata.selection``).
+        self.selection = selection
 
 
 class AttachedSession:
@@ -1936,14 +1942,28 @@ class AttachedSession:
         self._can_go_cold = True
         self._birth_model = initial_model
         self._model_selection_override = model_selection_override
-        state = await self._synthesise_cold_state(cwd)
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
         # ``has_transcript``: a compressed session has a history to paint, and
         # the plain name would open it as an empty conversation.
         from local_operator.session import compression as _compression
 
-        if _compression.has_transcript(config_dir / "sessions" / session_id):
+        has_transcript = _compression.has_transcript(config_dir / "sessions" / session_id)
+        # THE DEFERRED RECORD IS READ BEFORE THE SYNTHESIS, so a HIT can hand the
+        # model resolution the journal's selection the record already proved
+        # (``ColdMetadata.selection``) instead of re-scanning the journal for it —
+        # the largest CPU cost a warm deferred open had left. Safe to move: the
+        # synthesis reads config, the wakes/monitors indexes and the selection,
+        # none of which the record restore touches, and the record restore reads
+        # nothing the synthesis writes. The eager path (every other caller) keeps
+        # today's order and reads, byte for byte.
+        if has_transcript and deferred_history:
+            self._deferred_history = await self._deferred_cold_details()
+        deferred = self._deferred_history
+        state = await self._synthesise_cold_state(
+            cwd, selection=deferred.selection if deferred is not None else None
+        )
+        if has_transcript:
             # ``want_checkpoint`` extracts the durable status row during the
             # SAME threaded parse the history comes from, so the restore below
             # costs no second read of a file that is 103 MB at the top end.
@@ -1956,8 +1976,6 @@ class AttachedSession:
             # list. No record, a record for another journal version, or a
             # record this process cannot validate all fall through to the eager
             # line, byte for byte.
-            if deferred_history:
-                self._deferred_history = await self._deferred_cold_details()
             if self._deferred_history is None:
                 await self._load_history(None, want_checkpoint=True)
             else:
@@ -2774,7 +2792,9 @@ class AttachedSession:
             logger.debug("cold state could not read the monitor index", exc_info=True)
         return monitors
 
-    async def _synthesise_cold_state(self, cwd: str) -> FrontendSessionState:
+    async def _synthesise_cold_state(
+        self, cwd: str, *, selection: "SelectionReading | None" = None
+    ) -> FrontendSessionState:
         """Canonical state for a session with no runtime to ask.
 
         A thin caller of :mod:`local_operator.session.cold_model`, which the
@@ -2796,6 +2816,9 @@ class AttachedSession:
             wakes=self._cold_wakes(),
             monitors=self._cold_monitors(),
             selection_sink=self._note_cold_selection,
+            # A deferred HIT's record-proved reading, or ``None`` to read the
+            # journal (see ``cold_model.resolve_conversation_model``).
+            selection=selection,
         )
         if state.selected_model is not None and state.selected_model.provider == "openai":
             # Resolve the account metadata the runtime would, so the band does
@@ -6513,7 +6536,7 @@ class AttachedSession:
         self._cold_spend = record.checkpoints.get(SESSION_SPEND_CUSTOM_TYPE)
         self._cold_order = dict(record.order)
         self._cold_seed_usage = record.seed_usage
-        return _DeferredHistory(witness)
+        return _DeferredHistory(witness, record.selection)
 
     async def hydrate_deferred_history(self) -> None:
         """Load the message list a deferred cold open left unread. Idempotent.
