@@ -329,6 +329,29 @@ class NotificationsSeen(Input):
     evidence: SeenEvidence
 
 
+class NativeSeenEvidence(Input):
+    """The PHONE's evidence (D11): its own edges, the desktop's re-checks.
+
+    ``surface`` is pinned to ``native`` and the input kinds to the gestures a
+    phone actually has. It is a separate model rather than a widened literal on
+    ``SeenEvidence`` so a desktop client cannot label its report "native" and a
+    relay client cannot label its own "desktop": each transport's door accepts
+    exactly the surface it is (the relay answers any other with
+    ``relay_surface_mismatch``).
+    """
+
+    surface: Literal["native"]
+    session_id: SessionID
+    input_kind: Literal["touch", "press", "scroll"]
+    input_at_ms: int = Field(ge=0)
+    visible_since_ms: int = Field(ge=0)
+
+
+class NativeNotificationsSeen(Input):
+    items: list[SeenItem] = Field(min_length=1, max_length=100)
+    evidence: NativeSeenEvidence
+
+
 @router.post("/v1/desktop/notifications/seen", response_model=CRUDResponse[dict[str, Any]])
 async def seen_notifications(body: NotificationsSeen, request: Request):
     """In-view auto-read: per item, its own revision and anchor, evidence re-checked.

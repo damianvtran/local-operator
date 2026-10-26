@@ -5778,6 +5778,10 @@ def build_app(daemon: MobileDaemon):
             # must not show, and this answer is cheap beside it.
             "notifications": _notifications_block(),
             "capabilities": {
+                # D11: the relay's own inbox receipt door, advertised so native
+                # can turn its receipt feed on instead of probing a refusal.
+                # Sourced from core's feature registry (`notifications_seen`), so
+                # the phone keys on ONE fact rather than a relay-side literal.
                 "features": _feature_flags(),
                 "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
@@ -8316,35 +8320,81 @@ def build_app(daemon: MobileDaemon):
         return JSONResponse(answer)
 
     async def api_notifications_seen(request: Request) -> Response:
-        """``POST /api/notifications/seen`` — refused in v1 (contract §3 of §7).
+        """``POST /api/notifications/seen`` — the PHONE's own in-view receipt (D11).
 
-        A READ RECEIPT IS A CLAIM ABOUT WHAT THE USER SAW, and this surface has
-        no way to know: the relay cannot measure a foreground window, an
-        uncovered pane, a dwell or an input edge on the phone's screen, and
-        none of that is in the request either — the client asserts every part
-        of it. Contract §6.4 therefore ships "no relay/native auto-read in
-        v1: explicit read only", and accepting the assertion would mint
-        ``read_via: in_view`` provenance the desktop's own presence rules
-        explicitly refuse to invent (round-1 R6 reproduced exactly that).
+        WHAT CHANGED, AND WHY. Round 1 refused every receipt here (R6), on
+        contract §6.4's "explicit read only" for the relay. The manager replaced
+        that rule (D11) after native #117 shipped its receipt feed as the inbox's
+        only auto-read path: the refusal left a phone that had plainly viewed an
+        item with no way to say so, retrying the refused write every 500 ms and
+        painting an error where the list should be.
 
-        The route stays, so a shipped phone build gets a vetted refusal (code
-        and sentence) rather than a 405 that reads as a broken app. Explicit
-        read via ``PATCH`` is unaffected.
+        The gate is the SAME ONE THE DESKTOP USES, not a second opinion. The
+        evidence is validated by ``NativeSeenEvidence`` (surface pinned to
+        ``native``; ``touch``/``press``/``scroll`` only), and
+        ``notifications.items.apply_seen`` re-checks every item against the store
+        exactly as the desktop route does: the row belongs to
+        ``evidence.session_id``, names its current revision and anchor,
+        ``visible_since`` sits between that row's own ``updated_at`` and the input
+        edge, the edge is fresh (≤120 s) and old enough for the dwell. Anything
+        else is ``skipped`` with its reason. A receipt is a claim about what the
+        operator saw, so nothing here trusts the client: it only refuses fewer
+        claims than round 1, each on the same evidence.
+
+        A phone that labels itself ``desktop`` is still refused, with its own
+        code (``relay_surface_mismatch``) so native can tell "wrong door" from
+        "bad evidence" — the R6 negative, kept.
         """
         denied = gate(request)
         if denied is not None:
             return denied
-        # A plain literal, like every other refusal in this file (the gate's
-        # "authentication required", the 422s below): the relay's error copy is
-        # its own wire vocabulary, not the desktop plane's catalogued
-        # sentences, and a second style here would be the defect.
-        return JSONResponse(
-            {
-                "error": "read receipts are not available on the relay",
-                "code": "relay_seen_unsupported",
-            },
-            status_code=422,
-        )
+        from pydantic import ValidationError
+
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 - a body that is not JSON is a refusal
+            return JSONResponse({"error": "a JSON body is required"}, status_code=422)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "a JSON object body is required"}, status_code=422)
+        evidence = payload.get("evidence")
+        surface = str((evidence or {}).get("surface") or "") if isinstance(evidence, dict) else ""
+        if surface != "native":
+            # ANY other surface, including the desktop's own: this route serves
+            # the phone, and an unlabelled or mislabelled claim has no evidence
+            # story this transport can honour.
+            return JSONResponse(
+                {
+                    "error": "read receipts on the relay are for the native surface, "
+                    "which reports touch, press or scroll edges",
+                    "code": "relay_surface_mismatch",
+                },
+                status_code=422,
+            )
+        try:
+            body = models.NativeNotificationsSeen.model_validate(payload)
+        except ValidationError as error:
+            return JSONResponse(
+                {"error": error.errors()[0].get("msg", "invalid receipt")}, status_code=422
+            )
+        try:
+            answer = await asyncio.to_thread(
+                inbox.apply_seen,
+                config_dir(),
+                [entry.model_dump(exclude_none=True) for entry in body.items],
+                body.evidence.model_dump(),
+            )
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        # The receipt's own answer carries the badge too, so the client need not
+        # poll for it after a read.
+        return JSONResponse(answer)
 
     async def api_schedules(request: Request) -> Response:
         """What is ARMED on this machine: the machine-wide wake and monitor

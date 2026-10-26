@@ -629,14 +629,25 @@ id/revision tokens a bulk write must echo, and the
   `ids[{id, revision}]`, or `session_id`+`through_seq`, or `all`+`through_seq`;
   every bulk target also needs the `observed` tokens, at most 500 per batch. A
   missing observation is `422`, never a legacy sweep.
-- `POST /api/notifications/seen` — **REFUSED in v1** (`422`,
-  `code: "relay_seen_unsupported"`), per contract §6.4's "no relay/native
-  auto-read in v1: explicit read only". A read receipt is a claim about what the
-  operator saw, and this surface cannot measure any part of it: no foreground
-  window, no uncovered pane, no dwell, and the input edge is the client's own
-  assertion. Accepting it would mint `read_via: in_view` provenance the desktop's
-  presence rules exist to refuse. The route stays so a shipped phone build gets a
-  vetted refusal rather than a `405`; explicit read is `PATCH` above.
+- `POST /api/notifications/seen` — the PHONE's in-view receipt (decision D11,
+  which supersedes round 1's blanket refusal). The body is
+  `{items:[{id, revision, anchor_id, visible_since_ms?}], evidence:{surface,
+  session_id, input_kind, input_at_ms, visible_since_ms}}` with `surface` pinned
+  to `"native"` and `input_kind` one of `touch`, `press` or `scroll`.
+  - The EVIDENCE is re-checked by the same store call the desktop uses: the row
+    belongs to `evidence.session_id`, names its current `revision` and
+    `anchor_id`, its own `visible_since` (or the batch fallback) sits between
+    that row's `updated_at` and the input edge, the edge is fresh (≤120 s) and at
+    least the dwell old, and a row already read answers `already`. Anything else
+    is `skipped` with its reason (`unknown`, `stale_revision`, `anchor_mismatch`,
+    `stale_evidence`, `already`), never a 500 and never a silent sweep.
+  - An accepted row records `read_via: "in_view"` with `read_surface: "native"`,
+    so provenance names the surface that produced it.
+  - ANY other surface — including the desktop's own `"desktop"`, and an absent
+    one — is refused `422 {code: "relay_surface_mismatch"}`. That is round 1's
+    R6 negative, kept: this door serves the phone and nothing else.
+  - Native keys on `capabilities.features.notifications_seen` (core's feature
+    registry) and turns its receipt feed on only when it is present.
 
 Every query the resource takes is validated by the DESKTOP route's own model
 (`NotificationsQuery`) and every PATCH body by `NotificationsPatch`, so a bound

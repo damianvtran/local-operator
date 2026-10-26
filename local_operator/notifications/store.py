@@ -82,6 +82,19 @@ _WAL_BUSY_TIMEOUT_MS = 250
 PRIORITIES = ("low", "normal", "high")
 _PRIORITY_RANK = {name: rank for rank, name in enumerate(PRIORITIES)}
 
+#: The surfaces whose ``seen`` receipts are accepted. ``native`` is the phone's
+#: own door (D11): its edges are touch/press/scroll and its evidence is
+#: re-checked here exactly like the desktop's, so a receipt cannot be minted
+#: from an assertion the server cannot examine.
+SEEN_SURFACES = ("desktop", "tui", "native")
+
+#: How long after the input edge a surface's receipt is admissible. The desktop
+#: waits a second so a wheel tick that merely lands on the pane cannot read; the
+#: TUI has already required a Key/MouseDown on a rendered card, so its own
+#: positive-elapsed check is enough; the phone gets the desktop's second, because
+#: a touch that scrolls a list is the same class of accidental edge.
+_DWELL_MS = {"desktop": 1000, "tui": 1, "native": 1000}
+
 #: Read provenance. There is no ``watching`` value: a new item is ALWAYS unread.
 #: ``in_view`` requires a per-item anchor/revision receipt with a real input
 #: edge; ``explicit`` is the operator's own gesture. The old presence evaluator
@@ -108,6 +121,13 @@ HISTORY_CAP = 20
 
 #: Retention (contract §1.4). Unread rows are never age-pruned: an unread item
 #: is exactly the thing the operator has not seen yet.
+#: Banner cooldown per item (contract §1.3, D15). A watcher that ticks every few
+#: minutes must not raise a banner per tick: inside this window a keyed update
+#: still bumps the row, its revision and the badge, and raises nothing. EVERY
+#: banner rung honours it through ``claim_delivery``, so the desktop feed, the
+#: runtime ladder and the TUI cannot disagree about what already spoke.
+BANNER_COOLDOWN_MS = 30 * 60 * 1000
+
 DISMISSED_TTL_MS = 14 * 24 * _HOUR_MS
 READ_TTL_MS = 30 * 24 * _HOUR_MS
 ROW_CAP = 10_000
@@ -315,10 +335,12 @@ _SCHEMA = (
       read_rev      INTEGER NOT NULL DEFAULT 0,
       read_at       INTEGER,
       read_via      TEXT,
+      read_surface  TEXT,
       dismissed_at  INTEGER,
       dismissed_via TEXT,
       delivered_rev INTEGER NOT NULL DEFAULT 0,
-      delivered_by  TEXT
+      delivered_by  TEXT,
+      delivered_at  INTEGER
     )
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS items_key ON items(session_id, key) WHERE key <> ''",
@@ -351,8 +373,8 @@ _SCHEMA = (
 _ITEM_COLUMNS = (
     "id, seq, session_id, session_title, agent_id, team_id, priority, title, body_md, "
     "links_json, key, content_hash, revision, repeat_count, anchor_id, created_at, "
-    "updated_at, read_rev, read_at, read_via, dismissed_at, dismissed_via, "
-    "delivered_rev, delivered_by"
+    "updated_at, read_rev, read_at, read_via, read_surface, dismissed_at, dismissed_via, "
+    "delivered_rev, delivered_by, delivered_at"
 )
 
 
@@ -910,7 +932,8 @@ class NotificationStore:
                 )
             elif op == "unread":
                 conn.execute(
-                    "UPDATE items SET seq=?, read_rev=0, read_at=NULL, read_via=NULL WHERE id=?",
+                    "UPDATE items SET seq=?, read_rev=0, read_at=NULL, read_via=NULL, "
+                    "read_surface=NULL WHERE id=?",
                     (seq, row["id"]),
                 )
             elif op == "dismiss":
@@ -1006,9 +1029,10 @@ class NotificationStore:
         # THE EDGE is batch-level: a trusted input kind on a known surface, an
         # input time in the past but fresh, and the dwell the surface needs
         # (the desktop waits one second while the anchor stays visible).
-        dwell_ms = 1000 if surface == "desktop" else 1
+        dwell_ms = _DWELL_MS.get(surface, 0)
         edge_fresh = (
-            surface in ("desktop", "tui")
+            surface in SEEN_SURFACES
+            and dwell_ms
             and 0 < input_at_ms <= stamp
             and dwell_ms <= stamp - input_at_ms <= INPUT_EVIDENCE_MS
         )
@@ -1039,9 +1063,10 @@ class NotificationStore:
                 else:
                     seq = self._next_seq(conn)
                     conn.execute(
-                        "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via='in_view' "
+                        "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via='in_view', "
+                        "read_surface=? "
                         "WHERE id=?",
-                        (seq, stamp, item_id),
+                        (seq, stamp, surface, item_id),
                     )
                     result.changed.append(item_id)
             return result
@@ -1075,7 +1100,7 @@ class NotificationStore:
 
         return self._read(body, [], "undelivered")
 
-    def claim_delivery(self, item_id: str, by: str) -> bool:
+    def claim_delivery(self, item_id: str, by: str, *, now: int | None = None) -> bool:
         """Claim the banner for an item's current revision, once, machine-wide.
 
         ``delivered_rev`` is the watermark a banner leg (desktop feed, TUI, the
@@ -1092,12 +1117,23 @@ class NotificationStore:
         claimable again (``notifications/delivery.py`` states the rule).
         """
 
+        stamp = now if now is not None else now_ms()
+
         def body(conn: sqlite3.Connection) -> bool:
             row = conn.execute(
-                "SELECT revision, delivered_rev, read_rev, dismissed_at FROM items WHERE id=?",
+                "SELECT revision, delivered_rev, read_rev, dismissed_at, delivered_at "
+                "FROM items WHERE id=?",
                 (item_id,),
             ).fetchone()
             if row is None or int(row["delivered_rev"]) >= int(row["revision"]):
+                return False
+            # THE COOLDOWN (contract §1.3, D15), checked before any other arm so
+            # it covers every rung: a high-priority watcher updating every five
+            # minutes used to banner twelve times an hour for one item. The row
+            # stays unread and badged; the SECOND update inside the window is
+            # simply not news a banner can carry.
+            last = row["delivered_at"]
+            if last is not None and stamp - int(last) < BANNER_COOLDOWN_MS:
                 return False
             if int(row["read_rev"]) >= int(row["revision"]):
                 return False
@@ -1107,10 +1143,14 @@ class NotificationStore:
             # it, or a direct caller re-banners what the operator dismissed.
             if row["dismissed_at"] is not None:
                 return False
-            seq = self._next_seq(conn)
+            # NO ``seq`` ADVANCE (D14). A claim changes nothing a list renders:
+            # it is a delivery watermark. Moving ``seq`` made an UNCHANGED high
+            # item "stale" to an in-flight bulk confirm, so "mark all read"
+            # skipped exactly the item that had just bannered.
             conn.execute(
-                "UPDATE items SET seq=?, delivered_rev=revision, delivered_by=? WHERE id=?",
-                (seq, by, item_id),
+                "UPDATE items SET delivered_rev=revision, delivered_by=?, delivered_at=? "
+                "WHERE id=?",
+                (by, stamp, item_id),
             )
             return True
 
@@ -1125,15 +1165,16 @@ class NotificationStore:
         """
 
         def body(conn: sqlite3.Connection) -> bool:
+            # NO ``seq`` ADVANCE (D14), the claim's own rule. ``delivered_at`` is
+            # deliberately NOT cleared: a release means the raise produced
+            # nothing, and the cooldown clock must still start from the attempt
+            # or a failing spawn would retry every second forever.
             released = conn.execute(
                 "UPDATE items SET delivered_rev=0, delivered_by='' "
                 "WHERE id=? AND delivered_rev=? AND delivered_by=?",
                 (item_id, int(revision), by),
             )
-            if not released.rowcount:
-                return False
-            conn.execute("UPDATE items SET seq=? WHERE id=?", (self._next_seq(conn), item_id))
-            return True
+            return bool(released.rowcount)
 
         return self._write(body, "release")
 

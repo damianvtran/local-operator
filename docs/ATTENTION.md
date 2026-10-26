@@ -360,6 +360,17 @@ and answers `skipped` with the reason (`unknown`, `stale_revision`,
 `anchor_mismatch`, `stale_evidence`, `already`) otherwise. The desktop sends it through the foreground
 receipt guard (`notifications.seen`), like the existing receipt ops.
 
+**The phone's receipt door (D11).** The relay's `POST /api/notifications/seen`
+accepts `surface: "native"` with `touch`/`press`/`scroll` edges and applies the
+same per-item re-checks below; an accepted row records `in_view` with
+`read_surface: "native"`. Any other surface is `relay_surface_mismatch`.
+
+**One banner per item per 30 minutes** (contract §1.3, D15). Every banner rung
+claims through `claim_delivery`, which refuses inside the cooldown: a keyed
+update still bumps the row, its revision and the badge, and raises no banner. A
+claim or release moves no list watermark (D14), so a bulk confirm that was armed
+before a claim still applies to the same rows afterwards.
+
 **No automatic path may acknowledge in bulk** (R10). Mark-all-read and dismiss-
 by-session are explicit gestures, token-bound: they carry the `through_seq` the
 surface first observed (the answer's `high_water`) PLUS exact `observed`

@@ -142,7 +142,9 @@ Full shapes: `../DESKTOP_API.md` "The Notifications inbox".
 ### 5.1 Capability
 
 `features.notifications: 1`. Absent it, a client offers no page, row, slash
-destination or feed branch.
+destination or feed branch. `features.notifications_seen: 1` is the native
+receipt door (D11): the phone turns its in-view receipt feed on only when it is
+present, because a core that predates it refuses every receipt.
 
 ### 5.2 Desktop routes
 
@@ -150,6 +152,13 @@ Five cold routes: list, count, detail, the token-bound PATCH (`read`, `unread`,
 `dismiss`, `undismiss` over `ids[{id, revision}]`, or `session_id`+`through_seq`,
 or `all`+`through_seq`, with exact `observed` tokens for either bulk target), and the `seen` evidence door. A write naming a revision
 the store has moved past is `skipped: stale_revision`, never applied.
+
+`seen` accepts the surfaces `desktop`, `tui` and `native` (`store.SEEN_SURFACES`),
+each through its own door: the desktop route takes pointer/key/wheel, the TUI's
+key/mouse-down, the relay's touch/press/scroll (D11, and the relay answers any
+other surface with `relay_surface_mismatch`). A focus gain is never an input edge
+(D12). Every accepted row records `read_via: in_view` plus the `read_surface`
+that produced it.
 
 ### 5.3 Feed frame
 

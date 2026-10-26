@@ -194,10 +194,16 @@ def test_a_spawn_that_reports_nothing_releases_the_claim(tmp_path: Path) -> None
         hold=False,
     )
     assert not result.raised and result.rung == delivery.RUNG_NONE
-    # The watermark is back, so the next surface can raise this revision — and
-    # the item is still unread, so nothing was acknowledged by the attempt.
+    # The watermark is back, so the revision is still owed — and the item is
+    # still unread, so nothing was acknowledged by the attempt.
     assert _row(store, item.item_id)["delivered_rev"] == 0
     assert store.counts()[0] == 1
+    # THE RETRY IS BOUNDED (D15/T4): a host whose spawn always reports nothing
+    # (Windows, Linux without notify-send) used to re-claim and re-release every
+    # second forever. The cooldown clock starts at the attempt, so the next
+    # claim is refused inside the window and accepted after it.
+    assert not store.claim_delivery(item.item_id, "desktop"), "the cooldown bounds the retry"
+    _cool(tmp_path)
     assert store.claim_delivery(item.item_id, "desktop")
 
 
@@ -261,6 +267,26 @@ def _advertise(feed: Any, subscription: Any, kinds: list[str] | None = None) -> 
         session_id=SID,
         window={"exists": True, "focused": True, "visible": True, "minimized": False},
     )
+
+
+def _cool(root: Path, *, ms: int | None = None) -> None:
+    """Move every row's LAST BANNER ATTEMPT past the cooldown (D15).
+
+    Separate from :func:`_age` on purpose: ``_age`` moves content time so the
+    grace has elapsed, and a test that wants the banner cooldown to have expired
+    is asserting a different clock.
+    """
+    import sqlite3
+
+    from local_operator.notifications.store import BANNER_COOLDOWN_MS, now_ms
+
+    stamp = now_ms() - (BANNER_COOLDOWN_MS if ms is None else ms) - 1
+    conn = sqlite3.connect(root / "notifications.db")
+    try:
+        with conn:
+            conn.execute("UPDATE items SET delivered_at=?", (stamp,))
+    finally:
+        conn.close()
 
 
 def _age(root: Path, *, ms: int = 10_000) -> None:
@@ -837,12 +863,20 @@ def test_a_claim_failure_mid_pass_strands_nothing(tmp_path: Path) -> None:
         broken.setattr(NotificationStore, "claim_delivery", flaky)
         _tick(feed)
     assert _frames(subscription) == [], "nothing may be published from a failed pass"
-    assert calls["n"] == 3
-    # Every row is owed again, and the next pass raises them.
+    # Every row is owed again: the two already claimed were RELEASED, so no
+    # revision was stranded unraised.
     rows = [store.get(item_id) for item_id in ids]
     assert all(row is not None and row["delivered_rev"] == 0 for row in rows)
-    _tick(feed)
-    assert len(_frames(subscription)) == 4, "3 singles plus one digest for the fourth"
+    # THE RETRY IS BOUNDED (D15/T4). The released rows kept the attempt's
+    # ``delivered_at``, so the store refuses to re-claim them inside the
+    # cooldown — the per-second claim/release storm this test used to permit is
+    # what a host with no banner producer (Windows, Linux without notify-send)
+    # lived in. Nothing is lost: the rows are still unread, still counted, and
+    # claimable the moment the window expires.
+    assert not store.claim_delivery(ids[0], "desktop"), "the cooldown holds the retry"
+    _cool(tmp_path)
+    assert store.claim_delivery(ids[0], "desktop"), "and releases it afterwards"
+    assert store.counts()[0] == 4, "no attempt acknowledged an item"
     asyncio.run(feed.close())
 
 

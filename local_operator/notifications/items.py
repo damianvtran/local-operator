@@ -184,6 +184,10 @@ def notify_item(
         "revision": int(row.get("revision") or 1),
         "read": read,
         "read_via": row.get("read_via") if read else None,
+        # WHICH surface produced an ``in_view`` read (D11). The desktop, the TUI
+        # and the phone all record ``in_view``; this is the provenance that says
+        # which of them the evidence came from.
+        "read_surface": row.get("read_surface") if read else None,
         "dismissed": dismissed,
         "repeat_count": int(row.get("repeat_count") or 1),
         "key": str(row.get("key") or ""),
@@ -225,6 +229,7 @@ def ask_item(
         "revision": 1,
         "read": read,
         "read_via": "explicit" if read else None,
+        "read_surface": None,
         "dismissed": False,
         "repeat_count": 1,
         "session": sessions.get(session_id),

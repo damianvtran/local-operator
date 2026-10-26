@@ -649,6 +649,51 @@ def test_detail_ids_use_the_patch_regex(client) -> None:
         assert answer.status_code == 422, (bad, answer.status_code)
 
 
+def test_a_banner_claim_never_moves_the_list_watermark(tmp_path: Path) -> None:
+    """D14/CD4: claiming delivery must not make an unchanged row "stale"."""
+    store = _store(tmp_path)
+    item = store.notify(SID, title="high thing", priority="high")
+    _, high_water = store.counts()
+    page = list_page(tmp_path, state="unread")
+    observed = page["observed"]
+    assert store.claim_delivery(item.item_id, "desktop")
+    # The SAME tokens the surface rendered still apply: the claim changed no
+    # content, no revision and no read state.
+    result = apply_patch(
+        tmp_path, "read", all_items=True, through_seq=high_water, observed=observed
+    )
+    assert result["changed"] == [item.item_id], result
+    assert store.counts()[0] == 0
+
+
+def test_one_banner_per_item_per_cooldown_window(tmp_path: Path) -> None:
+    """D15/CD2: a keyed watcher inside the window bumps the row, not the banner."""
+    from local_operator.notifications.store import BANNER_COOLDOWN_MS
+
+    store = _store(tmp_path)
+    now = int(time.time() * 1000)
+    first = store.notify(SID, title="campaign", body_md="10", priority="high", key="c", now=now)
+    assert store.claim_delivery(first.item_id, "desktop", now=now)
+    # Five keyed updates five minutes apart — the fraud/campaign wake case. The
+    # sixth tick lands exactly ON the window's edge and is asserted below.
+    for step in range(1, 6):
+        stamp = now + step * 5 * 60 * 1000
+        updated = store.notify(
+            SID, title="campaign", body_md=str(10 + step), priority="high", key="c", now=stamp
+        )
+        assert updated.item_id == first.item_id
+        row = store.get(first.item_id)
+        assert row is not None
+        assert int(row["revision"]) == step + 1, "the row still updates"
+        assert store.counts()[0] == 1, "and the badge still counts it"
+        assert not store.claim_delivery(
+            first.item_id, "desktop", now=stamp
+        ), "inside the cooldown a revision raises no banner"
+    # Past the window the newest revision is claimable again.
+    later = now + BANNER_COOLDOWN_MS + 1
+    assert store.claim_delivery(first.item_id, "desktop", now=later)
+
+
 def test_a_corrupt_store_is_quarantined_by_the_next_write(tmp_path: Path) -> None:
     """CD1: a damaged file heals on the write path instead of refusing forever.
 

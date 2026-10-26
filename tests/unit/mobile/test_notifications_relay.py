@@ -89,33 +89,125 @@ def test_list_detail_patch_and_seen_round_trip() -> None:
     ).json()
     assert read["changed"] == [item.item_id] and read["unread_count"] == 0
 
-    # R6 / contract §6.4: NO RELAY AUTO-READ IN V1. The phone cannot measure a
-    # foreground window, an uncovered pane or a decided dwell, so a receipt it
-    # asserts would mint "Seen live" provenance the desktop's own presence rules
-    # explicitly refuse to invent. The route answers a vetted refusal, and the
-    # item it named is untouched — explicit read via PATCH above is the only way.
+    # D11 (supersedes R6's blanket refusal): the phone's OWN receipt is
+    # accepted — `native` surface, touch/press/scroll edges — and re-checked
+    # against the store exactly like the desktop's. Round 1's negative is kept
+    # below: a receipt that labels itself `desktop` is refused.
     seen_item = _store().notify(SID, title="in view", anchor_id="call_view")
     time.sleep(1.3)
     visible_since = int(time.time() * 1000) - 1_100
     input_at = int(time.time() * 1000)
     time.sleep(1.1)
-    refusal = client.post(
+    accepted = client.post(
         "/api/notifications/seen",
         json={
             "items": [{"id": seen_item.item_id, "revision": 1, "anchor_id": "call_view"}],
             "evidence": {
-                "surface": "desktop",
+                "surface": "native",
                 "session_id": SID,
+                "input_kind": "touch",
                 "input_at_ms": input_at,
                 "visible_since_ms": visible_since,
             },
         },
     )
-    assert refusal.status_code == 422, refusal.text
-    body = refusal.json()
-    assert body["code"] == "relay_seen_unsupported" and body["error"]
+    assert accepted.status_code == 200, accepted.text
+    body = accepted.json()
+    assert body["changed"] == [seen_item.item_id], body
     row = _store().get(seen_item.item_id)
+    assert row is not None
+    assert row["read_via"] == "in_view" and row["read_surface"] == "native"
+    assert row["read_rev"] == 1
+
+
+def test_the_relay_refuses_a_receipt_that_claims_another_surface() -> None:
+    """R6's negative, kept: this door is the native one, and only it (D11)."""
+    client = _client()
+    item = _store().notify(SID, title="not for a desktop claim", anchor_id="call_x")
+    now = int(time.time() * 1000)
+    for surface in ("desktop", "tui", ""):
+        refusal = client.post(
+            "/api/notifications/seen",
+            json={
+                "items": [{"id": item.item_id, "revision": 1, "anchor_id": "call_x"}],
+                "evidence": {
+                    "surface": surface,
+                    "session_id": SID,
+                    "input_kind": "touch",
+                    "input_at_ms": now,
+                    "visible_since_ms": now - 5_000,
+                },
+            },
+        )
+        assert refusal.status_code == 422, (surface, refusal.text)
+        assert refusal.json()["code"] == "relay_surface_mismatch", surface
+    row = _store().get(item.item_id)
     assert row is not None and row["read_via"] is None and row["read_rev"] == 0
+
+
+def test_the_relay_refuses_a_focus_edge_and_stale_evidence() -> None:
+    """D12 on the phone, and the desktop's per-item re-checks (D13)."""
+    client = _client()
+    item = _store().notify(SID, title="edges", anchor_id="call_e")
+    now = int(time.time() * 1000)
+
+    def receipt(**evidence: Any) -> Any:
+        return client.post(
+            "/api/notifications/seen",
+            json={
+                "items": [{"id": item.item_id, "revision": 1, "anchor_id": "call_e"}],
+                "evidence": {
+                    "surface": "native",
+                    "session_id": SID,
+                    "input_kind": "touch",
+                    "input_at_ms": now,
+                    "visible_since_ms": now - 5_000,
+                    **evidence,
+                },
+            },
+        )
+
+    assert receipt(input_kind="focus").status_code == 422, "a focus gain is not an edge"
+    # Stale visibility: before this row's own update.
+    stale = receipt(visible_since_ms=now - 600_000)
+    assert stale.status_code == 200 and stale.json()["changed"] == []
+    assert stale.json()["skipped"][0]["reason"] == "stale_evidence"
+    # Wrong revision, and the wrong session's claim. Both arrive as SKIPPED with
+    # their own reason: a receipt is ANSWERED, never rejected wholesale, so the
+    # phone can tell "this is not mine" from "this moved since I painted it".
+    wrong_revision = client.post(
+        "/api/notifications/seen",
+        json={
+            "items": [{"id": item.item_id, "revision": 2, "anchor_id": "call_e"}],
+            "evidence": {
+                "surface": "native",
+                "session_id": SID,
+                "input_kind": "touch",
+                "input_at_ms": now,
+                "visible_since_ms": now - 5_000,
+            },
+        },
+    )
+    assert wrong_revision.status_code == 200, wrong_revision.text
+    assert wrong_revision.json()["skipped"][0]["reason"] == "stale_revision"
+    other = receipt(session_id="0" * 12)
+    assert other.status_code == 200, other.text
+    assert other.json()["skipped"][0]["reason"] == "unknown"
+    row = _store().get(item.item_id)
+    assert row is not None and row["read_rev"] == 0
+
+
+def test_the_relay_advertises_the_native_seen_door() -> None:
+    """D11: native turns its receipt feed on from this key, never by probing.
+
+    Cold: the capability payload's ``features`` dict IS ``_feature_flags()``
+    (``/api/sessions`` is the door that carries it, and that door dials
+    runtimes), so the fact is asserted where it is defined. The live wire is
+    proven against a real ``lop mobile serve`` in the PR's evidence section.
+    """
+    from local_operator.mobile import daemon as daemon_module
+
+    assert daemon_module._feature_flags()["notifications_seen"] == 1
 
 
 def test_bulk_writes_need_the_observed_tokens_and_never_widen() -> None:
