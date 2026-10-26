@@ -725,6 +725,10 @@ def set_tags(
         actor=actor,
         source=source or actor,
         confidence=confidence,
+        # Her tag set IS organizing work (the same rule update_asset applies to a
+        # name/description); an EMPTY set is a clear, which organizes nothing
+        # and, for the same reason, un-organizes nothing.
+        mark_organized=actor == "librarian" and bool(tag_ids),
     )
     return get_asset(config, asset_id)
 

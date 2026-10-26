@@ -13,7 +13,24 @@ import json
 import pytest
 
 from local_operator import settings_io
+from local_operator.harness.types import (
+    AbortSignal,
+    AgentTool,
+    ChatRequest,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    TextContent,
+    ToolContext,
+    ToolResult,
+)
 from local_operator.librarian import bootstrap, proactive
+from local_operator.library import index, indexer
+from local_operator.library.metadata import MetadataStore
+from local_operator.session.session import Session
+from local_operator.session.transcript import Transcript
+from local_operator.tools.library_tool import build_library_tool
 
 
 def test_the_settings_registry_matches_the_consumers_defaults() -> None:
@@ -62,6 +79,10 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
 
     sid = await bootstrap.ensure_session(isolated_root)
     assert sid
+    # Every write below passes HER OWN session id: the tool derives the actor
+    # from the caller's identity, so a call with no context is an ordinary
+    # agent's no matter what ``actor`` says.
+    hers = ToolContext(session_id=sid)
     report = tmp_path / "weekly.md"
     report.write_text("the Monday numbers", encoding="utf-8")
     seed_session(isolated_root, "feedfacecafe", write_rows("w1", 1.0, report))
@@ -97,7 +118,7 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
         },
         None,
         None,
-        None,
+        hers,
     )
     assert updated.is_error is False
     row = store.asset(asset.id)
@@ -113,7 +134,7 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
         {"op": "update", "asset_id": asset.id, "name": "Renamed", "actor": "librarian"},
         None,
         None,
-        None,
+        hers,
     )
     assert refused.is_error is True
     assert "asset_locked" in text(refused)
@@ -128,3 +149,95 @@ async def test_the_librarian_drives_the_real_library_tool(isolated_root, tmp_pat
     )
     rows = json.loads(text(await execute_library("c5", {"op": "conventions"}, None, None, None)))
     assert [row["id"] for row in rows["conventions"]] == ["tags.weekly"]
+
+
+MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
+
+
+class _OneEvalTurn:
+    """Answers the first request with an ``eval`` call, then with a plain stop."""
+
+    def __init__(self) -> None:
+        self.requests = 0
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests += 1
+        first = self.requests == 1
+
+        async def gen():
+            if first:
+                yield StreamToolCallDelta(
+                    index=0, id="c1", name="eval", argument_delta='{"code": "x"}'
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+            else:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+
+@pytest.mark.asyncio
+async def test_the_eval_bridge_records_her_write_as_hers(isolated_root, tmp_path) -> None:
+    """The route nearly every one of her writes actually took: an eval cell.
+
+    ``tool("library", ...)`` inside a cell is a NESTED dispatch: the loop binds
+    the turn's ``ToolContext`` for the cell and copies it with ``dispatch_tool``
+    added, so the tool must see the SESSION's id rather than a fresh one. If
+    that propagation broke, her own organizing would be recorded as an agent's
+    again — which is exactly the bug this file exists to catch — so the cell is
+    driven through a real :class:`Session`, a real scripted turn and the real
+    registered tool. The cell itself is scripted rather than run on a kernel:
+    the seam under test is the context propagation, not the kernel's IPC, and
+    ``tool()`` in the eval namespace IS this call.
+    """
+    from tests.unit.library._fixtures import session as seed_session
+    from tests.unit.library._fixtures import write_rows
+
+    sid = await bootstrap.ensure_session(isolated_root)
+    assert sid
+    report = tmp_path / "weekly.md"
+    report.write_text("the Monday numbers", encoding="utf-8")
+    seed_session(isolated_root, "feedfacecafe", write_rows("w1", 1.0, report))
+    asset = index.build_catalog(isolated_root, budget_s=None).assets[0]
+    indexer.reset_for_tests()
+    indexer.rebuild_now(isolated_root)
+
+    async def run_cell(tool_call_id, args, signal, on_update, context):
+        answer = await context.dispatch_tool(
+            "library",
+            {"op": "update", "asset_id": asset.id, "name": "Operator weekly"},
+        )
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="eval",
+            content=[TextContent(text=json.dumps(answer))],
+        )
+
+    session = Session(
+        model=MODEL,
+        stream_fn=_OneEvalTurn(),
+        tools=[
+            AgentTool(
+                name="eval",
+                description="eval",
+                parameters={"type": "object", "properties": {}},
+                approval_tier="read",
+                execute=run_cell,
+            ),
+            build_library_tool(),
+        ],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+        session_id=sid,
+    )
+    # Hermetic: the constructor reads ``tools.defer`` from the isolated config.
+    session._tool_deferral = True
+    await session.prompt("organize what you have")
+    await session.dispose()
+
+    row = MetadataStore(isolated_root).asset(asset.id)
+    assert row is not None
+    assert row["name"] == "Operator weekly"
+    assert row["name_source"] == "librarian", "the bridge lost her identity"
+    assert row["organized_by"] == "librarian" and row["organized_at"]
