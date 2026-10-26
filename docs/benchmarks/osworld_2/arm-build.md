@@ -91,6 +91,9 @@ Admission refuses, fail-closed:
 
 ## What it does NOT prove
 
+- **Not offline.** A build fetches the locked dependency set from PyPI and the
+  pinned OSWorld git ref; only the *checks* are local. Nothing here contacts a
+  model provider, a guest, or AWS.
 - **No guest, no VM, no episode.** Nothing here allocates, boots, or talks to a
   remote desktop, and the adapter's action path is not exercised. A green build
   says nothing about whether a task can be driven.
