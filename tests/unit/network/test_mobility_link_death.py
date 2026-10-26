@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -215,6 +216,52 @@ def test_release_refuses_every_entry_it_cannot_prove_is_this_move(
     assert SESSION in read_handoff_journal(tmp_path)
 
 
+def test_link_close_keeps_the_descriptor_until_its_reader_exits(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shutdown is not descriptor ownership transfer (R3-1 / Q6).
+
+    Hold a real link's reader just after recv reports EOF. Closing from another
+    thread must wake that read without releasing its fd; only the reader's finally
+    may close it. This pins the ordering independently of the macOS timed-recv race
+    that left the re-dial test's evicted reader alive on an already-closed socket.
+    """
+    p: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = p
+    _pair_settled(p, monkeypatch, role="admin")
+    observed = threading.Event()
+    release = threading.Event()
+    owner: dict[str, Any] = {}
+    real = wire.FrameReader.read_record_payload
+
+    def read_until_shutdown(reader: Any, deadline: float | None) -> bytes:
+        try:
+            return real(reader, deadline)
+        except (ConnectionError, OSError):
+            if reader._sock is owner.get("socket"):
+                observed.set()
+                release.wait(timeout=5)
+            raise
+
+    monkeypatch.setattr(wire.FrameReader, "read_record_payload", read_until_shutdown)
+    server_b._ensure_link(server_a.identity.device_id)
+    assert wait_for(lambda: server_a._link_for(server_b.identity.device_id) is not None)
+    link = server_a._link_for(server_b.identity.device_id)
+    assert link is not None and link._reader is not None
+    owner["socket"] = link.sock
+    try:
+        link.close("we-closed", flush_s=0.0)
+        assert observed.wait(timeout=5), "shutdown did not wake the retained reader"
+        assert link._reader.is_alive(), "the gate must hold the reader before its finally"
+        assert link.sock.fileno() >= 0, "the closing thread released the reader's descriptor"
+    finally:
+        release.set()
+        link.close("we-closed", flush_s=0.0)
+        link._reader.join(timeout=5)
+    assert not link._reader.is_alive(), link._reader.name
+    assert link.sock.fileno() == -1, "the reader must release its descriptor on exit"
+
+
 def test_a_re_dial_during_a_copy_releases_the_source_and_the_retry_completes(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -256,15 +303,19 @@ def test_a_re_dial_during_a_copy_releases_the_source_and_the_retry_completes(
                 evicted = [self_.link, server_a.links[self_.link.link_id]]
 
                 def reap_evicted_readers() -> None:
-                    # Close hooks can be waiting on another fixture-owned link's
-                    # reply. Stop the pair first so all such waiters are failed.
+                    # Stop the pair and join BOTH retained readers before asserting:
+                    # eviction has removed them from the fixture's registry, but
+                    # they still own their sockets until the read loops unwind.
                     server_a.stop()
                     server_b.stop()
+                    survivors = []
                     for old_link in evicted:
                         reader = old_link._reader  # noqa: SLF001 — exact fixture-owned thread
                         if reader is not None:
                             reader.join(timeout=5)
-                            assert not reader.is_alive(), reader.name
+                            if reader.is_alive():
+                                survivors.append(reader.name)
+                    assert not survivors, survivors
 
                 request.addfinalizer(reap_evicted_readers)
                 replacement, reason = server_b.dial(

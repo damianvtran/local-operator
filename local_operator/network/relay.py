@@ -4364,10 +4364,17 @@ class PeerLink:
             self.sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
-        try:
-            self.sock.close()
-        except OSError:
-            pass
+        # The reader owns the descriptor until it leaves recv. On macOS, closing
+        # immediately after shutdown can strand an already-waiting timed recv until
+        # its original deadline (CPython #154224; measured here with a closed fd and
+        # a surviving mesh reader at the 120s idle timeout). Shutdown wakes the read;
+        # its finally block releases the descriptor. A link never started, or whose
+        # reader already exited, has no owner left to perform that release.
+        if self._reader is None or not self._reader.is_alive():
+            try:
+                self.sock.close()
+            except OSError:
+                pass
         self.server.link_closed(self, reason)
 
     # -- threads ------------------------------------------------------------
@@ -4404,6 +4411,13 @@ class PeerLink:
             if not self._closed.is_set():
                 self._log_link_error("reader", exc)
             self.close("error")
+        finally:
+            # No other thread may release/reuse this descriptor while our recv is
+            # still waiting. This also covers reader-initiated and concurrent close.
+            try:
+                self.sock.close()
+            except OSError:
+                pass
 
     def _log_link_error(self, side: str, exc: BaseException) -> None:
         """Say WHY a link died, ONCE, with the cause that actually ended it.
