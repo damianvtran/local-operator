@@ -583,9 +583,10 @@ export function Transcript({
 	const openerJoined = pinnedOpener !== null && older.some((entry) => rowKey(entry) === rowKey(pinnedOpener));
 	const detachedOpener = pinnedOpener && !openerJoined && older.length > 0 ? pinnedOpener : null;
 	if (detachedOpener) heldMap.delete(rowKey(detachedOpener));
-	const allMerged = [...heldMap.values()];
-	const trimmed = allMerged.length > 2000;
-	const merged = trimmed ? allMerged.slice(-2000) : allMerged;
+	/* Only unsolicited live retention is capped. Explicitly fetched history
+	   must survive the join: trimming its oldest page here both hides the
+	   rows the reader requested and pins the next cursor to that same page. */
+	const merged = [...heldMap.values()];
 	/* Long projections pin the opening user row ahead of a disjoint tail. It is
 	   already retained, but it is not the tail's chronological history cursor;
 	   anchor at the next row so the API can return the missing middle. The
@@ -602,9 +603,7 @@ export function Transcript({
 	   `older[0]` is the oldest row this view actually holds, so the next page is
 	   the one immediately before it and paging is linear in the reader's taps. */
 	const oldestId =
-		trimmed && merged[0]
-			? merged[0].id
-			: older.length > 0
+		older.length > 0
 			? older[0].id
 			: entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user"
 				? entries[1]?.id ?? entries[0]?.id ?? null
@@ -615,7 +614,14 @@ export function Transcript({
 	   open tail grows in place under its stable key. The definition lives once
 	   in `lib/quiet-groups` and is pinned across clients by the shared parity
 	   fixture. */
-	const groups = contextualQuietGroupsOf(merged, pid, peerCycles);
+	/* Quiet grouping speaks wire IDs; the condense join speaks canonical tool
+	   identities (`call:<tool_call_id>`). Normalize ownership once so both the
+	   fold exclusion and disclosure children refer to the exact same rows. */
+	const canonicalIds = new Map(merged.map((entry) => [entry.id, rowKey(entry)]));
+	const groups = contextualQuietGroupsOf(merged, pid, peerCycles).map((group) => ({
+		...group,
+		rowIds: group.rowIds.map((id) => canonicalIds.get(id) ?? id),
+	}));
 	const quietRowIds = new Set(groups.flatMap((group) => group.rowIds));
 	const live = streaming || pending.length > 0;
 	const condensed = useMemo(() => composeCondensedEntries(merged, {
@@ -729,7 +735,7 @@ export function Transcript({
 		setOlder((cur) => {
 			const held = new Set([...cur, ...heldLive, ...entries].map(rowKey));
 			return [...page.filter((entry) => !held.has(rowKey(entry)) ||
-			(pinnedOpener !== null && rowKey(entry) === rowKey(pinnedOpener))), ...cur].slice(-2000);
+			(pinnedOpener !== null && rowKey(entry) === rowKey(pinnedOpener))), ...cur];
 		});
 	};
 
@@ -778,7 +784,9 @@ export function Transcript({
 			}
 			setHasMore(has_more);
 		} catch {
-			/* A failed page is not fatal — leave hasMore so a retry can load it. */
+			/* Keep the cursor and hasMore intact: the explicit retry must request
+			   the failed page, not skip it or silently strand the reader. */
+			setOlderError(true);
 		} finally {
 			loadingRef.current = false;
 			setLoadingOlder(false);
@@ -904,6 +912,12 @@ export function Transcript({
 			if (header) {
 				const delta = header.getBoundingClientRect().top - box.top - pressed.top;
 				if (Math.abs(delta) > 0) el.scrollTop = Math.max(0, Math.min(max, scrollTop + delta));
+				/* The next render's generic follow uses these rows. Store them in
+				   the corrected frame, not the pre-click frame, or that render
+				   undoes this scroll and sends the pressed bar off-screen. Read the
+				   actual displacement so boundary clamping stays honest. */
+				const shift = el.scrollTop - scrollTop;
+				for (const row of rows) row.top -= shift;
 			}
 		}
 		const prev = anchorRows.current;
@@ -1009,7 +1023,7 @@ export function Transcript({
 			{pagedItems.map((item) => {
 				if (item.kind === "quiet") {
 					return <RowBoundary key={item.key}>
-						<QuietGroupRow group={item.group} partial={headCut && item.group.rowIds[0] === merged[0]?.id}>
+						<QuietGroupRow group={item.group} partial={headCut && item.group.rowIds[0] === (merged[0] ? rowKey(merged[0]) : undefined)}>
 							{item.group.rowIds.map((id) => {
 								const member = merged.find((entry) => rowKey(entry) === id);
 								return member ? transcriptRow(member) : null;

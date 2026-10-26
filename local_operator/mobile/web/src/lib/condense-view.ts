@@ -142,7 +142,6 @@ export function composeCondensedEntries(
 			groups.push(group);
 			nextFold += 1;
 		}
-		const condensed = runIsCondensed(run, openRuns);
 		if (!run.collapses) {
 			for (const group of groups) {
 				output.push(group.kind === "run" ? foldFor(group, false) : rowFor(group.row));
@@ -168,6 +167,10 @@ export function composeCondensedEntries(
 		};
 		const bars = new Map<number, Extract<CondenseEntry, { kind: "turn" }>>();
 		const activeRun = renderRun;
+		/* The prompt may shrink only when a visible bar can restore it. Live
+		   and quiet-ownership overrides remove bars after the base plan, so
+		   derive prompt presentation from that effective plan too. */
+		const condensed = runIsCondensed(activeRun, openRuns);
 		for (const group of groups) {
 			const members = group.kind === "run" ? group.rows : [group.row];
 			const first = segmentOf.get(members[0].record.id);

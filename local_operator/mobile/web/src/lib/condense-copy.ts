@@ -28,6 +28,12 @@ const CLASS_KIND: Record<string, string> = {
 export function foldUnit(segment: FoldCountSegment): string {
 	if (segment.key === "kind:shell") return messageRuntime.t("relay.transcript.fold.shell", { count: segment.count });
 	if (segment.key === "kind:python") return messageRuntime.t("relay.transcript.fold.python", { count: segment.count });
+	/* Known catalogue classes carry count-free structured nouns. Other model
+	   units (waits, job checks, named kinds) already include their count; do
+	   not feed that whole phrase into a second counted catalogue template.
+	   Technical model labels keep their existing wording until localized as
+	   their own structured kinds, rather than guessing nouns by parsing prose. */
+	if (!(segment.key in CLASS_KIND) && !segment.key.startsWith("name:")) return segment.label;
 	const kind = CLASS_KIND[segment.key] ?? "other";
 	return messageRuntime.t("relay.transcript.fold.unit", {
 		kind,

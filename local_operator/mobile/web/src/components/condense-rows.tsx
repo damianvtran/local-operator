@@ -40,13 +40,16 @@ function Header({
 	label?: string;
 }) {
 	const failureLabel = failed ? messageRuntime.t("relay.transcript.fold.failed_label") : "";
+	/* An explicit name overrides descendant text, including the failure cue.
+	   Keep the same translated cue in both naming paths. */
+	const accessibleLabel = label ? [label, failureLabel].filter(Boolean).join(" · ") : undefined;
 	return (
 		<button
 			type="button"
 			data-condense-header={id}
 			aria-expanded={open}
 			aria-controls={`${id}:body`}
-			aria-label={label}
+			aria-label={accessibleLabel}
 			onClick={onToggle}
 			className="flex h-11 min-h-11 w-full items-center gap-1.5 overflow-hidden rounded-sm px-1.5 text-start select-none active:bg-surface"
 		>

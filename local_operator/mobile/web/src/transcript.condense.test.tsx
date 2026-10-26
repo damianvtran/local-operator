@@ -82,6 +82,40 @@ describe("condensed transcript rendering", () => {
 		expect(screen.getByText("exit 1")).toBeTruthy();
 	});
 
+	it("includes failure in a collapsed turn's accessible name", () => {
+		render(<Transcript pid="failed-turn" entries={[
+			entry("u", "user", "Question"), tool("a"),
+			tool("b", { tool_state: "failed", error: "exit 1" }), tool("c"),
+			entry("answer", "assistant", "Answer"),
+		]} />);
+		expect(screen.getByRole("button", { name: /Includes a failed action/ })).toBeTruthy();
+	});
+
+	it("retains corrected row coordinates on the render after a disclosure click", () => {
+		const rows = settledTurn();
+		const view = render(<Transcript pid="follow-up-render" entries={rows} />);
+		const scroller = view.container.querySelector<HTMLElement>(".lo-scroll")!;
+		const header = view.container.querySelector<HTMLElement>("[data-condense-header]")!;
+		Object.defineProperty(scroller, "scrollHeight", { value: 3000, configurable: true });
+		Object.defineProperty(scroller, "clientHeight", { value: 500, configurable: true });
+		scroller.scrollTop = 200;
+		vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({ top: 100 } as DOMRect);
+		vi.spyOn(header, "getBoundingClientRect").mockImplementation(() => ({
+			top: (header.getAttribute("aria-expanded") === "true" ? 700 : 600) - scroller.scrollTop,
+		}) as DOMRect);
+		const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+			return { top: this.hasAttribute("data-completion-anchor") ? 900 - scroller.scrollTop : 0 } as DOMRect;
+		});
+		try {
+			fireEvent.click(header);
+			expect(scroller.scrollTop).toBe(300);
+			view.rerender(<Transcript pid="follow-up-render" entries={[...rows]} />);
+			expect(scroller.scrollTop).toBe(300);
+		} finally {
+			geometry.mockRestore();
+		}
+	});
+
 	it("anchors a toggled bar in the scroller's coordinate frame", () => {
 		const { container } = render(<Transcript pid="s" entries={settledTurn()} />);
 		const scroller = container.querySelector<HTMLElement>(".lo-scroll")!;
