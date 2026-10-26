@@ -1073,9 +1073,9 @@ def test_an_owner_deletion_and_append_reconciles_through_the_retry(
     The owner deletes ``title.json`` and appends a turn. The first plan also declares a
     member this destination does not hold and no transfer carries — a plan assembled from
     stamps that no longer describe the source — and the copy loses a member it had
-    reported in the same window. The refusal names the phantom, ``sync_from`` reports
-    again, and the second plan re-sends the member that is gone, so the finished cursor
-    describes the copy rather than the plan.
+    reported in the same window. The refusal names a member this copy cannot justify,
+    ``sync_from`` reports again, and the second plan re-sends the member that is gone, so
+    the finished cursor describes the copy rather than the plan.
     """
     root = tmp_path / "holder"
     owner = root / "owner"
@@ -1119,7 +1119,11 @@ def test_an_owner_deletion_and_append_reconciles_through_the_retry(
     second = sync.sync_from(root, "abc123", ask=ask, into=replica)
 
     assert [exc.code for exc in refusals] == ["stale_plan"]
-    assert phantom in refusals[0].message
+    # WHICHEVER NAME IT CARRIES IS TRUE: this destination holds neither the member it lost
+    # inside the plan answer (``notes.md``, which the report-justified pin checks first)
+    # nor the phantom the plan declares, and the refusal owes a name rather than an
+    # anonymous retry. Pinning the phantom alone would pin an accident of member order.
+    assert any(name in refusals[0].message for name in ("scratchpad/notes.md", phantom))
     assert [plan["transcript"]["mode"] for plan in plans] == ["append", "replace"]
     assert "scratchpad/notes.md" in [item["name"] for item in plans[1]["items"]]
     assert second["mode"] == "replace"
@@ -1130,3 +1134,276 @@ def test_an_owner_deletion_and_append_reconciles_through_the_retry(
     assert not (replica / "title.json").exists()
     for name, digest in cursor["files"].items():
         assert sync.sha256_bytes((replica / name).read_bytes()) == digest, name
+
+
+# ---------------------------------------------------------------------------
+# A report-only member is PINNED by its stat facts, not published on a digest alone
+# ---------------------------------------------------------------------------
+
+
+def _record_refused_pulls(monkeypatch: pytest.MonkeyPatch) -> list[sync.SyncRefused]:
+    """Every refusal a pull raised, in order, with the real ``pull`` still running."""
+    refusals: list[sync.SyncRefused] = []
+    original_pull = sync.pull
+
+    def recording_pull(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return original_pull(*args, **kwargs)
+        except sync.SyncRefused as exc:
+            refusals.append(exc)
+            raise
+
+    monkeypatch.setattr(sync, "pull", recording_pull)
+    return refusals
+
+
+def _synced_replica_with_a_turn(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A holder whose replica is complete, and an owner that has appended one turn.
+
+    The append is what makes the next plan an ``append``: every member the replica
+    already holds at an unchanged digest is then OMITTED from the plan, so the pull has
+    nothing but the destination's own report to justify it with — the case these cells
+    are about.
+    """
+    root = tmp_path / "holder"
+    owner = root / "owner"
+    session = owner / "sessions" / "abc123"
+    (session / "scratchpad").mkdir(parents=True)
+    transcript = session / "transcript.jsonl"
+    original = b'{"line":1}\n'
+    transcript.write_bytes(original)
+    (session / "scratchpad" / "notes.md").write_bytes(b"notes")
+    replica = sync.replica_dir(root, "abc123")
+    sync.sync_from(root, "abc123", ask=_owner_ask(owner), into=replica)
+    transcript.write_bytes(original + b'{"line":2}\n')
+    return root, owner, replica
+
+
+def test_a_report_justified_member_deleted_during_the_plan_answer_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member the report justified and the plan omitted must still be HERE when published.
+
+    ``held_report`` digests the copy set once, before the owner is asked; the owner then
+    omits what that report describes. A member deleted in that window used to be attested
+    from the report anyway, so the cursor claimed a file the replica no longer held and
+    ``promote_replica`` refused the copy as ``incomplete_replica``.
+    """
+    root, owner, replica = _synced_replica_with_a_turn(tmp_path)
+    member = replica / "scratchpad" / "notes.md"
+    plans: list[dict[str, Any]] = []
+    honest = _owner_ask(owner, "abc123", plans)
+    refusals = _record_refused_pulls(monkeypatch)
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        answer = honest(frame)
+        if frame["phase"] == "plan" and len(plans) == 1:
+            member.unlink()
+        return answer
+
+    second = sync.sync_from(root, "abc123", ask=ask, into=replica)
+
+    assert [exc.code for exc in refusals] == ["stale_plan"]
+    assert "scratchpad/notes.md" in refusals[0].message
+    assert [item["name"] for item in plans[1]["items"]] == ["scratchpad/notes.md"]
+    assert second["mode"] == "replace"
+    assert (replica / "scratchpad" / "notes.md").read_bytes() == b"notes"
+    promoted = sync.promote_replica(root, "abc123", new_id="recovered")
+    assert promoted["session_id"] == "recovered"
+    assert (root / "sessions" / "recovered" / "scratchpad" / "notes.md").read_bytes() == b"notes"
+
+
+def test_a_report_justified_member_rewritten_during_the_plan_answer_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same window, different bytes: the report's digest may not outlive the bytes it saw."""
+    root, owner, replica = _synced_replica_with_a_turn(tmp_path)
+    member = replica / "scratchpad" / "notes.md"
+    plans: list[dict[str, Any]] = []
+    honest = _owner_ask(owner, "abc123", plans)
+    refusals: list[sync.SyncRefused] = []
+    at_refusal: list[bytes] = []
+    original_pull = sync.pull
+
+    def recording_pull(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return original_pull(*args, **kwargs)
+        except sync.SyncRefused as exc:
+            refusals.append(exc)
+            at_refusal.append(member.read_bytes())
+            raise
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        answer = honest(frame)
+        if frame["phase"] == "plan" and len(plans) == 1:
+            member.write_bytes(b"tampered")
+        return answer
+
+    monkeypatch.setattr(sync, "pull", recording_pull)
+    second = sync.sync_from(root, "abc123", ask=ask, into=replica)
+
+    assert [exc.code for exc in refusals] == ["stale_plan"]
+    assert "scratchpad/notes.md" in refusals[0].message
+    # NOT DELETED OR REPAIRED BY THE REFUSAL: the bytes this device wrote stay in place
+    # until the retry replaces them with the owner's.
+    assert at_refusal == [b"tampered"]
+    assert second["mode"] == "replace"
+    assert member.read_bytes() == b"notes"
+    cursor = sync.read_replica_cursor(root, "abc123")
+    for name, digest in cursor["files"].items():
+        assert sync.sha256_bytes((replica / name).read_bytes()) == digest, name
+
+
+def test_an_unchanged_omitted_member_is_pinned_by_one_stat_not_a_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The honest append pays one ``lstat`` per omitted member, and reads no bytes of it.
+
+    This is the cost the attestation may not regress: re-hashing the copy set on every
+    turn is what the earlier cost fix removed, so the pin has to answer with stat facts.
+    """
+    root, owner, replica = _synced_replica_with_a_turn(tmp_path)
+    member = replica / "scratchpad" / "notes.md"
+    plans: list[dict[str, Any]] = []
+    ask = _owner_ask(owner, "abc123", plans)
+    opened: list[Path] = []
+    original_open = sync._open_for_read
+
+    def recording_open(path: Path, scope: Any) -> int:
+        opened.append(Path(path))
+        return original_open(path, scope)
+
+    def refuse_to_hash(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError(f"the append hashed a member it already holds: {args[:3]}")
+
+    monkeypatch.setattr(sync, "_open_for_read", recording_open)
+    monkeypatch.setattr(sync, "_held_member_digest_now", refuse_to_hash)
+    second = sync.sync_from(root, "abc123", ask=ask, into=replica)
+
+    assert second["mode"] == "append"
+    assert second["items"] == 0
+    assert plans[-1]["items"] == []
+    assert member.resolve() not in [path.resolve() for path in opened]
+    assert "stats" in sync.held_report(replica, replica)
+    cursor = sync.read_replica_cursor(root, "abc123")
+    assert cursor["files"]["scratchpad/notes.md"] == sync.sha256_bytes(b"notes")
+
+
+@pytest.mark.parametrize("honest", [True, False])
+def test_a_report_without_stat_facts_is_justified_by_a_digest_not_by_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, honest: bool
+) -> None:
+    """A ``have`` from a caller that carries no facts falls back to the disk digest.
+
+    The bare digest is the same report and cannot justify itself: a member whose bytes
+    disagree with it is refused rather than published on the report's word.
+    """
+    name = "scratchpad/notes.md"
+    dest = tmp_path / "replica"
+    (dest / "scratchpad").mkdir(parents=True)
+    declared = sync.sha256_bytes(b"notes")
+    (dest / "scratchpad" / "notes.md").write_bytes(b"notes" if honest else b"forged")
+    measured: list[str] = []
+    original_digest = sync._held_member_digest_now
+
+    def recording_digest(*args: Any, **kwargs: Any) -> str:
+        measured.append(str(args[2]))
+        return original_digest(*args, **kwargs)
+
+    monkeypatch.setattr(sync, "_held_member_digest_now", recording_digest)
+    have = {"files": {name: declared}}
+
+    if honest:
+        result = sync.pull(
+            tmp_path,
+            "session",
+            ask=_complete_plan({name: declared}),
+            dest_dir=dest,
+            attachments_root=dest,
+            have=have,
+        )
+        assert result.files[name] == declared
+    else:
+        with pytest.raises(sync.SyncRefused) as refusal:
+            sync.pull(
+                tmp_path,
+                "session",
+                ask=_complete_plan({name: declared}),
+                dest_dir=dest,
+                attachments_root=dest,
+                have=have,
+            )
+        assert refusal.value.code == "stale_plan"
+        assert name in refusal.value.message
+        assert (dest / "scratchpad" / "notes.md").read_bytes() == b"forged"
+    assert measured == [name]
+
+
+@pytest.mark.parametrize("name", ["scratchpad/../../escape.md", "attachments/../escape.bin"])
+def test_an_unsafe_declared_member_is_unknown_not_a_stale_plan_retry(
+    tmp_path: Path, name: str
+) -> None:
+    """An escaping member name is refused as one, and a retry is not what it needs.
+
+    A GUARD rather than a red cell: the plan's own destination check already answers this
+    before the attestation runs (``_validate_plan_destinations``). It is here because the
+    attestation must not turn that refusal into an absence if the two ever drift apart,
+    and the plan count pins that no retry was spent on it.
+    """
+    dest = sync.replica_dir(tmp_path, "session")
+    dest.mkdir(parents=True)
+    served: list[int] = []
+    serving = _complete_plan({name: sync.sha256_bytes(b"payload")})
+
+    def ask(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame["phase"] == "plan":
+            served.append(1)
+        return serving(frame)
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.sync_from(tmp_path, "session", ask=ask, into=dest)
+
+    assert refusal.value.code == "unknown_item"
+    assert name in refusal.value.message
+    assert len(served) == 1
+
+
+def test_a_refused_member_read_is_unknown_not_a_stale_plan_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal from the scoped read is a refusal, not an absence.
+
+    The unraced containment shapes are answered before the read itself (the containment
+    walk, then the leaf checks), so this reaches the handler where it is still reachable:
+    the read seam answers the ``unknown_item`` that ``_refuse_io`` produces, and that has
+    to reach the caller unchanged. ``stale_plan`` is what ``sync_from`` retries, so
+    swallowing the refusal as an absence reports the wrong problem for a member that is
+    present and cannot be satisfied by asking again.
+    """
+    name = "scratchpad/notes.md"
+    dest = tmp_path / "replica"
+    (dest / "scratchpad").mkdir(parents=True)
+    declared = sync.sha256_bytes(b"notes")
+    (dest / "scratchpad" / "notes.md").write_bytes(b"notes")
+    original_open = sync._open_for_read
+
+    def refuse_the_member(path: Path, scope: Any) -> int:
+        if Path(path).name == "notes.md":
+            raise sync.SyncRefused(
+                "unknown_item", "Sync member 'notes.md' was not written: it is unsafe."
+            )
+        return original_open(path, scope)
+
+    monkeypatch.setattr(sync, "_open_for_read", refuse_the_member)
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.pull(
+            tmp_path,
+            "session",
+            ask=_complete_plan({name: declared}),
+            dest_dir=dest,
+            attachments_root=dest,
+        )
+
+    assert refusal.value.code == "unknown_item"
+    assert refusal.value.message == "Sync member 'notes.md' was not written: it is unsafe."
