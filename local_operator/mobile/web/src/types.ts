@@ -864,6 +864,9 @@ export interface Capabilities {
 	    relays that have none of these routes). Absent on an older relay, which
 	    must HIDE the action rather than offer a control whose request would 404. */
 	session_tags?: { available: boolean };
+	/** Creation keys are safe to replay only when this versioned contract is
+	    advertised. Older relays silently ignore unknown start-body fields. */
+	session_start?: { version: number; durable_idempotency: boolean; receipt_capacity: number };
 }
 
 export type CommandOp =

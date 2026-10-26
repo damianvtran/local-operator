@@ -643,6 +643,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "config root, beside the seen-store and the push registries — machine "
         "state about moves, never an entry of a session directory",
     ),
+    # The keyed session-start receipt store (`mobile/start_receipts.py`). Its ONE
+    # construction site passes `config_dir()` (`mobile/daemon.py`), so the database
+    # sits at the config root beside the transfer receipts. It must never travel with
+    # a session: a request id replayed from another device's store would resolve to a
+    # session that is not on this daemon.
+    "local_operator/mobile/start_receipts.py": (
+        1,
+        "``RECEIPTS_NAME``: the per-installation keyed session-start receipt store "
+        "under the config root, beside the transfer receipts — machine state mapping "
+        "a request id to THIS daemon's session, never an entry of a session directory",
+    ),
     "local_operator/secrets/keys.py": (
         5,
         "``secrets/`` and its registration ticket: the credential store at the config root. "
