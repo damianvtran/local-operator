@@ -176,14 +176,16 @@ async def test_query_preview_surfaces_the_middle_and_labels_resolve(
     for start, end in details["query_passages"]:
         label = f"[lines {start}-{end}"
         assert label in preview
-        stored, _total = store.read_lines(handle, start, end)
+        read = store.read_lines(handle, start, end)
+        assert read is not None
+        stored, _total = read
         shown = "\n".join(stored)
         assert f"]\n{shown}\n" in preview
         back = await execute_read(
             "r", {"path": handle, "range": f"{start}-{end}"}, None, None, context
         )
         for line in stored:
-            assert line in back.content[0].text
+            assert line in back.text
 
 
 @pytest.mark.asyncio
@@ -281,7 +283,7 @@ async def test_tool_entry_point_threads_query(context: ToolContext) -> None:
     result = await execute_web_fetch(
         "c1", {"url": "https://example.com/t", "query": "max_connections"}, context=context
     )
-    assert NEEDLE in result.content[0].text
+    assert NEEDLE in result.text
 
 
 def test_markdown_escaped_identifier_still_scores_as_identifier() -> None:
@@ -326,4 +328,4 @@ async def test_more_matches_hint_resolves_through_read(context: ToolContext) -> 
     assert match, preview[-600:]
     found = await execute_read("r", {"path": match.group(1)}, None, None, context)
     assert found.is_error is False
-    assert "Group" in found.content[0].text
+    assert "Group" in found.text

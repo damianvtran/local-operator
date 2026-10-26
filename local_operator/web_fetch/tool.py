@@ -397,11 +397,9 @@ def _shape_from_content(
     preview = f"{header}\n\n{body}" if body else header
     details = dict(result_like)
     wants_passages = (
-        bool(query and query.strip())
-        and spill_details is not None
-        and result_like.get("render_method") in _RANKABLE_METHODS
+        bool(query and query.strip()) and result_like.get("render_method") in _RANKABLE_METHODS
     )
-    if wants_passages:
+    if wants_passages and spill_details is not None:
         shaped = _query_preview(
             header, str(query), spill_details["spill"]["handle"], TOOL_OUTPUT_LIMIT_CHARS
         )

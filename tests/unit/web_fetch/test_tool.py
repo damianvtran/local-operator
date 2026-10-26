@@ -986,4 +986,4 @@ async def test_read_url_sugar_never_passes_a_query(
     result = await execute_read("t1", {"path": "https://example.com/md"}, None, None, context)
     assert seen.get("query") is None
     assert "query_passages" not in (result.details or {})
-    assert "Full output" in result.content[0].text
+    assert "Full output" in result.text

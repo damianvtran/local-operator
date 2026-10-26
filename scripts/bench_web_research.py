@@ -615,7 +615,7 @@ def live_markdown(summary: dict[str, Any], arms: list[Arm]) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--arm", action="append", required=True, help="NAME=<worktree path>")
     parser.add_argument("--reps", type=int, default=1)
     parser.add_argument("--tasks", default="", help="comma-separated task slugs (default: all)")
