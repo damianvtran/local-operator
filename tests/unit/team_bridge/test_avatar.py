@@ -221,3 +221,55 @@ async def test_exact_limit_and_large_thumbnail(tmp_path, mime):
     assert await client.fetch_avatar(
         "acc_2", v="0123456789abcdef", size=256, expected_account_id="acc_1"
     ) == (body, mime)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"etag": '"valid"', "cache-control": "private, no-store"},
+        {"etag": "unquoted"},
+        {"etag": '"' + "x" * 255 + '"'},
+        {},
+    ],
+)
+async def test_noncacheable_http_entities_always_cold_fetch(tmp_path, headers):
+    conditionals = []
+
+    def upstream(request):
+        conditionals.append(request.headers.get("if-none-match"))
+        return httpx.Response(200, content=PNG, headers={"content-type": "image/png", **headers})
+
+    client = TeamBridgeClient(
+        tmp_path, store=AvatarStore(), transport=httpx.MockTransport(upstream)
+    )
+    for _ in range(2):
+        assert (
+            await client.fetch_avatar(
+                "acc_2", v="0123456789abcdef", size=64, expected_account_id="acc_1"
+            )
+        )[0] == PNG
+    assert conditionals == [None, None]
+
+
+async def test_transport_failure_evicts_without_stale_fallback(tmp_path):
+    from local_operator.team_bridge.client import BridgeUnreachable
+
+    conditionals = []
+
+    def upstream(request):
+        conditionals.append(request.headers.get("if-none-match"))
+        if len(conditionals) == 2:
+            raise httpx.ReadError("fixture connection failure")
+        return httpx.Response(
+            200, content=PNG, headers={"content-type": "image/png", "etag": '"valid"'}
+        )
+
+    client = TeamBridgeClient(
+        tmp_path, store=AvatarStore(), transport=httpx.MockTransport(upstream)
+    )
+    args = {"v": "0123456789abcdef", "size": 64, "expected_account_id": "acc_1"}
+    await client.fetch_avatar("acc_2", **args)
+    with pytest.raises(BridgeUnreachable):
+        await client.fetch_avatar("acc_2", **args)
+    await client.fetch_avatar("acc_2", **args)
+    assert conditionals == [None, '"valid"', None]
