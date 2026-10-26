@@ -45,6 +45,8 @@ import {
 import { ProjectsSheet } from "../components/projects-sheet";
 import { SessionTagLine } from "../components/session-tag-line";
 import { Drawer, type DrawerItem } from "../components/ui/drawer";
+import { ChromeIcon } from "../components/ui/chrome-icon";
+import { BrandMark } from "../components/ui/brand-mark";
 import { Snackbar } from "../components/ui/snackbar";
 import { Chip } from "../components/ui/chip";
 import { AsksSheet } from "../components/asks-sheet";
@@ -1435,17 +1437,18 @@ export function SessionListScreen() {
 		<div className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col">
 			<header className="flex h-[calc(52px+env(safe-area-inset-top))] shrink-0 items-center gap-1 px-1 pt-[env(safe-area-inset-top)]">
 				<button type="button" className="relative flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface"
-					ref={projectsButtonRef} aria-label={messageRuntime.t("relay.chrome.drawer.open")} aria-expanded={drawerOpen} aria-controls="relay-navigation" onClick={() => setDrawerOpen(true)}>☰
+					ref={projectsButtonRef} aria-label={messageRuntime.t("relay.chrome.drawer.open")} aria-expanded={drawerOpen} aria-controls="relay-navigation" onClick={() => setDrawerOpen(true)}><ChromeIcon name="menu" />
 					{sessions.length > 0 && !connected ? <span aria-hidden className="absolute end-2 top-2 size-2 rounded-full bg-warning" /> : null}
 				</button>
 				{searchOpen ? <input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)}
 					aria-label={messageRuntime.t("relay.chrome.list.search_label")} placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
 					className="min-h-11 min-w-0 flex-1 rounded-md bg-elevated px-3 text-body text-ink placeholder:text-ink-dim" /> :
-					<div className="min-w-0 flex-1"><h1 className="truncate text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.conversations")}</h1>
-						{sessions.length > 0 && !connected ? <p role="status" className="text-meta text-ink-dim">{messageRuntime.t("relay.chrome.link.reconnecting")}</p> : null}</div>}
+					<div className="flex min-w-0 flex-1 items-center gap-2"><BrandMark />
+						<div className="min-w-0 flex-1"><h1 className="truncate text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.conversations")}</h1>
+							{sessions.length > 0 && !connected ? <p role="status" className="text-meta text-ink-dim">{messageRuntime.t("relay.chrome.link.reconnecting")}</p> : null}</div></div>}
 				<button type="button" className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface"
 					aria-label={searchOpen ? messageRuntime.t("relay.chrome.list.search_close") : messageRuntime.t("relay.chrome.list.search_open")}
-					onClick={() => { setSearchOpen(!searchOpen); setQuery(""); }}>{searchOpen ? "✕" : "⌕"}</button>
+					onClick={() => { setSearchOpen(!searchOpen); setQuery(""); }}><ChromeIcon name={searchOpen ? "close" : "search"} /></button>
 			</header>
 			{/* `flex-wrap` is only the safety net for a column too narrow for even
 			    the three fixed filters plus `+N`; the fit keeps it to one line at

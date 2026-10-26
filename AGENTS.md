@@ -2662,6 +2662,8 @@ misreports how much changed.
 
 ## Visual validation: how to actually look at a UI change
 
+Mobile relay UI: [docs/design/mobile-relay-guidelines.md](docs/design/mobile-relay-guidelines.md).
+
 This is a terminal UI. **A passing test is not evidence that a visual change
 looks right**, and every spacing, layout, or animation change in this repo has
 to be inspected as a rendered frame before it is claimed to work. The recipe

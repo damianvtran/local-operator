@@ -8,6 +8,8 @@ import { useId, type ReactNode } from "react";
 import { columnBox } from "../../lib/column";
 import { messageRuntime } from "../../store";
 import { useModalLayer } from "./use-modal-layer";
+import { ChromeIcon } from "./chrome-icon";
+import { BrandMark } from "./brand-mark";
 
 export interface DrawerItem {
 	id: string;
@@ -39,9 +41,10 @@ export function Drawer({ open, onClose, items, status }: {
 		<nav aria-label={messageRuntime.t("relay.chrome.drawer.label")}
 			className="lo-drawer-panel absolute start-0 inset-y-0 flex w-[min(320px,85%)] flex-col bg-surface px-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-[max(env(safe-area-inset-top),0.5rem)] shadow-overlay">
 			<div className="flex min-h-12 items-center gap-2">
-				<span id={titleId} className="flex-1 px-3 text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.label")}</span>
+				<div className="flex min-w-0 flex-1 items-center gap-2 ps-3"><BrandMark />
+					<span id={titleId} className="min-w-0 truncate text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.label")}</span></div>
 				<button ref={closeRef} type="button" onClick={onClose} aria-label={messageRuntime.t("relay.chrome.drawer.close")}
-					className="flex size-11 items-center justify-center rounded-md text-ink-muted active:bg-elevated">✕</button>
+					className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-elevated"><ChromeIcon name="close" /></button>
 			</div>
 			<div ref={scrollCue} className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto">
 				{items.filter(item => item.available !== false).map((item, i, visible) => {
