@@ -16,18 +16,42 @@ Two passes (``pruneSupersededToolResults``):
 
 Prompt-cache guards (the whole point of doing this carefully):
 
-- Warm-suffix guard: ``suffix_tokens[i]`` is the estimated size of everything
-  after index ``i`` — the content the provider must re-write at cacheWrite
-  premium if ``i`` is mutated. Candidates whose suffix exceeds
-  ``cache_warm_suffix_tokens`` sit inside the warm cache prefix and are left
-  for compaction (which rebuilds the cache anyway) — *unless* the idle flush
-  applies, or the candidate is a superseded victim at least as large as that
-  suffix (see :data:`OVERSIZED_SUPERSEDE_TOKENS`). The useless pass has no
-  such exception: a worthless-once-consumed result does not repay a warm
-  re-write on any horizon the supersede arithmetic promises.
+- Sent-prefix guard: a candidate the provider has already been SENT (it sits
+  before the newest assistant message — see :func:`_sent_prefix_end`) is left
+  alone while the cache may still hold it, and waits for the idle flush or for
+  compaction (which rebuilds the cache anyway). The only exception is a
+  superseded victim at least as large as the suffix it invalidates (see
+  :data:`OVERSIZED_SUPERSEDE_TOKENS`). The useless pass has no such exception:
+  a worthless-once-consumed result does not repay a warm re-write on any
+  horizon the supersede arithmetic promises. Candidates in the not-yet-sent
+  tail (the tool batch that just landed) are blanked freely: no cache entry
+  covers them, so the rewrite costs nothing.
+
+  WHY structural, not a token budget. The guard used to let through any
+  candidate whose SUFFIX was under ``cache_warm_suffix_tokens`` (8,000
+  estimated tokens), on the theory that re-writing 8k tokens is cheap. The
+  provider does not re-write "the suffix", though. It reads the longest
+  prefix ending at a block it previously MARKED, found by walking back at
+  most ~20 content blocks from the new request's markers. Mutating a block
+  the previous request covered invalidates every entry written since. In a
+  frame-dense run the next valid entry is usually out of lookback reach, so
+  the read collapses to the system head and the whole conversation is
+  re-written. Measured on this fleet (7d, analytics ``calls`` table plus
+  transcript replays through ``AnthropicClient._build_body``): subagent
+  prefix breaks were 54% of all Anthropic cache writes. In the replayed
+  sessions, the first divergent byte of a break was a blank written by this
+  sweep before the previous request's final marker. Session 0d598f9ee38e
+  read exactly the 27,967-token system head and re-wrote 165-168k tokens on
+  7 consecutive calls, 5-8 s apart, each right after a stale-frame blank of
+  a frame with only ~2.4k estimated tokens after it. Carrying a stale frame
+  instead costs its tokens at the cache-READ rate (0.1x), and one avoided
+  break pays for that over hundreds of calls.
 - Idle flush: once ``now - last_activity >= idle_flush_ms`` the provider cache
   is provably cold (the default 90 min exceeds Anthropic's 1 h long-retention
-  TTL), so re-writing the sent region is free and every candidate flushes.
+  TTL), so re-writing the sent region is free and every candidate flushes in
+  one batch. ``last_activity`` must be the last provider REQUEST, stamped per
+  call: a stamp taken only when a run ends reads 0 for the whole of a
+  subagent's first run, which made every boundary look idle.
 - ``MIN_PRUNE_TOKENS`` floor: blanking a result smaller than the floor costs
   more than it saves (the placeholder itself has a token cost) and only churns
   the cache — skip it.
@@ -91,7 +115,7 @@ USELESS_NOTICE = "[Uneventful result elided]"
 STALE_FRAME_NOTICE = "[screenshot omitted: superseded by a more recent view of the same surface]"
 
 #: Minimum size for the Fix C oversized-supersede exception (see
-#: :func:`prune_tool_outputs`). The warm-suffix guard exists because blanking
+#: :func:`prune_tool_outputs`). The sent-prefix guard exists because blanking
 #: forces the provider to re-write everything after the victim at the
 #: cacheWrite premium, so a small victim costs more than it saves. That
 #: arithmetic inverts only when the victim itself outweighs the suffix it
@@ -100,10 +124,8 @@ STALE_FRAME_NOTICE = "[screenshot omitted: superseded by a more recent view of t
 #: large as its suffix is repaid on the NEXT request alone. The exception
 #: therefore compares the victim estimate against the ACTUAL suffix
 #: (``suffix_tokens[i]``), never against a fixed number alone. This constant
-#: is only a floor beneath that comparison, mirroring
-#: ``cache_warm_suffix_tokens``' default (8,000) in the same units the guard
-#: already uses, so the exception can never fire for a victim the guard
-#: itself would call small. It deliberately does NOT apply to the useless
+#: is only a floor beneath that comparison (8,000 estimated tokens), so the
+#: exception never fires for a small victim. It deliberately does NOT apply to the useless
 #: pass (see the module docstring). This is NOT an earlier trigger: pruning
 #: already runs post-turn (session._maybe_compact -> _plan_compaction);
 #: the victims that accumulated did so because this guard deferred them,
@@ -874,6 +896,26 @@ def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:
     return suffix
 
 
+def _sent_prefix_end(messages: Sequence[Message]) -> int:
+    """Index of the newest assistant message: everything before it was SENT.
+
+    An assistant message exists only because a request carrying every message
+    before it reached the provider, so those messages may sit under a live
+    prompt-cache entry. Anything after it (the tool batch that just landed,
+    a new user turn) has never been sent, and mutating it costs no cache.
+    ``0`` when there is no assistant message yet: nothing has been answered,
+    so nothing is known to be cached.
+
+    Structural on purpose: the sweep cannot see marker placement or TTLs (those
+    are per-provider wire decisions), but "was sent" is exactly the property a
+    cache entry depends on, and it holds for every provider.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == "assistant":
+            return index
+    return 0
+
+
 def _payload_of(message: Message) -> dict[str, Any]:
     """The message's provider payload when it is a plain dict, else ``{}``."""
     payload = message.provider_payload
@@ -1037,7 +1079,6 @@ def prune_tool_outputs(
     messages: Sequence[Message],
     now_ms: int,
     last_activity_ms: int,
-    cache_warm_suffix_tokens: int = 8000,
     idle_flush_ms: int = 5400000,
 ) -> tuple[list[Message], bool]:
     """Blank superseded and useless tool outputs in place.
@@ -1051,10 +1092,11 @@ def prune_tool_outputs(
     NEVER removed so tool-call/result pairing survives for every provider.
 
     Guards, in order per candidate: never errors, never skill/guide reads,
-    never already-pruned, never below :data:`MIN_PRUNE_TOKENS`, and never
-    inside the warm cache suffix — unless the idle flush window has elapsed,
-    or (superseded pass only) the victim is at least as large as the suffix
-    it invalidates and at least :data:`OVERSIZED_SUPERSEDE_TOKENS`.
+    never already-pruned, never below :data:`MIN_PRUNE_TOKENS`, and never in
+    the already-SENT prefix (:func:`_sent_prefix_end`) — unless the idle flush
+    window has elapsed, or (superseded pass only) the victim is at least as
+    large as the suffix it invalidates and at least
+    :data:`OVERSIZED_SUPERSEDE_TOKENS`.
     """
     if not messages:
         return list(messages), False
@@ -1121,7 +1163,7 @@ def prune_tool_outputs(
 
     # Suffix sums are computed HERE, after the candidate passes, and only when
     # there is a candidate to judge. They are read by exactly one guard below
-    # (``suffix_tokens[i] > cache_warm_suffix_tokens``), and both passes above
+    # (the oversized-supersede exception), and both passes above
     # are pure structural walks that never look at a token count — so deferring
     # is behaviour-identical: nothing has been mutated yet, and the sums are a
     # pure function of ``messages``.
@@ -1136,6 +1178,7 @@ def prune_tool_outputs(
     # nothing to prune. Candidates present -> the guard needs real numbers and
     # we pay honestly.
     suffix_tokens = compute_suffix_tokens(messages) if (superseded or useless) else []
+    sent_end = _sent_prefix_end(messages)
 
     changed = False
     # WHY the two passes do not share the oversized exception (R2): the
@@ -1154,10 +1197,11 @@ def prune_tool_outputs(
             victim_tokens = estimate_tokens(message)
             if victim_tokens < MIN_PRUNE_TOKENS:
                 continue
-            if not idle and suffix_tokens[i] > cache_warm_suffix_tokens:
-                # Inside the warm cache prefix: re-writing it costs the
-                # cacheWrite premium on the whole suffix. Leave it for
-                # compaction, which rebuilds the cache anyway — UNLESS this
+            if not idle and i < sent_end:
+                # Already sent, so a live cache entry may cover it: blanking it
+                # invalidates every entry written since (see the module
+                # docstring for the measured collapse). Leave it for the idle
+                # flush or for compaction, which rebuilds the cache anyway — UNLESS this
                 # is a superseded victim that alone outweighs that suffix
                 # (see OVERSIZED_SUPERSEDE_TOKENS): then the re-write is
                 # repaid by not re-billing the victim on the very next
@@ -1209,7 +1253,6 @@ def prune_stale_frames_in_place(
     now_ms: int,
     last_activity_ms: int,
     keep_recent_frames: int = SESSION_KEEP_RECENT_FRAMES,
-    cache_warm_suffix_tokens: int = 8000,
     idle_flush_ms: int = 5400000,
 ) -> int:
     """Blank stale frames in place — the session-side sibling of
@@ -1222,11 +1265,16 @@ def prune_stale_frames_in_place(
 
     - never errors and never skill/guide reads (:func:`_is_prunable`), never an
       already-pruned result, and never below :data:`MIN_PRUNE_TOKENS`;
-    - never a candidate whose suffix lies inside the warm prompt cache
-      (``cache_warm_suffix_tokens``) — mutating there re-writes everything
-      after it at cacheWrite price — *unless* the idle flush
+    - never a candidate the provider has already been sent
+      (:func:`_sent_prefix_end`) — mutating there invalidates every cache
+      entry written since, which on a frame-dense run collapses the read to
+      the system head (see the module docstring) — *unless* the idle flush
       (``idle_flush_ms`` since the last provider request) proves the cache
-      cold.
+      cold. In practice a frame is therefore elided only at an idle flush or
+      by compaction: by the time a newer frame supersedes it, it has been sent.
+      Stale frames stay resident until then, and the context bound still
+      holds: they count toward the compaction trigger and the wire-byte
+      ladder like any other content.
 
     Two deliberate narrowings vs the runner's primitive, each the reason this
     sibling exists. Only TOOL-result frames are candidates: the runner's
@@ -1253,7 +1301,7 @@ def prune_stale_frames_in_place(
     if not victims:
         return 0
     idle = (now_ms - last_activity_ms) >= idle_flush_ms
-    suffix_tokens = compute_suffix_tokens(messages)
+    sent_end = _sent_prefix_end(messages)
     dropped = 0
     for index in victims:
         message = messages[index]
@@ -1267,10 +1315,9 @@ def prune_stale_frames_in_place(
             continue
         if estimate_tokens(message) < MIN_PRUNE_TOKENS:
             continue
-        if not idle and suffix_tokens[index] > cache_warm_suffix_tokens:
-            # Inside the warm cache prefix: re-writing it costs the
-            # cacheWrite premium on everything after it. Leave the frame for
-            # the idle flush, or for compaction, which cuts it away.
+        if not idle and index < sent_end:
+            # Already sent: a live cache entry may cover it. Leave the frame
+            # for the idle flush, or for compaction, which cuts it away.
             continue
         dropped += _blank_frames(message)
     return dropped

@@ -16719,6 +16719,15 @@ class Session:
         # runs (idempotent: it re-adopts the newest usage it scans).
         if isinstance(event, MessageEndEvent):
             self._note_usage([event.message])
+            # The provider-cache clock the prune sweeps read
+            # (``_plan_compaction``) advances on EVERY completed provider
+            # call, not only when a run ends. A subagent usually lives inside
+            # one long run, so with the run-end stamp alone this read 0 for its
+            # whole life. Every boundary sweep then saw a 90-minute "idle" gap
+            # and blanked already-cached frames and reads mid-run, which is the
+            # prefix-break mechanism described in ``compaction/pruning.py``.
+            if isinstance(event.message, Message) and event.message.usage is not None:
+                self._last_provider_request_ms = int(time.time() * 1000)
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
         #

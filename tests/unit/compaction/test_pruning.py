@@ -453,6 +453,58 @@ def test_warm_suffix_defers_frames_until_idle():
     assert not any(isinstance(block, ImageContent) for block in oldest.content)
 
 
+def test_a_sent_frame_waits_for_idle_even_behind_a_small_suffix():
+    """The sent-prefix guard is structural, not a token budget.
+
+    The old guard let a frame through whenever fewer than 8,000 estimated
+    tokens followed it. In a screenshot loop that is every boundary: the frame
+    blanked was the one the PREVIOUS request carried, and the provider then
+    lost every cache entry written since (measured: 27,967-token head reads
+    with 165k+ token re-writes on consecutive calls 5-8 s apart). A frame the
+    provider has already been sent therefore waits for the idle flush, however
+    little follows it.
+    """
+    oldest, middle = [_frame(f"/shots/{i}.png") for i in range(2)]
+    newest = _frame("/shots/2.png")
+    messages = [Message.user("look"), oldest, Message.assistant("next"), middle,
+                Message.assistant("again"), newest]
+    assert compute_suffix_tokens(messages)[1] < 8000  # the old guard let this through
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE)
+    assert dropped == 0
+    assert any(isinstance(block, ImageContent) for block in oldest.content)
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=NOW - IDLE_AGO)
+    assert dropped == 1
+    assert not any(isinstance(block, ImageContent) for block in oldest.content)
+
+
+def test_unsent_tail_still_prunes_while_warm():
+    """Candidates after the newest assistant message were never sent, so no
+    cache entry covers them and the sweep blanks them at any time."""
+    first, second, third = [_frame(f"/shots/{i}.png") for i in range(3)]
+    messages = [Message.user("look"), Message.assistant("reading all three"), first, second, third]
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE)
+    assert dropped == 1
+    assert not any(isinstance(block, ImageContent) for block in first.content)
+
+
+def test_a_sent_superseded_read_waits_for_idle_even_behind_a_small_suffix():
+    """Same structural guard for the superseded pass: a re-read of a file blanks
+    the earlier read only once the cache is cold, unless the victim outweighs
+    its suffix (the oversized exception, covered separately)."""
+    old_read = _read_result("/repo/a.py")
+    messages = [Message.user("hi"), old_read, Message.assistant("again"), _read_result("/repo/a.py")]
+    assert compute_suffix_tokens(messages)[1] < 8000
+
+    _, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is False
+    _, changed = prune_tool_outputs(messages, NOW, NOW - IDLE_AGO)
+    assert changed is True
+    assert old_read.text == SUPERSEDED_NOTICE
+
+
 def test_user_frames_are_never_swept():
     """A paste is not a view of a surface the session drove.
 
