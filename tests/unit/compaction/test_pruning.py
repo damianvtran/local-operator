@@ -466,8 +466,14 @@ def test_a_sent_frame_waits_for_idle_even_behind_a_small_suffix():
     """
     oldest, middle = [_frame(f"/shots/{i}.png") for i in range(2)]
     newest = _frame("/shots/2.png")
-    messages = [Message.user("look"), oldest, Message.assistant("next"), middle,
-                Message.assistant("again"), newest]
+    messages = [
+        Message.user("look"),
+        oldest,
+        Message.assistant("next"),
+        middle,
+        Message.assistant("again"),
+        newest,
+    ]
     assert compute_suffix_tokens(messages)[1] < 8000  # the old guard let this through
 
     dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE)
@@ -495,7 +501,12 @@ def test_a_sent_superseded_read_waits_for_idle_even_behind_a_small_suffix():
     the earlier read only once the cache is cold, unless the victim outweighs
     its suffix (the oversized exception, covered separately)."""
     old_read = _read_result("/repo/a.py")
-    messages = [Message.user("hi"), old_read, Message.assistant("again"), _read_result("/repo/a.py")]
+    messages = [
+        Message.user("hi"),
+        old_read,
+        Message.assistant("again"),
+        _read_result("/repo/a.py"),
+    ]
     assert compute_suffix_tokens(messages)[1] < 8000
 
     _, changed = prune_tool_outputs(messages, NOW, ACTIVE)

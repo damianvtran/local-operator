@@ -66,9 +66,7 @@ MODEL = ModelSpec(
 #: designer runs that produced the measured breaks (0d598f9ee38e re-read four
 #: PNGs in rotation). DISTINCT bytes per screen so a blank is observable.
 SCREENS = [f"/scratch/shot-{index}.png" for index in range(3)]
-_PIXELS = {
-    path: base64.b64encode(f"png:{path}".encode() * 64).decode() for path in SCREENS
-}
+_PIXELS = {path: base64.b64encode(f"png:{path}".encode() * 64).decode() for path in SCREENS}
 
 #: A production-sized brief (~480 KB of text). Load-bearing: the mid-turn
 #: boundary reaches the sweep only when the cheap pre-gate cannot rule
@@ -202,12 +200,14 @@ def _encoded_messages(request: ChatRequest) -> tuple[list[str], int]:
             final_marker = index
         stripped = {
             "role": message["role"],
-            "content": [
-                {key: value for key, value in block.items() if key != "cache_control"}
-                for block in content
-            ]
-            if isinstance(content, list)
-            else content,
+            "content": (
+                [
+                    {key: value for key, value in block.items() if key != "cache_control"}
+                    for block in content
+                ]
+                if isinstance(content, list)
+                else content
+            ),
         }
         encoded.append(json.dumps(stripped, sort_keys=True))
     return encoded, final_marker
