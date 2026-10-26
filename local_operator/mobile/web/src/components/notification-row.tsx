@@ -102,7 +102,7 @@ export function NotificationRow({
 					else if (isAsk) onAnswer();
 					else onOpen();
 				}}
-				className={cn("flex min-w-0 flex-1 items-center gap-3 ps-4 pe-13 py-2 text-start select-none active:bg-surface", selected && "bg-accent-wash")}
+				className={cn("@container flex min-w-0 flex-1 items-center gap-3 ps-4 py-2 text-start select-none active:bg-surface", selecting ? "pe-4" : "pe-13", selected && "bg-accent-wash")}
 			>
 				<span aria-hidden className="flex size-4 shrink-0 items-center justify-center">
 					{selecting ? (
@@ -110,23 +110,40 @@ export function NotificationRow({
 							selected ? "bg-accent text-on-accent" : "border border-control")}>{selected ? "✓" : ""}</span>
 					) : unread ? <span className="inline-block size-1.5 rounded-full bg-accent" /> : null}
 				</span>
-				<span aria-hidden className={cn("flex size-5 shrink-0 items-center justify-center text-body-sm",
+				{/* ONE FIXED SLOT WIDE ENOUGH FOR THE WIDEST GLYPH (`▁▃▅`, 1.75em at
+				    every size): the old `size-5` box measured 40 px against 57 px of bars
+				    at 200 % and spilled into the title (design RW-D1), and a slot that
+				    grew with its glyph put each row's title at a different x. It is decorative — priority is also
+				    the High chip and the accessible name — so a row whose content box is
+				    under 260 px drops it and gives the width to the title. A px bound,
+				    NOT rem: a rem bound grows with the text it is meant to measure
+				    against, and hid the glyph at 100 % (360 px phone: content box 292,
+				    130 %: 272, 200 %: ~224 — only the last one drops it). */}
+				<span aria-hidden className={cn("flex h-5 w-8 shrink-0 items-center justify-center text-body-sm @max-[260px]:hidden",
 					isAsk ? "text-info" : item.priority === "high" ? "text-warning" : "text-ink-dim")}>
 					{isAsk ? "?" : item.priority === "high" ? "▁▃▅" : item.priority === "normal" ? "▁▃" : "▁"}
 				</span>
+				{/* THE TITLE OWNS LINE ONE AND MAY WRAP TO TWO (design RW-D1). It used to
+				    share one line with the shrink-0 High/×N chips, and every other part
+				    of the row scales with text size, so at 200 % on 360 px the High
+				    row's title was 0 px wide — the most urgent row was the unreadable
+				    one. The chips now lead line two; the source keeps a floor of 8ch so
+				    the row still says where it came from; the age keeps its own slot. */}
 				<span className="flex min-w-0 flex-1 flex-col gap-0.5">
-					<span className="flex min-w-0 items-center gap-1.5">
-						<span className={cn("min-w-0 flex-1 truncate text-body", unread ? "font-semibold text-ink" : "text-ink-muted")}>{item.title}</span>
-						{item.priority === "high" && !isAsk ? <span className="shrink-0 rounded-sm bg-warning-wash px-1.5 text-meta text-warning">{messageRuntime.t("relay.notifications.row.high")}</span> : null}
-						{item.repeat_count > 1 ? <span className="shrink-0 rounded-sm bg-surface px-1.5 text-meta tabular-nums text-ink-dim">{messageRuntime.t("relay.notifications.row.repeat", { count: item.repeat_count })}</span> : null}
-					</span>
-					{/* The age gets its OWN non-shrinking slot (past-sessions' rule): as
-					    one truncating string, the age was the part clipped away at 130 %
-					    text on a 360 px phone, and "how recent" is what the reel answers. */}
-					<span className="flex min-w-0 gap-1.5 text-meta text-ink-dim">
-						<span className="min-w-0 truncate">{source}</span>
-						<span aria-hidden>·</span>
-						<span className="shrink-0">{age}</span>
+					<span className={cn("line-clamp-2 break-words text-body", unread ? "font-semibold text-ink" : "text-ink-muted")}>{item.title}</span>
+					<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-meta text-ink-dim">
+						{item.priority === "high" && !isAsk ? <span className="shrink-0 rounded-sm bg-warning-wash px-1.5 text-warning">{messageRuntime.t("relay.notifications.row.high")}</span> : null}
+						{item.repeat_count > 1 ? <span className="shrink-0 rounded-sm bg-surface px-1.5 tabular-nums">{messageRuntime.t("relay.notifications.row.repeat", { count: item.repeat_count })}</span> : null}
+						{/* The source keeps an 8ch floor and the age never clips; when the
+						    two cannot share a line (360 px at 200 % text: 157 px for ~220 px
+						    of content, measured in round 1) the age wraps under the source
+						    instead of running into the ✕ column. */}
+						<span className="flex max-w-full flex-1 flex-wrap gap-x-1.5">
+							{/* The separator travels with the source, so a wrapped age starts
+							    its line clean rather than with a dangling "·". */}
+							<span className="flex min-w-[8ch] max-w-full gap-1.5"><span className="min-w-0 truncate">{source}</span><span aria-hidden>·</span></span>
+							<span className="shrink-0">{age}</span>
+						</span>
 					</span>
 				</span>
 			</button>

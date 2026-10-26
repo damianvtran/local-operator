@@ -270,3 +270,33 @@ describe("detail", () => {
 		errors.mockRestore();
 	});
 });
+
+describe("design round 1 (RW-D2, RW-D4, RW-D6)", () => {
+	it("RW-D2: a questions-only selection cannot Dismiss, and says why before the tap", async () => {
+		const ask = item({ id: "ask:abcdefabcdef:q1", source: "ask", title: "Ship it?", actions: { dismiss: false, answer: true, read: true } });
+		vi.mocked(api.getNotifications).mockResolvedValue(page([], { waiting: [ask], waiting_count: 1, waiting_unread_count: 1, observed: [{ id: ask.id, revision: 1 }] }));
+		render(<NotificationsScreen />);
+		fireEvent.click(await screen.findByRole("button", { name: "Select" }));
+		fireEvent.click(screen.getByRole("button", { name: "Select Ship it?" }));
+		expect((screen.getByRole("button", { name: "Dismiss 0" }) as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByText("1 question stays until it's answered")).toBeTruthy();
+	});
+
+	it("RW-D4: the Unread chip reserves its counted width before the first read answers", async () => {
+		vi.mocked(api.getNotifications).mockReturnValue(new Promise(() => {}));
+		render(<NotificationsScreen />);
+		const chip = screen.getByRole("button", { name: /^Unread/ });
+		// The counted label is laid out (invisibly) so the All chip cannot move…
+		expect(chip.querySelector(".invisible")?.textContent).toBe("Unread · 8");
+		// …and no number is ever announced while it is unknown (D16).
+		expect(chip.textContent?.replace("Unread · 8", "")).toBe("Unread");
+	});
+
+	it("RW-D6: a failed first load names the cause in the reader's words", async () => {
+		vi.mocked(api.getNotifications).mockRejectedValue(new TypeError("Failed to fetch"));
+		render(<NotificationsScreen />);
+		expect(await screen.findByText("Couldn't load notifications.")).toBeTruthy();
+		expect(screen.getByText("this computer could not be reached")).toBeTruthy();
+		expect(screen.queryByText("Failed to fetch")).toBeNull();
+	});
+});

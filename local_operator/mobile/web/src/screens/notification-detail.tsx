@@ -22,7 +22,7 @@ import { Markdown } from "../components/markdown";
 import { NotificationReceipt } from "../components/notification-receipt";
 import { Button } from "../components/ui/button";
 import { Sheet } from "../components/ui/sheet";
-import { ageText, receiptText, sourceName, tokenOf, writeFailureText } from "../lib/notifications";
+import { ageText, failureReason, receiptText, sourceName, tokenOf, writeFailureText } from "../lib/notifications";
 import { navigate, navigateUp } from "../router";
 import { messageRuntime, retainSessionListStream, useSessions } from "../store";
 import type { NotificationDetail, NotificationsReceipt } from "../types";
@@ -65,7 +65,7 @@ export function NotificationDetailScreen({ itemId }: { itemId: string }) {
 			setLoad({ state: "ready", detail });
 		} catch (error) {
 			if (error instanceof HttpError && error.status === 404) setLoad({ state: "missing" });
-			else setLoad({ state: "error", message: error instanceof Error ? error.message : String(error) });
+			else setLoad({ state: "error", message: failureReason(error) });
 		}
 	}, [itemId]);
 	useEffect(() => { void refetch(); }, [refetch]);

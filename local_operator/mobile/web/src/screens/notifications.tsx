@@ -32,7 +32,8 @@ import { NotificationRow } from "../components/notification-row";
 import { Button } from "../components/ui/button";
 import { Chip } from "../components/ui/chip";
 import { Sheet } from "../components/ui/sheet";
-import { groupByDay, mergeObserved, receiptText, tokenOf, writeFailureText, type NotificationsOp } from "../lib/notifications";
+import { cn } from "../lib/cn";
+import { failureReason, groupByDay, mergeObserved, receiptText, tokenOf, writeFailureText, type NotificationsOp } from "../lib/notifications";
 import { navigate, navigateUp } from "../router";
 import { messageRuntime, retainSessionListStream, useCapabilities, useNotificationsBlock, useSessions } from "../store";
 import type { NotificationItem, NotificationsReceipt, NotificationToken } from "../types";
@@ -46,6 +47,8 @@ const SECTION_KEY = {
 	yesterday: "relay.notifications.section.yesterday",
 	earlier: "relay.notifications.section.earlier",
 } as const;
+/** Width reservation only (RW-D4): never shown, never announced. */
+const PLACEHOLDER_COUNT = 8;
 const CLOCK: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit" };
 
 /** The tab is a per-device preference (design §2: "the choice persists per
@@ -198,7 +201,8 @@ export function NotificationsScreen() {
 		} catch (error) {
 			if (mine !== seq.current) return;
 			if (loadedRef.current) setRefreshFailedAt(Date.now());
-			else setLoadError(error instanceof Error ? error.message : String(error));
+			/* The cause in the reader's words, not transport text (design RW-D6). */
+			else setLoadError(failureReason(error));
 		}
 	}, [tab]);
 
@@ -278,6 +282,7 @@ export function NotificationsScreen() {
 	const groups = useMemo(() => groupByDay(loaded?.items ?? [], new Date(nowMs)), [loaded, nowMs]);
 	const selectedRows = allRows.filter(item => selected.has(item.id));
 	const selectedDismissible = selectedRows.filter(item => item.actions.dismiss);
+	const selectedQuestions = selectedRows.filter(item => item.source === "ask").length;
 
 	const toggle = (id: string) => setSelected(current => {
 		const next = new Set(current);
@@ -310,7 +315,10 @@ export function NotificationsScreen() {
 			onLongPress={() => startSelect(item.id)}
 			onDismiss={() => void write("dismiss", { op: "dismiss", ids: [tokenOf(item)] }, [tokenOf(item)])} />
 	);
-	const sectionClass = "sticky top-0 z-10 truncate bg-canvas px-4 pt-4 pb-1 text-meta font-medium text-ink-dim";
+	/* Section headers stick BELOW the Mark-all band while it shows (design
+	   RW-D5): at `top-0` both pinned at the same y and the band hid Today. */
+	const bandShown = !selecting && unreadLoaded.length > 0;
+	const sectionClass = cn("sticky z-10 truncate bg-canvas px-4 pt-4 pb-1 text-meta font-medium text-ink-dim", bandShown ? "top-11" : "top-0");
 	const empty = loaded !== null && allRows.length === 0;
 
 	return (
@@ -332,7 +340,18 @@ export function NotificationsScreen() {
 					    pending is not unread, so a read ask stays pinned here — hence
 					    `waiting_count`, not the badge's `waiting_unread_count`. Shown
 					    only once the tab's own read answered; unknown renders no number. */}
-					{loaded && tab === "unread" ? messageRuntime.t("relay.notifications.filter.unread", { count: loaded.unreadCount + loaded.waitingCount }) : messageRuntime.t("relay.notifications.filter.unread_plain")}
+					{/* NO JUMP WHEN THE COUNT ARRIVES (design RW-D4). Before the first
+					    read the chip still lays out the counted message, with an
+					    invisible placeholder figure, so the All chip beside it does not
+					    move 19 px under the thumb when the number lands. The figure is
+					    hidden from sight AND from AT (D16: unknown is never stated as a
+					    number); the plain label is what is read until then. */}
+					{tab !== "unread" ? messageRuntime.t("relay.notifications.filter.unread_plain")
+						: loaded ? messageRuntime.t("relay.notifications.filter.unread", { count: loaded.unreadCount + loaded.waitingCount })
+						: <span className="relative">
+							<span aria-hidden className="invisible">{messageRuntime.t("relay.notifications.filter.unread", { count: PLACEHOLDER_COUNT })}</span>
+							<span className="absolute inset-y-0 start-0 whitespace-nowrap">{messageRuntime.t("relay.notifications.filter.unread_plain")}</span>
+						</span>}
 				</Chip>
 				<Chip selected={tab === "all"} aria-pressed={tab === "all"} onClick={() => changeTab("all")}>{messageRuntime.t("relay.notifications.filter.all")}</Chip>
 			</div>
@@ -341,7 +360,7 @@ export function NotificationsScreen() {
 					{messageRuntime.t("relay.notifications.error.refresh", { time: new Date(refreshFailedAt).toLocaleTimeString(undefined, CLOCK) })}
 					<button type="button" className="ms-2 min-h-11 font-semibold underline" onClick={() => void loadFirst()}>{messageRuntime.t("relay.notifications.error.retry")}</button>
 				</p> : null}
-				{!selecting && unreadLoaded.length > 0 ? <div className="sticky top-0 z-20 bg-canvas">
+				{bandShown ? <div className="sticky top-0 z-20 bg-canvas">
 					<button type="button" onClick={openMarkAll} disabled={writing || writesPaused} aria-busy={writing}
 						className="min-h-11 w-full px-4 text-start text-body-sm text-ink-muted active:bg-surface disabled:text-ink-disabled">{messageRuntime.t("relay.notifications.mark_all")}</button>
 				</div> : null}
@@ -349,8 +368,17 @@ export function NotificationsScreen() {
 					<h2 className="text-heading font-semibold">{messageRuntime.t("relay.notifications.error.load")}</h2>
 					<p className="text-body-sm text-ink-muted">{loadError}</p>
 					<Button onClick={() => { setLoadError(""); void loadFirst(); }}>{messageRuntime.t("relay.notifications.error.retry")}</Button>
-				</div> : <div aria-label={messageRuntime.t("relay.notifications.loading")} aria-busy="true" className="px-4 pt-2">
-					{[0, 1, 2, 3, 4].map(i => <div key={i} className="flex h-14 items-center gap-3"><div className="size-4 shrink-0" /><div className="flex flex-1 flex-col gap-2"><div className="h-3 w-3/5 rounded-sm bg-surface" /><div className="h-2 w-[35%] rounded-sm bg-surface" /></div></div>)}
+				</div> : <div aria-label={messageRuntime.t("relay.notifications.loading")} aria-busy="true">
+					{/* THE SKELETON HAS THE CONTENT'S GEOMETRY (design RW-D4): a band the
+					    height of Mark all read and a section-header slot come first, so the
+					    first real row lands where the first skeleton row was instead of
+					    73 px lower. Bars are `bg-hairline` (1.41 / 1.25 on canvas; the
+					    `bg-surface` bars measured 1.07:1 and read as a blank screen,
+					    RW-D3) and pulse like the Library's, stilled under reduced motion. */}
+					<div className="min-h-11" />
+					<div className="flex h-[1lh] items-center px-4 pt-4 pb-1 text-meta box-content"><div className="h-3 w-24 rounded-sm bg-hairline motion-safe:animate-pulse" /></div>
+					{[0, 1, 2, 3, 4].map(i => <div key={i} className="flex min-h-14 items-center gap-3 ps-4 pe-13 py-2"><div className="size-4 shrink-0" /><div className="h-5 w-8 shrink-0" />
+						<div className="flex flex-1 flex-col gap-2"><div className="h-3 w-3/5 rounded-sm bg-hairline motion-safe:animate-pulse" /><div className="h-2 w-[35%] rounded-sm bg-hairline motion-safe:animate-pulse" /></div></div>)}
 				</div> : empty ? <div className="flex min-h-[55vh] flex-col items-center justify-center gap-2 px-6 text-center">
 					<span aria-hidden className="mb-2 text-title text-ink-dim">✓</span>
 					<h2 className="text-heading font-semibold">{tab === "unread" ? messageRuntime.t("relay.notifications.empty.caught_up.title") : messageRuntime.t("relay.notifications.empty.none.title")}</h2>
@@ -370,13 +398,19 @@ export function NotificationsScreen() {
 				</>}
 			</main>
 			{selecting ? <div className="absolute inset-x-0 bottom-0 z-20 flex items-center gap-2 bg-surface px-3 pt-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-overlay">
-				<span className="min-w-0 flex-1 truncate text-body-sm text-ink-muted">{messageRuntime.t("relay.notifications.select.count", { count: selected.size })}</span>
+				<span className="flex min-w-0 flex-1 flex-col">
+					<span className="truncate text-body-sm text-ink-muted">{messageRuntime.t("relay.notifications.select.count", { count: selected.size })}</span>
+					{selectedQuestions > 0 ? <span className="text-meta text-ink-dim">{messageRuntime.t("relay.notifications.receipt.live_ask", { count: selectedQuestions })}</span> : null}
+				</span>
 				<Button disabled={selectedRows.length === 0 || writing || writesPaused}
 					onClick={() => { const tokens = selectedRows.map(tokenOf); endSelect(); void write("read", { op: "read", ids: tokens }, tokens); }}>
 					{messageRuntime.t("relay.notifications.select.read")}</Button>
 				{/* The count is the rows a dismiss can act on: live questions are
 				    skipped by the store (`live_ask`), and the receipt names them. */}
-				<Button variant="danger" disabled={selectedRows.length === 0 || writing || writesPaused}
+				{/* Dismiss acts on updates only: a question stays until answered, and
+				    the bar says so BEFORE the tap (design RW-D2), with the store's own
+				    receipt wording. Nothing dismissible selected = nothing to offer. */}
+				<Button variant="danger" disabled={selectedDismissible.length === 0 || writing || writesPaused}
 					onClick={() => { const tokens = selectedRows.map(tokenOf); endSelect(); void write("dismiss", { op: "dismiss", ids: tokens }, tokens); }}>
 					{messageRuntime.t("relay.notifications.select.dismiss", { count: selectedDismissible.length })}</Button>
 			</div> : null}

@@ -50,11 +50,16 @@ export function receiptText(op: NotificationsOp, receipt: Pick<NotificationsRece
     `fetch` rejects with browser-ese ("Failed to fetch"), which is not a reason a
     reader can act on, so an unreachable relay gets its own clause. */
 export function writeFailureText(error: unknown): string {
+	return messageRuntime.t("relay.notifications.error.write", { reason: failureReason(error) });
+}
+
+/** Why a request failed, as a clause a reader can act on: the unreachable
+    sentence for a transport failure, else the relay's own sentence. Shared by
+    writes and first loads (design RW-D6), so neither paints "Failed to fetch". */
+export function failureReason(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
-	const unreachable = message === "" || /failed to fetch|networkerror|load failed|network request failed/i.test(message);
-	return messageRuntime.t("relay.notifications.error.write", {
-		reason: unreachable ? messageRuntime.t("relay.notifications.error.unreachable") : message,
-	});
+	const unreachable = message === "" || /^\d{3}$/.test(message) || /failed to fetch|networkerror|load failed|network request failed/i.test(message);
+	return unreachable ? messageRuntime.t("relay.notifications.error.unreachable") : message;
 }
 
 /** Epoch MILLISECONDS (the inbox wire's unit) → a short localized age. */
