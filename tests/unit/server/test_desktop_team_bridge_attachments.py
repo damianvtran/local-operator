@@ -92,7 +92,7 @@ def proxy(tmp_path, monkeypatch):
                 self.send_response(204)
                 self.end_headers()
                 return None
-            if self.command == "GET" and "/attachments/" in self.path:
+            if self.command == "GET" and ("/attachments/" in self.path or "/avatar?" in self.path):
                 return self._reply(200, state["serve"], state["serve_type"])
             out = json.dumps({"msg": "Message sent", "result": {"id": MID, "seq": 1}}).encode()
             return self._reply(200, out, "application/json")
@@ -103,6 +103,9 @@ def proxy(tmp_path, monkeypatch):
     hub_thread = threading.Thread(target=hub.serve_forever, daemon=True)
     hub_thread.start()
     store = FakeStore()
+    state["store"] = store
+    state["incarnation"] = "login-a"
+    store.native_login_incarnation = lambda _id: state["incarnation"]
     real_client = bridge.TeamBridgeClient
     monkeypatch.setattr(bridge, "org_oauth_destination_allowed", lambda _base: True)
     monkeypatch.setattr(

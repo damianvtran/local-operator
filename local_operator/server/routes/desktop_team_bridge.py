@@ -2153,6 +2153,50 @@ async def delete_conversation_attachment(
     return Response(status_code=204)
 
 
+@router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/avatar")
+async def get_account_avatar(
+    target_account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Relay only a versioned account image, never a renderer-supplied URL.
+
+    The viewer receipt is mandatory even on GET: queued desktop work must not
+    acquire a new account's authority after login changes. No-store prevents
+    an HTTP cache from outliving that account fence.
+    """
+    query = request.query_params
+    keys = {"v", "size", "expected_account_id"}
+    if set(query) != keys or any(len(query.getlist(key)) != 1 for key in keys):
+        _raise_read("invalid_request")
+    if (
+        not is_account_id(target_account_id)
+        or not is_account_id(query["expected_account_id"])
+        or re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None
+        or query["size"] not in {"64", "256"}
+    ):
+        _raise_read("invalid_request")
+    data, mime = await _conversation_reply(
+        _conversation_client(config_manager).fetch_avatar(
+            target_account_id,
+            v=query["v"],
+            size=int(query["size"]),
+            expected_account_id=query["expected_account_id"],
+        )
+    )
+    if mime not in _ATTACHMENT_SERVABLE or len(data) > 1024 * 1024:
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @router.get(
     "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}"
     "/attachments/{attachment_id}"
