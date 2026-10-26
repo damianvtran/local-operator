@@ -1576,15 +1576,32 @@ def test_a_read_only_tree_is_reclaimed_through_the_widen_path(root: Path) -> Non
     assert len(result.content) == 1 and result.errors == 0
 
 
-def test_an_unreadable_tree_is_reclaimed_through_the_pre_widen_walk(root: Path) -> None:
+def test_an_unreadable_shape_tree_keeps_the_pad_rather_than_guessing(root: Path) -> None:
+    """CHANGED WITH THE R4-3 BLOCKER, deliberately: this pad now survives.
+
+    Removal itself would still succeed — ``rmtree`` needs write on the PARENT and
+    only read on the tree's own entries — and that is what made the old rule look
+    safe: the pass deleted a shape it could not inspect at all. The recency floor
+    must never be silently blind, so an unreadable subtree is now a pad abort:
+    kept, counted, and named. The trade-off is stated plainly here because it is
+    a policy change, not a bug fix: one unreadable ``node_modules`` now keeps its
+    whole pad for an operator to look at.
+    """
     pad = _kept_pad(root, "husk0")
     tree = pad / "node_modules"
     tree.mkdir()
     (tree / "pkg.js").write_text("x\n")
     os.chmod(tree, 0o000)
-    result = _pass(root)
-    assert not tree.exists()
-    assert len(result.content) == 1 and result.errors == 0
+    try:
+        result = _pass(root)
+    finally:
+        os.chmod(tree, 0o700)
+    assert tree.exists()
+    assert result.content == []
+    assert result.errors == 1
+    reason = dict(result.content_kept)["husk0"]
+    assert "could not be looked at completely" in reason
+    assert "node_modules" in reason
 
 
 def test_a_failed_file_removal_keeps_the_file_and_counts_an_error(
@@ -3509,6 +3526,66 @@ def test_the_report_and_the_planner_agree_when_only_the_pad_root_is_recent(
     result = _pass(root, idle=False, now=moment, policy=_copy_provider(source))
     assert result.content == []
     assert ("rootonly", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
+
+
+def test_an_unstattable_file_inside_a_shape_keeps_the_whole_pad(root: Path) -> None:
+    """R4-3: the recency signal must never be silently blind.
+
+    A directory that can be LISTED but not SEARCHED (mode 0400) has scandir
+    succeed while ``entry.stat()`` fails with EACCES — the real shape of any
+    entry that disappears between listing and stat, without needing a race. The
+    non-strict walk skipped it, called the shape idle, and the real run deleted
+    the fresh file with ``errors=0``.
+    """
+    moment = time.time() + 60
+    pad = _kept_pad(root, "blindstat")
+    _age(root / "sessions" / "blindstat" / "transcript.jsonl", moment - 60 * HOUR)
+    locked = pad / "build" / "locked"
+    locked.mkdir(parents=True)
+    fresh = locked / "notes.txt"
+    fresh.write_text("work\n")
+    for path in sorted(pad.rglob("*"), reverse=True):
+        _age(path, moment - 72 * HOUR)
+    _age(pad, moment - 72 * HOUR)
+    os.chmod(locked, 0o400)
+    try:
+        dry = _pass(root, idle=False, now=moment, dry_run=True)
+        assert dry.content == []
+        reason = dict(dry.content_kept)["blindstat"]
+        assert "could not be looked at completely" in reason
+        assert "notes.txt" in reason
+        result = _pass(root, idle=False, now=moment)
+    finally:
+        # Permissions restored BEFORE the existence checks: ``Path.exists()``
+        # raises rather than answering under a non-searchable parent.
+        os.chmod(locked, 0o700)
+    assert fresh.exists()
+    assert result.content == []
+
+
+def test_an_unreadable_subtree_inside_a_shape_keeps_the_whole_pad(root: Path) -> None:
+    """R4-3, the scandir half: an unreadable subtree is keep, not "no changes"."""
+    moment = time.time() + 60
+    pad = _kept_pad(root, "blindsub")
+    _age(root / "sessions" / "blindsub" / "transcript.jsonl", moment - 60 * HOUR)
+    secret = pad / "build" / "secret"
+    secret.mkdir(parents=True)
+    (secret / "draft.txt").write_text("work\n")
+    for path in sorted(pad.rglob("*"), reverse=True):
+        _age(path, moment - 72 * HOUR)
+    _age(pad, moment - 72 * HOUR)
+    os.chmod(secret, 0o000)
+    try:
+        dry = _pass(root, idle=False, now=moment, dry_run=True)
+        assert dry.content == []
+        reason = dict(dry.content_kept)["blindsub"]
+        assert "could not be looked at completely" in reason
+        assert "secret" in reason
+        result = _pass(root, idle=False, now=moment)
+    finally:
+        os.chmod(secret, 0o700)
+    assert (secret / "draft.txt").exists()
+    assert result.content == []
 
 
 def test_a_fresh_file_past_the_byte_cap_inside_a_shape_keeps_the_pad(root: Path) -> None:

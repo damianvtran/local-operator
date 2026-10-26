@@ -2677,12 +2677,28 @@ def measure_session_dir(
     return contents
 
 
+class DirScanIncomplete(Exception):
+    """Part of a tree could not be inspected, and the caller asked to know.
+
+    Raised by :func:`bounded_dir_scan` in ``strict`` mode only. It carries the
+    offending path and the reason so the caller can name them to the operator:
+    "cannot be inspected" and "cannot be read" are different repair actions, and
+    a bare exception type tells nobody which happened where.
+    """
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"{path}: {reason}")
+
+
 def bounded_dir_scan(
     directory: Path,
     max_entries: int = CONTENTS_MAX_ENTRIES,
     *,
     recency_max_entries: int | None = None,
     fresh_since_ns: int | None = None,
+    strict: bool = False,
 ) -> tuple[int, int, int, bool]:
     """``(bytes, entries, newest_mtime_ns, truncated)`` under ``directory``.
 
@@ -2710,6 +2726,17 @@ def bounded_dir_scan(
     subtree safer), which truncates the byte figure — safe only because that
     caller then keeps the whole item; ignore ``bytes`` in that case.
 
+    ``strict`` IS FOR CALLERS THAT WILL DELETE ON THE ANSWER, AND ONLY FOR THEM.
+    Non-strict mode swallows every ``OSError`` (an unstattable entry, a
+    classification that fails, a subtree that cannot be scanned) and simply
+    does not observe it — so ``newest_mtime_ns`` can come back blind to a fresh
+    file it could not stat, and a caller that deletes on "no recent entry" would
+    destroy exactly the work this walk exists to protect. Strict mode raises
+    :class:`DirScanIncomplete` instead, carrying the path and the reason; the
+    content layer turns that into a whole-pad abort. Non-strict is therefore
+    only for callers that will NOT delete on the answer — the removal receipt
+    and any size notice — which need a lower bound, not a verdict.
+
     Shared with ``delegated_retention`` — it lives HERE because the receipt
     writer needs the same walk and cannot import that module, not the other way
     round.
@@ -2729,7 +2756,11 @@ def bounded_dir_scan(
                     seen += 1
                     try:
                         info = entry.stat(follow_symlinks=False)
-                    except OSError:
+                    except OSError as exc:
+                        if strict:
+                            raise DirScanIncomplete(
+                                entry.path, f"cannot be inspected ({exc.strerror or exc})"
+                            ) from exc
                         continue
                     newest = max(newest, info.st_mtime_ns)
                     if fresh_since_ns is not None and info.st_mtime_ns >= fresh_since_ns:
@@ -2741,9 +2772,15 @@ def bounded_dir_scan(
                             stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False) and seen <= max_entries:
                             total += info.st_size
-                    except OSError:
+                    except OSError as exc:
+                        if strict:
+                            raise DirScanIncomplete(
+                                entry.path, f"cannot be classified ({exc.strerror or exc})"
+                            ) from exc
                         continue
-        except OSError:
+        except OSError as exc:
+            if strict:
+                raise DirScanIncomplete(current, f"cannot be read ({exc.strerror or exc})") from exc
             continue
     return total, seen, newest, False
 

@@ -1082,6 +1082,7 @@ def _bounded_dir_scan(
     *,
     recency_max_entries: int | None = None,
     fresh_since_ns: int | None = None,
+    strict: bool = False,
 ) -> tuple[int, int, int, bool]:
     """``(bytes, entries, newest_mtime_ns, truncated)``; the pass's own caps.
 
@@ -1095,7 +1096,28 @@ def _bounded_dir_scan(
         max_entries,
         recency_max_entries=recency_max_entries,
         fresh_since_ns=fresh_since_ns,
+        strict=strict,
     )
+
+
+def _scan_for_floor(directory: Path, *, now: float) -> tuple[int, int, int, bool]:
+    """The recency walk for an item the pass may DELETE: STRICT, always.
+
+    A walk that swallows an ``OSError`` returns "no recent entry" for a subtree
+    it could not see, and the caller then deletes it — the same fail-open shape
+    the copy arm had, one layer down. Strict mode raises
+    :class:`cleanup.DirScanIncomplete` and this turns it into the pad abort, so
+    the pad is kept whole, counted, and named in the dry run.
+    """
+    try:
+        return _bounded_dir_scan(
+            directory,
+            recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
+            fresh_since_ns=_fresh_since_ns(now),
+            strict=True,
+        )
+    except cleanup_module.DirScanIncomplete as exc:
+        raise _PadAbort(f"scratchpad could not be looked at completely: {exc}") from exc
 
 
 def bounded_dir_bytes(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> int:
@@ -1870,10 +1892,8 @@ def _plan_pad_content(
                             # the pad floor BEFORE planning: a fresh entry here
                             # keeps the pad whole instead of being discovered
                             # after the removal row already exists.
-                            measured, counted, newest, truncated = _bounded_dir_scan(
-                                Path(entry.path),
-                                recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
-                                fresh_since_ns=_fresh_since_ns(now),
+                            measured, counted, newest, truncated = _scan_for_floor(
+                                Path(entry.path), now=now
                             )
                             plan.newest_mtime_ns = max(plan.newest_mtime_ns, newest)
                             if plan.keep_for_recent_edit(now):
@@ -1974,11 +1994,7 @@ def _plan_tree(path: str, root: str, plan: _PadPlan, *, now: float) -> bool:
     if not decision.reclaim:
         plan.kept.append(f"{relative}: {decision.keep}")
         return False
-    measured, counted, newest, truncated = _bounded_dir_scan(
-        Path(path),
-        recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
-        fresh_since_ns=_fresh_since_ns(now),
-    )
+    measured, counted, newest, truncated = _scan_for_floor(Path(path), now=now)
     plan.newest_mtime_ns = max(plan.newest_mtime_ns, newest)
     if plan.keep_for_recent_edit(now):
         return True
