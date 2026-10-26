@@ -657,6 +657,68 @@ def test_detail_ids_use_the_patch_regex(client) -> None:
         assert answer.status_code == 422, (bad, answer.status_code)
 
 
+def test_a_store_written_by_the_previous_head_opens_and_serves(tmp_path: Path) -> None:
+    """R5-1 MAJOR: `CREATE TABLE IF NOT EXISTS` never adds a column.
+
+    A `notifications.db` written by the previous head carries neither
+    `read_surface` nor `delivered_at`, and every read answered `no such column`
+    — a 500 on list, detail, PATCH and the banner claim with no recovery for
+    the operator. The store now adds what it is missing when it opens, so the
+    file is upgraded in place.
+    """
+    import sqlite3
+
+    from local_operator.notifications.store import _SCHEMA
+
+    old_path = tmp_path / "notifications.db"
+    conn = sqlite3.connect(old_path)
+    with conn:
+        # A REALISTIC previous-head store: every table and index it shipped,
+        # with the two columns this round added dropped back off. `DROP COLUMN`
+        # (SQLite 3.35+) is what makes this the same file the old build wrote,
+        # rather than a hand-written subset that would fail for unrelated
+        # reasons.
+        for statement in _SCHEMA:
+            conn.execute(statement)
+        conn.execute("ALTER TABLE items DROP COLUMN read_surface")
+        conn.execute("ALTER TABLE items DROP COLUMN delivered_at")
+        conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES ('next_seq', '2')")
+        conn.execute(
+            "INSERT INTO items (id, seq, session_id, priority, title, content_hash, "
+            "created_at, updated_at) VALUES (?, 1, ?, 'high', 'old row', 'h', ?, ?)",
+            ("n_aaaaaaaaaaaaaaaa", "a1b2c3d4e5f6", 1_700_000_000_000, 1_700_000_000_000),
+        )
+        conn.execute("PRAGMA user_version=1")
+    conn.close()
+
+    store = NotificationStore(tmp_path)
+    # The row the OLD build wrote is readable, and the new columns exist.
+    rows, _ = store.list_items(state="all")
+    assert [row["id"] for row in rows] == ["n_aaaaaaaaaaaaaaaa"]
+    assert rows[0]["read_surface"] is None
+    assert store.counts()[0] == 1
+    # The claim path needs delivered_at, and must not raise.
+    assert store.claim_delivery("n_aaaaaaaaaaaaaaaa", "desktop") is True
+    assert store.release_delivery("n_aaaaaaaaaaaaaaaa", 1, "desktop") is True
+    # Writes still work and carry the new column.
+    item = store.notify("a1b2c3d4e5f6", title="new row", anchor_id="call_m")
+    assert store.get(item.item_id) is not None
+    columns = {
+        str(row[1])
+        for row in sqlite3.connect(tmp_path / "notifications.db")
+        .execute("PRAGMA table_info(items)")
+        .fetchall()
+    }
+    assert {"read_surface", "delivered_at"} <= columns
+
+    # IDEMPOTENT: opening it again is a no-op, not a duplicate-column error.
+    NotificationStore(tmp_path).counts()
+    # And a store too old to have the TABLE at all still gets created whole.
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    assert NotificationStore(fresh).counts()[0] == 0
+
+
 def test_the_item_session_block_carries_live_state(tmp_path: Path) -> None:
     """Contract §5 names ``live_state``; the shape sent ``live`` alone.
 

@@ -16425,7 +16425,16 @@ class Session:
 
         try:
             route = await asyncio.to_thread(
-                _delivery.route_item, root, action=outcome.action, priority=outcome.priority
+                _delivery.route_item,
+                root,
+                action=outcome.action,
+                priority=outcome.priority,
+                # R2-2: a TUI showing this conversation with the operator active
+                # in it is the surface that acknowledges the card, so the
+                # runtime must not raise its detached banner over it. The probe
+                # answers True only on real evidence; unknown is None and
+                # notifies (§6.3).
+                tui_watching=self._notify_tui_evidence(),
             )
         except Exception:  # noqa: BLE001 — chrome must not fail the write
             logger.debug("notify: banner routing failed", exc_info=True)
@@ -16438,6 +16447,12 @@ class Session:
             route.detail,
             self.session_id,
         )
+        if route.rung == _delivery.RUNG_TUI_VIEWER:
+            # The TUI is showing it; its rung 3 stands down and its receipt
+            # reads the item. Nothing to hand off and no banner to raise, and
+            # the run's completion banner is NOT the same event (R1), so
+            # spoken_for stays False.
+            return
         if route.spoken_for:
             # Handed to an advertising desktop: the feed raises it (contract
             # §3.4 suppression applies now — the handoff is the banner).

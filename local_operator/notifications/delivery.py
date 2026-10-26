@@ -70,6 +70,11 @@ RUNG_DETACHED = "detached"  # this process spawns the OS banner
 RUNG_NONE = "none"  # nothing can raise it right now
 RUNG_GATED = "gated"  # the operator's switch or the rig guard refused it
 RUNG_SILENT = "silent"  # unchanged/absorbed: no new content to announce
+#: A TUI is showing this conversation and the operator is active in it, so the
+#: card is already on screen. The TUI's rung-3 leg stands down for that case and
+#: its in-view receipt acknowledges the item; without this rung the RUNTIME
+#: still raised a detached banner over a card the operator was reading (R2-2).
+RUNG_TUI_VIEWER = "tui-viewer"
 
 
 @dataclass(frozen=True)
@@ -148,6 +153,7 @@ def route_item(
     action: str,
     priority: str,
     presence: Any = None,
+    tui_watching: bool | None = None,
 ) -> DeliveryResult:
     """The write-time half: is there anything to raise, and who raises it?
 
@@ -157,6 +163,12 @@ def route_item(
     set only for a deliverable revision a desktop subscription that advertises
     ``update`` will raise, read UNCACHED (R3): a 2 s-old lease could name an
     app that has already quit.
+
+    ``tui_watching`` is the rung-3 mirror (R2-2): True when a TUI is showing
+    this exact conversation AND the operator is active in it. Only an explicit
+    True suppresses; ``None`` — no evidence available, an older TUI, a probe
+    that failed — falls through to the normal rungs, because a missed banner is
+    the failure the whole ladder exists to prevent (contract §6.3).
     """
     if str(priority) != "high":
         return DeliveryResult(rung=RUNG_PRIORITY)
@@ -169,6 +181,10 @@ def route_item(
         from local_operator.session.runtime.presence import desktop_presence
 
         presence = desktop_presence(Path(config_dir), cached=False)
+    if tui_watching is True:
+        # The card is on screen in the focused conversation. Nothing is handed
+        # off and nothing raised: the TUI's in-view receipt acknowledges it.
+        return DeliveryResult(rung=RUNG_TUI_VIEWER, detail="a TUI is showing it")
     if presence is not None and presence.delivers("update"):
         return DeliveryResult(rung=RUNG_FEED, detail="desktop update channel", handed_off=True)
     return DeliveryResult(rung=RUNG_DETACHED, detail="runtime will raise")
@@ -189,6 +205,7 @@ def deliver_item(
     notify: Callable[..., bool] | None = None,
     allow_detached: bool = True,
     hold: bool = True,
+    tui_watching: bool | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> DeliveryResult:
     """Decide the rung for one written item and raise it at most once.
@@ -202,7 +219,13 @@ def deliver_item(
     production passes none of them and gets the real store, the real lease
     reader and ``tui.notify.detached_notify``.
     """
-    route = route_item(config_dir, action=action, priority=priority, presence=presence)
+    route = route_item(
+        config_dir,
+        action=action,
+        priority=priority,
+        presence=presence,
+        tui_watching=tui_watching,
+    )
     if route.rung != RUNG_DETACHED:
         return route
     # ONE Path at the boundary: callers pass either spelling (the session hands

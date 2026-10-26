@@ -181,6 +181,54 @@ def test_a_receipt_before_the_claim_suppresses_and_a_revision_revives_the_banner
     assert revived.raised and _row(store, item.item_id)["delivered_rev"] == 2
 
 
+def test_a_tui_showing_the_conversation_stands_the_runtime_down(tmp_path: Path) -> None:
+    """R2-2: the rung-3 hold must also silence rung 4.
+
+    The TUI's own leg skips a conversation it is showing (so the operator is not
+    bannered about a card they are reading), and the runtime then raised its
+    detached banner anyway — the cross-rung duplicate the auditor reproduced.
+    Only an explicit True suppresses; unknown notifies (contract §6.3).
+    """
+    # Watched and active: nothing is raised and nothing is handed off.
+    held = delivery.route_item(tmp_path, action="created", priority="high", tui_watching=True)
+    assert held.rung == delivery.RUNG_TUI_VIEWER and not held.spoken_for
+    # The grace+claim path never runs for it either: route_item is the only door
+    # into deliver_item for a written item.
+    assert (
+        delivery.deliver_item(
+            tmp_path,
+            item_id="n_aaaaaaaaaaaaaaaa",
+            revision=1,
+            priority="high",
+            tui_watching=True,
+            notify=lambda *a, **k: pytest.fail("a watched conversation is not bannered"),
+            hold=False,
+        ).rung
+        == delivery.RUNG_TUI_VIEWER
+    )
+
+    # UNKNOWN still notifies: the same call with no evidence raises.
+    store = NotificationStore(tmp_path)
+    item = _high_item(store)
+    raised: list[str] = []
+    result = delivery.deliver_item(
+        tmp_path,
+        item_id=item.item_id,
+        revision=1,
+        priority="high",
+        store=store,
+        tui_watching=None,
+        notify=lambda *a, **k: raised.append("yes") or True,
+        hold=False,
+    )
+    assert result.raised and raised == ["yes"]
+    # And an explicit FALSE behaves the same as unknown.
+    _high_item(NotificationStore(tmp_path))
+    assert delivery.route_item(
+        tmp_path, action="created", priority="high", tui_watching=False
+    ).rung in (delivery.RUNG_DETACHED, delivery.RUNG_FEED, delivery.RUNG_GATED)
+
+
 def test_a_spawn_that_reports_nothing_releases_the_claim(tmp_path: Path) -> None:
     store = NotificationStore(tmp_path)
     item = _high_item(store)
@@ -198,13 +246,49 @@ def test_a_spawn_that_reports_nothing_releases_the_claim(tmp_path: Path) -> None
     # still unread, so nothing was acknowledged by the attempt.
     assert _row(store, item.item_id)["delivered_rev"] == 0
     assert store.counts()[0] == 1
-    # THE RETRY IS BOUNDED (D15/T4): a host whose spawn always reports nothing
-    # (Windows, Linux without notify-send) used to re-claim and re-release every
-    # second forever. The cooldown clock starts at the attempt, so the next
-    # claim is refused inside the window and accepted after it.
-    assert not store.claim_delivery(item.item_id, "desktop"), "the cooldown bounds the retry"
-    _cool(tmp_path)
-    assert store.claim_delivery(item.item_id, "desktop")
+    # A RELEASE ROLLS THE COOLDOWN BACK (R5-1): the item was never SHOWN, so a
+    # transient spawn failure must not silence it for thirty minutes. The next
+    # claim therefore succeeds immediately; what bounds the retry is the caller's
+    # own backoff (the TUI's doubling interval, the feed's ITEM_RETRY_BACKOFF_S),
+    # not the cooldown.
+    assert store.claim_delivery(item.item_id, "desktop"), "nothing was shown, so nothing holds"
+    row = _row(store, item.item_id)
+    assert row["delivered_at"] is not None, "a SUCCESSFUL claim keeps its stamp"
+    assert not store.claim_delivery(item.item_id, "desktop"), "and now the cooldown holds"
+
+
+def test_a_transient_failure_does_not_suppress_the_item_for_the_cooldown(
+    tmp_path: Path,
+) -> None:
+    """R5-1: rollback on release, retention on success — the pair, both ways."""
+    store = NotificationStore(tmp_path)
+    item = _high_item(store)
+    assert (
+        deliver_item(
+            tmp_path,
+            item_id=item.item_id,
+            revision=1,
+            priority="high",
+            store=store,
+            notify=_silent,
+            hold=False,
+        ).rung
+        == delivery.RUNG_NONE
+    )
+    row = _row(store, item.item_id)
+    assert row["delivered_rev"] == 0 and row["delivered_at"] is None, row
+
+    # The same revision now raises, because nothing is standing in its way.
+    assert deliver_item(
+        tmp_path,
+        item_id=item.item_id,
+        revision=1,
+        priority="high",
+        store=store,
+        notify=lambda *a, **k: True,
+        hold=False,
+    ).raised
+    assert _row(store, item.item_id)["delivered_at"] is not None
 
 
 def test_an_advertising_desktop_takes_the_feed_rung_without_a_second_banner(tmp_path: Path) -> None:
@@ -867,15 +951,12 @@ def test_a_claim_failure_mid_pass_strands_nothing(tmp_path: Path) -> None:
     # revision was stranded unraised.
     rows = [store.get(item_id) for item_id in ids]
     assert all(row is not None and row["delivered_rev"] == 0 for row in rows)
-    # THE RETRY IS BOUNDED (D15/T4). The released rows kept the attempt's
-    # ``delivered_at``, so the store refuses to re-claim them inside the
-    # cooldown — the per-second claim/release storm this test used to permit is
-    # what a host with no banner producer (Windows, Linux without notify-send)
-    # lived in. Nothing is lost: the rows are still unread, still counted, and
-    # claimable the moment the window expires.
-    assert not store.claim_delivery(ids[0], "desktop"), "the cooldown holds the retry"
-    _cool(tmp_path)
-    assert store.claim_delivery(ids[0], "desktop"), "and releases it afterwards"
+    # NOTHING WAS SHOWN, SO NOTHING HOLDS (R5-1): the released rows lose their
+    # attempt stamp and are claimable again at once. The bound that stops a
+    # per-tick claim/release storm is the FEED's own retry deadline
+    # (ITEM_RETRY_BACKOFF_S), not the thirty-minute cooldown — a transient
+    # failure must not cost the banner for half an hour.
+    assert store.claim_delivery(ids[0], "desktop"), "a release rolls the stamp back"
     assert store.counts()[0] == 4, "no attempt acknowledged an item"
     asyncio.run(feed.close())
 

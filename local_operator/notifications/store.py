@@ -312,6 +312,18 @@ class ApplyResult:
     skipped: list[dict[str, str]] = field(default_factory=list)
 
 
+#: Columns added to ``items`` AFTER the table shipped. `CREATE TABLE IF NOT
+#: EXISTS` does nothing to an existing file, so a store written by an earlier
+#: build would answer every read with "no such column: <name>" — a 500 on list,
+#: detail, PATCH and the banner claim, with no recovery path for the operator
+#: (round-4 R5-1 review, MAJOR). Each entry is applied add-if-missing under the
+#: same write transaction that creates the table, so opening an old store
+#: upgrades it exactly once, and a NEW store is already complete.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("read_surface", "ALTER TABLE items ADD COLUMN read_surface TEXT"),
+    ("delivered_at", "ALTER TABLE items ADD COLUMN delivered_at INTEGER"),
+)
+
 _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS items (
@@ -501,11 +513,47 @@ class NotificationStore:
                             conn.execute(statement)
                         conn.execute("INSERT OR IGNORE INTO meta(k, v) VALUES ('next_seq', '1')")
                         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            # ADD-IF-MISSING, and OUTSIDE the version gate on purpose. `CREATE
+            # TABLE IF NOT EXISTS` is a no-op on an existing file, and a store
+            # written by any build that already declared this SCHEMA_VERSION
+            # never re-enters the block above — so gating the ALTERs on the
+            # version is exactly the hole that made an older store answer
+            # "no such column" on every route (round-4 R5-1 review, MAJOR).
+            # The column LIST is the contract; the version is not.
+            self._ensure_columns(conn)
             self._adopt_wal(conn)
             return conn
         except BaseException:
             conn.close()
             raise
+
+    @staticmethod
+    def _ensure_columns(conn: sqlite3.Connection) -> None:
+        """Add any `_ADDED_COLUMNS` an existing store predates, then stop.
+
+        A READ of ``table_info`` first, so the common case costs one metadata
+        query and takes no write lock; only a store that genuinely predates a
+        column enters a transaction. Read from the table rather than from
+        ``user_version`` because a half-upgraded or hand-repaired file must
+        converge instead of failing on a duplicate column.
+        """
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'"
+        ).fetchone():
+            return
+        present = {str(row[1]) for row in conn.execute("PRAGMA table_info(items)").fetchall()}
+        missing = [(column, alter) for column, alter in _ADDED_COLUMNS if column not in present]
+        if not missing:
+            return
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Re-read under the lock: two processes racing an old store must not
+            # both ALTER (the loser would die on "duplicate column name").
+            present = {str(row[1]) for row in conn.execute("PRAGMA table_info(items)").fetchall()}
+            for column, alter in missing:
+                if column not in present:
+                    conn.execute(alter)
+                    logger.info("notifications: store upgraded with column %s", column)
 
     @staticmethod
     def _adopt_wal(conn: sqlite3.Connection) -> None:
@@ -537,6 +585,17 @@ class NotificationStore:
                 # A placeholder a first writer has not populated yet.
                 conn.close()
                 return None
+            # AN OLD STORE IS NOT A READ ERROR (R5-1 review, MAJOR). A reader
+            # opens `mode=ro`, which cannot ALTER, so a file written before a
+            # column existed would fail every read with "no such column" and the
+            # route would answer 500 with no recovery. Upgrading is a WRITE, so
+            # hand this open to the migrating path once and read the result;
+            # the common case (columns already present) stays read-only and
+            # takes no write lock.
+            present = {str(row[1]) for row in conn.execute("PRAGMA table_info(items)").fetchall()}
+            if any(column not in present for column, _ in _ADDED_COLUMNS):
+                conn.close()
+                return self._connect_once()
         except BaseException:
             conn.close()
             raise
@@ -1165,12 +1224,18 @@ class NotificationStore:
         """
 
         def body(conn: sqlite3.Connection) -> bool:
-            # NO ``seq`` ADVANCE (D14), the claim's own rule. ``delivered_at`` is
-            # deliberately NOT cleared: a release means the raise produced
-            # nothing, and the cooldown clock must still start from the attempt
-            # or a failing spawn would retry every second forever.
+            # NO ``seq`` ADVANCE (D14), the claim's own rule.
+            #
+            # ``delivered_at`` IS ROLLED BACK (R5-1). The cooldown is a rule about
+            # what the operator was SHOWN, and a released claim shown nothing must
+            # not silence the item for thirty minutes: a transient spawn failure
+            # (a notifier still starting, a refused spawn under load) would
+            # otherwise cost the banner entirely. What bounds the retry instead is
+            # the CALLER's own backoff — the TUI's doubling interval and the
+            # desktop feed's per-item retry gate — so rolling back cannot become
+            # the per-second claim/release storm T4 measured.
             released = conn.execute(
-                "UPDATE items SET delivered_rev=0, delivered_by='' "
+                "UPDATE items SET delivered_rev=0, delivered_by='', delivered_at=NULL "
                 "WHERE id=? AND delivered_rev=? AND delivered_by=?",
                 (item_id, int(revision), by),
             )

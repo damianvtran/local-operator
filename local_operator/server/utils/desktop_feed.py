@@ -339,6 +339,15 @@ ITEM_CLAIM_BOUND = 200
 #: enough that an unrelated item a minute later is a fresh single, not a "more".
 ITEM_BURST_WINDOW_S = 10.0
 
+#: How long the item leg leaves a row alone after a raise produced NOTHING (R5-1).
+#: `release_delivery` rolls the cooldown stamp back so a transient spawn failure
+#: does not silence the item for thirty minutes — which leaves the feed as the
+#: only thing standing between that rollback and a claim/release pair every
+#: 100 ms tick on a host with no notifier backend (the M2 shape). One retry per
+#: this window is the bound; it is shorter than the burst window on purpose,
+#: because a released row is owed NOW and should not wait for the next burst.
+ITEM_RETRY_BACKOFF_S = 30.0
+
 
 def _authoring_projection(text: str, volatile: frozenset[str]) -> str:
     """The AUTHORED lines of one registry row, with the volatile ones dropped.
@@ -734,6 +743,11 @@ class DesktopFeed:
         self._item_window_started = 0.0
         self._item_window_singles = 0
         self._item_window_digested = False
+        #: ``id -> monotonic deadline`` for rows whose raise produced nothing
+        #: (R5-1). The cooldown stamp is rolled back on release, so this is what
+        #: keeps a failing producer to one attempt per ITEM_RETRY_BACKOFF_S
+        #: instead of one per tick.
+        self._item_retry_after: dict[str, float] = {}
 
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
@@ -1544,10 +1558,21 @@ class DesktopFeed:
         except Exception:  # noqa: BLE001 - a banner never breaks the feed
             return
         held = [row for row in pending if grace_remaining_ms(row) > 0]
-        ready = [row for row in pending if grace_remaining_ms(row) <= 0]
+        now_retry = time.monotonic()
+        cooling = [
+            row
+            for row in pending
+            if self._item_retry_after.get(str(row.get("id")), 0.0) > now_retry
+        ]
+        ready = [
+            row
+            for row in pending
+            if grace_remaining_ms(row) <= 0
+            and self._item_retry_after.get(str(row.get("id")), 0.0) <= now_retry
+        ]
         # Re-examine next tick while anything is held (or a bounded read was
         # full); otherwise this pass covered everything owed.
-        self._items_owed = bool(held) or len(pending) >= ITEM_CLAIM_BOUND
+        self._items_owed = bool(held) or bool(cooling) or len(pending) >= ITEM_CLAIM_BOUND
         if not ready:
             return
         now = time.monotonic()
@@ -1614,8 +1639,14 @@ class DesktopFeed:
         return won
 
     async def _release_item_claims(self, store: Any, rows: list[dict[str, Any]]) -> None:
-        """Give back this pass's unpublished claims (round-1 R5), best-effort."""
+        """Give back this pass's unpublished claims (round-1 R5), best-effort.
+
+        Each released row also gets a retry deadline (R5-1): the release rolls the
+        cooldown stamp back, so without this the next 100 ms tick would claim and
+        release it again, forever.
+        """
         for row in rows:
+            self._item_retry_after[str(row.get("id"))] = time.monotonic() + ITEM_RETRY_BACKOFF_S
             try:
                 await asyncio.to_thread(
                     store.release_delivery, str(row["id"]), int(row["revision"]), "feed"
