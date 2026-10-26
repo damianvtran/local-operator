@@ -3681,10 +3681,17 @@ class Session:
         self._shell_write_root = shell_write_root or None
         #: Whether this session is a READ-ONLY shell role (``scout``): set by a
         #: delegating parent (``shell_write_root`` given) or by attaching the
-        #: role's profile (:meth:`_apply_readonly_shell_role`). ONE-WAY for the
-        #: life of the session, like a declared inventory: a later ``/agent``
-        #: switch or detach does not give the shell its host reach back, because
-        #: a model that ran as a scout may have been steered by what it read.
+        #: role's profile (:meth:`_apply_readonly_shell_role`). Held for the
+        #: life of this PROCESS, like a declared inventory: a later ``/agent``
+        #: switch or detach in the same process does not give the shell its host
+        #: reach back, because a model that ran as a scout may have been steered
+        #: by what it read. It is deliberately NOT persisted: a reopened session
+        #: takes the confinement of the profile attached at restore. Switching a
+        #: scout to ``coder`` is the operator choosing a coder's shell, so a
+        #: restore that finds ``coder`` attached gives exactly that, while a
+        #: scout restored as scout is confined again by the same
+        #: :meth:`attach_agent_profile` path
+        #: (``test_a_resumed_scout_attachment_is_confined_again``).
         #: When set with no root (no scratchpad, or no sandbox on this host),
         #: ``bash`` is withheld at :meth:`_filter_declared`.
         self._readonly_shell = self._shell_write_root is not None

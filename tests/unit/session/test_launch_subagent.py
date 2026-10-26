@@ -3362,8 +3362,10 @@ async def test_attaching_the_scout_profile_without_a_sandbox_strips_bash(tmp_pat
 
 @pytest.mark.asyncio
 async def test_the_scout_confinement_is_one_way(tmp_path, monkeypatch):
-    """Switching to another role, or detaching, does not hand the host shell
-    back: a model that ran as a scout may have been steered by what it read."""
+    """Within this process, switching to another role or detaching does not
+    hand the host shell back: a model that ran as a scout may have been steered
+    by what it read. Not persisted across a reopen, where the profile attached
+    at restore decides (see the resume test below)."""
     session = _session_with_bash(tmp_path, monkeypatch, available=True)
     assert session.attach_agent_profile("scout")
     root = session._shell_write_root
