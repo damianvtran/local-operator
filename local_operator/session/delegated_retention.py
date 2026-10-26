@@ -351,6 +351,7 @@ from local_operator.session.cleanup import (
     DEFAULT_DELEGATED_MAX_AGE_HOURS,
     MAX_DELEGATED_MAX_AGE_HOURS,
     MIN_DELEGATED_MAX_AGE_HOURS,
+    PAD_DIRNAME,
     PINNED_REASON,
     Candidate,
     CleanupPolicy,
@@ -1118,6 +1119,54 @@ def _scan_for_floor(directory: Path, *, now: float) -> tuple[int, int, int, bool
         )
     except cleanup_module.DirScanIncomplete as exc:
         raise _PadAbort(f"scratchpad could not be looked at completely: {exc}") from exc
+
+
+def _record_pad_floor(session_dir: Path, *, now: float) -> tuple[str | None, bool]:
+    """``(keep_reason, unreadable)`` for removing a WHOLE session over its pad.
+
+    THE GAP THIS CLOSES (seen on the first live run of the 12 h floor): the floor
+    covered only the scratchpad CONTENT layer, while the record pass decides by
+    the transcript/mail clock and then ``remove_session_dir`` deletes the entire
+    directory, pad included. A session whose transcript was 50.6 h idle but whose
+    pad files had been edited 5.4-8.7 h earlier (a headless run's sqlite library
+    and pid files) was removed whole — transcript-idle is not pad-idle, which is
+    exactly the failure the floor exists to stop.
+
+    This is the SAME strict scan the planner and the copy report use
+    (:func:`_scan_for_floor`'s arguments, the shared constants, the shared
+    reason strings), seeded with the pad root's own stat for the same reason: a
+    rename in place updates the root and no child. Only the ``scratchpad/``
+    subtree is scanned — the transcript and sidecar clocks stay exactly as they
+    were, and a pad that is a symlink (never followed, as everywhere else) or
+    absent has nothing to protect.
+
+    Three outcomes, all KEEPS: recent (``CONTENT_PAD_RECENT_REASON``), too large
+    to prove idle, and not inspectable (``unreadable`` is True so the caller
+    counts the error — "could not look" is never a removal and never silent).
+    """
+    pad = session_dir / PAD_DIRNAME
+    if pad.is_symlink() or not pad.is_dir():
+        return None, False
+    try:
+        newest = pad.stat(follow_symlinks=False).st_mtime_ns
+        _bytes, _entries, walked, truncated = _bounded_dir_scan(
+            pad,
+            recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
+            fresh_since_ns=_fresh_since_ns(now),
+            strict=True,
+        )
+    except cleanup_module.DirScanIncomplete as exc:
+        return f"scratchpad could not be looked at completely: {exc}", True
+    except OSError as exc:
+        return f"scratchpad could not be looked at completely: {pad}: {exc.strerror or exc}", True
+    if _pad_recent(now, max(newest, walked)):
+        return CONTENT_PAD_RECENT_REASON, False
+    if truncated:
+        return (
+            f"scratchpad too large to prove idle (more than {CONTENT_RECENCY_MAX_ENTRIES} entries)",
+            False,
+        )
+    return None, False
 
 
 def bounded_dir_bytes(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> int:
@@ -4109,8 +4158,14 @@ def _evaluate(
     projects: set[str],
     pinned: frozenset[str] = frozenset(),
     live_resolved: Path | None,
+    unreadable: list[str] | None = None,
 ) -> str | None:
-    """Why ``cand`` must be kept (a short phrase), or ``None`` if it may go."""
+    """Why ``cand`` must be kept (a short phrase), or ``None`` if it may go.
+
+    ``unreadable``, when given, receives the name of a candidate kept because its
+    pad could not be inspected, so the caller can count the error: a keep is the
+    right answer for "could not look", but it must not be silent telemetry.
+    """
     name = cand.path.name
     if name in pinned:
         # A pin is the operator's own statement that this conversation stays,
@@ -4144,6 +4199,14 @@ def _evaluate(
     fresh = session_activity_path(os.fspath(cand.path))
     if fresh is not None and fresh >= cutoff:
         return "active since the scan"
+    # LAST, because it is the only guard that walks: every cheaper reason (a pin,
+    # a parent, a claim, the activity clock) is allowed to name the keep first,
+    # and the ones the operator reads in the dry run keep their own wording.
+    pad_keep, pad_unreadable = _record_pad_floor(cand.path, now=now)
+    if pad_keep is not None:
+        if pad_unreadable and unreadable is not None:
+            unreadable.append(name)
+        return pad_keep
     return None
 
 
@@ -4391,6 +4454,7 @@ def run_delegated_pass(
             result.protected.append((cand.path.name, "inside the (widened) window"))
             _notify(on_kept, cand.path.name, "inside the (widened) window")
             continue
+        unreadable_pads: list[str] = []
         keep = _evaluate(
             cand,
             config_dir=config_dir,
@@ -4400,8 +4464,11 @@ def run_delegated_pass(
             projects=projects,
             pinned=pinned,
             live_resolved=live_resolved,
+            unreadable=unreadable_pads,
         )
         if keep is not None:
+            if unreadable_pads:
+                result.errors += 1
             result.protected.append((cand.path.name, keep))
             _notify(on_kept, cand.path.name, keep)
             continue
@@ -4423,6 +4490,25 @@ def run_delegated_pass(
         if dry_run:
             result.removed.append(row)
             _notify(on_plan, row)
+            continue
+        # RE-ASKED AT THE REMOVAL MOMENT, like the pin: the sizing walk above and
+        # the earlier decision are a gap in which another process can write into
+        # the pad, and a write after the preview must still keep it. The pass's
+        # ``moment`` is the right clock, not a fresh ``time.time()``: a file
+        # written during a long drain has an mtime AFTER ``moment``, and a future
+        # mtime counts as recent (``_pad_recent``), so it is caught either way —
+        # while ``moment`` keeps this decision deterministic and can only keep
+        # more (a pad does not age out of the grace mid-pass).
+        late_keep, late_unreadable = _record_pad_floor(cand.path, now=moment)
+        if late_keep is not None:
+            # Only ``chosen`` holds the row here: a real run appends to
+            # ``removed`` after the remover confirms, and a dry run never gets
+            # this far (it ``continue``s above).
+            result.chosen.pop()
+            if late_unreadable:
+                result.errors += 1
+            result.protected.append((cand.path.name, late_keep))
+            _notify(on_kept, cand.path.name, late_keep)
             continue
         try:
             done = remove_session_dir(
