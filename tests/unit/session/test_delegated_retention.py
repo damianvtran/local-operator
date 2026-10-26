@@ -77,10 +77,52 @@ def _names(root: Path) -> set[str]:
     return {p.name for p in (root / "sessions").iterdir() if p.is_dir()}
 
 
-def _pass(root: Path, **kwargs: Any) -> dr.DelegatedResult:
+#: How old an IDLE pad's content is in these fixtures: past every grace and window
+#: the content layer uses, so a pad that a test does not deliberately touch models
+#: the real store's "untouched for days" state rather than "written a millisecond
+#: ago by the fixture itself".
+IDLE_PAD_AGE_S = 100 * HOUR
+
+
+def _idle_pads(root: Path) -> None:
+    """Backdate every scratchpad entry under ``root`` to ``NOW - IDLE_PAD_AGE_S``.
+
+    Fixtures create files by writing them, which stamps them with the wall clock;
+    the content layer's whole-pad recency floor reads exactly that, so an
+    unadjusted fixture would describe a pad being written at this instant while
+    the test means "idle for days". TRANSCRIPTS AND MAIL ARE DELIBERATELY NOT
+    TOUCHED: their mtimes are the session's activity clock, which every test sets
+    explicitly through ``age_h``. A test that needs a genuinely fresh pad entry
+    (the recency-floor tests, the stale-output freshness cases) passes
+    ``idle=False`` and ages the entries it cares about itself.
+    """
+    stamp = NOW - IDLE_PAD_AGE_S
+    for pad in sorted((root / "sessions").glob("*/scratchpad")):
+        for path in sorted(pad.rglob("*"), reverse=True):
+            try:
+                if not path.is_symlink():
+                    os.utime(path, (stamp, stamp), follow_symlinks=False)
+            except OSError:
+                continue
+        try:
+            os.utime(pad, (stamp, stamp), follow_symlinks=False)
+        except OSError:
+            continue
+
+
+def _pass(root: Path, *, idle: bool = True, **kwargs: Any) -> dr.DelegatedResult:
     kwargs.setdefault("now", NOW)
     kwargs.setdefault("removal_pause_s", 0)
+    if idle:
+        _idle_pads(root)
     return dr.run_delegated_pass(root, kwargs.pop("policy", _provider()), **kwargs)
+
+
+def _report(sessions_dir: Path, *, idle: bool = True, **kwargs: Any) -> dr.NonGitCopyReport:
+    """``scan_non_git_copies`` over an idle store (see :func:`_idle_pads`)."""
+    if idle:
+        _idle_pads(sessions_dir.parent)
+    return dr.scan_non_git_copies(sessions_dir, **kwargs)
 
 
 def _kept(result: dr.DelegatedResult) -> dict[str, str]:
@@ -1407,12 +1449,12 @@ def test_a_broken_gitdir_link_keeps_the_directory_whole(root: Path) -> None:
     ]
 
 
-def test_a_stale_big_log_is_reclaimed_and_small_or_fresh_files_stay(root: Path) -> None:
+def test_a_stale_big_log_is_reclaimed_when_the_whole_pad_is_idle(root: Path) -> None:
+    """Rule (a) still works: with nothing fresh in the pad, the big stale log goes."""
     pad = _kept_pad(root, "logs")
     big = _stale_file(pad / "desktop-suite.log")
     big_size = big.stat().st_size
     small = _stale_file(pad / "fd-run.log", size_mb=1)
-    fresh = _stale_file(pad / "today.log", age_h=1)
     (pad / "notes.md").write_text("what happened\n")
     (pad / "drive.py").write_text("print('x')\n")
     evidence = pad / "evidence"
@@ -1420,12 +1462,28 @@ def test_a_stale_big_log_is_reclaimed_and_small_or_fresh_files_stay(root: Path) 
     (evidence / "frame.png").write_bytes(b"\x89PNG")
     result = _pass(root)
     assert not big.exists()
-    assert small.exists() and fresh.exists()
+    assert small.exists()  # under the 10 MB floor
     assert (pad / "notes.md").exists() and (pad / "drive.py").exists()
     assert (evidence / "frame.png").exists()
     assert [(row.session, row.bytes, row.entries) for row in result.content] == [
         ("logs", big_size, 1)
     ]
+
+
+def test_one_fresh_log_inside_an_old_pad_keeps_the_whole_pad(root: Path) -> None:
+    """The recency floor outranks rule (a) for the pad as a unit.
+
+    A file written an hour ago is where the incident's "another process is using
+    this pad" shows up, and taking the big stale sibling beside it would destroy
+    the same pad while that write is in flight.
+    """
+    pad = _kept_pad(root, "freshlog")
+    big = _stale_file(pad / "desktop-suite.log")
+    fresh = _stale_file(pad / "today.log", age_h=1)
+    result = _pass(root, idle=False)
+    assert big.exists() and fresh.exists()
+    assert result.content == []
+    assert ("freshlog", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
 
 
 def test_a_loose_node_modules_is_reclaimed_whole(root: Path) -> None:
@@ -2670,7 +2728,7 @@ def test_an_empty_directory_scaffold_is_not_an_error(root: Path) -> None:
     pad = _kept_pad(root, "scaffold")
     (pad / "review-home" / "Library" / "Caches").mkdir(parents=True)
 
-    report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    report = _report(root / "sessions", min_store_bytes=1)
 
     assert report.errors == 0 and report.candidates == []
 
@@ -2694,7 +2752,7 @@ def test_zero_files_with_real_bytes_is_still_an_impossible_result(
     with pytest.raises(dr.NonGitCopyScanError, match="zero files from a non-empty tree"):
         dr._prove_copy(scaffold, trees=())
 
-    report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    report = _report(root / "sessions", min_store_bytes=1)
     assert report.errors == 1
     assert report.candidates[0].error is True
     assert "zero files" in report.candidates[0].reason
@@ -2714,7 +2772,7 @@ def test_the_store_guard_means_could_not_see_the_store(root: Path) -> None:
     session = root / "sessions" / "fileonly"
     (session / "scratchpad").mkdir(parents=True)
     (session / "scratchpad" / "notes.txt").write_text("x")
-    honest = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+    honest = _report(root / "sessions", min_store_bytes=1)
     assert honest.candidates == [] and honest.count == 0
 
     # No scratchpad directory at all, over a store that holds bytes: the scan
@@ -2723,11 +2781,11 @@ def test_the_store_guard_means_could_not_see_the_store(root: Path) -> None:
     (blind / "transcript-only").mkdir(parents=True)
     (blind / "transcript-only" / "transcript.jsonl").write_text("x" * 64)
     with pytest.raises(dr.NonGitCopyScanError, match="could not see any scratchpad"):
-        dr.scan_non_git_copies(blind, min_store_bytes=1)
+        _report(blind, min_store_bytes=1)
 
     empty = root / "empty-store" / "sessions"
     empty.mkdir(parents=True)
-    assert dr.scan_non_git_copies(empty, min_store_bytes=1).candidates == []
+    assert _report(empty, min_store_bytes=1).candidates == []
 
 
 def test_an_unreadable_store_raises_instead_of_reporting_empty(root: Path) -> None:
@@ -2735,7 +2793,7 @@ def test_an_unreadable_store_raises_instead_of_reporting_empty(root: Path) -> No
     not_a_store = root / "sessions-is-a-file"
     not_a_store.write_text("not a directory")
     with pytest.raises(dr.NonGitCopyScanError, match="store cannot be read"):
-        dr.scan_non_git_copies(not_a_store)
+        _report(not_a_store)
 
 
 def test_an_unreadable_file_refuses_the_candidate_without_aborting_the_pad(
@@ -2779,9 +2837,7 @@ def test_a_report_lists_both_provable_and_withheld_copies(root: Path) -> None:
     young_pad.mkdir()
     _copy_tree(source, young_pad / "copy")
 
-    report = dr.scan_non_git_copies(
-        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
-    )
+    report = _report(root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48)
 
     rows = {row.session: row for row in report.candidates}
     assert rows["oldcopy"].proof_ok and rows["oldcopy"].would_reclaim
@@ -2800,9 +2856,7 @@ def test_the_report_counts_sessions_not_provable_subtrees(root: Path) -> None:
     _copy_tree(source, pad / "a")
     _copy_tree(source, pad / "b")
 
-    report = dr.scan_non_git_copies(
-        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
-    )
+    report = _report(root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48)
 
     assert report.count == 2, "both top-level directories are candidates"
     assert report.reclaimable_sessions == 1
@@ -2957,7 +3011,7 @@ def test_the_report_keeps_a_copy_the_pass_would_refuse(root: Path) -> None:
     _copy_tree(source, session_git / "copy")
     (session_git.parent / ".git").write_text("gitdir: elsewhere\n")
 
-    report = dr.scan_non_git_copies(
+    report = _report(
         root / "sessions",
         references=(os.fspath(source),),
         now=NOW,
@@ -3009,9 +3063,7 @@ def test_a_sha256_reference_is_refused_with_its_object_format(root: Path) -> Non
     pad = _kept_pad(root, "sha256ref")
     copy = _copy_tree(source, pad / "copy")
 
-    report = dr.scan_non_git_copies(
-        root / "sessions", references=(os.fspath(sha),), now=NOW, window_hours=48
-    )
+    report = _report(root / "sessions", references=(os.fspath(sha),), now=NOW, window_hours=48)
 
     rows = [row for row in report.candidates if row.session == "sha256ref"]
     assert rows, "the candidate must still be reported"
@@ -3044,9 +3096,7 @@ def test_candidates_are_recursive_and_the_largest_provable_subtree_wins(root: Pa
     (run / "notes.md").write_text("session artifacts\n")
     copy = _copy_tree(source, run / "base-repo")
 
-    report = dr.scan_non_git_copies(
-        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
-    )
+    report = _report(root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48)
     rows = {row.path: row for row in report.candidates}
     parent = rows["qacopy/scratchpad/qa-1232"]
     child = rows["qacopy/scratchpad/qa-1232/base-repo"]
@@ -3069,9 +3119,7 @@ def test_an_evidence_named_refused_segment_is_reached_by_the_arm(root: Path) -> 
 
     assert _is_refused_segment("evidence-build"), "the fixture must be a refused name"
 
-    report = dr.scan_non_git_copies(
-        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
-    )
+    report = _report(root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48)
     rows = {row.path: row for row in report.candidates}
     row = rows["evidencecopy/scratchpad/evidence-build/base-repo"]
     assert row.proof_ok and row.would_reclaim
@@ -3086,7 +3134,7 @@ def test_a_missing_store_is_an_honest_empty_report(root: Path) -> None:
     """A fresh install has no ``sessions/``: empty report, not exit 3 (review 2)."""
     missing = root / "fresh-install" / "sessions"
 
-    report = dr.scan_non_git_copies(missing, min_store_bytes=1)
+    report = _report(missing, min_store_bytes=1)
 
     assert report.candidates == [] and report.errors == 0
     assert report.skipped == "no store"
@@ -3099,7 +3147,7 @@ def test_an_unreadable_pad_is_counted_as_an_error(root: Path) -> None:
     (pad / "copy" / "payload").write_bytes(b"x" * 64)
     os.chmod(pad, 0o000)
     try:
-        report = dr.scan_non_git_copies(root / "sessions", min_store_bytes=1)
+        report = _report(root / "sessions", min_store_bytes=1)
     finally:
         os.chmod(pad, 0o755)
 
@@ -3118,9 +3166,7 @@ def test_a_non_delegated_proof_is_not_reported_as_waiting(root: Path) -> None:
     pad.mkdir()
     _copy_tree(source, pad / "copy")
 
-    report = dr.scan_non_git_copies(
-        root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48
-    )
+    report = _report(root / "sessions", references=(os.fspath(source),), now=NOW, window_hours=48)
 
     row = next(row for row in report.candidates if row.session == "usercopy")
     assert row.proof_ok is True
@@ -3143,7 +3189,7 @@ def test_the_proof_is_a_union_across_reference_repositories(root: Path) -> None:
     (copy / "sub").mkdir()
     (copy / "sub" / "a.txt").write_text("alpha\n")
 
-    report = dr.scan_non_git_copies(
+    report = _report(
         root / "sessions",
         references=(os.fspath(first), os.fspath(second)),
         now=NOW,
@@ -3165,7 +3211,7 @@ def test_an_operator_hold_refuses_a_provable_copy_in_both_surfaces(root: Path) -
     free_pad = _kept_pad(root, "freecopy")
     free_copy = _copy_tree(source, free_pad / "copy")
 
-    report = dr.scan_non_git_copies(
+    report = _report(
         root / "sessions",
         references=(os.fspath(source),),
         holds=("heldcopy",),
@@ -3203,9 +3249,7 @@ def test_unreadable_holds_skip_the_arm_entirely(root: Path) -> None:
     assert result.copy_skipped == "holds unreadable"
     assert result.copy_candidates == 0
 
-    report = dr.scan_non_git_copies(
-        root / "sessions", references=(os.fspath(source),), holds=None, now=NOW
-    )
+    report = _report(root / "sessions", references=(os.fspath(source),), holds=None, now=NOW)
     assert report.skipped == "holds unreadable" and report.candidates == []
 
 
@@ -3222,3 +3266,244 @@ def test_a_sub_threshold_parent_is_descended_into(root: Path) -> None:
 
     assert not (copy / "payload").exists()
     assert result.copy_reclaimed_bytes > 0
+
+
+# --------------------------------------------------------------------------
+# Pad recency floor: a transcript's age is not the pad's age
+# --------------------------------------------------------------------------
+
+
+def test_a_nested_write_inside_the_grace_keeps_the_whole_pad(root: Path) -> None:
+    """A 60 h-old transcript must not make a one-minute-old nested file disposable.
+
+    The other process/session is modelled by writing by absolute path after the
+    pad was built; the transcript is deliberately untouched. Before the floor,
+    the build-shape arm takes ``build/`` whole without checking its contents.
+    """
+    pad = _kept_pad(root, "pad-recency-incident")
+    _age(
+        root / "sessions" / "pad-recency-incident" / "transcript.jsonl",
+        NOW - 60 * HOUR,
+    )
+    shape = pad / "build"
+    shape.mkdir()
+    stale = _stale_file(shape / "old-output.bin")
+    moment = time.time()
+    _age(
+        stale,
+        moment - 24 * HOUR,
+    )
+    # NON-SHAPE parent: the planner descends here, unlike the build shape.
+    nested = pad / "worker" / "current"
+    nested.mkdir(parents=True)
+    touched = nested / "hand-edit.txt"
+    touched.write_text("another process owns this write\n")
+    moment = touched.stat().st_mtime + 60
+    _age(
+        touched,
+        moment - 60,
+    )
+    for directory in (shape, pad / "worker", nested):
+        _age(
+            directory,
+            moment - 3 * 24 * HOUR,
+        )
+    _age(
+        pad,
+        moment - 3 * 24 * HOUR,
+    )
+    cand = dr._Cand(
+        root / "sessions" / "pad-recency-incident",
+        clock=NOW - 60 * HOUR,
+        has_transcript=True,
+    )
+    result = dr._reclaim_pad_content(
+        cand,
+        config_dir=root,
+        now=moment,
+        cutoff=moment - 48 * HOUR,
+        live_resolved=None,
+        sessions_dir=root / "sessions",
+        dry_run=False,
+        actor="cli",
+        trigger="manual",
+    )
+    assert touched.exists(), "a nested write one minute old must survive"
+    assert stale.exists(), "a fresh nested write keeps the whole pad, not one file"
+    assert result.row is None
+    assert result.kept == [dr.CONTENT_PAD_RECENT_REASON], result.kept
+
+
+def _age(path: Path, stamp: float) -> None:
+    """Set one file or directory's atime and mtime together (pyright-typed)."""
+    os.utime(path, (stamp, stamp))
+
+
+def _old_pad(root: Path, name: str, *, moment: float) -> Path:
+    """A pad with an old transcript and a stale build shape, outside the grace."""
+    pad = _kept_pad(root, name)
+    # _kept_pad creates the parent's directory after the transcript, so its
+    # directory mtime is fresh; age it after every fixture operation.
+    parent = pad.parent
+    _age(
+        root / "sessions" / name / "transcript.jsonl",
+        moment - 60 * HOUR,
+    )
+    shape = pad / "build"
+    shape.mkdir()
+    _stale_file(shape / "old.bin", age_h=72)
+    for path in (shape / "old.bin",):
+        _age(
+            path,
+            moment - 48 * HOUR,
+        )
+    _age(
+        shape,
+        moment - 48 * HOUR,
+    )
+    # The test's `now` is deliberately ahead of the filesystem clock used while
+    # building the fixture; parent mtimes must be aged against that same clock.
+    _age(
+        pad.parent,
+        moment - 48 * HOUR,
+    )
+    _age(
+        pad,
+        moment - 48 * HOUR,
+    )
+    _age(
+        parent,
+        moment - 48 * HOUR,
+    )
+    return pad
+
+
+def _old_copy_pad(root: Path, name: str, *, moment: float) -> tuple[Path, Path]:
+    source = _published_source(root)
+    pad = _kept_pad(root, name)
+    parent = pad.parent
+    _age(
+        root / "sessions" / name / "transcript.jsonl",
+        moment - 60 * HOUR,
+    )
+    copy = _copy_tree(source, pad / "copy")
+    for path in copy.rglob("*"):
+        _age(
+            path,
+            moment - 48 * HOUR,
+        )
+    _age(
+        copy,
+        moment - 48 * HOUR,
+    )
+    _age(
+        pad,
+        moment - 48 * HOUR,
+    )
+    _age(
+        pad.parent,
+        moment - 48 * HOUR,
+    )
+    _age(
+        parent,
+        moment - 48 * HOUR,
+    )
+    return source, copy
+
+
+def test_an_old_pad_is_still_reclaimed_after_the_grace(root: Path) -> None:
+    """The floor is a guard, not a disable switch for the content layer."""
+    moment = time.time() + 60
+    pad = _old_pad(root, "old-pad", moment=moment)
+    result = _pass(root, idle=False, now=moment)
+    assert not (pad / "build" / "old.bin").exists()
+    assert result.content and result.content[0].classes == (dr.CONTENT_CLASS_BUILD,)
+
+
+def test_a_recent_entry_mtime_inside_a_shape_keeps_the_pad(root: Path) -> None:
+    """A shape directory's own mtime is honoured without descending into it."""
+    moment = time.time() + 60
+    pad = _old_pad(root, "recent-shape", moment=moment)
+    _age(
+        pad / "build",
+        moment - 60,
+    )
+    result = _pass(root, idle=False, now=moment)
+    assert (pad / "build" / "old.bin").exists()
+    assert result.content == []
+    assert ("recent-shape", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
+
+
+def test_exactly_at_the_grace_boundary_keeps_the_pad(root: Path) -> None:
+    """The floor is inclusive: exactly 12 h is still inside the safe window."""
+    moment = time.time() + 60
+    pad = _old_pad(root, "boundary-pad", moment=moment)
+    _age(
+        pad / "build",
+        moment - dr.CONTENT_PAD_GRACE_S,
+    )
+    result = _pass(root, idle=False, now=moment)
+    assert (pad / "build" / "old.bin").exists()
+    assert ("boundary-pad", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
+
+
+def test_just_outside_the_grace_boundary_reclaims_the_pad(root: Path) -> None:
+    moment = time.time() + 60
+    pad = _old_pad(root, "outside-boundary", moment=moment)
+    _age(
+        pad / "build",
+        moment - dr.CONTENT_PAD_GRACE_S - 1,
+    )
+    result = _pass(root, idle=False, now=moment)
+    assert not (pad / "build" / "old.bin").exists()
+    assert result.content
+
+
+def test_a_recent_copy_is_kept_and_not_counted_as_reclaimed(root: Path) -> None:
+    """The copy arm shares the floor and reports a keep, not a copy reclaim."""
+    moment = time.time() + 60
+    source, copy = _old_copy_pad(root, "recent-copy", moment=moment)
+    _age(
+        copy / "payload",
+        moment - 60,
+    )
+    result = _pass(root, idle=False, now=moment, policy=_copy_provider(source))
+    assert (copy / "payload").exists()
+    assert result.content == []
+    assert result.copy_candidates == 0
+    assert result.copy_reclaimed_bytes == 0
+    assert ("recent-copy", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
+
+
+def test_an_old_copy_is_still_reclaimed(root: Path) -> None:
+    moment = time.time() + 60
+    source, copy = _old_copy_pad(root, "old-copy", moment=moment)
+    result = _pass(root, idle=False, now=moment, policy=_copy_provider(source))
+    assert not (copy / "payload").exists()
+    assert result.content and result.content[0].classes == (dr.CONTENT_CLASS_COPY,)
+
+
+def test_the_copy_report_does_not_advertise_a_recent_copy(root: Path) -> None:
+    moment = time.time() + 60
+    source, copy = _old_copy_pad(root, "recent-report", moment=moment)
+    _age(
+        copy / "payload",
+        moment - 60,
+    )
+    report = _report(root / "sessions", idle=False, references=(os.fspath(source),), now=moment)
+    row = next(row for row in report.candidates if row.session == "recent-report")
+    assert not row.would_reclaim
+    assert row.reason == dr.CONTENT_PAD_RECENT_REASON
+
+
+def test_a_dry_run_reports_the_recent_keep_and_no_reclaim_rows(root: Path) -> None:
+    """The dry-run result and --json's source result must not hide the keep."""
+    moment = time.time() + 60
+    pad = _old_pad(root, "recent-dry", moment=moment)
+    _age(
+        pad / "build",
+        moment - 60,
+    )
+    result = _pass(root, idle=False, now=moment, dry_run=True)
+    assert result.content == []
+    assert ("recent-dry", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept

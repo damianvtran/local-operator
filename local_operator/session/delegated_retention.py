@@ -469,6 +469,36 @@ STALE_OUTPUT_SUFFIXES: tuple[str, ...] = (
 STALE_OUTPUT_MIN_BYTES = 10 * 1024 * 1024
 STALE_OUTPUT_GRACE_S = 12 * 3600.0
 
+#: The whole-pad recency floor deliberately matches STALE_OUTPUT_GRACE_S: a
+#: file old enough for that arm is not evidence that the whole pad is idle, and
+#: different graces for shapes/copies would make one write safe in one arm and
+#: disposable in another. The floor uses the newest ENTRY mtime, not the pad
+#: directory's mtime (a nested write does not update it) and not the transcript
+#: clock (another process may write into the pad by absolute path).
+CONTENT_PAD_GRACE_S = 12 * 3600.0
+CONTENT_PAD_RECENT_REASON = "pad edited within 12h"
+
+#: THE HONEST LIMIT of the floor. A shape directory (``node_modules``,
+#: ``build``, ``target``, …) is judged by its OWN entry mtime and is NOT
+#: descended into, so a write nested deeper inside one is invisible here and the
+#: shape arm still takes that subtree. That is deliberate: descending into every
+#: ``node_modules`` is the multi-gigabyte walk the shape arm exists to avoid.
+#: Everything else the incident turned on still stands — live claim, lease, armed
+#: wake/monitor, holds, pins, origin and the session's own activity clock — and
+#: this is strictly safer than the rule it replaces, which had no recency signal
+#: at all for a shape taken by name.
+
+
+def _pad_recent(now: float, newest_mtime_ns: int) -> bool:
+    """Whether the newest observed entry is inside the whole-pad grace.
+
+    INCLUSIVE at the boundary: at exactly 12 h the stale-output arm still
+    reclaims a file, so the floor keeps the pad too. Future mtimes are recent
+    (a skewed clock is not evidence that a pad is idle).
+    """
+    return newest_mtime_ns > 0 and now - newest_mtime_ns / 1_000_000_000 <= CONTENT_PAD_GRACE_S
+
+
 #: The four class phrases a content row's reason is built from, in the fixed
 #: order they are displayed and counted (see :func:`_PadPlan.classes`).
 CONTENT_CLASS_MERGED = "merged-clean clone"
@@ -1566,6 +1596,24 @@ class _PadPlan:
     copy_candidates: int = 0
     copy_candidate_bytes: int = 0
     copy_deferred: int = 0
+    #: Newest mtime observed in this pad, including entries the arms take whole.
+    newest_mtime_ns: int = 0
+
+    def keep_for_recent_edit(self, now: float) -> bool:
+        """Discard every planned removal when the pad was edited recently.
+
+        The whole pad is refused as one unit: taking a stale sibling while a
+        nested write survives would still destroy active work. Copy counters
+        are cleared too, so the pad cannot be counted as reclaimed.
+        """
+        if not _pad_recent(now, self.newest_mtime_ns):
+            return False
+        self.removals.clear()
+        self.kept[:] = [CONTENT_PAD_RECENT_REASON]
+        self.copy_candidates = 0
+        self.copy_candidate_bytes = 0
+        self.copy_deferred = 0
+        return True
 
     def classes(self) -> tuple[str, ...]:
         """The distinct classes taken, in the fixed display order."""
@@ -1593,6 +1641,21 @@ def _has_evidence_segment(relative: str) -> bool:
     output, is unaffected.
     """
     return any(part.lower().startswith("evidence") for part in Path(relative).parts)
+
+
+def _observe_pad_mtime(path: Path, plan: _PadPlan, *, now: float) -> bool:
+    """Observe one pad's newest entry mtime; return whether it is recent.
+
+    The pad root is included because a write that renames an entry in place
+    updates the root even when the replaced entry's own mtime is old. A failure
+    to stat is a refusal, not an old-pad answer.
+    """
+    try:
+        info = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _PadAbort(f"scratchpad root {path} cannot be inspected") from exc
+    plan.newest_mtime_ns = max(plan.newest_mtime_ns, info.st_mtime_ns)
+    return plan.keep_for_recent_edit(now)
 
 
 def _plan_pad_content(
@@ -1639,6 +1702,9 @@ def _plan_pad_content(
         # (only entries below it are), and deleting selected content under a
         # repository this pass may not judge would dirty it — keep it whole.
         plan.kept.append("the scratchpad root is itself a git tree")
+        # No recency walk: this pad plans no removal, so there is nothing the
+        # floor could keep, and walking it would double the pad's cost for a
+        # reason that can never change the decision.
         return plan
     if os.path.lexists(os.path.join(os.fspath(pad), ".git")):
         # The SESSION directory is a repository whose worktree includes the
@@ -1674,6 +1740,15 @@ def _plan_pad_content(
                 "(none configured, or no merged trunk to prove against)"
             )
             copy_arm = None
+    # ONE recency observation per pad: the root's own stat here, then every
+    # entry as the main walk reaches it (and a copy proof's files as the arm
+    # proves them). There is deliberately NO pre-walk: the copy-arm refusals
+    # above only clear ``copy_arm`` and fall through to this walk, and the two
+    # git-root refusals plan nothing at all, so either would have walked every
+    # ordinary pad a second time on a store whose content phase is measured in
+    # tens of seconds.
+    if _observe_pad_mtime(Path(root), plan, now=now):
+        return plan
     visited = 0
     repos = 0
     # ``(path, depth, copy_ancestor, copy_allowed)``: the last two carry the
@@ -1681,7 +1756,7 @@ def _plan_pad_content(
     # directory was already attempted (so a nested proof is not counted as a new
     # candidate), and ``copy_allowed`` is cleared below a nested repository.
     stack: list[tuple[str, int, bool, bool]] = [(root, 0, False, True)]
-    while stack:
+    while stack and not plan.keep_for_recent_edit(now):
         current, depth, copy_ancestor, copy_allowed = stack.pop()
         try:
             with os.scandir(current) as entries:
@@ -1694,6 +1769,13 @@ def _plan_pad_content(
         for entry in children:
             name = entry.name
             try:
+                # Stat EVERY entry before an arm takes it. A shape directory's
+                # own mtime is honoured even though its contents are not walked;
+                # symlinks are included but never followed.
+                info = entry.stat(follow_symlinks=False)
+                plan.newest_mtime_ns = max(plan.newest_mtime_ns, info.st_mtime_ns)
+                if plan.keep_for_recent_edit(now):
+                    return plan
                 if entry.is_symlink():
                     continue  # never followed, never shape-matched
                 if name == ".git":
@@ -1744,6 +1826,10 @@ def _plan_pad_content(
                         verdict = _plan_copy(
                             entry.path, pad, plan, copy_arm, counted=not copy_ancestor
                         )
+                        # _prove_copy has walked the candidate's files; fold its
+                        # newest mtime into the floor before taking any of them.
+                        if plan.keep_for_recent_edit(now):
+                            return plan
                         if verdict == _COPY_BELOW:
                             # Not a candidate at THIS size, but its children may
                             # hold the copy (measured: the copy sits under a run
@@ -2127,6 +2213,8 @@ class _CopyProof:
     #: Bytes actually hashed (the real pass's budget is charged this, not the
     #: candidate's total: a path present in no tree is never read).
     hashed_bytes: int = 0
+    #: Newest file mtime seen by the proof walk, for the pad recency floor.
+    newest_mtime_ns: int = 0
     #: Why the candidate is not reclaimed; empty means it is.
     reason: str = ""
     below_floor: bool = False
@@ -2212,6 +2300,10 @@ def _prove_copy(
                 proof.reason = f"more than {NON_GIT_COPY_MAX_ENTRIES} entries"
                 return proof
             try:
+                # Every entry contributes to the pad floor, including a
+                # directory whose own mtime changed without its files changing.
+                info = entry.stat(follow_symlinks=False)
+                proof.newest_mtime_ns = max(proof.newest_mtime_ns, info.st_mtime_ns)
                 if entry.is_symlink():
                     continue  # never followed: a link is not proof of a copy
                 if entry.name == ".git":
@@ -2230,9 +2322,9 @@ def _prove_copy(
                     proof.cap_exceeded = True
                     proof.reason = f"more than {NON_GIT_COPY_MAX_FILES} files"
                     return proof
-                info = entry.stat(follow_symlinks=False)
                 relative = os.path.relpath(entry.path, candidate).replace(os.sep, "/")
                 files.append((Path(entry.path), relative, info.st_size, info.st_mtime_ns))
+                proof.newest_mtime_ns = max(proof.newest_mtime_ns, info.st_mtime_ns)
                 proof.total_bytes += info.st_size
             except OSError:
                 proof.unreadable = True
@@ -2426,6 +2518,10 @@ def _plan_copy(path: str, pad: Path, plan: _PadPlan, arm: _CopyArm, *, counted: 
     # proof returns a deferred verdict, which this records and does not descend
     # past (the candidate is retried next pass).
     proof = _prove_copy(candidate, trees=arm.trees(pad), cache=arm.hash_cache, budget=arm.budget)
+    # The proof's file walk is the only inspection inside a copy candidate:
+    # retain its newest mtime for the pad-wide floor. A refused/unreadable or
+    # capped proof is already a keep, never a removal proof.
+    plan.newest_mtime_ns = max(plan.newest_mtime_ns, proof.newest_mtime_ns)
     arm.spend(proof.hashed_bytes)
     if proof.below_floor:
         return _COPY_BELOW
@@ -2667,6 +2763,8 @@ def scan_non_git_copies(
                 qualified = True
         trees = tuple(trees)
         cache = _HashCache()
+        pad_newest_mtime_ns = 0
+        pad_rows: list[NonGitCopyCandidate] = []
         stack: list[tuple[str, int, bool, bool]] = [(os.fspath(pad), 0, False, True)]
         while stack:
             current, depth, ancestor, allowed = stack.pop()
@@ -2677,7 +2775,11 @@ def scan_non_git_copies(
                 continue  # unreadable dir: its parent already recorded the keep
             for entry in children:
                 try:
-                    if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    info = entry.stat(follow_symlinks=False)
+                    pad_newest_mtime_ns = max(pad_newest_mtime_ns, info.st_mtime_ns)
+                    if entry.is_symlink():
+                        continue
+                    if not entry.is_dir(follow_symlinks=False):
                         continue
                     if entry.name == ".git":
                         continue
@@ -2727,6 +2829,10 @@ def scan_non_git_copies(
                         )
                     )
                     continue
+                # The report's outer walk descends directories only; the
+                # candidate proof is what stats its files. Fold that newest
+                # mtime into the pad-wide recency decision.
+                pad_newest_mtime_ns = max(pad_newest_mtime_ns, proof.newest_mtime_ns)
                 if proof.below_floor:
                     stack.append((entry.path, depth + 1, ancestor, True))
                     continue
@@ -2748,7 +2854,13 @@ def scan_non_git_copies(
                         proof_ok and within_window and not root_guard and delegated and deletable
                     )
                     would = proof_ok and not within_window and deletable and not root_guard
-                    if root_guard:
+                    if _pad_recent(moment, pad_newest_mtime_ns):
+                        # The report is read-only, but must not advertise a
+                        # copy the pass would refuse for recent pad activity.
+                        reason = CONTENT_PAD_RECENT_REASON
+                        waiting = False
+                        would = False
+                    elif root_guard:
                         # The pass keeps the whole pad before any copy proof;
                         # the row is a keep, never a would-reclaim (review B1).
                         reason = root_guard
@@ -2764,7 +2876,7 @@ def scan_non_git_copies(
                         reason = f"proof ok, inside the {float(window_hours):g}h window"
                     else:
                         reason = ""
-                report.candidates.append(
+                pad_rows.append(
                     NonGitCopyCandidate(
                         session=session_dir.name,
                         path=os.path.relpath(entry.path, sessions_dir).replace(os.sep, "/"),
@@ -2788,6 +2900,15 @@ def scan_non_git_copies(
                     stack.append((entry.path, depth + 1, True, True))
                 elif outcome == _COPY_BLOCKED:
                     stack.append((entry.path, depth + 1, True, False))
+        # A recent sibling discovered after an earlier candidate was proved
+        # must still change that candidate's advertised state. This is why the
+        # pad's rows are held until the walk completes.
+        if _pad_recent(moment, pad_newest_mtime_ns):
+            for row in pad_rows:
+                row.waiting = False
+                row.would_reclaim = False
+                row.reason = CONTENT_PAD_RECENT_REASON
+        report.candidates.extend(pad_rows)
     if not report.candidates and not pads:
         # THE STORE-LEVEL VACUOUS GUARD means "the scan could not SEE the
         # store" (review B3b), not "the store has no copies": zero scratchpad
@@ -3080,6 +3201,10 @@ def _reclaim_pad_content(
         raise _PadAbort(f"scratchpad cannot be inspected ({exc.__class__.__name__})") from exc
     if plan is None:
         return outcome
+    # The planner's final floor check is intentionally before this extension:
+    # it clears any early sibling's removals and replaces the keep reasons with
+    # the one reason the operator needs. Do not append a duplicate reason here.
+    plan.keep_for_recent_edit(now)
     outcome.kept.extend(plan.kept)
     # Rolled even when nothing was planned: a share-refused candidate is a keep
     # the CLI's report block must count, and its zero removals are the point.
