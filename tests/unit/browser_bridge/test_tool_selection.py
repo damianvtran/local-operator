@@ -142,6 +142,12 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             "styles",
             "hit_test",
             "ancestors",
+            # Network telemetry uses a standing CDP Network-domain subscription
+            # on the desktop host; cmux has no equivalent request stream.
+            "network_start",
+            "network_stop",
+            "network_read",
+            "network_clear",
         }
     )
 

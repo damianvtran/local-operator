@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (13 modules: access-flow.ts, access-queue.ts, ax-compact.ts, ax-locator.ts, deadline.ts, element-query.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 2e8e2f4949a10babb93493aecd5262883d19379004e24df11d980a62f60317c9
+// Inputs sha256: 18ce7757d229d1a3d14a67064a0712898b2eeb95f6bfabbb8e8ee800779d9e0c
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -71,7 +71,7 @@ export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: st
   "upload": { label: 'Allow uploads', permission: '' },
 };
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught
