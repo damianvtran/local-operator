@@ -435,6 +435,79 @@ async def test_later_idle_arrival_skips_retained_failed_body(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_self_contained_card_keeps_its_wake_behind_retained_failed_body(
+    tmp_path, monkeypatch
+):
+    """PR #2951 round 1 MAJOR-1: a woken card without a body of its own must open a turn.
+
+    A retained failed reservation A routes the idle card through the body-only
+    pass; when that pass opens no turn (A fails again, nothing else eligible),
+    the card is still owed the ordinary wake it would have had on main.
+    """
+    tool_entered, finish_tool = asyncio.Event(), asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        tool_entered.set()
+        await finish_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="held_work",
+            content=[TextContent(text="original work finished")],
+        )
+
+    tool = AgentTool(name="held_work", description="bounded test work", execute=execute)
+    async with runtime_rig(tmp_path, monkeypatch, tools=[tool]) as rig:
+        directories = sorted(p.name for p in (rig.root / "sessions").iterdir())
+        rig.stream.scripted = [
+            [],
+            _tool_call("held-1", "held_work"),
+            [StreamTextDelta(delta="settled"), StreamEndEvent(stop_reason="stop")],
+        ]
+        working = asyncio.create_task(rig.session.prompt("finish existing work"))
+        try:
+            await asyncio.wait_for(tool_entered.wait(), 5)
+            assert (await deliver(rig))["handled"][0]["action"] == "delivered"
+            first_waiter = rig.session._pending_body_followup_task
+            rig.unavailable.add(MESSAGE_ID)
+            finish_tool.set()
+            await asyncio.wait_for(working, 10)
+            await settle(rig.session)
+            assert first_waiter.done()
+            first = rig.store.body_reservation(rig.owner, CONVERSATION_ID, MESSAGE_ID)
+            assert first["state"] == "pending" and first["attempts"] == 1
+            assert len(rig.stream.requests) == 3
+
+            # A self-contained bridge card (pair-lane shape: screened excerpt,
+            # no reservation of its own) arriving at idle.
+            result = await send_peer_message(
+                rig.record,
+                text="SELF-CONTAINED-CARD-6141",
+                mode="mailbox",
+                wake=True,
+                sender={},
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            )
+            await settle(rig.session)
+            assert len(rig.stream.requests) == 4
+            assert "SELF-CONTAINED-CARD-6141" in "\n".join(rig.stream.texts(-1))
+            assert BODY not in "\n".join(rig.stream.texts(-1))
+            # NIT-1: the sender is told the truth — this arrival woke the session.
+            assert str(result) == "delivered and woke the session", str(result)
+            first = rig.store.body_reservation(rig.owner, CONVERSATION_ID, MESSAGE_ID)
+            # A is retained with its reason, never consumed or quarantined;
+            # the bounded retries are the follow-up pass plus the ordinary wake.
+            assert first["state"] == "pending" and first["last_error"] == "binding_drift"
+            assert first["attempts"] <= 3
+            assert not rig.session._turn_lock.locked()
+            assert rig.session._pending_body_followup_task.done()
+            assert sorted(p.name for p in (rig.root / "sessions").iterdir()) == directories
+        finally:
+            finish_tool.set()
+            if not working.done():
+                await asyncio.wait_for(working, 10)
+
+
+@pytest.mark.asyncio
 async def test_arrival_during_failed_hydration_rearms_same_waiter(tmp_path, monkeypatch):
     """B arrives after A's finite-pass horizon, before is_streaming turns true."""
     tool_entered, finish_tool = asyncio.Event(), asyncio.Event()

@@ -4319,6 +4319,14 @@ class Session:
         # turn. The reservation, not this task or the card text, owes the work.
         self._pending_body_followup_task: asyncio.Task[Any] | None = None
         self._pending_body_followup_again = False
+        # The wake a woken idle bridge card is owed when it is routed through
+        # the body-only pass instead of the ordinary wake. That pass may open no
+        # turn (a retained failed body fails again), and a self-contained card
+        # (pair-lane excerpt, no reservation of its own) must still be read
+        # (PR #2951 round 1, MAJOR-1). A card leaves this list when a turn's
+        # pipeline starts with it on the live context, whichever path opened
+        # that turn (body pass, typed prompt, steering wake).
+        self._bridge_cards_owed_wake: list[CustomMessage] = []
         #: The turn's terminal verdict, captured where the loop's agent_end is
         #: handled. Settlement runs in the ``finally``, after ``_flush_held_end``
         #: has already released that event, so the verdict must be captured
@@ -10355,8 +10363,18 @@ class Session:
                 # durable; a degraded store must not abort the receive.
                 logger.warning("bridge ask: hook failed on the record-only append", exc_info=True)
         self._append_or_park_journal(message)
-        if not joins_body_waiter and (
-            native_body_wake or (busy and wake and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE)
+        owes_card_wake = native_body_wake and not busy
+        if owes_card_wake:
+            # Recorded only now that the card is on the context or parked. The
+            # waiter settles this with an ordinary wake if its pass opens no
+            # turn that read the card; re-arming covers a waiter that retired
+            # during the awaits above.
+            self._bridge_cards_owed_wake.append(message)
+        if owes_card_wake or (
+            not joins_body_waiter
+            and busy
+            and wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
         ):
             # Idle admitted bodies need the SAME finite pass as busy arrivals:
             # an ordinary oldest-only prompt could retry retained failed A and
@@ -10375,6 +10393,10 @@ class Session:
         # at the post-batch boundary, which is what keeps the splice hazard
         # documented above from being reintroduced here.
         self._peer_arrival.mark()
+        if owes_card_wake:
+            # The waiter opens a turn for this card (a body turn, or the
+            # ordinary fallback), so the sender is told what actually happens.
+            return receipt("delivered and woke the session")
         return receipt("delivered to the mailbox (will be read on the next turn)")
 
     async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
@@ -17084,6 +17106,14 @@ class Session:
         finally:
             restart_fence.release_shared(admission)
         await self._refresh_context_metadata()
+        if self._bridge_cards_owed_wake:
+            # This turn builds from the live context, so a woken bridge card
+            # already on it is read; one still parked (it arrived during body
+            # hydration, after the opener's flush) stays owed its wake.
+            live = {id(message) for message in self._context.messages}
+            self._bridge_cards_owed_wake = [
+                card for card in self._bridge_cards_owed_wake if id(card) not in live
+            ]
         # Flip the discovery record's ``started`` bit the first time a REAL
         # turn runs. This is the single choke point every spawn path funnels
         # through — the user's ``prompt()``, wake deliveries
@@ -17431,7 +17461,7 @@ class Session:
         if task is not None and not task.done():
             self._pending_body_followup_again = True
             return
-        if self._pending_body_followup_row() is None:
+        if not self._bridge_cards_owed_wake and self._pending_body_followup_row() is None:
             return
 
         async def drain() -> None:
@@ -17458,6 +17488,19 @@ class Session:
                     )
                     # Each attempt releases the ordinary turn lock. Selecting
                     # B explicitly prevents failed A being hydrated again here.
+                if self._pending_body_followup_again:
+                    continue
+                if self._bridge_cards_owed_wake:
+                    # No turn in this pass read a woken card: give it the
+                    # ordinary wake it would have had without the body route.
+                    # The pipeline still offers the oldest eligible body, so a
+                    # retained failed row gets at most one more attempt here.
+                    await self._prompt_messages(
+                        [],
+                        carried_prompt=True,
+                        guard=lambda: bool(self._bridge_cards_owed_wake),
+                        guard_note="woken bridge card already read by a later turn",
+                    )
                 if not self._pending_body_followup_again:
                     return
 
