@@ -152,6 +152,26 @@ async def _cleanup_stream(close: Callable[..., Any] | None) -> None:
 #: session appear on the phone before the user reaches for it.
 SCAN_INTERVAL_S = 2.0
 
+#: THE ONE HEALTH WINDOW behind the phone header's status dot
+#: (``SessionProjection.heartbeat_stale``): an owner is "not answering" once
+#: BOTH its record's ``heartbeat_at`` and the last projection frame this relay
+#: received from it are older than this.
+#:
+#: WHY ``HEARTBEAT_TIMEOUT_S`` (45 s = three ``HEARTBEAT_INTERVAL_S`` beats).
+#: It is the bound ``registry.classify`` already calls ``wedged`` and the
+#: catalogue words as "not answering", so the dot, the session list and the
+#: desktop catalogue flip on the same evidence at the same moment instead of
+#: three surfaces disagreeing for 30 s. One interval would flicker on a single
+#: late beat — the beat is written by the runtime's own event loop, which a
+#: busy turn starves (see ``HEARTBEAT_INTERVAL_S``) — and anything longer only
+#: delays a true report.
+#:
+#: WHY THE FRAME CLOCK TOO. A streaming turn starves exactly that loop, so its
+#: beat can go 100 s+ stale while the session pushes frames many times a
+#: second: alive and answering, which the dot must paint GREEN. A fresh frame
+#: is therefore as good as a fresh beat; yellow needs both to be quiet.
+SESSION_HEALTH_WINDOW_S = registry.HEARTBEAT_TIMEOUT_S
+
 #: The bound on ONE push-worker pass, for the tick hook in ``_scan_once`` (S5).
 #:
 #: Deliberately ABOVE the 30 s the repo's own outbound Radient calls carry
@@ -485,6 +505,10 @@ class SessionEntry:
         self.next_dial_at: float = 0.0
         self.degraded = False
         self.ended = False
+        #: ``time.monotonic()`` of the last projection frame this relay received
+        #: from the owner, the second clock of ``SESSION_HEALTH_WINDOW_S``.
+        #: ``None`` until the first frame: no frame is no evidence of answering.
+        self.last_frame_at: float | None = None
         # SSE ownership is session-level in SessionTable. A process entry is a
         # replaceable routing generation and must never own a conversation view.
         # Kept as an alias only for compatibility with focused diagnostics.
@@ -2509,12 +2533,17 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     continue
                 incoming.degraded = False
                 incoming.ended = False
+                # A frame IS the owner answering: it clears the health verdict
+                # here, and the scan (``_sync_heartbeat_stale``) is what raises it
+                # again once both clocks go quiet.
+                entry.last_frame_at = time.monotonic()
                 try:
                     captured = daemon.capture_subagent_details(incoming, record=record)
                 except _StaleProjection:
                     # A predecessor frame can arrive after its payload cache entry
                     # was evicted. Its identity remains fenced by the epoch ledger.
                     continue
+                captured.heartbeat_stale = False
                 entry.projection = captured
                 entry.ready.set()
                 if op == "welcome" and daemon.phone_viewing(record.session_id):
@@ -3293,6 +3322,50 @@ def _latest_projection_frame(
             return best
         if candidate.get("version", 0) >= best.get("version", 0):
             best = candidate
+
+
+def heartbeat_stale(
+    entry: SessionEntry, *, now: float | None = None, monotonic_now: float | None = None
+) -> bool:
+    """Whether ``entry``'s owner has gone quiet past ``SESSION_HEALTH_WINDOW_S``.
+
+    True only when BOTH clocks are quiet: the record's ``heartbeat_at`` (wall
+    clock, written by the runtime) and ``last_frame_at`` (monotonic, stamped by
+    this relay on every frame it receives). A streaming turn starves the beat
+    but floods frames, so it reads fresh; an idle runtime sends no frames but
+    keeps beating, so it reads fresh too. A record that was never stamped
+    (``heartbeat_at <= 0``) is no evidence of answering, the same reading
+    ``_advertisable_counts`` gives it.
+    """
+    wall = time.time() if now is None else now
+    mono = time.monotonic() if monotonic_now is None else monotonic_now
+    beat = float(getattr(entry.record, "heartbeat_at", 0.0) or 0.0)
+    beat_quiet = beat <= 0.0 or wall - beat > SESSION_HEALTH_WINDOW_S
+    frame_quiet = (
+        entry.last_frame_at is None or mono - entry.last_frame_at > SESSION_HEALTH_WINDOW_S
+    )
+    return beat_quiet and frame_quiet
+
+
+def _sync_heartbeat_stale(entry: SessionEntry, daemon: "MobileDaemon") -> None:
+    """Publish ``entry``'s health verdict onto its payload, repainting on change.
+
+    Called from every scan pass (``SCAN_INTERVAL_S``), so a verdict lags its
+    evidence by at most one scan. Only a TRANSITION fans out: the frame is a
+    full snapshot, and re-sending an unchanged one every 2 s would cost every
+    watching phone a repaint for nothing. An ended entry or one with no payload
+    yet has nothing to publish — ``ended`` outranks the verdict on the phone,
+    and a payload-less entry is served a durable rebuild whose ``None`` already
+    means "not measured".
+    """
+    projection = entry.projection
+    if entry.ended or projection is None:
+        return
+    stale = heartbeat_stale(entry)
+    if projection.heartbeat_stale is stale:
+        return
+    projection.heartbeat_stale = stale
+    _fan_out(entry, daemon)
 
 
 def _mirror_dial_health(entry: SessionEntry) -> None:
@@ -4104,6 +4177,7 @@ class MobileDaemon:
                     self._dial_tasks[record.pid] = asyncio.ensure_future(_dial(self, entry))
             if not entry.ended and self.phone_viewing(record.session_id):
                 self._schedule_phone_attach(record)
+            _sync_heartbeat_stale(entry, self)
         # Reap entries whose record vanished entirely.
         for pid in list(self.table.entries):
             if pid not in seen:
