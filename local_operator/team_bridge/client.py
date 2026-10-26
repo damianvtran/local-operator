@@ -2176,9 +2176,16 @@ class TeamBridgeClient:
         before: str | None = None,
         cursor: str | None = None,
         scope: Literal["account"] | None = None,
+        status: Literal["open", "archived"] | None = None,
         access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
         """One page of the caller's conversations, newest activity first.
+
+        ``status="archived"`` asks for the archived half (the server's own rule
+        decides what the caller may see there, including an organization
+        administrator's archived channels they are not a member of); omitted or
+        ``"open"`` is the live list. The default is NOT sent, so an older
+        server that has no ``status`` parameter keeps answering exactly as before.
 
         ``scope="account"`` asks for the merged page across every organization
         the signed-in account is an ACTIVE member of. The server derives that set
@@ -2201,6 +2208,8 @@ class TeamBridgeClient:
             params["cursor"] = cursor
         if scope:
             params["scope"] = scope
+        if status:
+            params["status"] = status
         return await self._send(
             "GET", "/messaging/conversations", params=params or None, access=access
         )
@@ -2262,13 +2271,41 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Archive or unarchive. ``action`` is the closed set ``archive|unarchive``."""
+        """Archive or unarchive. ``action`` is the closed set ``archive|unarchive``.
+
+        Permitted to the conversation owner or, on a channel, an organization
+        owner/admin (the server decides; the desktop never infers authority).
+        """
 
         if action not in ("archive", "unarchive"):
             raise ValueError("action must be 'archive' or 'unarchive'")
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/{action}",
+            params={"tenant_id": tenant_id} if tenant_id else None,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def conversation_delete(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Permanently delete an ARCHIVED conversation. Irreversible.
+
+        The server owns every rule (owner or organization owner/admin, archived
+        only, never a built-in) and erases the history; this client only carries
+        the request. A repeat after completion answers ``conversation_not_found``,
+        which callers treat as done.
+        """
+
+        return await self._send(
+            "DELETE",
+            f"/messaging/conversations/{conversation_id}",
             params={"tenant_id": tenant_id} if tenant_id else None,
             access=access,
             expected_account_id=expected_account_id,
