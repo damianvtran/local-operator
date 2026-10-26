@@ -42,6 +42,30 @@ def _argv(config_dir: Path) -> list[str]:
     ]
 
 
+def log_path(config_dir: Path) -> Path:
+    """The connector's own rotating log (written by the process itself).
+
+    Under ``<config_dir>/logs`` like the wake supervisor's log, so ``config_dir``
+    alone relocates it for tests and second profiles.
+    """
+
+    return config_dir / "logs" / "bridge-connector.log"
+
+
+def stderr_path(config_dir: Path) -> Path:
+    """What launchd points the connector's stdout/stderr at.
+
+    DELIBERATELY NOT :func:`log_path`. The process rotates its log by renaming
+    it, and a launchd ``StandardErrorPath`` fd is never reopened, so sharing one
+    file would strand launchd's stream in the rotated backup (the failure
+    ``local_operator.paths.runtime_log_path`` documents for ``mobile.log``). This
+    file only receives what escapes the logging handler: an interpreter crash
+    traceback or a stray ``print``, so it stays small without rotation.
+    """
+
+    return config_dir / "logs" / "bridge-connector.stderr.log"
+
+
 def plist_path() -> Path:
     """The real install target (rendered/tests never write there)."""
 
@@ -61,6 +85,11 @@ def render_plist(config_dir: Path) -> dict[str, object]:
         # plain dictionary form.
         "KeepAlive": True,
         "EnvironmentVariables": {"LOCAL_OPERATOR_CONNECTOR": "1"},
+        # Without these launchd sends stdout/stderr to /dev/null, which hid a
+        # receive outage completely (2026-10-26). Only an already-installed
+        # plist lacks them until the next install rewrites it.
+        "StandardOutPath": str(stderr_path(config_dir)),
+        "StandardErrorPath": str(stderr_path(config_dir)),
     }
 
 
