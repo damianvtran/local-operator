@@ -100,17 +100,57 @@ def test_the_stock_digest_is_the_pre_fix_file_and_only_pr_500_differs() -> None:
     assert hashlib.sha256(_stock_bytes()).hexdigest() == guest_xcursor.STOCK_SHA256
 
 
-def test_a_tampered_vendored_file_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Res:
-        def joinpath(self, _name: str) -> "_Res":
-            return self
-
-        def read_bytes(self) -> bytes:
-            return b"tampered"
-
-    monkeypatch.setattr(guest_xcursor.resources, "files", lambda _pkg: _Res())
+def test_a_tampered_vendored_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / guest_xcursor.VENDORED_RESOURCE).write_bytes(b"tampered")
+    monkeypatch.setattr(guest_xcursor, "__file__", str(tmp_path / "guest_xcursor.py"))
     with pytest.raises(ValueError, match="digest"):
         guest_xcursor.patched_source()
+
+
+def test_the_vendored_file_loads_under_the_workers_verified_source_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker imports adapter modules through discovery's verified loader.
+
+    That loader has no resource reader, so ``importlib.resources`` raised
+    ``Can't open orphan path`` there and the first validation episode recorded
+    ``applied: false``. Execute this module through the SAME loader class and
+    read the vendored file from it.
+    """
+
+    import importlib.util
+
+    from local_operator.evaluation.adapters import discovery
+
+    path = Path(guest_xcursor.__file__)
+    # The PACKAGE is what the worker's finder serves through the verified
+    # loader, and ``importlib.resources`` resolves resources from the package's
+    # spec -- so the package must be the verified one too, or this test would
+    # pass against the very code that failed in the worker.
+    init = path.parent / "__init__.py"
+    package = types.ModuleType("lop_osworld_v2_adapter")
+    package.__spec__ = importlib.util.spec_from_file_location(
+        "lop_osworld_v2_adapter",
+        init,
+        loader=discovery._VerifiedSourceLoader(init, init.read_bytes()),
+        submodule_search_locations=[str(path.parent)],
+    )
+    package.__path__ = [str(path.parent)]
+    package.__file__ = str(init)
+    monkeypatch.setitem(sys.modules, "lop_osworld_v2_adapter", package)
+    loader = discovery._VerifiedSourceLoader(path, path.read_bytes())
+    spec = importlib.util.spec_from_file_location(
+        "lop_osworld_v2_adapter.guest_xcursor_verified", path, loader=loader
+    )
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "lop_osworld_v2_adapter"
+    # A dataclass resolves its module through sys.modules while executing.
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    loader.exec_module(module)
+    assert hashlib.sha256(module.patched_source()).hexdigest() == guest_xcursor.PATCHED_SHA256
 
 
 # ----------------------------------------------------------------------

@@ -80,7 +80,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field
-from importlib import resources
+from pathlib import Path
 from typing import Callable, Literal, Sequence
 
 from lop_osworld_v2_adapter.guest_disk import CommandResult
@@ -234,7 +234,14 @@ def patched_source() -> bytes:
     whole claim of this module is "upstream's exact bytes".
     """
 
-    data = resources.files(__package__).joinpath(VENDORED_RESOURCE).read_bytes()
+    # By path beside this module, NOT ``importlib.resources``: the worker
+    # imports adapter modules through discovery's ``_VerifiedSourceLoader``,
+    # which serves hashed source and has no resource reader, so
+    # ``resources.files(__package__)`` raises "Can't open orphan path" there
+    # (measured on the first validation episode: the patch was recorded
+    # ``applied: false`` for exactly that). The file is RECORD-covered, so the
+    # package digest attests it, and the pin below re-checks it regardless.
+    data = (Path(__file__).resolve().parent / VENDORED_RESOURCE).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     if digest != PATCHED_SHA256:
         raise ValueError(f"vendored pyxcursor digest {digest} != pinned {PATCHED_SHA256}")
