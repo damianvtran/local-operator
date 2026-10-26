@@ -2460,7 +2460,7 @@ class ToolContext(BaseModel):
     #: own listings hide (``resume.is_user_session``), a one-shot host or an
     #: output-contract session (the ``quiet_end`` exclusions), and under
     #: ``LOP_NOTIFY=0``. Present, it is called with the validated arguments and
-    #: the tool call id, writes the item (rung 0 decided inside), and returns
+    #: the tool call id, writes the item as unread, and returns
     #: the sentence the model reads; it raises only for a store refusal the
     #: tool reports as a retryable error.
     notify_inbox: Callable[..., Awaitable[str]] | None = None

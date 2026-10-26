@@ -19,7 +19,7 @@ signed Electron build.
 See ``docs/design/descriptive-notifications.md`` for the decision record.
 
 THE PACKAGE INIT IS LAZY, AND THAT IS LOAD-BEARING. The package also holds the
-operator's inbox (``store.py``, ``items.py``, ``presence.py``;
+operator's inbox (``store.py``, ``items.py``;
 ``docs/design/notifications-inbox.md``), whose store must stay stdlib-only: the
 desktop feed's doorbell, the relay and the cleanup sweep read it where the
 harness must not load. ``compose`` imports ``tui.notify``, which loads the TUI

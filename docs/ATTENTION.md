@@ -350,9 +350,12 @@ and only per item: the item's own rendered `revision` and `anchor_id`, rendered,
 uncovered and visible in a focused foreground interface, with a fresh input
 edge. The server re-checks what it can — the item belongs to
 `evidence.session_id`, the revision and anchor are current, and
-`visible_since_ms` is not before the current revision, visibility precedes
-input, input is not future and is within 120 s, and the anchor has stayed
-visible after input for at least 1 s on desktop (positive elapsed time on TUI) —
+each item's own `visible_since_ms` (or the batch fallback when absent) is not
+before that item's current revision, visibility precedes input, input is not
+future and is within 120 s, and the anchor has stayed visible after input for at
+least 1 s on desktop (positive elapsed time on TUI). A window or app focus gain
+is never an input edge: only trusted pointer/key/wheel events on desktop, or
+key/mouse-down on TUI, count (D12) —
 and answers `skipped` with the reason (`unknown`, `stale_revision`,
 `anchor_mismatch`, `stale_evidence`, `already`) otherwise. The desktop sends it through the foreground
 receipt guard (`notifications.seen`), like the existing receipt ops.

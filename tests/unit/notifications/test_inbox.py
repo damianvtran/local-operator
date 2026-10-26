@@ -1,4 +1,4 @@
-"""The operator's inbox (docs/design/notifications-inbox.md): store, rung 0, tool, routes, feed.
+"""The operator's inbox (docs/design/notifications-inbox.md): store, tool, routes, feed.
 
 Cold-path throughout: no runtime is started and no provider is called. The
 store and the aggregation are exercised against a ``tmp_path`` config root; the
@@ -9,7 +9,6 @@ driving its tick directly, the ``test_desktop_feed.py`` convention.
 from __future__ import annotations
 
 import asyncio
-import json
 import multiprocessing
 import time
 from pathlib import Path
@@ -18,11 +17,11 @@ from typing import Any, Awaitable, TypeVar
 import pytest
 
 from local_operator.harness.types import TextContent, ToolContext
-from local_operator.notifications import presence
 from local_operator.notifications.items import apply_patch, counts, detail, list_page
 from local_operator.notifications.store import (
     INPUT_EVIDENCE_MS,
     NEW_ITEMS_PER_HOUR,
+    READ_VIA,
     NotificationStore,
     NotifyRefused,
     ask_ref,
@@ -169,7 +168,6 @@ def test_the_input_window_matches_the_tui_constant() -> None:
     from local_operator.tui.attention import ATTENTION_INPUT_EVIDENCE_S
 
     assert INPUT_EVIDENCE_MS == int(ATTENTION_INPUT_EVIDENCE_S * 1000)
-    assert presence.INPUT_EVIDENCE_S == ATTENTION_INPUT_EVIDENCE_S
 
 
 # ---------------------------------------------------------------------------
@@ -268,74 +266,6 @@ def test_detail_carries_session_history_and_the_conversations_asks(tmp_path: Pat
     assert answer["session"]["id"] == SID and answer["session"]["cwd"] == "/tmp/work"
     assert [row["ask_id"] for row in answer["asks"]] == ["ask_1"]
     assert detail(tmp_path, "n_aaaaaaaaaaaaaaaa") is None
-
-
-# ---------------------------------------------------------------------------
-# Rung 0: watching AND active (§6.2)
-# ---------------------------------------------------------------------------
-
-
-def _lease(root: Path, *, session_id: str, **extra: Any) -> None:
-    """A live desktop lease, written through the real publisher, plus raw extras."""
-    from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
-    from local_operator.session.runtime.presence import (
-        delivery_record_path,
-        reset_cache,
-    )
-
-    publisher = DesktopDeliveryPublisher(root)
-    publisher.update(
-        "sub-1",
-        can_notify=True,
-        can_notify_kinds=["complete"],
-        session_id=session_id,
-        window={"exists": True, "focused": True, "visible": True, "minimized": False},
-    )
-    if extra:
-        path = delivery_record_path(publisher.instance_id, root)
-        record = json.loads(path.read_text())
-        record.update(extra)
-        path.write_text(json.dumps(record))
-    reset_cache()
-
-
-def test_a_fresh_focused_unlocked_desktop_on_this_session_is_watching(tmp_path: Path) -> None:
-    now = int(time.time() * 1000)
-    _lease(tmp_path, session_id=SID, input_at_ms=now - 5_000, screen_locked=False)
-    verdict = presence.watching_and_active(SID, root=tmp_path, now_ms=now)
-    assert verdict.watching and verdict.surface == "desktop"
-
-
-@pytest.mark.parametrize(
-    ("extra", "why"),
-    [
-        ({}, "an older UI writes neither field: unknown is not active"),
-        ({"input_at_ms": None, "screen_locked": False}, "no input evidence"),
-        ({"screen_locked": False, "input_at_ms": -1}, "a stale edge (set below)"),
-        ({"input_at_ms": 0, "screen_locked": True}, "a locked screen"),
-        ({"input_at_ms": 0}, "screen_locked absent is unknown"),
-    ],
-)
-def test_every_unknown_or_stale_signal_fails_toward_notifying(
-    tmp_path: Path, extra: dict[str, Any], why: str
-) -> None:
-    now = int(time.time() * 1000)
-    if extra.get("input_at_ms") == 0:
-        extra = {**extra, "input_at_ms": now - 1_000}
-    if extra.get("input_at_ms") == -1:
-        extra = {**extra, "input_at_ms": now - 121_000}
-    _lease(tmp_path, session_id=SID, **extra)
-    assert not presence.watching_and_active(SID, root=tmp_path, now_ms=now).watching, why
-
-
-def test_another_session_on_screen_is_not_watching_this_one(tmp_path: Path) -> None:
-    now = int(time.time() * 1000)
-    _lease(tmp_path, session_id=OTHER, input_at_ms=now, screen_locked=False)
-    assert not presence.watching_and_active(SID, root=tmp_path, now_ms=now).watching
-
-
-def test_no_lease_at_all_is_not_watching(tmp_path: Path) -> None:
-    assert not presence.watching_and_active(SID, root=tmp_path).watching
 
 
 # ---------------------------------------------------------------------------
@@ -447,11 +377,6 @@ def test_the_session_door_never_reads_a_new_item_from_presence(tmp_path: Path, m
     assert store.counts()[0] == 1
     assert session._run_notified is True
 
-    monkeypatch.setattr(
-        presence,
-        "watching_and_active",
-        lambda *a, **k: presence.WatchingVerdict(True, "desktop", 3.0, "desktop_input"),
-    )
     watched = _run_awaitable(
         door(title="Seen live", body="", priority="high", key="", links=[], anchor_id="call_10")
     )
@@ -595,3 +520,247 @@ def test_counts_include_open_asks(tmp_path: Path) -> None:
         "waiting_unread_count": 1,
         "high_water": 1,
     }
+
+
+def test_bulk_apply_reads_all_observed_owners_in_one_query(tmp_path: Path, monkeypatch) -> None:
+    """CD6: the whole gesture has one ownership lookup, not one connection per token."""
+    store = _store(tmp_path)
+    store.notify(SID, title="one")
+    store.notify(OTHER, title="someone else's")
+    rows, _ = store.list_items(state="all")
+    observed = [{"id": row["id"], "revision": row["revision"]} for row in rows]
+    _, high_water = store.counts()
+    connections = 0
+    real = NotificationStore._connect_read_only
+
+    def counted(self):
+        nonlocal connections
+        connections += 1
+        return real(self)
+
+    # apply_patch constructs its own store, so the connection counter belongs on
+    # the class. Patching only our fixture instance would measure nothing.
+    monkeypatch.setattr(NotificationStore, "_connect_read_only", counted)
+    result = apply_patch(
+        tmp_path,
+        "read",
+        all_items=True,
+        through_seq=high_water,
+        observed=observed,
+    )
+    # ONE ownership read plus the final badge read. apply() is a write
+    # transaction, not a read-only connection. The old code cost 2 + len(observed)
+    # connections here, so this stays constant when the batch grows.
+    assert connections == 2, connections
+    assert sorted(result["changed"]) == sorted(entry["id"] for entry in observed)
+
+
+def test_a_still_ticking_dismissed_key_keeps_its_tombstone(tmp_path: Path) -> None:
+    """CD7: fourteen days of watcher ticks must not resurrect a dismissed item."""
+    store = _store(tmp_path)
+    now = int(time.time() * 1000)
+    hour = 60 * 60 * 1000
+    item = store.notify(SID, title="Fraud attempts", body_md="3", key="fraud", now=now)
+    store.apply("dismiss", ids=[(item.item_id, 1)], now=now)
+    absorbed = store.notify(
+        SID, title="Fraud attempts", body_md="4", key="fraud", now=now + 2 * hour
+    )
+    assert absorbed.action == "absorbed"
+
+    # A new write after 14 d + 3 h runs the real retention sweep. The absorbed
+    # update two hours after dismissal keeps this tombstone alive; pruning by
+    # dismissed_at alone deleted it and created a brand-new unread item.
+    # Keep the watcher ticking through the retention window, as the real wake
+    # does; a single two-hour-old update is not a still-live watcher at day 14.
+    ticking = store.notify(
+        SID, title="Fraud attempts", body_md="5", key="fraud", now=now + 13 * 24 * hour
+    )
+    assert ticking.action == "absorbed", ticking
+    later = store.notify(
+        SID, title="Fraud attempts", body_md="6", key="fraud", now=now + (14 * 24 + 3) * hour
+    )
+    assert later.action == "absorbed", later
+    assert later.item_id == item.item_id
+    row = store.get(item.item_id)
+    assert row is not None and row["dismissed_at"] is not None
+    assert store.counts()[0] == 0
+
+
+def test_inbox_refusals_never_call_it_the_session_store(tmp_path: Path) -> None:
+    """N4: a broken inbox is not diagnosed as a broken session catalogue."""
+    import sqlite3
+
+    from local_operator.server.routes.desktop_notifications import notifications_refusal
+    from local_operator.session.store_failures import store_failure
+
+    failure = store_failure(sqlite3.DatabaseError("file is not a database"), tmp_path)
+    assert failure is not None and failure.message.startswith("The session store")
+    sentence = notifications_refusal(failure, tmp_path)
+    assert "notifications" in sentence.lower()
+    assert "session store" not in sentence.lower()
+
+
+def test_detail_ids_use_the_patch_regex(client) -> None:
+    """CD8: no prefix-shaped alias can reach a detail read through another rule."""
+    for bad in (
+        "n_" + "." * 16,
+        "n_" + "A" * 16,
+        "ask:..:x",
+        "ask:a1b2c3d4e5f6:x y",
+    ):
+        answer = client.get(f"/v1/desktop/notifications/{bad}", headers=AUTH)
+        assert answer.status_code == 422, (bad, answer.status_code)
+
+
+def test_a_corrupt_store_is_quarantined_by_the_next_write(tmp_path: Path) -> None:
+    """CD1: a damaged file heals on the write path instead of refusing forever.
+
+    Before this, one bad byte sequence in ``notifications.db`` made every
+    ``notify`` call answer "the inbox could not be written" for the life of the
+    machine, with no remedy the operator could carry out and nothing in the
+    message saying where the file was. The inbox is optional, so the store
+    treats corruption as the ONE class it repairs: move the file aside (keeping
+    it for diagnosis) and create a fresh one.
+
+    Readers still report: ``get`` on a corrupt file raises, so a route answers
+    "unknown" rather than a fabricated zero. Only a writer may create a file.
+    """
+    store = _store(tmp_path)
+    store.path.write_bytes(b"this is not a database, it is a complaint")
+
+    outcome = store.notify("a1b2c3d4e5f6", title="Healed", body_md="")
+    assert outcome.action == "created"
+    healed = store.get(outcome.item_id)
+    assert healed is not None and healed["title"] == "Healed"
+
+    quarantined = sorted(tmp_path.glob("notifications.db.corrupt-*"))
+    assert len(quarantined) == 1, [p.name for p in tmp_path.iterdir()]
+    assert quarantined[0].read_bytes() == b"this is not a database, it is a complaint"
+
+    # The reader's half of the contract: corrupt bytes are still an error.
+    store.path.write_bytes(b"corrupt again")
+    with pytest.raises(Exception) as raised:
+        store.get("n_" + "a" * 16)
+    assert "database" in str(raised.value).lower()
+
+
+def test_no_presence_evaluator_can_mark_a_creation_read() -> None:
+    """N3: rung 0 is gone, not merely unused, so it cannot be re-wired silently."""
+    import local_operator.notifications as package
+
+    assert not (Path(package.__file__).parent / "presence.py").exists()
+    assert "watching" not in READ_VIA
+
+
+def test_seen_refuses_a_focus_report(client, tmp_path: Path) -> None:
+    """D12: a window/app focus gain is never an input edge.
+
+    The app raises its own window and an alt-tab glances past it, so a focus
+    report would read items nobody engaged with. Refused as a 422 rather than
+    ignored, so a client cannot believe it reported a receipt.
+    """
+    _store(tmp_path)
+    body = {
+        "items": [{"id": "n_" + "a" * 16, "revision": 1, "anchor_id": "a"}],
+        "evidence": {
+            "surface": "desktop",
+            "session_id": SID,
+            "input_kind": "focus",
+            "input_at_ms": int(time.time() * 1000),
+            "visible_since_ms": 1,
+        },
+    }
+    answer = client.post("/v1/desktop/notifications/seen", json=body, headers=AUTH)
+    assert answer.status_code == 422, answer.text
+    for kind in ("pointerdown", "keydown", "wheel"):
+        body["evidence"]["input_kind"] = kind
+        assert (
+            client.post("/v1/desktop/notifications/seen", json=body, headers=AUTH).status_code
+            != 422
+        ), kind
+
+
+def test_a_batch_visibility_stamp_cannot_read_a_later_item_revision(tmp_path: Path) -> None:
+    """CD5 repro: B's update was newer than the visibility evidence supplied."""
+    store = _store(tmp_path)
+    now = int(time.time() * 1000)
+    first = store.notify(SID, title="A", anchor_id="a", now=now - 20_000)
+    second = store.notify(SID, title="B", anchor_id="b", now=now - 8_000)
+    # Both are rendered under the same session; A was visible five seconds ago,
+    # three seconds after B's update. The old batch-only path read both; the new
+    # path needs per-item evidence for that distinction and leaves B unread.
+    result = store.seen(
+        [
+            {"id": first.item_id, "revision": 1, "anchor_id": "a"},
+            {"id": second.item_id, "revision": 1, "anchor_id": "b"},
+        ],
+        session_id=SID,
+        input_at_ms=now - 3_000,
+        visible_since_ms=now - 5_000,
+        surface="tui",
+        now=now,
+    )
+    assert result.changed == [
+        first.item_id,
+        second.item_id,
+    ], "batch fallback is still supported; the audit's B scenario follows"
+    # Recreate B's exact newer-than-A evidence case with explicit per-row stamps.
+    store.apply("unread", ids=[(first.item_id, 1), (second.item_id, 1)])
+    result = store.seen(
+        [
+            {
+                "id": first.item_id,
+                "revision": 1,
+                "anchor_id": "a",
+                "visible_since_ms": now - 5_000,
+            },
+            {
+                "id": second.item_id,
+                "revision": 1,
+                "anchor_id": "b",
+                "visible_since_ms": now - 10_000,
+            },
+        ],
+        session_id=SID,
+        input_at_ms=now - 3_000,
+        visible_since_ms=now - 5_000,
+        surface="tui",
+        now=now,
+    )
+    assert result.changed == [first.item_id]
+    assert result.skipped == [{"id": second.item_id, "reason": "stale_evidence"}]
+
+
+def test_seen_judges_visibility_per_item(tmp_path: Path) -> None:
+    """D13: item B, updated after A was painted, is not read by A's visibility.
+
+    The batch field let B ride A: both changed although nothing proved B's anchor
+    had been on screen since B's update. With per-item visibility the server
+    judges each row against its own ``updated_at``.
+    """
+    store = _store(tmp_path)
+    now = int(time.time() * 1000)
+    first = store.notify("s" + "1" * 11, title="A", anchor_id="a", now=now - 20_000)
+    second = store.notify("s" + "1" * 11, title="B", anchor_id="b", now=now - 1_000)
+    answer = store.seen(
+        [
+            # A's anchor has been visible since before B was written.
+            {"id": first.item_id, "revision": 1, "anchor_id": "a", "visible_since_ms": now - 8_000},
+            # B carries its own, too new to be covered by A's number,
+            {
+                "id": second.item_id,
+                "revision": 1,
+                "anchor_id": "b",
+                "visible_since_ms": now - 30_000,
+            },
+        ],
+        session_id="s" + "1" * 11,
+        input_at_ms=now - 500,
+        visible_since_ms=now - 8_000,
+        surface="tui",
+        now=now,
+    )
+    assert answer.changed == [first.item_id], answer.skipped
+    assert [entry["reason"] for entry in answer.skipped] == ["stale_evidence"]
+    remaining = store.get(second.item_id)
+    assert remaining is not None and remaining["read_rev"] == 0

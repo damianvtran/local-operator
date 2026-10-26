@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import re
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -55,7 +56,15 @@ router = APIRouter(tags=["Desktop notifications"], dependencies=[Depends(require
 #: An item id: a notify row (``n_`` + 16 base32) or an open-ask ref
 #: (``ask:<session_id>:<ask_id>``). Shape-checked so a malformed id is a 422
 #: before any store is opened.
-ItemID = Annotated[str, Field(pattern=r"^(n_[a-z2-7]{16}|ask:[a-f0-9]{12}:[A-Za-z0-9_-]{1,64})$")]
+#: ONE regex for the id shape, used by the PATCH models AND the detail path
+#: (CD8). The detail route used to accept anything with the right prefix and
+#: length: ``n_................`` and ``ask:..:x`` both passed, and the second
+#: reached ``ask_store.read_entry(config, "..")``. Starlette refuses a ``/`` in a
+#: path param (``%2F`` is a 404, measured), so it was not exploitable — but a
+#: detail route validating looser than the write models is a defect regardless.
+_ITEM_ID_PATTERN = r"^(n_[a-z2-7]{16}|ask:[a-f0-9]{12}:[A-Za-z0-9_-]{1,64})$"
+ItemID = Annotated[str, Field(pattern=_ITEM_ID_PATTERN)]
+_ITEM_ID_RE = re.compile(_ITEM_ID_PATTERN)
 SessionID = Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
 
 
@@ -199,9 +208,8 @@ async def notification_detail(item_id: str, request: Request):
 
 
 def _valid_item_id(value: str) -> bool:
-    from local_operator.notifications.store import is_item_id, parse_ask_ref
-
-    return is_item_id(value) or parse_ask_ref(value) is not None
+    """The PATCH models' own shape rule, so both transports refuse the same ids."""
+    return _ITEM_ID_RE.match(value) is not None
 
 
 class ItemToken(Input):
@@ -261,6 +269,11 @@ class SeenItem(Input):
     id: Annotated[str, Field(pattern=r"^n_[a-z2-7]{16}$")]
     revision: int = Field(ge=1)
     anchor_id: str = Field(min_length=1, max_length=200)
+    #: When THIS item's anchor was first visible on the surface (D13). Optional
+    #: because the batch field below is the older contract; when a client sends
+    #: it, the server checks it against this row's own ``updated_at`` instead of
+    #: letting one item's visibility vouch for another's.
+    visible_since_ms: int | None = Field(None, ge=0)
 
 
 class SeenEvidence(Input):
@@ -268,8 +281,13 @@ class SeenEvidence(Input):
 
     surface: Literal["desktop", "tui"]
     session_id: SessionID
-    input_kind: Literal["pointerdown", "keydown", "wheel", "focus"]
+    #: A trusted input EDGE, never a focus gain (D12). The app raises its own
+    #: window and alt-tab glances past it, so a focus report reads items nobody
+    #: engaged with; ``focus`` is refused as a 422 rather than ignored, so a
+    #: client cannot believe it reported something.
+    input_kind: Literal["pointerdown", "keydown", "wheel"]
     input_at_ms: int = Field(ge=0)
+    #: Fallback visibility for clients that measured one value over the batch.
     visible_since_ms: int = Field(ge=0)
 
 

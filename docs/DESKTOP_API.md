@@ -2437,12 +2437,12 @@ on save (an older core refuses it).
 | `GET /v1/desktop/notifications/count` | — | `{unread_count, waiting_count, waiting_unread_count, high_water}` |
 | `GET /v1/desktop/notifications/{id}` | `id` = `n_<16 base32>` or `ask:<session_id>:<ask_id>` | `{item, history, session, anchor, projects, asks}`; 404 `wire.errors.notifications.unknown_item`, 422 for a malformed id |
 | `PATCH /v1/desktop/notifications` | `{op: read\|unread\|dismiss\|undismiss}` plus EXACTLY ONE target: `ids:[{id, revision}]` (1..500), or `session_id`+`through_seq`+`observed`, or `all:true`+`through_seq`+`observed` (0..500 tokens) | `{changed, skipped:[{id, reason}], unread_count, waiting_count, waiting_unread_count, high_water}` |
-| `POST /v1/desktop/notifications/seen` | `{items:[{id, revision, anchor_id}] (1..100), evidence:{surface, session_id, input_kind, input_at_ms, visible_since_ms}}` | same shape as PATCH |
+| `POST /v1/desktop/notifications/seen` | `{items:[{id, revision, anchor_id, visible_since_ms?}] (1..100), evidence:{surface, session_id, input_kind, input_at_ms, visible_since_ms}}` | same shape as PATCH |
 
 **Item shape** (`notifications/items.py`, one shape for both sources): `id`,
 `source` (`notify`/`ask`), `priority`, `title`, `excerpt`, `created_at`,
 `updated_at`, `seq`, `revision`, `read`, `read_via`
-(`explicit`/`in_view`/`watching`/`null`), `dismissed`, `repeat_count`, `key`,
+(`explicit`/`in_view`/`null`; creation is always unread), `dismissed`, `repeat_count`, `key`,
 `anchor_id`, `session{id, title, agent_id, live}`, `projects[{key, name,
 status}]`, `ask` (the open ask's question/dismissibility, else `null`) and
 `actions{dismiss, answer, read}`. An open ask always reports `high` and
@@ -2455,6 +2455,13 @@ unread. A by-session or all-items write must carry `through_seq` AND the
 stores and the rendered filters/page; the scalar bound alone cannot identify
 asks. Missing observations are 422, not a legacy sweep. Session scope only
 narrows that set. Concurrent new revisions are skipped, never silently cleared.
+
+**Seen evidence is per item, and focus is not an edge.** `input_kind` is
+`pointerdown`, `keydown` or `wheel`; a focus-only report is 422 (D12). When an
+item supplies its own `visible_since_ms`, the server checks that stamp against
+THAT row's current `updated_at`, then `visible_since <= input_at <= now` and the
+120 s freshness/dwell rules. The batch field remains the fallback for clients
+that have not added per-item stamps; a mixed batch is judged row by row (D13).
 
 **All means the entire explicitly requested scope, not the first 50 rows.** On
 an explicit mark-all/dismiss-session gesture, clients enumerate every page of

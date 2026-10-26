@@ -39,6 +39,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
 import sqlite3
 import time
@@ -81,10 +82,11 @@ _WAL_BUSY_TIMEOUT_MS = 250
 PRIORITIES = ("low", "normal", "high")
 _PRIORITY_RANK = {name: rank for rank, name in enumerate(PRIORITIES)}
 
-#: Read provenance. ``watching``: created read because the operator was in the
-#: conversation and active when it landed (rung 0). ``in_view``: the item's
-#: anchor was on screen when a real input edge arrived. ``explicit``: a gesture.
-READ_VIA = ("explicit", "in_view", "watching")
+#: Read provenance. There is no ``watching`` value: a new item is ALWAYS unread.
+#: ``in_view`` requires a per-item anchor/revision receipt with a real input
+#: edge; ``explicit`` is the operator's own gesture. The old presence evaluator
+#: was deleted (N3), rather than left available for a future accidental re-wire.
+READ_VIA = ("explicit", "in_view")
 
 #: Wire size caps (contract §1.3). The tool's pydantic schema enforces the same
 #: numbers; the store re-applies them so a second writer cannot exceed them.
@@ -215,6 +217,31 @@ class NotifyRefused(Exception):
         self.reason = reason
 
 
+#: The corruption family: a file whose bytes are not a database.
+_CORRUPT_ERRONAMES = frozenset({"SQLITE_CORRUPT", "SQLITE_NOTADB"})
+
+
+def _is_corrupt(error: sqlite3.Error) -> bool:
+    """True when SQLite says this file is not (or can no longer be) a database.
+
+    THE ONLY CLASS THE STORE HEALS ITSELF. A damaged file is a condition no
+    retry can improve and no reader can work around, and the operator cannot be
+    asked to delete a database they never created. Every other failure keeps its
+    own answer: contention is retried, and an unopenable store (permissions, a
+    full disk) is reported, because moving a healthy file aside would destroy
+    the data the operator is looking for. The certified errornames come first;
+    the message checks are the fallback for paths that raise a bare
+    ``DatabaseError`` (measured on 3.12: opening garbage makes
+    ``PRAGMA user_version`` raise ``DatabaseError: file is not a database``
+    with no errorname).
+    """
+    name = str(getattr(error, "sqlite_errorname", "") or "")
+    if name:
+        return name in _CORRUPT_ERRONAMES
+    message = str(error).lower()
+    return "file is not a database" in message or "malformed" in message
+
+
 def _is_contention(error: sqlite3.OperationalError) -> bool:
     name = str(getattr(error, "sqlite_errorname", "") or "")
     if name:
@@ -241,6 +268,22 @@ class NotifyOutcome:
     read: bool
     priority: str
     seq: int
+
+
+def _visible_for_row(
+    entry: Mapping[str, Any], batch_visible: int, input_at_ms: int, updated_at: int
+) -> bool:
+    """Was THIS item's anchor visible after its last change, before the input?
+
+    CD5/D13: the batch-level field let item B ride item A's visibility — both
+    were read although nothing proved B's anchor had been painted since B's
+    update. An item that reports its own ``visible_since_ms`` is judged on that
+    value alone; one that does not keeps the older batch semantics, so a mixed
+    batch is judged per row rather than by its most generous member.
+    """
+    visible = entry.get("visible_since_ms")
+    stamp = int(visible) if visible is not None else int(batch_visible)
+    return 0 < stamp <= input_at_ms and stamp >= updated_at
 
 
 @dataclass
@@ -354,7 +397,53 @@ class NotificationStore:
     # -- connections ------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        """A write connection, creating and migrating the schema when needed."""
+        """A write connection, creating and migrating the schema when needed.
+
+        A file SQLite cannot read at all is QUARANTINED and replaced (CD1): the
+        inbox is an optional store, and one damaged file must not turn every
+        ``notify`` call on this machine into a permanent refusal with no remedy
+        the operator could carry out. Only the write path heals, because only a
+        writer may create a file; readers still report the failure so a route can
+        say "unknown" instead of silently answering zero (measured: the desktop
+        feed, the relay and the tool all reached a corrupt store).
+        """
+        try:
+            return self._connect_once()
+        except sqlite3.DatabaseError as error:
+            if not _is_corrupt(error):
+                raise
+            moved = self._quarantine()
+            logger.warning(
+                "notifications: store was unreadable (%s); %s and a fresh store is being created",
+                error,
+                f"moved to {moved.name}" if moved is not None else "could not be moved aside",
+            )
+            return self._connect_once()
+
+    def _quarantine(self) -> Path | None:
+        """Move a corrupt store (and its WAL sidecars) aside for diagnosis.
+
+        The sidecars go with the database they belong to: a ``-wal`` left beside
+        a fresh file would be applied to it. Best-effort — a file we cannot move
+        still gets the recreate attempt, and the caller logs which happened.
+        """
+        stamp = int(time.time())
+        moved: Path | None = None
+        for suffix in ("", "-wal", "-shm"):
+            source = self.path.with_name(self.path.name + suffix) if suffix else self.path
+            if not source.exists():
+                continue
+            target = self.path.with_name(f"{self.path.name}{suffix}.corrupt-{stamp}")
+            try:
+                os.replace(source, target)
+            except OSError:
+                continue
+            if suffix == "":
+                moved = target
+        return moved
+
+    def _connect_once(self) -> sqlite3.Connection:
+        """One connection attempt: create, migrate, adopt WAL."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             # Private before SQLite writes anything: item bodies are the
@@ -669,6 +758,31 @@ class NotificationStore:
 
         return self._read(body, ([], None), "list")
 
+    def session_ids(self, ids: Sequence[str]) -> dict[str, str]:
+        """One read for a batch of ids: ``{id: session_id}`` (CD6).
+
+        A bulk gesture echoes up to 500 observed tokens, and asking the store
+        one row at a time opened up to 500 read-only connections per "dismiss
+        all from this conversation" — on the same store the feed stats every
+        100 ms. One ``WHERE id IN (…)`` statement answers the one question the
+        caller has (which session owns this id), and an id absent from the
+        answer is a row this store does not own.
+        """
+        wanted = [str(one) for one in ids if one]
+        if not wanted:
+            return {}
+        placeholders = ",".join("?" for _ in wanted)
+
+        def body(conn: sqlite3.Connection) -> dict[str, str]:
+            return {
+                str(row["id"]): str(row["session_id"])
+                for row in conn.execute(
+                    f"SELECT id, session_id FROM items WHERE id IN ({placeholders})", wanted
+                )
+            }
+
+        return self._read(body, {}, "session_ids")
+
     def get(self, item_id: str) -> dict[str, Any] | None:
         def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
             row = conn.execute(
@@ -873,13 +987,13 @@ class NotificationStore:
         """
         stamp = now if now is not None else now_ms()
         result = ApplyResult()
-        # Visibility must precede the input; the desktop additionally waits
-        # one second after it while the anchor stays visible. Unknown surface
-        # and zero/future visibility are not positive render evidence.
+        # THE EDGE is batch-level: a trusted input kind on a known surface, an
+        # input time in the past but fresh, and the dwell the surface needs
+        # (the desktop waits one second while the anchor stays visible).
         dwell_ms = 1000 if surface == "desktop" else 1
-        evidence_fresh = (
+        edge_fresh = (
             surface in ("desktop", "tui")
-            and 0 < visible_since_ms <= input_at_ms <= stamp
+            and 0 < input_at_ms <= stamp
             and dwell_ms <= stamp - input_at_ms <= INPUT_EVIDENCE_MS
         )
 
@@ -900,7 +1014,9 @@ class NotificationStore:
                     or not row["anchor_id"]
                 ):
                     result.skipped.append({"id": item_id, "reason": "anchor_mismatch"})
-                elif not evidence_fresh or visible_since_ms < int(row["updated_at"]):
+                elif not edge_fresh or not _visible_for_row(
+                    entry, visible_since_ms, input_at_ms, int(row["updated_at"])
+                ):
                     result.skipped.append({"id": item_id, "reason": "stale_evidence"})
                 elif int(row["read_rev"]) >= int(row["revision"]):
                     result.skipped.append({"id": item_id, "reason": "already"})
@@ -989,8 +1105,15 @@ class NotificationStore:
         high; unread rows are never deleted by age or by the cap.
         """
         before = conn.total_changes
+        # CD7: a DISMISSED row is aged out by its LAST activity, not by the
+        # dismiss alone. A watcher the operator dismissed keeps ticking (the
+        # fraud/campaign case): every absorbed update moves ``updated_at``, so
+        # pruning on ``dismissed_at`` alone eventually dropped the tombstone and
+        # the next tick re-created the item as new and unread — undoing exactly
+        # the rule that keeps a 5-minute wake out of the reel.
         conn.execute(
-            "DELETE FROM items WHERE dismissed_at IS NOT NULL AND dismissed_at < ?",
+            "DELETE FROM items WHERE dismissed_at IS NOT NULL "
+            "AND max(dismissed_at, updated_at) < ?",
             (stamp - DISMISSED_TTL_MS,),
         )
         conn.execute(

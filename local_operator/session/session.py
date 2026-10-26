@@ -936,8 +936,8 @@ def _ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
-def _notify_sentence(outcome: Any, *, watching: bool) -> str:
-    """What the ``notify`` tool tells the model about one write (§1.3, §6.2).
+def _notify_sentence(outcome: Any) -> str:
+    """What the ``notify`` tool tells the model about one write (§1.3).
 
     Model-facing English (a tool result), so it is not catalogued. Each arm
     names what happened and, where the next move differs, what to do — the
@@ -951,11 +951,6 @@ def _notify_sentence(outcome: Any, *, watching: bool) -> str:
         return (
             f"The operator dismissed {item}; the update was recorded without notifying. "
             "Use a higher priority or a new key only if it now needs them."
-        )
-    if watching:
-        return (
-            f"The operator is viewing this conversation; recorded as read ({item}). "
-            "Do not raise it again."
         )
     if outcome.action == "updated":
         return f"Updated {item} ({_ordinal(max(1, outcome.repeat_count - 1))} update)."
@@ -16385,7 +16380,7 @@ class Session:
             agent_id=self._agent_id or "",
         )
         self._run_notified = True
-        return _notify_sentence(outcome, watching=False)
+        return _notify_sentence(outcome)
 
     def _notify_tui_evidence(self) -> Any:
         """The attached TUI's input evidence, when the runtime reports one (L1b/L2).

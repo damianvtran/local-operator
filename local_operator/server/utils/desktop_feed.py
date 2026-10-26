@@ -126,6 +126,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
 import zlib
 from collections import deque
@@ -290,6 +291,11 @@ AUTHORITATIVE_RECOVERY_INTERVAL_S = 30.0
 #: reported at WARNING immediately, and then at most once per this interval while
 #: it persists, so a persistent failure is visible without a traceback per tick.
 TICK_FAILURE_WARNING_INTERVAL_S = 60.0
+
+#: How often an unreadable inbox store may be reported. The condition repeats on
+#: every poll tick until a writer quarantines the file, and one line per minute
+#: is what makes it diagnosable without burying the log in it.
+INBOX_WARNING_INTERVAL_S = 60.0
 
 #: The shortest gap between two DOORBELL-fallback probes (review NIT 1). The
 #: fallback exists for a session's FIRST record, which has no cached file to
@@ -686,6 +692,9 @@ class DesktopFeed:
         #: doorbell that moved without changing the counts or the high-water
         #: mark (a WAL checkpoint, a no-op connect) publishes nothing.
         self._notifications_seen: tuple[int, int, int, int] | None = None
+        #: When the inbox read last warned, so a corrupt store reports once a
+        #: minute instead of once per 100 ms tick.
+        self._inbox_warned_at = 0.0
         self._asks_pending = False
         self._notifications_pending = False
 
@@ -1172,7 +1181,9 @@ class DesktopFeed:
         # stand at connect are what the client's own first list read shows.
         self._notifications_fingerprint = _db_fingerprint(self.notifications.path)
         self._asks_token = self._asks_probe()
-        self._notifications_seen = self._notifications_state()
+        # An unreadable store leaves this ``None`` (unknown), which is what
+        # stops a failed read being announced as "0 unread" on connect.
+        self._notifications_seen = self._notifications_state_or_none()
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -1988,13 +1999,14 @@ class DesktopFeed:
                 moved = True
         if not moved:
             return
-        try:
-            state = await asyncio.to_thread(self._notifications_state)
-        except Exception:
-            # A contended or unreadable store is retried on the next tick
-            # rather than dropped: the fingerprint is not advanced.
+        state = await asyncio.to_thread(self._notifications_state_or_none)
+        if state is None:
+            # A contended or damaged store is retried on the next tick rather
+            # than dropped: the fingerprint is not advanced, and the tick
+            # RETURNS instead of raising — a raise here would end the poll loop
+            # and take every other frame family down with it (CD1).
             self._notifications_pending = True
-            raise
+            return
         self._notifications_pending = False
         self._notifications_fingerprint = fingerprint
         if state == self._notifications_seen and not asks_moved:
@@ -2011,6 +2023,34 @@ class DesktopFeed:
                 "waiting_unread_count": waiting_unread,
             },
         )
+
+    def _notifications_state_or_none(self) -> tuple[int, int, int, int] | None:
+        """The inbox counts, or ``None`` when the store cannot be read (CD1).
+
+        AN OPTIONAL STORE MUST NOT KILL THE FEED. ``_take_baseline`` runs inside
+        the poll loop, and an exception there fails ``baseline_ready`` for every
+        subscriber: attention, completion, catalogue and status frames would all
+        die because ``notifications.db`` is a damaged file. Measured: one garbage
+        byte sequence in that store turned ``GET /v1/desktop/events`` into an
+        empty 200 with ``DatabaseError: file is not a database`` in the log.
+
+        ``None`` means UNKNOWN, not zero: the caller keeps the previous state and
+        publishes nothing, so a badge never drops to 0 because a read failed. The
+        warning is rate-limited because the condition repeats every tick until a
+        writer quarantines the file (``NotificationStore._connect`` does).
+        """
+        try:
+            return self._notifications_state()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError) as error:
+            now = time.monotonic()
+            if now - self._inbox_warned_at >= INBOX_WARNING_INTERVAL_S:
+                self._inbox_warned_at = now
+                logger.warning(
+                    "desktop feed: notifications store could not be read (%s); "
+                    "inbox state is unknown until a write repairs or replaces it",
+                    error,
+                )
+            return None
 
     def _notifications_state(self) -> tuple[int, int, int, int]:
         """Total pending and unread pending asks stay distinct on the wire."""

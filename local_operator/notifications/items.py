@@ -462,14 +462,22 @@ def apply_patch(
     if bulk:
         if observed is None or through_seq is None:
             raise ValueError("bulk writes require observed tokens and through_seq")
+        # ONE READ FOR THE WHOLE BATCH (CD6): the per-token ``store.get`` this
+        # replaces opened a connection per observed entry, up to 500 of them.
+        owners = store.session_ids(
+            [
+                str(entry.get("id") or "")
+                for entry in observed
+                if not str(entry.get("id") or "").startswith(ASK_REF_PREFIX)
+            ]
+        )
         bounded = []
         for entry in observed:
             item_id = str(entry.get("id") or "")
             if item_id.startswith(ASK_REF_PREFIX):
                 belongs = item_id.split(":", 2)[1]
             else:
-                row = store.get(item_id)
-                belongs = str(row["session_id"]) if row else ""
+                belongs = owners.get(item_id, "")
             if all_items or belongs == session_id:
                 bounded.append(entry)
         ids = bounded

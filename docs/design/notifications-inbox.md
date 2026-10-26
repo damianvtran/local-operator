@@ -62,8 +62,12 @@ cap the write is refused and the refusal names the remedy (pass a `key`).
 
 ### 1.4 Retention and privacy
 
-Retention prunes on write, at most hourly: dismissed after 14 d, read after
-30 d, unread never by age; a 10,000-row cap. Deleting a conversation deletes its
+Retention prunes on write, at most hourly: dismissed after 14 d since its
+last activity (`max(dismissed_at, updated_at)`, so a still-ticking watcher keeps
+its tombstone), read after 30 d, unread never by age; a 10,000-row cap. An
+unreadable store never invalidates the desktop feed: its state stays unknown,
+the previous state is retained and other frame families continue. A corrupt
+SQLite file is quarantined by the next write and recreated (CD1). Deleting a conversation deletes its
 items, their history and its asks' read marks (`session/cleanup.py`). Title,
 body and link labels are scrubbed through the session's redaction before they
 reach the store: the loop redacts the public tool-start event, not the raw

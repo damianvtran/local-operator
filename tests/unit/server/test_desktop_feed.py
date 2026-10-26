@@ -4418,3 +4418,99 @@ def monkeypatch_read_text(replacement):
             Path.read_text = original
 
     return _manage()
+
+
+# -- CD1: an optional store nobody can read must not take the feed down --------
+
+
+def _corrupt_inbox(root: Path) -> Path:
+    """A ``notifications.db`` whose bytes are not a database (the audit's repro)."""
+    store = root / "notifications.db"
+    store.write_bytes(b"this is not a database, it is a complaint")
+    return store
+
+
+def _queued_types(subscription: Any) -> list[str]:
+    return [frame["type"] for frame in _queued(subscription)]
+
+
+def test_a_corrupt_inbox_store_still_opens_the_feed(tmp_path: Path) -> None:
+    """CD1: ``DatabaseError`` from the inbox baseline failed every subscriber.
+
+    Measured before the fix: garbage in ``notifications.db`` made
+    ``GET /v1/desktop/events`` answer an empty 200, because ``_take_baseline``
+    raised and ``baseline_ready`` carried the exception to every waiter. The
+    inbox is an OPTIONAL store: attention, completion, catalogue and status
+    frames must not depend on it being readable.
+    """
+    _listable_session(tmp_path, "ea" * 6)
+    _corrupt_inbox(tmp_path)
+    feed = _feed(tmp_path)
+
+    feed._take_baseline()  # must not raise
+
+    # UNKNOWN, not zero: nothing was read, so nothing is claimed.
+    assert feed._notifications_seen is None
+
+    subscription = feed.subscribe()
+    frames = asyncio.run(_drain(feed, subscription, 1))
+    assert [frame["type"] for frame in frames] == ["open"]
+    asyncio.run(feed.close())
+
+
+def test_an_unreadable_inbox_store_still_opens_the_feed(tmp_path: Path) -> None:
+    """The same property for ``chmod 000``: unopenable is not a database, either."""
+    _listable_session(tmp_path, "eb" * 6)
+    store = _corrupt_inbox(tmp_path)
+    store.chmod(0o000)
+    try:
+        feed = _feed(tmp_path)
+        feed._take_baseline()
+        assert feed._notifications_seen is None
+        subscription = feed.subscribe()
+        frames = asyncio.run(_drain(feed, subscription, 1))
+        assert [frame["type"] for frame in frames] == ["open"]
+        asyncio.run(feed.close())
+    finally:
+        store.chmod(0o600)
+
+
+def test_the_inbox_tick_reports_unknown_instead_of_ending_the_loop(tmp_path: Path) -> None:
+    """A failing inbox read returns, and the OTHER channels keep publishing.
+
+    ``_maybe_emit_notifications`` used to re-raise so the fingerprint was not
+    advanced. Correct about the retry, fatal about the loop: the exception
+    escaped ``_tick`` into ``_poll_loop``.
+    """
+    _listable_session(tmp_path, "ec" * 6)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    _corrupt_inbox(tmp_path)
+    feed._notifications_pending = True
+    _tick(feed)  # must not raise
+
+    # THE PREVIOUS STATE IS KEPT: the healthy baseline read (0, 0, 0, 0) stands,
+    # because an unreadable store is "unknown", not "the operator has nothing".
+    assert feed._notifications_seen == (0, 0, 0, 0)
+    assert feed._notifications_pending is True, "the retry must survive the failure"
+
+    # An attention frame published afterwards still reaches the subscriber.
+    _record_publish(tmp_path, "ec" * 6)
+    _tick(feed)
+    types = _queued_types(subscription)
+    assert "session_status" in types or "notification" in types, types
+    asyncio.run(feed.close())
+
+
+def test_the_inbox_failure_warning_is_rate_limited(tmp_path: Path, caplog: Any) -> None:
+    """One line a minute, not one per 100 ms tick: the condition repeats."""
+    _listable_session(tmp_path, "ed" * 6)
+    _corrupt_inbox(tmp_path)
+    feed = _feed(tmp_path)
+    with caplog.at_level(logging.WARNING, logger=feed_module.logger.name):
+        for _ in range(5):
+            assert feed._notifications_state_or_none() is None
+    lines = [r for r in caplog.records if "notifications store could not be read" in r.message]
+    assert len(lines) == 1, [r.message for r in lines]
