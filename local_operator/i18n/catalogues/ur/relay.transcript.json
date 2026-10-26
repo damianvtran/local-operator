@@ -1,0 +1,21 @@
+{
+  "relay.transcript.turn.condensed": "سمیٹا گیا مرحلہ",
+  "relay.transcript.turn.took": "{duration} لگے",
+  "relay.transcript.turn.actions": "{label, select, other {{count, plural, one {# عمل} other {# اعمال}}}}",
+  "relay.transcript.turn.completed": "مکمل",
+  "relay.transcript.fold.unit": "{kind, select, files {{count, plural, one {# فائل} other {# فائلیں}}} searches {{count, plural, one {# تلاش} other {# تلاشیں}}} web {{count, plural, one {# ویب تلاش} other {# ویب تلاشیں}}} shell {{count, number} shell} python {{count, number} python} edits {{count, plural, one {# ترمیم} other {# ترامیم}}} tasks {{count, plural, one {# کام} other {# کام}}} incoming {{count, plural, one {# آنے والا پیغام} other {# آنے والے پیغامات}}} wakes {{count, plural, one {# بیداری کی رسید} other {# بیداری کی رسیدیں}}} other {{count, number} {name}}}",
+  "relay.transcript.fold.shell": "{count, plural, one {# shell} other {# shell}}",
+  "relay.transcript.fold.python": "{count, plural, one {# python} other {# python}}",
+  "relay.transcript.fold.more": "{count, plural, one {اور # دوسرا عمل} other {اور # دیگر اعمال}}",
+  "relay.transcript.fold.failed_label": "اس میں ناکام عمل شامل ہے",
+  "relay.transcript.fold.partial_label": "{count, plural, one {کم از کم # عمل — پچھلے پیغامات ابھی لوڈ نہیں ہوئے} other {کم از کم # اعمال — پچھلے پیغامات ابھی لوڈ نہیں ہوئے}}",
+  "relay.transcript.older.failed": "پچھلے پیغامات لوڈ نہیں ہو سکے",
+  "relay.transcript.label.steered": "رخ بدلا گیا",
+  "relay.transcript.label.wake": "بیداری",
+  "relay.transcript.label.peer": "ہم مرتبہ کا پیغام",
+  "relay.transcript.label.job": "کام کا نتیجہ",
+  "relay.transcript.label.ask": "سوال",
+  "relay.transcript.label.messages": "پیغامات",
+  "relay.transcript.composer.queued": "{count, plural, one {# قطار میں} other {# قطار میں}}",
+  "relay.transcript.session.unread_refused": "ناپڑھے پیغامات کی حالت پڑھی نہیں جا سکی — کچھ صاف نہیں کیا گیا۔ دوبارہ کوشش کریں۔"
+}

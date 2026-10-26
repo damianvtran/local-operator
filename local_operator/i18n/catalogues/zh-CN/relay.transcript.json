@@ -1,0 +1,21 @@
+{
+  "relay.transcript.turn.condensed": "已折叠的轮次",
+  "relay.transcript.turn.took": "耗时 {duration}",
+  "relay.transcript.turn.actions": "{label, select, other {{count, plural, other {# 项操作}}}}",
+  "relay.transcript.turn.completed": "已完成",
+  "relay.transcript.fold.unit": "{kind, select, files {{count, plural, other {# 个文件}}} searches {{count, plural, other {# 次搜索}}} web {{count, plural, other {# 次网页搜索}}} shell {{count, number} shell} python {{count, number} python} edits {{count, plural, other {# 次编辑}}} tasks {{count, plural, other {# 项任务}}} incoming {{count, plural, other {# 条收到的消息}}} wakes {{count, plural, other {# 条唤醒回执}}} other {{count, number} {name}}}",
+  "relay.transcript.fold.shell": "{count, plural, other {# shell}}",
+  "relay.transcript.fold.python": "{count, plural, other {# python}}",
+  "relay.transcript.fold.more": "{count, plural, other {另有 # 项操作}}",
+  "relay.transcript.fold.failed_label": "包含失败的操作",
+  "relay.transcript.fold.partial_label": "{count, plural, other {至少 # 项操作 — 更早的消息尚未加载}}",
+  "relay.transcript.older.failed": "无法加载更早的消息",
+  "relay.transcript.label.steered": "已转向",
+  "relay.transcript.label.wake": "唤醒",
+  "relay.transcript.label.peer": "对等方消息",
+  "relay.transcript.label.job": "任务结果",
+  "relay.transcript.label.ask": "提问",
+  "relay.transcript.label.messages": "消息",
+  "relay.transcript.composer.queued": "{count, plural, other {# 条排队中}}",
+  "relay.transcript.session.unread_refused": "无法读取未读状态，未清除任何内容。请重试。"
+}
