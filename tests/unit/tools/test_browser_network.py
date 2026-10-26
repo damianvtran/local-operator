@@ -314,3 +314,21 @@ def test_combined_bodies_over_the_read_cap_persist_nothing(monkeypatch, tmp_path
     assert "256" in result.text
     scratch = tmp_path / "scratch"
     assert not scratch.exists() or not list(scratch.glob("network-request-*.body"))
+
+
+def test_a_network_denial_does_not_claim_a_navigation_prompt():
+    """A policy refusal on a network action must not name a navigation prompt."""
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    error = BridgeError(
+        code=ErrorCode.ORIGIN_DENIED,
+        message="network capture belongs to another requester or has not started",
+    )
+    rendered = format_error(error, action="network_read", host="ui")
+    assert "navigation" not in rendered.lower()
+    assert "network capture belongs to another requester" in rendered
+
+    # Every other action keeps the navigation copy it has always had.
+    other = BridgeError(code=ErrorCode.ORIGIN_DENIED, message="", data={"origin": "https://x.test"})
+    assert "navigation" in format_error(other, action="goto", host="ui")

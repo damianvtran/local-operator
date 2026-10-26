@@ -505,6 +505,14 @@ def format_error(
     # one, because "update the app or Local Operator" is not actionable without
     # knowing which side is behind. Implemented above the table lookup.
     if error.code == ErrorCode.ORIGIN_DENIED:
+        # The network actions reuse `origin_denied` for a POLICY refusal that has
+        # nothing to do with a navigation: a body scope that is not an exact
+        # non-root URL, or a capture that belongs to another requester. The
+        # navigation sentence ("a prompt went unanswered") sent an agent chasing
+        # an approval that does not exist (QA finding, 2026-10-26), so the host's
+        # own message is rendered when it has one for these actions.
+        if action.startswith("network_") and str(error.message or "").strip():
+            return f"{error.message} Nothing was captured by this call."
         origin = str(error.data.get("origin") or _origin(str(error.data.get("url", ""))))
         return (
             f"navigation to {origin or '(unknown origin)'} was denied by the user (or the "
