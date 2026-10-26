@@ -343,3 +343,17 @@ def test_a_restarted_relay_is_what_clears_a_parked_entry_on_the_shipped_build(
     after_restart = mobility.reconcile(root, only=SESSION, own_instance="i_after_restart")
     assert [row["action"] for row in after_restart] == ["rolled_back"], after_restart
     assert read_handoff_journal(root) == {}
+
+
+def test_a_relay_that_is_stopping_does_not_release_its_entries() -> None:
+    """Every link goes at shutdown; that is not a dead copy.
+
+    Releasing on the way down would turn an ordinary restart into a rollback of a move
+    that was merely interrupted, and the recovery for that already exists: the next
+    instance reconciles the entry as another instance's leftover.
+    """
+    stopping = SimpleNamespace(is_set=lambda: True)
+    server = SimpleNamespace(root=Path("/nonexistent"), instance_id="i_mine", _stop=stopping)
+    link = SimpleNamespace(device_id="d_away")
+
+    assert mobility._on_link_closed(cast(Any, server), link, "we-closed") is None  # noqa: SLF001

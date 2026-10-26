@@ -4673,9 +4673,19 @@ def _on_link_closed(server: "RelayServer", link: Any, reason: str) -> None:
     redial means the destination can still reach this device, and its own retry is a
     fresh ``prepare`` — clearing the entry then would be rolling back a handoff whose
     owner is very much alive.
+
+    A RELAY THAT IS STOPPING IS NOT ASKED, and that is the same rule ``link_closed``
+    itself applies before it reports a lost peer: every link goes at shutdown, and
+    releasing entries here would turn an ordinary restart into a rollback of a move
+    that was merely interrupted. The next instance reconciles them as another
+    instance's leftovers, which is the recovery that already exists.
     """
     device_id = str(getattr(link, "device_id", "") or "")
-    if not device_id or server._link_for(device_id) is not None:  # noqa: SLF001
+    # THE PRECEDENCE IS SPELLED, not left to ``and`` binding over a mixed condition.
+    stopping = getattr(server, "_stop", None)
+    if not device_id or (stopping is not None and stopping.is_set()):  # noqa: SLF001
+        return
+    if server._link_for(device_id) is not None:  # noqa: SLF001
         return
     cleared = expire_for_peer(
         server.root, "", instance=str(server.instance_id), to_device=device_id
