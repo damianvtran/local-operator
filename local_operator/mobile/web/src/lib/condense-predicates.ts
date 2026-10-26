@@ -44,8 +44,18 @@ export function displayName(toolName: string): string {
 	const name = toolName.trim();
 	if (!name.toLowerCase().startsWith(MCP_PREFIX)) return name;
 	const rest = name.slice(MCP_PREFIX.length);
-	const separator = rest.indexOf("__");
-	return separator === -1 ? rest : rest.slice(separator + 2);
+	/*
+	 * ONE UNDERSCORE, NOT TWO: the producer mints `mcp__<server>_<tool>`, so the
+	 * server segment ends at the FIRST `_`. A server whose own name contains an
+	 * underscore cannot be split back out, which is why only the first segment is
+	 * treated as the server and the remainder is still the call's identifier.
+	 * (Found by the real-journal agreement run: the two-underscore reading renamed
+	 * `mcp__datadog_search_datadog_metrics` to `datadog_search_datadog_metrics`
+	 * and every count-line key built from it disagreed.)
+	 */
+	const split = rest.indexOf("_");
+	if (split <= 0) return rest || name;
+	return rest.slice(split + 1) || rest;
 }
 
 /**
