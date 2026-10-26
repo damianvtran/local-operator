@@ -56,8 +56,9 @@ actual_scope_lib_sha=${actual_scope_lib_sha%% *}
 [ "$actual_scope_lib_sha" = "$EXPECTED_SCOPE_LIB_SHA256" ]
 
 # The concurrency key serializes relabels. The shared guard tolerates exactly the
-# reviewed consumed failed runs and the current row; API errors, missing or
-# substituted ids, duplicates or any other history fail closed.
+# three reviewed consumed failed runs (40223296178, 40238106261, 40257911039),
+# each once and in any order, plus this run's own row; a fourth prior run, API
+# errors, missing or substituted ids, duplicates or any other history fail closed.
 native_history_allows_retry "$GITHUB_REPOSITORY" native-delegated-once.yml "$GITHUB_RUN_ID" || {
   printf 'native history does not match the reviewed consumed set\n' >&2
   exit 2

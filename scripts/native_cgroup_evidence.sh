@@ -180,11 +180,16 @@ signal_payload_pid() {
 
 native_history_allows_retry() {
   local repository=$1 workflow=$2 current=$3 runs consumed
-  # The operator authorized one retry after the first consumed run; both failed
-  # diagnostics (40223296178, 40238106261) are the reviewed consumed set and
-  # their evidence stays. These ids may appear in ANY order, each EXACTLY once,
-  # with at most the current run's own row. Every other history shape refuses,
-  # so this can never become a general rerun bypass.
+  # THE CONSUMED SET IS EXACTLY THREE FAILED, REVIEWED DIAGNOSTICS: 40223296178,
+  # 40238106261 and 40257911039. Each is spent — its authorization was used and
+  # its evidence stays in the history — so a history holding all three once, in
+  # ANY order, plus at most this run's own row, is the only shape allowed. Every
+  # other shape refuses and fails closed: a fourth prior run, a duplicate, a
+  # substitution, a missing id, malformed or truncated JSON, a non-array, a
+  # null/string id, two documents, or a gh failure. That is what keeps this from
+  # becoming a general rerun bypass, and it is why the three ids are spelled out
+  # rather than counted: a `>= 1` rule would pass a history that has already
+  # spent an unreviewed run.
   runs=$("$GH_BIN" run list --repo "$repository" \
     --workflow "$workflow" --limit 100 --json databaseId) || return 1
   consumed=$("$JQ_BIN" -r --arg current "$current" '
@@ -192,11 +197,13 @@ native_history_allows_retry() {
     elif all(.[]; (.databaseId | type) == "number") then
       ([.[] | select(.databaseId == 40223296178)] | length) as $first
       | ([.[] | select(.databaseId == 40238106261)] | length) as $second
+      | ([.[] | select(.databaseId == 40257911039)] | length) as $third
       | ([.[] | select((.databaseId | tostring) == $current)] | length) as $current_rows
       | ([.[] | select(.databaseId as $id
-          | ($id != 40223296178 and $id != 40238106261)
+          | ($id != 40223296178 and $id != 40238106261 and $id != 40257911039)
             and (($id | tostring) != $current))] | length) as $unexpected
-      | if $first == 1 and $second == 1 and $current_rows <= 1 and $unexpected == 0
+      | if $first == 1 and $second == 1 and $third == 1
+           and $current_rows <= 1 and $unexpected == 0
         then 0 else 1 end
     else 1 end
   ' <<<"$runs") || return 1
