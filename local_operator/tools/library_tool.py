@@ -21,7 +21,7 @@ must not block on an approval dialog to rename an asset.
 PROVENANCE. A write through this tool is recorded under the actor DERIVED
 from the caller's identity: the session ``librarian/state.json`` names records
 ``librarian``, every other session records ``agent``. The explicit ``actor``
-parameter stays for a user-initiated surface (``user``); ``librarian`` is
+parameter stays for a write the caller knows is user-initiated; ``librarian`` is
 reserved, and asking for it from any other session is an error rather than a
 record. Derivation rather than a seed-supplied parameter, because a caller that
 must remember to pass it forgets: the Librarian's own ``tool()`` lines did for
