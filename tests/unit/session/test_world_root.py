@@ -35,6 +35,7 @@ from local_operator import sdk
 from local_operator.evaluation.session_arm import (
     EPISODE_TOOL_SURFACE,
     SessionArmError,
+    open_episode_session,
     validate_episode_session_spec,
 )
 from local_operator.session.spec import (
@@ -429,6 +430,35 @@ async def test_world_root_none_keeps_the_ordinary_unclipped_session(
     assert OUTER_GUIDANCE in systems, "an ordinary session keeps the historical ancestor walk"
     assert INNER_GUIDANCE in systems
     assert not scripted_.tool_texts, "no tool call may have run in the unconfined session"
+
+
+@pytest.mark.asyncio
+async def test_the_episode_handle_reads_world_root_confinement_from_the_real_session(
+    episode: SimpleNamespace,
+) -> None:
+    """PR #2958 R1-1, over the REAL SDK open the arm uses.
+
+    The arm's topology note says "isolated scratch workspace" from
+    ``EpisodeSession.confined``. A world-root-only episode (no explicit
+    ``confinement_root`` argument) is confined by the session factory at
+    construction, so the handle must read it as confined; an ordinary session
+    must not. No prompt is sent: only the open and the handle's reading.
+    """
+    world_only = await open_episode_session(spec=_episode_spec(episode.world), roots=episode.roots)
+    try:
+        assert world_only.confined is True
+        installed = cast(Any, world_only.session)._confinement_root
+        assert Path(installed).resolve() == episode.world.resolve()
+    finally:
+        await world_only.aclose()
+
+    ordinary = await open_episode_session(
+        spec=SessionSpec(hosting="test", model="mock"), roots=episode.roots
+    )
+    try:
+        assert ordinary.confined is False
+    finally:
+        await ordinary.aclose()
 
 
 def test_world_root_validation_refuses_incoherent_layouts(tmp_path: Path) -> None:
