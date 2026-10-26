@@ -77,6 +77,7 @@ from local_operator.harness.types import (
     Aside,
     AudioContent,
     ChatRequest,
+    ConsumerCut,
     Content,
     CustomMessage,
     DocumentContent,
@@ -3109,6 +3110,28 @@ class AgentLoop:
                             self._discard_pending_custom(pending)
                             return
                         degenerate_stream_recoveries += 1
+                        # ONE steer in the transcript, never a run of them. A
+                        # consecutive trip finds the previous steer as the last
+                        # row (the looping turn it followed was just dropped),
+                        # so it is retired before the fresh one goes in; at the
+                        # cap (above) the existing one stays as the record.
+                        # Without this the next user turn read "your last
+                        # message was stopped…" twice in a row with nothing
+                        # between (review n2). Matched on the text: the steer is
+                        # a fresh ``Message.user`` per trip.
+                        # Only a steer THIS run minted (the tail of both lists):
+                        # a row an earlier run persisted is durable history and
+                        # is never rewritten from here.
+                        last = context.messages[-1] if context.messages else None
+                        if (
+                            isinstance(last, Message)
+                            and last.role == "user"
+                            and last.text == DEGENERATE_STREAM_RECOVERY_PROMPT
+                            and new_messages
+                            and new_messages[-1] is last
+                        ):
+                            context.messages.pop()
+                            new_messages.pop()
                         # Persisted for the reason every recovery prompt is: a
                         # resumed session must be able to see why it was
                         # re-asked. Harness chrome -- see
@@ -3116,10 +3139,17 @@ class AgentLoop:
                         recovery = Message.user(DEGENERATE_STREAM_RECOVERY_PROMPT)
                         context.messages.append(recovery)
                         new_messages.append(recovery)
-                        # No TurnEndEvent and no notice, as on the silent
-                        # length re-ask: the turn is not in the transcript, and
-                        # its record is the ``degenerate_stream`` payload on the
-                        # ``message_end`` already emitted plus the log line.
+                        # No TurnEndEvent: the turn is not in the transcript, so
+                        # there is no live row to settle (the nameless and
+                        # wordless re-asks' reason). And, unlike those siblings,
+                        # NO NOTICE -- deliberately, and only for now: each of
+                        # them yields catalogue copy, and a new message here
+                        # needs a translated ``tui.notices`` key in every
+                        # carried locale (review m1, deferred to a follow-up
+                        # PR). The record is the ``degenerate_stream`` payload
+                        # on the ``message_end`` already emitted, which every
+                        # surface reads to label the cut row honestly
+                        # (``rows.assistant_stop_notice``), plus the log line.
                         has_more_tool_calls = True
                         continue
 
@@ -4227,6 +4257,7 @@ class AgentLoop:
         # The first trip of the degeneration guard on this call, if any; see
         # where the stream is opened below.
         degenerate: DegenerationTrip | None = None
+        cut_receipt: ConsumerCut | None = None
         # The spec the request below is BUILT with, captured before the stream
         # starts. Declared here rather than read after the ``try`` for two
         # reasons: the resolved ``model`` is assigned inside it, so a reader
@@ -4385,16 +4416,24 @@ class AgentLoop:
             )
             request = self._arm_one_turn_secrets(context, request)
             secret_active = request.has_one_turn_secrets
-            # THE DEGENERATION GUARD (``harness.degeneration``): one detector
-            # per channel, and a cut signal of this call's own. It stops a
-            # stream whose tail has become one short passage repeated verbatim
-            # BEFORE the provider bills the rest of the output budget, which is
-            # the only point at which stopping it saves anything. The cut ends
-            # the stream through the same pump cancellation an abort uses, but
-            # never touches ``signal`` -- see ``_abortable_stream``.
+            # THE DEGENERATION GUARD (``harness.degeneration``): one detector on
+            # the REASONING channel, and a cut signal of this call's own. It
+            # stops a stream whose reasoning has become one short passage
+            # repeated verbatim BEFORE the provider bills the rest of the output
+            # budget, which is the only point at which stopping it saves
+            # anything. Visible text is deliberately NOT watched: legitimate
+            # answers (identical-row tables, zero-byte base64, repeated log
+            # lines) are exactly periodic too, and cutting one throws away an
+            # answer the user asked for -- see the module docstring. The cut
+            # ends the stream through the same pump cancellation an abort uses,
+            # but never touches ``signal`` -- see ``_abortable_stream``.
             degeneration_cut = AbortSignal()
             reasoning_guard = StreamDegenerationGuard("reasoning")
-            text_guard = StreamDegenerationGuard("text")
+            # Armed BEFORE dispatch so the stream fn's decorated copy of this
+            # request shares it: the usage recorder reads it to book the cut
+            # call's spend as an ESTIMATE rather than as unknown (review m3; see
+            # ``ChatRequest._consumer_cut``).
+            cut_receipt = request.arm_consumer_cut()
             stream = _abortable_stream(config.stream_fn(request, signal), signal, degeneration_cut)
             from local_operator.providers.failover import _one_turn_scrub_stream_event
 
@@ -4431,9 +4470,6 @@ class AgentLoop:
                     text_parts.append(event.delta)
                     if not secret_active:
                         yield MessageUpdateEvent(message=assistant, delta=event.delta)
-                    if degenerate is None and (trip := text_guard.feed(event.delta)):
-                        degenerate = trip
-                        degeneration_cut.abort("degenerate stream")
                 elif isinstance(event, StreamReasoningDelta):
                     # The model is THINKING, and the user can see it from here.
                     #
@@ -4459,6 +4495,12 @@ class AgentLoop:
                         yield ReasoningDeltaEvent(message_id=assistant.id, delta=event.delta)
                     if degenerate is None and (trip := reasoning_guard.feed(event.delta)):
                         degenerate = trip
+                        # Everything streamed so far is output the provider
+                        # billed: the reasoning up to the trip plus any text
+                        # (none, in the measured shape, but a turn can speak
+                        # first and loop after).
+                        if cut_receipt is not None:
+                            cut_receipt.mark(trip.chars + sum(map(len, text_parts)))
                         degeneration_cut.abort("degenerate stream")
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
@@ -4860,6 +4902,17 @@ class AgentLoop:
                 **(provider_payload or {}),
                 "degenerate_stream": degenerate.payload(),
             }
+            # The cut call's SPEND (review m3). No provider usage frame arrives
+            # on a cancelled stream, so the recorder below the loop books an
+            # estimate (``model.configure._estimate_consumer_cut_usage``, basis
+            # ``estimated``) and hands it back on the shared receipt; the same
+            # figure goes on the message so the session's spend band, the turn
+            # aggregate and a parent's child ledger all see the call instead of
+            # a free one. The recorder's ``finally`` has already run: the pump
+            # task it lives in was awaited by ``_abortable_stream`` before the
+            # stream ended. A provider frame that DID arrive before the cut wins.
+            if usage is None and cut_receipt is not None and cut_receipt.estimated_usage:
+                usage = cut_receipt.estimated_usage
             logger.warning(
                 "degenerate %s stream stopped: a %d-character passage repeated %d+ times "
                 "verbatim after %d characters (unit starts %r)",

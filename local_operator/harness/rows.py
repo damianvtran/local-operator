@@ -1608,6 +1608,21 @@ def assistant_stop_notice(
             "model refused the request (no details recorded)"
         )
         return refusal, "error"
+    if stop_reason == "length" and (provider_payload or {}).get("degenerate_stream"):
+        # THE DEGENERATION GUARD'S CUT (``harness.degeneration``), not the
+        # output limit. The loop ends a guard-cut turn as ``length`` so no
+        # surface reads it as a complete answer, but every sentence in the arm
+        # below names the OUTPUT LIMIT or BUDGET -- false here: the guard stopped
+        # the stream after ~10 KB precisely so the budget was not spent (review
+        # round 1, m2). The cut message is dropped from durable history, so this
+        # is reached by a fold over LIVE rows: an attached viewer's
+        # ``_live_history`` re-prepared mid-run, or the phone/TUI replay of the
+        # same window. ``interrupted`` is the existing, cause-neutral word for a
+        # turn that ended before it finished, and it claims nothing about why.
+        # Warning tier, like the length arm: the harness recovered the turn, it
+        # did not fail. (A properly worded, translated notice is a follow-up:
+        # a new message needs a new catalogue key in every carried locale.)
+        return "interrupted", "warning"
     if stop_reason == "length":
         # Tier `warning`, not `error`: the turn produced what it produced and
         # stopped where the limit sits, which is a statement about the reply's

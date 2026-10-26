@@ -12,7 +12,13 @@ Two layers, in two halves of this file.
    the guard exists for: the stream is cut long before the budget, the turn
    recovers through a steer rather than a replay, the recovery is capped, the
    budget-exhausted copy is never said about a stream that was stopped early,
-   and the genuine empty-length path is untouched.
+   and the genuine empty-length path is untouched. Visible text is NOT guarded
+   (review round 1, M1): every periodic answer shape the review found tripping
+   the earlier text guard is delivered intact here.
+3. What the cut leaves behind: every surface that folds the cut message labels
+   it neutrally rather than as an output-limit/budget stop (review m2), and the
+   cut call's spend is recorded as an ESTIMATE, never as unknown or billed
+   (review m3).
 
 THE MEASURED SHAPE. ``_TRACE_UNITS`` are the three repeating units recovered
 from the 2026-10-26 OSWorld trace (``osworld-task_063``, session
@@ -27,8 +33,9 @@ trace's own tails, not composed by hand.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -48,7 +55,11 @@ from local_operator.harness.loop import (
     AgentLoop,
     LoopContext,
 )
-from local_operator.harness.rows import harness_chrome_prompts, is_harness_chrome
+from local_operator.harness.rows import (
+    assistant_stop_notice,
+    harness_chrome_prompts,
+    is_harness_chrome,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -65,7 +76,10 @@ from local_operator.harness.types import (
     StreamTextDelta,
     TextContent,
     ToolResult,
+    Usage,
 )
+from local_operator.mobile.projection import ProjectionFold, fold_messages_to_entries
+from local_operator.mobile.types import SessionProjection
 from tests.unit.harness.test_loop import ScriptedStream, make_config, tool_call_delta
 
 # ---------------------------------------------------------------------------
@@ -106,8 +120,8 @@ def _deltas(text: str, size: int = 2) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)]
 
 
-def _feed(text: str, *, channel: str = "reasoning", size: int = 2):
-    guard = StreamDegenerationGuard(channel)  # type: ignore[arg-type]
+def _feed(text: str, *, size: int = 2):
+    guard = StreamDegenerationGuard()
     for delta in _deltas(text, size):
         trip = guard.feed(delta)
         if trip is not None:
@@ -189,13 +203,6 @@ def test_the_measured_loop_trips_early(unit: str) -> None:
     assert trip.chars < 225_000 // 10
 
 
-def test_degenerate_visible_text_trips_too() -> None:
-    trip = _feed("Here is the plan.\n" + "I will now click the button. " * 2_000, channel="text")
-    assert trip is not None
-    assert trip.channel == "text"
-    assert trip.period == len("I will now click the button. ")
-
-
 @pytest.mark.parametrize(
     "text",
     [
@@ -219,11 +226,10 @@ def test_legitimate_long_output_never_trips(text: str) -> None:
     never trips, because nothing below the window is ever checked.
     """
     assert len(text) >= WINDOW_CHARS - 1
-    for channel in ("reasoning", "text"):
-        assert _feed(text, channel=channel) is None  # type: ignore[arg-type]
-        # Delta size must not matter: one-character and large fragments too.
-        assert _feed(text, channel=channel, size=1) is None  # type: ignore[arg-type]
-        assert _feed(text, channel=channel, size=4_000) is None  # type: ignore[arg-type]
+    assert _feed(text) is None
+    # Delta size must not matter: one-character and large fragments too.
+    assert _feed(text, size=1) is None
+    assert _feed(text, size=4_000) is None
 
 
 def test_a_repeat_longer_than_the_period_ceiling_does_not_trip() -> None:
@@ -277,9 +283,8 @@ class LoopingProvider:
     #: The budget the measured turns spent, in characters of reasoning.
     BUDGET_CHARS = 225_423
 
-    def __init__(self, turns: list[list[StreamEvent] | str], *, channel: str = "reasoning"):
+    def __init__(self, turns: list[list[StreamEvent] | str]):
         self.turns = turns
-        self.channel = channel
         self.requests: list[ChatRequest] = []
         self.streamed: list[int] = []
         self.cancelled: list[bool] = []
@@ -296,11 +301,10 @@ class LoopingProvider:
             index = len(self.streamed)
             self.streamed.append(0)
             self.cancelled.append(False)
-            make = StreamReasoningDelta if self.channel == "reasoning" else StreamTextDelta
             try:
                 for delta in _deltas(_PREAMBLE):
                     self.streamed[index] += len(delta)
-                    yield make(delta=delta)
+                    yield StreamReasoningDelta(delta=delta)
                 unit = _TRACE_UNITS[0]
                 while True:
                     for delta in _deltas(unit):
@@ -310,7 +314,7 @@ class LoopingProvider:
                             # guard did NOT cut the stream.
                             yield StreamEndEvent(stop_reason="length")
                             return
-                        yield make(delta=delta)
+                        yield StreamReasoningDelta(delta=delta)
                         # A real socket read yields to the event loop; without
                         # this the pump would drain the generator in one step.
                         await asyncio.sleep(0)
@@ -402,20 +406,51 @@ async def test_the_measured_shape_is_cut_early_and_recovers_with_a_steer() -> No
     assert any(isinstance(e, ReasoningDeltaEvent) for e in events)
 
 
+#: Legitimate VISIBLE answers that are exactly periodic for far longer than the
+#: guard's window -- every shape agent review round 1 on PR #2993 measured tripping
+#: the (since removed) text-channel guard. Each is something a user can ask for.
+_PERIODIC_ANSWERS = {
+    "identical-table-rows": "| a | b |\n|---|---|\n" + "| 0 | 0 |\n" * 3_000,
+    "csv-empty-fields": "a,b,c\n" + ",,\n" * 6_000,
+    "csv-identical-rows": "flag,value\n" + "1,0\n" * 5_000,
+    "base64-zero-bytes": base64.b64encode(bytes(24_000)).decode(),
+    "base64-zero-bytes-mime": base64.encodebytes(bytes(24_000)).decode(),
+    "hex-zero-bytes": "00" * 12_000,
+    "json-zero-array": json.dumps([0] * 8_000),
+    "json-null-objects": json.dumps([{"a": None}] * 2_000),
+    "box-drawing-rule": "\u2500" * 20_000,
+    "ascii-frame-blank-rows": "+" + "-" * 78 + "+\n" + ("|" + " " * 78 + "|\n") * 300,
+    "spaces": " " * 20_000,
+    "newlines": "\n" * 20_000,
+    "dots": "." * 20_000,
+    "svg-path": '<path d="M0 0 ' + "l1 0 " * 5_000 + '"/>',
+    "repeated-log-line": "WARN retrying connection\n" * 1_000,
+    "ok-lines": "ok\n" * 5_000,
+    "cjk-repeated": "\u6211\u4e0d\u77e5\u9053\u3002" * 3_000,
+    "emoji": "\U0001f600" * 12_000,
+}
+
+
 @pytest.mark.asyncio
-async def test_degenerate_visible_text_is_cut_and_recovered() -> None:
-    provider = LoopingProvider(
-        ["loop", [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]],
-        channel="text",
-    )
+@pytest.mark.parametrize("answer", list(_PERIODIC_ANSWERS.values()), ids=list(_PERIODIC_ANSWERS))
+async def test_a_periodic_visible_answer_is_delivered_intact(answer: str) -> None:
+    """Visible text is NOT guarded: a long verbatim-periodic answer completes.
+
+    Through the real loop, at the 7-character delta granularity the review used:
+    one request, no cut, no steer, no error, and the final assistant message is
+    the answer byte for byte. With a text-channel guard each of these was thrown
+    away three times and the run ended "Degenerate output" (review M1).
+    """
+    deltas = [StreamTextDelta(delta=answer[i : i + 7]) for i in range(0, len(answer), 7)]
+    provider = LoopingProvider([[*deltas, StreamEndEvent(stop_reason="stop")]])
     context, events, end, notices = await _run(provider)
-    assert provider.cancelled == [True]
-    assert provider.streamed[0] < LoopingProvider.BUDGET_CHARS // 8
-    assert len(_steers(context)) == 1
-    # The looping prose is not kept: neither in the context nor replayed.
-    assert not any("Hmm! Hmm, hmm" in m.text for m in provider.requests[1].messages)
-    assert end.error is None
-    assert _budget_notices(notices) == []
+    assert len(provider.requests) == 1
+    assert end.error is None and not end.aborted
+    assert _steers(context) == []
+    assert not any(_degenerate_record(m) for m in _assistant_ends(events))
+    last = context.messages[-1]
+    assert isinstance(last, Message) and last.role == "assistant"
+    assert last.text == answer and last.stop_reason == "stop"
 
 
 @pytest.mark.asyncio
@@ -426,7 +461,14 @@ async def test_the_recovery_cap_ends_the_run_named_for_the_degeneration() -> Non
     assert len(provider.requests) == MAX_DEGENERATE_STREAM_RECOVERIES + 1
     assert provider.cancelled == [True] * (MAX_DEGENERATE_STREAM_RECOVERIES + 1)
     assert all(n < LoopingProvider.BUDGET_CHARS // 8 for n in provider.streamed)
-    assert len(_steers(context)) == MAX_DEGENERATE_STREAM_RECOVERIES
+    # ONE steer, never a run of them (review n2): every re-ask ends with exactly
+    # one, and the run leaves exactly one behind for the next user turn to read.
+    for retry in provider.requests[1:]:
+        assert retry.messages[-1].text == DEGENERATE_STREAM_RECOVERY_PROMPT
+        assert sum(m.text == DEGENERATE_STREAM_RECOVERY_PROMPT for m in retry.messages) == 1
+    assert len(_steers(context)) == 1
+    last = context.messages[-1]
+    assert isinstance(last, Message) and last.text == DEGENERATE_STREAM_RECOVERY_PROMPT
     # Named for what happened -- never the output-limit sentence or cause.
     assert end.error is not None and end.error.startswith("Degenerate output:")
     assert "verbatim loop" in end.error
@@ -537,3 +579,187 @@ def test_the_steer_is_harness_chrome() -> None:
     assert is_harness_chrome(DEGENERATE_STREAM_RECOVERY_PROMPT)
     assert is_harness_chrome("  " + DEGENERATE_STREAM_RECOVERY_PROMPT + "\n")
     assert not is_harness_chrome("why did the model fall into a loop?")
+
+
+# ---------------------------------------------------------------------------
+# 3. What the cut leaves behind: honest labels on every fold, and its spend.
+# ---------------------------------------------------------------------------
+
+#: The output-limit / budget wording every ordinary ``length`` arm uses, and
+#: which is FALSE for a guard cut (the stream was stopped ~10 KB in precisely so
+#: the budget was not spent).
+_LIMIT_WORDS = ("output limit", "output budget", "whole output budget")
+
+
+def _guard_cut(text: str = "") -> Message:
+    """A cut message exactly as the loop settles it (stop reason and payload)."""
+    message = Message(
+        role="assistant",
+        content=[TextContent(text=text)] if text else [],
+        stop_reason="length",
+        provider_payload={
+            "degenerate_stream": {
+                "channel": "reasoning",
+                "period": 36,
+                "repeats": 284,
+                "chars": 14_336,
+            }
+        },
+    )
+    return message
+
+
+@pytest.mark.parametrize("text", ["", "I will now click the button."])
+def test_a_guard_cut_is_never_labelled_an_output_limit_stop(text: str) -> None:
+    """Review m2 at the shared helper: neutral copy, warning tier, both arms."""
+    notice = assistant_stop_notice(
+        text=text,
+        has_tool_calls=False,
+        stop_reason="length",
+        provider_payload=_guard_cut(text).provider_payload,
+    )
+    assert notice == ("interrupted", "warning")
+    # Control: the same message WITHOUT the guard's record keeps today's copy.
+    plain = assistant_stop_notice(
+        text=text, has_tool_calls=False, stop_reason="length", provider_payload={}
+    )
+    assert plain is not None and any(w in plain[0] for w in _LIMIT_WORDS)
+
+
+@pytest.mark.parametrize("text", ["", "I will now click the button."])
+def test_the_phone_folds_say_nothing_false_about_a_guard_cut(text: str) -> None:
+    """Review m2 on the phone: the history page AND the attach seed.
+
+    The cut message is never made durable, so these folds reach it as a live
+    row (an attached viewer's ``_live_history`` re-prepared mid-run). Both fold
+    paths run the real projection code over the real message shape.
+    """
+    history = [Message.user("move the bubble"), _guard_cut(text)]
+    page = fold_messages_to_entries(list(history))
+    fold = ProjectionFold(SessionProjection(session_id="s", pid=1))
+    fold.fold_history(list(history))
+    for rows in (page, list(fold.projection.transcript)):
+        notices = [row for row in rows if row.kind == "notice"]
+        assert [row.text for row in notices] == ["interrupted"]
+        assert not any(w in (row.text or "") for row in rows for w in _LIMIT_WORDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["", "I will now click the button."])
+async def test_the_tui_replay_says_nothing_false_about_a_guard_cut(text: str) -> None:
+    """Review m2 in the TUI: the real app's settled-row replay of a cut message."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.conftest import await_session_boot
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
+
+    session = FakeSession()
+    session._history = [Message.user("move the bubble"), _guard_cut(text)]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+    assert "move the bubble" in shown
+    assert "interrupted" in shown
+    assert not any(w in shown for w in _LIMIT_WORDS)
+
+
+def test_a_cut_calls_estimate_is_labelled_and_never_a_receipt() -> None:
+    """Review m3 at the estimator: the documented arithmetic and its labels."""
+    from local_operator.model.configure import (
+        _CUT_CHARS_PER_OUTPUT_TOKEN,
+        _estimate_consumer_cut_usage,
+    )
+    from local_operator.providers.context import measure_request
+
+    request = ChatRequest(
+        model=ModelSpec(provider="anthropic", model_id="claude-opus-5"),
+        system_blocks=["You are terse."],
+        messages=[Message.user("move the bubble " * 200)],
+    )
+    estimate = _estimate_consumer_cut_usage(request, None, cut_chars=14_342)
+    assert estimate.billing_basis == "estimated"
+    assert estimate.usd_cost is None and estimate.estimated_usd_cost is None
+    assert estimate.input_tokens == measure_request(request).tokens > 0
+    assert estimate.output_tokens == 14_342 // _CUT_CHARS_PER_OUTPUT_TOKEN
+    assert estimate.reasoning_tokens == estimate.output_tokens
+    # A partial provider frame that arrived before the cut wins where it has a
+    # count, and still never counts as a receipt.
+    partial = Usage(input_tokens=52_000, output_tokens=10, usd_cost=0.5)
+    merged = _estimate_consumer_cut_usage(request, partial, cut_chars=14_342)
+    assert merged.input_tokens == 52_000
+    assert merged.output_tokens == 14_342 // _CUT_CHARS_PER_OUTPUT_TOKEN
+    assert merged.usd_cost is None and merged.billing_basis == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_a_cut_runs_ledger_is_non_zero_and_marked_estimated(tmp_path) -> None:
+    """Review m3 end to end: the REAL recorder under the REAL loop.
+
+    ``SessionStreamFn._record_stream`` wraps a provider that loops forever; the
+    guard cuts it, the recorder books the cut call, and the loop puts the same
+    figure on the cut message. The analytics ledger must hold a NON-ZERO,
+    priced row whose basis says ``estimated`` and whose ``usage_reported`` says
+    no receipt arrived; the request-final observation (benchmark cost
+    accounting) must say ``estimated`` coverage rather than ``missing``.
+    """
+    import sqlite3
+
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.model.configure import SessionStreamFn
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    recorder = reset_recorder_for_test(store)
+    stream_fn = object.__new__(SessionStreamFn)
+    stream_fn._session_id = "sess-cut"
+    stream_fn._counts_as_child_request = False
+    observed: list[dict[str, Any]] = []
+
+    def notify(target: Any, **kwargs: Any) -> None:
+        observed.append(kwargs)
+
+    stream_fn._request_observation_target = lambda: object()  # type: ignore[method-assign]
+    stream_fn._notify_request_final = notify  # type: ignore[method-assign]
+    # The answer turn reports a real usage frame: the control row that must
+    # stay a provider report (basis not ``estimated``, ``usage_reported`` 1).
+    answer_usage = Usage(input_tokens=900, output_tokens=12)
+    provider = LoopingProvider(
+        [
+            "loop",
+            [
+                StreamTextDelta(delta="Done."),
+                StreamEndEvent(stop_reason="stop", usage=answer_usage),
+            ],
+        ]
+    )
+
+    def recorded(request: ChatRequest, signal: AbortSignal | None) -> Any:
+        return stream_fn._record_stream(request, cast(Any, provider(request, signal)))
+
+    model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
+    context, events, end, _notices = await _run(recorded, model=model)
+    assert end.error is None and provider.cancelled == [True]
+
+    cut = next(m for m in _assistant_ends(events) if _degenerate_record(m))
+    assert cut.usage is not None and cut.usage.billing_basis == "estimated"
+    assert cut.usage.output_tokens > 0 and cut.usage.input_tokens > 0
+    assert cut.usage.usd_cost is None
+
+    recorder.flush_for_test()
+    with sqlite3.connect(tmp_path / "a.db") as db:
+        rows = db.execute(
+            "SELECT output_tokens, cost_micro, cost_known, billing_basis, usage_reported "
+            "FROM calls ORDER BY ts_ms"
+        ).fetchall()
+    assert len(rows) == 2
+    output_tokens, cost_micro, cost_known, basis, reported = rows[0]
+    assert output_tokens == cut.usage.output_tokens
+    assert cost_known == 1 and cost_micro > 0
+    assert basis == "estimated" and reported == 0
+    assert rows[1][3] != "estimated" and rows[1][4] == 1
+
+    assert [o["usage_estimated"] for o in observed] == [True, False]
+    assert observed[0]["usage"].billing_basis == "estimated"

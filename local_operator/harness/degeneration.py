@@ -12,26 +12,40 @@ then retried twice more at lower effort, and each retry looped the same way.
 Every surface (TUI, desktop, mobile, exec, SDK) shares that loop, so any model
 on any surface can pay this.
 
-WHAT IT DETECTS, AND WHAT IT MUST NOT. A trip requires the LAST
-:data:`WINDOW_CHARS` characters of ONE channel (reasoning or visible text) to be
-exactly periodic with a period of at most :data:`MAX_PERIOD_CHARS`. Because the
-window is ``MAX_PERIOD_CHARS * MIN_REPEATS`` long, a trip always means at least
-:data:`MIN_REPEATS` verbatim copies of the same unit, end to end, with no
-variation at all. Ordinary long output never satisfies that: a table, a list or
-code with repeated STRUCTURE varies in its content (a row value, an item number,
-an identifier), and a single differing character anywhere in the window breaks
-exact periodicity. The cost of the strictness is the one class it cannot tell
-apart: output the user genuinely asked to be repeated verbatim more than ~10 KB
-in a row. That is accepted; the alternative is billing the whole budget on
-every loop.
+WHAT IT DETECTS. A trip requires the LAST :data:`WINDOW_CHARS` characters of the
+stream to be exactly periodic with a period of at most :data:`MAX_PERIOD_CHARS`.
+Because the window is ``MAX_PERIOD_CHARS * MIN_REPEATS`` long, a trip always
+means at least :data:`MIN_REPEATS` verbatim copies of the same unit, end to end,
+with no variation at all. A single differing character anywhere in the window
+breaks exact periodicity.
+
+REASONING ONLY, AND WHY. The loop feeds this guard the REASONING channel and
+nothing else. Exact periodicity is NOT rare in legitimate VISIBLE output: agent
+review round 1 on PR #2993 measured trips on a table of identical rows, CSV of
+empty fields, base64/hex of zero bytes, ``[0]*N`` JSON, box-drawing rules, a
+repeated log line, ``ok\n`` x 5000 and repeated CJK -- all things a user can ask
+for -- and, through the real loop, a finite 30 KB identical-row table was thrown
+away three times. Reasoning is different: nobody asks a model to think the same
+sentence twenty times, it is never the deliverable, and the same review replayed
+14,981 real assistant turns' reasoning through the guard with exactly the three
+measured loops tripping. The motivating trace was reasoning. A visible-text loop
+therefore still runs to the output limit and takes the ordinary length path.
 
 COST. ``feed`` only appends to a pending list until :data:`CHECK_STRIDE_CHARS`
 characters have accumulated, then folds them into a bounded tail and runs one
 periodicity check over it. Memory is bounded by ``WINDOW_CHARS +
-CHECK_STRIDE_CHARS`` plus one delta; work is a few window-sized C-level string
-operations per stride, i.e. O(1) amortised per character, and a stream shorter
-than the window never runs a check at all. Measured on the trace above, replaying
-each 225-253 K character turn through the guard took ~2-3 ms of CPU in total.
+CHECK_STRIDE_CHARS`` plus one delta (~57 KiB peak measured). Per-character work
+is constant and bounded -- at most ``MAX_PERIOD_CHARS`` candidate offsets per
+stride, each a C-level window comparison -- but how much of that bound is spent
+depends on the text. Varied reasoning almost never produces a 64-character
+recurrence, so it costs ~50 ns/char (measured, 1.7 MB of prose in 2-character
+deltas). Low-entropy text that is NOT periodic (long dash rules or ``AAAA``
+runs broken by varying characters) produces many candidates that each fail
+late: measured here at 0.22-0.36 µs/char, and by the reviewer at 0.6-0.73
+µs/char on a loaded host -- about 0.7 ms per 1 KB stride. Still O(1) amortised
+and far below the cost of receiving the text, but not free. A stream shorter
+than the window never runs a check at all. Replaying each 225-253 K character
+turn of the trace above through the guard took ~2-4 ms of CPU in total.
 
 STDLIB ONLY, like ``chrome_prompts``: the loop imports it on every turn and it
 needs nothing from the rest of the package.
@@ -70,12 +84,14 @@ CHECK_STRIDE_CHARS = 1024
 
 #: Length of the tail probe used to find candidate periods. Any period ``p`` of
 #: the window makes the last ``_PROBE_CHARS`` characters reappear exactly ``p``
-#: characters earlier, so only those offsets need a full comparison; in
-#: non-repeating text a 64-character exact recurrence within 512 characters is
-#: rare, which keeps the candidate list near empty.
+#: characters earlier, so only those offsets need a full comparison. In varied
+#: text a 64-character exact recurrence within 512 characters is rare; in
+#: low-entropy text it is common, which is the cost the module docstring states.
 _PROBE_CHARS = 64
 
-Channel = Literal["reasoning", "text"]
+#: The one stream channel the loop guards; see "REASONING ONLY" above. Kept as a
+#: named type so the transcript record names the channel explicitly.
+Channel = Literal["reasoning"]
 
 
 @dataclass(frozen=True)
@@ -110,18 +126,17 @@ class DegenerationTrip:
 
 
 class StreamDegenerationGuard:
-    """Watches one channel's deltas and reports the first verbatim loop.
+    """Watches one model call's reasoning deltas and reports the first verbatim loop.
 
-    One instance per channel per model call: reasoning and visible text are
-    watched separately because a loop in one says nothing about the other, and
-    interleaving them would let a varied answer mask a looping thought (or the
-    reverse). Once tripped, ``feed`` keeps returning ``None``: the caller acts
-    on the first trip and the stream is being cancelled.
+    One instance per model call, fed reasoning fragments only (see the module
+    docstring for why visible text is not watched). Once tripped, ``feed`` keeps
+    returning ``None``: the caller acts on the first trip and the stream is being
+    cancelled.
     """
 
     __slots__ = ("channel", "_tail", "_pending", "_pending_chars", "_chars", "_tripped")
 
-    def __init__(self, channel: Channel) -> None:
+    def __init__(self, channel: Channel = "reasoning") -> None:
         self.channel: Channel = channel
         self._tail = ""
         self._pending: list[str] = []
