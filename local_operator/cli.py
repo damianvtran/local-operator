@@ -4969,15 +4969,101 @@ def _delegated_hours(text: str) -> int:
     return value
 
 
-def _print_cleanup_rows(rows: list[Any], verb: str) -> None:
-    for candidate in rows[:_CLEANUP_TEXT_ROWS]:
+class _CleanupStream:
+    """Live output for the ``lop sessions cleanup`` PREVIEW on a terminal.
+
+    WHY: on a 4,700-directory store the preview ran ~390 s (scan 10 s, record
+    decisions and scratchpad-content checks ~57 s, scratchpad audit 319 s) and
+    printed nothing until every pass had finished, which reads as a hang. This
+    prints the policy lines before the first pass, shows ONE updating status line
+    for the scan/content/audit heartbeats, and prints each row as the pass decides
+    it. The rows are the SAME objects the final result lists hold and the final
+    block skips the head it already printed (:func:`_print_cleanup_rows`), so a
+    streamed row can never appear twice.
+
+    A TTY affordance only: ``enabled`` is ``stdout.isatty() and not --json``. A
+    pipe, a file or a script keeps the block layout and section order it always
+    had (the output is parsed), and ``--json`` stays ONE object at the end. The
+    status line uses ``\r`` + erase-line, which is meaningless anywhere but a
+    terminal.
+    """
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self._live = False
+        self._rows = 0
+        self._kept = 0
+
+    def status(self, text: str) -> None:
+        """Replace the single status line; never adds a line."""
+        if not self.enabled:
+            return
+        sys.stdout.write(f"\r\033[K{text}")
+        sys.stdout.flush()
+        self._live = True
+
+    def clear(self) -> None:
+        if self._live:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+            self._live = False
+
+    def line(self, text: str = "") -> None:
+        """Print one permanent line (header or row), flushed at once."""
+        self.clear()
+        print(text, flush=True)
+
+    def begin_class(self) -> None:
+        """Reset the per-section row counters (rows are capped per section)."""
+        self._rows = 0
+        self._kept = 0
+
+    def plan_callback(self, verb: str) -> Any:
+        """``on_plan`` for a pass: print each decided row, up to the text cap."""
+
+        def on_plan(candidate: Any) -> None:
+            if self._rows < _CLEANUP_TEXT_ROWS:
+                self.line(_cleanup_row(candidate, verb))
+            self._rows += 1
+
+        return on_plan
+
+    def kept_callback(self) -> Any:
+        def on_kept(name: str, guard: str) -> None:
+            if self._kept < _CLEANUP_TEXT_ROWS:
+                self.line(f"  kept         {name}  ({guard})")
+            self._kept += 1
+
+        return on_kept
+
+    def progress_callback(self, label: str = "") -> Any:
+        """``on_progress`` for the scan and content phases: one updating line."""
+        names = {"scan": "scanning sessions", "content": "checking scratchpad content"}
+
+        def on_progress(phase: str, done: int, total: int | None, elapsed: float) -> None:
+            of = f"/{total}" if total else ""
+            self.status(f"  {names.get(phase, phase)}… {done}{of} ({elapsed:.0f}s)")
+
+        return on_progress
+
+    def audit_callback(self) -> Any:
+        def on_pad(pad: Any, done: int, total: int) -> None:
+            self.status(f"  auditing scratchpads… {done}/{total}")
+
+        return on_pad
+
+
+def _print_cleanup_rows(rows: list[Any], verb: str, *, streamed: bool = False) -> None:
+    # ``streamed``: the head (the first _CLEANUP_TEXT_ROWS rows) was already
+    # printed live by :class:`_CleanupStream`; only the overflow note remains.
+    for candidate in rows[: 0 if streamed else _CLEANUP_TEXT_ROWS]:
         print(_cleanup_row(candidate, verb))
     if len(rows) > _CLEANUP_TEXT_ROWS:
         print(f"  ... and {len(rows) - _CLEANUP_TEXT_ROWS} more (--json lists every row)")
 
 
-def _print_kept(protected: list[tuple[str, str]]) -> None:
-    for name, guard in protected[:_CLEANUP_TEXT_ROWS]:
+def _print_kept(protected: list[tuple[str, str]], *, streamed: bool = False) -> None:
+    for name, guard in protected[: 0 if streamed else _CLEANUP_TEXT_ROWS]:
         print(f"  kept         {name}  ({guard})")
     if len(protected) > _CLEANUP_TEXT_ROWS:
         # The pass caps each kept group at WINDOW_NAMES_CAP while still counting
@@ -5197,7 +5283,10 @@ def _print_scratchpads(audit: Any) -> None:
     switch to turn on. Rows are capped like every other listing; ``--json``
     carries every pad, every shape and the worktree pointers.
     """
-    from local_operator.session.scratchpad_audit import pointer_display
+    from local_operator.session.scratchpad_audit import (
+        DRY_RUN_AUDIT_BUDGET_S,
+        pointer_display,
+    )
 
     print(
         # i18n: ignore operator CLI output, English-only; owned by the
@@ -5213,6 +5302,18 @@ def _print_scratchpads(audit: Any) -> None:
         f"{len(audit.pads)} session pad(s); {_format_bytes(audit.total_bytes)} held; "
         f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
     )
+    if audit.stopped_early:
+        # A budgeted audit that stopped must SAY so: its totals are a lower bound
+        # and its ranking covers only the pads reached. Silence here would present
+        # a partial audit as the store's.
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"audit stopped at its {DRY_RUN_AUDIT_BUDGET_S:.0f} s dry-run budget: audited "
+            f"{len(audit.pads)} of "
+            f"{audit.total_pads} pads, so the figures above are a lower bound; run "
+            "lop sessions cleanup --scratchpads-only --dry-run for the full audit"
+        )
     for pad in audit.pads[:_CLEANUP_TEXT_ROWS]:
         tags: list[str] = []
         if pad.over_cap:
@@ -5512,11 +5613,18 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     from local_operator.session.delegated_retention import (
         UNBOUNDED,
         DelegatedResult,
+        effective_window_hours,
         run_delegated_pass,
     )
-    from local_operator.session.scratchpad_audit import audit_scratchpads
+    from local_operator.session.scratchpad_audit import (
+        DRY_RUN_AUDIT_BUDGET_S,
+        audit_scratchpads,
+    )
 
     root = config_dir()
+    # Live output is a terminal affordance and never touches ``--json`` (see
+    # :class:`_CleanupStream`): a pipe or file gets the block layout it always had.
+    stream = _CleanupStream(sys.stdout.isatty() and not args.json)
     policy = policy_from_config(ConfigManager(root))
     reference_overrides = tuple(
         os.path.abspath(os.path.expanduser(path))
@@ -5672,6 +5780,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         # ONLY the audit and the content plan: the record halves are not part of
         # this mode, and printing them would offer rows it will never apply.
         moment = time.time()
+        stream.status("  scanning sessions…")
         with file_logging():
             preview = run_delegated_pass(
                 root,
@@ -5682,8 +5791,14 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 trigger="manual",
                 now=moment,
                 only=(),
+                on_progress=stream.progress_callback() if stream.enabled else None,
             )
-        audit = audit_scratchpads(root / "sessions")
+        # UNBUDGETED: this command IS the audit. It streams a per-pad heartbeat
+        # on a terminal instead of going quiet for minutes.
+        audit = audit_scratchpads(
+            root / "sessions", on_pad=stream.audit_callback() if stream.enabled else None
+        )
+        stream.clear()
         if args.json:
             emit_json(
                 CleanupResult(dry_run=True, skipped="not run (--scratchpads-only)"),
@@ -5737,6 +5852,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 )
             return 2
         moment = time.time()
+        stream.status("  scanning sessions…")
         with file_logging():
             preview = run_delegated_pass(
                 root,
@@ -5747,8 +5863,12 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 trigger="manual",
                 now=moment,
                 only=(),
+                on_progress=stream.progress_callback() if stream.enabled else None,
             )
-        audit = audit_scratchpads(root / "sessions")
+        audit = audit_scratchpads(
+            root / "sessions", on_pad=stream.audit_callback() if stream.enabled else None
+        )
+        stream.clear()
         if not args.json:
             _print_scratchpads(audit)
             print()
@@ -5883,26 +6003,10 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     # The LISTING is always a dry run first, so a real run shows the user the
     # same rows before anything is removed. Both previews share ONE clock.
     moment = time.time()
-    # ``file_logging`` for the preview too: every scratchpad-git keep is a
-    # WARNING by design (one line per kept session, for the log), and on a first
-    # dry run those would interleave with the listing that already names each
-    # one under "kept".
-    with file_logging():
-        if policy.has_any_limit:
-            parent_preview = run_cleanup(
-                root, policy, dry_run=True, force=force, actor="cli", now=moment
-            )
-        else:
-            parent_preview = CleanupResult(dry_run=True, skipped="no limits configured")
-        delegated_preview = run_delegated_pass(
-            root,
-            lambda: policy,
-            dry_run=True,
-            force=force,
-            actor="cli",
-            trigger="manual",
-            now=moment,
-        )
+    # The policy lines are built BEFORE any pass runs: on a terminal they are the
+    # first thing printed (so output starts at once, not after ~6 minutes), and
+    # the delegated window comes from the same clamp the pass applies
+    # (``effective_window_hours``) so the line cannot promise a different one.
     parent_policy_line = (
         f"policy: enabled={'on' if policy.enabled else 'OFF'} max_sessions={policy.max_sessions} "
         f"max_inactive_days={policy.max_inactive_days} max_total_bytes={policy.max_total_bytes} "
@@ -5912,9 +6016,71 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     )
     delegated_policy_line = (
         f"policy: {'on' if policy.delegated_enabled else 'OFF'}, remove delegated sessions idle "
-        f"over {delegated_preview.hours}h (parent still active, open project, running, armed "
-        "wake/monitor or unpushed git work keeps them)"
+        f"over {effective_window_hours(policy)}h (parent still active, open project, running, "
+        "armed wake/monitor or unpushed git work keeps them)"
     )
+    # The verb a class's rows carry: a class the run will NOT execute renders as
+    # "would remove" (review F1), see ``sections``.
+    row_verb = "would remove" if args.dry_run else "will remove"
+    parent_row_verb = row_verb if parent_runs else "would remove"
+    delegated_row_verb = row_verb if delegated_runs else "would remove"
+    if stream.enabled:
+        stream.line("== Your conversations (parent sessions) ==")
+        stream.line(parent_policy_line)
+        if policy.has_any_limit and not policy.enabled and parent_row_verb == "would remove":
+            stream.line(f"note: {switch_hint}; this is a preview only")
+        stream.begin_class()
+    # ``file_logging`` for the preview too: every scratchpad-git keep is a
+    # WARNING by design (one line per kept session, for the log), and on a first
+    # dry run those would interleave with the listing that already names each
+    # one under "kept".
+    with file_logging():
+        if policy.has_any_limit:
+            stream.status("  scanning your conversations…")
+            parent_preview = run_cleanup(
+                root,
+                policy,
+                dry_run=True,
+                force=force,
+                actor="cli",
+                now=moment,
+                on_plan=stream.plan_callback(parent_row_verb) if stream.enabled else None,
+                on_kept=stream.kept_callback() if stream.enabled else None,
+            )
+        else:
+            parent_preview = CleanupResult(dry_run=True, skipped="no limits configured")
+        if stream.enabled:
+            # The parent section's summary line needs its totals, so on a terminal
+            # it follows the rows that streamed (the block layout prints it first).
+            if parent_preview.skipped == "no limits configured":
+                stream.line("parent class: off")
+            else:
+                stream.line(
+                    f"scanned {parent_preview.scanned} sessions; "
+                    f"{parent_row_verb} {len(parent_preview.removed)}"
+                )
+                _print_cleanup_rows(parent_preview.removed, parent_row_verb, streamed=True)
+                _print_kept(parent_preview.protected, streamed=True)
+            stream.line()
+            stream.line("== Delegated work (subagents and background sessions) ==")
+            stream.line(delegated_policy_line)
+            if not policy.delegated_enabled and delegated_row_verb == "would remove":
+                stream.line("note: delegated cleanup is off in config; this is a preview only")
+            stream.begin_class()
+            stream.status("  scanning sessions…")
+        delegated_preview = run_delegated_pass(
+            root,
+            lambda: policy,
+            dry_run=True,
+            force=force,
+            actor="cli",
+            trigger="manual",
+            now=moment,
+            on_progress=stream.progress_callback() if stream.enabled else None,
+            on_plan=stream.plan_callback(delegated_row_verb) if stream.enabled else None,
+            on_kept=stream.kept_callback() if stream.enabled else None,
+        )
+        stream.clear()
 
     def sections(
         verb: str,
@@ -5930,23 +6096,28 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         # "nothing to remove" in the same output.
         parent_verb = verb if parent_runs else "would remove"
         delegated_verb = verb if delegated_runs else "would remove"
-        print("== Your conversations (parent sessions) ==")
-        print(parent_policy_line)
-        if parent.skipped == "no limits configured":
-            print("parent class: off")
-        else:
-            if not policy.enabled and parent_verb == "would remove":
-                print(f"note: {switch_hint}; this is a preview only")
-            print(f"scanned {parent.scanned} sessions; {parent_verb} {len(parent.removed)}")
-            _print_cleanup_rows(parent.removed, parent_verb)
-            _print_kept(parent.protected)
-        print()
-        print("== Delegated work (subagents and background sessions) ==")
-        print(delegated_policy_line)
+        # ``live``: a terminal run already printed the headers, policy lines and
+        # the HEAD of each row list while the passes ran (:class:`_CleanupStream`);
+        # only what needs the finished result is printed here.
+        live = stream.enabled
+        if not live:
+            print("== Your conversations (parent sessions) ==")
+            print(parent_policy_line)
+            if parent.skipped == "no limits configured":
+                print("parent class: off")
+            else:
+                if not policy.enabled and parent_verb == "would remove":
+                    print(f"note: {switch_hint}; this is a preview only")
+                print(f"scanned {parent.scanned} sessions; {parent_verb} {len(parent.removed)}")
+                _print_cleanup_rows(parent.removed, parent_verb)
+                _print_kept(parent.protected)
+            print()
+            print("== Delegated work (subagents and background sessions) ==")
+            print(delegated_policy_line)
         if delegated.skipped and delegated.skipped.startswith("skipped:"):
             print(f"{delegated.skipped} (nothing removed; fail-closed)")
         else:
-            if not policy.delegated_enabled and delegated_verb == "would remove":
+            if not live and not policy.delegated_enabled and delegated_verb == "would remove":
                 print("note: delegated cleanup is off in config; this is a preview only")
             print(
                 f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
@@ -5954,7 +6125,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 f"{delegated.kept_by_origin} kept by origin; "
                 f"{delegated_verb} {len(delegated.removed)}"
             )
-            _print_cleanup_rows(delegated.removed, delegated_verb)
+            _print_cleanup_rows(delegated.removed, delegated_verb, streamed=live)
             # UX U4: on a store with thousands of kept rows the size view is
             # buried below them. Name the narrower command BEFORE the kept list
             # so it is discoverable from the top of the section.
@@ -5964,7 +6135,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 "  size by pad: lop sessions cleanup --scratchpads-only --dry-run "
                 "(Scratchpads section below)"
             )
-            _print_kept(delegated.protected)
+            _print_kept(delegated.protected, streamed=live)
             if delegated_runs:
                 content_verb = (
                     "would reclaim" if delegated_verb == "would remove" else "will reclaim"
@@ -5975,7 +6146,16 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         # The read-only store audit runs here whatever BOTH switches say: it is
         # the section an operator turns the switches on FROM. It never opens a
         # path for writing (``session/scratchpad_audit.py``).
-        audit = audit_scratchpads(root / "sessions")
+        # BOUNDED here, and only here: the audit measured 319 s over 4,716 pads and
+        # used to run in full on every dry run. A truncated audit says so (the
+        # printer and the JSON both carry it); ``--scratchpads-only --dry-run``
+        # is the unbudgeted audit and the notice points at it.
+        audit = audit_scratchpads(
+            root / "sessions",
+            budget_s=DRY_RUN_AUDIT_BUDGET_S,
+            on_pad=stream.audit_callback() if stream.enabled else None,
+        )
+        stream.clear()
         if args.json:
             emit_json(
                 parent_preview,

@@ -88,6 +88,28 @@ LOCK_WAIT_S = 1.0
 PINS_LIMIT = 50
 
 
+def load_pin_ids(config_dir: Path) -> list[str]:
+    """Every pinned session id in the pin file, UNPRUNED, or raise.
+
+    The strict half of :func:`read_pins`, for a caller whose answer must FAIL
+    CLOSED. ``read_pins`` degrades an unreadable file to ``[]`` because a
+    sidebar ranks fine without pins; a retention pass that read that ``[]`` as
+    "nothing is pinned" would reap exactly the sessions an operator pinned
+    because they must survive. So this distinguishes the two: an ABSENT file is
+    ``[]`` (nothing was ever pinned), while a truncated file, a JSON value that
+    is not an array, or an I/O error raises ``OSError``/``ValueError``.
+    Non-string entries are skipped — they cannot name a session — and NOT
+    pruned against the store: an id with no directory protects nothing.
+    """
+    try:
+        raw = json.loads((Path(config_dir) / PINS_FILE).read_text())
+    except FileNotFoundError:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{PINS_FILE} is not an array")
+    return [item for item in raw if isinstance(item, str)]
+
+
 def read_pins(config_dir: Path) -> list[str]:
     """The pinned session ids, newest pin first; ``[]`` when unreadable.
 
@@ -104,13 +126,9 @@ def read_pins(config_dir: Path) -> list[str]:
     """
     directory = Path(config_dir)
     try:
-        raw = json.loads((directory / PINS_FILE).read_text())
-    except FileNotFoundError:
-        return []
+        raw = load_pin_ids(directory)
     except (OSError, ValueError):
         logger.debug("sidebar pins unreadable; continuing without them", exc_info=True)
-        return []
-    if not isinstance(raw, list):
         return []
     sessions = directory / "sessions"
     return [
@@ -124,10 +142,7 @@ def read_pins(config_dir: Path) -> list[str]:
         # this is defence in depth: the same rule `session_directory_name`
         # states for discovery metadata, reused rather than re-spelled, so a
         # file this app wrote cannot redirect a read outside `sessions/`.
-        if isinstance(item, str)
-        and item == Path(item).name
-        and session_directory_name(item)
-        and (sessions / item).is_dir()
+        if item == Path(item).name and session_directory_name(item) and (sessions / item).is_dir()
     ]
 
 

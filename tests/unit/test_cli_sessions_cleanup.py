@@ -15,6 +15,7 @@ import argparse
 import io
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -991,3 +992,143 @@ def test_the_copy_report_honours_the_delegated_window_override(store: Path, caps
     assert payload["window_hours"] == 2
     assert payload["would_reclaim_now"] == 1
     assert payload["proof_ok_within_window"] == 0
+
+
+# -- a dry run that streams on a terminal and is unchanged everywhere else -----
+#
+# On the operator's 4,716-directory store the preview ran ~390 s and printed
+# nothing until the last pass finished. A terminal now sees the policy lines at
+# once, one updating status line, and each decided row as it is decided; a pipe
+# or file keeps the block layout it always had, and --json stays one object.
+
+
+def _tty(monkeypatch: pytest.MonkeyPatch, capsys: Any, value: bool) -> None:
+    # capsys swaps ``sys.stdout`` for a capture object that is never a tty.
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: value, raising=False)
+
+
+def _pad(root: Path, name: str, size: int = 100) -> None:
+    pad = root / "sessions" / name / "scratchpad"
+    pad.mkdir(parents=True, exist_ok=True)
+    (pad / "f").write_bytes(b"x" * size)
+
+
+def test_a_terminal_sees_the_policy_lines_before_any_pass_runs(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config(store, enabled=True, remove_empty=True)
+    _delegated(store, "kid-old-0001")
+    _tty(monkeypatch, capsys, True)
+    at_call: dict[str, str] = {}
+    real = dr.run_delegated_pass
+
+    def probe(*args: Any, **kwargs: Any) -> Any:
+        at_call["out"] = capsys.readouterr().out  # what the user had seen BEFORE the pass
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dr, "run_delegated_pass", probe)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    seen = at_call["out"]
+    assert seen.startswith("== Your conversations (parent sessions) ==")
+    assert "policy: enabled=on" in seen
+    assert "== Delegated work (subagents and background sessions) ==" in seen
+    assert "policy: on, remove delegated sessions idle over 48h" in seen
+
+
+def test_streamed_rows_appear_once_and_the_summary_still_closes_the_section(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _delegated(store, "kid-old-0001")
+    _delegated(store, "kid-old-0002")
+    _delegated(store, "kid-new-0001", age_h=1)
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert out.count("would remove kid-old-0001") == 1
+    assert out.count("would remove kid-old-0002") == 1
+    assert out.count("kept         kid-new-0001") == 1
+    assert "2 delegated sessions; " not in out or "would remove 2" in out
+    assert "nothing was removed (dry run)" in out
+    assert (store / "sessions" / "kid-old-0001").exists(), "a dry run removes nothing"
+    # No status line is left behind: every \r is followed by the erase code.
+    assert "\r" not in out.replace("\r\x1b[K", "")
+
+
+def test_a_pipe_gets_the_block_layout_with_no_control_codes(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _delegated(store, "kid-old-0001")
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\r" not in out
+    order = [
+        out.index("== Your conversations (parent sessions) =="),
+        out.index("parent class: off"),
+        out.index("== Delegated work (subagents and background sessions) =="),
+        out.index("1 delegated sessions;"),
+        out.index("would remove kid-old-0001"),
+        out.index("== Scratchpads =="),
+        out.index("nothing was removed (dry run)"),
+    ]
+    assert order == sorted(order)
+
+
+def test_json_is_one_object_whatever_the_terminal(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _delegated(store, "kid-old-0001")
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)  # raises if anything else was printed
+    assert payload["outcome"] == "dry-run"
+    assert [row["session"] for row in payload["delegated"]["removed"]] == ["kid-old-0001"]
+    assert "budget_exhausted" not in payload["scratchpads"]
+
+
+def test_a_budgeted_dry_run_audit_says_it_stopped_and_where_the_full_one_is(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session import scratchpad_audit
+
+    for index in range(6):
+        _delegated(store, f"kid-old-{index:04d}")
+        _pad(store, f"kid-old-{index:04d}")
+    monkeypatch.setattr(scratchpad_audit, "DRY_RUN_AUDIT_BUDGET_S", 0.0)
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "audited 1 of 6 pads" in out and "lower bound" in out
+    assert "lop sessions cleanup --scratchpads-only --dry-run" in out
+
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    audit = json.loads(capsys.readouterr().out)["scratchpads"]
+    assert audit["budget_exhausted"] is True and audit["total_pads"] == 6 and audit["count"] == 1
+
+
+def test_scratchpads_only_dry_run_audits_every_pad_with_no_budget(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session import scratchpad_audit
+
+    for index in range(6):
+        _delegated(store, f"kid-old-{index:04d}")
+        _pad(store, f"kid-old-{index:04d}")
+    monkeypatch.setattr(scratchpad_audit, "DRY_RUN_AUDIT_BUDGET_S", 0.0)
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True, scratchpads_only=True)) == 0
+    out = capsys.readouterr().out
+    assert "6 session pad(s)" in out and "audit stopped" not in out
+
+
+def test_a_pinned_delegated_session_is_kept_by_the_cli_dry_run(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _delegated(store, "kid-pinned-01")
+    _delegated(store, "kid-old-0001")
+    (store / "sidebar-pins.json").write_text(json.dumps(["kid-pinned-01"]))
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "kept         kid-pinned-01  (pinned by the operator)" in out
+    assert "would remove kid-old-0001" in out and "would remove kid-pinned-01" not in out

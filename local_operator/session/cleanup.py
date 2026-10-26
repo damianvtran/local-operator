@@ -2837,6 +2837,16 @@ def _session_title(directory: Path) -> str:
         return ""
 
 
+def _observe(callback: Callable[..., None] | None, *args: Any) -> None:
+    """Call a display observer; its failure never changes a cleanup decision."""
+    if callback is None:
+        return
+    try:
+        callback(*args)
+    except Exception:  # noqa: BLE001 — display only
+        logger.debug("session cleanup: observer callback failed", exc_info=True)
+
+
 def run_cleanup(
     config_dir: Path,
     policy: CleanupPolicy,
@@ -2846,8 +2856,18 @@ def run_cleanup(
     dry_run: bool = False,
     force: bool = False,
     actor: str = "startup",
+    on_plan: Callable[[Candidate], None] | None = None,
+    on_kept: Callable[[str, str], None] | None = None,
 ) -> CleanupResult:
     """Apply ``policy`` to ``config_dir/sessions``.
+
+    ``on_plan(row)`` / ``on_kept(name, guard)`` are display observers for the
+    CLI's preview: called as each candidate is DECIDED (chosen by the first limit
+    that takes it, or kept by a guard), with the values ``result.chosen`` /
+    ``result.protected`` end up holding, so a streamed listing never differs from
+    the final one. They fire while the PLAN is decided (a real run applies it
+    later, in :func:`apply_cleanup`, which they do not observe) and a failing
+    observer never changes a decision.
 
     THE MASTER SWITCH GOVERNS EVERY CALLER. Round 1 let the CLI run with
     ``enabled: false`` on the theory that typing the command was consent;
@@ -3008,6 +3028,7 @@ def run_cleanup(
         if name not in protected_seen:
             protected_seen.add(name)
             result.protected.append((name, guard))
+            _observe(on_kept, name, guard)
 
     def consider(entry: _Entry, policy_name: str, reason: str) -> bool:
         name = entry.path.name
@@ -3031,6 +3052,7 @@ def run_cleanup(
             origin=_origin_label(entry.path),
             active=entry.activity is not None,
         )
+        _observe(on_plan, chosen[name])
         return True
 
     if policy.remove_empty:

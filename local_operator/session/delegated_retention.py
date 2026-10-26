@@ -328,6 +328,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import subprocess
 import time
@@ -524,6 +525,20 @@ CONTENT_MAX_UNIQUE_COMMITS = 20_000
 WINDOW_NAMES_CAP = 500
 
 ROSTER_NAME = "subagent-roster.v1.json"
+
+#: The scan reports a heartbeat every this many directory entries. A scan is
+#: ~2 ms per directory on a loaded store (9.7 s for 4,716), so this is a line
+#: roughly every half second: often enough that a person sees motion, rare
+#: enough that the callback is not the cost.
+SCAN_PROGRESS_EVERY = 256
+
+#: The content phase costs ~14 ms a pad (measured: ~48 s over 3,436 pads), so a
+#: heartbeat every 32 pads is a line about every half second.
+CONTENT_PROGRESS_EVERY = 32
+
+#: ``(phase, done, total_or_None, elapsed_s)``: a coarse heartbeat for a caller
+#: that wants to show motion during a pass (``lop sessions cleanup`` on a TTY).
+ProgressCallback = Callable[[str, int, "int | None", float], None]
 _PROJECT_CLOSED = frozenset({"done", "archived"})
 
 
@@ -2779,7 +2794,13 @@ class _ContentGuard:
 
 
 def _content_guard(
-    cand: _Cand, *, config_dir: Path, now: float, cutoff: float, live_resolved: Path | None
+    cand: _Cand,
+    *,
+    config_dir: Path,
+    now: float,
+    cutoff: float,
+    live_resolved: Path | None,
+    pinned: frozenset[str] = frozenset(),
 ) -> _ContentGuard:
     """The content phase's OWN guards: why this pad must not be touched at all.
 
@@ -2823,6 +2844,10 @@ def _content_guard(
         return _ContentGuard("operator holds unreadable", fresh)
     if held is not None:
         return _ContentGuard("held by the operator", fresh)
+    if cand.path.name in pinned:
+        # The same pin the record pass honours (``pinned`` is read once per pass):
+        # a pinned conversation keeps its pad too.
+        return _ContentGuard(PINNED_REASON, fresh)
     if fresh is not None and fresh >= now:
         return _ContentGuard("active since the scan", fresh)
     if live_resolved is not None:
@@ -2960,6 +2985,7 @@ def _reclaim_pad_content(
     actor: str,
     trigger: str,
     copy_arm: "_CopyArm | None" = None,
+    pinned: frozenset[str] = frozenset(),
 ) -> _ContentOutcome:
     """Evaluate — and in a real pass execute — the content reclaim for ONE pad.
 
@@ -2982,7 +3008,12 @@ def _reclaim_pad_content(
     """
     outcome = _ContentOutcome()
     guard = _content_guard(
-        cand, config_dir=config_dir, now=now, cutoff=cutoff, live_resolved=live_resolved
+        cand,
+        config_dir=config_dir,
+        now=now,
+        cutoff=cutoff,
+        live_resolved=live_resolved,
+        pinned=pinned,
     )
     if guard.reason is not None:
         outcome.kept.append(guard.reason)
@@ -3289,8 +3320,51 @@ def _cached_json(path: Path) -> Any:
     return payload
 
 
+def _record_in_flight(record: dict[str, Any]) -> bool:
+    """Whether a roster record describes a child its parent could still act on.
+
+    The roster is the parent's LIFETIME LEDGER (the last 256 records, each with
+    ``outcome``/``settled_at``/``paused``/``result_text``), not a resumption set:
+    measured on the operator's store, 19,468 of 19,756 records were settled and
+    unpaused, and a parent that lives for weeks therefore pinned its whole
+    historical subtree so the delegated window could only ever reclaim children
+    whose parent had itself aged out. A SETTLED child is history — its result
+    text already lives in the parent's roster — while two states stay actionable:
+
+    * IN FLIGHT: ``settled_at`` absent/None, the child has not finished.
+    * PAUSED: ``hub`` resumes a paused child, and ``paused`` is ORTHOGONAL to
+      ``settled_at`` (44 records on the same store carry both), so a paused
+      record is protected even though it is stamped settled.
+
+    Fails CLOSED on a field this cannot read: a ``settled_at`` that is not a
+    finite number (a string, a bool, NaN) is not proof of settlement, and any
+    truthy ``paused`` protects (``"false"`` included — a value this build did not
+    write is not evidence the child is idle).
+    """
+    if record.get("paused"):
+        return True
+    settled_at = record.get("settled_at")
+    if isinstance(settled_at, bool) or not isinstance(settled_at, (int, float)):
+        return True
+    return not math.isfinite(settled_at)
+
+
 def roster_children(roster: Path) -> set[str]:
-    """Session ids a parent's roster records as its children.
+    """Session ids a parent's roster records as children it could still act on.
+
+    IN-FLIGHT OR PAUSED records only (:func:`_record_in_flight`); a settled child
+    is history and is not named. This is the ONE source of truth for both callers
+    — retention rule 3 (:func:`_protected_children`) and
+    :func:`active_parent_sessions` (compression keeps a child's transcript
+    uncompressed "while its parent could still resume it") — so they answer the
+    same question: a settled child cannot be resumed. A child named by SEVERAL
+    records is protected if ANY of them is in flight.
+
+    FAILS CLOSED on a record that is not an object: it cannot say which child it
+    describes, so it could be hiding an in-flight one, and the roster is
+    reported unknowable (the pass is skipped) exactly as a non-list ``records``
+    already was. (All 19,756 records on the operator's store are objects.) A dict
+    record that names no usable ``session_dir`` names no child and protects none.
 
     Raises :class:`_Unknowable` for a roster that exists but cannot be read or is
     not an object — the caller must not treat that as "no children".
@@ -3305,10 +3379,11 @@ def roster_children(roster: Path) -> set[str]:
         raise _Unknowable(f"{roster.parent.name}/{ROSTER_NAME}: records is not a list")
     names: set[str] = set()
     for record in records:
-        if isinstance(record, dict):
-            directory = record.get("session_dir")
-            if isinstance(directory, str) and directory:
-                names.add(os.path.basename(directory.rstrip("/\\")))
+        if not isinstance(record, dict):
+            raise _Unknowable(f"{roster.parent.name}/{ROSTER_NAME}: a record is not an object")
+        directory = record.get("session_dir")
+        if isinstance(directory, str) and directory and _record_in_flight(record):
+            names.add(os.path.basename(directory.rstrip("/\\")))
     return names
 
 
@@ -3394,6 +3469,7 @@ def _scan(
     now: float,
     should_stop: Callable[[], bool] | None,
     deadline: float | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> _Scan:
     """One pass over the store: no sizes, no rglob, a handful of syscalls per directory.
 
@@ -3405,6 +3481,7 @@ def _scan(
     only for an OLD directory that has a roster.
     """
     scan = _Scan()
+    began = time.monotonic()
     try:
         entries = [e for e in os.scandir(sessions_dir) if not e.name.startswith(".")]
     except OSError as exc:
@@ -3418,6 +3495,8 @@ def _scan(
         ):
             scan.stopped = True
             return scan
+        if index and index % SCAN_PROGRESS_EVERY == 0:
+            _notify(on_progress, "scan", index, len(entries), time.monotonic() - began)
         try:
             if not entry.is_dir(follow_symlinks=False):
                 continue
@@ -3562,6 +3641,28 @@ def active_parent_sessions(
 
 _WARNED_KEEP: set[tuple[str, str]] = set()
 
+#: The reason a pinned session is kept (record and content layers alike).
+PINNED_REASON = "pinned by the operator"
+
+
+def _pinned_sessions(config_dir: Path) -> frozenset[str]:
+    """Session ids the operator pinned in the sidebar; raises :class:`_Unknowable`.
+
+    The standing rule is "never remove a parent session, a PINNED session, or
+    anything with a live runtime", and until now pins were consulted nowhere in
+    the cleanup path. Uses the strict reader (``load_pin_ids``), not
+    ``read_pins``: the latter turns an unreadable file into ``[]``, which here
+    would mean "reap everything the operator pinned". Imported lazily because
+    ``local_operator.tui`` is heavy and this module must stay light for the
+    runtime child.
+    """
+    from local_operator.tui.sidebar_pins import load_pin_ids
+
+    try:
+        return frozenset(load_pin_ids(config_dir))
+    except (OSError, ValueError) as exc:
+        raise _Unknowable(f"sidebar-pins.json: {exc}") from exc
+
 
 def _evaluate(
     cand: _Cand,
@@ -3571,10 +3672,16 @@ def _evaluate(
     cutoff: float,
     parents: set[str],
     projects: set[str],
+    pinned: frozenset[str] = frozenset(),
     live_resolved: Path | None,
 ) -> str | None:
     """Why ``cand`` must be kept (a short phrase), or ``None`` if it may go."""
     name = cand.path.name
+    if name in pinned:
+        # A pin is the operator's own statement that this conversation stays,
+        # and nothing else in the pass consulted it: asked FIRST so the reason
+        # names the real guard instead of whichever rule happens to match.
+        return PINNED_REASON
     if name in parents:
         return "parent session still active"
     if name in projects:
@@ -3605,6 +3712,35 @@ def _evaluate(
     return None
 
 
+def effective_window_hours(policy: CleanupPolicy) -> int:
+    """The delegated age window a pass will actually apply, always in range.
+
+    One definition for the pass (``result.hours``) and for a caller that must
+    state the window BEFORE the pass runs (the CLI prints its policy line first
+    so output starts at once): two spellings of this clamp would let the line
+    promise a window the pass then did not use.
+    """
+    return max(
+        MIN_DELEGATED_MAX_AGE_HOURS,
+        min(MAX_DELEGATED_MAX_AGE_HOURS, policy.delegated_max_age_hours),
+    )
+
+
+def _notify(callback: Callable[..., None] | None, *args: Any) -> None:
+    """Call an observer; an observer's failure never changes a retention decision.
+
+    The callbacks are display hooks (a broken pipe on a closed terminal is the
+    realistic failure). A pass that aborted half-way through a removal batch
+    because stdout went away would be a worse outcome than a lost progress line.
+    """
+    if callback is None:
+        return
+    try:
+        callback(*args)
+    except Exception:  # noqa: BLE001 — display only; never alters the decision
+        logger.debug("session cleanup: observer callback failed", exc_info=True)
+
+
 def run_delegated_pass(
     config_dir: Path,
     policy_provider: Callable[[], CleanupPolicy],
@@ -3621,6 +3757,9 @@ def run_delegated_pass(
     should_stop: Callable[[], bool] | None = None,
     only: Iterable[str] | None = None,
     content_only: Iterable[str] | None = None,
+    on_progress: ProgressCallback | None = None,
+    on_plan: Callable[[Candidate], None] | None = None,
+    on_kept: Callable[[str, str], None] | None = None,
 ) -> DelegatedResult:
     """One scan-and-remove pass over the DELEGATED class.
 
@@ -3640,6 +3779,16 @@ def run_delegated_pass(
     pass, and shown then. ``None`` leaves the phase unconfined (startup passes,
     tests). ``actor`` and ``trigger`` are recorded on every reclaim (the log row
     and the pad's manifest), so a loss can be traced to what ran the pass.
+
+    ``on_progress``, ``on_plan`` and ``on_kept`` are OBSERVERS for a caller that
+    shows output while the pass runs (a dry run over thousands of directories
+    took minutes with nothing printed). ``on_plan(row)`` fires as each candidate
+    is decided removable and ``on_kept(name, reason)`` as each is decided kept,
+    in the same order and with the same values the final ``removed`` /
+    ``protected`` lists carry, so a caller that streamed needs no second print
+    and cannot print a row twice. ``on_progress(phase, done, total, elapsed_s)``
+    is a heartbeat from the scan and the content phase. None of them can change
+    a decision (:func:`_notify`).
     """
     # Resolved at CALL time so the module constants are the tuning surface (a
     # default bound at import would make them inert). ``budget_s=UNBOUNDED`` is
@@ -3656,10 +3805,7 @@ def run_delegated_pass(
     result = DelegatedResult(dry_run=dry_run)
     sessions_dir = config_dir / SESSIONS_DIRNAME
     policy = policy_provider()
-    result.hours = max(
-        MIN_DELEGATED_MAX_AGE_HOURS,
-        min(MAX_DELEGATED_MAX_AGE_HOURS, policy.delegated_max_age_hours),
-    )
+    result.hours = effective_window_hours(policy)
     if not policy.delegated_enabled and not force and not dry_run:
         result.skipped = "disabled"
         return result
@@ -3684,7 +3830,7 @@ def run_delegated_pass(
     # leave nothing recorded and no backlog to resume, i.e. a drain that never
     # continues; the scan is O(directories) in a handful of stats each (measured in
     # the PR), so the budget is spent where the cost is: removals.
-    scan = _scan(sessions_dir, cutoff, moment, should_stop, None)
+    scan = _scan(sessions_dir, cutoff, moment, should_stop, None, on_progress)
     result.scan_seconds = time.monotonic() - started
     result.scanned = scan.total
     result.window_names = scan.window_names
@@ -3699,6 +3845,11 @@ def run_delegated_pass(
     try:
         parents = _protected_children(scan)
         projects = open_project_sessions(config_dir)
+        # ONCE per pass, never per candidate: thousands of candidates must not
+        # each re-read the pin file. A pin file that exists and cannot be read
+        # skips the whole pass (like an unreadable roster) rather than reading
+        # as "nothing is pinned".
+        pinned = _pinned_sessions(config_dir)
     except _Unknowable as exc:
         logger.warning("session cleanup: delegated pass skipped, cannot read %s", exc)
         result.skipped = f"skipped: cannot read {exc}"
@@ -3773,6 +3924,7 @@ def run_delegated_pass(
         position += 1
         if cand.clock >= cutoff:
             result.protected.append((cand.path.name, "inside the (widened) window"))
+            _notify(on_kept, cand.path.name, "inside the (widened) window")
             continue
         keep = _evaluate(
             cand,
@@ -3781,10 +3933,12 @@ def run_delegated_pass(
             cutoff=cutoff,
             parents=parents,
             projects=projects,
+            pinned=pinned,
             live_resolved=live_resolved,
         )
         if keep is not None:
             result.protected.append((cand.path.name, keep))
+            _notify(on_kept, cand.path.name, keep)
             continue
         idle_hours = max(0.0, (moment - cand.clock) / 3600.0)
         # Sized here, for the rows about to be shown or removed only: a bounded
@@ -3803,6 +3957,7 @@ def run_delegated_pass(
         result.chosen.append(row)
         if dry_run:
             result.removed.append(row)
+            _notify(on_plan, row)
             continue
         try:
             done = remove_session_dir(
@@ -3950,6 +4105,14 @@ def run_delegated_pass(
             cand = content_pool[content_position]
             content_position += 1
             name = cand.path.name
+            if content_position % CONTENT_PROGRESS_EVERY == 0:
+                _notify(
+                    on_progress,
+                    "content",
+                    content_position,
+                    len(content_pool),
+                    time.monotonic() - started,
+                )
             try:
                 outcome = _reclaim_pad_content(
                     cand,
@@ -3962,6 +4125,7 @@ def run_delegated_pass(
                     actor=actor,
                     trigger=trigger,
                     copy_arm=copy_arm,
+                    pinned=pinned,
                 )
             except _PadAbort as abort:
                 result.errors += 1
@@ -4025,14 +4189,18 @@ def run_delegated_pass(
         # window, and one with NO USABLE clock (no marker, or an implausible birth
         # stamp). Calling the second "active recently" would state something the
         # scan does not know.
-        result.protected.extend(
+        tail = [
             (name, f"inside the {result.hours}h window or no usable clock")
             for name in scan.window_names
-        )
-        # Same cap, same place: these were never in the age rule at all (their
-        # origin is not reapable) and they have no sidebar row, so the dry run is
-        # the only surface that can tell the operator WHICH ones the count means.
-        result.protected.extend((name, "origin not reapable") for name in scan.kept_by_origin_names)
+        ]
+        tail.extend((name, "origin not reapable") for name in scan.kept_by_origin_names)
+        result.protected.extend(tail)
+        for name, reason in tail:
+            _notify(on_kept, name, reason)
+        # (``origin not reapable`` rides in ``tail`` above.) Same cap, same
+        # place: these were never in the age rule at all (their origin is not
+        # reapable) and they have no sidebar row, so the dry run is the only
+        # surface that can tell the operator WHICH ones the count means.
     result.freed_bytes = freed
     if not dry_run and result.removed:
         logger.warning(
