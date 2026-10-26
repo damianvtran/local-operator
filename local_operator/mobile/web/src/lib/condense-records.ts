@@ -220,6 +220,11 @@ export function toCondenseRecord(entry: TranscriptEntry): CondenseRecord | null 
 				args: entry.details?.args as Record<string, unknown> | undefined,
 			};
 		case "notice": {
+			/* Bookkeeping customs can project a text-less notice. It has no
+			   renderable content, so it must not enter buildRows as a blank row;
+			   importantly this guard is text-based, NOT a custom_type blocklist:
+			   session_state and MCP warnings with real text stay visible. */
+			if (!entry.text.trim()) return null;
 			const severity = String(entry.details?.severity ?? "info");
 			const customType = entry.custom_type || "";
 			if (customType === "wake_prompt" || entry.details?.notice_kind === "wake")

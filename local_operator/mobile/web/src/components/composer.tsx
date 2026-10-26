@@ -1514,6 +1514,11 @@ export function Composer({
 				    its real picker; only the presentation changes, never send/retry
 				    routing or the pending-envelope lifetime. */}
 				<div className={COMPOSER_CHIP_ROW}>
+					{projection.queued_count > 0 ? (
+						<span className={cn(COMPOSER_CHIP, "shrink-0")}>
+							{messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })}
+						</span>
+					) : null}
 					<div className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
 					{/* SHORT VIEWPORTS KEEP THE MODEL CONTROL (design round 2 D6, corrected in
 					   code round 3 C3-3). D6's saving is VERTICAL — the meta facts stop

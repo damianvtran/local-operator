@@ -122,6 +122,10 @@ OWNED_SPA_NAMESPACES = (
     # docs/design/mobile-relay-redesign.md §11.1). Its own namespace so no existing
     # English value changes: a value edit stales every locale's passed ledger rows.
     "relay.chrome",
+    # Condensed transcript bars and tool-fold units (C2). A separate owned
+    # namespace keeps the frozen relay.chrome source bytes and ledger hashes
+    # untouched while its English copy is prepared for the translation wave.
+    "relay.transcript",
 )
 
 GENERATED_HEADER = (
