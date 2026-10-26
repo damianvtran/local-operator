@@ -808,6 +808,45 @@ def test_a_repeat_install_is_idempotent_by_content(
     assert fake.calls == [], "an unchanged, running unit was restarted"
 
 
+def test_arms_from_sessions_with_different_paths_never_rewrite_the_unit(
+    redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The unit PATH must not depend on which session's arm rendered it.
+
+    Review/QA round 1 (M1/Q1): a render that copied the caller's PATH made two
+    sessions with different PATHs trade the unit back and forth — a rewrite plus
+    ``daemon-reload``/``enable``/``start`` on every alternation, the restart loop
+    ``wakes/supervisor.py`` names for the LaunchAgent. Alternating a sparse
+    manager PATH with a venv-and-scratchpad PATH must now be content-idempotent.
+    """
+    from local_operator.wakes import install as mod
+
+    store = tmp_path / "config"
+    fake = _systemd(monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "_systemd_supervisor_state",
+        lambda _config: mod.SupervisorState(loaded=True, running=True, pid=4321, detail="active"),
+    )
+    sparse = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin"
+    shim = tmp_path / "scratchpad" / ".lop-shim"
+    session = f"{shim}:{tmp_path / 'proj' / '.venv' / 'bin'}:.:/usr/bin"
+
+    monkeypatch.setenv("PATH", sparse)
+    mod.ensure_supervisor_installed(store)
+    installed = mod.plist_path().read_text(encoding="utf-8")
+    fake.calls.clear()
+
+    outcomes = []
+    for caller_path in (session, sparse, session):
+        monkeypatch.setenv("PATH", caller_path)
+        outcomes.append(mod.ensure_supervisor_installed(store).reason)
+
+    assert outcomes == ["already installed"] * 3
+    assert fake.calls == [], "a caller's PATH change rewrote and reloaded the unit"
+    assert mod.plist_path().read_text(encoding="utf-8") == installed
+
+
 def test_a_loaded_but_dead_supervisor_is_started_again(
     redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

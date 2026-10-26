@@ -287,8 +287,10 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
     name = "tunnel"
     try:
         if supervisors.supervisor() != supervisors.LAUNCHCTL:
-            # The systemd user unit has no plist to repair; it re-reads its unit
-            # file on every start, so it has never had this failure mode.
+            # The systemd user unit has no plist to repair. Its content CAN go
+            # stale (the `Environment="PATH=…"` line, `supervisors.systemd_path`),
+            # and only `lop tunnel install` rewrites it: an upgrade-time Linux
+            # refresh is audit A24's named follow-up (`update._linux_refresh_steps`).
             return launchd.PlistRefresh(name=name, kind="unsupported")
         path = service_path()
         if not launchd.is_own_plist(path, LABEL):
