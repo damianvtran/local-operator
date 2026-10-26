@@ -49,6 +49,17 @@ NAMELESS_CALL_RECOVERY_PROMPT = (
 )
 
 
+# This fixed prompt is also recognised on replay: the recovery is harness
+# chrome, never an instruction attributed to the operator.
+NO_PROGRESS_RECOVERY_PROMPT = (
+    "Harness recovery notice: you have repeated the same tool action or short "
+    "cycle with unchanged arguments and results, with no observable change. "
+    "Re-read the current state and take a different approach; do not repeat "
+    "the unchanged cycle. If progress requires an external change, report the "
+    "blocker instead of continuing to poll without progress."
+)
+
+
 #: What the loop tells the model after a turn arrived with no text and no tool
 #: calls on a clean stop. Like the nameless-call notice above it is the only
 #: record of why the conversation continues: the empty message itself is

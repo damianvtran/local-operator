@@ -28,7 +28,7 @@ import logging
 import re
 import time
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar, cast
@@ -71,10 +71,13 @@ from local_operator.harness.types import (
     AgentToolUpdate,
     ApprovalDescribeFn,
     Aside,
+    AudioContent,
     ChatRequest,
     Content,
     CustomMessage,
+    DocumentContent,
     FinalResponseCheck,
+    ImageContent,
     InvalidToolArgumentsError,
     LoopConfig,
     Message,
@@ -544,6 +547,14 @@ STEERING_INTERRUPT_POLL_S = 0.25
 REPEATED_TOOL_ERROR_WARNING = 3
 REPEATED_TOOL_ERROR_LIMIT = 6
 
+# Successful calls can stall too: an observed wait/ESC cycle ran 824 times
+# without changing its results. Count unchanged occurrences per short cycle,
+# not elapsed time, with headroom for ordinary jobs/wait/monitor polling.
+NO_PROGRESS_WARNING = 12
+NO_PROGRESS_LIMIT = 24
+MAX_NO_PROGRESS_RECOVERIES = 2
+NO_PROGRESS_MAX_PERIOD = 3
+
 #: How many times ONE run re-asks the model after a tool call arrived with no
 #: NAME at all. ``_model_turn`` drops such calls before anything executes them
 #: (a nameless call is wire-illegal, so keeping it killed later requests), and
@@ -562,6 +573,7 @@ MAX_NAMELESS_CALL_RECOVERIES = 2
 #: test imports them from here.
 NAMELESS_CALL_RECOVERY_PROMPT = _chrome_prompts.NAMELESS_CALL_RECOVERY_PROMPT
 WORDLESS_STOP_RECOVERY_PROMPT = _chrome_prompts.WORDLESS_STOP_RECOVERY_PROMPT
+NO_PROGRESS_RECOVERY_PROMPT = _chrome_prompts.NO_PROGRESS_RECOVERY_PROMPT
 LENGTH_STOP_RECOVERY_PROMPT = _chrome_prompts.LENGTH_STOP_RECOVERY_PROMPT
 CONTINUE_TRUNCATED_ANSWER_PROMPT = _chrome_prompts.CONTINUE_TRUNCATED_ANSWER_PROMPT
 CONNECTIVITY_CONTINUATION_PROMPT = _chrome_prompts.CONNECTIVITY_CONTINUATION_PROMPT
@@ -1239,6 +1251,79 @@ def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -
         # skipping the update would make two distinct errors collide.
         digest.update(result.text.encode("utf-8", "surrogatepass"))
     return digest.hexdigest()
+
+
+@dataclass
+class _NoProgressGuard:
+    """Bounded streaming detector for unchanged period-1/2/3 tool cycles.
+
+    Keep only the last three digests and three lag-match counts, never output
+    bodies. A changing result breaks that lag's streak; IDs and timing do not
+    count as progress. Work is one serialization/hash plus three comparisons
+    per call, independent of run length (hashing still scales with payload size).
+    """
+
+    history: deque[bytes] = field(default_factory=lambda: deque(maxlen=NO_PROGRESS_MAX_PERIOD))
+    matches: list[int] = field(default_factory=lambda: [0] * NO_PROGRESS_MAX_PERIOD)
+    warned: bool = False
+
+    def observe(self, call: ToolCall, result: ToolResult) -> tuple[int, int]:
+        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT):
+            self.reset()
+            return 1, 0
+        # Include all arguments, with canonical dictionary ordering. Content
+        # includes media content and its type, never capture provenance: a new
+        # revision can still show identical pixels. Whitelist the provider's
+        # media fields so future capture IDs/timestamps cannot disguise a loop.
+        # Hash the inline base64 content without retaining another payload copy;
+        # textual observations keep their existing serialization. Narrow on the
+        # CLASS, not on ``block.type``: the discriminator is a string, so a
+        # comparison leaves the union unnarrowed and the media fields
+        # unreadable to a type checker.
+        payload = json.dumps(
+            [
+                call.name,
+                call.arguments,
+                result.is_error,
+                [
+                    (
+                        {
+                            "type": block.type,
+                            "mime_type": block.mime_type,
+                            "sha256": hashlib.sha256(
+                                block.data.encode("utf-8", "surrogatepass")
+                            ).hexdigest(),
+                        }
+                        if isinstance(block, (ImageContent, AudioContent, DocumentContent))
+                        else block.model_dump(mode="json")
+                    )
+                    for block in result.content
+                ],
+            ],
+            sort_keys=True,
+            default=str,
+        )
+        digest = hashlib.sha256(payload.encode("utf-8", "surrogatepass")).digest()
+        best = (1, 1)
+        for index in range(NO_PROGRESS_MAX_PERIOD):
+            period = index + 1
+            self.matches[index] = (
+                self.matches[index] + 1
+                if len(self.history) >= period and self.history[-period] == digest
+                else 0
+            )
+            repetitions = 1 + self.matches[index] // period
+            if repetitions > best[1]:
+                best = period, repetitions
+        if not any(self.matches):
+            self.warned = False
+        self.history.append(digest)
+        return best
+
+    def reset(self) -> None:
+        self.history.clear()
+        self.matches = [0] * NO_PROGRESS_MAX_PERIOD
+        self.warned = False
 
 
 async def _abortable_stream(
@@ -2138,6 +2223,8 @@ class AgentLoop:
         run_context_tokens: int | None = None
         last_error_batch: str | None = None
         repeated_error_batches = 0
+        no_progress = _NoProgressGuard()
+        no_progress_recoveries = 0
         # Re-asks this run has spent on turns whose tool calls arrived with no
         # name; see ``MAX_NAMELESS_CALL_RECOVERIES``.
         nameless_call_recoveries = 0
@@ -2162,6 +2249,7 @@ class AgentLoop:
                     if pending:
                         last_error_batch = None
                         repeated_error_batches = 0
+                        no_progress.reset()
                     self._drain_pending(pending, context)
                     pending = []
 
@@ -3451,6 +3539,39 @@ class AgentLoop:
                         context.messages.append(recovery)
                         new_messages.append(recovery)
                         yield _notice(_nt.repeated_tool_errors(), kind="warning")
+
+                    # Inspect executed calls across batch boundaries: a model
+                    # may emit a cycle as one batch or as several turns.
+                    recovery_needed = False
+                    if len(assistant.tool_calls) != len(tool_results):
+                        no_progress.reset()
+                    else:
+                        for call, result in zip(assistant.tool_calls, tool_results):
+                            period, repetitions = no_progress.observe(call, result)
+                            if repetitions >= NO_PROGRESS_LIMIT:
+                                yield AgentEndEvent(
+                                    messages=new_messages,
+                                    error=(
+                                        "No progress: repeated tool action or short cycle "
+                                        f"(period {period}) produced unchanged arguments "
+                                        f"and results for {repetitions} repetitions. "
+                                        "The harness stopped this repetition; re-read the "
+                                        "current state and take a different approach."
+                                    ),
+                                    generation=generation,
+                                )
+                                return
+                            if repetitions >= NO_PROGRESS_WARNING and not no_progress.warned:
+                                no_progress.warned = True
+                                recovery_needed = True
+                    if recovery_needed and no_progress_recoveries < MAX_NO_PROGRESS_RECOVERIES:
+                        no_progress_recoveries += 1
+                        recovery = Message.user(NO_PROGRESS_RECOVERY_PROMPT)
+                        context.messages.append(recovery)
+                        new_messages.append(recovery)
+                        yield MessageStartEvent(message=recovery)
+                        yield MessageEndEvent(message=recovery)
+
                     # THE QUIET-TURN END (docs/design/quiet-turns.md §4): a
                     # ``no_reply`` call is an affirmative way to end the turn,
                     # so a batch whose LAST result carries the quiet marker ends

@@ -146,7 +146,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The SEVEN, and why each is persisted:
+    The EIGHT, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``CONTINUATION_AFTER_COMPACTION`` — the session's auto-continuation after a
@@ -156,6 +156,8 @@ def harness_chrome_prompts() -> tuple[str, ...]:
       notice instead.
     - ``NAMELESS_CALL_RECOVERY_PROMPT`` — the re-ask after a tool call arrived
       with no name and was dropped; the live run showed a notice instead.
+    - ``NO_PROGRESS_RECOVERY_PROMPT`` — the steer after unchanged tool calls
+      repeat; persisted so replay records the harness intervention.
     - ``WORDLESS_STOP_RECOVERY_PROMPT`` — the re-ask after a turn arrived with
       no text and no tool calls on a clean stop; the live run showed a notice
       instead.
@@ -196,6 +198,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
+        NO_PROGRESS_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
     )
     from local_operator.session.goal_loop import LOOP_PROMPT
@@ -205,6 +208,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         CONTINUATION_AFTER_COMPACTION,
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
+        NO_PROGRESS_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
