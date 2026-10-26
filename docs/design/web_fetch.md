@@ -439,6 +439,47 @@ that *references* spill keeps each module doing one thing. The index inherits
 spill's bound for free because it holds no content and self-checks against
 `stat`.
 
+### 8.1 Query passages (`query`) — answering from the first preview
+
+**Why.** An oversized page used to come back as head + tail of the 8 KB
+budget. Research answers usually sit in the middle (a parameter table, one RFC
+section), so the next model turn was a `read spill://…?q=` to find it.
+Measured over 490 recent `web_fetch` results: 47% were oversized, and 59% of
+those were followed by exactly that re-read — a full extra round trip (~30 s)
+for a sentence the tool already held. `query` lets the model say what it is
+looking for in the fetch itself.
+
+**Shape.** With `query` set and an oversized prose/markdown result, the preview
+is: header, a ~700-char lead (`[lines 1-N of T]`), the top-ranked passages in
+document order each labelled `[lines a-b · § heading]`, a one-line count of
+further matches with a `?q=` hint, and the standard spill footer. The whole
+preview stays within `TOOL_OUTPUT_LIMIT_CHARS`, so asking never costs more
+context than not asking.
+
+**Constraints.**
+
+- *Line labels are the stored copy's.* `local_operator/web_fetch/passages.py`
+  ranks the lines `SpillStore.read_lines` serves, never the pre-spill string,
+  so `read spill://<h> range=a-b` returns exactly the text shown (span
+  stripping and the 4 MB entry clip would otherwise shift coordinates).
+- *Pure, deterministic, offline, linear.* BM25 term weighting plus bonuses for
+  exact identifiers (`max_connections`), numbers and adjacent query words; no
+  model call, network or dependency; ties break on document order. A 5 MB page
+  is chunked and tokenised once (pinned structurally in `test_passages.py`).
+- *Lexical only.* It cannot paraphrase; the spill handle remains the fallback.
+- *Query is a view, not a variant.* It never enters the cache key: a hit with
+  a different query re-shapes the cached content with no network call.
+- *Narrow trigger.* Inline-sized pages, JSON (a cut-out passage is not JSON)
+  and binary notices ignore `query`. No match falls back to head/tail and says
+  so. No `query` is byte-identical to the pre-`query` preview (golden pin in
+  `test_tool.py`); `read <url>` and `lop web-fetch` never pass one.
+
+**Measuring it.** `scripts/bench_web_research.py --offline` fetches each
+long-page task once through two worktrees and reports whether the expected
+answer is in the head/tail preview vs the query preview (deterministic, no
+tokens); without `--offline` it runs a live A/B of real research questions
+through `lop exec`.
+
 ---
 
 ## 9. Config schema

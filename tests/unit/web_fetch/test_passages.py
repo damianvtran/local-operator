@@ -8,6 +8,7 @@ that resolve verbatim through ``read spill://<h> range=``.
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import httpx
@@ -281,3 +282,48 @@ async def test_tool_entry_point_threads_query(context: ToolContext) -> None:
         "c1", {"url": "https://example.com/t", "query": "max_connections"}, context=context
     )
     assert NEEDLE in result.content[0].text
+
+
+def test_markdown_escaped_identifier_still_scores_as_identifier() -> None:
+    """markdownify writes ``SQLITE\\_MAX\\_COLUMN``; the query names it plainly."""
+    lines = ["# Limits", ""]
+    for i in range(40):
+        lines += [f"## Limit {i}", "", f"The default for limit {i} is configurable.", ""]
+    # Decoys carry every query WORD, more often than the target does, but never
+    # the identifier itself: only the identifier bonus can rank the target first,
+    # and that bonus only fires if the escaped spelling is unescaped for scoring.
+    for i in range(3):
+        lines += [
+            f"## Display {i}",
+            "",
+            "The default SQLite shell max column width; the default column is the max "
+            "SQLite column by default.",
+            "",
+        ]
+    # Its own section, so the target is not merged into a decoy's chunk.
+    lines += ["## Columns", ""]
+    target = len(lines) + 1
+    lines += [r"The setting for SQLITE\_MAX\_COLUMN is 2000.", ""]
+    # One passage only, so the assertion is about the TOP-ranked chunk.
+    sel = select_passages(lines, "SQLITE_MAX_COLUMN default", budget=300, max_passages=1)
+    assert sel is not None
+    assert sel.passages[0].start <= target <= sel.passages[0].end
+    assert "\\_" in sel.passages[0].text, "shown text stays the stored text"
+
+
+@pytest.mark.asyncio
+async def test_more_matches_hint_resolves_through_read(context: ToolContext) -> None:
+    page = _long_markdown()
+    preview, details, _e = await run_fetch(
+        "https://example.com/h",
+        tool_name="web_fetch",
+        context=context,
+        transport=_transport(page),
+        query="group settings logging",
+    )
+    assert details["query_more"] > 0
+    match = re.search(r'\[\d+ more passages? match — read\(path="([^"]+)"\)\]', preview)
+    assert match, preview[-600:]
+    found = await execute_read("r", {"path": match.group(1)}, None, None, context)
+    assert found.is_error is False
+    assert "Group" in found.content[0].text

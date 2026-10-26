@@ -58,6 +58,11 @@ _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 _LIST_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+")
 _DIGIT_RE = re.compile(r"\d")
+#: Rendered docs decorate headings with anchor links (``[#](#guc-…)``,
+#: ``[15.5.20.](#section-15.5.20)``). In a passage label they are noise the
+#: model pays for on every passage, so links collapse to their text and empty
+#: or ``#`` anchors disappear.
+_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 
 #: Query words that mean "the answer is a number" — a chunk with a digit in it
 #: gets a small nudge for such a query, because "what is the default X" is
@@ -160,6 +165,12 @@ def _is_identifier(raw: str) -> bool:
     )
 
 
+def _clean_heading(text: str) -> str:
+    """A heading as a short label: link text only, anchors and escapes gone."""
+    text = _LINK_RE.sub(lambda m: "" if m.group(1) in ("", "#", "¶") else m.group(1), text)
+    return " ".join(text.replace("\\", "").split())[:120]
+
+
 def _block_kind(line: str) -> str:
     stripped = line.lstrip()
     if stripped.startswith("|"):
@@ -203,7 +214,7 @@ def chunk_lines(lines: list[str]) -> list[_Chunk]:
             match = _HEADING_RE.match(line)
             if match:
                 close()
-                heading = match.group(2)[:120]
+                heading = _clean_heading(match.group(2))
                 # The heading line is its own chunk so a query naming the
                 # section ("Misdirected Request") can land on it directly.
                 chunks.append(_Chunk(number, number, heading, len(line)))
@@ -273,7 +284,11 @@ def _score_chunks(
     df: Counter[str] = Counter()
     total_len = 0
     for chunk in chunks:
+        # markdownify escapes ``_`` and ``*`` (``SQLITE\\_MAX\\_COLUMN``); score
+        # the unescaped form so an identifier query matches the identifier.
+        # Scoring only — the passage shown is still the stored text verbatim.
         text = "\n".join(lines[chunk.start - 1 : chunk.end])
+        text = text.replace("\\_", "_").replace("\\*", "*")
         terms = _terms(text)
         heading_terms = _terms(chunk.heading)
         counts = Counter(t for t in terms if t in wanted)
