@@ -46,8 +46,18 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const LIB = join(HERE, "..", "src/lib");
 const SOURCES_PATH = join(LIB, "parity-sources.json");
 
-/** The default sibling checkout: this repository's sibling by directory name. */
-const DEFAULT_SIBLING = resolve(join(HERE, "..", "..", "..", "..", "..", "..", "local-operator-ui"));
+/**
+ * THE REPOSITORY ROOT, and the sibling checkout beside it.
+ *
+ * `HERE` is `<repo>/local_operator/mobile/web/scripts`, so FOUR levels up is the
+ * repository root and the sibling is its SIBLING DIRECTORY. Round 2 measured the old
+ * six-level climb resolving to the HOME directory (or, inside a `.worktrees/<x>`
+ * checkout, to `local-operator-ui` under the worktrees directory), so the default
+ * silently found nothing and printed the advisory skip on the very layout it was
+ * written for (C1-M1).
+ */
+const REPO_ROOT = resolve(HERE, "..", "..", "..", "..");
+const DEFAULT_SIBLING = resolve(REPO_ROOT, "..", "local-operator-ui");
 
 const args = process.argv.slice(2);
 const latest = args.includes("--latest");

@@ -1724,8 +1724,10 @@ def fold_messages_to_entries(
                         # The condensation facts (types.TranscriptEntry): the
                         # provider's phase declaration and whether this row
                         # carried calls of its own. Both arms set them, and
-                        # ``tests/unit/mobile/test_projection.py`` pins the two
-                        # arms equal for the same history.
+                        # ``tests/unit/mobile/test_projection_condense_fields.py``
+                        # is what pins them (``test_the_assistant_phase_survives_
+                        # both_arms``); the arm each row type really reaches is
+                        # stated in that file's comments.
                         stop_reason=_stop_reason_of(message),
                         calls_tools=_calls_tools_of(message),
                     )

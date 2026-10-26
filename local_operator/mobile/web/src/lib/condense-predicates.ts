@@ -2,12 +2,13 @@
  * THE DESKTOP PREDICATES THE CONDENSATION MODEL READS, lifted verbatim.
  *
  * SOURCES, at the desktop sourceHash `parity-sources.json` pins
- * (`243bcbf9c2a42e93…`), line ranges of THAT source:
- * - `components/trace/tool-row-model.ts` — `isPartialDelivery` 553-617,
- *   `isFailedResult` 618-802, `displayName` 803-831.
+ * (`03068f15e59435d7…`), line ranges of THAT source (measured, round 2 - the round-1
+ * ranges ended at the next function's start, not at its own end):
+ * - `components/trace/tool-row-model.ts` — `isPartialDelivery` 553-573,
+ *   `isFailedResult` 618-741, `displayName` 803-833.
  * - `components/trace/receipt-row-model.ts` — `receiptFamilyOf` 194-213,
- *   `isInternalReceipt` 214-317, the `PeerSender` type 318-331,
- *   `EMPTY_SENDER` 332-352, `peerName` 353-388, `peerIdentity` 389-408.
+ *   `isInternalReceipt` 214-252, the `PeerSender` type 318-331,
+ *   `EMPTY_SENDER` 332-352, `peerName` 353-388, `peerIdentity` 389-409.
  *
  * WHY A SEPARATE FILE. The model ports (`condense-rows.ts`, `condense-segments.ts`,
  * `condense-fold.ts`, `condense-plan.ts`) are copies of desktop modules, and those

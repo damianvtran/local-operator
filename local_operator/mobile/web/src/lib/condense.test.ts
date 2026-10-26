@@ -17,14 +17,15 @@
  * model; this test runs ours. A port that drifts fails HERE, in the tree that
  * drifted, rather than on the phone.
  *
- * THE SKIP-LIST IS EXACT AND NAMED (architect §6.3). Three token shapes cannot
- * cross this wire at all, each with the fallback this surface actually renders:
- *
- *  - `Z` / `R` - the quiet `no_reply` call (settled `Z`, running `R`). The relay
- *    never mints that row (quiet-turn design §5, S1), so a quiet-closed run reads
- *    here as a STEERED run: its earlier exchange condenses only when the merged
- *    run settles and its bar is labelled `Steered`. Measured: 2 calls in 1 of 102
- *    journal copies, so it is recorded rather than fixed.
+ * THE SKIP IS ONE FAMILY, MEASURED (architect §5; corrected in round 2, C1-m5).
+ * `Z` / `R` - the quiet `no_reply` call, settled and running - cannot cross this
+ * wire at all: the relay never mints that row (quiet-turn design §5, S1). WHAT
+ * THAT MEANS HERE is that the turn does NOT SPLIT. A quiet close ends the turn on
+ * the desktop, so the next prompt opens a new run; with no such row, both prompts
+ * stay in ONE run, whose earlier exchange condenses when the merged run settles.
+ * The label is the run's own - `Steered` belongs to a user row inside a run, and a
+ * user row is pinned, so no bar changes its words. `the quiet-closed fallback the
+ * skip-list names` asserts the split (2 runs on the desktop shape, 1 here).
  * And the closed-notice and terminal-notice tokens DO replay, because C1's
  * `terminal` flag is what makes a notice `complete` on this wire (`K` closed/info,
  * `M` terminal/error, `O` a plain notice): the relay's `:stop` notice, a live
@@ -485,11 +486,26 @@ describe("the wire-to-record mapping (the one relay-specific file)", () => {
 		expect(rowKey({ id: "u1", kind: "user", tool_call_id: "" })).toBe("u1");
 	});
 
-	it("an unknown relay kind feeds nothing rather than inventing a row", () => {
+	it("two kinds the wire carries map to their arms", () => {
 		const records = toCondenseRecords([entry({ kind: "reasoning" }), entry({ id: "x", kind: "steer" })]);
 		expect(records).toHaveLength(2);
 		expect(records[0]).toMatchObject({ kind: "assistant", streaming: true, text: "" });
 		expect(records[1]).toMatchObject({ kind: "user" });
+	});
+
+	it("an unknown relay kind feeds NOTHING rather than inventing a row", () => {
+		/*
+		 * THE `default -> null` ARM, which round 1 never reached: the test above it
+		 * only exercised kinds that HAVE an arm (C1-m5). A bundle newer than this
+		 * client can send a kind this map does not know, and the rule is that it
+		 * contributes no record at all - never a placeholder row, which would paint
+		 * an empty line the reader cannot dismiss.
+		 */
+		const unknown = { ...entry({ id: "u-new" }), kind: "some_future_kind" } as unknown as TranscriptEntry;
+		expect(toCondenseRecords([unknown])).toEqual([]);
+		/* And it does not disturb its neighbours. */
+		const mixed = toCondenseRecords([entry({ id: "u1", kind: "user" }), unknown, entry({ id: "a1" })]);
+		expect(mixed.map((record) => record.id)).toEqual(["u1", "a1"]);
 	});
 });
 

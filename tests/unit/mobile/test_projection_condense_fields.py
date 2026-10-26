@@ -45,8 +45,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     TextContent,
 )
-from local_operator.mobile.projection import ProjectionFold
-from local_operator.mobile.projection import cap_projection_frame
+from local_operator.mobile.projection import ProjectionFold, cap_projection_frame
 from local_operator.mobile.types import (
     SessionProjection,
     SessionRecord,
@@ -196,20 +195,39 @@ def test_a_session_incident_is_terminal_in_the_history_arm() -> None:
 
 
 def test_a_bridge_delivery_carries_its_family_in_both_arms() -> None:
-    """The one receipt family the LIVE path really delivers.
+    """The one receipt family the LIVE path really delivers - through the EVENT.
 
     ``team_bridge_message`` is admitted by the live delivery path and folded by the
     history path, so it is the family where "both arms agree" is a claim about
-    production rather than about a fixture. Round 1 measured the two arms matching
-    on this type (notice + custom_type on each), which is what this pins.
+    production. ROUND 2 (C1-m7) showed the round-1 test was not that: it called
+    ``note_nonpeer_delivery`` directly, while production reaches that method only
+    from a ``PeerMessageDeliveredEvent`` on a fold BOUND to a peer-cycle source -
+    unbound, the same event paints no row at all (measured: ``[]``). So this drives
+    ``fold_event`` on a bound fold, the way ``test_peer_cycle_display.py`` does, and
+    the round-1 shape would have passed with the production path broken.
     """
-    messages: list[AgentMessage] = [custom(TEAM_BRIDGE_TYPE, "c-bridge")]
-    durable = history_fold(messages)
-    live = live_fold(messages)
-    assert durable["c-bridge"].custom_type == TEAM_BRIDGE_TYPE
-    assert live["c-bridge"].custom_type == TEAM_BRIDGE_TYPE
-    assert durable["c-bridge"].terminal is False
-    assert live["c-bridge"].terminal is False
+    from local_operator.harness.types import PeerMessageDeliveredEvent
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.mobile.types import SessionProjection
+
+    projection = SessionProjection(session_id="s-live", pid=1)
+    fold = ProjectionFold(projection)
+    fold.set_peer_cycle_source(None, transcript=None, owner_epoch="owner-epoch")
+    fold.fold_event(
+        PeerMessageDeliveredEvent(
+            message_id="m-bridge",
+            body="bridge payload",
+            custom_type=TEAM_BRIDGE_TYPE,
+            sender={},
+        )
+    )
+    live = {row.id: row for row in projection.transcript}
+    assert "m-bridge" in live, [row.kind for row in projection.transcript]
+    durable = history_fold([custom(TEAM_BRIDGE_TYPE, "m-bridge")])
+    assert durable["m-bridge"].custom_type == TEAM_BRIDGE_TYPE
+    assert live["m-bridge"].custom_type == TEAM_BRIDGE_TYPE
+    assert durable["m-bridge"].terminal is False
+    assert live["m-bridge"].terminal is False
 
 
 def test_a_job_result_and_a_monitor_prompt_keep_their_family_in_the_history_arm() -> None:
