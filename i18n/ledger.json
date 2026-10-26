@@ -1960,6 +1960,25 @@
     },
     {
       "locale": "ru",
+      "namespace": "tui.notifications",
+      "source_sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+      "translator": {
+        "agent": "tui-tr-ru",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, tui-audit-ru)",
+        "model": "radient/auto",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "ntt2 delta audit: the 3 changed keys (chip_high, pointer_unread, stale_skipped) re-audited and passed, 0 blocker/major, 1 nit; 72/72 keys, 3 replaced lines; bundle i18n/audits/evidence/ru/tui.notifications/ntt2/. Auditor served radient/auto (quota chain, disclosed)."
+    },
+    {
+      "locale": "ru",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
       "translator": {
