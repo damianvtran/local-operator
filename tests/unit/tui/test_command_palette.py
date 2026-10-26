@@ -405,7 +405,9 @@ class TestWidget:
                     str(option.prompt).split("\n", 1)[0]
                     for option in app.screen.query_one(CommandList).options
                 ]
-                if labels:
+                # System hits can arrive before the shielded session scan;
+                # their presence does not mean the intended row is ready.
+                if any("stored conversation" in label for label in labels):
                     break
                 await pilot.pause(0.05)
             assert any("stored conversation" in label for label in labels), labels
