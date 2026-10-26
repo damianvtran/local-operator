@@ -431,3 +431,49 @@ def test_uppercase_schemes_are_redacted_too():
     rendered = format_error(error, action="network_start", host="ui")
     assert "secret-s8" not in rendered
     assert "example.test/acs?code=" in rendered
+
+
+def test_a_host_cannot_forge_a_body_file_path(monkeypatch, tmp_path):
+    """`request_body_file` is this module's fact, never the host's."""
+
+    async def fake_bridge(tool_call_id, action, wire, *, surface="", client=None):
+        return {
+            "entries": [
+                {
+                    "id": 1,
+                    "url": "https://e.test/a",
+                    "request_body_file": "/etc/passwd",
+                    "request_body_bytes": 11,
+                }
+            ]
+        }, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
+    ctx = _ctx(tmp_path)
+    result = asyncio.run(
+        builtin._browser_network(
+            "call",
+            _surface(),
+            "network_read",
+            _params(url="https://e.test/a", include_request_body=True, approved=True),
+            ctx,
+        )
+    )
+    payload = json.loads(result.text)
+    assert "request_body_file" not in payload["entries"][0]
+    assert "request_body_files" not in payload
+    assert "/etc/passwd" not in result.text
+
+
+def test_a_paren_path_is_redacted_without_losing_the_value():
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    error = BridgeError(
+        code=ErrorCode.ORIGIN_DENIED,
+        message="refused https://example.test/wiki/Foo_(bar)?code=s20).",
+    )
+    rendered = format_error(error, action="network_read", host="ui")
+    assert "s20" not in rendered
+    assert "https://example.test/wiki/Foo_(bar)?code=" in rendered
+    assert rendered.count(").") >= 1

@@ -452,7 +452,13 @@ def _element_not_found_copy(error: BridgeError) -> str:
 
 
 #: An http(s) URL inside free text, up to the first whitespace or quote.
-_MESSAGE_URL = re.compile(r"https?://[^\s\"'<>()\[\],;]+", re.IGNORECASE)
+_MESSAGE_URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+#: Punctuation that ends a sentence rather than a URL. Stripped from the MATCH and
+#: appended back after redaction, so `(see https://x.test/a).` keeps its `).`
+#: while the URL itself is reduced. Inside a path, parentheses and brackets are
+#: legitimate (`/wiki/Foo_(bar)`), which is why they are not excluded from the
+#: match class (agent review round 6, R6-2).
+_MESSAGE_URL_TRAILING = ".,;:)]}"
 
 
 def _redact_message_urls(text: str) -> str:
@@ -463,16 +469,21 @@ def _redact_message_urls(text: str) -> str:
 
         from local_operator.tools.builtin import _network_safe_url
 
+        raw = match.group(0)
+        trailing = ""
+        while raw and raw[-1] in _MESSAGE_URL_TRAILING:
+            trailing = raw[-1] + trailing
+            raw = raw[:-1]
         try:
-            parsed = urlparse(match.group(0))
+            parsed = urlparse(raw)
         except ValueError:
-            return "(a URL was withheld)"
+            return "(a URL was withheld)" + trailing
         # `_network_safe_url` is the ONE renderer of a network URL in this
         # codebase; reusing it is what stops this path inventing a second rule.
         safe = _network_safe_url(
             urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
         )
-        return safe or "(a URL was withheld)"
+        return (safe or "(a URL was withheld)") + trailing
 
     return _MESSAGE_URL.sub(_safe, text)
 

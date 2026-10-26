@@ -25441,13 +25441,15 @@ _NETWORK_METADATA_KEYS = frozenset(
         "error_text",
         "canceled",
         "finished",
-        # Added BY THIS MODULE, not by the host: the private file each body was
-        # written to and its byte count. The body itself is never a key here —
-        # it is popped into a file before this filter runs.
-        "request_body_file",
-        "request_body_bytes",
     }
 )
+
+#: Keys THIS module adds to an entry after writing a body. Deliberately NOT in
+#: `_NETWORK_METADATA_KEYS`: a host that sent one of these would otherwise have
+#: its value rendered, and on a body-less entry the result would describe a
+#: private file that does not exist (agent review round 6, R6-1). They are
+#: merged in by index after the filter, from this module's own write results.
+_NETWORK_BODY_FACT_KEYS = frozenset({"request_body_file", "request_body_bytes"})
 
 
 def _network_safe_url(raw: object) -> str:
@@ -25607,11 +25609,20 @@ async def _browser_network(
         # bounded here rather than accumulated as files appear.
         if sum(len(data) for _entry, data in pending) > NETWORK_MAX_READ_BODY_BYTES:
             raise ValueError("the read's combined request bodies exceed the 256 KiB limit")
+        facts_by_id: dict[int, dict[str, Any]] = {}
         for entry, data in pending:
             facts = _write_network_body(data, context)
             written.append(Path(facts["request_body_file"]))
-            entry.update(facts)
+            identifier = entry.get("id")
+            if isinstance(identifier, int):
+                facts_by_id[identifier] = facts
         safe = _network_metadata_result(raw)
+        # Facts are attached AFTER the allowlist, keyed by the entry id this
+        # module already trusted, so no host-supplied path can be rendered.
+        for entry in safe.get("entries", []):
+            facts = facts_by_id.get(entry.get("id"))
+            if facts:
+                entry.update(facts)
         if action == "network_read" and params.include_request_body:
             files = [
                 entry["request_body_file"]
