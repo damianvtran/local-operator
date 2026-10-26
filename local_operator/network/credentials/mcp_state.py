@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from local_operator.network.credentials.placement import (
     _assert_no_material,
@@ -146,24 +147,18 @@ def record(
     """
     if not network_id or not key or state not in STATES:
         return
+    row = {
+        "state": state,
+        # Bounded here rather than at every reader: these strings ride
+        # audit rows and --json documents, and a broker code or device
+        # name is a name, never a sentence the owner composed.
+        "code": str(code or "")[:64],
+        "owner_device": str(owner_device or "")[:128],
+        "owner_name": str(owner_name or "")[:128],
+        "at": time.time(),
+    }
     try:
-        _write(
-            network_id,
-            {
-                **load(network_id, root),
-                key: {
-                    "state": state,
-                    # Bounded here rather than at every reader: these strings ride
-                    # audit rows and --json documents, and a broker code or device
-                    # name is a name, never a sentence the owner composed.
-                    "code": str(code or "")[:64],
-                    "owner_device": str(owner_device or "")[:128],
-                    "owner_name": str(owner_name or "")[:128],
-                    "at": time.time(),
-                },
-            },
-            root,
-        )
+        _update(network_id, root, lambda entries: {**entries, key: row})
     except Exception:  # noqa: BLE001 — bookkeeping must never fail a borrow
         return
 
@@ -173,11 +168,17 @@ def clear(network_id: str, key: str, *, root: Path | None = None) -> None:
     if not network_id or not key:
         return
     try:
-        entries = load(network_id, root)
-        if key not in entries:
+        # The unlocked read only skips the lock (and the directory it would create)
+        # when there is nothing to do; ``_update`` re-reads under the lock to decide.
+        if key not in load(network_id, root):
             return
-        entries.pop(key, None)
-        _write(network_id, entries, root)
+        _update(
+            network_id,
+            root,
+            lambda entries: (
+                {k: v for k, v in entries.items() if k != key} if key in entries else None
+            ),
+        )
     except Exception:  # noqa: BLE001 — see :func:`record`
         return
 
@@ -191,20 +192,61 @@ def forget_device(network_id: str, device: str, *, root: Path | None = None) -> 
     """
     if not network_id or not device:
         return
-    try:
-        entries = load(network_id, root)
+
+    def drop(entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]] | None:
         kept = {
             key: row for key, row in entries.items() if str(row.get("owner_device") or "") != device
         }
-        if len(kept) == len(entries):
+        return kept if len(kept) != len(entries) else None
+
+    try:
+        # Unlocked precheck for the no-op only; the decision is ``_update``'s locked read.
+        if drop(load(network_id, root)) is None:
             return
-        _write(network_id, kept, root)
+        _update(network_id, root, drop)
     except Exception:  # noqa: BLE001 — see :func:`record`
         return
 
 
+@contextmanager
+def _evidence_lock(network_id: str, root: Path | None) -> Iterator[None]:
+    """The cross-process lock beside the evidence file, held for a whole update.
+
+    NOT REENTRANT: it is an ``flock`` on a freshly opened descriptor, so a holder
+    that took it again would wait on itself. That is why only :func:`_update`
+    takes it, and :func:`_write` runs inside that hold rather than taking its own.
+    """
+    target = mcp_auth_path(network_id, root)
+    _ensure_private_dir(target.parent, root=_config_root(root))
+    with _cross_process_lock(target.parent / MCP_AUTH_LOCK_FILENAME, root=_config_root(root)):
+        yield
+
+
+def _update(
+    network_id: str,
+    root: Path | None,
+    change: Callable[[dict[str, dict[str, Any]]], dict[str, dict[str, Any]] | None],
+) -> None:
+    """Read, change and write the evidence under ONE hold of the lock.
+
+    WHY (#2991 review round 1, R4): the writers used to ``load`` outside the lock
+    and take it only to write, so a relay ``record`` that loaded before a
+    ``forget_device`` and wrote after it put the forgotten device's row back — the
+    lost-update the placement document closed with ``_document_lock``. ``change``
+    returns the new entries, or ``None`` for "nothing to write".
+    """
+    with _evidence_lock(network_id, root):
+        updated = change(load(network_id, root))
+        if updated is not None:
+            _write(network_id, updated, root)
+
+
 def _write(network_id: str, entries: dict[str, dict[str, Any]], root: Path | None) -> None:
-    """One atomic, 0600, locked write. The caller has already swallowed nothing."""
+    """One atomic, 0600 write — THE ONE WRITER. The caller holds :func:`_evidence_lock`.
+
+    Only :func:`_update` calls it, so every write is built from a read made under
+    the same hold of the lock. The caller has already swallowed nothing.
+    """
     from local_operator.network import store
 
     target = mcp_auth_path(network_id, root)
@@ -216,9 +258,7 @@ def _write(network_id: str, entries: dict[str, dict[str, Any]], root: Path | Non
     # The same structural refusal the placement writer makes: this document may
     # never grow a field that could hold material.
     _assert_no_material(payload, where="mcp auth")
-    _ensure_private_dir(target.parent, root=_config_root(root))
-    with _cross_process_lock(target.parent / MCP_AUTH_LOCK_FILENAME, root=_config_root(root)):
-        store._write_private_json(target, payload)
+    store._write_private_json(target, payload)
 
 
 def file_is_private(path: Path) -> bool:

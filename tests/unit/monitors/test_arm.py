@@ -211,11 +211,12 @@ async def test_arming_glob_with_an_unknown_argument_is_refused_without_a_write(r
         await arm_monitor(
             root,
             "shape01",
-            {"tool": "glob", "arguments": {"pattern": "*.py", "path": "/tmp"}, "every": "60s"},
+            # ``root``: glob declares ``path`` since PR #2982, so it is no longer unknown.
+            {"tool": "glob", "arguments": {"pattern": "*.py", "root": "/tmp"}, "every": "60s"},
         )
 
     assert refused.value.status == STATUS_CONFLICT
-    assert 'unknown argument(s) "path"' in str(refused.value)
+    assert 'unknown argument(s) "root"' in str(refused.value)
     # Nothing was written: no transcript entry, no index entry.
     assert _latest(root, "shape01")["monitors"] == []
     assert read_entry(root, "shape01") is None
