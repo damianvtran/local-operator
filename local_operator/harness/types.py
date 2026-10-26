@@ -721,6 +721,11 @@ _CLONE_GUARD_FIELDS = frozenset(
         # never changes the prompt bytes the model reads.
         "cache_diagnostics",
         "cache_diagnostics_previous_id",
+        # Request role for the Anthropic cache-TTL policy, stamped by
+        # ``SessionStreamFn`` on every request (``anthropic_cache_ttl``). It
+        # selects a marker TTL, never message bytes, so an armed one-turn secret
+        # stays in the one body it was approved for.
+        "cache_role",
     }
 )
 #: Model fields that same decoration may set: the per-turn effort fit.
