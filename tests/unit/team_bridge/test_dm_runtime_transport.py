@@ -743,6 +743,154 @@ async def test_unread_card_behind_an_adopted_aside_still_gets_its_wake(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_fallback_failing_before_dispatch_keeps_the_card_reachable(tmp_path, monkeypatch):
+    """PR #2951 round 4 MAJOR-R4-1: a fallback that fails before the loop leaks nothing.
+
+    The round-3 scenario (a card stranded behind an adopted aside) plus one
+    injected failure on the fallback's way into the loop. The card must stay
+    on the live context, a later turn must read it, its debt must not leak, and
+    no request may ever end on the model's own reply.
+    """
+    tool_entered, finish_tool = asyncio.Event(), asyncio.Event()
+    hydration_entered, finish_hydration = asyncio.Event(), asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        tool_entered.set()
+        await finish_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="held_work",
+            content=[TextContent(text="done")],
+        )
+
+    tool = AgentTool(name="held_work", description="bounded test work", execute=execute)
+    async with runtime_rig(tmp_path, monkeypatch, tools=[tool]) as rig:
+        rig.stream.scripted = [
+            [],
+            _tool_call("held-1", "held_work"),
+            [StreamTextDelta(delta="settled"), StreamEndEvent(stop_reason="stop")],
+        ]
+        working = asyncio.create_task(rig.session.prompt("finish existing work"))
+        try:
+            await asyncio.wait_for(tool_entered.wait(), 5)
+            assert (await deliver(rig))["handled"][0]["action"] == "delivered"
+            rig.unavailable.add(MESSAGE_ID)
+            finish_tool.set()
+            await asyncio.wait_for(working, 10)
+            await settle(rig.session)
+            assert len(rig.stream.requests) == 3
+            session = rig.session
+            refresh = session._refresh_context_metadata
+            injected = []
+
+            async def failing_once():
+                # One transient failure inside the fallback turn, after its
+                # input is chosen and before the loop re-appends it.
+                if session._bridge_cards_owed_wake and not injected:
+                    injected.append(True)
+                    raise RuntimeError("injected pre-loop failure")
+                return await refresh()
+
+            session._refresh_context_metadata = failing_once
+            rig.body_gates[MESSAGE_ID] = (hydration_entered, finish_hydration)
+            await send_peer_message(
+                rig.record,
+                text="UNREAD-CARD-9090",
+                mode="mailbox",
+                wake=True,
+                sender={},
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            )
+            await asyncio.wait_for(hydration_entered.wait(), 5)
+            await session.adopt_aside(
+                [
+                    Message(role="user", content=[TextContent(text="aside question")]),
+                    Message(role="assistant", content=[TextContent(text="aside answer")]),
+                ]
+            )
+            finish_hydration.set()
+            await settle(session)
+            assert injected == [True], "the failure was never injected"
+
+            # The card was put back where it was, so live order matches the
+            # transcript again and the card is reachable.
+            card = [
+                m
+                for m in session._context.messages
+                if "UNREAD-CARD-9090" in str(getattr(m, "details", ""))
+            ]
+            assert len(card) == 1
+            owed = session._bridge_cards_owed_wake
+            assert all(any(c is m for m in session._context.messages) for c in owed)
+
+            # A later turn reads the card, and that settles the debt.
+            before = len(rig.stream.requests)
+            rig.stream.scripted = [
+                [StreamTextDelta(delta="later"), StreamEndEvent(stop_reason="stop")]
+            ]
+            await session.prompt("later typed prompt")
+            await settle(session)
+            assert "UNREAD-CARD-9090" in "\n".join(rig.stream.texts(before))
+            assert session._bridge_cards_owed_wake == []
+            assert session._bridge_card_fallback_attempts == {}
+
+            # A later DM's pass opens no leaked fallback.
+            rig.unavailable.discard(MESSAGE_ID)
+            rig.body_gates.clear()
+            second_id = "bcmsg_abcdef09"
+            rig.messages[second_id] = "SECOND-BODY-3131"
+            rig.event_filter.add(second_id)
+            before = len(rig.stream.requests)
+            assert (await deliver(rig))["handled"][0]["action"] == "delivered"
+            await settle(session)
+            assert session._bridge_cards_owed_wake == []
+            for request in rig.stream.requests[3:]:
+                assert getattr(request.messages[-1], "role", None) != "assistant"
+            assert len(rig.stream.requests) - before <= 2
+        finally:
+            finish_tool.set()
+            finish_hydration.set()
+            if not working.done():
+                await asyncio.wait_for(working, 10)
+
+
+@pytest.mark.asyncio
+async def test_fallback_guard_drops_unreachable_and_exhausted_cards(tmp_path, monkeypatch):
+    """PR #2951 round 4: the guard's hygiene, isolated.
+
+    A card neither live nor parked can never be carried, and a card that has
+    used its fallback attempts is not retried again: both are dropped, so no
+    failure mode can leave a debt that opens a turn on every later pass.
+    """
+    from local_operator.session.session import BRIDGE_CARD_FALLBACK_ATTEMPTS
+
+    def card(text):
+        return CustomMessage(
+            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            attribution="user",
+            details={"text": text, "body": text, "sender": {}},
+        )
+
+    async with runtime_rig(tmp_path, monkeypatch) as rig:
+        session = rig.session
+        base = list(session._context.messages)
+        lost = card("LOST")
+        session._bridge_cards_owed_wake = [lost]
+        assert session._bridge_card_wake_still_owed() is False
+        assert session._bridge_cards_owed_wake == []
+
+        live = card("LIVE")
+        session._context.messages.append(live)
+        session._bridge_cards_owed_wake = [live]
+        for _ in range(BRIDGE_CARD_FALLBACK_ATTEMPTS):
+            assert session._bridge_card_wake_still_owed() is True
+        assert session._bridge_card_wake_still_owed() is False
+        assert session._bridge_cards_owed_wake == []
+        assert session._bridge_card_fallback_attempts == {}
+        session._context.messages[:] = base
+
+
+@pytest.mark.asyncio
 async def test_fallback_keeps_unread_cards_and_never_ends_on_a_reply(tmp_path, monkeypatch):
     """PR #2951 round 3 MINOR-R3-2: the fallback guard and its input, isolated from the settle.
 

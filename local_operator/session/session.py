@@ -390,6 +390,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How many fallback turns one woken bridge card may open before its wake is
+#: dropped (PR #2951 round 4). A fallback that runs to dispatch settles the
+#: card, so a second admission means the first never sent its request (a
+#: pre-loop failure, a pre-aborted drop). Three allows a transient failure to
+#: recover twice; past that the cause is persistent, and every further attempt
+#: is a paid turn the same failure would refuse. The card stays durable in the
+#: transcript and on the live context, so the next ordinary turn still reads it.
+BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
+
 
 def _notice(
     message: Msg,
@@ -4327,6 +4336,12 @@ class Session:
         # pipeline starts with it on the live context, whichever path opened
         # that turn (body pass, typed prompt, steering wake).
         self._bridge_cards_owed_wake: list[CustomMessage] = []
+        # Fallback turns admitted per owed card (keyed by object id, cleared
+        # with the debt), and the cards the current fallback moved to its
+        # input with their original context index, so a turn that fails
+        # before the loop re-appends them can put them back.
+        self._bridge_card_fallback_attempts: dict[int, int] = {}
+        self._bridge_card_wake_moved: list[tuple[int, CustomMessage]] = []
         #: The turn's terminal verdict, captured where the loop's agent_end is
         #: handled. Settlement runs in the ``finally``, after ``_flush_held_end``
         #: has already released that event, so the verdict must be captured
@@ -16954,7 +16969,9 @@ class Session:
             if initial_after_guard is not None:
                 # Input that depends on the context as the guard saw it, so it
                 # is computed under the same lock hold (the bridge card
-                # fallback re-presents a card stranded behind a reply).
+                # fallback re-presents a card stranded behind a reply). The
+                # ``finally`` below undoes the move if the turn never got that
+                # far.
                 initial = [*initial, *initial_after_guard()]
             # A newly ARRIVING unit of work is a fresh intent, exactly like a
             # typed prompt, so it clears the sticky abort the same way
@@ -17046,6 +17063,8 @@ class Session:
                 opened_body=opened_body,
             )
         finally:
+            if initial_after_guard is not None:
+                self._restore_unpresented_bridge_cards()
             if pending_body_only:
                 # Cancellation between hydration and pipeline entry still
                 # releases our claim; normal settlement already cleared it.
@@ -17520,6 +17539,7 @@ class Session:
             self._bridge_cards_owed_wake = [
                 card for card in self._bridge_cards_owed_wake if id(card) not in read
             ]
+            self._forget_settled_card_attempts()
 
     def _bridge_card_wake_still_owed(self) -> bool:
         """The fallback turn's under-lock guard: is any owed card still unread?
@@ -17533,10 +17553,73 @@ class Session:
         # Only the dispatch settle proves a card was read. The context's shape
         # does not: an adopted aside's user/assistant pair can land behind a
         # still-unread card (PR #2951 round 3, MINOR-R3-1), so a trailing
-        # assistant message says nothing about the card. An owed card here is
-        # unread and keeps its wake; ``_fallback_card_wake_initial`` makes the
-        # turn's request end on input.
-        return bool(self._bridge_cards_owed_wake)
+        # assistant message says nothing about the card.
+        #
+        # Every owed card must be on the live context or parked: that is what
+        # lets the fallback's request end on it rather than on a reply. A card
+        # in neither place can never be carried, so its debt would only open
+        # turns ending on the model's own reply (PR #2951 round 4, MAJOR-R4-1).
+        # Drop it, loudly; the card stays durable in the transcript.
+        live = {id(message) for message in self._context.messages}
+        parked = {id(message) for message in self._pending_context_journal}
+        unreachable = [
+            card
+            for card in self._bridge_cards_owed_wake
+            if id(card) not in live and id(card) not in parked
+        ]
+        exhausted = [
+            card
+            for card in self._bridge_cards_owed_wake
+            if self._bridge_card_fallback_attempts.get(id(card), 0) >= BRIDGE_CARD_FALLBACK_ATTEMPTS
+        ]
+        if unreachable or exhausted:
+            logger.warning(
+                "bridge card wake: dropped %d unreachable and %d exhausted owed card(s)",
+                len(unreachable),
+                len(exhausted),
+            )
+            gone = {id(card) for card in (*unreachable, *exhausted)}
+            self._bridge_cards_owed_wake = [
+                card for card in self._bridge_cards_owed_wake if id(card) not in gone
+            ]
+            self._forget_settled_card_attempts()
+        if not self._bridge_cards_owed_wake:
+            return False
+        for card in self._bridge_cards_owed_wake:
+            attempts = self._bridge_card_fallback_attempts
+            attempts[id(card)] = attempts.get(id(card), 0) + 1
+        return True
+
+    def _forget_settled_card_attempts(self) -> None:
+        """Keep attempt counts only for cards still owed (ids can be reused)."""
+
+        owed = {id(card) for card in self._bridge_cards_owed_wake}
+        self._bridge_card_fallback_attempts = {
+            key: count for key, count in self._bridge_card_fallback_attempts.items() if key in owed
+        }
+
+    def _restore_unpresented_bridge_cards(self) -> None:
+        """Put back a card the fallback moved if its turn never re-appended it.
+
+        ``_fallback_card_wake_initial`` takes a stranded card off the context so
+        the loop's own ``extend`` of the turn input can put it last. A failure
+        before that extend (restart fence, metadata refresh, model selection,
+        inbox drain, ask reconciliation, system blocks) would otherwise leave
+        the card neither live nor parked. Restored at its original index, so
+        live order matches the transcript again; a pre-aborted turn that
+        re-parked it already put it somewhere reachable and is left alone.
+        """
+
+        moved, self._bridge_card_wake_moved = self._bridge_card_wake_moved, []
+        if not moved:
+            return
+        live = {id(message) for message in self._context.messages}
+        parked = {id(message) for message in self._pending_context_journal}
+        for index, card in sorted(moved, key=lambda pair: pair[0]):
+            if id(card) in live or id(card) in parked:
+                continue
+            self._context.messages.insert(min(index, len(self._context.messages)), card)
+            live.add(id(card))
 
     def _fallback_card_wake_initial(self) -> list[AgentMessage]:
         """The fallback turn's input: owed cards already behind a reply.
@@ -17565,6 +17648,13 @@ class Session:
         stranded = [card for card in self._bridge_cards_owed_wake if id(card) in behind]
         if not stranded:
             return []
+        # Recorded before the move so ``_restore_unpresented_bridge_cards`` can
+        # undo it on any path that never reaches the loop's re-append.
+        self._bridge_card_wake_moved = [
+            (index, message)
+            for index, message in enumerate(messages)
+            if any(message is card for card in stranded)
+        ]
         self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
         return stranded
 
