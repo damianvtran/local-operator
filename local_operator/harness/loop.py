@@ -71,10 +71,13 @@ from local_operator.harness.types import (
     AgentToolUpdate,
     ApprovalDescribeFn,
     Aside,
+    AudioContent,
     ChatRequest,
     Content,
     CustomMessage,
+    DocumentContent,
     FinalResponseCheck,
+    ImageContent,
     InvalidToolArgumentsError,
     LoopConfig,
     Message,
@@ -1273,7 +1276,10 @@ class _NoProgressGuard:
         # revision can still show identical pixels. Whitelist the provider's
         # media fields so future capture IDs/timestamps cannot disguise a loop.
         # Hash the inline base64 content without retaining another payload copy;
-        # textual observations keep their existing serialization.
+        # textual observations keep their existing serialization. Narrow on the
+        # CLASS, not on ``block.type``: the discriminator is a string, so a
+        # comparison leaves the union unnarrowed and the media fields
+        # unreadable to a type checker.
         payload = json.dumps(
             [
                 call.name,
@@ -1288,7 +1294,7 @@ class _NoProgressGuard:
                                 block.data.encode("utf-8", "surrogatepass")
                             ).hexdigest(),
                         }
-                        if block.type in ("image", "audio", "document")
+                        if isinstance(block, (ImageContent, AudioContent, DocumentContent))
                         else block.model_dump(mode="json")
                     )
                     for block in result.content

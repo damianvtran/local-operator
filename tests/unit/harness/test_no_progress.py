@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Sequence
 
 import pytest
 
@@ -21,6 +22,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentTool,
     CapturedFrame,
+    Content,
     ImageContent,
     Message,
     MessageEndEvent,
@@ -32,14 +34,23 @@ from local_operator.harness.types import (
 from tests.unit.harness.test_loop import ScriptedStream, make_config, tool_call_delta
 
 
-async def run_calls(calls, *, results=None, errors=False, batch_size=1):
-    """Distinct wire IDs and timings must not disguise identical observations."""
+async def run_calls(
+    calls, *, results: Sequence[Sequence[Content]] | None = None, errors=False, batch_size=1
+):
+    """Distinct wire IDs and timings must not disguise identical observations.
+
+    ``results`` is a Sequence, not a list, so a case may pass homogeneous
+    lists (``list[list[ImageContent]]``) without the invariance error a
+    ``list[list[Content]]`` parameter raises.
+    """
     executed = []
 
     async def execute(tool_call_id, args, signal, on_update, context):
         index = len(executed)
         executed.append((tool_call_id, args))
-        content = results[index] if results is not None else [TextContent(text="unchanged")]
+        content: list[Content] = (
+            list(results[index]) if results is not None else [TextContent(text="unchanged")]
+        )
         return ToolResult(
             tool_call_id=tool_call_id,
             content=content,
