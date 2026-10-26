@@ -1686,3 +1686,54 @@ async def test_the_trigger_respects_the_configured_cap() -> None:
         hooks, "merge it once CI is green", task_id="t-cr2"
     )
     assert "tool://code_requests" not in blocked
+
+
+@pytest.mark.asyncio
+async def test_a_local_credential_intent_never_reaches_vault_through_the_roster() -> None:
+    """Vault guidance is gated off the recommendation path for everyone, today.
+
+    Operator requirement: local use recommends the ``secret`` tool, and Vault is
+    advertised only to a user with a paid Team plan. No cheap, already-fetched
+    Team-plan signal exists in a session (the membership plan summary arrives
+    only from an on-demand ``GET /me/memberships``), and a session-start network
+    call is ruled out — so NO roster row may name Vault. The guide's sharing
+    section is reachable only once a model already reads ``guide://credentials``
+    for a credential task. This drives the REAL packaged guide and the REAL
+    secret tool through the roster builder, so a later description edit that
+    starts advertising Vault fails here, not in a user's prompt.
+    """
+    from local_operator.guides import discover_guides
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.secret_tool import build_secret_tool
+
+    tool = build_secret_tool(ToolContext())
+    assert tool is not None
+    guides = [guide for guide in discover_guides() if guide.name == "credentials"]
+    assert len(guides) == 1
+    hooks = _hooks(_FakeIndex(skills=guides))  # type: ignore[arg-type]
+    hooks.tool_roster = session_factory._tool_roster_rows([tool])
+
+    roster = session_factory._build_classification_roster(hooks)
+
+    assert ("tool", "secret", "tool://secret") in [
+        (row.kind, row.name, row.resource_url) for row in roster
+    ]
+    assert ("guide", "credentials", "guide://credentials") in [
+        (row.kind, row.name, row.resource_url) for row in roster
+    ]
+    assert all("vault" not in row.description.lower() for row in roster)
+    assert "vault" not in tool.description.lower()
+
+    secret_row = next(row for row in roster if row.name == "secret")
+    classifier = _FakeClassifier(_Recommendation(resources=(secret_row,)))
+    hooks.classifier = classifier
+    block = await session_factory._select_knowledge_block(
+        hooks, "Keep this API key on my machine for later sessions", task_id="local-cred"
+    )
+
+    assert "- tool://secret" in block
+    assert "vault" not in block.lower()
+    request_text = "\n".join(
+        candidate.description for candidate in classifier.requests[0].candidates
+    )
+    assert "vault" not in request_text.lower()

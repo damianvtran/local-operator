@@ -938,3 +938,48 @@ def test_harness_import_guide_states_the_safe_preview_first_flow() -> None:
     assert "read-only on the other harness" in body
     assert "Re-run is safe" in body
     assert "No filesystem path is accepted" in body
+
+
+def _credentials_section(body: str, heading: str) -> str:
+    """One ``## `` section of a guide body, heading line included."""
+    start = body.index(f"## {heading}\n")
+    end = body.find("\n## ", start + 1)
+    return body[start:] if end == -1 else body[start:end]
+
+
+def test_credentials_guide_keeps_local_first_and_names_vault_only_for_teammates() -> None:
+    """The Vault pointer is a SHARING answer, never the local default.
+
+    Operator requirement (Radient Vault programme): ``lop secret`` stays the
+    local encrypted store, and Vault is only for a value teammates must share —
+    behind Radient sign-in and a paid Team plan. The section also has to say
+    plainly that the agent has no Vault tool yet, so a model reading it points
+    the user at the console instead of inventing a call to an API that refuses.
+    """
+    from local_operator.redaction_shapes import scrub_shapes_with_hits
+
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://credentials")
+    assert body is not None
+
+    section = _credentials_section(body, "Sharing a credential with teammates")
+    # Prose is wrapped and emphasised; judge the words, not the line breaks.
+    prose = " ".join(section.replace("**", "").split())
+    assert "this machine only" in prose
+    assert "`secret` tool" in prose and "`lop secret`" in prose
+    assert "paid Team plan" in prose
+    assert "https://console.radienthq.com/dashboard/vaults" in prose
+    assert "cannot yet create or read" in prose
+    assert "Team Bridge message" in prose
+    # Concise by requirement: a few lines, not a second guide.
+    assert len(section.splitlines()) <= 20
+
+    # Vault is named in this section only — the local-store sections must keep
+    # teaching the local store with no remote-store ambiguity.
+    outside = body.replace(section, "")
+    assert "Vault" not in outside
+
+    # No secret-shaped value in the guidance itself: the same shape table the
+    # redaction guard runs must find nothing to mask in the new section.
+    _, hits = scrub_shapes_with_hits(section)
+    assert hits == []

@@ -231,6 +231,21 @@ remove the file, so delete the plaintext afterwards. Verify a round trip with
 `lop secret get NAME | shasum -a 256` against the original when the value has
 to be byte-exact.
 
+## Sharing a credential with teammates
+
+The long-term store (`secret` tool, `lop secret`, `/credential`) is **this
+machine only**, and it is the default for every credential you keep. Nothing in
+it reaches anyone else.
+
+A value that teammates must also use goes in **Radient Vault**, which needs the
+user signed in to Radient on an organization with a paid Team plan. Vaults,
+their members and item reveal are managed in the console at
+`https://console.radienthq.com/dashboard/vaults`. You cannot yet create or read
+Vault items yourself: point the user there, and they add the value by hand.
+
+Never share a secret by pasting it into a chat message, a Team Bridge message, a
+PR or a file — that is a leak, not a share.
+
 ## Published copies and secret names
 
 In supported published-copy consumers, the complete-text redaction callback
