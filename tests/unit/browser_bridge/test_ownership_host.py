@@ -2525,8 +2525,30 @@ async def test_recover_with_no_surface_still_says_there_is_nothing_to_recover(
     assert context.browser.surface_id == ""
 
 
-def test_ownership_text_names_available_for_any_unsettled_state_with_a_surface() -> None:
-    for state in ("allocated", "owned", "cleanup_pending", "somefuturestate"):
-        assert "no browser tab" not in builtin._browser_ownership_text(state, True)
-    for state in ("allocated", "unresolved", ""):
-        assert "Nothing to recover" in builtin._browser_ownership_text(state, False)
+@pytest.mark.parametrize(
+    "state, has_surface, expected",
+    [
+        # Live-tab states with a handle: usable.
+        ("allocated", True, "Browser tab available (allocated)"),
+        ("owned", True, "Browser ownership recovered (owned)"),
+        ("cleanup_pending", True, "Browser ownership recovered (cleanup_pending)"),
+        # `pending` keeps a handle after a failed close but the tab is NOT usable;
+        # unknown states must not be promised either. Both keep the prior text.
+        ("pending", True, "Nothing to recover"),
+        ("unresolved", True, "Nothing to recover"),
+        ("somefuturestate", True, "Nothing to recover"),
+        ("", True, "Nothing to recover"),
+        # No handle: never "available".
+        ("allocated", False, "Nothing to recover"),
+        ("owned", False, "Nothing to recover"),
+        ("pending", False, "Nothing to recover"),
+        ("unresolved", False, "Nothing to recover"),
+    ],
+)
+def test_ownership_text_only_calls_a_tab_available_for_explicit_live_states(
+    state: str, has_surface: bool, expected: str
+) -> None:
+    text = builtin._browser_ownership_text(state, has_surface)
+    assert expected in text
+    if expected == "Nothing to recover":
+        assert "available" not in text

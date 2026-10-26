@@ -23,6 +23,7 @@ import asyncio
 import enum
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,20 @@ HEALTH_RETRY_BACKOFF_S = 0.05
 #: cannot change.
 HEALTH_MAX_ATTEMPTS = 2
 
+#: Longest slice of host-controlled text (a ``/health`` field) allowed into the log
+#: line and the agent-facing sentence. A foreign service on a recycled port
+#: controls these bytes; bounding them keeps a hostile or buggy listener from
+#: flooding ``runtime.log`` or the model's context.
+_DETAIL_MAX_CHARS = 80
+
+#: Minimum seconds between two WARNINGs for the same (pid, port, outcome) from the
+#: REACHABILITY site. ``ui_browser_reachable`` runs on the action path, so a silent
+#: host would otherwise log once per action (twice for an unpinned ``open``). The
+#: preflight site is never limited: it is once per dispatched command and carries
+#: the user-visible failure.
+_REACHABLE_LOG_INTERVAL_S = 30.0
+_reachable_last_logged: dict[tuple[Any, Any, str], float] = {}
+
 #: Sampling period of the loop-lag canary (see ``_LoopLagCanary``).
 _LAG_TICK_S = 0.05
 
@@ -80,8 +95,25 @@ class UiHostClient(HostClient):
                 raise TimeoutError("browser operation deadline exhausted before health")
         if current.instance_id is None:
             return
+
+        def record_rotated() -> bool:
+            # A rotated record means `call` will rediscover and probe the NEW
+            # generation; spending a second full budget on the old one only delays
+            # that. Unreadable discovery counts as "unchanged": decide on the probe.
+            try:
+                latest = self._read()
+            except Exception:  # noqa: BLE001 - discovery may never raise at a call site
+                return False
+            return latest is not None and self._record_identity(latest) != self._record_identity(
+                current
+            )
+
         probe = await probe_health(
-            current, first_budget=remaining, deadline=deadline, site="preflight"
+            current,
+            first_budget=remaining,
+            deadline=deadline,
+            site="preflight",
+            abandon_retry_if=record_rotated,
         )
         if not probe.ok:
             raise HostPreDeliveryFailure(_failure_copy(probe, current, self.copy_for()))
@@ -182,7 +214,12 @@ async def ui_browser_reachable(
         return False
     if status is state_store.Liveness.FRESH and current.instance_id is None:
         return True
-    probe = await probe_health(current, site="reachable")
+    # ONE attempt: this runs on the action path with no caller deadline, ahead of
+    # `preflight`, which owns the starved-checker retry. Retrying here as well
+    # doubled the worst case of a stale, silent host (measured 6.2-6.4 s vs 3.3-3.9 s
+    # on main) for no gain: a false "unreachable" here only re-routes this action,
+    # while the command itself is still protected by preflight's retry.
+    probe = await probe_health(current, site="reachable", max_attempts=1)
     return probe.ok
 
 
@@ -227,8 +264,11 @@ class HealthProbe:
     error: str = ""
     #: Worst lateness of the checker's own event loop while it was probing, in ms.
     loop_lag_ms: float = 0.0
-    #: Short human reason for MISMATCH/BAD_RESPONSE (pids and generations only).
+    #: Short human reason for MISMATCH/BAD_RESPONSE, clipped to _DETAIL_MAX_CHARS.
     detail: str = ""
+    #: True when the caller's deadline shortened any attempt below the standard
+    #: budget, so "within <budget>s" would overstate what was actually allowed.
+    clamped: bool = False
 
     @property
     def ok(self) -> bool:
@@ -271,6 +311,12 @@ class _LoopLagCanary:
         self.max_lag_s = max(self.max_lag_s, time.monotonic() - self._due)
 
 
+def _clip(text: object) -> str:
+    """Bound host-controlled text; an ellipsis marks that something was cut."""
+    value = str(text)
+    return value if len(value) <= _DETAIL_MAX_CHARS else value[:_DETAIL_MAX_CHARS] + "…"
+
+
 async def _probe_once(current: Any, budget: float) -> tuple[HealthVerdict, str, str]:
     """One ``/health`` GET bounded by ``budget``: (verdict, exception class, detail).
 
@@ -305,18 +351,24 @@ async def _probe_once(current: Any, budget: float) -> tuple[HealthVerdict, str, 
     except Exception as exc:  # noqa: BLE001 - any other failure is "not a healthy answer"
         return HealthVerdict.BAD_RESPONSE, type(exc).__name__, ""
     if response.status_code != 200:
-        return HealthVerdict.BAD_RESPONSE, "", f"http {response.status_code}"
+        return HealthVerdict.BAD_RESPONSE, "", _clip(f"http {response.status_code}")
     try:
         body = response.json()
         answered_pid = int(body.get("pid", -1)) if isinstance(body, dict) else -1
-    except (ValueError, TypeError) as exc:
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 - the body is host-controlled: NOTHING it holds may raise
+        # `pid` can be inf (``1e999`` -> OverflowError), NaN (ValueError), a list or
+        # dict (TypeError), a non-numeric string, or a literal past int()'s digit
+        # limit; the body itself can be invalid JSON/UTF-8. All are one verdict, and
+        # the old bool helper's blanket `except` guaranteed the same.
         return HealthVerdict.BAD_RESPONSE, type(exc).__name__, "malformed body"
     if not isinstance(body, dict):
         return HealthVerdict.BAD_RESPONSE, "", "malformed body"
     if body.get("host") != state_store.HOST:
-        return HealthVerdict.MISMATCH, "", f"host {body.get('host')!r}"
+        return HealthVerdict.MISMATCH, "", _clip(f"host {body.get('host')!r}")
     if answered_pid != current.pid:
-        return HealthVerdict.MISMATCH, "", f"answering pid {answered_pid}"
+        return HealthVerdict.MISMATCH, "", _clip(f"answering pid {answered_pid}")
     if current.instance_id is not None and body.get("instance_id") != current.instance_id:
         return HealthVerdict.MISMATCH, "", "instance_id differs from the published generation"
     if body.get("ready") is False:
@@ -330,6 +382,8 @@ async def probe_health(
     first_budget: float | None = None,
     deadline: float | None = None,
     site: str,
+    max_attempts: int = HEALTH_MAX_ATTEMPTS,
+    abandon_retry_if: Callable[[], bool] | None = None,
 ) -> HealthProbe:
     """Probe the published host's ``/health``, surviving a starved CHECKER, bounded.
 
@@ -345,7 +399,12 @@ async def probe_health(
     * only ``TIMEOUT`` is retried; refused / mismatch / bad body are definite and
       fail on the first attempt, so a dead host is reported as fast as before;
     * a timeout whose pid is no longer alive is also definite (no retry);
-    * the happy path is exactly one GET.
+    * the happy path is exactly one GET;
+    * ``max_attempts=1`` disables the retry (the reachability gate, which has no
+      caller deadline and must not double a silent host's cost);
+    * ``abandon_retry_if`` is consulted before the retry: when it says the record
+      this probe is checking was replaced, the retry is skipped so the caller's
+      rediscovery can probe the new generation instead.
 
     A failure is logged once as a single ``key=value`` line (nothing on success).
     ``deadline`` is on ``asyncio``'s loop clock, like ``preflight``'s.
@@ -357,6 +416,7 @@ async def probe_health(
     first_budget = HEALTH_PROBE_TIMEOUT_S if first_budget is None else first_budget
     budget = first_budget
     attempts = 0
+    clamped = first_budget < HEALTH_PROBE_TIMEOUT_S
     verdict, error, detail = HealthVerdict.TIMEOUT, "", ""
     while True:
         attempts += 1
@@ -365,9 +425,11 @@ async def probe_health(
             verdict, error, detail = await _probe_once(current, budget)
         finally:
             canary.stop()
-        if verdict is not HealthVerdict.TIMEOUT or attempts >= HEALTH_MAX_ATTEMPTS:
+        if verdict is not HealthVerdict.TIMEOUT or attempts >= max_attempts:
             break
         if not state_store.pid_alive(current.pid):
+            break
+        if abandon_retry_if is not None and abandon_retry_if():
             break
         # The pause is clamped too: a caller's deadline is a hard ceiling, and the
         # backoff is part of what a retry costs.
@@ -380,6 +442,7 @@ async def probe_health(
             budget = min(budget, deadline - loop.time())
             if budget <= 0:
                 break
+            clamped = clamped or budget < HEALTH_PROBE_TIMEOUT_S
     probe = HealthProbe(
         verdict=verdict,
         elapsed_s=time.monotonic() - started,
@@ -388,6 +451,7 @@ async def probe_health(
         error=error,
         loop_lag_ms=canary.max_lag_s * 1000.0,
         detail=detail,
+        clamped=clamped,
     )
     if not probe.ok:
         _log_probe_failure(current, probe, site)
@@ -404,6 +468,13 @@ def _log_probe_failure(current: Any, probe: HealthProbe, site: str) -> None:
     is the host's ``started_at``, which separates "the same process, repeatedly"
     from "a recycled one".
     """
+    if site == "reachable":
+        key = (current.pid, current.port, probe.verdict.value)
+        now = time.monotonic()
+        last = _reachable_last_logged.get(key)
+        if last is not None and now - last < _REACHABLE_LOG_INTERVAL_S:
+            return
+        _reachable_last_logged[key] = now
     logger.warning(
         "ui_host_health_probe_failed site=%s outcome=%s pid=%s port=%s instance_id=%s "
         "generation=%s budget_s=%.3f elapsed_s=%.3f attempts=%d loop_lag_ms=%.1f "
@@ -433,10 +504,18 @@ def _failure_copy(probe: HealthProbe, current: Any, copy: Any) -> str:
     late check sent the agent off to restart a healthy app.
     """
     if probe.verdict is HealthVerdict.TIMEOUT and state_store.pid_alive(current.pid):
+        plural = "s" if probe.attempts != 1 else ""
+        # When the caller's deadline shortened an attempt, "within 1.5s" would claim
+        # more patience than was possible; say what was true instead.
+        window = (
+            "within the time allowed "
+            f"({probe.elapsed_s:.1f}s over {probe.attempts} attempt{plural})"
+            if probe.clamped
+            else f"within {probe.budget_s:.1f}s over {probe.attempts} attempt{plural}"
+        )
         return (
             f"the desktop browser host is published (pid {current.pid}, port {current.port}) "
-            f"but did not answer the bounded health check within {probe.budget_s:.1f}s over "
-            f"{probe.attempts} attempt{'s' if probe.attempts != 1 else ''}; the host may be "
+            f"but did not answer the bounded health check {window}; the host may be "
             "fine and this machine overloaded — retry the same command; no command was sent"
         )
     if probe.verdict is HealthVerdict.MISMATCH:
