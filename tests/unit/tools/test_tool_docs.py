@@ -511,9 +511,14 @@ MEASURED_TOKENS: dict[str, int] = {
     "video_status": 202,
     "wait": 268,
     "wake": 308,
-    "web_fetch": 348,
+    # RE-MEASURED (web-research-speed): 348 -> 363 — the new optional
+    # ``query`` parameter (passage previews for oversized pages) in the
+    # rendered schema, net of the description trimmed to pay for it.
+    "web_fetch": 363,
     "web_read": 221,
-    "web_search": 189,
+    # RE-MEASURED (web-research-speed): 189 -> 193 — "with `query`" steers the
+    # follow-up fetch of a result toward a passage preview.
+    "web_search": 193,
     "write": 137,
 }
 
