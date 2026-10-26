@@ -3528,6 +3528,70 @@ def test_the_report_and_the_planner_agree_when_only_the_pad_root_is_recent(
     assert ("rootonly", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
 
 
+def _shape_fresh_copy_pad(
+    root: Path, name: str, *, moment: float, fresh: bool
+) -> tuple[Path, Path]:
+    """A pad with a PROVABLE old copy candidate and a shape directory.
+
+    ``fresh`` puts a one-minute-old file at ``build/nested/edit.txt`` and ages
+    every enclosing directory, so only that file can make the pad recent — the
+    reviewers' repro, and the case the report's outer walk used to skip.
+    """
+    source = _published_source(root)
+    pad = _kept_pad(root, name)
+    _age(root / "sessions" / name / "transcript.jsonl", moment - 60 * HOUR)
+    _copy_tree(source, pad / "copy")
+    nested = pad / "build" / "nested"
+    nested.mkdir(parents=True)
+    edit = nested / "edit.txt"
+    edit.write_text("hand edit\n")
+    for path in sorted(pad.rglob("*"), reverse=True):
+        _age(path, moment - 72 * HOUR)
+    _age(pad, moment - 72 * HOUR)
+    if fresh:
+        _age(edit, moment - 60)
+    return source, pad
+
+
+def test_the_report_keeps_a_pad_whose_only_recent_entry_is_inside_a_shape(
+    root: Path,
+) -> None:
+    """Round 7: the two surfaces cannot disagree about a shape interior.
+
+    The report's outer walk skips refused-segment subtrees, which is exactly
+    where the planner looks hardest. Both now take ONE pad-wide verdict from the
+    planner's own strict scan.
+    """
+    moment = time.time() + 60
+    source, pad = _shape_fresh_copy_pad(root, "shapefresh", moment=moment, fresh=True)
+
+    report = _report(root / "sessions", idle=False, references=(os.fspath(source),), now=moment)
+    row = next(row for row in report.candidates if row.session == "shapefresh")
+    assert not row.would_reclaim
+    assert row.reason == dr.CONTENT_PAD_RECENT_REASON
+    assert report.reclaimable_bytes == 0
+    dry = _pass(root, idle=False, now=moment, dry_run=True, policy=_copy_provider(source))
+    assert dry.content == []
+    assert ("shapefresh", dr.CONTENT_PAD_RECENT_REASON) in dry.content_kept
+    assert (pad / "build" / "nested" / "edit.txt").exists()
+
+
+def test_the_report_still_reclaims_the_same_pad_when_nothing_is_recent(
+    root: Path,
+) -> None:
+    """The control: the pad-wide verdict must not disarm the report."""
+    moment = time.time() + 60
+    source, pad = _shape_fresh_copy_pad(root, "shapecold", moment=moment, fresh=False)
+
+    report = _report(root / "sessions", idle=False, references=(os.fspath(source),), now=moment)
+    row = next(row for row in report.candidates if row.session == "shapecold")
+    assert row.would_reclaim
+    assert report.reclaimable_bytes > 0
+    dry = _pass(root, idle=False, now=moment, dry_run=True, policy=_copy_provider(source))
+    assert dry.content, "the idle pad is still planned"
+    assert not any(name == "shapecold" for name, _ in dry.content_kept)
+
+
 def test_an_unstattable_file_inside_a_shape_keeps_the_whole_pad(root: Path) -> None:
     """R4-3: the recency signal must never be silently blind.
 

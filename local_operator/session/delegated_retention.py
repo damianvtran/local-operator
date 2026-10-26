@@ -2896,16 +2896,44 @@ def scan_non_git_copies(
                 qualified = True
         trees = tuple(trees)
         cache = _HashCache()
-        # THE PAD ROOT COUNTS TOO (review round 5, R5-2): the planner observes
-        # it before its walk, so a pad whose only recent mtime is the root (a
-        # file renamed in place updates it without touching the file's own
-        # mtime) is kept there. A report that skipped this stat advertised a
-        # would-reclaim the pass refuses — two surfaces disagreeing about the
-        # same store.
+        # ONE PAD-WIDE VERDICT, FROM THE PLANNER'S OWN WALK (review round 7).
+        # The two surfaces used to disagree BY CONSTRUCTION: this outer walk
+        # skips refused-segment subtrees (`build/`, `node_modules/`), which is
+        # where the planner's recency floor looks hardest, so a pad whose only
+        # recent entry was `build/nested/edit.txt` was advertised as
+        # would-reclaim while the pass kept it whole. Rather than teach this
+        # walk a second set of arm rules, ask the SAME strict bounded scan the
+        # planner uses, ONCE per pad, and let its answer govern every row:
+        # recent, or not provable, means the whole pad is a keep with the
+        # planner's own reason string. Candidate proofs still contribute their
+        # own mtimes below — that can only reinforce this verdict.
+        verdict = ""
         try:
+            # The pad ROOT's own mtime is part of the answer and the bounded scan
+            # observes only its ENTRIES: a rename in place updates the root and
+            # leaves every child's mtime untouched (review round 5, R5-2).
             pad_newest_mtime_ns = pad.stat(follow_symlinks=False).st_mtime_ns
         except OSError:
             pad_newest_mtime_ns = 0
+        try:
+            _b, _e, walked_newest, truncated = cleanup_module.bounded_dir_scan(
+                pad,
+                recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
+                fresh_since_ns=_fresh_since_ns(moment),
+                strict=True,
+            )
+        except cleanup_module.DirScanIncomplete as exc:
+            verdict = f"scratchpad could not be looked at completely: {exc}"
+            pad_newest_mtime_ns = 0
+        else:
+            pad_newest_mtime_ns = max(pad_newest_mtime_ns, walked_newest)
+            if _pad_recent(moment, pad_newest_mtime_ns):
+                verdict = CONTENT_PAD_RECENT_REASON
+            elif truncated:
+                verdict = (
+                    "scratchpad too large to prove idle "
+                    f"(more than {CONTENT_RECENCY_MAX_ENTRIES} entries)"
+                )
         pad_rows: list[NonGitCopyCandidate] = []
         stack: list[tuple[str, int, bool, bool]] = [(os.fspath(pad), 0, False, True)]
         while stack:
@@ -3045,11 +3073,17 @@ def scan_non_git_copies(
         # A recent sibling discovered after an earlier candidate was proved
         # must still change that candidate's advertised state. This is why the
         # pad's rows are held until the walk completes.
-        if _pad_recent(moment, pad_newest_mtime_ns):
+        # A LATE-DISCOVERED FRESH SIBLING (a candidate proof's own file walk can
+        # see deeper than this loop) still has to change every row already
+        # emitted for the pad, which is why the rows are held until the walk
+        # completes.
+        if _pad_recent(moment, pad_newest_mtime_ns) and not verdict:
+            verdict = CONTENT_PAD_RECENT_REASON
+        if verdict:
             for row in pad_rows:
                 row.waiting = False
                 row.would_reclaim = False
-                row.reason = CONTENT_PAD_RECENT_REASON
+                row.reason = verdict
         report.candidates.extend(pad_rows)
     if not report.candidates and not pads:
         # THE STORE-LEVEL VACUOUS GUARD means "the scan could not SEE the
