@@ -32,6 +32,7 @@ from tests.unit.session.cleanup_store_fixture import (
     _roster,
     _session,
     build_store,
+    idle_pads,
 )
 
 ON = CleanupPolicy(delegated_enabled=True, delegated_max_age_hours=48)
@@ -55,6 +56,12 @@ def _pass(store: Store, **kwargs: Any) -> dr.DelegatedResult:
 @pytest.fixture
 def store(tmp_path: Path) -> Any:
     built = build_store(tmp_path)
+    # EVERY pad here is an IDLE pad: the fixtures write content at wall-clock
+    # now, which the recency floor correctly reads as active work, so the store
+    # would otherwise keep every pad and test the floor instead of the rules
+    # under test. The live store's pads are days old; this makes the fixture
+    # match it. A test that wants a FRESH pad must build one after this call.
+    idle_pads(tmp_path, now=built.now)
     try:
         yield built
     finally:
@@ -97,6 +104,37 @@ def test_the_old_predicate_keeps_every_settled_child_and_the_new_one_frees_them(
     assert not removed & set(kept)
     # None of the freed children is still reported as "parent session still active".
     assert not [n for n in store.freed_by_the_roster_fix if n in kept]
+
+
+def test_a_freshly_written_pad_is_kept_by_the_recency_floor(store: Store) -> None:
+    """The fixture ages idles pads; a pad written NOW must still be kept.
+
+    Without this, ``idle_pads`` could be quietly ageing the very fixture that
+    proves the floor works, and the suite would only ever see the reclaim side.
+    """
+    late = store.sessions / "written-now"
+    late.mkdir()
+    (late / "origin.json").write_text(json.dumps({"origin": "subagent"}))
+    transcript = late / "transcript.jsonl"
+    transcript.write_text('{"type":"message"}\n')
+    os.utime(transcript, (store.now - 100 * HOUR, store.now - 100 * HOUR))
+    # A parent inside the window keeps the RECORD, so the content layer — the
+    # floor under test — is what decides about this pad.
+    keeper = store.sessions / "parent-written-now"
+    keeper.mkdir()
+    (keeper / "transcript.jsonl").write_text('{"type":"message"}\n')
+    os.utime(keeper / "transcript.jsonl", (store.now - HOUR, store.now - HOUR))
+    # IN FLIGHT (settled_at absent): the record is protected, so the pad reaches
+    # the content layer and only the recency floor can keep it.
+    _roster(keeper, [_record(store, "written-now", settled_at=None)])
+    pad = late / "scratchpad"
+    pad.mkdir()
+    (pad / "build").mkdir()
+    (pad / "build" / "just-now.o").write_bytes(b"x" * 64)
+
+    result = _pass(store, dry_run=True)
+    assert late.name not in {row.session for row in result.content}
+    assert (late.name, dr.CONTENT_PAD_RECENT_REASON) in [(n, r) for n, r in result.content_kept]
 
 
 def test_every_protected_class_survives_with_the_reason_of_its_real_guard(store: Store) -> None:

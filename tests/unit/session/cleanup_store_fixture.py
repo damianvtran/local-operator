@@ -99,6 +99,40 @@ def _roster(directory: Path, records: Sequence[object]) -> None:
     (directory / ROSTER_NAME).write_text(json.dumps({"version": 1, "records": records}))
 
 
+#: How old an IDLE pad's content is in these fixtures: past every grace and
+#: window the content layer uses, so an unadjusted pad is the only thing that
+#: looks active.
+IDLE_PAD_AGE_S = 100 * HOUR
+
+
+def idle_pads(root: Path, *, now: float, age_s: float = IDLE_PAD_AGE_S) -> None:
+    """Backdate every scratchpad entry under ``root`` to ``now - age_s``.
+
+    A fixture that writes pad content stamps it with the wall clock, and the
+    content layer's whole-pad recency floor reads exactly that — correctly: a
+    file written a second ago IS active work. A test that means "an idle pad"
+    therefore has to say so, and this is where it says it. FILES AND
+    DIRECTORIES, deepest first, because creating a file bumps its parent
+    directory's mtime and a fresh directory keeps the pad just as effectively as
+    a fresh file.
+
+    Deliberately a function the fixture calls, not an autouse side effect: a
+    test that wants a genuinely fresh pad simply does not call it, and the
+    difference is visible in the test.
+    """
+    stamp = now - age_s
+    for pad in sorted((root / "sessions").glob("*/scratchpad")):
+        for path in sorted(pad.rglob("*"), key=lambda entry: len(entry.parts), reverse=True):
+            try:
+                os.utime(path, (stamp, stamp), follow_symlinks=False)
+            except OSError:
+                continue
+        try:
+            os.utime(pad, (stamp, stamp), follow_symlinks=False)
+        except OSError:
+            continue
+
+
 def _stale_file(path: Path, size_mb: int = 11, age_h: float = 24.0, now: float = 0.0) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as handle:

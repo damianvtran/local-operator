@@ -30,6 +30,7 @@ from local_operator.cli import (
 from local_operator.config import ConfigManager
 from local_operator.session import delegated_retention as dr
 from local_operator.session.cleanup import CLEANUP_LOG_NAME, mark_store
+from tests.unit.session.cleanup_store_fixture import idle_pads
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -382,6 +383,16 @@ def test_a_real_run_with_nothing_to_do_never_promises_a_removal(store: Path, cap
 # -- the scratchpad-content block --------------------------------------------
 
 
+def _settle(store: Path) -> None:
+    """Age every pad entry so this store models an IDLE pad (see ``idle_pads``).
+
+    Called AFTER a test writes its content: creating a file bumps its parent
+    directory's mtime, and a fresh directory keeps the pad just as surely as a
+    fresh file. A test that wants a pad to stay FRESH simply does not call it.
+    """
+    idle_pads(store, now=time.time())
+
+
 def _content_pad(store: Path, name: str) -> Path:
     """A scratchpad for a delegated session the RECORD pass keeps.
 
@@ -399,6 +410,7 @@ def _content_pad(store: Path, name: str) -> Path:
     directory = _delegated(store, name)
     pad = directory / "scratchpad"
     pad.mkdir()
+    _settle(store)
     return pad
 
 
@@ -415,6 +427,9 @@ def _big_log(path: Path, *, size_mb: int = 11, age_h: float = 24) -> Path:
 def test_dry_run_shows_the_scratchpad_content_block(store: Path, capsys: Any) -> None:
     pad = _content_pad(store, "content-kid-01")
     big = _big_log(pad / "desktop-suite.log")
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(dry_run=True)) == 0
     out = capsys.readouterr().out
     assert "scratchpad content: would reclaim 1 pad(s)" in out
@@ -426,6 +441,9 @@ def test_dry_run_shows_the_scratchpad_content_block(store: Path, capsys: Any) ->
 def test_json_carries_the_scratchpad_content_block(store: Path, capsys: Any) -> None:
     pad = _content_pad(store, "content-kid-02")
     big = _big_log(pad / "desktop-suite.log")
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
     payload = json.loads(capsys.readouterr().out)
     scratch = payload["delegated"]["scratchpad"]
@@ -445,6 +463,9 @@ def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
     big_size = big.stat().st_size
     monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args()) == 0
     out = capsys.readouterr().out
     assert (
@@ -493,6 +514,26 @@ def test_a_recently_touched_pad_is_kept_by_the_content_phase(store: Path, capsys
     assert "Reclaimed scratchpad content" not in capsys.readouterr().out
 
 
+def test_a_freshly_written_pad_is_kept_and_the_cli_names_the_reason(
+    store: Path, capsys: Any
+) -> None:
+    """The FLOOR as a positive, through the CLI text.
+
+    Every other test here settles its pads first; this one deliberately leaves
+    one fresh, so the recency floor is exercised as something that keeps work
+    rather than as a fixture nuisance.
+    """
+    pad = _content_pad(store, "content-kid-09")
+    _settle(store)
+    big = _big_log(pad / "desktop-suite.log")
+    # Creating the log bumped the pad's own mtime: fresh by construction now.
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "scratchpad content: would reclaim 0 pad(s)" in out
+    assert "content kept content-kid-09  (pad edited within 12h)" in out
+    assert big.exists()
+
+
 def test_the_scratchpad_switch_off_reclaims_nothing_and_says_so(store: Path, capsys: Any) -> None:
     _config(store, delegated={"scratchpad": {"enabled": False}})
     pad = _content_pad(store, "content-kid-04")
@@ -511,6 +552,9 @@ def test_force_runs_the_content_phase_when_the_scratchpad_switch_is_off(
     _config(store, delegated={"scratchpad": {"enabled": False}})
     pad = _content_pad(store, "content-kid-05")
     big = _big_log(pad / "desktop-suite.log")
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(force=True, yes=True)) == 0
     assert not big.exists()
 
@@ -569,6 +613,9 @@ def test_apply_confines_content_to_the_previewed_pads(
             grown.append(_big_log(pad_y / "sibling-fail.log"))
 
     monkeypatch.setattr(cli_module, "_print_content", mutate)
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(yes=True)) == 0
     out = capsys.readouterr().out
     assert "Reclaimed scratchpad content from 1 session(s)" in out
@@ -655,6 +702,9 @@ def test_scratchpads_only_yes_reports_confirmed_true(store: Path, capsys: Any) -
     pad = _content_pad(store, "confirmed-kid")
     _big_log(pad / "desktop-suite.log")
 
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(scratchpads_only=True, yes=True, json=True)) == 0
     payload = json.loads(capsys.readouterr().out)
 
@@ -671,6 +721,9 @@ def test_an_interactive_confirmation_and_a_decline_both_report_their_answer(
 
     monkeypatch.setattr("sys.stdin", io.StringIO("no\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(json=True)) == 2
     declined = json.loads(capsys.readouterr().out)
     assert declined["confirmed"] is False
@@ -785,6 +838,9 @@ def _copy_session(
 def test_the_copy_report_lists_the_class_and_removes_nothing(store: Path, capsys: Any) -> None:
     reference, copy = _copy_session(store)
 
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert (
         sessions_cleanup_command(
             _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
@@ -880,6 +936,9 @@ def test_the_copy_report_shows_a_configured_operator_hold(store: Path, capsys: A
 def test_the_copy_report_json_carries_every_row(store: Path, capsys: Any) -> None:
     reference, _copy = _copy_session(store)
 
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert (
         sessions_cleanup_command(
             _args(
@@ -960,6 +1019,9 @@ def test_the_copy_report_honours_the_delegated_window_override(store: Path, caps
     """A 10 h pad is inside 48 h and past 2 h: the override IS the preview."""
     reference, _copy = _copy_session(store, age_hours=10)
 
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert (
         sessions_cleanup_command(
             _args(
