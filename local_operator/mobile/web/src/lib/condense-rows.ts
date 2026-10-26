@@ -1,6 +1,6 @@
 /**
  * THE ROW LIST A PLAN IS COMPUTED OVER, ported from the desktop.
- * Ported from `damianvtran/local-operator-ui` at sourceHash 03068f15e59435d7…:src/renderer/src/features/chat/canonical/transcript-rows.ts:37-753
+ * Ported from `damianvtran/local-operator-ui` at sourceHash f9f4611dd3dbcc06…:src/renderer/src/features/chat/canonical/transcript-rows.ts:37-753
  *
  * WHAT IT DECIDES, and why the phone needs it rather than a flat render: which
  * records PAINT at all (`paintsSomething`), which of them are statement rows or
