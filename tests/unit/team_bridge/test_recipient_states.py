@@ -709,8 +709,15 @@ async def test_unmentioned_member_is_woken_exactly_when_the_setting_emits_a_row(
     assert "mention: no" in card
     assert "mention: yes" not in card
     # No reply obligation rides the card; reply-vs-quiet is the served
-    # guidance's call, not this delivery's.
-    assert "no_reply" not in card and "reply" not in card.lower()
+    # guidance's call, not this delivery's. The one reply mention allowed is
+    # the conditional ROUTE line (where an answer goes if one is sent), so
+    # an answer stays in the conversation instead of the legacy pair inbox.
+    reply_lines = [line for line in card.splitlines() if "reply" in line.lower()]
+    assert "no_reply" not in card
+    assert reply_lines == [
+        "if you reply: bridge channel_post with this conversation_id; "
+        "legacy send/reply never appears in a conversation"
+    ]
     assert "guidance: bridge-guidance-v2" in card
     requests = _card_requests(all_member)
     assert len(requests) == 1 and "mention: no" in requests[0]
