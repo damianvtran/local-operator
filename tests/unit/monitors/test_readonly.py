@@ -520,10 +520,12 @@ def test_glob_with_path_is_refused_at_arm() -> None:
     """
     glob_tool = real_tool("glob")
     assert readonly.monitor_call_verdict(glob_tool, {"pattern": "*.py"}) is None
-    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "*.py", "path": "/tmp"})
+    # ``root`` stands in for an undeclared argument: ``path`` was the example
+    # until glob grew a real ``path`` parameter (PR #2982).
+    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "*.py", "root": "/tmp"})
     assert reason is not None
-    assert 'unknown argument(s) "path"' in reason, reason
-    assert "glob accepts: pattern." in reason, reason
+    assert 'unknown argument(s) "root"' in reason, reason
+    assert "glob accepts: path, pattern." in reason, reason
 
 
 def intent_tool(name: str) -> AgentTool:
@@ -564,8 +566,8 @@ def test_injected_intent_key_is_stripped_at_tick_and_accepted_at_arm() -> None:
     }
     # The refusal a real typo earns is unchanged, and the accepts list does not
     # advertise the harness's own field.
-    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "x", "path": "/tmp"})
-    assert reason is not None and "glob accepts: pattern." in reason, reason
+    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "x", "root": "/tmp"})
+    assert reason is not None and "glob accepts: path, pattern." in reason, reason
 
 
 def test_a_tool_that_declares_its_own_i_keeps_it() -> None:
@@ -627,6 +629,7 @@ def test_required_and_type_errors_refused() -> None:
     [
         ("glob", {"pattern": "*.py"}),
         ("glob", {"pattern": "*.py", "path": "/tmp"}),
+        ("glob", {"pattern": "*.py", "root": "/tmp"}),
         ("read", {"path": "/x"}),
         ("read", {"range": "1-5"}),
     ],
@@ -660,7 +663,7 @@ def test_the_external_arm_accepts_an_injected_intent_like_the_session_arm() -> N
     # The parity is accept-parity on the injected key ONLY: a genuinely
     # undeclared key is still refused from both doors, so the transform cannot
     # become an accept-bypass for anything else.
-    stray = {"pattern": "x", "path": "/tmp"}
+    stray = {"pattern": "x", "root": "/tmp"}
     assert readonly.monitor_call_verdict(intent_tool("glob"), stray) is not None
     assert readonly.external_monitor_verdict("glob", stray) is not None
 
