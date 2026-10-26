@@ -113,3 +113,69 @@ export type HubReceipt = {
 	label: string;
 	jobId: string;
 };
+
+/** A peer sender's identity, as the wire carries it (all fields advisory). */
+export type CondensePeerSender = {
+	pid: string;
+	conversationName: string;
+	cwd: string;
+	sessionId: string;
+	modelLabel: string;
+};
+
+/** The tools this surface renders as a generating-media card. */
+const IMAGE_GEN_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"generate_image",
+	"generate_video",
+	"generate_voiceover",
+	"generate_sound_effect",
+]);
+
+export function isImageGenTool(toolName: string): boolean {
+	return IMAGE_GEN_TOOL_NAMES.has(toolName);
+}
+
+const TRAILING_SEPARATORS = /[\\/]+$/;
+const PATH_SEPARATOR = /[\\/]/;
+
+/**
+ * `(name, quoted)` for the sending session, or `("", false)`.
+ *
+ * The ladder - conversation name, then cwd basename, then a short session id -
+ * is why a peer receipt never degrades to a bare pid: a row naming `pid 1` names
+ * nothing a reader can act on, and the whole point of the row is to say WHICH
+ * session reached in. Ported verbatim; the quiet-group sender bucket keys on it,
+ * so the two surfaces must bucket a sender identically even though each words the
+ * bar itself.
+ */
+export function peerName(sender: CondensePeerSender): {
+	name: string;
+	quoted: boolean;
+} {
+	if (sender.conversationName) {
+		return { name: sender.conversationName, quoted: true };
+	}
+	const cwd = sender.cwd.replace(TRAILING_SEPARATORS, "");
+	if (cwd) {
+		const base = cwd.split(PATH_SEPARATOR).pop() ?? "";
+		if (base) return { name: `${base}/`, quoted: false };
+	}
+	if (sender.sessionId) return { name: sender.sessionId.slice(0, 8), quoted: false };
+	return { name: "", quoted: false };
+}
+
+/** The identity a collapsed receipt row leads with (ported verbatim). */
+export function peerIdentity(sender: CondensePeerSender): string {
+	const { name, quoted } = peerName(sender);
+	if (name) return quoted ? `"${name}"` : name;
+	return sender.pid ? `pid ${sender.pid}` : "another session";
+}
+
+/** An all-absent sender, so the record shape is never a nullable pair. */
+export const EMPTY_SENDER: CondensePeerSender = {
+	pid: "",
+	conversationName: "",
+	cwd: "",
+	sessionId: "",
+	modelLabel: "",
+};

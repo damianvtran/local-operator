@@ -1,0 +1,16 @@
+{
+	"_": "WHERE the cross-client parity fixtures are pinned, so a desktop model change this surface has not ported is a NAMED divergence instead of the silent drift that let the quiet-group clause copies diverge for nine days. `sha256` is over the copied bytes; `commit` is the desktop tree they were generated from.",
+	"condense.parity.json": {
+		"repo": "damianvtran/local-operator-ui",
+		"path": "scripts/fixtures/condense.parity.json",
+		"commit": "db5ec669215461cbdd8d117f20f8968cc0060013",
+		"sha256": "1e1840b8c84d062340cd772017d12be3ed0d0fcb4613afde8be450129ea81791"
+	},
+	"quiet-groups.parity.json": {
+		"repo": "damianvtran/local-operator-ui",
+		"path": "scripts/fixtures/quiet-groups.parity.json",
+		"commit": "9c5a6958b1",
+		"sha256": "ba02cd3d62ef763f97023d055d1951f88539de351a01cae5765ba899d4738138",
+		"note": "The relay authored these bytes (9a0bb4ec933, 2026-10-16) and the desktop adopts them verbatim in its C0 PR; until that merge lands the commit names that PR's head rather than a mainline commit."
+	}
+}

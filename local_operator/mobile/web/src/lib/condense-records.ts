@@ -37,7 +37,7 @@
  *   rows `<msg>:<call>`, so identity is derived here (`rowKey`) instead of being
  *   taken from `id`.
  */
-import type { TranscriptEntry } from "../api";
+import type { TranscriptEntry } from "../types";
 
 /**
  * The record's discriminant, in the desktop's vocabulary.
