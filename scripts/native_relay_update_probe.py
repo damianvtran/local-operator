@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import pwd
+import re
 import shutil
 import signal
 import socket
@@ -337,8 +338,54 @@ def _write_pinned_unit(unit: Path, generation: Path, port: int) -> None:
     _require(["systemctl", "--user", "daemon-reload"])
 
 
-def _write_readiness_diagnostics(observed: dict[str, Any]) -> None:
-    """Preserve bounded, non-secret evidence when readiness never converges."""
+#: Bounded size of EVERY diagnostic tail uploaded in the readiness artifact.
+_DIAGNOSTIC_TAIL_CHARS = 2000
+
+#: A FIXED set of key/token shapes redacted before a tail reaches the public
+#: artifact. This is a pattern filter, not a claim that today's relay never logs
+#: a secret: a future log line must not silently become the leak.
+_REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"(?i)\b(control_key|private_key|api[_-]?key|access[_-]?token|"
+            r"refresh[_-]?token|token|secret|password|passphrase)\b"
+            r'"?(\s*[:=]\s*)"?([^\s",;}]+)'
+        ),
+        r"\1\2<redacted>",
+    ),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer <redacted>"),
+    (re.compile(r"\b[0-9a-fA-F]{40,}\b"), "<redacted-hex>"),
+    (re.compile(r"\b[A-Za-z0-9_-]{43,}={0,2}\b"), "<redacted-blob>"),
+)
+
+
+def _redact(text: str) -> tuple[str, int]:
+    """Apply every fixed pattern, returning the text and the replacement count."""
+    total = 0
+    for pattern, replacement in _REDACTIONS:
+        text, count = pattern.subn(replacement, text)
+        total += count
+    return text, total
+
+
+def _tail(text: str) -> str:
+    """The bounded form every diagnostic tail shares."""
+    return text[-_DIAGNOSTIC_TAIL_CHARS:]
+
+
+def _write_readiness_diagnostics(observed: dict[str, Any], private_log: Path) -> None:
+    """Record why readiness never converged, without waiting to be asked twice.
+
+    The runner discards the package log and the isolated config on exit, so the
+    only durable evidence is an uploaded artifact. ``private_log`` is the
+    manager's own console log: unit-setup failures (an unopenable ``append:``
+    target is the measured one) are manager messages and never reach the journal.
+
+    Every field is redacted and bounded before it leaves the process: the
+    artifact is public, so a secret-shaped value must never depend on today's
+    relay choosing not to log one. The record itself is never included —
+    ``_observation`` deliberately keeps the control key out of its fixed keys.
+    """
     journal_tail = "journalctl unavailable"
     if shutil.which("journalctl") is not None:
         try:
@@ -346,19 +393,34 @@ def _write_readiness_diagnostics(observed: dict[str, Any]) -> None:
                 ["journalctl", "--user", "-u", relay.SYSTEMD_UNIT, "-n", "80", "--no-pager"],
                 timeout=5.0,
             )
-            journal_tail = (journal.stdout + "\n" + journal.stderr).strip()[-2000:]
+            journal_tail = (journal.stdout + "\n" + journal.stderr).strip()
         except ProbeFailure as exc:
             journal_tail = str(exc)
-    log = relay.log_path()
+    network_log = relay.log_path()
     try:
-        network_tail = log.read_text(encoding="utf-8", errors="replace")[-2000:].strip()
+        network_tail = network_log.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         network_tail = f"unavailable: {exc}"
+    try:
+        manager_tail = private_log.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        manager_tail = f"unavailable: {exc}"
+    tails: dict[str, str] = {}
+    replacements = 0
+    for key, raw in (
+        ("journal_tail", journal_tail),
+        ("manager_log_tail", manager_tail),
+        ("network_log_tail", network_tail),
+    ):
+        redacted, count = _redact(raw)
+        replacements += count
+        tails[key] = _tail(redacted.strip())
     payload = {
         "last_observation": observed,
-        "journal_tail": journal_tail,
-        "network_log_path": str(log),
-        "network_log_tail": network_tail,
+        "manager_log_path": str(private_log),
+        "network_log_path": str(network_log),
+        "redaction": {"patterns": len(_REDACTIONS), "replacements": replacements},
+        **tails,
     }
     destination = (
         Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()) / "native-relay-readiness.json"
@@ -373,7 +435,7 @@ def _write_readiness_diagnostics(observed: dict[str, Any]) -> None:
         pass
 
 
-def _start_and_wait(generation: Path, sha: str) -> dict[str, Any]:
+def _start_and_wait(generation: Path, sha: str, private_log: Path) -> dict[str, Any]:
     _require(["systemctl", "--user", "start", relay.SYSTEMD_UNIT])
     observed: dict[str, Any] = {}
     deadline = time.monotonic() + 30.0
@@ -384,7 +446,7 @@ def _start_and_wait(generation: Path, sha: str) -> dict[str, Any]:
             _assert_identity(observed, generation, sha, "service start", expected_stale=True)
             return observed
         time.sleep(0.1)
-    _write_readiness_diagnostics(observed)
+    _write_readiness_diagnostics(observed, private_log)
     raise ProbeFailure(f"relay did not become ready on its advertised source {sha}")
 
 
@@ -623,7 +685,7 @@ def main() -> int:
         # Negative control: identical fixture, old refresh code. The one failed
         # process read used to produce `current` and leave the old relay live.
         _write_pinned_unit(unit, base_generation, port)
-        before = _start_and_wait(base_generation, base_sha)
+        before = _start_and_wait(base_generation, base_sha, scratch / "private-systemd.log")
         receipt = _refresh(base_generation, scratch, "base")
         after = _observation()
         _assert_identity(
@@ -647,7 +709,7 @@ def main() -> int:
 
         # Fixed case: only the generation carrying the new product code changes.
         _write_pinned_unit(unit, base_generation, port)
-        before = _start_and_wait(base_generation, base_sha)
+        before = _start_and_wait(base_generation, base_sha, scratch / "private-systemd.log")
         receipt = _refresh(head_generation, scratch, "fixed")
         after = _observation()
         _assert_identity(

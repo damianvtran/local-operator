@@ -342,7 +342,7 @@ def test_foreign_init_scope_control_pid_is_not_signaled(root: Path) -> None:
     )
 
 
-def test_history_allows_only_the_consumed_failed_run(root: Path) -> None:
+def test_history_allows_the_reviewed_consumed_set_in_any_order(root: Path) -> None:
     _bash(
         root,
         r"""
@@ -351,18 +351,28 @@ def test_history_allows_only_the_consumed_failed_run(root: Path) -> None:
         GH_BIN=mock_gh
         JQ_BIN=jq
         current=99999999999
-        mock_gh() { printf '%s\n' '[{"databaseId":40223296178}]'; }
-        native_history_allows_retry owner/repo native-delegated-once.yml "$current"
-        # The live list also includes the current run; it is not another attempt.
+        # The live history holds both consumed failed diagnostics.
         mock_gh() {
-          printf '%s\n' '[{"databaseId":40223296178},{"databaseId":99999999999}]'
+          printf '%s\n' '[{"databaseId":40223296178},{"databaseId":40238106261}]'
         }
         native_history_allows_retry owner/repo native-delegated-once.yml "$current"
+        # Order must not matter, and the current run may also be listed once.
+        mock_gh() {
+          printf '%s\n' \
+            '[{"databaseId":40238106261},{"databaseId":99999999999},{"databaseId":40223296178}]'
+        }
+        native_history_allows_retry owner/repo native-delegated-once.yml "$current"
+        # A run that lists ITSELF beside the consumed pair is the same history
+        # with the current row already present, and is allowed.
+        mock_gh() {
+          printf '%s\n' '[{"databaseId":40223296178},{"databaseId":40238106261}]'
+        }
+        native_history_allows_retry owner/repo native-delegated-once.yml 40238106261
         """,
     )
 
 
-def test_history_refuses_the_consumed_run_plus_any_other(root: Path) -> None:
+def test_history_refuses_a_third_unexpected_run(root: Path) -> None:
     _bash(
         root,
         r"""
@@ -371,17 +381,73 @@ def test_history_refuses_the_consumed_run_plus_any_other(root: Path) -> None:
         GH_BIN=mock_gh
         JQ_BIN=jq
         mock_gh() {
-          printf '%s\n' '[{"databaseId":40223296178},{"databaseId":123456789}]'
+          printf '%s\n' \
+            '[{"databaseId":40223296178},{"databaseId":40238106261},{"databaseId":123456789}]'
         }
         if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
-          printf 'additional run unexpectedly authorized\n' >&2
+          printf 'third run unexpectedly authorized\n' >&2
           exit 1
         fi
         """,
     )
 
 
-def test_history_refuses_a_different_or_missing_predecessor(root: Path) -> None:
+def test_history_refuses_a_duplicate_current_row(root: Path) -> None:
+    """The current run may appear once; a duplicated row is unexpected history."""
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        source "$LIB"
+        GH_BIN=mock_gh
+        JQ_BIN=jq
+        mock_gh() {
+          local rows='['
+          rows+='{"databaseId":40223296178},'
+          rows+='{"databaseId":40238106261},'
+          rows+='{"databaseId":99999999999},'
+          rows+='{"databaseId":99999999999}]'
+          printf '%s\n' "$rows"
+        }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'duplicate current row unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        """,
+    )
+
+
+def test_history_refuses_a_duplicate_or_missing_consumed_run(root: Path) -> None:
+    _bash(
+        root,
+        r"""
+        set -euo pipefail
+        source "$LIB"
+        GH_BIN=mock_gh
+        JQ_BIN=jq
+        mock_gh() {
+          printf '%s\n' \
+            '[{"databaseId":40223296178},{"databaseId":40223296178},{"databaseId":40238106261}]'
+        }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'duplicate consumed id unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        mock_gh() { printf '%s\n' '[{"databaseId":40223296178}]'; }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'missing consumed id unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        mock_gh() { printf '%s\n' '[{"databaseId":40238106261}]'; }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'substituted consumed id unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        """,
+    )
+
+
+def test_history_refuses_a_substituted_or_missing_history(root: Path) -> None:
     _bash(
         root,
         r"""
@@ -391,12 +457,12 @@ def test_history_refuses_a_different_or_missing_predecessor(root: Path) -> None:
         JQ_BIN=jq
         mock_gh() { printf '%s\n' '[{"databaseId":123456789}]'; }
         if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
-          printf 'different predecessor unexpectedly authorized\n' >&2
+          printf 'substituted history unexpectedly authorized\n' >&2
           exit 1
         fi
         mock_gh() { printf '%s\n' '[]'; }
         if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
-          printf 'missing predecessor unexpectedly authorized\n' >&2
+          printf 'empty history unexpectedly authorized\n' >&2
           exit 1
         fi
         """,
@@ -414,6 +480,15 @@ def test_history_refuses_api_and_malformed_response_failures(root: Path) -> None
         mock_gh() { return 1; }
         if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
           printf 'API failure unexpectedly authorized\n' >&2
+          exit 1
+        fi
+        # Valid JSON followed by a non-zero exit must ALSO refuse.
+        mock_gh() {
+          printf '%s\n' '[{"databaseId":40223296178},{"databaseId":40238106261}]'
+          return 1
+        }
+        if native_history_allows_retry owner/repo native-delegated-once.yml 99999999999; then
+          printf 'non-zero exit with allowed body unexpectedly authorized\n' >&2
           exit 1
         fi
         mock_gh() { printf '%s\n' 'not-json'; }

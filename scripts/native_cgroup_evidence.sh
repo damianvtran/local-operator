@@ -180,19 +180,24 @@ signal_payload_pid() {
 
 native_history_allows_retry() {
   local repository=$1 workflow=$2 current=$3 runs consumed
-  # 40223296178 is the one consumed, failed diagnostic whose evidence must stay.
-  # The operator authorized exactly one reviewed retry, not a general rerun
-  # bypass: require that predecessor once and reject every other history row.
+  # The operator authorized one retry after the first consumed run; both failed
+  # diagnostics (40223296178, 40238106261) are the reviewed consumed set and
+  # their evidence stays. These ids may appear in ANY order, each EXACTLY once,
+  # with at most the current run's own row. Every other history shape refuses,
+  # so this can never become a general rerun bypass.
   runs=$("$GH_BIN" run list --repo "$repository" \
     --workflow "$workflow" --limit 100 --json databaseId) || return 1
   consumed=$("$JQ_BIN" -r --arg current "$current" '
     if type != "array" then 1
     elif all(.[]; (.databaseId | type) == "number") then
-      ([.[] | select(.databaseId == 40223296178)] | length) as $consumed
+      ([.[] | select(.databaseId == 40223296178)] | length) as $first
+      | ([.[] | select(.databaseId == 40238106261)] | length) as $second
       | ([.[] | select((.databaseId | tostring) == $current)] | length) as $current_rows
-      | ([.[] | select((.databaseId != 40223296178) and
-          ((.databaseId | tostring) != $current))] | length) as $unexpected
-      | if $consumed == 1 and $current_rows <= 1 and $unexpected == 0 then 0 else 1 end
+      | ([.[] | select(.databaseId as $id
+          | ($id != 40223296178 and $id != 40238106261)
+            and (($id | tostring) != $current))] | length) as $unexpected
+      | if $first == 1 and $second == 1 and $current_rows <= 1 and $unexpected == 0
+        then 0 else 1 end
     else 1 end
   ' <<<"$runs") || return 1
   [ "$consumed" = 0 ]

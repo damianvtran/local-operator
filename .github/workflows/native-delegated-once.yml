@@ -1,7 +1,8 @@
 # One operator-authorized diagnostic, never a standing privileged CI gate.
-# The operator applies native-<exact-reviewed-head> once after
-# wrapper/provenance/cleanup review. The wrapper verifies that head and these
-# content hashes; any earlier run consumes the authorization (including relabel).
+# The operator applies native-<exact-reviewed-head> only for a head whose guard
+# and fixture changes have been reviewed. The wrapper verifies that head and
+# these content hashes; only the reviewed consumed failed runs and the current
+# row may appear in history, so any other dispatch fails closed.
 name: Native delegated relay update once
 on:
   pull_request:
@@ -35,9 +36,9 @@ jobs:
       - name: Run the one authorized delegated diagnostic
         env:
           EXPECTED_HEAD: ${{ github.event.label.name }}
-          EXPECTED_WRAPPER_SHA256: 0f73d475c046b33d27e755d737bbd396f89e32774bceb7b25800c7074cdd7201
-          EXPECTED_PROBE_SHA256: ec219437dc7ac00ae863ad25cb846731daca4f02a25f9ae72ddcdae108d71156
-          EXPECTED_SCOPE_LIB_SHA256: 63c9b6b2259ab02411970060a3bb3c7dab0d1d31f7d9f6ccb6c737bdc51a3877
+          EXPECTED_WRAPPER_SHA256: 8ac417cb1b987af6212eaaf85d2fb27b6b76af4096dde6cb63da08ace7016935
+          EXPECTED_PROBE_SHA256: 894e140286fa0d161750232cc83cddacfe541d9d6ecb717f252edb1770f31af9
+          EXPECTED_SCOPE_LIB_SHA256: ecd43b9548f7cc5594585d8c3c8fa35c38ad1a631c5ce324d1374d02b4c17a19
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/native-delegated-once-wrapper.sh
       - name: Upload scope and native receipts

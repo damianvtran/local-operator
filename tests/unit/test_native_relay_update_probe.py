@@ -182,6 +182,8 @@ def test_readiness_failure_preserves_observation_and_log_tails(
     log = config / "logs" / "network.log"
     log.parent.mkdir(parents=True)
     log.write_text("network-tail\n", encoding="utf-8")
+    manager_log = root / "private-systemd.log"
+    manager_log.write_text("manager-tail: failed to open output file\n", encoding="utf-8")
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     observed = {"pid": 4321, "advertised_source_ref": "wrong", "answering": False}
     monkeypatch.setattr(probe, "_require", lambda _argv: None)
@@ -210,10 +212,40 @@ def test_readiness_failure_preserves_observation_and_log_tails(
     )
 
     with pytest.raises(probe.ProbeFailure, match="did not become ready"):
-        probe._start_and_wait(Path("/generation"), "base")  # noqa: SLF001
+        probe._start_and_wait(Path("/generation"), "base", manager_log)  # noqa: SLF001
 
     receipt = json.loads((root / "native-relay-readiness.json").read_text(encoding="utf-8"))
     assert receipt["last_observation"] == observed
     assert "journal-tail" in receipt["journal_tail"]
     assert "network-tail" in receipt["network_log_tail"]
+    assert "failed to open output file" in receipt["manager_log_tail"]
+    assert receipt["manager_log_path"] == str(manager_log)
     assert receipt["network_log_path"] == str(probe.relay.log_path())
+    assert receipt["redaction"]["replacements"] == 0
+    # The record itself is never part of the payload, so its key cannot leak.
+    assert "control_key" not in receipt["last_observation"]
+
+
+def test_readiness_diagnostics_redact_secret_shaped_tails(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A planted secret-shaped value must not survive into the public artifact."""
+    monkeypatch.setenv("RUNNER_TEMP", str(root))
+    config = root / "config"
+    log = config / "logs" / "network.log"
+    log.parent.mkdir(parents=True)
+    planted = "QA_SUPERSECRET_VALUE_123"
+    log.write_text(f"token={planted}\n", encoding="utf-8")
+    manager_log = root / "private-systemd.log"
+    manager_log.write_text(f'"control_key": "{planted}"\n', encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(probe.shutil, "which", lambda _name: None)
+
+    probe._write_readiness_diagnostics({"pid": 0}, manager_log)  # noqa: SLF001
+
+    artifact = (root / "native-relay-readiness.json").read_text(encoding="utf-8")
+    assert planted not in artifact
+    assert artifact.count("<redacted>") >= 2
+    receipt = json.loads(artifact)
+    assert receipt["redaction"]["replacements"] >= 2
+    assert receipt["last_observation"] == {"pid": 0}

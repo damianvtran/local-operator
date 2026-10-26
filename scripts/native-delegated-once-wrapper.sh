@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One operator-authorized ephemeral CI diagnostic. No normal-PR invocation and
-# no retry: the workflow's label/run-attempt/history guards call this only once.
+# A one-shot diagnostic: no automatic invocation. The workflow's label,
+# run-attempt and history guards call this only for the explicitly reviewed head
+# named by the label; the reviewed consumed failures remain in the history.
 # Exactly one privileged command is used (sudo -n systemd-run). Cleanup signals
 # only authenticated runner-owned PIDs; all other scope inspection is read-only.
 set -euo pipefail
@@ -54,11 +55,11 @@ actual_scope_lib_sha=$("$SHA256SUM" "$GITHUB_WORKSPACE/scripts/native_cgroup_evi
 actual_scope_lib_sha=${actual_scope_lib_sha%% *}
 [ "$actual_scope_lib_sha" = "$EXPECTED_SCOPE_LIB_SHA256" ]
 
-# The concurrency key serializes relabels. The shared guard tolerates only the
-# consumed failed run 40223296178 for the operator's one reviewed retry; API
-# errors, a missing predecessor, or any additional/unexpected run fail closed.
+# The concurrency key serializes relabels. The shared guard tolerates exactly the
+# reviewed consumed failed runs and the current row; API errors, missing or
+# substituted ids, duplicates or any other history fail closed.
 native_history_allows_retry "$GITHUB_REPOSITORY" native-delegated-once.yml "$GITHUB_RUN_ID" || {
-  printf 'authorized retry history does not match the single consumed failed run\n' >&2
+  printf 'native history does not match the reviewed consumed set\n' >&2
   exit 2
 }
 
