@@ -7,6 +7,7 @@ or evict; forgetting one would turn a lost-response retry into another session.
 SQLite supplies portable cross-process claim exclusion and durable transactions;
 async tasks merely coalesce callers and shield the existing spawn from disconnects.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -31,11 +32,13 @@ MAX_FIELD_CHARS = 4096
 #: The field bounds above limit what a receipt stores, not what the relay must
 #: buffer and parse to find out that a body breaks them: an 8 MiB authenticated
 #: body was fully read and parsed only to be refused afterwards. The cap is
-#: derived from the schema, so it can never refuse a valid request: the worst
-#: JSON encoding of one code point is an escaped surrogate pair (12 bytes), so
-#: three maximal fields cost 3 x 4096 x 12 bytes; the 4 KiB slack covers the
-#: key (at most 36 escaped characters), escaped field names, punctuation and
-#: ordinary whitespace. It applies to unkeyed callers too, because the route
+#: derived from the schema, so it never refuses a compactly or ordinarily
+#: formatted UTF-8 body within the field bounds: the worst JSON encoding of one
+#: code point is an escaped surrogate pair (12 bytes), so three maximal fields
+#: cost 3 x 4096 x 12 bytes; the 4 KiB slack covers the key (at most 36 escaped
+#: characters), escaped field names, punctuation and ordinary whitespace. Bodies
+#: padded past that slack, or sent as UTF-16/32 JSON, can exceed it; no real
+#: client sends either. It applies to unkeyed callers too, because the route
 #: cannot know whether a body is keyed until it has parsed it; no real legacy
 #: body (a path plus two identifiers) comes near it.
 START_BODY_MAX_BYTES = 3 * MAX_FIELD_CHARS * 12 + 4096
@@ -149,14 +152,21 @@ class StartReceipts:
             raise ValueError("invalid_receipt")
         if not all(isinstance(value, str) and value for value in chosen.values()):
             raise ValueError("invalid_receipt")
-        if (not isinstance(sid, str) or len(sid) != 12
-                or any(c not in "0123456789abcdef" for c in sid)):
+        if (
+            not isinstance(sid, str)
+            or len(sid) != 12
+            or any(c not in "0123456789abcdef" for c in sid)
+        ):
             raise ValueError("invalid_receipt")
         if result is not None:
             answer = json.loads(result)
-            if (not isinstance(answer, dict) or answer.get("ok") is not True
-                    or answer.get("session_id") != sid or type(answer.get("pid")) is not int
-                    or answer["pid"] <= 0):
+            if (
+                not isinstance(answer, dict)
+                or answer.get("ok") is not True
+                or answer.get("session_id") != sid
+                or type(answer.get("pid")) is not int
+                or answer["pid"] <= 0
+            ):
                 raise ValueError("invalid_receipt")
 
     def _claim(self, key: str, request: str, resolve: Callable[[], dict[str, str]]):
@@ -194,7 +204,8 @@ class StartReceipts:
         with self._database() as db:
             row = db.execute(
                 "SELECT request_id, fingerprint, request, resolved, session_id, result "
-                "FROM receipts WHERE request_id=?", (key,)
+                "FROM receipts WHERE request_id=?",
+                (key,),
             ).fetchone()
             if row is None:
                 raise StartRefusal("create_receipts_unavailable", 503)
@@ -203,9 +214,13 @@ class StartReceipts:
                 raise StartRefusal("create_indeterminate", session_id=row[4])
             db.execute("UPDATE receipts SET result=? WHERE request_id=?", (json.dumps(answer), key))
 
-    async def start(self, body: dict[str, Any], resolve: Callable[[], dict[str, str]],
-                    spawn: Callable[[dict[str, str], str], Awaitable[int]],
-                    recover: Callable[[str], Awaitable[int | None]]) -> dict[str, Any]:
+    async def start(
+        self,
+        body: dict[str, Any],
+        resolve: Callable[[], dict[str, str]],
+        spawn: Callable[[dict[str, str], str], Awaitable[int]],
+        recover: Callable[[str], Awaitable[int | None]],
+    ) -> dict[str, Any]:
         """`recover` resolves the CURRENT owner of an exact SID, or ``None``.
 
         It is deliberately the only pid source for replays: a pid written to a

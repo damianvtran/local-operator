@@ -76,8 +76,8 @@ answers `create_indeterminate` (below) instead of a stale number.
 | 400 | `invalid_start_selection` | The resolved provider/model pair is missing or unusable |
 | 409 | `create_conflict` | Same key, different fingerprint or input |
 | 409 | `create_indeterminate` | Uncertain outcome; carries the authoritative `session_id` |
-| 503 | `create_capacity` | The receipt bound is full; new key refused before any side effect |
 | 413 | `start_request_too_large` | Body over 151,552 bytes; refused before it is parsed, keyed or not |
+| 503 | `create_capacity` | The receipt bound is full; new key refused before any side effect |
 | 503 | `create_receipts_unavailable` | Store corrupt, unreadable or unwritable |
 
 `create_indeterminate` is a **hold, not a failure to retry as new**. The
@@ -143,9 +143,11 @@ replaying while the store is full.
   before any JSON parsing. The cap is checked on `Content-Length` and again on
   the bytes actually read, so a chunked or lying request stops at the cap and
   is never buffered whole. It derives from the field bounds (3 fields × 4096
-  characters × 12 bytes for the widest JSON escape, plus 4 KiB), so no request
-  the schema admits is refused by it. It applies to unkeyed callers too: the
-  route cannot tell a body is keyed until it parses it.
+  characters × 12 bytes for the widest JSON escape, plus 4 KiB), so no compactly
+  or ordinarily formatted UTF-8 body within the field bounds is refused by it. A
+  body padded with more insignificant whitespace than that slack, or sent as
+  UTF-16/32 JSON, can exceed it; no real client sends either. It applies to
+  unkeyed callers too: the route cannot tell a body is keyed until it parses it.
 
 ## Client obligations
 

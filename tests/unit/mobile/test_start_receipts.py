@@ -107,14 +107,19 @@ def spawn_adapter(daemon: MobileDaemon):
 
     async def spawn(chosen, sid):
         return await daemon.spawn_session(
-            chosen["cwd"], provider=chosen["provider"], model_id=chosen["model_id"], resume=sid)
+            chosen["cwd"], provider=chosen["provider"], model_id=chosen["model_id"], resume=sid
+        )
 
     return spawn
 
 
 def body(**over) -> dict:
     payload = {
-        "create_request_id": KEY, "cwd": "~", "provider": "openai", "model_id": "fixture-model"}
+        "create_request_id": KEY,
+        "cwd": "~",
+        "provider": "openai",
+        "model_id": "fixture-model",
+    }
     payload.update(over)
     return payload
 
@@ -170,11 +175,15 @@ def test_concurrent_requests_for_one_key_coalesce(tmp_path, monkeypatch):
     async def scenario():
         first = asyncio.create_task(
             receipts.start(
-                body(), resolve, spawn_adapter(r.daemon), r.daemon.recover_started_session))
+                body(), resolve, spawn_adapter(r.daemon), r.daemon.recover_started_session
+            )
+        )
         await settle(lambda: bool(r.rows()))
         second = asyncio.create_task(
             receipts.start(
-                body(), resolve, spawn_adapter(r.daemon), r.daemon.recover_started_session))
+                body(), resolve, spawn_adapter(r.daemon), r.daemon.recover_started_session
+            )
+        )
         await asyncio.sleep(0.05)
         gate.set()
         return await asyncio.gather(first, second)
@@ -246,8 +255,11 @@ def test_completed_replay_without_a_live_owner_holds_the_sid(tmp_path, monkeypat
     monkeypatch.setattr(r.daemon, "recover_started_session", no_owner)
     replay = r.start(body())
     assert replay.status_code == 409
-    assert replay.json() == {"error": "create_indeterminate", "code": "create_indeterminate",
-                             "session_id": recorded["session_id"]}
+    assert replay.json() == {
+        "error": "create_indeterminate",
+        "code": "create_indeterminate",
+        "session_id": recorded["session_id"],
+    }
     assert "pid" not in replay.json()
     assert r.calls == 1
 
@@ -258,8 +270,11 @@ def test_pending_claim_adopts_only_a_verified_exact_owner(tmp_path, monkeypatch)
     (r.root).mkdir(parents=True, exist_ok=True)
     receipts = StartReceipts(r.root)
     _, encoded = canonical_request(body())
-    fresh, chosen, sid, answer = receipts._claim(KEY, encoded, lambda: {
-        "cwd": "/synthetic", "provider": "openai", "model_id": "fixture-model"})
+    fresh, chosen, sid, answer = receipts._claim(
+        KEY,
+        encoded,
+        lambda: {"cwd": "/synthetic", "provider": "openai", "model_id": "fixture-model"},
+    )
     assert fresh and answer is None
     r.daemon._start_receipts = receipts
 
@@ -287,8 +302,11 @@ def test_pending_claim_with_no_owner_stays_unresolved_without_spawning(tmp_path,
     r = rig(tmp_path, monkeypatch)
     receipts = StartReceipts(r.root)
     _, encoded = canonical_request(body())
-    _, _, sid, _ = receipts._claim(KEY, encoded, lambda: {
-        "cwd": "/synthetic", "provider": "openai", "model_id": "fixture-model"})
+    _, _, sid, _ = receipts._claim(
+        KEY,
+        encoded,
+        lambda: {"cwd": "/synthetic", "provider": "openai", "model_id": "fixture-model"},
+    )
     r.daemon._start_receipts = receipts
 
     held = r.start(body())
@@ -318,7 +336,10 @@ def test_cancelled_request_leaves_a_queryable_receipt(tmp_path, monkeypatch):
             receipts.start(
                 body(),
                 lambda: {"cwd": "/synthetic", "provider": "openai", "model_id": "fixture-model"},
-                spawn_adapter(r.daemon), r.daemon.recover_started_session))
+                spawn_adapter(r.daemon),
+                r.daemon.recover_started_session,
+            )
+        )
         while not r.rows():
             await asyncio.sleep(0.01)
         pending.cancel()
@@ -372,8 +393,9 @@ def test_authentication_and_origin_precede_claim_and_replay(tmp_path, monkeypatc
     anonymous = TestClient(build_app(r.daemon), follow_redirects=False)
     denied = anonymous.post("/api/sessions/start", json=body())
     assert denied.status_code in (401, 403)
-    cross = r.client.post("/api/sessions/start", json=body(),
-                          headers={"Origin": "http://evil.example"})
+    cross = r.client.post(
+        "/api/sessions/start", json=body(), headers={"Origin": "http://evil.example"}
+    )
     assert cross.status_code in (401, 403)
     assert r.calls == 0
     assert not r.receipts_path.exists()
@@ -410,7 +432,7 @@ def stream_post(r: Rig, raw: bytes, chunk: int = 64 * 1024) -> tuple[httpx.Respo
     async def chunks():
         nonlocal pulled
         for start in range(0, len(raw), chunk):
-            piece = raw[start:start + chunk]
+            piece = raw[start : start + chunk]
             pulled += len(piece)
             yield piece
 
@@ -423,8 +445,10 @@ def stream_post(r: Rig, raw: bytes, chunk: int = 64 * 1024) -> tuple[httpx.Respo
             transport=transport, base_url="http://testserver", cookies=cookies
         ) as client:
             return await client.post(
-                "/api/sessions/start", content=chunks(),
-                headers={"content-type": "application/json"})
+                "/api/sessions/start",
+                content=chunks(),
+                headers={"content-type": "application/json"},
+            )
 
     response = asyncio.run(scenario())
     return response, pulled
@@ -439,8 +463,9 @@ def test_oversized_declared_body_is_refused_before_parsing(tmp_path, monkeypatch
     """The reviewer's reproduction: an ~8 MiB keyed body with an honest length."""
     r = rig(tmp_path, monkeypatch)
     raw = json.dumps(body(cwd="x" * (8 * 1024 * 1024))).encode()
-    refused = r.client.post("/api/sessions/start", content=raw,
-                            headers={"content-type": "application/json"})
+    refused = r.client.post(
+        "/api/sessions/start", content=raw, headers={"content-type": "application/json"}
+    )
     assert refused.status_code == 413
     assert refused.json() == TOO_LARGE
     assert_no_side_effect(r)
@@ -450,8 +475,11 @@ def test_lying_content_length_is_bounded_by_the_bytes_read(tmp_path, monkeypatch
     """The header is the client's claim, never the bound."""
     r = rig(tmp_path, monkeypatch)
     raw = at_size(body(), START_BODY_MAX_BYTES + 1)
-    refused = r.client.post("/api/sessions/start", content=raw, headers={
-        "content-type": "application/json", "content-length": "64"})
+    refused = r.client.post(
+        "/api/sessions/start",
+        content=raw,
+        headers={"content-type": "application/json", "content-length": "64"},
+    )
     assert refused.status_code == 413
     assert refused.json() == TOO_LARGE
     assert_no_side_effect(r)
@@ -486,8 +514,9 @@ def test_byte_cap_boundary_admits_at_and_refuses_one_over(tmp_path, monkeypatch,
     def send(raw: bytes) -> httpx.Response:
         if framing == "chunked":
             return stream_post(r, raw, chunk=4096)[0]
-        return r.client.post("/api/sessions/start", content=raw,
-                             headers={"content-type": "application/json"})
+        return r.client.post(
+            "/api/sessions/start", content=raw, headers={"content-type": "application/json"}
+        )
 
     over = send(at_size(body(), START_BODY_MAX_BYTES + 1))
     assert over.status_code == 413
@@ -507,12 +536,13 @@ def test_cap_never_refuses_the_largest_schema_valid_body(tmp_path, monkeypatch):
     this is the most bytes a body inside the per-field bounds can take.
     """
     r = rig(tmp_path, monkeypatch)
-    widest = "\U0001F600" * MAX_FIELD_CHARS
+    widest = "\U0001f600" * MAX_FIELD_CHARS
     payload = body(cwd=widest, provider=widest, model_id=widest)
     raw = json.dumps(payload, ensure_ascii=True, indent=1).encode()
     assert len(raw) <= START_BODY_MAX_BYTES
-    reply = r.client.post("/api/sessions/start", content=raw,
-                          headers={"content-type": "application/json"})
+    reply = r.client.post(
+        "/api/sessions/start", content=raw, headers={"content-type": "application/json"}
+    )
     assert reply.status_code != 413
     assert reply.json()["code"] != "start_request_too_large"
 
@@ -589,18 +619,27 @@ def test_capability_is_advertised_only_on_an_authenticated_listing(tmp_path, mon
     r = rig(tmp_path, monkeypatch)
     payload = r.client.get("/api/sessions").json()
     assert payload["capabilities"]["session_start"] == {
-        "version": 1, "durable_idempotency": True, "receipt_capacity": 4096}
+        "version": 1,
+        "durable_idempotency": True,
+        "receipt_capacity": 4096,
+    }
     anonymous = TestClient(build_app(r.daemon), follow_redirects=False)
     assert anonymous.get("/api/sessions").status_code in (401, 403)
 
 
 def test_protocol_doc_matches_the_advertised_contract():
     """The doc is the contract native codes against; keep the two in step."""
-    doc_path = (
-        Path(__file__).resolve().parents[3] / "docs" / "design" / "mobile-start-receipts.md")
+    doc_path = Path(__file__).resolve().parents[3] / "docs" / "design" / "mobile-start-receipts.md"
     doc = doc_path.read_text()
-    for token in ("create_request_id", "session_start", "create_conflict", "create_indeterminate",
-                  "create_capacity", "create_receipts_unavailable", "start_request_too_large"):
+    for token in (
+        "create_request_id",
+        "session_start",
+        "create_conflict",
+        "create_indeterminate",
+        "create_capacity",
+        "create_receipts_unavailable",
+        "start_request_too_large",
+    ):
         assert token in doc
     # The documented byte cap is the enforced one.
     assert f"{START_BODY_MAX_BYTES:,} bytes" in doc

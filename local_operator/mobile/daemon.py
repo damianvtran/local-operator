@@ -7919,8 +7919,10 @@ def build_app(daemon: MobileDaemon):
 
                 async def spawn_start(chosen: dict[str, str], sid: str) -> int:
                     return await daemon.spawn_session(
-                        chosen["cwd"], provider=chosen["provider"],
-                        model_id=chosen["model_id"], resume=sid,
+                        chosen["cwd"],
+                        provider=chosen["provider"],
+                        model_id=chosen["model_id"],
+                        resume=sid,
                     )
 
                 answer = await daemon.start_receipts().start(
