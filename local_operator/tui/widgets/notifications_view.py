@@ -195,6 +195,11 @@ class NotificationsView(Vertical):
         #: page's loading state; an empty Snapshot is the caught-up state.
         self.snapshot: model.Snapshot | None = None
         self.cursor_id = ""
+        #: True while the detail pane owns the keys (DT3). In the wide layout the
+        #: detail is a second scrollable pane next to the list; without a mode
+        #: the arrows only ever moved the list, so a tall item could not be read
+        #: past its first screenful from the keyboard at all.
+        self._detail_focus = False
         self.selected_ids: set[str] = set()
         #: ``list`` or ``detail`` (narrow only; wide shows both).
         self.view_mode = "list"
@@ -399,22 +404,26 @@ class NotificationsView(Vertical):
     def action_move(self, delta: int) -> None:
         if self._confirm is not None:
             return
-        if self.view_mode == "detail":
-            self._detail.scroll_relative(y=delta, animate=False)
+        if self.view_mode == "detail" or self._detail_focus:
+            self._detail_scroll_by(delta)
             return
         self._move_to(self._index() + delta)
 
     def action_page(self, delta: int) -> None:
         if self._confirm is not None:
             return
-        step = max(1, (self._list.size.height or 2) - 1)
-        if self.view_mode == "detail":
-            self._detail.scroll_relative(y=delta * step, animate=False)
+        if self.view_mode == "detail" or self._detail_focus:
+            step = max(1, (self._detail.size.height or 2) - 1)
+            self._detail_scroll_by(delta * step)
             return
+        step = max(1, (self._list.size.height or 2) - 1)
         self._move_to(self._index() + delta * step)
 
     def action_jump(self, edge: int) -> None:
-        if self._confirm is not None or self.view_mode == "detail":
+        if self._confirm is not None:
+            return
+        if self.view_mode == "detail" or self._detail_focus:
+            self._detail_jump("top" if edge == 0 else "bottom")
             return
         self._move_to(0 if edge == 0 else len(self.rows) - 1)
 
@@ -435,10 +444,43 @@ class NotificationsView(Vertical):
         # because the re-read is what the open caused.
         if not self.wide:
             self.view_mode = "detail"
+        elif self._detail_row is not None:
+            # The pane is showing a row, so `↵` hands it the keys. Comparing
+            # against `row` alone was wrong on the Unread filter: opening marks
+            # the row read, it leaves the list, and `current` is by then its
+            # successor — so the second `↵` reopened a DIFFERENT item instead of
+            # letting the operator scroll the one they had just opened (DT3).
+            # DT3: in the wide layout `↵` on the row already in the pane hands
+            # the KEYS to that pane. The pane is taller than its box for any item
+            # with history (29 rows of content in 19), and without this the
+            # arrows, pgup/pgdn and home/end only ever moved the list — related
+            # projects and earlier updates were unreachable without a mouse.
+            self._focus_detail()
+            return
         self._detail_row = row
+        self._detail_focus = False
         self._apply_layout()
         self._paint()
         self._load_detail(mark_read=True)
+
+    # -- the detail pane's own keys (DT3) ------------------------------------
+    def _focus_detail(self) -> None:
+        """Hand the keyboard to the detail pane and show that it happened."""
+        self._detail_focus = True
+        self._paint()
+
+    def _detail_scroll_by(self, lines: int) -> None:
+        """Scroll the detail pane by ``lines``, clamped by its own geometry."""
+        try:
+            self._detail.scroll_relative(y=lines, animate=False)
+        except Exception:  # noqa: BLE001 — scrolling is a nicety, never a failure
+            pass
+
+    def _detail_jump(self, where: str) -> None:
+        try:
+            self._detail.scroll_to(y=0 if where == "top" else 10_000, animate=False, immediate=True)
+        except Exception:  # noqa: BLE001
+            pass
 
     def action_toggle_select(self) -> None:
         row = self.current
@@ -641,6 +683,12 @@ class NotificationsView(Vertical):
         if self._confirm is not None:
             self._disarm()
             return
+        if self._detail_focus:
+            # DT3: `esc` steps out of the pane, not out of the page — the list
+            # keeps its cursor and its pin, so the operator lands where they left.
+            self._detail_focus = False
+            self._paint()
+            return
         if self.selected_ids:
             self.selected_ids.clear()
             self._paint()
@@ -763,7 +811,11 @@ class NotificationsView(Vertical):
         list_width = max(20, (self._list.size.width or width) - 2)
         self._title.update(
             render.header_line(
-                snapshot or model.Snapshot(),
+                # DT1: the placeholder is marked NOT LOADED, so the header paints
+                # no counts while the first read is in flight. Passing a default
+                # Snapshot here was the whole bug: its zeros are indistinguishable
+                # from a store that really is empty.
+                snapshot or model.Snapshot(loaded=False),
                 self.filters,
                 width,
                 selected=len(self.selected_ids),
@@ -773,7 +825,15 @@ class NotificationsView(Vertical):
         self._rule.update(Text(render.RULE_GLYPH * 400, style="dim"))
         self._edge.update(Text("\n".join([render.EDGE_GLYPH] * 200), style="dim"))
         if snapshot is None:
-            self._list_text.update(Text(""))
+            # DT1: not an empty state, and not a blank either. A lone ellipsis is
+            # CHROME, not copy — the page's namespace is frozen and audited at an
+            # exact source hash in seven locales, so one new key here would
+            # invalidate seven ledger rows and need a fresh translator+auditor
+            # round for a line that disappears in a frame. The header above
+            # paints no counts while this shows, which is the finding's actual
+            # defect (fabricated zeros); this line only stops the body reading as
+            # "nothing here".
+            self._list_text.update(Text("  …", style=render.ink("muted")))
         elif snapshot.error or not snapshot.rows:
             self._list_text.update(render.empty_text(snapshot, self.filters))
         else:
@@ -788,7 +848,9 @@ class NotificationsView(Vertical):
             self._list_text.update(text)
             self._scroll_to_line(offsets.get(self.cursor_id))
         self._paint_detail()
-        self._notice_text.update(Text(self._footer_text(), style=render.ink("muted")))
+        # DT10: the title and the hint row both inset by one cell; this row
+        # started at column 0, which read as a one-cell misalignment beside them.
+        self._notice_text.update(Text(" " + self._footer_text(), style=render.ink("muted")))
         self._hints.update(render.hints_text(render.hint_row(self._hint_labels(), width - 1)))
 
     @property
@@ -821,6 +883,7 @@ class NotificationsView(Vertical):
                 position=(index + 1, len(self.rows)),
                 now_ms=self._now(),
                 show_back=not self.wide,
+                focused=self._detail_focus,
             )
         )
 
@@ -856,6 +919,14 @@ class NotificationsView(Vertical):
     def _hint_labels(self) -> list[tuple[str, str]]:
         row = self.detail_row
         labels: list[tuple[str, str]] = []
+        if self._detail_focus:
+            # DT3: while the pane owns the keys the footer narrows to the way
+            # back, and the pane's own top line carries the ▸ marker
+            # (`render.detail_text(focused=True)`). A "scroll" label would be a
+            # NEW string in a namespace whose seven ledger rows are keyed to its
+            # exact English source hash, so the mode is signalled in chrome
+            # instead: the cursor glyph moves from the list to the pane.
+            return [("esc", _t(_k.hint_back()))]
         if self.undo_live:
             labels.append(("z", _t(_k.hint_undo())))
         if row is not None and self._confirm is None:
@@ -881,8 +952,25 @@ class NotificationsView(Vertical):
                     if (row.get("session") or {}).get("id"):
                         labels.append(("E", _t(_k.hint_dismiss_all())))
                 read_label = _t(_k.hint_unread()) if row.get("read") else _t(_k.hint_read())
-                labels.append(("u", read_label))
                 labels.append(("space", _t(_k.hint_select())))
+                # DT2: ``A`` (mark every unread read, requirement 4) appeared in
+                # NO hint row in any state — the gesture existed and nothing said
+                # so. It is one string the namespace already carries
+                # (`hint_mark_all`), shown whenever there is something to mark.
+                snapshot = self.snapshot
+                if (
+                    snapshot is not None
+                    and (snapshot.unread_count + snapshot.waiting_unread_count) > 0
+                ):
+                    # COMPOSED FROM THE NAMESPACE'S OWN AUDITED STRINGS, not a new
+                    # key: `hint_read` + `filter_all` are already translated and
+                    # independently audited in all seven locales, and this
+                    # namespace's ledger rows are keyed to its exact English
+                    # source hash — one added string would invalidate seven rows
+                    # and need a translator+auditor round for two words. "read
+                    # all" is also the shortest honest label the gesture has.
+                    labels.append(("A", _t(_k.hint_read()) + " " + _t(_k.filter_all())))
+                labels.append(("u", read_label))
                 labels.append(("o", _t(_k.hint_conversation())))
                 labels.append(("f", _t(_k.hint_filter())))
         labels.append(("esc", _t(_k.hint_clear()) if self.selected_ids else _t(_k.hint_back())))

@@ -45,9 +45,19 @@ READ_ASK = "·"
 SELECTED = "◼"
 ASK_GLYPH = "?"
 RULE_GLYPH = "─"
+#: The back affordance's arrow. CHROME, not copy: the TUI layout is LTR with
+#: per-string isolation (docs/I18N.md), so "back" always points left — and the
+#: ur catalogue carried `→`, which points away from where `esc` goes (DT13).
+#: Owning it here makes the direction a property of the layout, not a
+#: translation, and needs no re-audit of seven locales.
+BACK_ARROW = "←"
 EDGE_GLYPH = "┃"
 #: The priority ladder in block glyphs: the desktop's bars at terminal scale.
-BARS = {"high": "▁▃▅", "normal": "▁▃ ", "low": "▁  "}
+#: THREE CELLS EVERY TIME (DT12). A lone ``▁`` plus two spaces read as an
+#: underscore — an empty input caret beside the title — because the glyph has no
+#: neighbour to compare with. All three levels now share the silhouette and
+#: differ only in fill: 3 high, 2 mid, 3 flat low.
+BARS = {"high": "▁▃▅", "normal": "▁▃▁", "low": "▁▁▁"}
 #: Right-hand columns (design §8.2): source ellipsised at 12 cells, time 5.
 SOURCE_CELLS = 12
 TIME_CELLS = 5
@@ -90,12 +100,28 @@ def compact_until(at_ms: int, now_ms: int | None = None) -> str:
 
 
 def row_time(at_ms: int, now_ms: int | None = None) -> str:
-    """Age today; ``HH:MM`` for older rows (the yesterday group in §8.2)."""
+    """Age today, ``HH:MM`` yesterday, a date beyond it (design §8.2).
+
+    DT7: a bare clock time under ``Earlier this week`` or ``Older`` names no day
+    at all, so the reader cannot tell Tuesday's row from today's. The bucket is
+    derived from the age rather than passed in, because every caller has the
+    same stamp and a second argument would be a second thing to get wrong.
+
+    The date is NUMERIC (``10/23``), deliberately: a three-letter weekday or a
+    CLDR short date would be English — or locale-dependent output from a process
+    whose LC_TIME is not the reader's — inside copy that seven locales have
+    already been audited for. Digits fit the existing five cells and read the
+    same in every shipped locale.
+    """
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
-    if now_ms - int(at_ms or 0) < 12 * 3600 * 1000:
+    age_ms = now_ms - int(at_ms or 0)
+    if age_ms < 12 * 3600 * 1000:
         age = compact_age(at_ms, now_ms)
         return _t(_k.row_now()) if age == "now" else age
-    return datetime.fromtimestamp(int(at_ms) / 1000).strftime("%H:%M")
+    moment = datetime.fromtimestamp(int(at_ms) / 1000)
+    if age_ms < 48 * 3600 * 1000:
+        return moment.strftime("%H:%M")
+    return f"{moment.month}/{moment.day}"
 
 
 def group_label(kind: str, value: str) -> str:
@@ -138,6 +164,54 @@ def _seen_clause(row: dict[str, Any]) -> str:
     if via == "in_view":
         return _t(_k.seen_in_chat())
     return ""
+
+
+def _bland_back_label() -> str:
+    """The localized back label with its arrow replaced by the layout's own.
+
+    The catalogue value carries an arrow glyph, and ur carried `→` while every
+    other locale carried `←` (DT13). The arrow is not a word: it is the
+    affordance's DIRECTION in an LTR layout, so it belongs to the code and the
+    translated text is used unchanged after it.
+    """
+    label = _t(_k.back())
+    stripped = label.lstrip("←→⟵⟶ ")
+    return f"{BACK_ARROW} {stripped}" if stripped != label or label else label
+
+
+def wrap_cells(text: str, cells: int) -> list[str]:
+    """Wrap ``text`` to ``cells`` terminal cells, never splitting a wide glyph.
+
+    ``textwrap`` counts code points, so a CJK title or an Urdu line would overrun
+    the box it was measured against. This walks the string and breaks on the last
+    space that still fits, falling back to a hard break at a glyph boundary.
+    """
+    limit = max(8, cells)
+    lines: list[str] = []
+    rest = text
+    while rest:
+        if cell_len(rest) <= limit:
+            lines.append(rest)
+            break
+        take = 0
+        cut = 0
+        for index in range(1, len(rest) + 1):
+            width = cell_len(rest[:index])
+            if width > limit:
+                break
+            take = index
+            if rest[index - 1] == " ":
+                cut = index
+        if cut:
+            lines.append(rest[: cut - 1])
+            rest = rest[cut:]
+            continue
+        if take == 0:
+            lines.append(rest)
+            break
+        lines.append(rest[:take])
+        rest = rest[take:]
+    return lines
 
 
 def _pad_cells(text: str, cells: int) -> str:
@@ -192,7 +266,12 @@ def row_line(
         chips.append((f"×{repeat}", "muted"))
     seen = _seen_clause(row) if row.get("read") else ""
     if seen:
-        chips.append((seen, "dim" if not ground else "muted"))
+        # DT6: ``dim`` on ``bg`` fails WCAG AA in 30 of the 54 shipped themes
+        # (light 3.77:1, gruvbox-light 3.61:1). This module's own rule above
+        # bans ``dim`` for source and time for exactly this reason, and a chip
+        # that says WHY an item is already read is not less important than the
+        # time it was read at. ``muted`` passes on ``bg`` in all 54.
+        chips.append((seen, "muted"))
     right_cells = 1 + SOURCE_CELLS + 1 + TIME_CELLS
     chip_cells = sum(cell_len(text) + 1 for text, _ in chips)
     title_cells = max(4, width - LEAD_CELLS - right_cells - chip_cells)
@@ -244,7 +323,12 @@ def header_line(
     # own rule elsewhere ("absence is not emptiness: paint nothing rather than a
     # 0"), and "0 unread · 0 waiting on you" above "database disk image is
     # malformed" is that rule contradicted one row up.
-    if not snapshot.error:
+    # DT1: and not while the first read is still in flight. ``snapshot is None``
+    # reaches this line as an EMPTY snapshot, whose counts are all zero, so the
+    # loading frame claimed "0 unread · 0 waiting on you" at the one moment the
+    # operator might decide whether to wait. Absence is not emptiness, and that
+    # rule is the same one the error state already follows two lines down.
+    if snapshot.loaded and not snapshot.error:
         unread = snapshot.unread_count + snapshot.waiting_unread_count
         text.append(
             " · " + _t(_k.header_counts(unread=unread, waiting=snapshot.waiting_count)),
@@ -347,6 +431,7 @@ def detail_text(
     position: tuple[int, int],
     now_ms: int | None = None,
     show_back: bool = True,
+    focused: bool = False,
 ) -> Text:
     """One item's detail (design §8.2 "Detail at 80 columns").
 
@@ -374,9 +459,11 @@ def detail_text(
     right.append(kind_word)
     right.append(_t(_k.position(index=str(position[0]), total=str(position[1]))))
     top = Text(no_wrap=True, overflow="crop")
-    top.append(" ")
+    # DT3: the pane carries the cursor glyph while IT owns the keys, so "the
+    # arrows move this, not the list" is visible without a word of new copy.
+    top.append(f"{CURSOR} " if focused else " ")
     if show_back:
-        top.append(_t(_k.back()), style=ink("muted"))
+        top.append(_bland_back_label(), style=ink("muted"))
     tail = " · ".join(right) + " "
     gap = width - cell_len(top.plain) - cell_len(tail)
     top.append(" " * max(1, gap))
@@ -400,6 +487,10 @@ def detail_text(
                 )
             )
         )
+    if is_ask:
+        deadline = int(item.get("expires_at") or item.get("deadline_at") or 0)
+        if deadline:
+            meta.append(_t(_k.ask_expires(time=compact_until(deadline, now_ms))))
     seen = _seen_clause(item) if item.get("read") else ""
     if seen:
         meta.append(seen)
@@ -407,10 +498,18 @@ def detail_text(
     text.append("\n ")
     text.append(RULE_GLYPH * (width - 2), style=ink("dim"))
     text.append("\n")
-    body = str(item.get("body_md") or "") if not is_ask else str(item.get("excerpt") or "")
+    # DT4: an ask's detail repeated its own question as the body — the title IS
+    # that question — and dropped the context the row already knows. The body is
+    # the update's prose; an ask's context is its expiry (in the meta line) and
+    # its related projects below.
+    body = str(item.get("body_md") or "") if not is_ask else ""
     if body.strip():
+        # DT9: a wrapped paragraph lost its inset on every continuation line,
+        # because the widget folded the text with no hanging indent. Wrapping
+        # here, cell-aware, keeps the shape on every line of every paragraph.
         for paragraph in body.strip().splitlines():
-            text.append(" " + paragraph + "\n", style=ink("fg"))
+            for line in wrap_cells(paragraph, width - 4):
+                text.append("   " + line + "\n", style=ink("fg"))
     else:
         text.append(" " + _t(_k.no_body()) + "\n", style=ink("muted"))
     links = item.get("links") or []
@@ -446,7 +545,9 @@ def detail_text(
                 text.append("  " + tail_text, style=ink("muted"))
             text.append("  a ↵", style=ink("muted"))  # i18n: ignore key glyphs, chrome
         text.append("\n")
-    projects = list((payload or {}).get("projects") or [])
+    # An ask has no payload: its projects ride the row, which is the same list
+    # the reel row was built from, so the pane and the row cannot disagree.
+    projects = list((payload or {}).get("projects") or item.get("projects") or [])
     if projects:
         text.append("\n")
         text.append_text(section_header(_t(_k.section_projects()), len(projects), width))
@@ -465,30 +566,67 @@ def detail_text(
             text.append("\n  ")
             stamp = datetime.fromtimestamp(int(entry.get("at") or 0) / 1000).strftime("%H:%M")
             text.append(stamp + "  ", style=ink("muted"))
+            # DT8: the title is what CHANGED between revisions ("11 sign-ups, 9
+            # blocked") and the excerpt is the first paragraph, which barely
+            # moves — so five revisions painted five identical lines. The
+            # excerpt stays as the fallback for a revision with no title.
             text.append(
-                truncate_cells(str(entry.get("excerpt") or entry.get("title") or ""), width - 10),
+                truncate_cells(str(entry.get("title") or entry.get("excerpt") or ""), width - 10),
                 style=ink("fg"),
             )
+        text.append("\n")
+    if is_ask:
+        # DT4: the ASK's own pane showed no gesture at all, so the one screen
+        # where answering is the obvious next step never said how.
+        text.append("\n ")
+        text.append("a ↵ " + _t(_k.hint_answer()), style=ink("muted"))
         text.append("\n")
     return text
 
 
+#: Which hint survives a narrow row, most valuable first (DT2).
+#:
+#: Widest-first was the only rule, so at 80 columns the volume gestures — the
+#: ones requirement 6 exists for — were the first to go, leaving the operator to
+#: already know them. The order below ranks by "how expensive is this to
+#: rediscover": ``esc`` is the way out, then the row actions, then the bulk
+#: gestures, then selection, and only then browsing/filters, which the detail
+#: and the header both restate.
+_HINT_RANK = {
+    "esc": 0,
+    "e": 1,
+    "E": 2,
+    "A": 3,
+    "space": 4,
+    "↵": 5,
+    "a": 6,
+    "u": 7,
+    "z": 8,
+    "o": 9,
+    "f": 10,
+}
+
+
 def hint_row(labels: Sequence[tuple[str, str]], width: int) -> list[tuple[str, str]]:
-    """Drop whole hints widest-first until the row fits; ``esc`` never drops.
+    """Drop whole hints until the row fits; ``esc`` never drops.
 
     The ``aggregate_footer`` rule (design §8.4): a clipped hint names a key with
-    half its meaning, so a hint is shown whole or not at all.
+    half its meaning, so a hint is shown whole or not at all. WHAT drops is the
+    ranked order above, not raw width (DT2); width only breaks a tie.
     """
 
     def cost(entries: Sequence[tuple[str, str]]) -> int:
         return sum(cell_len(f"{k} {v}") for k, v in entries) + 2 * max(0, len(entries) - 1) + 1
+
+    def worth(entry: tuple[str, str]) -> tuple[int, int]:
+        return (_HINT_RANK.get(entry[0], 50), cell_len(f"{entry[0]} {entry[1]}"))
 
     entries = list(labels)
     while cost(entries) > width and len(entries) > 1:
         droppable = [i for i, (key, _) in enumerate(entries) if key != "esc"]
         if not droppable:
             break
-        entries.pop(max(droppable, key=lambda i: cell_len(f"{entries[i][0]} {entries[i][1]}")))
+        entries.pop(max(droppable, key=lambda i: worth(entries[i])))
     return entries
 
 

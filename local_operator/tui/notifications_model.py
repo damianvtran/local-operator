@@ -102,6 +102,10 @@ class Snapshot:
     #: more pages than the page paints (the header then says "first N").
     complete: bool = True
     error: str = ""
+    #: False while the first read is still in flight (the page paints an empty
+    #: placeholder then). Distinguishes "nothing is waiting" from "we have not
+    #: looked yet", which is the difference DT1 caught the header inventing.
+    loaded: bool = True
 
     @property
     def rows(self) -> list[dict[str, Any]]:

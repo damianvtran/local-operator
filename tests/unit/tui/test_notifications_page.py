@@ -378,6 +378,42 @@ async def test_the_sidebar_note_counts_the_badge_and_hides_when_unknown(
 
 
 @pytest.mark.asyncio
+async def test_the_wide_pane_takes_the_keys_and_esc_returns_them(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DT3: at >=120 columns the pane was never focusable, so it never scrolled.
+
+    `↵` on an already-opened row hands the KEYS to the pane; `esc` steps back out
+    to the list with its cursor untouched. The footer narrows to the pane's own
+    gesture meanwhile, and the pane carries the ▸ marker.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    store = NotificationStore(tmp_path)
+    item = store.notify(S1, title="a tall one", body_md="x", priority="high")
+    # A SECOND row: opening the first marks it read, and on the default Unread
+    # filter a lone row leaves the list — `current` then answers None, which is a
+    # property of this fixture rather than of the pane.
+    store.notify(S2, title="still unread", priority="normal")
+    app = _app()
+    async with app.run_test(size=(140, 32)) as pilot:
+        await _settle(pilot)
+        app._open_notifications_view()
+        await _settle(pilot, 12)
+        view = _page(app)
+        assert view.wide, "the wide layout is the one under test"
+        await pilot.press("enter")
+        await _settle(pilot, 10)
+        await pilot.press("enter")  # second ↵: hand the keys to the pane
+        await _settle(pilot, 8)
+        assert view._detail_focus is True
+        assert [key for key, _ in view._hint_labels()] == ["esc"], "the pane's own row"
+        await pilot.press("escape")
+        await _settle(pilot, 6)
+        assert view._detail_focus is False, "esc returns the keys to the list"
+        assert str(view.current["id"]) == item.item_id, "and the cursor did not move"
+
+
+@pytest.mark.asyncio
 async def test_the_retry_countdown_never_arms_the_banner_latch(tmp_path: Path, monkeypatch) -> None:
     """R2-1: the countdown must not leave `_inbox_notify_pending` set.
 
@@ -413,6 +449,148 @@ async def test_the_retry_countdown_never_arms_the_banner_latch(tmp_path: Path, m
         app._notify_inbox_items()
         assert app._inbox_notify_retry_ticks == 0
         assert app._inbox_notify_pending is False
+
+
+def test_the_loading_header_invents_no_counts() -> None:
+    """DT1: an unloaded snapshot is not an empty one.
+
+    ``snapshot is None`` reaches the header as a placeholder whose counts are all
+    zero, so the frame claimed "0 unread · 0 waiting on you" at the one moment the
+    operator might decide whether to wait for a contended store.
+    """
+    placeholder = model.Snapshot(loaded=False)
+    line = render.header_line(placeholder, model.Filters(), 100).plain
+    assert "0 unread" not in line and "waiting on you" not in line, line
+    assert "Notifications" in line
+    # The control: a LOADED empty snapshot still states its real zero.
+    loaded = render.header_line(model.Snapshot(), model.Filters(), 100).plain
+    assert "0 unread" in loaded, loaded
+
+
+def test_the_volume_keys_survive_the_eighty_column_footer() -> None:
+    """DT2: `A` was in no hint row, and `E` was dropped at the default size.
+
+    The ladder dropped widest-first, so the gestures requirement 6 exists for
+    went before the ones the detail and the header restate.
+    """
+    labels = [
+        ("↵", "open"),
+        ("e", "dismiss"),
+        ("E", "dismiss all"),
+        ("space", "select"),
+        ("A", "read all"),
+        ("u", "read"),
+        ("o", "conversation"),
+        ("f", "filter"),
+        ("esc", "back"),
+    ]
+    kept = [key for key, _ in render.hint_row(labels, 79)]
+    for key in ("esc", "e", "E", "space", "A"):
+        assert key in kept, (key, kept)
+    for key in ("o", "f"):
+        assert key not in kept, kept
+
+
+def test_an_ask_pane_names_its_expiry_projects_and_gesture() -> None:
+    """DT4: the ask detail repeated its question and dropped its context."""
+    row = {
+        "id": "ask:s1:ask_1",
+        "source": "ask",
+        "priority": "ask",
+        "title": "Block the /24 for 24 hours, or keep watching?",
+        "excerpt": "Block the /24 for 24 hours, or keep watching?",
+        "created_at": 1_000,
+        "updated_at": 1_000,
+        "session": {"id": "s1"},
+        "projects": [{"title": "Radient free-credit defence", "status": "active"}],
+        "expires_at": 1_000 + 37 * 60 * 1000,
+    }
+    text = render.detail_text(
+        None, row, 75, position=(1, 1), now_ms=1_000 + 60 * 60 * 1000, show_back=False
+    ).plain
+    assert "Radient free-credit defence" in text
+    assert "expires" in text
+    assert "a ↵" in text
+    # The question appears ONCE (as the title), not again as a body.
+    assert text.count("keep watching?") == 1, text
+
+
+def test_older_rows_name_their_day_and_the_history_names_what_changed() -> None:
+    """DT7 + DT8: a bare clock time under "Older", and five identical lines."""
+    now = 1_700_000_000_000
+    day = 24 * 3600 * 1000
+    assert "/" in render.row_time(now - 5 * day, now), "a date, not a bare time"
+    assert ":" in render.row_time(now - 30 * 3600 * 1000, now), "yesterday keeps HH:MM"
+
+    row = {
+        "id": "n_1",
+        "source": "notify",
+        "priority": "high",
+        "title": "14 sign-ups, 12 blocked",
+        "body_md": "",
+        "created_at": now,
+        "updated_at": now,
+        "revision": 6,
+        "repeat_count": 6,
+        "session": {"id": "s1"},
+    }
+    history = [
+        {
+            "revision": r,
+            "at": now - r * 1000,
+            "title": f"{r} sign-ups, {r - 2} blocked",
+            "excerpt": "Fourteen accounts signed up from 203.0.113.0/24 between 10:12 and 10:40",
+        }
+        for r in (5, 4, 3, 2, 1)
+    ]
+    text = render.detail_text(
+        {"item": row, "history": history, "asks": [], "projects": []},
+        row,
+        90,
+        position=(1, 6),
+        now_ms=now,
+        show_back=False,
+    ).plain
+    assert "5 sign-ups, 3 blocked" in text and "4 sign-ups, 2 blocked" in text, text
+
+
+def test_the_seen_chip_and_the_low_bars_stay_readable() -> None:
+    """DT6 + DT12: `dim` fails AA in 30 of 54 themes, and a lone bar read as `_`."""
+    assert render.BARS["low"] == "▁▁▁", render.BARS
+    assert all(render.cell_len(bar) == 3 for bar in render.BARS.values()), render.BARS
+    row = {
+        "id": "n_2",
+        "source": "notify",
+        "priority": "normal",
+        "title": "x",
+        "read": True,
+        "read_via": "watching",
+        "created_at": 1,
+        "updated_at": 1,
+        "session": {"id": "s1"},
+        "seq": 1,
+        "revision": 1,
+    }
+    line = render.row_line(row, 80, cursor=False, selected=False, now_ms=2)
+    inks = {str(span.style) for span in line.spans}
+    assert not any("dim" in ink for ink in inks if ink), inks
+
+
+def test_the_back_affordance_points_left_in_every_locale() -> None:
+    """DT13: the ur catalogue carries `→`, which points away from `esc`."""
+    row = {
+        "id": "n_3",
+        "source": "notify",
+        "priority": "normal",
+        "title": "x",
+        "created_at": 1,
+        "updated_at": 1,
+        "session": {"id": "s1"},
+        "revision": 1,
+    }
+    text = render.detail_text(None, row, 60, position=(1, 1), now_ms=2, show_back=True).plain
+    assert "→" not in text, text
+    assert "←" in text, text
 
 
 def test_the_header_states_no_counts_for_an_errored_snapshot() -> None:
