@@ -4498,6 +4498,80 @@ class AuthStore:
             account_created_at=row.created_at if row is not None else 0,
         )
 
+    async def get_catalogue_access(self, provider: str) -> OAuthAccess | None:
+        """A credential for READING a provider catalogue, not routing inference.
+
+        Inference selection deliberately excludes quota-depleted accounts. Model
+        discovery must not inherit that decision: an exhausted account can still
+        have a valid OAuth grant and a provider-published model list. Hiding that
+        list made a signed-in provider look completely empty.
+
+        Keep the cascade's credential precedence (runtime/config override, OAuth,
+        login key, environment, other stored key), but do not read usage, rank or
+        repoint accounts, clear demotions, or block a credential on failure. A
+        transient refresh error degrades to the next eligible credential; a
+        provider-declared dead grant is never sent. Successful token rotation is
+        still persisted because discarding a single-use refresh token would break
+        the account, not protect it.
+        """
+        provider = self._storage_id(provider)
+        override = self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
+        if override:
+            return OAuthAccess(access_token=override, credential_id=0, kind="api_key")
+
+        key_fn = self._oauth_key_fn(provider)
+        oauth_rows = [
+            row for row in self.list_credentials(provider) if row.credential_type == "oauth"
+        ]
+        for row in oauth_rows:
+            try:
+                creds = await self._ensure_oauth_fresh(row)
+            except AuthStoreError:
+                continue
+            key = key_fn(creds) if key_fn else creds.get("access")
+            if key:
+                current = self.get_credential(row.id) or row
+                data = current.data
+                return OAuthAccess(
+                    access_token=key,
+                    credential_id=current.id,
+                    account_id=data.get("account_id"),
+                    email=data.get("email"),
+                    org_id=data.get("org_id"),
+                    api_endpoint=data.get("api_endpoint"),
+                    kind="oauth",
+                    raw=data,
+                    account_created_at=current.created_at,
+                )
+
+        # Preserve the ordinary cascade's API-key tiers and environment fallback.
+        # Iterating stored rows directly is intentional: `_usable_key_rows` also
+        # applies inference blocks, which are unrelated to catalogue authorization.
+        for source in ("login", None):
+            for row in self.list_credentials(provider):
+                if row.credential_type != "api_key":
+                    continue
+                if (source == "login") != (row.data.get("source") == "login"):
+                    continue
+                key = row.data.get("key")
+                if key:
+                    return OAuthAccess(
+                        access_token=key,
+                        credential_id=row.id,
+                        kind="api_key",
+                        account_created_at=row.created_at,
+                    )
+            if source == "login":
+                env_key = self._env_api_key(provider)
+                if env_key:
+                    return OAuthAccess(access_token=env_key, credential_id=0, kind="api_key")
+
+        resolver = self._fallback_resolvers.get(provider)
+        fallback = resolver(provider) if resolver is not None else None
+        if fallback:
+            return OAuthAccess(access_token=fallback, credential_id=0, kind="api_key")
+        return None
+
     async def list_oauth_accesses(self, provider: str) -> list[OAuthAccess]:
         """EVERY logged-in OAuth account for ``provider``, each one refreshed.
 

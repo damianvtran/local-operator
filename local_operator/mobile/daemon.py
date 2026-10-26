@@ -9377,6 +9377,12 @@ class _UnreadableAuthStore:
         # authoring catalogue passes it); this stand-in raises either way.
         raise self._unavailable("get_oauth_access")
 
+    async def get_catalogue_access(self, provider: str) -> Any:
+        # This stand-in must fail explicitly, never invent a credential. The
+        # controller catches the error and serves its degraded cached/static
+        # catalogue without turning an unreadable store into a login success.
+        raise self._unavailable("get_catalogue_access")
+
     async def list_oauth_accesses(self, provider: str) -> list[Any]:
         raise self._unavailable("list_oauth_accesses")
 
