@@ -15,8 +15,7 @@ vi.mock("./api", async (importOriginal) => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); document.documentElement.removeAttribute("dir"); });
 
-function expectChromeIcon(button: HTMLElement) {
-	expect(button.className).toContain("size-11");
+function expectChromeIcon(button: HTMLElement) {	expect(button.className).toContain("size-11");
 	const icon = button.querySelector("svg");
 	expect(icon).not.toBeNull();
 	expect(icon?.getAttribute("width")).toBe("24");
@@ -26,6 +25,19 @@ function expectChromeIcon(button: HTMLElement) {
 }
 
 describe("conversation chrome", () => {
+	it("edge-cases the white disc so the circle is discernible on a light ground", () => {
+		// The artwork is a white disc on transparency: on the near-white drawer it
+		// reads as a bare dark glyph unless the CONTAINER draws an edge. The bytes
+		// stay untouched; the ring uses the existing control-boundary token, which
+		// carries the contrast floor on both themes.
+		const view = render(<SessionListScreen />);
+		const mark = view.container.querySelector("header img[data-brand-mark]")!;
+		expect(mark.className).toContain("rounded-full");
+		expect(mark.className).toContain("ring-1");
+		expect(mark.className).toContain("ring-control");
+		expect(mark.getAttribute("width")).toBe("24");
+		expect(mark.getAttribute("height")).toBe("24");
+	});
 	it("uses the exact reviewed white-circle brand bytes, not a recoloured legacy motif", () => {
 		expect(brandIcon.startsWith("data:image/png;base64,")).toBe(true);
 		const bytes = Buffer.from(brandIcon.split(",")[1], "base64");

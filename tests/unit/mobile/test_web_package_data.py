@@ -129,6 +129,31 @@ def _directories(relative: str) -> list[str]:
     return ["/".join(parts[: index + 1]) + "/" for index in range(len(parts))]
 
 
+#: The Vite import suffixes a source may append to a relative spec. They select
+#: HOW the bundler consumes the file (`?inline` as a data URI, `?raw` as text,
+#: `?url` as a URL) and never name a different file — so the shipping check must
+#: probe the path itself. An UNKNOWN query is not in this set: it stays
+#: unresolved and fails loudly, because a new suffix is a change to review, not
+#: something a permissive strip should wave through.
+VITE_QUERY_SUFFIXES = ("?inline", "?raw", "?url", "?no-inline")
+
+
+def _without_vite_query(spec: str) -> str:
+    """The file a Vite-loaded spec names, with its import-mode suffix removed.
+
+    ``import icon from "../../assets/brand-icon.png?inline"`` names ONE file; the
+    suffix only tells Vite to inline it. Probing the raw spec made a shipped
+    asset look absent from the tree (review finding R1 on the chrome PR), which
+    is a false positive in the only check that would catch a real absence.
+    Anything not ending in a known suffix is returned unchanged, so it resolves
+    to nothing and reports honestly.
+    """
+    for suffix in VITE_QUERY_SUFFIXES:
+        if spec.endswith(suffix):
+            return spec[: -len(suffix)]
+    return spec
+
+
 def _resolve(importer: Path, spec: str) -> Path | None:
     """The file a relative import names, or None when nothing resolves.
 
@@ -141,7 +166,7 @@ def _resolve(importer: Path, spec: str) -> Path | None:
     ``is_file()``, and a spec with no file at all — with or without a dot in
     its name — comes back None, which is what the asset check turns into a
     failure."""
-    base = importer.parent / spec
+    base = importer.parent / _without_vite_query(spec)
     if base.is_file():
         return base.resolve()
     candidates = [
@@ -220,6 +245,16 @@ def test_the_relaxed_resolver_still_reports_a_missing_asset(tmp_path: Path) -> N
     assert _resolve(importer, "./absent.generated") is None
     assert _resolve(importer, "./absent.json") is None
     assert _resolve(importer, "../outside/either") is None
+
+    # A Vite import-mode suffix names the SAME file: the known suffixes must
+    # resolve, and the identical spec must still fail when the file is gone.
+    # Without this pair, stripping a suffix would be untested in BOTH directions.
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert _resolve(importer, "./logo.png?inline") is not None
+    assert _resolve(importer, "./absent.png?inline") is None
+    assert _resolve(importer, "./logo.png?unknown-mode") is None
+    assert _without_vite_query("./logo.png?inline") == "./logo.png"
+    assert _without_vite_query("./logo.png?unknown-mode") == "./logo.png?unknown-mode"
 
     # The real tree, in the shape the relaxation was added for, and the same
     # shape when it names nothing.

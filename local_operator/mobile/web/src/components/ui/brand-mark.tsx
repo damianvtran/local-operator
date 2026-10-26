@@ -7,5 +7,5 @@ import brandIcon from "../../assets/brand-icon.png?inline";
  * Provenance and the source-byte hash live in docs/design/mobile-relay-guidelines.md. */
 export function BrandMark() {
 	return <img data-brand-mark src={brandIcon} alt="" aria-hidden="true"
-		width="24" height="24" className="size-6 shrink-0" draggable={false} />;
+		width="24" height="24" className="size-6 shrink-0 rounded-full ring-1 ring-control" draggable={false} />;
 }

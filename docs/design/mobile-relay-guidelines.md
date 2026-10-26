@@ -51,6 +51,16 @@ static replay, an old screenshot or an intended interaction as current live proo
   header rows. It is decorative beside a named heading, not an extra focus target.
   Inline the artwork so an identity-proxy login redirect cannot break an image
   fetch. Do not replace unrelated login/app-icon assets as incidental cleanup.
+- **The white disc needs a container-level edge.** The artwork is a white disc on
+  transparency, so on the near-white light ground its own rim measures **1.04:1**
+  against the drawer and the circle stops being discernible — the mark reads as a
+  bare dark glyph. `BrandMark` therefore carries a 1 px `ring-control` ring with
+  `rounded-full` (measured **3.76:1** light, **4.18:1** dark against the drawer
+  ground, from both the token values and captured pixels). Rules: apply the edge
+  to the CONTAINER (ring/border/outline on the element), never recolour, tint or
+  edit the PNG bytes; keep the image box at 24 px so the edge does not push the
+  mark or its 44 px neighbours; no filled card, plate or extra chrome row. Any
+  future fixed-colour brand art owes the same edge check on both themes.
 - Use the shared `ChromeIcon` SVG for menu/search/close: **24 px visible icon box**,
   consistent stroke and optical weight, inside **at least 44 × 44 px independent
   tap targets**. Enlarging only the button does not enlarge the glyph. Verify the
