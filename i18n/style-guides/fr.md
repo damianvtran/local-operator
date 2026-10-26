@@ -29,6 +29,11 @@ for `fr`; when this file and a habit disagree, this file wins.
   script, prompt · API, CLI, TUI, JSON, YAML, HTTP, URL, GPU · bug. Reason:
   translating them ("validation", "bogue") reads foreign to fr developers.
 - Wave-1 recorded addition: runtime (kept English; mirrors the es guide).
+- Wave-2 recorded addition (fr `wire.errors.files` backfill): bearer, as the
+  HTTP authorization scheme named in a 401 (`Authorization: Bearer …`).
+  "token d’accès" keeps "token" English by the list above; "bearer" is the
+  scheme token beside it, and the shipped fr corpus uses no French rendering
+  of it. Naming the scheme is what tells the caller what to send.
 - Prefer French where settled: serveur, fichier, dossier, réseau, stockage,
   paramètres (settings), appareil (device), équipe, compétence (skill).
 

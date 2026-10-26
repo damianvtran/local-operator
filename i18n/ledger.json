@@ -6327,6 +6327,25 @@
       },
       "status": "passed",
       "note": "Independent terminal delta audit chrome25-zh-CN-a2: no unresolved blocker/major. R1 coverage carries forward for byte-identical keys, with old→new hash proof in the audit. Current target SHA-256 ba4215e753320387d61bc9d9661eb2a63420473436e492f6da657ac8595c1855. Translator and independent auditor identities are recorded from on-disk runtime metadata; radient/auto is the harness selector, underlying provider model not exposed and not inferred. Independent second safety round chrome25-safety-b2 also passed these bytes. Evidence: https://github.com/damianvtran/local-operator/pull/2934#issuecomment-6401749804. Verbose R1/remediation/R2 chains are retained outside the repository per AGENTS.md; compact byte hashes and actual independent identities are public in that receipt. Source-semantic pass only, not native/live translated-relay proof."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.files",
+      "source_sha256": "ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "French backfill. Copy authored by i18n-translator on the harness route radient/auto \u2014 a selector, not a vendor model id; the served model is not exposed and is not inferred. Independent i18n-auditor session 2674212bee8a (different session from the translator) re-read every key at its raise site in static.py/desktop.py: passed, 0 blocker, 0 major, 1 minor (sign_auth names the HTTP bearer scheme in English; recorded instead as a kept-English entry in i18n/style-guides/fr.md, so this row's target bytes are what ships). Evidence: i18n/audits/evidence/fr/wire.errors.files/wf26a1/record.json, receipt 84393fdc1ce87ff63a3196ec77342405f80f9c68b83ccc03cfa158c5c945c5c2."
     }
   ]
 }

@@ -1037,26 +1037,6 @@
     },
     {
       "locale": "fr",
-      "namespace": "wire.errors.files",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.errors.files.audio_type",
-        "wire.errors.files.heic_conversion",
-        "wire.errors.files.html_type",
-        "wire.errors.files.html_utf8",
-        "wire.errors.files.image_type",
-        "wire.errors.files.internal_error",
-        "wire.errors.files.sign_auth",
-        "wire.errors.files.sign_path",
-        "wire.errors.files.sign_route",
-        "wire.errors.files.sign_ttl",
-        "wire.errors.files.video_type"
-      ]
-    },
-    {
-      "locale": "fr",
       "namespace": "wire.errors.media",
       "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
       "owner": "i18n-translator lane",
