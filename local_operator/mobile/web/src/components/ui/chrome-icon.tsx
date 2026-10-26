@@ -1,8 +1,9 @@
 /** Chrome glyphs have an explicit optical footprint, independent of the 44px
  * button. Font symbols vary by platform and leave a nominally large target
- * looking tiny; the shared 24px viewBox keeps search/menu/close coherent. */
+ * looking tiny. A 20px box leaves the paths larger than those text glyphs but
+ * avoids oversized chrome; the shared 24-unit viewBox keeps optical proportions. */
 export function ChromeIcon({ name }: { name: "menu" | "search" | "close" }) {
-	return <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+	return <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
 		stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
 		aria-hidden="true" focusable="false" className="pointer-events-none shrink-0">
 		{name === "menu" ? <path d="M2 5h20M2 12h20M2 19h20" /> :

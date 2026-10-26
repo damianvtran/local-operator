@@ -15,11 +15,15 @@ vi.mock("./api", async (importOriginal) => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); document.documentElement.removeAttribute("dir"); });
 
-function expectChromeIcon(button: HTMLElement) {	expect(button.className).toContain("size-11");
+function expectChromeIcon(button: HTMLElement) {
+	expect(button.className).toContain("size-11");
 	const icon = button.querySelector("svg");
 	expect(icon).not.toBeNull();
-	expect(icon?.getAttribute("width")).toBe("24");
-	expect(icon?.getAttribute("height")).toBe("24");
+	// Operator-reviewed optical size: 20px is larger than the legacy text glyph
+	// without the oversized 24px chrome silhouette. The path geometry remains in
+	// a 24-unit viewBox, so search's 22-unit stroked diagonal renders at 18.33px.
+	expect(icon?.getAttribute("width")).toBe("20");
+	expect(icon?.getAttribute("height")).toBe("20");
 	expect(icon?.getAttribute("viewBox")).toBe("0 0 24 24");
 	expect(icon?.getAttribute("aria-hidden")).toBe("true");
 }

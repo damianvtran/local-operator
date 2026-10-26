@@ -61,10 +61,14 @@ static replay, an old screenshot or an intended interaction as current live proo
   edit the PNG bytes; keep the image box at 24 px so the edge does not push the
   mark or its 44 px neighbours; no filled card, plate or extra chrome row. Any
   future fixed-colour brand art owes the same edge check on both themes.
-- Use the shared `ChromeIcon` SVG for menu/search/close: **24 px visible icon box**,
-  consistent stroke and optical weight, inside **at least 44 × 44 px independent
-  tap targets**. Enlarging only the button does not enlarge the glyph. Verify the
-  actual path/ink extent as well as SVG and target rectangles in a rendered frame.
+- Use the shared `ChromeIcon` SVG for menu/search/close: **20 px visible icon box**
+  (operator-reviewed; larger than the legacy text glyph but optically restrained,
+  not the oversized 24 px silhouette), consistent stroke and optical weight, inside
+  **at least 44 × 44 px independent tap targets**. Keep the paths in the shared
+  24-unit viewBox: search's longest stroked diagonal is approximately **18.33 px**
+  at this scale. The brand mark is deliberately different and remains 24 px.
+  Enlarging only the button does not enlarge the glyph. Verify actual path/ink
+  extent as well as SVG and target rectangles in a rendered frame.
 - Icons inside named buttons are `aria-hidden`, unfocusable and non-interactive.
   Preserve the button's localized accessible name, expanded state, controls
   relationship and focus behavior. Mirror directional meaning in RTL, not neutral
