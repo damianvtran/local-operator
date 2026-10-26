@@ -1966,8 +1966,10 @@ def custom_type_proven_absent(
     DECLINES (``False``) rather than guesses: an archive (the walk materialises it,
     and this scan reads plain bytes only), a type with no fixed spelling, a journal
     larger than ``max_scan_bytes``, and any read error. The scan covers the file's
-    size at ``stat`` time, torn final row included, so a row appended after that
-    instant is one the walk could equally have missed by starting a moment sooner.
+    size at its ``fstat``, torn final row included. A row appended after that
+    instant is one this proof did not cover — the walk, starting LATER, could have
+    seen it — so the fallback cwd answered is the one the walk would have given had
+    it started at that same instant (#3001 review NIT-1).
 
     PURE READ: nothing is written. The tail-anchor sidecar stays prewarm's to
     publish (its module contract), and at ~3 ms warm per 8 MB this scan is cheaper

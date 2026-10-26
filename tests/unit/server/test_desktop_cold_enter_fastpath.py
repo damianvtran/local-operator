@@ -536,6 +536,13 @@ def _checkpoint_row(cwd: str, *, separators: tuple[str, str] = (",", ":")) -> by
     return json.dumps(row, separators=separators).encode("utf-8") + b"\n"
 
 
+def _tree_bytes(directory: Path) -> dict[str, bytes]:
+    """Every file under ``directory``, recursively, by relative path."""
+    return {
+        str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob("*") if p.is_file()
+    }
+
+
 @pytest.mark.asyncio
 async def test_a_checkpointless_journal_without_a_sidecar_skips_the_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -551,7 +558,7 @@ async def test_a_checkpointless_journal_without_a_sidecar_skips_the_walk(
     directory.mkdir(parents=True)
     await _journal(directory)
     assert not desktop_sessions._checkpoint_proven_absent(directory)
-    before = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+    before = _tree_bytes(directory)
     calls = _count_walks(monkeypatch)
     answer = await _bridge_cwd(root)
     assert calls == []
@@ -561,7 +568,7 @@ async def test_a_checkpointless_journal_without_a_sidecar_skips_the_walk(
         scoped.setattr(desktop_sessions, "custom_type_proven_absent", lambda *_a, **_k: False)
         assert await _bridge_cwd(root) == answer
     assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
-    assert {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()} == before
+    assert _tree_bytes(directory) == before
 
 
 @pytest.mark.asyncio
