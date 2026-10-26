@@ -2426,13 +2426,13 @@ class AttachedSession:
             cost_summary,  # neutral, not the TUI package (Q7)
         )
         from local_operator.session.frontend_state import CostKnowledge
-        from local_operator.session.session import (
+        from local_operator.session.roster_sidecar import (
             SUBAGENT_ROSTER_SIDECAR,
-            _read_roster_sidecar,
+            read_roster_sidecar,
         )
 
         payload = (
-            _read_roster_sidecar(
+            read_roster_sidecar(
                 self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
             )
             or {}
@@ -2489,15 +2489,15 @@ class AttachedSession:
         Best-effort: an unreadable or absent sidecar leaves the checkpoint's
         rows exactly as they were.
         """
-        from local_operator.session.session import (
+        from local_operator.session.roster_sidecar import (
             SUBAGENT_ROSTER_SIDECAR,
-            _read_roster_sidecar,
+            read_roster_sidecar,
         )
 
         rows: dict[str, Any] = {str(job.id): job for job in durable.jobs}
         try:
             if payload is None:
-                payload = _read_roster_sidecar(
+                payload = read_roster_sidecar(
                     self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
                 )
             for raw in (payload or {}).get("jobs") or []:

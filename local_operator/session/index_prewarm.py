@@ -431,10 +431,62 @@ def _anchor_current(directory: Path) -> bool:
         # Asked and answered in this process: this journal needs no sidecar (see
         # ``_NO_ANCHOR_NEEDED``). Without this the degraded pass spins on it forever.
         return True
+    if _rewritten_since_record(directory, stat):
+        return False
     anchor = read_anchor(directory)
     if anchor is None:
         return False
     return anchor.checkpoint_absent and anchor.inode == stat.st_ino and anchor.size == stat.st_size
+
+
+def _rewritten_since_record(directory: Path, journal: os.stat_result) -> bool:
+    """Whether the journal's inode metadata moved after the anchor was published.
+
+    THE PREWARM HALF OF THE DESKTOP REWRITE GUARD
+    (``server.utils.desktop_sessions._checkpoint_proven_absent``, #2941). That reader
+    refuses a record when the journal has not grown and its ``st_ctime_ns`` is at or
+    past the record file's ``st_mtime_ns``: the journal's bytes below the recorded
+    size are trusted by the boundary digest, and a same-size in-place rewrite is the
+    one change that digest cannot see. A plain ``chmod``/``chown`` (or a backup
+    tool's metadata restore) moves ctime the same way, and no reader can tell those
+    apart, so the reader answers "cannot tell" and takes the full walk.
+
+    AT OR PAST, NOT NEWER — copied from the reader, never re-derived. Coarse
+    filesystem timestamps put an untouched journal's ctime EQUAL to the record's
+    mtime, and a strict test there lets a same-tick rewrite through on the open
+    path (CI, #2941 shard test(3.12,2)). Two spellings of one decision would let the
+    reader refuse what this function calls current, and the record would then be
+    trusted by the selector while the open path ignored it, or rebuilt every pass.
+
+    WHY IT IS HERE AT ALL: without it the selector sees an unchanged inode/size and
+    calls the record current, ``write_tail_anchor`` sees ``validate_anchor`` pass
+    and returns early, and a metadata bump would leave the cold open on the full
+    walk for good. Answering "stale" makes the next pass rebuild the record once
+    (one ``build_anchor`` scan, off the hot path), which is exactly the work
+    prewarm exists to do.
+
+    RESIDUAL, disclosed rather than papered over: on a filesystem too coarse to
+    separate the journal's ctime from the newly written record's mtime, the rebuilt
+    record still cannot be trusted, so those journals pay one ``build_anchor`` scan
+    per prewarm pass instead of once. That is a bounded, off-hot-path cost and it is
+    paid rather than weakening the reader; stamping the validated ctime into a new
+    record field would settle it if it ever proves measurable.
+
+    Same-size only: a grown journal is the append path, whose ctime moves by
+    construction and whose suffix the validator already scans.
+    """
+    from local_operator.session.tail_anchor import anchor_path
+
+    try:
+        record = os.stat(anchor_path(directory))
+    except OSError:
+        return False
+    anchor = read_anchor(directory)
+    return (
+        anchor is not None
+        and journal.st_size == anchor.size
+        and journal.st_ctime_ns >= record.st_mtime_ns
+    )
 
 
 async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> int:
@@ -599,7 +651,15 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     """
     directory = Path(root) / "sessions" / session_id
     if validate_anchor(directory, read_anchor(directory)) is not None:
-        return False
+        try:
+            journal = (directory / TRANSCRIPT_FILENAME).stat()
+        except OSError:
+            return False
+        if not _rewritten_since_record(directory, journal):
+            return False
+        # Valid but older than the journal's last metadata change: the desktop
+        # reader will not trust it, so rebuild it once (see
+        # ``_rewritten_since_record``).
     # SINGLE-FLIGHT (F15): the expensive half is ``build_anchor``'s whole-file scan
     # for a checkpointless journal, and this writer is reachable from both the
     # startup queue and a warm request. The second caller leaves immediately; the

@@ -149,7 +149,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     The SEVEN, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
-    - ``_CONTINUATION_PROMPT`` — the session's auto-continuation after a
+    - ``CONTINUATION_AFTER_COMPACTION`` — the session's auto-continuation after a
       turn hit its step budget.
     - ``CONNECTIVITY_CONTINUATION_PROMPT`` — records why ONE answer arrived
       in two pieces across a network interruption; the live run showed a
@@ -190,19 +190,19 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     decision, and it is this function plus those recognisers, not a list per
     surface.
     """
-    from local_operator.harness.loop import (
+    from local_operator.harness.chrome_prompts import (
         CONNECTIVITY_CONTINUATION_PROMPT,
+        CONTINUATION_AFTER_COMPACTION,
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
     )
     from local_operator.session.goal_loop import LOOP_PROMPT
-    from local_operator.session.session import _CONTINUATION_PROMPT
 
     return (
         LOOP_PROMPT,
-        _CONTINUATION_PROMPT,
+        CONTINUATION_AFTER_COMPACTION,
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
@@ -237,7 +237,9 @@ def is_harness_chrome(text: str) -> bool:
     changes with the goal. The goal-mode loop's turn was the third instance of
     exactly that, and it had no recogniser at all.
     """
-    from local_operator.harness.loop import is_connectivity_continuation_instruction
+    from local_operator.harness.chrome_prompts import (
+        is_connectivity_continuation_instruction,
+    )
     from local_operator.session.goal_judge import is_goal_continuation_instruction
     from local_operator.session.goal_loop import is_loop_goal_instruction
 

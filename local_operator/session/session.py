@@ -89,6 +89,7 @@ from local_operator.compaction.marker import (
     with_capture_elision_frontier,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
+from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.guard_area import source_is_exempt
@@ -259,6 +260,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
+from local_operator.session import roster_sidecar as _roster_sidecar
 from local_operator.session.attachment_hints import with_attachment_hints
 from local_operator.session.channel_spend import (
     CHANNEL_SPEND_CUSTOM_TYPE,
@@ -444,9 +446,13 @@ ACTIVE_ROUTE_CUSTOM_TYPE = "active_model_route"
 #: let alone resume — the children the previous process started, even though
 #: their transcripts survive on disk. Re-snapshotted (newest-wins, like every
 #: custom entry) whenever the roster moves; loaded once at construction.
-SUBAGENT_ROSTER_CUSTOM_TYPE = "subagent_roster"
-SUBAGENT_ROSTER_SIDECAR = "subagent-roster.v1.json"
-_SUBAGENT_ROSTER_VERSION = 1
+# The names live in the stdlib-only ``roster_sidecar`` leaf so cold read-only
+# readers (desktop facade restore, cleanup receipts) can use them without
+# importing this module and the tool stack it drags in; re-exported here under
+# the historical spellings so the writer below and every caller share one value.
+SUBAGENT_ROSTER_CUSTOM_TYPE = _roster_sidecar.SUBAGENT_ROSTER_CUSTOM_TYPE
+SUBAGENT_ROSTER_SIDECAR = _roster_sidecar.SUBAGENT_ROSTER_SIDECAR
+_SUBAGENT_ROSTER_VERSION = _roster_sidecar.SUBAGENT_ROSTER_VERSION
 _SUBAGENT_SUMMARY_CHARS = 500
 
 #: The build THIS PROCESS loaded, read once and memoised. Compared against the
@@ -628,10 +634,13 @@ ATTENTION_REPUBLISH_DELAYS_S: tuple[float, ...] = (1.0, 5.0, 20.0, 60.0)
 
 #: Self-prompt scheduled after a compaction pass that cleared the recovery
 #: band, so the model resumes where the summary left off.
-_CONTINUATION_PROMPT = (
-    "The conversation context was just compacted into a summary. "
-    "Continue the task from where it left off."
-)
+#:
+#: DEFINED IN THE IMPORT-FREE LEAF, re-exported here: ``harness.rows`` has to
+#: RECOGNISE this text on every replayed row, and reading it from this module made
+#: the renderer import the session and its tool stack — 231 ``local_operator``
+#: modules, against 5 read from the leaf (module counts, not timings: the clock moves
+#: with host load, the graph does not). One literal, two spellings.
+_CONTINUATION_PROMPT = _chrome_prompts.CONTINUATION_AFTER_COMPACTION
 
 #: Cap on auto-continuation turns within one user turn
 #: MAX_PAUSED_TURN_CONTINUATIONS): a compaction pass that keeps clearing the
@@ -2962,23 +2971,9 @@ def _write_roster_sidecar_if_changed(
     return fingerprint, True
 
 
-def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
-    """Read a supported sidecar, falling back to the legacy transcript on error."""
-    try:
-        with path.open(encoding="utf-8") as handle:
-            payload = json.load(handle)
-        if not isinstance(payload, dict) or payload.get("version") != _SUBAGENT_ROSTER_VERSION:
-            return None
-        generation = payload.get("generation")
-        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
-            return None
-        if not isinstance(payload.get("jobs"), list) or not isinstance(
-            payload.get("records"), list
-        ):
-            return None
-        return payload
-    except (OSError, ValueError, TypeError):
-        return None
+#: Reader moved to the import-light leaf (see ``roster_sidecar``); kept under this
+#: name for the owner path and existing callers.
+_read_roster_sidecar = _roster_sidecar.read_roster_sidecar
 
 
 _render_compaction_marker = render_compaction_marker
