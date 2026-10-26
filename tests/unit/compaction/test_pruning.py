@@ -14,6 +14,7 @@ from local_operator.compaction.pruning import (
     prune_stale_frames_in_place,
     prune_tool_outputs,
     reclaim_captures_to_wire_budget,
+    stale_flush_due,
 )
 from local_operator.compaction.tokens import estimate_tokens, estimate_wire_bytes
 from local_operator.harness.types import (
@@ -514,6 +515,84 @@ def test_a_sent_superseded_read_waits_for_idle_even_behind_a_small_suffix():
     _, changed = prune_tool_outputs(messages, NOW, NOW - IDLE_AGO)
     assert changed is True
     assert old_read.text == SUPERSEDED_NOTICE
+
+
+def test_image_count_ceiling_on_a_200k_window_model():
+    """A 200k-window Anthropic model refuses more than 100 images per request
+    (live: ``Too much media: ... 101 images > 100``, PR #3004 QA C2c). The
+    batch flush fires at min(limit - margin, STALE_FLUSH_MAX_REQUEST_IMAGES)
+    images, even when the stale-frame count ceiling has not been reached,
+    because the images are mostly unflushable user pastes."""
+    from local_operator.compaction.pruning import (
+        PROVIDER_IMAGE_LIMIT_MARGIN,
+        STALE_FLUSH_MAX_REQUEST_IMAGES,
+        provider_image_limit,
+    )
+
+    ceiling = min(
+        provider_image_limit(200_000) - PROVIDER_IMAGE_LIMIT_MARGIN,
+        STALE_FLUSH_MAX_REQUEST_IMAGES,
+    )
+    assert provider_image_limit(200_000) == 100
+    assert provider_image_limit(None) == 100  # unknown window: the safe, small limit
+    assert ceiling <= 90  # always under the 100-image refusal
+
+    def request(total_images: int) -> list[Message]:
+        frames = [_frame(f"/shots/{i}.png") for i in range(3)]  # 1 stale, 2 retained
+        pastes = [
+            Message.user("ref", images=[ImageContent(data="aGVsbG8=", mime_type="image/png")])
+            for _ in range(total_images - len(frames))
+        ]
+        return pastes + frames
+
+    assert stale_flush_due(request(ceiling - 1), context_window=200_000) is False
+    assert stale_flush_due(request(ceiling), context_window=200_000) is True
+
+
+def test_image_ceiling_does_not_fire_with_nothing_to_flush():
+    """Only images a flush can free make the flush due."""
+    pastes = [
+        Message.user("ref", images=[ImageContent(data="aGVsbG8=", mime_type="image/png")])
+        for _ in range(60)
+    ]
+    assert stale_flush_due(pastes + [_frame("/shots/0.png")], context_window=200_000) is False
+
+
+def test_stale_frame_count_ceiling():
+    frames = [_frame(f"/shots/{i}.png") for i in range(9)]  # 7 stale
+    assert stale_flush_due(frames, context_window=1_000_000) is False
+    frames.append(_frame("/shots/9.png"))  # 8 stale
+    assert stale_flush_due(frames, context_window=1_000_000) is True
+
+
+def test_stale_wire_bytes_ceiling():
+    """A few huge stale frames flush before the wire trigger would summarize."""
+    big = [_frame(f"/shots/{i}.png") for i in range(4)]
+    for message in big:
+        message.content[1] = ImageContent(data="A" * 1_000_000, mime_type="image/png")
+    # 2 stale frames, ~2 MB: over 25% of a 4 MB trigger, under 25% of 16 MB.
+    assert stale_flush_due(big, context_window=1_000_000, wire_bytes_trigger=4_000_000) is True
+    assert stale_flush_due(big, context_window=1_000_000, wire_bytes_trigger=16_000_000) is False
+
+
+def test_flush_lifts_the_sent_prefix_guard_for_both_sweeps():
+    oldest, middle, newest = [_frame(f"/shots/{i}.png") for i in range(3)]
+    messages = [
+        Message.user("look"),
+        oldest,
+        Message.assistant("n"),
+        middle,
+        Message.assistant("m"),
+        newest,
+    ]
+    assert prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE) == 0
+    assert (
+        prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE, flush=True) == 1
+    )
+    old_read = _read_result("/repo/a.py")
+    reads = [Message.user("hi"), old_read, Message.assistant("again"), _read_result("/repo/a.py")]
+    assert prune_tool_outputs(reads, NOW, ACTIVE)[1] is False
+    assert prune_tool_outputs(reads, NOW, ACTIVE, flush=True)[1] is True
 
 
 def test_user_frames_are_never_swept():

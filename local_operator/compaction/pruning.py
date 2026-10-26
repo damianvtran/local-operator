@@ -49,9 +49,21 @@ Prompt-cache guards (the whole point of doing this carefully):
 - Idle flush: once ``now - last_activity >= idle_flush_ms`` the provider cache
   is provably cold (the default 90 min exceeds Anthropic's 1 h long-retention
   TTL), so re-writing the sent region is free and every candidate flushes in
-  one batch. ``last_activity`` must be the last provider REQUEST, stamped per
-  call: a stamp taken only when a run ends reads 0 for the whole of a
-  subagent's first run, which made every boundary look idle.
+  one batch. ``last_activity`` must be the end of the provider call that came
+  BEFORE the sent prefix being judged. The session stamps it per call and
+  hands each sweep the stamp from before the request that just completed
+  (``Session._idle_reference_ms``). It also sweeps once at run START, before
+  the first request, which is where a user returning after 90 minutes is
+  actually seen as idle. A run-end-only stamp read 0 for the whole of a
+  subagent's first run, which made every boundary look idle. A stamp taken
+  after the call made the flush unreachable (agent review round 1, M2).
+- Batch flush: the sent-prefix guard keeps stale content resident while warm,
+  so something has to bound it short of compaction. When the retained stale
+  set crosses a ceiling (:func:`stale_flush_due`), every candidate flushes at
+  once: one prefix break per batch instead of one per frame. Without it a
+  screenshot loop climbed to 58 resident frames and was summarized mid-task
+  by the 16 MB wire trigger, and on a 200k-window model it crossed
+  Anthropic's 100-images-per-request 400 (review M1, QA Q3).
 - ``MIN_PRUNE_TOKENS`` floor: blanking a result smaller than the floor costs
   more than it saves (the placeholder itself has a token cost) and only churns
   the cache — skip it.
@@ -77,6 +89,7 @@ from .marker import marker_exists
 from .tokens import estimate_tokens, estimate_wire_bytes, invalidate_message_cache
 
 __all__ = [
+    "IDLE_FLUSH_MS",
     "CaptureElision",
     "CapturePartition",
     "MIN_PRUNE_TOKENS",
@@ -97,6 +110,7 @@ __all__ = [
     "reclaim_captures_to_wire_budget",
     "shed_frames_to_wire_budget",
     "shed_stale_frames",
+    "stale_flush_due",
 ]
 
 #: Generic pruning floor. Below this, blanking recovers nothing — the
@@ -140,6 +154,52 @@ OVERSIZED_SUPERSEDE_TOKENS = 8000
 #: of resident frames sat outside it, 91.7% outside newest-1). The evaluation
 #: runner keeps more (3) because a screen-driving loop re-frames every step.
 SESSION_KEEP_RECENT_FRAMES = 2
+
+#: Idle flush window. 90 minutes exceeds Anthropic's 1 h long-retention TTL,
+#: so a gap this long proves the prompt cache cold and a blank costs nothing.
+#: The session's pre-run sweep reads it too, so the two cannot disagree.
+IDLE_FLUSH_MS = 5_400_000
+
+#: Batch-flush ceilings (see :func:`stale_flush_due`). The sent-prefix guard
+#: keeps stale frames and superseded reads resident while the cache is warm;
+#: these decide when carrying them costs more than the ONE prefix break that
+#: flushing them all at once costs. Whichever ceiling is hit first wins.
+#:
+#: Measured (PR #3004, review and QA round 1): with the old per-frame sweep a
+#: screenshot loop peaked at 2 resident frames; with the guard and no ceiling
+#: it peaked at 58 (live probe, 80 reads of ~220 KB: 15.3 MB, then two
+#: summary compactions mid-task) and, on the replayed 0d598f9ee38e, at 338
+#: images per request.
+#:
+#: Stale-frame count. Eight frames at ~1.6k tokens each is ~13k tokens re-read
+#: per call; one break on a ~150k context costs ~150k at the write premium, so
+#: eight keeps breaks rare (one per ~6 new frames after the first flush)
+#: while bounding the dead weight to a few percent of a typical context.
+STALE_FLUSH_MAX_FRAMES = 8
+
+#: Absolute cap on images in one request, below every provider's limit. The
+#: per-model limit below is lower for small-window models.
+STALE_FLUSH_MAX_REQUEST_IMAGES = 50
+
+#: Anthropic's per-request image limit by context window: 100 images on
+#: 200k-window models, 600 on larger ones. Measured live (QA round 1, C2c):
+#: 101 images on claude-haiku-4-5 returned ``HTTP 400 Too much media: 0
+#: document pages + 101 images > 100``. An unknown window is treated as the
+#: small one, the safe direction.
+PROVIDER_IMAGE_LIMIT_SMALL_WINDOW = 100
+PROVIDER_IMAGE_LIMIT_LARGE_WINDOW = 600
+PROVIDER_IMAGE_LIMIT_LARGE_WINDOW_MIN = 1_000_000
+
+#: Headroom under the provider's image limit: the request about to be sent
+#: adds the frames of the batch that just landed (a parallel read batch can
+#: add several), so flushing exactly AT the limit would still 400.
+PROVIDER_IMAGE_LIMIT_MARGIN = 10
+
+#: Stale bytes as a share of the wire-byte compaction trigger. At 25% the
+#: flush lands well before the 16 MB trigger summarizes the session (which
+#: is what happened at ~58 frames in the review's probe), so a frame-heavy
+#: run sheds its dead weight by flushing instead of by a summary pass.
+STALE_FLUSH_WIRE_TRIGGER_SHARE = 0.25
 
 
 def count_frame_messages(messages: Sequence[Message]) -> int:
@@ -916,6 +976,97 @@ def _sent_prefix_end(messages: Sequence[Message]) -> int:
     return 0
 
 
+def _frame_victims(messages: Sequence[Message], keep_recent_frames: int) -> list[int]:
+    """Indices :func:`prune_stale_frames_in_place` may blank, guards aside.
+
+    One definition shared by the sweep and the batch-flush ceiling, so the
+    ceiling counts exactly what a flush would free.
+    """
+    after, _ = prune_stale_frames(messages, keep_recent_frames=keep_recent_frames)
+    victims: list[int] = []
+    for index in range(len(messages)):
+        if after[index] is messages[index]:
+            continue
+        message = messages[index]
+        # User frames and markers are never candidates (see the sweep's
+        # docstring); the marker check is belt-and-braces — markers are
+        # user-role by construction — and keeps a future renderer that moves
+        # them out of that class from letting an archive be corrupted here.
+        if message.role != "tool" or marker_exists([message]):
+            continue
+        if not _is_prunable(message) or _is_pruned(message):
+            continue
+        if estimate_tokens(message) < MIN_PRUNE_TOKENS:
+            continue
+        victims.append(index)
+    return victims
+
+
+def provider_image_limit(context_window: int | None) -> int:
+    """The per-request image limit the batch flush keeps under.
+
+    Keyed on the context window because that is what Anthropic's limit follows
+    (100 on 200k-window models, 600 on larger ones) and what every
+    :class:`ModelSpec` carries. Unknown (0/None) is treated as small.
+    """
+    if context_window and context_window >= PROVIDER_IMAGE_LIMIT_LARGE_WINDOW_MIN:
+        return PROVIDER_IMAGE_LIMIT_LARGE_WINDOW
+    return PROVIDER_IMAGE_LIMIT_SMALL_WINDOW
+
+
+def stale_flush_due(
+    messages: Sequence[Message],
+    *,
+    context_window: int | None = None,
+    wire_bytes_trigger: int = 0,
+    keep_recent_frames: int = SESSION_KEEP_RECENT_FRAMES,
+) -> bool:
+    """Whether the retained stale frames have crossed a batch-flush ceiling.
+
+    The sent-prefix guard trades a prefix break per stale frame for carrying
+    the frame. That trade is only good while the carried set is small, so the
+    session asks this before each warm sweep and, when it says yes, sweeps
+    with ``flush=True``: everything stale goes in ONE batch, costing one break
+    instead of one per frame. Ceilings, first hit wins (constants above):
+
+    (a) stale frames >= :data:`STALE_FLUSH_MAX_FRAMES`;
+    (b) images in the request >= min(provider limit - margin,
+        :data:`STALE_FLUSH_MAX_REQUEST_IMAGES`), where the provider limit is
+        :func:`provider_image_limit` of ``context_window``;
+    (c) stale wire bytes >= :data:`STALE_FLUSH_WIRE_TRIGGER_SHARE` of
+        ``wire_bytes_trigger`` (skipped when the trigger is 0, i.e. disabled).
+
+    (b) counts every image, stale or not, because the provider's limit does,
+    but it only fires when a flush can free something: a request whose images
+    are all recent or user-authored has nothing to batch.
+    """
+    victims = _frame_victims(messages, keep_recent_frames)
+    if not victims:
+        return False
+    stale_frames = sum(
+        1
+        for index in victims
+        for block in messages[index].content
+        if isinstance(block, ImageContent)
+    )
+    if stale_frames >= STALE_FLUSH_MAX_FRAMES:
+        return True
+    images = sum(
+        1 for message in messages for block in message.content if isinstance(block, ImageContent)
+    )
+    image_ceiling = min(
+        provider_image_limit(context_window) - PROVIDER_IMAGE_LIMIT_MARGIN,
+        STALE_FLUSH_MAX_REQUEST_IMAGES,
+    )
+    if images >= image_ceiling:
+        return True
+    if wire_bytes_trigger > 0:
+        stale_bytes = estimate_wire_bytes([messages[index] for index in victims])
+        if stale_bytes >= STALE_FLUSH_WIRE_TRIGGER_SHARE * wire_bytes_trigger:
+            return True
+    return False
+
+
 def _payload_of(message: Message) -> dict[str, Any]:
     """The message's provider payload when it is a plain dict, else ``{}``."""
     payload = message.provider_payload
@@ -1079,7 +1230,9 @@ def prune_tool_outputs(
     messages: Sequence[Message],
     now_ms: int,
     last_activity_ms: int,
-    idle_flush_ms: int = 5400000,
+    idle_flush_ms: int = IDLE_FLUSH_MS,
+    *,
+    flush: bool = False,
 ) -> tuple[list[Message], bool]:
     """Blank superseded and useless tool outputs in place.
 
@@ -1097,11 +1250,15 @@ def prune_tool_outputs(
     window has elapsed, or (superseded pass only) the victim is at least as
     large as the suffix it invalidates and at least
     :data:`OVERSIZED_SUPERSEDE_TOKENS`.
+
+    ``flush=True`` lifts the sent-prefix guard for this call: the caller has
+    decided a batch flush is due (see :func:`stale_flush_due`), and riding the
+    same break releases the superseded reads that piled up beside the frames.
     """
     if not messages:
         return list(messages), False
 
-    idle = (now_ms - last_activity_ms) >= idle_flush_ms
+    idle = flush or (now_ms - last_activity_ms) >= idle_flush_ms
 
     # Pass (a): superseded reads. Walk newest-to-oldest; a seen key marks any
     # earlier result with the same key superseded, and a seen FULL read marks
@@ -1253,7 +1410,8 @@ def prune_stale_frames_in_place(
     now_ms: int,
     last_activity_ms: int,
     keep_recent_frames: int = SESSION_KEEP_RECENT_FRAMES,
-    idle_flush_ms: int = 5400000,
+    idle_flush_ms: int = IDLE_FLUSH_MS,
+    flush: bool = False,
 ) -> int:
     """Blank stale frames in place — the session-side sibling of
     :func:`prune_stale_frames`.
@@ -1270,11 +1428,10 @@ def prune_stale_frames_in_place(
       entry written since, which on a frame-dense run collapses the read to
       the system head (see the module docstring) — *unless* the idle flush
       (``idle_flush_ms`` since the last provider request) proves the cache
-      cold. In practice a frame is therefore elided only at an idle flush or
-      by compaction: by the time a newer frame supersedes it, it has been sent.
-      Stale frames stay resident until then, and the context bound still
-      holds: they count toward the compaction trigger and the wire-byte
-      ladder like any other content.
+      cold, or the caller passes ``flush=True`` because a batch-flush ceiling
+      was crossed (:func:`stale_flush_due`). By the time a newer frame
+      supersedes one, it has usually been sent, so frames leave in batches:
+      at an idle flush, at a batch flush, or by compaction.
 
     Two deliberate narrowings vs the runner's primitive, each the reason this
     sibling exists. Only TOOL-result frames are candidates: the runner's
@@ -1294,30 +1451,19 @@ def prune_stale_frames_in_place(
     if not messages:
         return 0
     # Victim selection IS the module's retention rule, read off the primitive
-    # so "recent" has one definition: the copy walk returns victims as the
-    # entries whose identity changed.
-    after, _ = prune_stale_frames(messages, keep_recent_frames=keep_recent_frames)
-    victims = [index for index in range(len(messages)) if after[index] is not messages[index]]
+    # so "recent" has one definition, and shared with the batch-flush ceiling
+    # so the ceiling counts exactly what a flush frees.
+    victims = _frame_victims(messages, keep_recent_frames)
     if not victims:
         return 0
-    idle = (now_ms - last_activity_ms) >= idle_flush_ms
+    idle = flush or (now_ms - last_activity_ms) >= idle_flush_ms
     sent_end = _sent_prefix_end(messages)
     dropped = 0
     for index in victims:
         message = messages[index]
-        # User frames and markers are never candidates (see the docstring);
-        # the marker check is belt-and-braces — markers are user-role by
-        # construction — and is what keeps a future renderer that moves them
-        # out of that class from letting an archive be corrupted here.
-        if message.role != "tool" or marker_exists([message]):
-            continue
-        if not _is_prunable(message) or _is_pruned(message):
-            continue
-        if estimate_tokens(message) < MIN_PRUNE_TOKENS:
-            continue
         if not idle and index < sent_end:
             # Already sent: a live cache entry may cover it. Leave the frame
-            # for the idle flush, or for compaction, which cuts it away.
+            # for the idle flush, the batch flush, or compaction.
             continue
         dropped += _blank_frames(message)
     return dropped

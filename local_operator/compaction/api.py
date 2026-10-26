@@ -62,6 +62,7 @@ from .cutpoint import (
 )
 from .marker import split_leading_marker
 from .pruning import (
+    IDLE_FLUSH_MS,
     MIN_PRUNE_TOKENS,
     SUPERSEDED_NOTICE,
     USELESS_NOTICE,
@@ -71,6 +72,7 @@ from .pruning import (
     prune_stale_frames_in_place,
     prune_tool_outputs,
     shed_frames_to_wire_budget,
+    stale_flush_due,
 )
 from .thresholds import (
     DEFAULT_WIRE_BYTES_BUDGET,
@@ -137,6 +139,7 @@ __all__ = [
     "DEFAULT_WIRE_BYTES_TRIGGER",
     "SUMMARIZATION_SYSTEM_PROMPT",
     "SUPERSEDED_NOTICE",
+    "IDLE_FLUSH_MS",
     "TOOL_ARGS_MAX_CHARS",
     "TOOL_RESULT_MAX_CHARS",
     "USELESS_NOTICE",
@@ -165,6 +168,7 @@ __all__ = [
     "prune_stale_frames_in_place",
     "prune_tool_outputs",
     "shed_frames_to_wire_budget",
+    "stale_flush_due",
     "register_invalidator",
     "render_file_operations",
     "resolve_advisor_floor_tokens",

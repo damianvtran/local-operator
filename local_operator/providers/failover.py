@@ -1077,6 +1077,15 @@ _IMAGE_REJECTION_MARKERS = (
     # ceiling are covered by one marker, since the number is the part that
     # moves.
     "image dimensions exceed max allowed size",
+    # The per-request image COUNT refusal: "Too much media: 0 document pages +
+    # 101 images > 100" (measured live on claude-haiku-4-5, PR #3004 QA round
+    # 1). Like the many-image dimension refusal it is reached by the
+    # conversation growing, not by a bad block, and without a marker it
+    # repeated on every prompt. The stale-frame batch flush
+    # (``compaction.pruning.stale_flush_due``) keeps requests under the limit;
+    # this is the backstop for images it cannot reach (user pastes, recent
+    # frames).
+    "too much media",
 )
 
 

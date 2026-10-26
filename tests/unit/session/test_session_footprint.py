@@ -86,9 +86,22 @@ def _final_turn(text: str):
 
 
 @pytest.mark.asyncio
-async def test_superseded_read_is_journalled_and_shrinks_the_resume(tmp_path):
+async def test_superseded_read_is_journalled_and_shrinks_the_resume(tmp_path, monkeypatch):
     """Read the same file twice, then resume: the resumed prompt must not
-    carry the stale copy the live session already blanked."""
+    carry the stale copy the live session already blanked.
+
+    The blank lands at the next point where it is cache-free: the pre-run
+    sweep of a run that starts after the idle-flush window. While the cache is
+    warm the earlier read was SENT, so blanking it would rewrite the cached
+    prefix (PR #3004: the sent-prefix guard). The capability under test (the
+    prune is journalled and the resume shrinks) is unchanged; only its timing
+    moved from "the next post-turn sweep" to "the next cold boundary".
+    """
+    import local_operator.session.session as session_module
+
+    clock = {"offset": 0.0}
+    real_time = session_module.time.time
+    monkeypatch.setattr(session_module.time, "time", lambda: real_time() + clock["offset"])
     directory = tmp_path / "sess"
     stream = ScriptedStream(
         [
@@ -96,6 +109,7 @@ async def test_superseded_read_is_journalled_and_shrinks_the_resume(tmp_path):
             _final_turn("read once"),
             _read_turn("c2"),
             _final_turn("read twice"),
+            _final_turn("after a break"),
         ]
     )
     session = Session(
@@ -107,6 +121,12 @@ async def test_superseded_read_is_journalled_and_shrinks_the_resume(tmp_path):
     )
     await session.prompt("read engine.py")
     await session.prompt("read engine.py again")
+    # Warm: the first read was sent with the second, so it stays (cache-safe).
+    assert not [e for e in Transcript(directory).entries() if e.type == ENTRY_PRUNE]
+    # 91 minutes later the cache is provably cold, and the next run's pre-run
+    # sweep blanks and journals the superseded copy before anything is sent.
+    clock["offset"] += 91 * 60
+    await session.prompt("still there?")
 
     # ``estimate_tokens`` memoizes on message.id, and a replayed message
     # reuses the id it was persisted under — so without invalidation every

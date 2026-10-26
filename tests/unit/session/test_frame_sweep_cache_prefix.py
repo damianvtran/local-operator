@@ -255,3 +255,122 @@ async def test_new_frame_never_rewrites_the_previous_cached_prefix(tmp_path, mon
     # cache is warm (newest-two retention would otherwise leave 2), so the
     # append-only history is the guard holding, not a sweep that found nothing.
     assert stream.frames_sent[-1] == len(reads)
+
+
+def _divergences(sent: list[tuple[list[str], int]]) -> list[int]:
+    """Request indices whose cached prefix (through the previous final
+    marker) differs from the request before them."""
+    broken: list[int] = []
+    for index in range(1, len(sent)):
+        before, final_marker = sent[index - 1]
+        after, _ = sent[index]
+        covered = final_marker + 1
+        if after[:covered] != before[:covered]:
+            broken.append(index)
+    return broken
+
+
+def _session(tmp_path, stream, model: ModelSpec = MODEL) -> Session:
+    return Session(
+        model=model,
+        stream_fn=stream,
+        tools=[_browser_tool(), _read_frame_tool()],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable instructions", "inventory", "env", "skills"],
+        compaction_settings=CompactionSettings(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_frames_flush_in_one_batch_at_the_ceiling(tmp_path):
+    """Warm stale frames are carried until STALE_FLUSH_MAX_FRAMES, then ALL go
+    in one batch: exactly one prefix divergence, and byte-stable again after.
+
+    Without the ceiling the guard let a screenshot loop climb to 58 resident
+    frames and get summarized mid-task (PR #3004 review round 1, M1).
+    """
+    from local_operator.compaction.pruning import (
+        SESSION_KEEP_RECENT_FRAMES,
+        STALE_FLUSH_MAX_FRAMES,
+    )
+
+    reads = [SCREENS[index % len(SCREENS)] for index in range(16)]
+    stream = RecordingStream(reads)
+    session = _session(tmp_path, stream)
+    try:
+        await session.prompt(BRIEF)
+    finally:
+        await session.dispose()
+
+    broken = _divergences(stream.sent)
+    assert len(broken) == 1, f"expected one batch flush, got divergences at {broken}"
+    flush_at = broken[0]
+    # The batch fired when the stale set reached the ceiling. The sweep runs
+    # BEFORE the request that would carry the ceiling-th stale frame, so the
+    # most ever sent is one stale frame short of it, plus the retained window.
+    assert (
+        max(stream.frames_sent[:flush_at])
+        == STALE_FLUSH_MAX_FRAMES - 1 + SESSION_KEEP_RECENT_FRAMES
+    )
+    assert stream.frames_sent[flush_at] <= SESSION_KEEP_RECENT_FRAMES + 1
+    # And the history is append-only again after the flush.
+    assert all(
+        later >= earlier
+        for earlier, later in zip(stream.frames_sent[flush_at:], stream.frames_sent[flush_at + 1 :])
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_run_after_a_91_minute_gap_flushes_before_its_first_request(tmp_path, monkeypatch):
+    """The user's wait between runs is judged before the next run sends
+    anything: stale frames go then, while the cache is provably cold, not
+    after the cold request (which would cost a second rewrite) and not never
+    (PR #3004 review M2, QA Q2)."""
+    import local_operator.session.session as session_module
+
+    clock = {"offset": 0.0}
+    real_time = session_module.time.time
+    monkeypatch.setattr(session_module.time, "time", lambda: real_time() + clock["offset"])
+
+    reads = [SCREENS[index % len(SCREENS)] for index in range(4)]
+    stream = RecordingStream(reads)
+    session = _session(tmp_path, stream)
+    try:
+        await session.prompt(BRIEF)
+        first_run = len(stream.sent)
+        assert stream.frames_sent[-1] == len(reads)  # warm: all carried
+        assert _divergences(stream.sent) == []
+
+        clock["offset"] += 91 * 60
+        await session.prompt("Anything else?")
+    finally:
+        await session.dispose()
+
+    # The first request of the second run already carries only the retained
+    # frames: the flush happened before it was built.
+    from local_operator.compaction.pruning import SESSION_KEEP_RECENT_FRAMES
+
+    assert stream.frames_sent[first_run] == SESSION_KEEP_RECENT_FRAMES
+    assert _divergences(stream.sent) == [first_run]
+
+
+@pytest.mark.asyncio
+async def test_a_short_gap_between_runs_keeps_the_prefix(tmp_path, monkeypatch):
+    """Negative control for the pre-run sweep: a user who answers inside the
+    idle window keeps the cached prefix byte-identical."""
+    import local_operator.session.session as session_module
+
+    clock = {"offset": 0.0}
+    real_time = session_module.time.time
+    monkeypatch.setattr(session_module.time, "time", lambda: real_time() + clock["offset"])
+
+    reads = [SCREENS[index % len(SCREENS)] for index in range(4)]
+    stream = RecordingStream(reads)
+    session = _session(tmp_path, stream)
+    try:
+        await session.prompt(BRIEF)
+        clock["offset"] += 4 * 60
+        await session.prompt("Anything else?")
+    finally:
+        await session.dispose()
+    assert _divergences(stream.sent) == []

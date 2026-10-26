@@ -16726,6 +16726,13 @@ class Session:
             # whole life. Every boundary sweep then saw a 90-minute "idle" gap
             # and blanked already-cached frames and reads mid-run, which is the
             # prefix-break mechanism described in ``compaction/pruning.py``.
+            #
+            # Read against this stamp, a sweep measures the gap BEFORE the
+            # request it precedes: the mid-turn sweep runs after the tool batch
+            # and before the next call, so a 90-minute tool still flushes. The
+            # one gap no post-call sweep can see is the user's wait between
+            # runs; ``_sweep_before_run`` covers that, before the first request
+            # (agent review round 1, M2).
             if isinstance(event.message, Message) and event.message.usage is not None:
                 self._last_provider_request_ms = int(time.time() * 1000)
         # Fold before fan-out: a client joining from an event handler observes a
@@ -17863,6 +17870,9 @@ class Session:
             signal.abort("interrupted")
         try:
             await self._ensure_selected_model()
+            # Before anything is sent: the one point that can see the user's
+            # wait since the last call (see the method).
+            await self._sweep_before_run()
             # Imported HERE, once per real turn, rather than at module scope:
             # `harness.rows` gathers the chrome prompts from
             # `session.goal_loop`/`session.session` behind a function precisely
@@ -23033,6 +23043,96 @@ class Session:
         rest = args[1:]
         return await asyncio.to_thread(lambda: func(snapshot, *rest))
 
+    async def _sweep_stale_outputs(
+        self, compaction_api: Any, settings: Any, llm_history: list[Message]
+    ) -> None:
+        """Run the in-place prune sweeps over ``llm_history`` and journal them.
+
+        (a) Superseded/useless tool outputs, then (b) stale frames, behind a
+        session gate: only a session that has CAPTURED browser views can own
+        frames a newer view of a surface supersedes, so every other session
+        type is left byte-identical (the gate's own comment draws the line).
+        Both take the sent-prefix and idle-flush guards: a blank of anything
+        already sent rewrites the prompt cache from that point on.
+
+        The idle flush compares against the last completed PROVIDER call
+        (``_last_provider_request_ms``), which every post-call sweep reads as
+        "the gap before the NEXT request": a 90-minute tool flushes. It is
+        deliberately not the stamp from before the call that just completed: if
+        that gap was idle, that call already rewrote the cache, and blanking now
+        would buy a SECOND rewrite on the next one (QA round 1, C4, where main
+        did exactly that). The user's wait between runs is judged once, before
+        the run's first request, by :meth:`_sweep_before_run`.
+
+        When the retained stale set crosses a batch-flush ceiling
+        (``stale_flush_due``) both sweeps run with ``flush=True``: everything
+        stale leaves in ONE batch, one prefix break instead of one per frame,
+        and the superseded reads ride the same break.
+        """
+        now_ms = int(time.time() * 1000)
+        last_ms = self._last_provider_request_ms
+        pruned_before = _pruned_ids(llm_history)
+        frames = _history_captured_browser_views(llm_history)
+        flush = False
+        if frames:
+            due: Any = getattr(compaction_api, "stale_flush_due", None)
+            if callable(due):
+                flush = bool(
+                    due(
+                        llm_history,
+                        context_window=self.effective_model.context_window,
+                        wire_bytes_trigger=self._wire_trigger_bytes(compaction_api, settings) or 0,
+                    )
+                )
+        # ``flush`` is passed only when set, so a duck-typed hook that predates
+        # the parameter (the suite has several) keeps its old signature.
+        extra = {"flush": True} if flush else {}
+        try:
+            compaction_api.prune_tool_outputs(llm_history, now_ms, last_ms, **extra)
+        except (ImportError, AttributeError):
+            pass  # optional pruning hook absent; degrade to no pruning
+        if frames:
+            try:
+                compaction_api.prune_stale_frames_in_place(
+                    llm_history, now_ms=now_ms, last_activity_ms=last_ms, **extra
+                )
+            except (ImportError, AttributeError):
+                pass  # optional frame sweep absent; degrade to no sweep
+        await self._journal_prunes(llm_history, pruned_before)
+
+    async def _sweep_before_run(self) -> None:
+        """Flush stale outputs before a run's first request, when the cache is cold.
+
+        Every other sweep runs right after a provider call, so none of them can
+        see the gap a user leaves between runs. Without this, the per-call
+        clock made the cross-run idle flush unreachable (agent review round 1,
+        M2; QA Q2): stale frames and superseded reads then left only by
+        compaction, and a resumed session carried every copy (QA Q1).
+
+        Here, before anything is sent, a gap of ``idle_flush_ms`` or more since
+        the last provider call proves the cache cold, so blanking costs nothing
+        the first request would not pay anyway. Best-effort: a sweep that fails
+        must never stop the run.
+        """
+        last_ms = self._last_provider_request_ms
+        if last_ms <= 0:
+            return  # nothing sent yet in this process: nothing to judge
+        try:
+            from local_operator.compaction import api as compaction_api
+        except ImportError:
+            return
+        settings = self._compaction_settings or compaction_api.CompactionSettings()
+        if not getattr(settings, "enabled", True):
+            return
+        idle_flush_ms = int(getattr(compaction_api, "IDLE_FLUSH_MS", 5_400_000))
+        if int(time.time() * 1000) - last_ms < idle_flush_ms:
+            return
+        try:
+            llm_history = self._render_for_compaction()
+            await self._sweep_stale_outputs(compaction_api, settings, llm_history)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("pre-run idle sweep failed", exc_info=True)
+
     async def _plan_compaction(
         self, *, respect_threshold: bool
     ) -> _CompactionPlan | CompactionOutcome:
@@ -23085,30 +23185,7 @@ class Session:
 
         # (1) Prune before deciding: blanked outputs shrink the estimate and
         # may avoid a compaction pass entirely. Mutates messages in place.
-        # The idle flush compares against the last PROVIDER request, not turn
-        # bookkeeping, so a genuinely idle session reclaims the warm region.
-        now_ms = int(time.time() * 1000)
-        pruned_before = _pruned_ids(llm_history)
-        try:
-            compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_provider_request_ms)
-        except (ImportError, AttributeError):
-            pass  # optional pruning hook absent; degrade to no pruning
-        # (1b) Stale frames ride the same boundary, behind a session gate:
-        # only a session that has CAPTURED browser views can own frames a
-        # newer view of a surface supersedes, so every other session type is
-        # left byte-identical (the gate's own comment draws the line). The
-        # frame blank writes bytes the prompt cache may still hold, so the
-        # sweep takes the same warm-suffix/idle-flush guards (1) takes.
-        if _history_captured_browser_views(llm_history):
-            try:
-                compaction_api.prune_stale_frames_in_place(
-                    llm_history,
-                    now_ms=now_ms,
-                    last_activity_ms=self._last_provider_request_ms,
-                )
-            except (ImportError, AttributeError):
-                pass  # optional frame sweep absent; degrade to no sweep
-        await self._journal_prunes(llm_history, pruned_before)
+        await self._sweep_stale_outputs(compaction_api, settings, llm_history)
 
         # (2) Trigger math: prefer the provider's ground-truth context size.
         provider_reported = (

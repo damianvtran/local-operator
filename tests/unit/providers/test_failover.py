@@ -3088,6 +3088,9 @@ def test_an_image_rejection_is_recognised_in_both_the_raised_and_rendered_forms(
         "dimensions exceed max allowed size for many-image requests: 2000 pixels",
         "messages.5.content.1.image.source.base64.data: At least one of the image "
         "dimensions exceed max allowed size: 8000 pixels",
+        # The per-request image COUNT refusal, measured live on
+        # claude-haiku-4-5 with 101 images (PR #3004 QA round 1, C2c).
+        "Too much media: 0 document pages + 101 images > 100",
     ],
 )
 def test_the_wordings_providers_actually_use_are_all_recognised(message: str) -> None:
