@@ -155,10 +155,17 @@ TASKS: tuple[Task, ...] = (
             # \b on every keyword: without it "max" matched the MAX inside
             # SQLITE_MAX_COLUMN and the phrase swallowed "_COLUMN is 32767",
             # scrubbing a wrong answer's own value (round-3 R4).
+            # A context phrase may not cross a sentence, a semicolon or a line:
+            # `[^.;\n]` keeps "… is 2000. Some guides say the max is 32767"
+            # from declaring a context for the 2000 clause (Q6's class).
             r"\b(?:max(?:imum)?|raise[sd]?|raising|up to|at most|increas\w*|"
             r"upper (?:bound|limit)|compile[- ]time (?:max(?:imum)?|limit)|larger than)\b"
-            r"[^.\n]{0,60}?32,?767",
-            r"32,?767[^.\n]{0,30}?\b(?:max(?:imum)?|at most|upper (?:bound|limit))\b",
+            r"[^.;\n]{0,60}?32,?767",
+            # Value-first only when ATTACHED: "32767 (the compile-time max)",
+            # "32767 max", or a table cell — not "32767 … some words … max".
+            r"32,?767\s*\([^).;\n]{0,30}?\b(?:max(?:imum)?|at most|upper (?:bound|limit))\b",
+            r"32,?767\s*\b(?:max(?:imum)?|at most|upper (?:bound|limit))\b",
+            r"\|\s*(?:max(?:imum)?|upper (?:bound|limit))\s*\|\s*32,?767\s*\|",
         ),
     ),
     Task(
@@ -198,13 +205,18 @@ TASKS: tuple[Task, ...] = (
         # and parentheticals), never as the docstring/comment answer itself.
         allowed_context=(
             # \b again: "code" matched inside unicode/encode/decode.
-            r"\b(?:code|program|source)\b[^\n]{0,40}?\b79\b",
-            r"\b79\b[^\n]{0,40}?\b(?:code|program|source)\b",
+            r"\b(?:code|program|source)\b[^.;\n]{0,40}?\b79\b",
+            # Value-first ONLY when attached (Q6: a free `[^\n]` gap let
+            # "79 characters per line. Code lines" reach across the sentence
+            # and blank the 79 that was stated AS the docstring answer).
+            r"\b79\b\s*(?:for|in)\s+(?:code|program|source)\b",
+            r"\b79\b\s*\([^).;\n]{0,25}?\b(?:code|program|source)\b",
+            r"\|\s*(?:code|program|source)\s*\|\s*79\b",
             # The document's own words for the general line limit, which a
             # correct answer quotes alongside the 72 docstring limit: "Limit
             # all lines to a maximum of 79 characters", "other lines … 79".
-            r"\b(?:all lines|other lines|every line|lines in general)\b[^\n]{0,50}?\b79\b",
-            r"\b79\b[^\n]{0,30}?\b(?:for all lines|for other lines|all lines)\b",
+            r"\b(?:all lines|other lines|every line|lines in general)\b[^.;\n]{0,50}?\b79\b",
+            r"\b79\b\s*(?:for|in)\s+(?:all|other|every)\s+lines\b",
         ),
     ),
     Task(
@@ -257,8 +269,11 @@ TASKS: tuple[Task, ...] = (
         # 80 is HTTP's port, legitimately mentioned beside 443. Declared so a
         # correct answer is not rejected for naming it (round-3 M5).
         allowed_context=(
-            r"\bHTTP\b[^.\n]{0,30}?\b80\b",
-            r"\b80\b[^.\n]{0,30}?\bHTTP\b",
+            # `(?!S)` so the HTTPS task's own name cannot declare the context
+            # (Q8), and `[^.;\n]` so it cannot cross a sentence.
+            r"\bHTTP\b(?!S)[^.;\n]{0,30}?\b80\b",
+            r"\b80\b\s*(?:for|in)\s+HTTP\b(?!S)",
+            r"\|\s*HTTP\s*\|\s*80\b",
         ),
     ),
 )
@@ -316,15 +331,24 @@ _NEGATION_WINDOW = 24
 
 
 def _literal_pattern(value: str) -> re.Pattern[str]:
-    """Whole-value literal match: "100" must not match inside "1000", "10000",
-    "100,000" or "100.5" (M2: the digit-only lookahead allowed the last two).
+    """Whole-value literal match for one answer value.
+
+    Three properties, each won the hard way in review:
+    - "100" must not match inside "1000", "10000", "100,000" or "100.5" (M2);
+    - a unit suffix is not the plain value: "100k" (N2);
+    - for four or more digits the thousands-separated and plain spellings are
+      THE SAME value in both directions ("65536" matches "65,536" and "65,535"
+      matches "65535"), because every real capture writes the comma form while
+      the distractor list is plain — which made `65,536` invisible (Q7).
     """
-    if any(ch.isdigit() for ch in value):
-        # N2: also reject a unit suffix ("100k"), which is not the plain value.
-        return re.compile(
-            rf"(?<![\d.,]){re.escape(value)}(?![\d]|[.,]\d|[kKmMgG]\b)", re.IGNORECASE
-        )
-    return re.compile(rf"\b{re.escape(value)}\b", re.IGNORECASE)
+    if not any(ch.isdigit() for ch in value):
+        return re.compile(rf"\b{re.escape(value)}\b", re.IGNORECASE)
+    canonical = value.replace(",", "")
+    spellings = {value, canonical}
+    if canonical.isdigit() and len(canonical) >= 4:
+        spellings.add(f"{canonical[:-3]},{canonical[-3:]}")
+    body = "|".join(re.escape(spelling) for spelling in sorted(spellings, key=len, reverse=True))
+    return re.compile(rf"(?<![\d.,])(?:{body})(?![\d]|[.,]\d|[kKmMgG]\b)", re.IGNORECASE)
 
 
 #: Forward negation needs a COPULA: "100 is not the default" negates the value,

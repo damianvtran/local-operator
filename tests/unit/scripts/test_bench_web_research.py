@@ -141,6 +141,39 @@ CASES: list[tuple[str, str, bool]] = [
     # M5: an admonition is not a negation; a real "doesn't equal" still fails.
     ("pg-max-connections", "Don't change it: 100 is the default.", True),
     ("pg-max-connections", "The default doesn't equal 100.", False),
+    # Q6: the pep8 exemption must not cross a sentence/semicolon boundary and
+    # blank the 79 that was stated AS the docstring answer.
+    (
+        "pep8-docstring-length",
+        "PEP 8 limits docstrings and comments to **79 characters** per line. "
+        "Code lines are limited to 79.",
+        False,
+    ),
+    ("pep8-docstring-length", "Docstrings/comments: 79 characters. Code: 72.", False),
+    (
+        "pep8-docstring-length",
+        "PEP 8 limits docstrings and comments to 79 characters; code lines to 72.",
+        False,
+    ),
+    # Q7: the comma spelling of a distractor is the same value as the plain
+    # one — every real capture writes the comma form.
+    (
+        "h2-initial-window",
+        "The initial value of `SETTINGS_INITIAL_WINDOW_SIZE` (0x04) is **65,536 octets** (2^16).",
+        False,
+    ),
+    ("sqlite-max-column", "The default is 32,767. Older builds used 2000.", False),
+    ("git-gc-auto", "gc.auto defaults to 67,000; it was 6700 in old versions.", False),
+    ("h2-initial-window", "The initial value is 65,535 octets.", True),
+    ("git-gc-auto", "The default value is 6700.", True),
+    # Q8: the https context must not be declared by "HTTPS" itself nor cross a
+    # sentence/semicolon boundary.
+    ("https-default-port", "HTTPS uses port 80 by default; plain HTTP uses 443.", False),
+    (
+        "https-default-port",
+        "The default HTTPS port is 80 (443 is for HTTP over TLS proxies).",
+        False,
+    ),
 ]
 
 
