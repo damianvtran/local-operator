@@ -158,6 +158,26 @@ export interface TranscriptEntry {
 	videos?: TranscriptVideoRef[];
 	/** Assistant rows stream: `final` flips true on message_end. */
 	final: boolean;
+	/* --- CONDENSATION FACTS (sparse: absent unless set) ---------------------
+	   Four facts the desktop's condensation model reads and this wire did not
+	   carry. They are TOP LEVEL rather than in `details` because the frame cap
+	   empties `details` under pressure, and the daemon omits each one at its
+	   default, so absence is the normal case: every reader treats it as the
+	   desktop's "unknown is absent" (see `lib/condense-records.ts`). */
+	/** The provider's phase declaration on an assistant row (`toolUse`/`stop`/
+	    `refusal`). Separates a lead-in frame from a settled answer. */
+	stop_reason?: string;
+	/** This assistant row carried tool calls of its own. Not derivable from the
+	    rows around it: live tool ids are `tc-<call>`, durable ids `<msg>:<call>`,
+	    and the fold legitimately drops some call rows. */
+	calls_tools?: boolean;
+	/** The verbatim `custom_type` of the `CustomMessage` this notice came from:
+	    the receipt family the fold groups by (`job_result`, `monitor_prompt`,
+	    `hub_message`, `wake_prompt`, `session_incident`). */
+	custom_type?: string;
+	/** This notice ENDS the turn (the `:stop` notice, a live error, a session
+	    incident). An explicit flag, never inferred from severity. */
+	terminal?: boolean;
 }
 
 /** A reference to one image block on a user turn. The bytes live in the

@@ -1,0 +1,16 @@
+{
+	"_": "WHERE the cross-client parity fixtures are pinned, so a desktop model change this surface has not ported is a NAMED divergence instead of the silent drift that let the quiet-group clause copies diverge for nine days. `sha256` is the exact bytes of the copy in this directory; `sourceHash` is the generator's hash of the DESKTOP MODEL SOURCE those bytes were produced from, which is what `scripts/check-condense-parity-latest.mjs` compares against the desktop's own manifest.",
+	"condense.parity.json": {
+		"repo": "damianvtran/local-operator-ui",
+		"path": "scripts/fixtures/condense.parity.json",
+		"manifest": "scripts/fixtures/condense.parity.manifest.json",
+		"sha256": "148d4ed2d651ccb9ecf1d87078bd13657628b2890db73337d0308f4d4702bb44",
+		"sourceHash": "03068f15e59435d7b0ff987a270c8dd17a1be54331902856b729524fcec69b4c"
+	},
+	"quiet-groups.parity.json": {
+		"repo": "damianvtran/local-operator-ui",
+		"path": "scripts/fixtures/quiet-groups.parity.json",
+		"sha256": "ba02cd3d62ef763f97023d055d1951f88539de351a01cae5765ba899d4738138",
+		"note": "The relay authored these bytes (9a0bb4ec933, 2026-10-16) and the desktop adopted them verbatim in its round-1 C0 head; this pin is the content hash only, because a commit id cannot be verified from the bytes and names a tree that may legitimately be ahead of them."
+	}
+}

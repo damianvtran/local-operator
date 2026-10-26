@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "node scripts/check-i18n.mjs && tsc -b && vite build",
     "preview": "vite preview",
-    "check": "node scripts/check-i18n.mjs && tsc -b --noEmit",
+    "check": "node scripts/check-i18n.mjs && node scripts/check-condense-parity-latest.mjs && tsc -b --noEmit",
     "test": "node scripts/check-i18n.mjs && node --test scripts/check-i18n.node-check.mjs && vitest run",
     "gen-themes": "node scripts/generate-theme-css.mjs",
     "check-themes": "node scripts/generate-theme-css.mjs --check && node scripts/contrast-contract.mjs",
