@@ -161,15 +161,23 @@ under the overrides) with its `uv.lock`, `policy-pins.txt` (what was installed),
 `build-record.json`. The verifier writes its report **before** deciding its exit
 code, so a refusal carries its evidence too.
 
-**The build record is one document at two paths.** `<arm>/build-record.json` is
-the canonical caller contract — `scripts/materialize_workspace_21.sh` reads
-`package_digest` from it before it will materialise a workspace — and
-`receipts/build-record.json` is kept because the earlier arms and this page name
-it. Both are serialised from the same dict, re-read, and compared byte for byte
-after writing; a mismatch is a refusal, not a warning. Neither path is ever
-overwritten (exclusive create), so an adopted or hand-repaired arm cannot be
-relabelled by a later run — before this, an arm built by the tool had to be
-hard-linked by hand before the launcher would accept it.
+**The build record is one document at two paths, and only a clean build publishes
+both.** `<arm>/build-record.json` is the canonical caller contract —
+`scripts/materialize_workspace_21.sh` reads `package_digest` from it before it
+will materialise a workspace — and `receipts/build-record.json` is kept because
+the earlier arms and this page name it. On success both are serialised from the
+same dict, re-read, and compared **byte for byte** (`read_bytes()`, not
+`read_text()`, which normalises line endings); a mismatch is a refusal, not a
+warning. A build that refuses writes its evidence under `receipts/` **only**: a
+refused record's `package_digest` is JSON `null`, which the launcher's `print`
+turns into the non-empty string `None` — so publishing it would hand the caller a
+digest that passes `[ -n "$PKG" ]`. No canonical file means the launcher's own
+read fails, which is the honest signal. Nothing is ever overwritten (exclusive
+create, all destinations preflighted before either is committed, and anything
+this run created is rolled back if the other path or the read-back fails), so an
+adopted or hand-repaired arm cannot be relabelled by a later run — before this,
+an arm built by the tool had to be hard-linked by hand before the launcher would
+accept it.
 
 The record's identity fields are taken from the verification report of **that
 run**, never from the arguments alone: `verified_commit` and

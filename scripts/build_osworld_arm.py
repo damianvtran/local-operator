@@ -889,39 +889,64 @@ def verify_recorded_identity(
     return refusals
 
 
-def write_build_record(layout: ArmLayout, record: Mapping[str, Any]) -> dict[str, Any]:
-    """Write the record at BOTH documented paths from one document.
+def _create_exclusive(path: Path, data: bytes) -> None:
+    """Create ``path`` with ``data`` or fail; never touches an existing file."""
 
-    The canonical path is the durable caller contract -- ``materialize_workspace``
-    and the launcher read ``<arm>/build-record.json`` -- and the receipts copy is
-    what earlier arms and ``arm-build.md`` name. Both are serialised from the
-    same dict, then re-read and compared byte for byte: a mismatch is a refusal,
-    not a warning, because two records that disagree make every downstream
-    receipt ambiguous. Neither path is ever overwritten (exclusive create), so an
-    adopted or hand-repaired arm cannot be relabelled by a later run.
+    with path.open("xb") as handle:
+        handle.write(data)
+
+
+def write_build_record(
+    layout: ArmLayout, record: Mapping[str, Any], *, publish: bool
+) -> dict[str, Any]:
+    """Write the record to the receipts path, and to the CALLER path only on success.
+
+    Two rules, both learned from review round 1:
+
+    * **Publication is conditional.** ``<arm>/build-record.json`` is what the
+      launcher reads (``json.load(...)['package_digest']`` then ``[ -n "$PKG" ]``),
+      and a refused build would publish ``package_digest: null`` -- which prints
+      as the non-empty string ``None`` and passes that guard. So a refused build
+      writes refusal evidence under ``receipts/`` ONLY, and the caller-facing
+      path stays absent: the launcher's own read then fails, which is the honest
+      signal.
+    * **Two paths are committed together or not at all.** Both destinations are
+      preflighted before either is created, and anything this call created is
+      removed if a later create or the byte-for-byte read-back fails. A
+      pre-existing record is never removed or overwritten.
     """
 
     payload = json.dumps(record, indent=2) + "\n"
-    targets = (layout.root / "build-record.json", layout.receipts / "build-record.json")
+    data = payload.encode("utf-8")
+    receipts_path = layout.receipts / "build-record.json"
+    canonical = layout.root / "build-record.json"
+    targets = [receipts_path, *([canonical] if publish else [])]
     for path in targets:
-        try:
-            with path.open("x", encoding="utf-8") as handle:
-                handle.write(payload)
-        except FileExistsError as error:
-            raise BuildRefused(
-                f"{path} already exists; an arm's build record is immutable"
-            ) from error
-    written = [path.read_text(encoding="utf-8") for path in targets]
-    if len(set(written)) != 1 or written[0] != payload:
-        raise BuildRefused(
-            "the canonical and receipts build records diverged after writing: "
-            + ", ".join(str(path) for path in targets)
-        )
+        if path.exists():
+            raise BuildRefused(f"{path} already exists; an arm's build record is immutable")
+    created: list[Path] = []
+    try:
+        for path in targets:
+            _create_exclusive(path, data)
+            created.append(path)
+            # Byte-exact, not read_text(): universal newlines would call a CRLF
+            # rewrite identical to the payload, and two records that differ by a
+            # line ending are two records (review round 1, R1-4).
+            if path.read_bytes() != data:
+                raise BuildRefused(f"{path} is not byte-identical to the record it should hold")
+    except BaseException:
+        for path in created:
+            try:
+                path.unlink()
+            except OSError:  # pragma: no cover - nothing else we can do here
+                pass
+        raise
     return {
         "record_contract": _RECORD_CONTRACT,
-        "canonical": str(targets[0]),
-        "receipts": str(targets[1]),
-        "bytes": len(payload),
+        "published": publish,
+        "canonical": str(canonical) if publish else None,
+        "receipts": str(receipts_path),
+        "bytes": len(data),
     }
 
 
@@ -1010,9 +1035,25 @@ def _execute(args: argparse.Namespace) -> int:
         if result.returncode != 0:
             refusals.append(f"{script} refused (rc={result.returncode})")
     verification_path = layout.receipts / "installed-verification.json"
-    recorded: dict[str, Any] = (
-        json.loads(verification_path.read_text()) if verification_path.is_file() else {}
-    )
+    recorded: dict[str, Any] = {}
+    if verification_path.is_file():
+        try:
+            loaded = json.loads(verification_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            # A report we cannot parse is NOT a verified arm, and letting the
+            # traceback escape would skip the refusal evidence entirely.
+            refusals.append(
+                f"the installed-verification report is not readable JSON ({error}); "
+                f"it is kept at {verification_path}"
+            )
+        else:
+            if isinstance(loaded, dict):
+                recorded = loaded
+            else:
+                refusals.append(
+                    f"the installed-verification report is not a JSON object; "
+                    f"it is kept at {verification_path}"
+                )
     planned = {
         name: version
         for name, version in lock_versions(
@@ -1034,6 +1075,7 @@ def _execute(args: argparse.Namespace) -> int:
     written = write_build_record(
         layout,
         {
+            "published": not refusals,
             "record_contract": _RECORD_CONTRACT,
             "arm_source_commit": args.source_sha,
             # The verifier's own facts, so a record cannot report a previous
@@ -1074,11 +1116,20 @@ def _execute(args: argparse.Namespace) -> int:
                 "adapter": instance_sha256(wheels[1]),
             },
         },
+        publish=not refusals,
     )
-    print(
-        f"RECORD: {written['canonical']} "
-        f"(identical copy: {written['receipts']}, {written['bytes']} bytes)"
-    )
+    if written["published"]:
+        print(
+            f"RECORD: {written['canonical']} "
+            f"(identical copy: {written['receipts']}, {written['bytes']} bytes)"
+        )
+    else:
+        # Deliberately no canonical file: the launcher must not be able to read a
+        # digest for an arm that failed verification or admission (R1-1).
+        print(
+            f"REFUSAL EVIDENCE: {written['receipts']} "
+            f"({written['bytes']} bytes); no canonical build record published"
+        )
     if refusals:
         raise Unverified("; ".join(refusals))
     print(f"BUILT: {layout.root} (receipts in {layout.receipts})")
