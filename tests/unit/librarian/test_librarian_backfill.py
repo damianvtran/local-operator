@@ -243,6 +243,186 @@ def test_a_later_ordinary_agents_tag_set_stays_theirs(isolated_root) -> None:
     assert [row["source"] for row in store.asset_tags(T)] == ["agent"]
 
 
+def test_only_a_tag_the_cell_passes_moves(isolated_root) -> None:
+    """A tag is a VALUE the cell passes, not a string its text happens to hold.
+
+    QA round 3, cell (d): with a substring match, an ordinary agent's tag was
+    re-sourced whenever its name occurred anywhere in her cell — demonstrated on
+    the live install with ``a``, ``op``, ``asset`` and ``library``, the last the
+    tool's own name. Every one of those strings is in this cell, none of them as
+    a tag value, and all four of the agent's rows stay his.
+    """
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    journal(
+        isolated_root,
+        [
+            {
+                "id": "toolu_plumbing",
+                "name": "eval",
+                "arguments": {
+                    "code": (
+                        # "library", "tags", an "asset" word and a lone "a" all
+                        # occur below: as the tool's name, as the value of the op,
+                        # inside an intent line, and as a loop variable.
+                        "lookup={name:key for name, key in "
+                        'tool("library",op="tags",action="list",'
+                        'i="Listing the library")["idm"]}\n'
+                        f'upd=[("{T}","{NAME_T}")]\n'
+                        "for a,n in upd:\n"
+                        '    r=tool("library",op="update",asset_id=a,name=n,'
+                        'i="Naming an asset")\n'
+                        f'sets={{"{T}":["{TAG_NAME}"]}}\n'
+                        "for a,t in sets.items():\n"
+                        '    r=tool("library",op="tags",action="set",asset_id=a,'
+                        "tags=[lookup[x] for x in t])\n"
+                    )
+                },
+            }
+        ],
+    )
+    theirs = {
+        name: store.create_tag(name, actor="agent")["id"]
+        for name in ("a", "op", "asset", "library")
+    }
+    store.set_asset_tags(T, [*theirs.values(), her_tag_id(store)], actor="agent")
+
+    assert backfill.reattribute_organized(isolated_root) == 1
+
+    sources = {row["id"]: row["source"] for row in store.asset_tags(T)}
+    assert sources[her_tag_id(store)] == "librarian"
+    for name, tag_id in theirs.items():
+        assert sources[tag_id] == "agent", name
+
+
+def test_a_tag_named_like_a_result_key_is_the_MEASURED_residual(isolated_root) -> None:
+    """The residual, pinned rather than left to be rediscovered.
+
+    A cell that reads a field out of a tool result puts that field's NAME among
+    its string constants (``d["tags"]``), and whole-string equality cannot tell
+    it from a tag value. Measured on the live journal, an agent tag named
+    ``tags`` is claimed on 38 of the 39 assets (``name``/``text``/``content``/
+    ``id``/``organized``/``metadata`` on 33-34): her cells read those fields.
+
+    Clearing it means excluding subscript slices, which measures 26 of her 37
+    real rows — her tag NAMES are also spelled as lookups (``idm["eng-3631"]``).
+    Trading 11 true rows for the field-name family is a call for whoever owns
+    the predicate, so the behaviour is pinned here and reported, not changed.
+    """
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    journal(
+        isolated_root,
+        [
+            {
+                "id": "toolu_result_key",
+                "name": "eval",
+                "arguments": {
+                    "code": (
+                        f'upd=[("{T}","{NAME_T}")]\n'
+                        "for a,n in upd:\n"
+                        '    r=tool("library",op="update",asset_id=a,name=n)\n'
+                        f'read=json.loads(tool("library",op="get",asset_id="{T}",'
+                        'i="Verifying")["content"][0]["text"])\n'
+                        'print(read["tags"], read["name"])\n'
+                        f'sets={{"{T}":["{TAG_NAME}"]}}\n'
+                        "for a,t in sets.items():\n"
+                        '    r=tool("library",op="tags",action="set",asset_id=a,tags=t)\n'
+                    )
+                },
+            }
+        ],
+    )
+    theirs = store.create_tag("tags", actor="agent")
+    store.set_asset_tags(T, [theirs["id"], her_tag_id(store)], actor="agent")
+
+    assert backfill.reattribute_organized(isolated_root) == 1
+
+    sources = {row["id"]: row["source"] for row in store.asset_tags(T)}
+    assert sources[her_tag_id(store)] == "librarian"
+    assert sources[theirs["id"]] == "librarian", "the residual this test pins"
+
+
+@pytest.mark.parametrize("shape", ["sets-names", "upd-trailing-name", "idm-literal"])
+def test_her_real_tag_shapes_still_move_the_row(isolated_root, shape: str) -> None:
+    """The three shapes her cells used, each read structurally.
+
+    ``sets`` holds the name; an ``upd``/``rows`` tuple carries it as a trailing
+    element; and one burst held a literal id map, which is the shape that names
+    a tag by its ID instead of its name.
+    """
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    tag_id = her_tag_id(store)
+    update = (
+        f'upd=[("{T}","{NAME_T}")]\n'
+        "for a,n in upd:\n"
+        '    r=tool("library",op="update",asset_id=a,name=n)\n'
+    )
+    if shape == "sets-names":
+        tags = (
+            f'sets={{"{T}":["{TAG_NAME}"]}}\n'
+            "idm={t['name']:t['id'] for t in "
+            "tool('library',op='tags',action='list')['idm']}\n"
+            "for a,t in sets.items():\n"
+            '    r=tool("library",op="tags",action="set",asset_id=a,'
+            "tags=[idm[x] for x in t])\n"
+        )
+    elif shape == "upd-trailing-name":
+        tags = (
+            f'rows=[("{T}","{NAME_T}","{TAG_NAME}")]\n'
+            "for a,n,t in rows:\n"
+            '    r=tool("library",op="tags",action="set",asset_id=a,tags=[t])\n'
+        )
+    else:
+        tags = (
+            f'idm={{"{TAG_NAME}":"{tag_id}"}}\n'
+            f'r=tool("library",op="tags",action="set",asset_id="{T}",'
+            f'tags=[idm["{TAG_NAME}"]],primary=idm["{TAG_NAME}"])\n'
+        )
+    journal(
+        isolated_root,
+        [{"id": f"toolu_{shape}", "name": "eval", "arguments": {"code": update + tags}}],
+    )
+
+    assert backfill.reattribute_organized(isolated_root) == 1
+    assert [row["source"] for row in store.asset_tags(T)] == ["librarian"]
+
+
+@pytest.mark.parametrize("broken", ["unbalanced-bracket", "nul-byte"])
+def test_an_unparseable_cell_contributes_no_tag_evidence(isolated_root, broken: str) -> None:
+    """A cell the pass cannot parse proves nothing about tags.
+
+    The naming half still reads the cell as text — it always has — so the asset
+    is hers; the tag row keeps its agent provenance, which is the safe
+    direction: the pass may under-recover, never claim what it could not read.
+    """
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    code = (
+        f'upd=[("{T}","{NAME_T}")]\n'
+        "for a,n in upd:\n"
+        '    r=tool("library",op="update",asset_id=a,name=n)\n'
+        f'sets={{"{T}":["{TAG_NAME}"]}}\n'
+        "for a,t in sets.items():\n"
+        '    r=tool("library",op="tags",action="set",asset_id=a,tags=[idm[x] for x in t])\n'
+    )
+    if broken == "unbalanced-bracket":
+        code += '    r=tool("library",op="tags",action="set",asset_id=a,tags=['
+    else:
+        # What a torn or NUL-laden append leaves behind: ast.parse refuses it.
+        code += "\x00"
+    journal(
+        isolated_root,
+        [{"id": f"toolu_{broken}", "name": "eval", "arguments": {"code": code}}],
+    )
+
+    assert backfill.reattribute_organized(isolated_root) == 1
+    row = store.asset(T)
+    assert row is not None and row["organized_by"] == "librarian"
+    assert [tag["source"] for tag in store.asset_tags(T)] == ["agent"]
+
+
 def test_a_native_tags_call_is_read_as_a_tags_op(isolated_root) -> None:
     """The op is an ARGUMENT in a native call, not text inside code.
 

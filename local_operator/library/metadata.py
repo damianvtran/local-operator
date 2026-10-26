@@ -158,11 +158,11 @@ class Attribution:
     """One row a re-attribution hands to the Librarian, with her own evidence.
 
     ``fields`` names the ``*_source`` columns that flip; ``tag_ids`` names the
-    tag assignments whose ``source`` moves with it — the ids of the tags HER
-    call is seen to name, by name or by id, matched by value exactly as the
-    fields are, so a tag set someone else applied afterwards stays theirs.
-    ``organized_at`` is WHEN SHE did it, taken from the audit log rather than
-    from the clock of the pass that re-reads it.
+    tag assignments whose ``source`` moves with it, matched by VALUE as the
+    fields are — the call must pass the tag's name or its id, whole-string —
+    so a tag set someone else applied afterwards stays theirs. ``organized_at``
+    is WHEN SHE did it, taken from the audit log rather than from the clock of
+    the pass that re-reads it.
     """
 
     asset_id: str
