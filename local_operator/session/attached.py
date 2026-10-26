@@ -141,6 +141,7 @@ from local_operator.session.replay_cache import (
     ColdReplay,
     ReplayKey,
     build_cold_replay,
+    build_cold_tail_metadata,
     cached_replay,
     load_cold_replay,
     replay_key,
@@ -1973,9 +1974,9 @@ class AttachedSession:
             # state restored below (the same four values, from the same
             # function, computed by an earlier process), it just defers the one
             # output that record deliberately does not carry — the message
-            # list. No record, a record for another journal version, or a
-            # record this process cannot validate all fall through to the eager
-            # line, byte for byte.
+            # list. A record MISS may also prove those facts from a bounded
+            # tail read; if neither proof is available, the eager line below
+            # stays the exact fallback.
             if self._deferred_history is None:
                 await self._load_history(None, want_checkpoint=True)
             else:
@@ -6500,16 +6501,15 @@ class AttachedSession:
     async def _deferred_cold_details(self) -> "_DeferredHistory | None":
         """The durable record's four state values plus a deferral token, or ``None``.
 
-        THE HIT, and the only place the deferred path touches cold state. The
-        record carries exactly what ``_read_transcript`` installs from a fresh
-        parse, so this sets the same four attributes from the same function's
-        earlier output rather than deriving anything.
+        A HIT restores the four values ``_read_transcript`` would install. On
+        a MISS, bounded tail evidence may prove those same values without a
+        message replay and file a fresh record for the next open. Neither path
+        treats a partial message list as hydrated history.
 
-        ``None`` is a MISS and means the caller takes today's eager read: no
-        record, an unreadable or unknown-schema one, one written for another
-        journal version or another request, one whose ``Usage`` no longer
-        validates, or a journal that moved while the record was being read.
-        None of those is an error — an open always has a correct slow answer.
+        ``None`` means neither the record nor bounded tail evidence was safe:
+        the caller keeps today's exact eager read. Missing facts, a damaged
+        tail, an archive or a journal that moved while reading are not errors;
+        they are reasons to use the correct slow answer.
 
         THREADED because a record is not always tiny: on real journals the
         checkpoint dict measured 0.3-1.4 MB, so parsing one is real work and it
@@ -6530,6 +6530,8 @@ class AttachedSession:
         if witness is None or path is None:
             return None
         record = await asyncio.to_thread(read_cold_metadata, path, witness_for(witness))
+        if record is None:
+            record = await asyncio.to_thread(build_cold_tail_metadata, witness, path)
         if record is None:
             return None
         self._cold_checkpoint = record.checkpoint

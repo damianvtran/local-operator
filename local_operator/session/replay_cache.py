@@ -88,6 +88,7 @@ from local_operator.session.model_selection import (
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import (
+    read_cold_tail,
     read_replay_suffix,
     replay_entries,
     usages_since_newest_shrink,
@@ -428,6 +429,50 @@ def build_cold_replay(
         return ColdReplay(messages=tuple(messages), retained=0, **values)
     _record_cold_metadata(metadata_path, key, values)
     return publish_replay(key, messages=messages, **values)
+
+
+def build_cold_tail_metadata(key: ReplayKey, path: Path) -> ColdMetadata | None:
+    """Defer a desktop record MISS only when bounded tail facts prove its state.
+
+    This never publishes a replay-cache entry: the tail's rows are evidence,
+    not the whole message list. Hydration still uses the exact eager replay.
+    Selection keeps its existing authority/rules; it is not guessed from the
+    checkpoint and the final journal witness covers both reads before filing.
+    """
+    if key.through_id is not None or key.strict_cut or not key.checkpoint_types:
+        return None
+    suffix = read_cold_tail(
+        key.directory,
+        checkpoint_types=key.checkpoint_types + key.opportunistic_types,
+    )
+    if suffix is None:
+        return None
+    seed = seed_reported_usage(usages_since_newest_shrink(suffix.entries))
+    if seed is None:
+        return None
+    selection = read_selection_reading(Path(key.directory))
+    fresh = replay_key(
+        key.directory,
+        through_id=key.through_id,
+        strict_cut=key.strict_cut,
+        checkpoint_types=key.checkpoint_types,
+        opportunistic_types=key.opportunistic_types,
+    )
+    if fresh != key:
+        return None
+    if selection.source != (key.inode, key.size, key.mtime_ns, key.ctime_ns):
+        return None
+    record = ColdMetadata(
+        witness=witness_for(key),
+        checkpoint=suffix.checkpoint,
+        checkpoints=suffix.checkpoints,
+        order=suffix.checkpoint_order,
+        seed_usage=seed,
+        bytes_read=suffix.bytes_read,
+        selection=selection,
+    )
+    write_cold_metadata(path, record)
+    return record
 
 
 def _record_cold_metadata(path: Path | None, key: "ReplayKey", values: dict[str, Any]) -> None:

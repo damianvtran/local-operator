@@ -809,7 +809,11 @@ _BACKWARD_CHUNK_BYTES = 1 << 20
 
 
 def _iter_complete_lines_backward(
-    handle: BinaryIO, end_of_file: int, *, chunk_bytes: int = _BACKWARD_CHUNK_BYTES
+    handle: BinaryIO,
+    end_of_file: int,
+    *,
+    chunk_bytes: int = _BACKWARD_CHUNK_BYTES,
+    max_bytes: int | None = None,
 ) -> Iterator[tuple[int, list[bytes]]]:
     """Yield ``(chunk_start, lines)`` pairs reading backward from ``end_of_file``.
 
@@ -845,11 +849,17 @@ def _iter_complete_lines_backward(
     row's bytes, however many chunks it spans.
     """
     position = end_of_file
+    # A bounded consumer must not read a giant unterminated row to BOF merely
+    # to learn it exceeded its budget. Never yield the partial leading row at
+    # this floor: only BOF proves that fragment is a complete journal row.
+    floor = max(0, end_of_file - max_bytes) if max_bytes is not None else 0
     # Fragments of one row, in READ order (newest first), each piece contiguous
     # with the next. Never joined until the boundary that ends the row arrives.
     carried: list[bytes] = []
     while True:
-        chunk_start = max(0, position - chunk_bytes)
+        if position <= floor:
+            return
+        chunk_start = max(floor, position - chunk_bytes)
         handle.seek(chunk_start)
         chunk = handle.read(position - chunk_start)
         position = chunk_start
@@ -1846,6 +1856,87 @@ class ReplaySuffix:
     #: own EOF — a window that stopped short can then look like a full read,
     #: which is the unsafe direction for every consumer of "I saw everything".
     reached_bof: bool = False
+    #: Parsed rows actually visited by a bounded metadata scan.
+    rows_read: int = 0
+
+
+def read_cold_tail(
+    directory: str | Path,
+    *,
+    checkpoint_types: tuple[str, ...],
+    max_bytes: int = 4 * 1024 * 1024,
+    max_rows: int = 256,
+) -> ReplaySuffix | None:
+    """Prove first-frame facts from a bounded plain-journal suffix, or decline.
+
+    This is NOT replay: entries are only the evidence for the newest usage
+    receipt, never a message-list substitute. Checkpoint, spend, their order
+    and the usage seed must all be found within 4 MiB / 256 rows, without an
+    observed compaction/shrink boundary leaving an earlier fact unresolved.
+    Earlier bytes cannot change those latest facts. Bound exhaustion, damaged
+    or incomplete lines, archives and unresolved shrink boundaries deliberately
+    keep the exact eager path; no absence is inferred from a bound.
+    """
+    from local_operator.session.compression import transcript_source
+
+    path, codec = transcript_source(Path(directory))
+    if codec is not None:
+        return None
+    checkpoints: dict[str, dict[str, Any]] = {}
+    order: dict[str, int] = {}
+    parsed: list[TranscriptEntry] = []
+    have_usage = False
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            end = handle.tell()
+            first = True
+            for start, lines in _iter_complete_lines_backward(
+                handle, end, chunk_bytes=64 * 1024, max_bytes=max_bytes
+            ):
+                # A complete JSON object without its terminating newline can
+                # still be an interrupted append. Let eager replay decide it.
+                if first and (not lines or lines[0] != b""):
+                    return None
+                first = False
+                for raw in lines:
+                    if not raw.strip():
+                        continue
+                    if len(parsed) >= max_rows:
+                        return None
+                    entry = TranscriptEntry.from_json(raw.decode("utf-8"))
+                    if entry is None:
+                        return None
+                    parsed.append(entry)
+                    provider = entry.payload.get("provider_payload") or {}
+                    if not isinstance(provider, dict):
+                        return None
+                    if (
+                        entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE)
+                        or provider.get(SHRUNK_KEY)
+                        or (entry.type == ENTRY_MESSAGE and provider.get("pruned"))
+                    ):
+                        return None
+                    if entry.type == ENTRY_CUSTOM:
+                        name = entry.payload.get("custom_type")
+                        if name in checkpoint_types and name not in checkpoints:
+                            checkpoints[name] = dict(entry.payload.get("details", {}))
+                            order[name] = len(parsed)
+                    if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict):
+                        have_usage = True
+                    if have_usage and all(name in checkpoints for name in checkpoint_types):
+                        return ReplaySuffix(
+                            entries=tuple(reversed(parsed)),
+                            through_present=True,
+                            checkpoint=checkpoints[checkpoint_types[0]],
+                            checkpoints=checkpoints,
+                            checkpoint_order=order,
+                            bytes_read=end - start,
+                            rows_read=len(parsed),
+                        )
+    except (OSError, UnicodeError, TypeError, ValueError):
+        return None
+    return None
 
 
 def read_replay_suffix(
