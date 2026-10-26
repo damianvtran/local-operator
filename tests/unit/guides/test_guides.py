@@ -938,3 +938,64 @@ def test_harness_import_guide_states_the_safe_preview_first_flow() -> None:
     assert "read-only on the other harness" in body
     assert "Re-run is safe" in body
     assert "No filesystem path is accepted" in body
+
+
+def _credentials_section(body: str, heading: str) -> str:
+    """One ``## `` section of a guide body, heading line included."""
+    start = body.index(f"## {heading}\n")
+    end = body.find("\n## ", start + 1)
+    return body[start:] if end == -1 else body[start:end]
+
+
+def test_credentials_guide_keeps_local_first_and_names_vault_only_for_teammates() -> None:
+    """The Vault pointer is a SHARING answer, never the local default.
+
+    Operator requirement (Radient Vault programme): ``lop secret`` stays the
+    local encrypted store, and Vault is advertised only to a user with access
+    through a paid Team plan. The agent has no plan signal in a session, and
+    Vault is still off in production for most organizations, so the pointer must
+    be CONDITIONAL on what the user can confirm (the plan, and **Vaults** in
+    their console sidebar) with an explicit default for the unknown case: do not
+    pitch it. An unconditional "goes in Radient Vault" was review round 1's M1 /
+    C2 and is pinned out here. The section also has to say plainly that the
+    agent has no Vault tool yet, so a model reading it does not invent a call to
+    an API that refuses.
+    """
+    from local_operator.redaction_shapes import scrub_shapes_with_hits
+
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://credentials")
+    assert body is not None
+
+    section = _credentials_section(body, "Sharing a credential with teammates")
+    # Prose is wrapped and emphasised; judge the words, not the line breaks.
+    prose = " ".join(section.replace("**", "").split())
+    assert "this machine only" in prose
+    assert "`secret` tool" in prose and "`lop secret`" in prose
+    # Bare `/credential` is session-only (the guide's own table); only the
+    # persist form writes the long-term store this section describes.
+    assert "`/credential --persist`" in prose
+    assert "cannot share a value with a teammate" in prose
+    assert "`guide://network`" in prose
+    # The condition, both halves, and the default when it is not confirmed.
+    assert "paid Team plan" in prose
+    assert "shows Vaults in the sidebar" in prose
+    assert "only after the user confirms both" in prose
+    assert "when you do not know, do not pitch it" in prose
+    assert "goes in Radient Vault" not in prose
+    assert "https://console.radienthq.com/dashboard/vaults" in prose
+    assert "cannot yet create or read" in prose
+    assert "Team Bridge message" in prose
+    assert "shared or committed file" in prose
+    # Concise by requirement: a few lines, not a second guide.
+    assert len(section.splitlines()) <= 20
+
+    # Vault is named in this section only — the local-store sections must keep
+    # teaching the local store with no remote-store ambiguity.
+    outside = body.replace(section, "")
+    assert "Vault" not in outside
+
+    # No secret-shaped value in the guidance itself: the same shape table the
+    # redaction guard runs must find nothing to mask in the new section.
+    _, hits = scrub_shapes_with_hits(section)
+    assert hits == []
