@@ -3797,6 +3797,104 @@ def test_the_other_guards_still_name_themselves_before_the_pad_floor(
     assert result.removed == []
 
 
+def _guard_project(root: Path, directory: Path) -> None:
+    _project(root, "open-p", "active", [directory.name])
+
+
+def _guard_hold(root: Path, directory: Path) -> None:
+    from local_operator.session.cleanup import set_hold
+
+    assert set_hold(
+        root / "sessions", directory.name, reason="evidence", by="operator", kind="evidence"
+    )
+
+
+def _guard_git_hazard(root: Path, directory: Path) -> None:
+    # An unborn, dirty repo in the pad: kept by the older hazard guard. It is
+    # created BEFORE the fixture ages the pad, so only the guard under test and
+    # the pad's own freshness (set after) differ between sessions.
+    repo = directory / "scratchpad" / "repo"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    (repo / "f").write_text("x")
+
+
+@pytest.mark.parametrize(
+    ("guard", "reason"),
+    [
+        (_guard_project, "linked to an open project"),
+        (_guard_hold, "held by the operator"),
+        (_guard_git_hazard, "scratchpad git repo has uncommitted/unpushed work"),
+    ],
+    ids=["project", "hold", "git-hazard"],
+)
+def test_project_hold_and_git_hazard_name_themselves_before_the_pad_floor(
+    root: Path, guard: Any, reason: str
+) -> None:
+    """M2: the same ordering contract as the claim/roster/pin test, for the rest.
+
+    Each session has a genuinely FRESH pad (touched an hour ago) AND a guard that
+    matches earlier in ``_evaluate``; the reason must be the guard's own. A
+    control session with only the fresh pad proves the pad reason would
+    otherwise have fired, so the assertion cannot pass vacuously.
+    """
+    guarded, guarded_file = _record_pad(root, "guarded", idle=False)
+    guard(root, guarded)
+    _bare, bare_file = _record_pad(root, "barepad", idle=False)
+    _idle_pads(root)
+    _age(guarded_file, NOW - HOUR)
+    _age(bare_file, NOW - HOUR)
+
+    result = _pass(root, idle=False)
+    kept = _kept(result)
+    assert kept["guarded"] == reason
+    assert kept["barepad"] == dr.CONTENT_PAD_RECENT_REASON
+    assert result.removed == []
+
+
+def test_a_pad_probe_that_raises_keeps_that_session_and_the_pass_carries_on(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: the ``scratchpad`` existence probe sits INSIDE the guarded region.
+
+    ``Path.is_symlink``/``is_dir`` re-raise anything but ENOENT-class errors, so
+    a pad that goes unreadable between the scan and the decision (a race, a
+    permission flip) used to raise out of ``run_delegated_pass`` and skip the
+    progress write for every OTHER session the pass had already removed. The
+    contract: that one session is kept as "could not be looked at completely",
+    the error is counted, the remaining candidates are still processed, and the
+    progress record is still written.
+    """
+    boom, boom_file = _record_pad(root, "boom", idle=False)
+    _record_pad(root, "cold-a", idle=False)
+    _record_pad(root, "cold-b", idle=False)
+    _idle_pads(root)
+    real = Path.is_symlink
+
+    def flaky(self: Path) -> bool:
+        if self.name == dr.PAD_DIRNAME and self.parent.name == "boom":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_symlink", flaky)
+    # Both layers on, as in production: the CONTENT layer reaches the same pad
+    # and has its own probe, which is not what this test is about.
+    record_only = _provider(
+        CleanupPolicy(
+            delegated_enabled=True, delegated_max_age_hours=48, delegated_scratchpad_enabled=False
+        )
+    )
+    result = _pass(root, idle=False, policy=record_only)
+
+    assert "could not be looked at completely" in _kept(result)["boom"]
+    assert "Permission denied" in _kept(result)["boom"]
+    assert result.errors == 1, "could not look is counted, never silent"
+    assert {c.session for c in result.removed} == {"cold-a", "cold-b"}
+    assert boom.exists() and boom_file.exists()
+    state = json.loads((root / "sessions" / dr.STATE_NAME).read_text())
+    assert state["removed_total"] == 2, "the progress write still happened"
+
+
 def test_an_unstattable_file_inside_a_shape_keeps_the_whole_pad(root: Path) -> None:
     """R4-3: the recency signal must never be silently blind.
 

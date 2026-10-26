@@ -1145,9 +1145,15 @@ def _record_pad_floor(session_dir: Path, *, now: float) -> tuple[str | None, boo
     counts the error — "could not look" is never a removal and never silent).
     """
     pad = session_dir / PAD_DIRNAME
-    if pad.is_symlink() or not pad.is_dir():
-        return None, False
     try:
+        # The existence probe is INSIDE the guarded region on purpose:
+        # ``is_symlink``/``is_dir`` swallow only ENOENT-class errors, so a pad
+        # that turns unreadable between the scan and this decision raised
+        # straight out of ``run_delegated_pass`` and skipped the progress write
+        # for every session the pass had already removed. "Could not look" is a
+        # keep and a counted error, exactly like the strict scan below.
+        if pad.is_symlink() or not pad.is_dir():
+            return None, False
         newest = pad.stat(follow_symlinks=False).st_mtime_ns
         _bytes, _entries, walked, truncated = _bounded_dir_scan(
             pad,
@@ -1158,7 +1164,10 @@ def _record_pad_floor(session_dir: Path, *, now: float) -> tuple[str | None, boo
     except cleanup_module.DirScanIncomplete as exc:
         return f"scratchpad could not be looked at completely: {exc}", True
     except OSError as exc:
-        return f"scratchpad could not be looked at completely: {pad}: {exc.strerror or exc}", True
+        # Name the entry that failed when the error carries it, like the
+        # ``DirScanIncomplete`` reason above; the pad itself is the fallback.
+        where = exc.filename if isinstance(exc.filename, str) else pad
+        return f"scratchpad could not be looked at completely: {where}: {exc.strerror or exc}", True
     if _pad_recent(now, max(newest, walked)):
         return CONTENT_PAD_RECENT_REASON, False
     if truncated:
@@ -4496,9 +4505,11 @@ def run_delegated_pass(
         # the pad, and a write after the preview must still keep it. The pass's
         # ``moment`` is the right clock, not a fresh ``time.time()``: a file
         # written during a long drain has an mtime AFTER ``moment``, and a future
-        # mtime counts as recent (``_pad_recent``), so it is caught either way —
-        # while ``moment`` keeps this decision deterministic and can only keep
-        # more (a pad does not age out of the grace mid-pass).
+        # mtime counts as recent (``_pad_recent``), so it is caught either way.
+        # Against a real clock this can only keep at least as much as a fresh
+        # read would WHILE ``moment`` <= real time (the normal case: ``moment``
+        # is taken at the start of the pass); a ``moment`` ahead of real time is
+        # a caller-supplied clock (tests, replays) and decides by that clock.
         late_keep, late_unreadable = _record_pad_floor(cand.path, now=moment)
         if late_keep is not None:
             # Only ``chosen`` holds the row here: a real run appends to
