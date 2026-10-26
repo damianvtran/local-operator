@@ -1704,10 +1704,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #   after the trim          93,564 chars = ~33,656 billed   FAIL, 190 over
 #   further trims           93,468 chars = ~33,620 billed   FAIL, 127 over
 #   budget                  33,700 (measured head + 80 headroom)
-# The trims are real and model-facing, not cosmetic: the selector, backend,
-# timeout_s, secret_ref, text, direction and tab fields each lost their second
-# sentence, and the four new network fields are one short clause apiece while
-# their contract lives in `read tool://browser` and docs/BROWSER.md. What
+# The trims are real and model-facing, not cosmetic: the selector, backend and
+# paths fields each lost their second sentence, and the four new network fields
+# are one short clause apiece. What is NOT true is that the contract lives only
+# in prose elsewhere — `read tool://browser` carries the four ops and their
+# filters, `guide://browser` carries the workflow, and the field text still names
+# the actions it applies to. What
 # remains is the schema surface of four genuinely new actions: removing it
 # would remove the capability, and the alternative - folding `approved` into
 # `include_request_body` - was rejected because the two answer different

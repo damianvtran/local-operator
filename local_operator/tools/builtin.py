@@ -20304,7 +20304,7 @@ class BrowserParams(BaseModel):
     # Bodies never use wildcard/origin-only scopes and never include responses.
     include_request_body: bool = Field(
         default=False,
-        description="Body opt-in: needs url and approved=true.",
+        description="'network_start'/'network_read': body opt-in; needs url and approved=true.",
     )
     approved: bool = Field(default=False, description="Acknowledges the sensitive body.")
     request_id: str = Field(

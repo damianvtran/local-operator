@@ -361,6 +361,24 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
             ToolDocOp(op="await_access", blurb="Wait for the user's decision."),
             ToolDocOp(op="cancel_access", blurb="Cancel YOUR pending exact-origin request."),
+            ToolDocOp(
+                op="network_start",
+                blurb=(
+                    "Begin recording THIS tab's requests (method, safe URL, "
+                    "status, timing, size, redirect links). Metadata only; "
+                    "url= + include_request_body= + approved= opt one exact "
+                    "origin+path's request bodies into a private file."
+                ),
+            ),
+            ToolDocOp(op="network_stop", blurb="Stop recording; the buffer stays readable."),
+            ToolDocOp(
+                op="network_read",
+                blurb=(
+                    "The recorded entries (bounded ring), optional filters: "
+                    "after_id=, request_id=, method=, status=, limit=."
+                ),
+            ),
+            ToolDocOp(op="network_clear", blurb="Drop the buffer."),
             ToolDocOp(op="recover", blurb="Recover YOUR tab."),
             ToolDocOp(op="retain", blurb="Hold it."),
             ToolDocOp(op="release", blurb="End that hold."),
@@ -381,6 +399,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- Tab ownership: 'tabs' lists every agent-driven tab including "
             "other sessions' (handles are redacted), and a redacted handle is "
             "not yours to drive.\n"
+            "- Network capture is the desktop app's host only (the extension "
+            "attaches its debugger per action and has no standing session): "
+            "'network_start' then read with 'network_read'. Bodies are opt-in "
+            "per exact origin+path and land in a private session file, never in "
+            "this transcript.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
