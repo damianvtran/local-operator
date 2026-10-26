@@ -427,7 +427,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (Library): the six-op catalog tool's reference — filters, tag and
     # provenance rules, and the read-tier rationale. Measured through this
     # file's own renderer; no other entry moved.
-    "library": 683,
+    # RE-MEASURED (Librarian provenance): 683 -> 713. The `actor` bullet now
+    # states the DERIVATION (the Librarian's own session records `librarian`,
+    # every other session `agent`) and the reservation, replacing a sentence
+    # that was simply wrong — it claimed a `librarian` default no caller ever
+    # used. The `update` bullet gains the clause that a non-empty tag set
+    # organizes too. Re-measured through this file's own printed table; no
+    # other entry moved.
+    "library": 713,
     "lsp": 272,
     # 116 -> 127 (memory move, round 1): the description now names
     # ``edit new_text={"move":"scope"}``, which makes the verb discoverable

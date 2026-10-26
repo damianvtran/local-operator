@@ -29,6 +29,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
@@ -146,6 +147,26 @@ def _bool(value: Any) -> bool:
 #: field whose current source ranks no higher; ``derived`` is refreshable by
 #: anyone, and a user value is never overwritten by an agent or the Librarian.
 _SOURCE_RANK: Final = {"derived": 0, "agent": 1, "librarian": 2, "user": 3}
+
+#: The fields a re-attribution may move between provenances. Named here so the
+#: UPDATE that flips them can never be handed a column name from outside.
+_ATTRIBUTABLE_FIELDS: Final = ("name", "description")
+
+
+@dataclass(frozen=True)
+class Attribution:
+    """One row a re-attribution hands to the Librarian, with her own evidence.
+
+    ``fields`` names the ``*_source`` columns that flip. ``organized_at`` is WHEN
+    SHE did it, taken from the audit log rather than from the clock of the pass
+    that re-reads it. ``asset_tags.source`` is deliberately NOT here: it is
+    display provenance, and inferring it from the journal cannot be done without
+    claiming an ordinary agent's tags (see ``librarian/backfill.py``).
+    """
+
+    asset_id: str
+    fields: tuple[str, ...]
+    organized_at: float
 
 
 class MetadataStore:
@@ -308,6 +329,20 @@ class MetadataStore:
                 return int(row["value"]) if row is not None else 0
             except (TypeError, ValueError):
                 return 0
+
+    def state_value(self, key: str) -> str | None:
+        """One small durable fact from ``state``, or ``None`` when unset.
+
+        The read half of the pattern ``primary_tag:`` and the schema version
+        already use: a fact too small for its own column rides this table
+        instead of landing in a file beside the store. An unavailable store
+        answers ``None``, like every other read here.
+        """
+        with self._read() as connection:
+            if connection is None:
+                return None
+            row = connection.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row is not None else None
 
     # -- assets --------------------------------------------------------------
 
@@ -478,6 +513,24 @@ class MetadataStore:
                         found[row["asset_id"]] = value
         return found
 
+    def unorganized_agent_assets(self) -> list[dict[str, Any]]:
+        """Rows an agent's own name or description stands on, unorganized.
+
+        The candidate set for the Librarian's one-shot re-attribution (see
+        :mod:`local_operator.librarian.backfill`): every other row is already
+        organized, user-authored, locked, or merely derived, and none of those
+        can be her edit.
+        """
+        with self._read() as connection:
+            if connection is None:
+                return []
+            rows = connection.execute(
+                "SELECT * FROM assets WHERE organized_at IS NULL AND locked = 0 "
+                "AND (name_source = 'agent' OR description_source = 'agent') "
+                "ORDER BY asset_id"
+            )
+            return [row for row in (self._asset_row(item) for item in rows) if row is not None]
+
     @staticmethod
     def _asset_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
@@ -511,9 +564,12 @@ class MetadataStore:
         """Write user/librarian fields, recording provenance and an edit row.
 
         ``source`` defaults to the actor (``user`` edits set ``user``; the
-        Librarian sets ``librarian``). ``locked`` is honoured HERE for agent
-        writes: the route and the tool both pass ``actor='librarian'``, and a
-        locked asset accepts only ``archived``/``locked`` changes.
+        Librarian sets ``librarian``). ``locked`` is honoured HERE for every
+        non-``user`` writer: the desktop route passes ``actor='user'`` for its
+        own user-initiated ops, and the ``library`` tool derives the actor from
+        the caller's session (``library_tool._is_librarian``), so a locked asset
+        accepts only ``archived``/``locked`` changes from a writer that is not
+        the user.
         """
         if actor not in TAG_CREATORS:
             raise TagRefused("unknown_actor", actor)
@@ -834,8 +890,16 @@ class MetadataStore:
         actor: str = "user",
         source: str | None = None,
         confidence: float | None = None,
+        mark_organized: bool = False,
     ) -> list[dict[str, Any]]:
-        """Replace an asset's tag set. All-or-nothing, bounded, validated."""
+        """Replace an asset's tag set. All-or-nothing, bounded, validated.
+
+        ``mark_organized`` stamps ``organized_at``/``organized_by`` in the SAME
+        transaction, for the caller that has decided this write organizes the
+        asset (``service.set_tags`` passes it only for a non-empty Librarian tag
+        set). ``confidence`` is NOT recorded on the asset: it belongs to the tag
+        assignments, which carry their own.
+        """
         unique = list(dict.fromkeys(str(tag_id) for tag_id in tag_ids if tag_id))
         if len(unique) > MAX_TAGS_PER_ASSET:
             raise TagRefused("too_many_tags", str(len(unique)))
@@ -890,11 +954,82 @@ class MetadataStore:
                         stamp,
                     ),
                 )
+                if mark_organized:
+                    # Her tag set is applied metadata (a favorite is not), so it
+                    # is organizing work — but it says nothing about the asset's
+                    # confidence, which stays NULL for exactly that reason.
+                    connection.execute(
+                        "UPDATE assets SET organized_at = ?, organized_by = 'librarian' "
+                        "WHERE asset_id = ?",
+                        (stamp, asset_id),
+                    )
         except MetadataError:
             raise
         except sqlite3.Error as error:
             raise MetadataUnavailable(str(error)) from error
         return self.asset_tags(asset_id)
+
+    # -- re-attribution ------------------------------------------------------
+
+    def apply_attributions(
+        self,
+        attributions: Sequence[Attribution],
+        *,
+        guard_key: str,
+        guard_value: str,
+    ) -> int:
+        """Move rows to the Librarian's provenance, in ONE transaction.
+
+        The write half of :mod:`local_operator.librarian.backfill`: the caller
+        brings the evidence (her own transcript) and this brings the atomicity.
+        ``guard_key`` is a ``state`` fact recording that the pass FINISHED —
+        including when it finished with nothing to move — so a pass that dies
+        half-way is retried by the next boot while a finished one is one read.
+
+        NO ``edits`` ROW IS WRITTEN. That table is the journal of what a caller
+        did, and this pass did nothing: it re-read records already in it, which
+        is why ``organized_at`` arrives as her original timestamp rather than as
+        now. Each statement re-checks its own predicate, so a second pass over
+        the same rows cannot stamp twice. Returns the number of rows moved.
+        """
+        moved = 0
+        try:
+            with self._write() as connection:
+                for item in attributions:
+                    fields = [field for field in item.fields if field in _ATTRIBUTABLE_FIELDS]
+                    if not fields:
+                        continue
+                    assignments = ", ".join(f"{field}_source = 'librarian'" for field in fields)
+                    # EVERY field the evidence claims must still be an agent's,
+                    # and the row must still be unlocked and unorganized: the
+                    # caller read its candidates outside this transaction, and
+                    # a re-check inside it is what stops a user's own value (or
+                    # a locked row) being stamped as hers by a stale read.
+                    standing = " AND ".join(f"{field}_source = 'agent'" for field in fields)
+                    cursor = connection.execute(
+                        f"UPDATE assets SET {assignments}, organized_at = ?, "
+                        "organized_by = 'librarian' "
+                        f"WHERE asset_id = ? AND organized_at IS NULL AND locked = 0 "
+                        f"AND {standing}",
+                        (item.organized_at, item.asset_id),
+                    )
+                    if not cursor.rowcount:
+                        continue
+                    moved += 1
+                if moved:
+                    self._bump_revision(connection)
+                # Written even for an empty pass: the guard means "this pass
+                # has run", not "this pass found something".
+                connection.execute(
+                    "INSERT INTO state(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (guard_key, guard_value),
+                )
+        except MetadataError:
+            raise
+        except sqlite3.Error as error:
+            raise MetadataUnavailable(str(error)) from error
+        return moved
 
     # -- conventions --------------------------------------------------------
 
@@ -1008,6 +1143,45 @@ class MetadataStore:
                     (asset_id, max(1, min(limit, 500))),
                 )
             return [dict(row) for row in rows]
+
+    def last_edit_at(
+        self,
+        asset_id: str,
+        *,
+        actor: str | None = None,
+        fields: Sequence[str] | None = None,
+    ) -> float | None:
+        """The newest edit's timestamp for an asset, by actor and/or field.
+
+        The re-attribution dates an organization to when it actually happened
+        (the edit that made it), not to the later pass that noticed it — and it
+        cannot use :meth:`edits` for that, whose window is bounded and could cut
+        off the row it is looking for. ``fields`` narrows to the edits that
+        touched one of these fields: without it the newest edit by an agent can
+        be a favorite or a later tag set rather than the naming edit that
+        organized the asset.
+        """
+        clauses = ["asset_id = ?"]
+        values: list[Any] = [asset_id]
+        if actor is not None:
+            clauses.append("actor = ?")
+            values.append(actor)
+        if fields:
+            placeholders = ",".join("?" for _ in fields)
+            # ``json_valid`` keeps ONE corrupt row from failing the read: the
+            # column is written by ``json.dumps`` and nothing else.
+            clauses.append(
+                "json_valid(fields) AND EXISTS (SELECT 1 FROM json_each(edits.fields) "
+                f"WHERE json_each.value IN ({placeholders}))"
+            )
+            values.extend(fields)
+        with self._read() as connection:
+            if connection is None:
+                return None
+            row = connection.execute(
+                f"SELECT MAX(at) AS at FROM edits WHERE {' AND '.join(clauses)}", tuple(values)
+            ).fetchone()
+            return float(row["at"]) if row is not None and row["at"] is not None else None
 
     def stats(self) -> dict[str, Any]:
         with self._read() as connection:

@@ -233,6 +233,34 @@ def _reconcile_session_title(config_dir: Path, session_id: str) -> None:
         logger.debug("librarian: could not reconcile the session title", exc_info=True)
 
 
+#: Whether THIS process has already paid for the transcript re-attribution.
+#: The metadata ``state`` fact the pass writes makes a second pass one read;
+#: this flag is what keeps the rest of a long-lived process from paying it.
+_ATTEMPTED_BACKFILL = False
+
+
+async def _reattribute_once(config_dir: Path) -> None:
+    """Run the one-shot edit re-attribution, at most once per process.
+
+    Her journal holds what the live store lost: every write she made before the
+    ``library`` tool derived her actor is recorded as an ordinary agent's (see
+    :mod:`local_operator.librarian.backfill`). Off-thread because it parses her
+    whole transcript and takes the metadata store's write lock; best-effort
+    because a boot must never fail on her bookkeeping. The flag is set BEFORE
+    the work, so a concurrent ensure cannot start a second pass.
+    """
+    global _ATTEMPTED_BACKFILL
+    if _ATTEMPTED_BACKFILL:
+        return
+    _ATTEMPTED_BACKFILL = True
+    try:
+        from local_operator.librarian import backfill
+
+        await asyncio.to_thread(backfill.reattribute_organized, config_dir)
+    except Exception:  # noqa: BLE001 — bookkeeping, never a boot dependency
+        logger.warning("librarian: could not re-attribute her earlier edits", exc_info=True)
+
+
 async def ensure_session(
     config_dir: Path | str | None = None, *, now_ms: int | None = None
 ) -> str | None:
@@ -332,4 +360,10 @@ async def ensure_session(
             await asyncio.to_thread(proactive.reap_orphan_rows, root, keep=hers)
         except Exception:  # noqa: BLE001 — litter, not a boot dependency
             logger.warning("librarian: could not reap orphaned wake rows", exc_info=True)
+
+    # THEN REPAIR THE RECORD OF WHAT SHE ALREADY DID. Deliberately LAST: it
+    # parses her journal, so a slow first pass must not delay the pin or the
+    # cadence above. One process, one attempt.
+    if hers is not None:
+        await _reattribute_once(root)
     return hers
