@@ -74,7 +74,7 @@ from typing import (
     get_args,
     get_origin,
 )
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
 
 from pydantic import (
     BaseModel,
@@ -1723,7 +1723,11 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
             # read, so the action can keep its own slot and the string gets the
             # rest.
             return f"{UNRESOLVABLE_MARKER} {action}: {url}"
+        if action in ("network_start", "network_read") and args.get("include_request_body"):
+            return f"capture sensitive request body: {url}"
         return f"{action}: {url}"
+    if action == "network_start" and args.get("include_request_body"):
+        return "capture sensitive request body with exact scope"
     return f"browser: {action}" if action else ""
 
 
@@ -19982,6 +19986,12 @@ BROWSER_ACTIONS = (
     "recover",
     "retain",
     "release",
+    # Desktop-host network telemetry. Metadata is the default; request-form
+    # bodies require a narrowly scoped, explicitly approved opt-in below.
+    "network_start",
+    "network_stop",
+    "network_read",
+    "network_clear",
 )
 
 #: ``retitle`` is a wire METHOD but deliberately NOT an action: the SESSION
@@ -20005,6 +20015,10 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {
         "scroll",
         "logs",
+        "network_start",
+        "network_stop",
+        "network_read",
+        "network_clear",
         "tabs",
         "request_access",
         "await_access",
@@ -20018,6 +20032,10 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "hit_test",
         "ancestors",
         "query",
+        "network_start",
+        "network_stop",
+        "network_read",
+        "network_clear",
     }
 )
 
@@ -20043,6 +20061,14 @@ _SCROLL_DIRECTIONS = frozenset({"top", "bottom", "up", "down", "left", "right"})
 
 #: Console levels ``logs`` filters on. Mirrors the extension's LEVELS.
 _LOG_LEVELS = frozenset({"error", "warning", "info", "log", "all"})
+
+#: Network telemetry bounds. The desktop host enforces its own lower/equal
+#: ceilings; refusing oversized requests here prevents an older or malicious
+#: peer from turning a read into an unbounded transcript payload.
+NETWORK_MAX_ENTRIES = 200
+NETWORK_MAX_BODY_BYTES = 64 * 1024
+NETWORK_MAX_READ_BODY_BYTES = 256 * 1024
+_NETWORK_ACTIONS = frozenset({"network_start", "network_stop", "network_read", "network_clear"})
 
 #: Style property names ``styles`` accepts as caller-requested extras. The
 #: charset is the CSS ident set that matters here: letters, digits, dashes and
@@ -20181,20 +20207,18 @@ class BrowserParams(BaseModel):
     backend: str = Field(
         default="",
         description=(
-            "'open': the host for a FRESH surface — '' (default order), 'ui', "
-            "'extension' (the user's real profile), or 'cmux'. A held handle or "
-            "an adoption outranks it; a host that cannot serve refuses."
+            "'open' fresh surface only: '' (default order), 'ui', 'extension' "
+            "(the user's real profile) or 'cmux'. A held handle or adoption "
+            "outranks it."
         ),
     )
     path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
-        description="CSS selector, a snapshot ref (e5), or an accessibility "
-        'locator for the click/type target: role=checkbox[name="Active"], '
-        'label="Homepage URL", text="Create GitHub App" — resolved '
-        "against the page's a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, the query CSS, the scroll element, or the "
-        "download/upload control.",
+        description="CSS selector, snapshot ref, or a11y locator for the "
+        'click/type target (role=checkbox[name="Active"], label=…, text=…) '
+        "resolved against the a11y tree, so it survives framework ids. Also the "
+        "read/snapshot scope, query CSS, scroll element or download/upload control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -20236,7 +20260,7 @@ class BrowserParams(BaseModel):
         default_factory=list,
         description=(
             "'upload': local files to attach (credential files and this "
-            "harness's config dir are refused; relative = session cwd)."
+            "harness's config dir refused; relative = session cwd)."
         ),
     )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
@@ -20275,6 +20299,25 @@ class BrowserParams(BaseModel):
         default=None,
         description="'ancestors': how many levels to walk up (1..16, default 12).",
     )
+    # Network telemetry. `url` on start/read is the EXACT origin+path scope for
+    # body capture; on read without bodies it is a safe metadata prefix filter.
+    # Bodies never use wildcard/origin-only scopes and never include responses.
+    include_request_body: bool = Field(
+        default=False,
+        description="'network_start'/'network_read': body opt-in; needs url and approved=true.",
+    )
+    approved: bool = Field(default=False, description="Acknowledges the sensitive body.")
+    request_id: str = Field(
+        default="",
+        description="Filter: one request id.",
+    )
+    after_id: int | None = Field(
+        default=None,
+        description="Filter: after this sequence.",
+    )
+    method: str = Field(default="", description="'network_read': HTTP method filter, e.g. POST.")
+    status: int | None = Field(default=None, description="'network_read': HTTP status filter.")
+    resource_type: str = Field(default="", description="'network_read': CDP resource type filter.")
     timeout_s: float | None = Field(
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
@@ -20693,6 +20736,80 @@ def _validate_browser_backend(action: str, params: BrowserParams) -> str:
     return ""
 
 
+def _validate_network_fields(action: str, params: BrowserParams) -> str:
+    """Validate network filters and the sensitive-body authorization contract.
+
+    Body reads need the SAME exact origin+path on start and read plus two
+    independent opt-ins. Query values are deliberately not part of the scope:
+    SAML relays and OAuth transactions put one-time values there, and retaining
+    them in a reusable permission would turn a single approval into a bearer
+    capability. The host repeats these checks at its trust boundary.
+    """
+    if action not in _NETWORK_ACTIONS:
+        if any(
+            (
+                params.include_request_body,
+                params.approved,
+                params.request_id,
+                params.after_id is not None,
+                params.method,
+                params.status is not None,
+                params.resource_type,
+            )
+        ):
+            return "network filters and body options require a network action"
+        return ""
+    if action not in ("network_start", "network_read"):
+        if params.include_request_body or params.approved:
+            return "'include_request_body' and 'approved' require network_start or network_read"
+        if params.url and action in ("network_stop", "network_clear"):
+            return f"'url' is not used by '{action}'"
+        return ""
+    if params.include_request_body != params.approved:
+        return (
+            "sensitive request-body capture requires both "
+            "include_request_body=true and approved=true"
+        )
+    if params.include_request_body:
+        try:
+            scope = urlparse(params.url.strip())
+        except ValueError:
+            return "request-body capture requires an exact HTTP(S) origin and path in 'url'"
+        if (
+            scope.scheme not in ("http", "https")
+            or not scope.hostname
+            or scope.username is not None
+            or scope.password is not None
+            or scope.fragment
+            or not scope.path.startswith("/")
+            or scope.path == "/"
+        ):
+            return (
+                "request-body capture requires an exact HTTP(S) origin and non-root path in 'url'"
+            )
+    elif action == "network_start" and params.url:
+        return (
+            "'url' on network_start requires include_request_body=true; "
+            "metadata captures the owned tab"
+        )
+    if action == "network_start" and any(
+        (
+            params.request_id,
+            params.after_id is not None,
+            params.method,
+            params.status is not None,
+            params.resource_type,
+        )
+    ):
+        return "network filters are for 'network_read'"
+    if action == "network_read":
+        if params.after_id is not None and params.after_id < 0:
+            return "'after_id' must be a non-negative capture sequence"
+        if params.status is not None and not 100 <= params.status <= 599:
+            return "'status' must be an HTTP status between 100 and 599"
+    return ""
+
+
 def _validate_window_fields(action: str, params: BrowserParams) -> str:
     """The snapshot window's refusals, and the actions that may not use it.
 
@@ -20704,7 +20821,11 @@ def _validate_window_fields(action: str, params: BrowserParams) -> str:
     # and `search` are the snapshot window's own coordinates. An action outside
     # this table takes NONE of the three — and an action inside it takes only
     # the ones its row names, which is what stops `start` riding a `query`.
-    allowed = {"snapshot": {"start", "limit", "search"}, "query": {"limit"}}.get(action, set())
+    allowed = {
+        "snapshot": {"start", "limit", "search"},
+        "query": {"limit"},
+        "network_read": {"limit"},
+    }.get(action, set())
     unused = [
         name
         for name, value in (
@@ -20719,7 +20840,11 @@ def _validate_window_fields(action: str, params: BrowserParams) -> str:
         # `search` is snapshot-only while `limit` is shared with `query`, and a
         # refusal that blurs the two sends the caller to a parameter that will
         # be refused again.
-        actions_for = {"start": "snapshot", "search": "snapshot", "limit": "snapshot or query"}
+        actions_for = {
+            "start": "snapshot",
+            "search": "snapshot",
+            "limit": "snapshot, query, or network_read",
+        }
         if len(unused) == 1:
             name = unused[0]
             return (
@@ -20730,6 +20855,10 @@ def _validate_window_fields(action: str, params: BrowserParams) -> str:
         return f"{parts} (got them on '{action}')"
     if action == "query":
         return _validate_query_limit(params)
+    if action == "network_read":
+        if params.limit is not None and not 1 <= params.limit <= NETWORK_MAX_ENTRIES:
+            return f"'limit' must be between 1 and {NETWORK_MAX_ENTRIES} network entries"
+        return ""
     return _validate_snapshot_window(params)
 
 
@@ -20980,6 +21109,9 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     window = _validate_window_fields(action, params)
     if window:
         return window
+    network = _validate_network_fields(action, params)
+    if network:
+        return network
     locator = _validate_locator_target(action, params)
     if locator:
         return locator
@@ -24633,6 +24765,8 @@ async def _bridge_action(
     """
     host = _host_of_client(client)
     surface = state.surface_id
+    if action in _NETWORK_ACTIONS:
+        return await _browser_network(tool_call_id, state, action, params, context, client=client)
     if action == "download":
         return await _browser_download(tool_call_id, state, params, context, client=client)
     if action == "upload":
@@ -25276,6 +25410,241 @@ async def execute_browser(
                 logger.warning("browser ownership record not updated", exc_info=True)
             if pending:
                 resource.recovered = False
+
+
+_NETWORK_BODY_KEY = "request_body_base64"
+_NETWORK_METADATA_KEYS = frozenset(
+    {
+        # EXACTLY the keys the desktop host's `network_read` emits per entry.
+        # Kept as a copy rather than a pass-through because this is the allowlist
+        # that stops a future host field reaching a model unvetted — but a copy
+        # that is wrong in both directions is worse than no copy: the first
+        # version dropped `finished` and all three redirect ids, so redirect
+        # correlation was invisible on the agent path while looking fine on the
+        # wire, and it kept `started_at` (the host deliberately strips it) plus
+        # seven other keys no host ever sends (agent review round 5, R5-1).
+        "id",
+        "request_id",
+        "method",
+        "url",
+        "status",
+        "duration_ms",
+        "resource_type",
+        "loader_id",
+        "frame_id",
+        "wall_time",
+        "redirect_request_id",
+        "redirect_from_id",
+        "redirect_to_id",
+        "encoded_data_length",
+        "from_cache",
+        "error_text",
+        "canceled",
+        "finished",
+    }
+)
+
+
+def _network_safe_url(raw: object) -> str:
+    """Keep URL structure useful for correlation, never query values or credentials."""
+    if not isinstance(raw, str):
+        return ""
+    try:
+        parsed = urlparse(raw)
+        host = parsed.netloc.rsplit("@", 1)[-1]
+        query = "&".join(
+            f"{quote(key, safe='')}=<redacted>"
+            for key, _value in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+        return urlunsplit((parsed.scheme, host, parsed.path, query, ""))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _network_metadata_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist model-visible network fields; never forward arbitrary CDP data."""
+    result = {
+        key: value
+        for key, value in payload.items()
+        if key
+        in {
+            # Exactly the desktop host's summary keys. It emits
+            # `dropped_entries`/`dropped_bodies`, and the earlier spelling here
+            # (`body_dropped`) silently deleted the real counter from every
+            # result — a counter nobody can read is the same as no counter, and
+            # it hid an oversize body being discarded (real-path probe,
+            # 2026-10-26). Exactly this set and no wider: a key the host never
+            # sends is dead weight that reads like a contract.
+            "active",
+            "count",
+            "dropped",
+            "dropped_entries",
+            "body_count",
+            "body_bytes",
+            "dropped_bodies",
+            "entries",
+        }
+    }
+    entries: list[dict[str, Any]] = []
+    for raw in payload.get("entries", []):
+        if not isinstance(raw, dict):
+            continue
+        entry = {key: value for key, value in raw.items() if key in _NETWORK_METADATA_KEYS}
+        if "url" in entry:
+            entry["url"] = _network_safe_url(entry["url"])
+        entries.append(entry)
+    result["entries"] = entries
+    return result
+
+
+def _decode_network_body(encoded: object) -> bytes:
+    """Validate and decode one body WITHOUT touching the filesystem.
+
+    Decoding is separated from writing so a read that turns out to be malformed
+    cannot leave the earlier bodies of the same read behind: every byte is
+    proven valid before the first file exists.
+    """
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("the host returned no request body")
+    # Bounds-check the ENCODED length first, so a hostile host cannot make this
+    # allocate a 100 MB buffer only to reject it afterwards.
+    if len(encoded) > ((NETWORK_MAX_BODY_BYTES + 2) // 3) * 4 + 4:
+        raise ValueError("the host request body exceeds the 64 KiB limit")
+    data = base64.b64decode(encoded, validate=True)
+    if not data or len(data) > NETWORK_MAX_BODY_BYTES:
+        raise ValueError("the host request body is empty or exceeds the 64 KiB limit")
+    return data
+
+
+def _write_network_body(data: bytes, context: ToolContext | None) -> dict[str, Any]:
+    """Write one decoded body to a randomised, private session scratch file.
+
+    Existence and mode are verified rather than assumed: ``mkstemp`` already
+    creates 0600, and the re-read is what turns "should be private" into a fact
+    this function can report. A failure removes the file it created and never
+    returns a path to material it could not secure.
+    """
+    from local_operator.scratchpad import ensure_scratchpad_dir, scratchpad_dir_of
+
+    directory = ensure_scratchpad_dir(scratchpad_dir_of(context))
+    if not directory:
+        raise OSError("this session has no private scratchpad for a network body")
+    fd, name = tempfile.mkstemp(prefix="network-request-", suffix=".body", dir=directory)
+    path = Path(name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        if path.stat().st_mode & 0o777 != 0o600:
+            raise OSError("private network body file permissions could not be verified")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        path.unlink(missing_ok=True)
+        raise
+    return {"request_body_file": str(path), "request_body_bytes": len(data)}
+
+
+async def _browser_network(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    action: str,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+) -> ToolResult:
+    """Run bounded network capture and consume sensitive bodies before rendering."""
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        **_browser_identity_params(context, tool_call_id),
+    }
+    for key in (
+        "url",
+        "include_request_body",
+        "approved",
+        "request_id",
+        "after_id",
+        "method",
+        "status",
+        "resource_type",
+        "limit",
+    ):
+        value = getattr(params, key)
+        if value is not None and value != "" and value is not False:
+            wire[key] = value
+    result, problem = await _bridge_call(
+        tool_call_id, action, wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    raw = result if isinstance(result, dict) else {}
+    written: list[Path] = []
+    try:
+        entries = result.get("entries", []) if isinstance(result, dict) else []
+        if not isinstance(entries, list):
+            raise ValueError("the host returned an invalid network entry list")
+        include_body = action == "network_read" and params.include_request_body
+        pending: list[tuple[dict[str, Any], bytes]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            # Remove the body unconditionally, including metadata-only reads:
+            # an old/hostile host cannot turn a response into a secret leak.
+            encoded = entry.pop(_NETWORK_BODY_KEY, None)
+            if encoded is not None and include_body:
+                pending.append((entry, _decode_network_body(encoded)))
+        # ALL bodies are decoded before the FIRST file is written, so a
+        # malformed or oversized entry persists nothing for the whole read
+        # (agent review round 1, R1-2). The same rule is why the total is
+        # bounded here rather than accumulated as files appear.
+        if sum(len(data) for _entry, data in pending) > NETWORK_MAX_READ_BODY_BYTES:
+            raise ValueError("the read's combined request bodies exceed the 256 KiB limit")
+        facts_by_id: dict[int, dict[str, Any]] = {}
+        for entry, data in pending:
+            # A body is only ever attributed by the entry id this module already
+            # trusts. An entry without one, or two entries sharing one, cannot be
+            # attributed at all: raising here runs the rollback below, so the
+            # read fails AND unlinks every body it wrote rather than leaving an
+            # unreferenced secret on disk (agent review round 7, R7-1/R7-2).
+            identifier = entry.get("id")
+            if not isinstance(identifier, int):
+                raise ValueError("the host returned a request body for an entry with no id")
+            if identifier in facts_by_id:
+                raise ValueError("the host returned duplicate network entry ids")
+            facts = _write_network_body(data, context)
+            written.append(Path(facts["request_body_file"]))
+            facts_by_id[identifier] = facts
+        safe = _network_metadata_result(raw)
+        # Facts are attached AFTER the allowlist, keyed by the entry id this
+        # module already trusted, so no host-supplied path can be rendered.
+        for entry in safe.get("entries", []):
+            facts = facts_by_id.get(entry.get("id"))
+            if facts:
+                entry.update(facts)
+        if action == "network_read" and params.include_request_body:
+            files = [
+                entry["request_body_file"]
+                for entry in safe["entries"]
+                if "request_body_file" in entry
+            ]
+            if files:
+                safe["request_body_files"] = files
+                safe["security"] = (
+                    "Request bodies are in private mode-0600 session scratch files; "
+                    "inspect locally without printing secrets."
+                )
+        return _text(tool_call_id, "browser", json.dumps(safe, indent=2, default=str))
+    except Exception as exc:
+        # Never include the host payload in an error: it may contain body bytes.
+        # A read that failed part-way leaves no artefact behind, so "nothing was
+        # persisted" is true of the failure as well as of the success path.
+        for path in written:
+            path.unlink(missing_ok=True)
+        logger.warning("browser network action failed: %s", type(exc).__name__)
+        return _error(tool_call_id, "browser", f"{action} failed: {type(exc).__name__}: {exc}")
 
 
 def _browser_secret_ref(
@@ -25997,11 +26366,25 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         # describer naming what the call will do.
         approval_tier="write",
         # Inspection is a true read: the harness must not ask for a write
-        # approval before it can reach the deliberately effect-free dispatcher.
+        # approval before it can reach the admittedly effect-free dispatcher.
+        # Sensitivity is decided by what the call makes visible, not by whether
+        # it writes anything: a network body read can carry cookies, bearer
+        # tokens or a SAML assertion, so it takes the same exec tier as
+        # `upload` and its approval text names the exact capture scope.
+        # Metadata-only network actions stay on the ordinary write tier.
         call_approval_tier=lambda args: (
             "read"
             if str(args.get("action") or "").strip().lower() == "inspect_ownership"
-            else "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
+            else (
+                "exec"
+                if str(args.get("action") or "").strip().lower() == "upload"
+                or (
+                    str(args.get("action") or "").strip().lower()
+                    in ("network_start", "network_read")
+                    and bool(args.get("include_request_body"))
+                )
+                else "write"
+            )
         ),
         concurrency="shared",
         interruptible=False,

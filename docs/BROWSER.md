@@ -87,9 +87,10 @@ an operator action.
 
 ## Actions
 
-The non-cmux hosts answer the same 22 wire methods; cmux can serve a subset, and
-the rest (`scroll`, `logs`, `tabs`, `download`, `upload`, the site-approval trio)
-degrade with a typed error naming the hosts that can. The table below is the CMUX
+The non-cmux hosts answer the same wire methods; cmux can serve a subset, and
+the rest (`scroll`, `logs`, `tabs`, `download`, `upload`, the site-approval trio,
+`network_start`/`network_stop`/`network_read`/`network_clear`) degrade with a
+typed error naming the hosts that can. The table below is the CMUX
 mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 
 | action | what it does | cmux command underneath |
@@ -104,6 +105,10 @@ mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 | `close` | Close the surface and drop the handle | `close-surface --surface <s>` |
 | `download` | Save what the page offers into the session's download directory | not available (typed refusal) |
 | `upload` | Attach local files to a `<input type=file>` | not available (typed refusal) |
+| `network_start` | Begin bounded request telemetry on the owned tab | not available (typed refusal) |
+| `network_stop` | Stop collecting; keep what was collected | not available (typed refusal) |
+| `network_read` | Read request metadata, and an approved body | not available (typed refusal) |
+| `network_clear` | Drop the buffer and its counters | not available (typed refusal) |
 
 One surface per session, owned by the `Session` and injected into every rebuilt
 `ToolContext` as `ToolContext.browser`. `open` called a second time navigates
@@ -113,6 +118,60 @@ whatever is still open. The holder has to be host-owned because
 handle the tool stored on the context it was handed survived exactly one turn,
 which broke `open X` → next message → `click Y` outright and stranded a cmux
 tab per turn that nothing could close.
+
+## Network telemetry
+
+Four actions expose the owned tab's request stream: `network_start`,
+`network_stop`, `network_read`, `network_clear`. They are served by the desktop
+app's browser host only. The extension's debugger is attached for the length of
+one action and therefore holds no standing session to subscribe to `Network`,
+and cmux has no request stream at all; both refuse with `capability_unsupported`
+(or the cmux degrade) rather than returning an empty capture that looks like
+traffic.
+
+**Metadata is the default and the ceiling.** Each entry carries the method, a
+safe URL, the HTTP status, duration, CDP resource type and loader/frame ids,
+wall time, encoded length, cache state, cancellation/failure text, and the
+redirect predecessor/successor sequence numbers. Nothing else is forwarded: the
+host does not send headers, cookies or bodies unless asked, and the harness
+allowlists the fields it renders even if a host sends more. The safe URL keeps
+scheme, host, path and query **keys**; query values, credentials and the
+fragment are removed, because a SAML relay, an OAuth code and a session token
+all live in exactly those places.
+
+**Bodies are opt-in, narrow, and never printed.** `include_request_body=true`
+requires an `approved=true` acknowledgement, an exact HTTP(S) origin and
+non-root path in `url`, and the same scope on both `network_start` and
+`network_read`. The scope compares origin+path, so one approval cannot become a
+bearer capability for a site. Only REQUEST bodies are available; responses are
+not. The desktop host keeps at most 64 KiB per body and 256 KiB of bodies at a
+read, and the harness refuses anything larger before it writes.
+
+A body read is an `exec`-tier call, not the tool's ordinary write tier: the
+value can be a live assertion or a bearer credential. The bytes never enter the
+tool result. The harness decodes them after the bridge returns, writes one
+randomised file into the session's own scratchpad with mode `0600`, verifies
+that mode, and returns only `request_body_file` and `request_body_bytes`. Read
+that path locally with a shell that does not echo it (`wc -c`, `grep -c`), and
+do not paste its contents into a transcript, an MR or a release note.
+
+**Bounded, in-memory, and owned.** The desktop host keeps 500 entries and 1 MiB
+of metadata in the tab's process; the oldest are dropped and counted in
+`dropped`. A capture is keyed by the requesting session as well as the tab, so a
+handover or a second session's start replaces it with an empty one rather than
+exposing what the previous owner saw. Nothing is written to disk by the host,
+and the buffer dies with the tab: `close`, a DevTools takeover, and host
+shutdown all drop it.
+
+```text
+browser network_start                       # metadata only, this session's tab
+browser goto  https://sso.example/auth      # or click through the flow
+browser network_read  method=POST limit=20
+browser network_start url=https://sso.example/auth/saml/acs include_request_body=true approved=true
+browser click selector=button[type=submit]
+browser network_read  url=https://sso.example/auth/saml/acs include_request_body=true approved=true
+browser network_stop
+```
 
 ## Downloads and uploads
 

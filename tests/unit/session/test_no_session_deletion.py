@@ -72,6 +72,23 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    # Browser network telemetry keeps its one sensitive artefact in the SESSION
+    # SCRATCHPAD, as a mkstemp REGULAR FILE whose name it generated one line
+    # earlier (`network-request-*.body`). Unlinking it removes that file and
+    # nothing else: the path is never a session directory, never a transcript,
+    # and never a caller-supplied name. Two sites, because a write that fails
+    # after the file exists and a read that fails after some bodies were written
+    # each have to leave no artefact behind (agent review round 1, R1-2).
+    (
+        "local_operator/tools/builtin.py::_write_network_body",
+        "<path>.unlink",
+        "Unlinks the mkstemp body file this call just created in the session scratchpad.",
+    ),
+    (
+        "local_operator/tools/builtin.py::_browser_network",
+        "<path>.unlink",
+        "Rolls back only the network-request-*.body files the same read created.",
+    ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only

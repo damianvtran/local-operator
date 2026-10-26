@@ -176,7 +176,18 @@ CAPABILITY_SWITCH_LOCATION = (
 #: which the tool can only render as "the bridge broke"; the gate turns the same
 #: peer into a typed, actionable `capability_unsupported` instead.
 CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
-    {"download", "upload", "styles", "hit_test", "ancestors", "query"}
+    {
+        "download",
+        "upload",
+        "styles",
+        "hit_test",
+        "ancestors",
+        "query",
+        "network_start",
+        "network_stop",
+        "network_read",
+        "network_clear",
+    }
 )
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
@@ -356,6 +367,30 @@ METHODS = (
     # answering "not enabled" rather than "not capable".
     "download",
     "upload",
+    # Desktop-host network telemetry. The shared vocabulary is additive so an
+    # older peer keeps protocol 1; capability advertisement/refusal makes an
+    # extension or cmux host degrade explicitly instead of faking a capture.
+    "network_start",
+    "network_stop",
+    "network_read",
+    "network_clear",
+)
+
+#: Wire methods only the DESKTOP app's browser host can serve.
+#:
+#: They stay in ``METHODS`` because the wire vocabulary is shared and additive at
+#: protocol 1, but this build must neither serve nor advertise them: the
+#: extension attaches its debugger for the length of one action, so it holds no
+#: standing session a ``Network`` subscription could live on. The advertisement is
+#: already derived from the extension's handler table, so this constant exists for
+#: the one place that would otherwise grow a second hand-kept list — the
+#: extension's "every wire method has a handler" test. Generated into both
+#: TypeScript targets so the two sides cannot drift.
+DESKTOP_ONLY_METHODS: tuple[str, ...] = (
+    "network_start",
+    "network_stop",
+    "network_read",
+    "network_clear",
 )
 
 
@@ -440,6 +475,12 @@ COMMAND_TIMEOUTS = {
     # the attach plus the read-back that proves the DOM holds them. A 256 MB
     # attach is the worst case (UPLOAD_MAX_BYTES), not the common one.
     "upload": 60.0,
+    # Network actions only enable/disable CDP collection or read an in-memory
+    # ring; none waits for a page or a human decision.
+    "network_start": 20.0,
+    "network_stop": 20.0,
+    "network_read": 20.0,
+    "network_clear": 20.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin
