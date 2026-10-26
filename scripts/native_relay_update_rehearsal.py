@@ -61,6 +61,7 @@ def _observation(
     stale: bool | None = False,
     source_ref: str = "a" * 40,
     install_root: str = "",
+    listen_address: str = "127.0.0.1",
     answering: bool = True,
 ) -> dict[str, Any]:
     """A record shaped like the one a real relay publishes."""
@@ -72,6 +73,7 @@ def _observation(
         "advertised_version": "0.90.2",
         "advertised_source_ref": source_ref,
         "advertised_install_root": install_root,
+        "advertised_listen_address": listen_address,
         "answering": answering,
     }
 
@@ -101,6 +103,17 @@ def cell_identity_contract(root: Path) -> str:
             expected_stale=False,
         ),
         "loaded process",
+    )
+    _must_fail(
+        "non-loopback bind",
+        lambda: probe._assert_identity(  # noqa: SLF001
+            _observation(generation=generation, source_ref=sha, listen_address="0.0.0.0"),
+            generation,
+            sha,
+            "rehearsal",
+            expected_stale=False,
+        ),
+        "not loopback",
     )
     _must_fail(
         "source ref",
@@ -213,6 +226,10 @@ def cell_readiness(root: Path) -> str:
     def ready_observation() -> dict[str, Any]:
         return _observation(generation=generation, source_ref=sha, stale=True)
 
+    def never_ready() -> dict[str, Any]:
+        """A relay that is up but never advertises this source — no host reads."""
+        return _observation(generation=generation, source_ref="0" * 40, stale=True, answering=False)
+
     original_observation = probe._observation
     original_require = probe._require
     try:
@@ -224,6 +241,9 @@ def cell_readiness(root: Path) -> str:
         probe._require = original_require  # type: ignore[assignment]
 
     # Now the failure path: never answers, so the loop must exhaust and record.
+    # The environment is SAVED and restored: this cell used to leave both keys
+    # pointing at a directory it then deleted, which leaked into later cells.
+    saved_env = {key: os.environ.get(key) for key in ("RUNNER_TEMP", "LOCAL_OPERATOR_CONFIG_DIR")}
     os.environ["RUNNER_TEMP"] = str(root)
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(root / "config")
     (root / "config" / "logs").mkdir(parents=True, exist_ok=True)
@@ -246,6 +266,10 @@ def cell_readiness(root: Path) -> str:
         # exercise the fixture, never to reach a real systemd.
         saved["require"] = probe._require
         probe._require = lambda _argv: None  # type: ignore[assignment]
+        # Q7-2/R12-1: ``_observation`` is faked here too. The real one reads this
+        # host's supervisor and, on macOS, the operator's LIVE relay — a read-only
+        # leak the comment above claimed did not exist.
+        probe._observation = never_ready  # type: ignore[assignment]
         saved["time"] = probe.time
         probe.time = Clock()  # type: ignore[assignment]
         calls["n"] = 0
@@ -258,6 +282,12 @@ def cell_readiness(root: Path) -> str:
     finally:
         probe.time = saved["time"]  # type: ignore[assignment]
         probe._require = saved["require"]  # type: ignore[assignment]
+        probe._observation = original_observation  # type: ignore[assignment]
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     artifact = root / "native-relay-readiness.json"
     _check(artifact.is_file(), "readiness timeout left no diagnostics artifact")
@@ -273,6 +303,12 @@ def cell_live_relay(root: Path) -> str:
     python = sys.executable
     config = root / "config"
     config.mkdir(parents=True, exist_ok=True)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    # The probe's own writer, so the cell fails if that shape regresses: the
+    # relay must bind loopback BECAUSE the config was read, not because of a flag.
+    probe._write_isolated_config(config, port)  # noqa: SLF001
     env = dict(os.environ)
     env.update(
         HOME=str(root),
@@ -280,9 +316,6 @@ def cell_live_relay(root: Path) -> str:
         LOCAL_OPERATOR_NO_NOTIFICATIONS="1",
         PYTHONPATH=str(Path(__file__).resolve().parents[1]),
     )
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = int(sock.getsockname()[1])
     process = subprocess.Popen(
         [python, "-m", "local_operator.network.relay", "--port", str(port)],
         env=env,
@@ -290,6 +323,14 @@ def cell_live_relay(root: Path) -> str:
         stderr=subprocess.PIPE,
         text=True,
     )
+    # A typed local rather than `process.stderr` at the use site: pyright cannot
+    # narrow the Optional on a second read, and a rehearsal that silently dropped
+    # the relay's own dying words would hide the reason it exists.
+    stderr = process.stderr
+    if stderr is None:  # pragma: no cover - PIPE guarantees a stream
+        process.kill()
+        process.wait(timeout=10)
+        raise RehearsalFailure("real relay stderr is not captured; cannot report its failure")
     try:
         record_path = None
         deadline = time.monotonic() + 20.0
@@ -299,7 +340,7 @@ def cell_live_relay(root: Path) -> str:
                 record_path = matches[0]
                 break
             if process.poll() is not None:
-                raise RehearsalFailure(f"real relay exited: {process.stderr.read()[-500:]}")
+                raise RehearsalFailure(f"real relay exited: {stderr.read()[-500:]}")
             time.sleep(0.2)
         _check(record_path is not None, "real relay published no record within 20s")
         record = json.loads(Path(str(record_path)).read_text(encoding="utf-8"))
@@ -310,8 +351,37 @@ def cell_live_relay(root: Path) -> str:
             "the fixture's relaxed rule must be revisited",
         )
         _check(record.get("pid") == process.pid, "record pid is not the started process")
+        bound = str((record.get("listen") or {}).get("address") or "")
+        _check(
+            bound in ("127.0.0.1", "::1"),
+            f"relay bound {bound!r}, not loopback: the isolated config was not read",
+        )
         _check("source_ref" in record, "record carries no source_ref field")
-        return "a real relay record has install_root='' (the field the old assertion demanded)"
+        # R12-3: run the REAL record through the fixture's own assertion rather
+        # than only eyeballing three fields. Two values cannot come from the
+        # record: a relay publishes no loaded generation (that is the process's),
+        # and this checkout has no install stamp, so source_ref may be "". Both
+        # are supplied here and named in the returned sentence, so the cell says
+        # exactly how much of the contract it exercised.
+        generation = root / "generations" / "head"
+        sha = str(record.get("source_ref") or "")
+        observation: dict[str, Any] = {
+            "pid": process.pid,
+            "loaded_generation": str(generation),
+            "loaded_stale": False,
+            "advertised_record_pid": int(record.get("pid") or 0),
+            "advertised_source_ref": sha,
+            "advertised_install_root": str(record.get("install_root") or ""),
+            "advertised_listen_address": bound,
+            "answering": True,
+        }
+        probe._assert_identity(  # noqa: SLF001
+            observation, generation, sha, "live relay record", expected_stale=False
+        )
+        return (
+            "a real relay record passes _assert_identity with install_root='' "
+            f"(source_ref={sha!r}; loaded generation supplied, not advertised)"
+        )
     finally:
         process.kill()
         process.wait(timeout=10)
@@ -348,12 +418,30 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
+    # R12-4: the receipt must carry its own limits. A receipt read on its own
+    # must not be able to imply that native systemd behaviour was exercised.
+    not_covered = [
+        "real systemd cgroup delegation and systemd-run privilege boundaries",
+        "systemd opening the unit's append: log targets",
+        "the private user manager's own unit setup",
+        "the real 'lop update' child process and its one-shot ps fault",
+        "generation installation by uv, and any Linux-only path",
+    ]
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(
-            json.dumps({"cells": results, "status": "FAIL" if failed else "PASS"}, indent=2) + "\n",
+            json.dumps(
+                {
+                    "cells": results,
+                    "status": "FAIL" if failed else "PASS",
+                    "not_covered": not_covered,
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
+        print("not covered: " + "; ".join(not_covered))
     print(f"rehearsal {'FAILED' if failed else 'passed'} ({len(results)} cells)")
     return 1 if failed else 0
 

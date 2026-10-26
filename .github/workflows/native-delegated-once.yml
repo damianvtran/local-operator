@@ -37,7 +37,7 @@ jobs:
         env:
           EXPECTED_HEAD: ${{ github.event.label.name }}
           EXPECTED_WRAPPER_SHA256: 8ac417cb1b987af6212eaaf85d2fb27b6b76af4096dde6cb63da08ace7016935
-          EXPECTED_PROBE_SHA256: 3caf01401a07d0912e88c687e85c9d5b6453ae7732cbb7bfbd626214d95dc02f
+          EXPECTED_PROBE_SHA256: ae23c80d398bf204c630f1da9febacaf03f2cc1f31aa638aa4ccafac100b9ee5
           EXPECTED_SCOPE_LIB_SHA256: ecd43b9548f7cc5594585d8c3c8fa35c38ad1a631c5ce324d1374d02b4c17a19
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/native-delegated-once-wrapper.sh

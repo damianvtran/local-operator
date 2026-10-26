@@ -275,6 +275,7 @@ def test_identity_accepts_an_unpublished_install_root_and_rejects_a_wrong_one(
             "advertised_record_pid": 4321,
             "advertised_source_ref": sha,
             "advertised_install_root": advertised_root,
+            "advertised_listen_address": "127.0.0.1",
             "answering": True,
         }
 
@@ -291,3 +292,27 @@ def test_identity_accepts_an_unpublished_install_root_and_rejects_a_wrong_one(
             "wrong-root",
             expected_stale=True,
         )
+
+
+def test_isolated_config_is_written_where_the_store_reads_it(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fixture's network settings must live under ``values.network``.
+
+    A bare top-level ``network:`` block parses and is silently ignored, which is
+    how three privileged runs bound ``0.0.0.0`` while the receipt claimed
+    loopback. Reading back through the store is the discriminating check: on the
+    old shape every value below returns its default.
+    """
+    from local_operator.network import store
+
+    config = root / "config"
+    config.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+
+    probe._write_isolated_config(config, 51234)  # noqa: SLF001
+
+    raw = (config / "config.yml").read_text(encoding="utf-8")
+    assert raw.startswith("values:"), raw[:40]
+    assert store.read_config(("network", "listen_address"), "", root=config) == "127.0.0.1"
+    assert store.read_config(("network", "port"), 0, root=config) == 51234

@@ -86,6 +86,9 @@ def _require(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]
     return result
 
 
+_LOOPBACK_ADDRESSES = ("127.0.0.1", "::1")
+
+
 def _generation_environment(env: dict[str, str] | None = None) -> dict[str, str]:
     """A child environment that cannot import the driver checkout by accident.
 
@@ -178,6 +181,9 @@ def _observation() -> dict[str, Any]:
         "advertised_version": record.version if record is not None else "",
         "advertised_source_ref": record.source_ref if record is not None else "",
         "advertised_install_root": record.install_root if record is not None else "",
+        "advertised_listen_address": (
+            str((record.listen or {}).get("address") or "") if record is not None else ""
+        ),
         "answering": answering,
     }
 
@@ -199,12 +205,22 @@ def _assert_identity(
             f"{label}: advertised source {observed['advertised_source_ref']!r}, expected {sha}"
         )
     # THE RELAY DOES NOT PUBLISH install_root. ``PeerRecord`` declares the field
-    # (network/types.py) but ``RelayServer._record`` never passes it, so a live
+    # (network/types.py) but ``RelayServer.peer_record`` never passes it, so a live
     # relay advertises "" for its whole life — measured on a real relay, and the
     # probe's third run died here asking for a value that cannot exist. The
     # generation is already proven twice above: the process's own generation and
     # the record's source_ref. Enforce this only for a build that DOES publish a
     # root, so a future regression that names the wrong tree still fails loudly.
+    # LOOPBACK IS A PROPERTY OF THE RUN, NOT OF A RECEIPT SENTENCE. The isolated
+    # config used to be written at the wrong YAML level, so the relay ignored it
+    # and bound 0.0.0.0 while the receipt still claimed "127.0.0.1 only" — three
+    # privileged runs and a rehearsal reported safety that did not exist. The
+    # bound address is read back from the relay's own record here, so a wrong
+    # bind fails the run.
+    if observed["advertised_listen_address"] not in _LOOPBACK_ADDRESSES:
+        raise ProbeFailure(
+            f"{label}: relay bound {observed['advertised_listen_address']!r}, not loopback"
+        )
     expected_root = str(update._generation_install_root(generation))  # noqa: SLF001
     advertised_root = str(observed["advertised_install_root"])
     if advertised_root and advertised_root != expected_root:
@@ -329,6 +345,46 @@ def _install_source(source: Path, sha: str, version: str, ref: str) -> Path:
     if identity["source_ref"] != sha or identity["version"] != version:
         raise ProbeFailure(f"installed source identity mismatch for {source}: {identity}")
     return generation
+
+
+def _relay_reported(lines: list[str], status: str) -> bool:
+    """Whether the NETWORK RELAY's own report line carries ``status``.
+
+    Matching the bare word anywhere in the child's output is how an unrelated
+    daemon's success could satisfy this check; the line is machine-readable, so
+    it is parsed: ``daemon_report: {"name":"network relay","status":"already"}``.
+    """
+    prefix = "daemon_report: "
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        try:
+            payload = json.loads(stripped[len(prefix) :])
+        except ValueError:
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("name") == "network relay"
+            and payload.get("status") == status
+        ):
+            return True
+    return False
+
+
+def _write_isolated_config(config: Path, port: int) -> None:
+    """Write the isolated store in the shape ``store.read_config`` actually reads.
+
+    THE TOP-LEVEL SHAPE IS A SILENT NO-OP. The store reads ``values.network.*``
+    (``config.py`` models ``values`` as the one settings namespace), so a
+    document written as bare ``network:`` parses fine, is ignored, and leaves the
+    relay on its defaults — which bind ``0.0.0.0``. That is what happened here:
+    the config was ignored in every run while the receipt asserted loopback.
+    """
+    (config / "config.yml").write_text(
+        "values:\n" "  network:\n" "    listen_address: 127.0.0.1\n" f"    port: {port}\n",
+        encoding="utf-8",
+    )
 
 
 def _write_pinned_unit(unit: Path, generation: Path, port: int) -> None:
@@ -637,10 +693,7 @@ def main() -> int:
         os.environ["GIT_CONFIG_SYSTEM"] = "/dev/null"
         os.environ["GIT_TERMINAL_PROMPT"] = "0"
         port = _free_port()
-        (config / "config.yml").write_text(
-            f"network:\n  listen_address: 127.0.0.1\n  port: {port}\n",
-            encoding="utf-8",
-        )
+        _write_isolated_config(config, port)
         if store.networks_dir(config).exists() and any(store.networks_dir(config).glob("*.json")):
             raise ProbeFailure("the isolated config unexpectedly carries a peer network")
 
@@ -675,7 +728,6 @@ def main() -> int:
             "private_manager": "ready before generation install or service dispatch",
             "real_home_for_manager_only": True,
             "config": "isolated, synthetic identity, no peer records",
-            "relay_listen": "127.0.0.1 only",
             "external_dialing": "none by the relay; dependency installation only",
             "port": port,
             "strace_available": shutil.which("strace") is not None,
@@ -705,8 +757,16 @@ def main() -> int:
             raise ProbeFailure(
                 "base negative control did not retain the old success receipt: " f"{receipt}"
             )
-        if not any('"already"' in line for line in receipt["receipt_lines"]):
-            raise ProbeFailure(f"base did not emit the old current/already receipt: {receipt}")
+        if not _relay_reported(receipt["receipt_lines"], "already"):
+            raise ProbeFailure(
+                f"base did not report the relay itself as already current: {receipt}"
+            )
+        # The measured bind. ``_start_and_wait``/``_assert_identity`` refuse a
+        # non-loopback record, so this row is observed, never asserted by hand.
+        result["listening"] = {
+            "address": before["advertised_listen_address"],
+            "loopback_asserted": True,
+        }
         result["base"] = {
             "before": before,
             "refresh": receipt,
@@ -727,8 +787,8 @@ def main() -> int:
         )
         if after["pid"] == before["pid"] or receipt["returncode"] != 0:
             raise ProbeFailure(f"fixed relay did not restart successfully: {receipt}")
-        if not any('"refreshed"' in line for line in receipt["receipt_lines"]):
-            raise ProbeFailure(f"fixed relay did not emit a refreshed receipt: {receipt}")
+        if not _relay_reported(receipt["receipt_lines"], "refreshed"):
+            raise ProbeFailure(f"the relay itself was not reported refreshed: {receipt}")
         result["fixed"] = {
             "before": before,
             "refresh": receipt,
