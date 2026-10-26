@@ -117,6 +117,20 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 # the checker's output then fails to parse. The env var cannot be trusted; the
 # flag can.
 _UV = ("uv", "--color", "never")
+# Every child this script spawns carries the notification gate. Two reasons, and
+# the sweep in tests/unit/test_notification_isolation.py enforces the first: a
+# module that hands a child a built environment must make the switch its own
+# business rather than inheriting it, because a child that raises a banner puts
+# a mock session's reply on the operator's lock screen. The second is specific to
+# this script -- the arm interpreter it launches imports the whole harness, so an
+# episode-shaped import path here should be as unable to notify as any other.
+_NOTIFICATIONS_GATE = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
+
+
+def _child_env(**extra: str) -> dict[str, str]:
+    """The environment every child of this script runs with."""
+
+    return {**os.environ, _NOTIFICATIONS_GATE: "1", **extra}
 
 
 class BuildRefused(RuntimeError):
@@ -178,7 +192,9 @@ def run(argv: Sequence[str]) -> str:
     """Run one external command, reporting failure as a refusal, not a traceback."""
 
     try:
-        completed = subprocess.run(list(argv), capture_output=True, text=True, check=False)
+        completed = subprocess.run(
+            list(argv), capture_output=True, text=True, check=False, env=_child_env()
+        )
     except OSError as error:
         raise BuildRefused(f"{argv[0]} could not be executed: {error}") from error
     output = (completed.stdout + completed.stderr).strip()
@@ -202,7 +218,7 @@ def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"},
+        env=_child_env(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0"),
     )
 
 
@@ -269,7 +285,7 @@ def materialise_source(repo: Path, sha: str, destination: Path) -> None:
         ["git", "-C", str(repo), "archive", sha],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"},
+        env=_child_env(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0"),
     )
     if archive.stdout is None:  # pragma: no cover - defensive
         raise BuildRefused("git archive produced no output stream")
@@ -279,6 +295,7 @@ def materialise_source(repo: Path, sha: str, destination: Path) -> None:
         capture_output=True,
         text=False,
         check=False,
+        env=_child_env(),
     )
     archive.stdout.close()
     status = archive.wait()
@@ -914,6 +931,7 @@ def _execute(args: argparse.Namespace) -> int:
             capture_output=True,
             text=True,
             check=False,
+            env=_child_env(),
         )
         print((result.stdout + result.stderr).strip())
         if result.returncode != 0:
