@@ -435,3 +435,23 @@ def test_a_human_unpin_wins_against_a_concurrent_bootstrap_reassert(tmp_path: Pa
         second.join(timeout=15)
         assert sid not in read_pins(tmp_path), "a human unpin was overwritten by the reassert"
         assert sid in explicitly_unpinned(tmp_path)
+
+
+# -- the strict reader the cleanup pass uses --------------------------------
+#
+# ``read_pins`` degrades every failure to ``[]`` because a sidebar ranks fine
+# without pins. Retention cannot take that answer: "unreadable" read as "nothing
+# is pinned" would reap exactly what the operator pinned.
+
+
+def test_load_pin_ids_separates_absent_from_unreadable(tmp_path: Path) -> None:
+    from local_operator.tui.sidebar_pins import PINS_FILE, load_pin_ids, read_pins
+
+    assert load_pin_ids(tmp_path) == []  # never pinned anything
+    (tmp_path / PINS_FILE).write_text('["a", 3, "b"]')
+    assert load_pin_ids(tmp_path) == ["a", "b"]  # not pruned, non-strings skipped
+    for bad in ("{truncated", '{"a": 1}', '"a"'):
+        (tmp_path / PINS_FILE).write_text(bad)
+        with pytest.raises((OSError, ValueError)):
+            load_pin_ids(tmp_path)
+        assert read_pins(tmp_path) == []  # the lenient reader is unchanged
