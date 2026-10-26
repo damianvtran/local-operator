@@ -157,18 +157,16 @@ _ATTRIBUTABLE_FIELDS: Final = ("name", "description")
 class Attribution:
     """One row a re-attribution hands to the Librarian, with her own evidence.
 
-    ``fields`` names the ``*_source`` columns that flip; ``tag_ids`` names the
-    tag assignments whose ``source`` moves with it, matched by VALUE as the
-    fields are — the call must pass the tag's name or its id, whole-string —
-    so a tag set someone else applied afterwards stays theirs. ``organized_at``
-    is WHEN SHE did it, taken from the audit log rather than from the clock of
-    the pass that re-reads it.
+    ``fields`` names the ``*_source`` columns that flip. ``organized_at`` is WHEN
+    SHE did it, taken from the audit log rather than from the clock of the pass
+    that re-reads it. ``asset_tags.source`` is deliberately NOT here: it is
+    display provenance, and inferring it from the journal cannot be done without
+    claiming an ordinary agent's tags (see ``librarian/backfill.py``).
     """
 
     asset_id: str
     fields: tuple[str, ...]
     organized_at: float
-    tag_ids: tuple[str, ...] = ()
 
 
 class MetadataStore:
@@ -1018,20 +1016,6 @@ class MetadataStore:
                     if not cursor.rowcount:
                         continue
                     moved += 1
-                    if item.tag_ids:
-                        # The same value-match the fields above carry: only the
-                        # ids HER call is seen to assign move. Another agent's
-                        # later set does not carry them, so its rows stay that
-                        # agent's; the ids come from the asset's own rows, so
-                        # the list is bounded by MAX_TAGS_PER_ASSET.
-                        ids = list(dict.fromkeys(item.tag_ids))
-                        placeholders = ",".join("?" for _ in ids)
-                        connection.execute(
-                            "UPDATE asset_tags SET source = 'librarian' "
-                            "WHERE asset_id = ? AND source = 'agent' "
-                            f"AND tag_id IN ({placeholders})",
-                            (item.asset_id, *ids),
-                        )
                 if moved:
                     self._bump_revision(connection)
                 # Written even for an empty pass: the guard means "this pass

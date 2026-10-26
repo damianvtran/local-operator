@@ -173,7 +173,7 @@ def test_mark_organized_stamps_in_the_tag_transaction(tmp_path) -> None:
 
 
 def test_apply_attributions_moves_the_rows_and_sets_the_guard(tmp_path) -> None:
-    """One transaction: provenance, the stamp, the tags, and the guard fact."""
+    """One transaction: provenance, the stamp, and the guard fact."""
     s = store(tmp_path)
     s.ensure_asset(A, "p:/a")
     s.ensure_asset(B, "p:/b")
@@ -184,7 +184,7 @@ def test_apply_attributions_moves_the_rows_and_sets_the_guard(tmp_path) -> None:
     revision = s.metadata_revision()
 
     moved = s.apply_attributions(
-        [Attribution(A, ("name",), 1234.5, tag_ids=(tag["id"],))],
+        [Attribution(A, ("name",), 1234.5)],
         guard_key="backfill:test:v1",
         guard_value='{"matched":1}',
     )
@@ -193,7 +193,9 @@ def test_apply_attributions_moves_the_rows_and_sets_the_guard(tmp_path) -> None:
     assert row is not None
     assert row["name_source"] == "librarian" and row["name"] == "Hyundai re-screen"
     assert row["organized_at"] == 1234.5 and row["organized_by"] == "librarian"
-    assert [t["source"] for t in s.asset_tags(A)] == ["librarian"]
+    # ``asset_tags.source`` is display provenance and NOT this pass's business:
+    # the tag row keeps the agent provenance it was written with.
+    assert [t["source"] for t in s.asset_tags(A)] == ["agent"]
     # The pass DID move metadata, so a cursor minted before it must be refused.
     assert s.metadata_revision() != revision
     assert s.state_value("backfill:test:v1") == '{"matched":1}'
@@ -204,7 +206,7 @@ def test_apply_attributions_moves_the_rows_and_sets_the_guard(tmp_path) -> None:
     # pass still records its guard.
     assert (
         s.apply_attributions(
-            [Attribution(A, ("name",), 9999.0, tag_ids=(tag["id"],))],
+            [Attribution(A, ("name",), 9999.0)],
             guard_key="backfill:test:v1",
             guard_value='{"matched":0}',
         )
@@ -212,54 +214,6 @@ def test_apply_attributions_moves_the_rows_and_sets_the_guard(tmp_path) -> None:
     )
     again = s.asset(A)
     assert again is not None and again["organized_at"] == 1234.5
-
-
-def test_apply_attributions_only_moves_the_tag_ids_it_is_given(tmp_path) -> None:
-    """A tag row moves by ID, so a set someone else applied stays theirs.
-
-    ``asset_tags`` holds a set, so a later write IS a replacement of hers (a
-    delete plus re-insert, which is how the column is written). Only the id the
-    evidence carries may move; every other row on the asset keeps its own
-    provenance. The guard key is opaque to this test: only the rows matter.
-    """
-    s = store(tmp_path)
-    s.ensure_asset(A, "p:/a")
-    s.update_fields(A, {"name": "Hyundai re-screen"}, actor="agent")
-    hers = s.create_tag("hyundai-poc")
-    theirs = s.create_tag("eng-3631")
-    s.set_asset_tags(A, [hers["id"], theirs["id"]], actor="agent")
-
-    assert (
-        s.apply_attributions(
-            [Attribution(A, ("name",), 1234.5, tag_ids=(hers["id"],))],
-            guard_key="scratch-pass",
-            guard_value='{"matched":1}',
-        )
-        == 1
-    )
-    assert {tag["id"]: tag["source"] for tag in s.asset_tags(A)} == {
-        hers["id"]: "librarian",
-        theirs["id"]: "agent",
-    }
-
-
-def test_apply_attributions_without_tag_ids_leaves_every_tag_alone(tmp_path) -> None:
-    """No tag evidence means no tag row moves — not "all of them"."""
-    s = store(tmp_path)
-    s.ensure_asset(A, "p:/a")
-    s.update_fields(A, {"name": "Hyundai re-screen"}, actor="agent")
-    tag = s.create_tag("hyundai-poc")
-    s.set_asset_tags(A, [tag["id"]], actor="agent")
-
-    assert (
-        s.apply_attributions(
-            [Attribution(A, ("name",), 1234.5)],
-            guard_key="scratch-pass",
-            guard_value='{"matched":1}',
-        )
-        == 1
-    )
-    assert [row["source"] for row in s.asset_tags(A)] == ["agent"]
 
 
 def test_apply_attributions_leaves_locked_and_user_rows_alone(tmp_path) -> None:

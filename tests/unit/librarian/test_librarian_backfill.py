@@ -193,358 +193,49 @@ def test_matched_rows_flip_with_her_own_timestamp(attributed) -> None:
     assert guard["matched"] == 2 and guard["at"]
 
 
-def test_her_tag_assignment_moves_with_the_row(attributed) -> None:
-    """A tag SHE named is re-sourced — by NAME, because that is all she wrote.
+def test_tag_provenance_is_left_untouched(attributed) -> None:
+    """``asset_tags.source`` is NOT this pass's business: her tag rows stay agent.
 
-    Her cell holds ``sets={asset: ["hyundai-poc"]}`` and resolves the id at
-    runtime, so the id appears NOWHERE in her journal: an id-only match leaves
-    this row an agent's, which is what the round-2 finding measured.
+    Every rule that reached her 37 pre-fix tag assignments also claimed an
+    ordinary agent's work, and the column is display provenance only — nothing
+    decides anything from it (``set_asset_tags`` replaces a set with no rank
+    check, and only ``asset_tags()`` renders it). So the pass re-reads the
+    journal for names and descriptions and leaves the tags exactly as they are,
+    even though the cell below names this asset and its tag.
     """
     root, store = attributed
+    before = {row["id"]: row["source"] for row in store.asset_tags(T)}
+    assert before == {her_tag_id(store): "agent"}
     transcript = (root / "sessions" / LIB / "transcript.jsonl").read_text(encoding="utf-8")
-    assert her_tag_id(store) not in transcript
-    assert [row["source"] for row in store.asset_tags(T)] == ["agent"]
+    assert TAG_NAME in transcript, "the journal names that tag; the pass still leaves it"
 
     assert backfill.reattribute_organized(root) == 2
 
-    tagged = store.asset(T)
-    assert tagged is not None
-    assert tagged["name_source"] == "librarian"
-    assert tagged["organized_by"] == "librarian"
-    # Her NAMING edit, not the tag set written seconds later: the stamp is the
-    # moment she organized the asset, and a later agent edit is not it.
-    assert tagged["organized_at"] == store.last_edit_at(T, actor="agent", fields=("name",))
-    assert tagged["organized_at"] < store.last_edit_at(T, actor="agent")
-    assert [row["source"] for row in store.asset_tags(T)] == ["librarian"]
-
-
-def test_a_later_ordinary_agents_tag_set_stays_theirs(isolated_root) -> None:
-    """The tags half is a VALUE match, not "her call mentions this asset".
-
-    The finding: requiring only the asset id in a tags call re-sourced every
-    agent tag row on the row she named — including a set another agent applied
-    afterwards (a delete plus re-insert), which this pass may not claim. A tag
-    neither of whose names her call holds moves nothing; the asset stays hers.
-    """
-    root = isolated_root
-    state.write_state(root, {"session_id": LIB})
-    store = seed(root)
-    journal(root, her_calls(TAG_NAME))
-    theirs = store.create_tag("eng-3631")
-    store.set_asset_tags(T, [theirs["id"]], actor="agent")
-    transcript = (root / "sessions" / LIB / "transcript.jsonl").read_text(encoding="utf-8")
-    assert theirs["name"] not in transcript
-
-    assert backfill.reattribute_organized(root) == 2
-
-    tagged = store.asset(T)
-    assert tagged is not None and tagged["organized_by"] == "librarian"
-    assert [row["id"] for row in store.asset_tags(T)] == [theirs["id"]]
-    assert [row["source"] for row in store.asset_tags(T)] == ["agent"]
-
-
-def test_only_a_tag_the_cell_passes_moves(isolated_root) -> None:
-    """A tag is a VALUE the cell passes, not a string its text happens to hold.
-
-    QA round 3, cell (d): with a substring match, an ordinary agent's tag was
-    re-sourced whenever its name occurred anywhere in her cell — demonstrated on
-    the live install with ``a``, ``op``, ``asset`` and ``library``, the last the
-    tool's own name. Every one of those strings is in this cell, none of them as
-    a tag value, and all four of the agent's rows stay his.
-    """
-    state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    journal(
-        isolated_root,
-        [
-            {
-                "id": "toolu_plumbing",
-                "name": "eval",
-                "arguments": {
-                    "code": (
-                        # "library", "tags", an "asset" word and a lone "a" all
-                        # occur below: as the tool's name, as the value of the op,
-                        # inside an intent line, and as a loop variable.
-                        "lookup={name:key for name, key in "
-                        'tool("library",op="tags",action="list",'
-                        'i="Listing the library")["idm"]}\n'
-                        f'upd=[("{T}","{NAME_T}")]\n'
-                        "for a,n in upd:\n"
-                        '    r=tool("library",op="update",asset_id=a,name=n,'
-                        'i="Naming an asset")\n'
-                        f'sets={{"{T}":["{TAG_NAME}"]}}\n'
-                        "for a,t in sets.items():\n"
-                        '    r=tool("library",op="tags",action="set",asset_id=a,'
-                        "tags=[lookup[x] for x in t])\n"
-                    )
-                },
-            }
-        ],
-    )
-    theirs = {
-        name: store.create_tag(name, actor="agent")["id"]
-        for name in ("a", "op", "asset", "library")
-    }
-    store.set_asset_tags(T, [*theirs.values(), her_tag_id(store)], actor="agent")
-
-    assert backfill.reattribute_organized(isolated_root) == 1
-
-    sources = {row["id"]: row["source"] for row in store.asset_tags(T)}
-    assert sources[her_tag_id(store)] == "librarian"
-    for name, tag_id in theirs.items():
-        assert sources[tag_id] == "agent", name
-
-
-def test_a_tag_named_like_a_result_key_is_the_MEASURED_residual(isolated_root) -> None:
-    """The residual, pinned rather than left to be rediscovered.
-
-    A cell that reads a field out of a tool result puts that field's NAME among
-    its string constants (``d["tags"]``), and whole-string equality cannot tell
-    it from a tag value. Measured on the live journal, an agent tag named
-    ``tags`` is claimed on 38 of the 39 assets (``name``/``text``/``content``/
-    ``id``/``organized``/``metadata`` on 33-34): her cells read those fields.
-
-    Clearing it means excluding subscript slices, which measures 26 of her 37
-    real rows — her tag NAMES are also spelled as lookups (``idm["eng-3631"]``).
-    Trading 11 true rows for the field-name family is a call for whoever owns
-    the predicate, so the behaviour is pinned here and reported, not changed.
-    """
-    state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    journal(
-        isolated_root,
-        [
-            {
-                "id": "toolu_result_key",
-                "name": "eval",
-                "arguments": {
-                    "code": (
-                        f'upd=[("{T}","{NAME_T}")]\n'
-                        "for a,n in upd:\n"
-                        '    r=tool("library",op="update",asset_id=a,name=n)\n'
-                        f'read=json.loads(tool("library",op="get",asset_id="{T}",'
-                        'i="Verifying")["content"][0]["text"])\n'
-                        'print(read["tags"], read["name"])\n'
-                        f'sets={{"{T}":["{TAG_NAME}"]}}\n'
-                        "for a,t in sets.items():\n"
-                        '    r=tool("library",op="tags",action="set",asset_id=a,tags=t)\n'
-                    )
-                },
-            }
-        ],
-    )
-    theirs = store.create_tag("tags", actor="agent")
-    store.set_asset_tags(T, [theirs["id"], her_tag_id(store)], actor="agent")
-
-    assert backfill.reattribute_organized(isolated_root) == 1
-
-    sources = {row["id"]: row["source"] for row in store.asset_tags(T)}
-    assert sources[her_tag_id(store)] == "librarian"
-    assert sources[theirs["id"]] == "librarian", "the residual this test pins"
-
-
-@pytest.mark.parametrize("shape", ["sets-names", "upd-trailing-name", "idm-literal"])
-def test_her_real_tag_shapes_still_move_the_row(isolated_root, shape: str) -> None:
-    """The three shapes her cells used, each read structurally.
-
-    ``sets`` holds the name; an ``upd``/``rows`` tuple carries it as a trailing
-    element; and one burst held a literal id map, which is the shape that names
-    a tag by its ID instead of its name.
-    """
-    state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    tag_id = her_tag_id(store)
-    update = (
-        f'upd=[("{T}","{NAME_T}")]\n'
-        "for a,n in upd:\n"
-        '    r=tool("library",op="update",asset_id=a,name=n)\n'
-    )
-    if shape == "sets-names":
-        tags = (
-            f'sets={{"{T}":["{TAG_NAME}"]}}\n'
-            "idm={t['name']:t['id'] for t in "
-            "tool('library',op='tags',action='list')['idm']}\n"
-            "for a,t in sets.items():\n"
-            '    r=tool("library",op="tags",action="set",asset_id=a,'
-            "tags=[idm[x] for x in t])\n"
-        )
-    elif shape == "upd-trailing-name":
-        tags = (
-            f'rows=[("{T}","{NAME_T}","{TAG_NAME}")]\n'
-            "for a,n,t in rows:\n"
-            '    r=tool("library",op="tags",action="set",asset_id=a,tags=[t])\n'
-        )
-    else:
-        tags = (
-            f'idm={{"{TAG_NAME}":"{tag_id}"}}\n'
-            f'r=tool("library",op="tags",action="set",asset_id="{T}",'
-            f'tags=[idm["{TAG_NAME}"]],primary=idm["{TAG_NAME}"])\n'
-        )
-    journal(
-        isolated_root,
-        [{"id": f"toolu_{shape}", "name": "eval", "arguments": {"code": update + tags}}],
-    )
-
-    assert backfill.reattribute_organized(isolated_root) == 1
-    assert [row["source"] for row in store.asset_tags(T)] == ["librarian"]
-
-
-@pytest.mark.parametrize("broken", ["unbalanced-bracket", "nul-byte"])
-def test_an_unparseable_cell_contributes_no_tag_evidence(isolated_root, broken: str) -> None:
-    """A cell the pass cannot parse proves nothing about tags.
-
-    The naming half still reads the cell as text — it always has — so the asset
-    is hers; the tag row keeps its agent provenance, which is the safe
-    direction: the pass may under-recover, never claim what it could not read.
-    """
-    state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    code = (
-        f'upd=[("{T}","{NAME_T}")]\n'
-        "for a,n in upd:\n"
-        '    r=tool("library",op="update",asset_id=a,name=n)\n'
-        f'sets={{"{T}":["{TAG_NAME}"]}}\n'
-        "for a,t in sets.items():\n"
-        '    r=tool("library",op="tags",action="set",asset_id=a,tags=[idm[x] for x in t])\n'
-    )
-    if broken == "unbalanced-bracket":
-        code += '    r=tool("library",op="tags",action="set",asset_id=a,tags=['
-    else:
-        # What a torn or NUL-laden append leaves behind: ast.parse refuses it.
-        code += "\x00"
-    journal(
-        isolated_root,
-        [{"id": f"toolu_{broken}", "name": "eval", "arguments": {"code": code}}],
-    )
-
-    assert backfill.reattribute_organized(isolated_root) == 1
+    assert {row["id"]: row["source"] for row in store.asset_tags(T)} == before
     row = store.asset(T)
-    assert row is not None and row["organized_by"] == "librarian"
-    assert [tag["source"] for tag in store.asset_tags(T)] == ["agent"]
+    assert row is not None and row["name_source"] == "librarian"
 
 
-def test_a_native_tags_call_is_read_as_a_tags_op(isolated_root) -> None:
-    """The op is an ARGUMENT in a native call, not text inside code.
+def test_a_deeply_nested_journal_line_costs_a_row_not_a_boot(attributed) -> None:
+    """A pathological line must not take the pass down with it.
 
-    One literal would only ever match one of the two forms; the real journal
-    held both, and a native call whose tags were not re-sourced would leave her
-    own tag assignments attributed to an agent.
+    ``json.loads`` recurses with the JSON it decodes, so a line nested deeper
+    than the decoder's stack raises ``RecursionError`` (measured here: 20,000
+    levels, "maximum recursion depth exceeded while decoding a JSON array").
+    Review round 4 measured what that cost before this catch: the whole pass
+    died and wrote no guard, so every later boot re-parsed and died again.
     """
-    state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    journal(
-        isolated_root,
-        [
-            {
-                "id": "toolu_n",
-                "name": "library",
-                "arguments": {"op": "update", "asset_id": T, "name": NAME_T},
-            },
-            {
-                "id": "toolu_m",
-                "name": "library",
-                "arguments": {
-                    "op": "tags",
-                    "action": "set",
-                    "asset_id": T,
-                    "tags": [her_tag_id(store)],
-                },
-            },
-        ],
-    )
-    assert backfill.reattribute_organized(isolated_root) == 1
-    assert [row["source"] for row in store.asset_tags(T)] == ["librarian"]
+    root, store = attributed
+    path = root / "sessions" / LIB / "transcript.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        # "library" so the pass's cheap line filter keeps it, and nested far past
+        # the decoder's stack: a torn or hostile append, not a shape any writer
+        # produces.
+        handle.write("[" * 20000 + '"library"' + "]" * 20000 + "\n")
 
-
-def tags_cell(tag_id: str) -> dict[str, Any]:
-    """One eval cell whose tags op is written as a DICT — the missed spelling."""
-    return {
-        "id": "toolu_dict",
-        "name": "eval",
-        "arguments": {
-            "code": (
-                f'upd=[("{T}","{NAME_T}")]\n'
-                "for a,n in upd:\n"
-                '    r=tool("library",op="update",asset_id=a,name=n)\n'
-                f'    r=tool("library",{{"op": "tags", "action": "set", '
-                f'"asset_id": "{T}", "tags": ["{tag_id}"]}})\n'
-            )
-        },
-    }
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        {"op": "tags"},  # a native call: the op is an argument
-        {"code": 'r=tool("library", op="tags", asset_id="la_x")'},
-        {"code": "r=tool('library', op='tags', asset_id='la_x')"},
-        {"code": 'r=tool("library", {"op": "tags", "asset_id": "la_x"})'},
-        {"code": "r=tool('library', {'op': 'tags', 'asset_id': 'la_x'})"},
-    ],
-)
-def test_every_spelling_of_a_tags_op_is_read_as_one(arguments: dict[str, Any]) -> None:
-    """The op reaches a journal as an argument, or as text in four spellings.
-
-    The finding: one literal matched one of them, and the miss is SILENT — the
-    rows simply stay an agent's: nothing errors, nothing is logged.
-    """
-    assert backfill._is_tag_call({"name": "library", "arguments": arguments}) is True
-
-
-@pytest.mark.parametrize(
-    "code",
-    [
-        'stop="tags"',  # a word ending in ``op`` is not the op
-        "opts='tags'",
-        'tool("library", op="update", asset_id="la_x")',
-        'tool("library", op="tagged", asset_id="la_x")',
-    ],
-)
-def test_a_near_miss_is_not_a_tags_op(code: str) -> None:
-    """Only the op itself counts, in either quote style and either position."""
-    assert backfill._is_tag_call({"name": "library", "arguments": {"code": code}}) is False
-
-
-def test_a_dict_form_tags_op_in_a_cell_still_moves_her_tag_row(isolated_root) -> None:
-    """End to end, through the real pass: the spelling the old literal missed."""
-    state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    journal(isolated_root, [tags_cell(her_tag_id(store))])
-
-    assert backfill.reattribute_organized(isolated_root) == 1
-    assert [row["source"] for row in store.asset_tags(T)] == ["librarian"]
-
-
-def test_a_word_ending_in_op_is_not_a_tags_op(isolated_root) -> None:
-    """``stop="tags"`` is not ``op="tags"``: no row moves on that alone.
-
-    A bare substring match calls this cell a tag write — the id is in it — and
-    re-sources a row on no evidence, which is the direction of error this pass
-    must not make.
-    """
-    state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    journal(
-        isolated_root,
-        [
-            {
-                "id": "toolu_stop",
-                "name": "eval",
-                "arguments": {
-                    "code": (
-                        f'upd=[("{T}","{NAME_T}")]\n'
-                        "for a,n in upd:\n"
-                        '    r=tool("library",op="update",asset_id=a,name=n)\n'
-                        'stop="tags"\n'
-                        f'print("{T}", "{her_tag_id(store)}")\n'
-                    )
-                },
-            }
-        ],
-    )
-    assert backfill.reattribute_organized(isolated_root) == 1
-    assert [row["source"] for row in store.asset_tags(T)] == ["agent"]
+    assert backfill.reattribute_organized(root) == 2
+    row = store.asset(A)
+    assert row is not None and row["organized_at"] == 200.0
 
 
 def test_a_row_an_agent_re_edited_afterwards_is_left_alone(attributed) -> None:
