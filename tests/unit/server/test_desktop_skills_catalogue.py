@@ -318,7 +318,10 @@ async def test_a_project_skill_shadows_a_home_skill_of_the_same_name(env) -> Non
 
     data = _data(await env.client.get("/v1/desktop/skills", params=params))
 
-    assert [row for row in data["skills"] if row["name"] == "collide"] == [
+    # Rows are a strict superset since ``skill_library:1`` (additive source/link
+    # fields; tests/unit/server/test_desktop_skills_library.py pins them), so
+    # this collision cell compares the historical two keys only.
+    assert _rows({"skills": [r for r in data["skills"] if r["name"] == "collide"]}) == [
         {"name": "collide", "description": "From project."}
     ]
     assert data["warning_count"] == 1
