@@ -37,6 +37,16 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from local_operator.notifications import items as inbox
 
+#: The slash commands this feature's copy names, and the two-token form one of
+#: them takes. They are declared to ``display_tr`` as technical ISLANDS, not
+#: merely isolated with the sentence: an Urdu sentence that carries a literal
+#: command renders ``/notifications`` as ``notifications/`` when only the whole
+#: string is wrapped (measured by the ur audit with GNU FriBidi), because the
+#: interior resolves as RTL prose around an LTR run. An island paints the token
+#: contiguously, in the order it was authored.
+SHELL_COMMANDS: tuple[str, ...] = ("/notifications", "/unread")
+SHELL_COMMAND_TEMPLATES: tuple[str, ...] = ("/unread read",)
+
 #: The routes' per-request token cap (``PATCH /v1/desktop/notifications``); the
 #: page writes in batches no larger, so one bulk gesture never depends on a
 #: limit only the HTTP layer enforces.

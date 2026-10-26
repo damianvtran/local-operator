@@ -2607,6 +2607,19 @@ Screen.settings #input-dock #prompt-chevron {
     padding: 0;
 }
 
+/* ...EXCEPT the combined receipt, which is PROSE (vi audit). `dismissed` +
+ * `asks_stay` + `stale_skipped` compose to 95 cells in English and 121 in
+ * Vietnamese against the 76-cell notice, and the rendered frame stopped
+ * mid-sentence. `auto` with a 2-row ceiling keeps the rule above for every
+ * short notice — the list still does not move — and lets the one sentence
+ * that cannot fit take its second line. No catalogue string is shortened for
+ * a width limit. Same specificity as the rule above, declared after it. */
+.notifications-view .notifications-view-notice {
+    height: auto;
+    max-height: 2;
+    padding: 0;
+}
+
 /* The settings skeleton's hint row is 2 tall with a 1-row top pad; here the
  * notice row above already separates it, and the 80x24 frame needs that row
  * for the list. One row, no pad (measured: the inherited pad clipped the

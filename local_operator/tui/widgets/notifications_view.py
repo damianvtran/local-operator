@@ -46,12 +46,18 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from local_operator.i18n import keys as i18n_keys
-from local_operator.i18n.text import tr
 from local_operator.paths import config_dir
 from local_operator.tui import notifications_model as model
 from local_operator.tui import notifications_render as render
+from local_operator.tui.i18n_status import display_tr
 
-_t = tr("tui.notifications")
+_t = display_tr(
+    "tui.notifications",
+    # The literal /commands ride as islands (see model.SHELL_COMMANDS):
+    # per-string isolation alone reorders them in Urdu.
+    technical_literals=model.SHELL_COMMANDS,
+    technical_commands=model.SHELL_COMMAND_TEMPLATES,
+)
 _k = i18n_keys.tui_notifications
 
 #: The split threshold (design §8.3). Below it the detail replaces the list.

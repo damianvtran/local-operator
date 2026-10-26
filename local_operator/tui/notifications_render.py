@@ -22,14 +22,20 @@ from rich.style import Style
 from rich.text import Text
 
 from local_operator.i18n import keys as i18n_keys
-from local_operator.i18n.text import tr
 from local_operator.notifications.items import first_question as inbox_first_question
 from local_operator.resume import format_age
 from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.widgets.tool_card import truncate_cells
 
-_t = tr("tui.notifications")
+_t = display_tr(
+    "tui.notifications",
+    # The literal /commands ride as islands (see model.SHELL_COMMANDS):
+    # per-string isolation alone reorders them in Urdu.
+    technical_literals=model.SHELL_COMMANDS,
+    technical_commands=model.SHELL_COMMAND_TEMPLATES,
+)
 _k = i18n_keys.tui_notifications
 
 #: Chrome, not copy: glyphs no locale translates (the schedule page's rule).
@@ -134,6 +140,16 @@ def _seen_clause(row: dict[str, Any]) -> str:
     return ""
 
 
+def _pad_cells(text: str, cells: int) -> str:
+    """Right-align ``text`` in ``cells`` terminal cells (never truncating).
+
+    The complement of ``truncate_cells``: a cell budget needs cell-aware
+    padding, because a wide character occupies two columns and a combining
+    mark none.
+    """
+    return " " * max(0, cells - cell_len(text)) + text
+
+
 def row_line(
     row: dict[str, Any],
     width: int,
@@ -161,7 +177,13 @@ def row_line(
     line.append(" ", style=ink("fg", ground=ground))
     # Right side first, so the title takes exactly what is left.
     source = truncate_cells(model.source_name(row), SOURCE_CELLS)
-    stamp = row_time(int(row.get("updated_at") or 0), now_ms).rjust(TIME_CELLS)
+    # CELL budgets, CELL padding (zh-CN audit, and reachable in English): both
+    # fields are sized in terminal cells, so `str.rjust` — which counts
+    # characters — overran the width it had just reserved for any non-ASCII
+    # stamp or conversation name. Measured at a 78-cell list in zh-CN: 80 cells
+    # for a just-now row with an ASCII title, 86 with a Chinese one; and 82 in
+    # ENGLISH with a Chinese title, because the source field was the other half.
+    stamp = _pad_cells(row_time(int(row.get("updated_at") or 0), now_ms), TIME_CELLS)
     chips: list[tuple[str, str]] = []
     if row.get("priority") == "high" and row.get("source") != "ask":
         chips.append((_t(_k.chip_high()), "warning"))
@@ -186,7 +208,9 @@ def row_line(
         line.append(" ", style=ink("fg", ground=ground))
         line.append(text, style=ink(token, ground=ground))
     line.append(" ", style=ink("fg", ground=ground))
-    line.append(source.rjust(SOURCE_CELLS), style=ink("fg" if cursor else "muted", ground=ground))
+    line.append(
+        _pad_cells(source, SOURCE_CELLS), style=ink("fg" if cursor else "muted", ground=ground)
+    )
     line.append(" ", style=ink("fg", ground=ground))
     line.append(stamp, style=ink("fg" if cursor else "muted", ground=ground))
     pad = width - cell_len(line.plain)
@@ -331,9 +355,17 @@ def detail_text(
     is_ask = item.get("source") == "ask"
     kind_word = _t(_k.ask_kind()) if is_ask else _t(_k.update_kind())
     priority = str(item.get("priority") or "normal")
-    right = []
+    right: list[str] = []
     if not is_ask:
-        right.append(BARS.get(priority, BARS["normal"]).rstrip() + " " + priority)
+        # BARS, and the LOCALIZED chip only for `high` — never the raw data
+        # token (vi audit). `… + " " + priority` printed the English `normal`
+        # inside every locale's header; the list row's own column is three
+        # cell-bars with no word (`_kind_cells`), so the header follows it, and
+        # the frozen namespace needs no key for the default level.
+        cells = BARS.get(priority, BARS["normal"]).rstrip()
+        if priority == "high":
+            cells = cells + " " + _t(_k.chip_high())
+        right.append(cells)
     right.append(kind_word)
     right.append(_t(_k.position(index=str(position[0]), total=str(position[1]))))
     top = Text(no_wrap=True, overflow="crop")

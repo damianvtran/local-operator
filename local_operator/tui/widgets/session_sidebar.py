@@ -34,9 +34,11 @@ from local_operator.resume import (
     peer_reason_words,
 )
 from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
+from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.composer_focus import composer_may_take_focus, focus_is_claimed
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
 from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.ask_queue import ASK_MARKER
@@ -49,7 +51,13 @@ from local_operator.tui.widgets.session_picker import (
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 _t = tr("tui.small")
-_inbox_t = tr("tui.notifications")
+_inbox_t = display_tr(
+    "tui.notifications",
+    # The literal /commands ride as islands (see model.SHELL_COMMANDS):
+    # per-string isolation alone reorders them in Urdu.
+    technical_literals=model.SHELL_COMMANDS,
+    technical_commands=model.SHELL_COMMAND_TEMPLATES,
+)
 _t_tags = tr("tui.tags")
 
 if TYPE_CHECKING:
