@@ -430,14 +430,25 @@ def _shape_from_content(
             footer = _spill_footer(meta, span) if meta is not None else ""
             preview = f"{header}\n\n{notice}\n{fallback_body}{footer}"
             if len(preview) > TOOL_OUTPUT_LIMIT_CHARS:
-                # M3: when the framing ALONE exceeds the cap (e.g. a 7,900-char
-                # URL in the header), slicing would cut the spill footer off
-                # and the model loses the handle it needs to expand the page.
-                # Degrade to the no-query shape, which keeps the handle, and
-                # state why; only slice when even that leaves no footer.
-                preview = f"{header}\n\n{body}"
-                if len(preview) > TOOL_OUTPUT_LIMIT_CHARS and "spill://" in preview:
-                    # Keep the header + footer (the handle) over the body.
+                # The notice is framing the no-query shape does not have, and
+                # the header can itself be enormous (a multi-kilobyte URL),
+                # which no framing can fix. Try in order of preference: the
+                # notice + re-elided body, notice + the page's own head/tail
+                # body, then the head/tail body alone. All three carry the
+                # spill footer, i.e. the handle; only if none fits (the header
+                # alone is already over the cap) is a content slice used, and
+                # that slice still ends with the footer. A preview without the
+                # handle cannot be expanded at all, which is worse than
+                # exceeding the cap by the length of the header.
+                candidates = (
+                    f"{header}\n\n{notice}\n{body}",
+                    f"{header}\n\n{body}",
+                )
+                preview = next(
+                    (text for text in candidates if len(text) <= TOOL_OUTPUT_LIMIT_CHARS),
+                    "",
+                )
+                if not preview:
                     footer_text = _spill_footer(meta) if meta is not None else ""
                     keep = TOOL_OUTPUT_LIMIT_CHARS - len(header) - 2 - len(footer_text)
                     preview = f"{header}\n\n{content[: max(0, keep)]}{footer_text}"

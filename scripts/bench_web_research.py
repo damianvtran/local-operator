@@ -152,10 +152,13 @@ TASKS: tuple[Task, ...] = (
         # default. Forgive it only in a raise/max/up-to/at-most/upper-bound
         # phrase; "the default is 32767" is not scrubbed and still fails.
         allowed_context=(
-            r"(?:max(?:imum)?|raise[sd]?|raising|up to|at most|increas\w*|"
-            r"upper (?:bound|limit)|compile[- ]time (?:max(?:imum)?|limit)|larger than)"
+            # \b on every keyword: without it "max" matched the MAX inside
+            # SQLITE_MAX_COLUMN and the phrase swallowed "_COLUMN is 32767",
+            # scrubbing a wrong answer's own value (round-3 R4).
+            r"\b(?:max(?:imum)?|raise[sd]?|raising|up to|at most|increas\w*|"
+            r"upper (?:bound|limit)|compile[- ]time (?:max(?:imum)?|limit)|larger than)\b"
             r"[^.\n]{0,60}?32,?767",
-            r"32,?767[^.\n]{0,30}?(?:max(?:imum)?|at most|upper (?:bound|limit))",
+            r"32,?767[^.\n]{0,30}?\b(?:max(?:imum)?|at most|upper (?:bound|limit))\b",
         ),
     ),
     Task(
@@ -194,13 +197,14 @@ TASKS: tuple[Task, ...] = (
         # 79 only where it is attached to code (either order, incl. table rows
         # and parentheticals), never as the docstring/comment answer itself.
         allowed_context=(
-            r"(?:code|program|source)[^\n]{0,40}?\b79\b",
-            r"\b79\b[^\n]{0,40}?(?:code|program|source)",
+            # \b again: "code" matched inside unicode/encode/decode.
+            r"\b(?:code|program|source)\b[^\n]{0,40}?\b79\b",
+            r"\b79\b[^\n]{0,40}?\b(?:code|program|source)\b",
             # The document's own words for the general line limit, which a
             # correct answer quotes alongside the 72 docstring limit: "Limit
             # all lines to a maximum of 79 characters", "other lines … 79".
-            r"(?:all lines|other lines|every line|lines in general)[^\n]{0,50}?\b79\b",
-            r"\b79\b[^\n]{0,30}?(?:for all lines|for other lines|all lines)",
+            r"\b(?:all lines|other lines|every line|lines in general)\b[^\n]{0,50}?\b79\b",
+            r"\b79\b[^\n]{0,30}?\b(?:for all lines|for other lines|all lines)\b",
         ),
     ),
     Task(
@@ -250,6 +254,12 @@ TASKS: tuple[Task, ...] = (
         "https://www.rfc-editor.org/rfc/rfc9110.html",
         expected=("443",),
         distractors=("444", "80", "8443", "4433"),
+        # 80 is HTTP's port, legitimately mentioned beside 443. Declared so a
+        # correct answer is not rejected for naming it (round-3 M5).
+        allowed_context=(
+            r"\bHTTP\b[^.\n]{0,30}?\b80\b",
+            r"\b80\b[^.\n]{0,30}?\bHTTP\b",
+        ),
     ),
 )
 
@@ -291,7 +301,11 @@ class RunRecord:
 #: sentence-initial "Not"/"Never"/"No" negates just as much as a lower-case one
 #: (round-2 R3: the case-sensitive pattern let "Not 100" through).
 _NEGATION_RE = re.compile(
-    r"(?:\bnot\b|\bnever\b|\bno\b|\bisn't\b|\bwasn't\b|\bdon't\b"
+    # ``no`` NOT followed by punctuation: "no 100 default" negates the value,
+    # while "No, the default is 100." is an interjection (round-3 M5).
+    r"(?:\bnot\b|\bnever\b|\bno\b(?!\s*[,;:.!?])"
+    r"|\bisn't\b|\bwasn't\b|\baren't\b|\bweren't\b"
+    r"|\bdon't\b|\bdoesn't\b|\bdidn't\b"
     r"|\binstead of\b|\brather than\b)",
     re.IGNORECASE,
 )
@@ -306,7 +320,10 @@ def _literal_pattern(value: str) -> re.Pattern[str]:
     "100,000" or "100.5" (M2: the digit-only lookahead allowed the last two).
     """
     if any(ch.isdigit() for ch in value):
-        return re.compile(rf"(?<![\d.,]){re.escape(value)}(?![\d]|[.,]\d)", re.IGNORECASE)
+        # N2: also reject a unit suffix ("100k"), which is not the plain value.
+        return re.compile(
+            rf"(?<![\d.,]){re.escape(value)}(?![\d]|[.,]\d|[kKmMgG]\b)", re.IGNORECASE
+        )
     return re.compile(rf"\b{re.escape(value)}\b", re.IGNORECASE)
 
 
@@ -334,17 +351,41 @@ def _is_negated(text: str, match: re.Match[str]) -> bool:
     # "Guido van Rossum is not only Python's creator but also …" is a correct
     # answer, and scanning the raw window would negate his name (round-2 N1).
     before = re.sub(r"not (?:only|just)|no doubt", "", before, flags=re.IGNORECASE)
+    # An admonition is not a negation either: "Don't change it: 100 is the
+    # default." states the answer (round-3 M5). Narrow on purpose — dropping
+    # don't/doesn't/didn't wholesale would accept "doesn't equal 100".
+    before = re.sub(
+        r"\b(?:don't|do not)\s+(?:change|touch|move|worry|forget)\b",
+        "",
+        before,
+        flags=re.IGNORECASE,
+    )
     return bool(_NEGATION_RE.search(before)) or bool(_FORWARD_NEGATION_RE.match(after))
 
 
 def _scrub_allowed_context(task: Task, answer: str) -> str:
-    """Blank out task-declared adjacent-context phrases (same length, so match
-    offsets elsewhere are unaffected). Everything NOT scrubbed is still scanned
-    for distractors, so an undeclared wrong value fails wherever it appears.
+    """Blank the DISTRACTOR LITERALS that sit inside a declared context phrase.
+
+    Only the wrong value is blanked, never the whole phrase: blanking the span
+    would erase an expected value inside it too ("SQLITE_MAX_COLUMN defaults to
+    2000 and can be raised to 32767" lost its 2000), and a wrong value stated AS
+    the answer must stay visible so the run fails (round-3 R4).
+
+    Offsets are preserved (the replacement is spaces of the same length), so
+    every later match keeps its position in the original answer.
     """
+    chars: list[str] | None = None
     for pattern in task.allowed_context:
-        answer = re.sub(pattern, lambda m: " " * len(m.group(0)), answer, flags=re.IGNORECASE)
-    return answer
+        for context in re.finditer(pattern, answer, re.IGNORECASE):
+            phrase = context.group(0)
+            for wrong in task.distractors:
+                for match in _literal_pattern(wrong).finditer(phrase):
+                    if chars is None:
+                        chars = list(answer)
+                    begin = context.start() + match.start()
+                    for index in range(begin, begin + (match.end() - match.start())):
+                        chars[index] = " "
+    return "".join(chars) if chars is not None else answer
 
 
 def validate_answer(task: Task, answer: str) -> bool:

@@ -106,6 +106,41 @@ CASES: list[tuple[str, str, bool]] = [
     ("pep8-docstring-length", "The docstring limit is 79, not 72.", False),
     # N1: additive idiom is not a negation
     ("python-creator", "Guido van Rossum is not only Python's creator but also its BDFL.", True),
+    # R4: the SQLite identifier must not trigger the context scrub. Each of
+    # these states 32767 AS THE DEFAULT and is wrong, identifier or not.
+    ("sqlite-max-column", "The default SQLITE_MAX_COLUMN is 32767. Older builds used 2000.", False),
+    ("sqlite-max-column", "SQLITE_MAX_COLUMN defaults to 32767 (2000 in older versions).", False),
+    (
+        "sqlite-max-column",
+        "The default value of SQLITE_MAX_COLUMN is 32767; you can lower it to 2000 "
+        "at compile time.",
+        False,
+    ),
+    (
+        "sqlite-max-column",
+        "SQLite's default `SQLITE_MAX_COLUMN` is **32767**, according to "
+        "https://www.sqlite.org/limits.html.\n- Many applications keep it near 2000.",
+        False,
+    ),
+    ("sqlite-max-column", "The default is 32767. Older builds used 2000.", False),
+    # R4: and the scrub must not erase the EXPECTED value inside its own phrase.
+    ("sqlite-max-column", "SQLITE_MAX_COLUMN defaults to 2000 and can be raised to 32767.", True),
+    ("sqlite-max-column", "SQLITE_MAX_COLUMN is 2000 by default; at most 32767.", True),
+    # R4: "code" inside unicode/encode/decode must not declare the 79 context.
+    (
+        "pep8-docstring-length",
+        "Docstrings are limited to 79 characters; unicode text may need 72.",
+        False,
+    ),
+    # M5: an interjection "No," does not negate the value that follows.
+    ("pg-max-connections", "No, the default is 100.", True),
+    # M5: HTTP's port 80 beside HTTPS's 443 is declared context.
+    ("https-default-port", "HTTPS defaults to port 443 (HTTP uses 80).", True),
+    # N2: a unit suffix is not the plain value.
+    ("pg-max-connections", "The default is 100k.", False),
+    # M5: an admonition is not a negation; a real "doesn't equal" still fails.
+    ("pg-max-connections", "Don't change it: 100 is the default.", True),
+    ("pg-max-connections", "The default doesn't equal 100.", False),
 ]
 
 
