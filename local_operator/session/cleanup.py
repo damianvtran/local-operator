@@ -2678,29 +2678,43 @@ def measure_session_dir(
 
 
 def bounded_dir_scan(
-    directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES
-) -> tuple[int, int, int]:
-    """``(bytes, entries, newest_mtime_ns)`` under ``directory``, at most ``max_entries``.
+    directory: Path,
+    max_entries: int = CONTENTS_MAX_ENTRIES,
+    *,
+    recency_max_entries: int | None = None,
+    fresh_since_ns: int | None = None,
+) -> tuple[int, int, int, bool]:
+    """``(bytes, entries, newest_mtime_ns, truncated)`` under ``directory``.
 
-    Bytes and entries are LOWER BOUNDS once capped. One walk serves the size
-    estimate a notice records, the entry count a cleanup-log row carries, and
-    the newest mtime a caller may use as a safety signal, so the three can never
-    disagree about what was measured. Deliberately not :func:`_dir_bytes` (an
-    unbounded ``rglob`` that also follows into ``node_modules``): this runs per
-    removed item, so its cost is bounded.
+    BYTES AND ENTRIES ARE BOUNDED AT ``max_entries`` and are LOWER BOUNDS once
+    capped. One walk serves the size estimate a notice records, the entry count
+    a cleanup-log row carries, and the newest mtime a caller may use as a safety
+    signal, so the three can never disagree about what was measured.
+    Deliberately not :func:`_dir_bytes` (an unbounded ``rglob`` that also
+    follows into ``node_modules``): this runs per removed item.
 
-    THE MTIME IS THE REASON THIS RETURNS THREE VALUES: a caller about to delete a
+    THE MTIME IS THE REASON THIS RETURNS FOUR VALUES. A caller about to delete a
     directory it takes whole (the content layer's shape arm) has no other cheap
-    sight of a file written inside it, and a second walk for that question would
-    double the per-directory cost. Every enumerated entry is statted, including
-    directories, whose own mtime changes when a file is added or removed beside
-    it. Both figures stop at ``max_entries``, so past the cap nothing beyond it is
-    observed — the same bound the byte figure already has.
+    sight of a file written inside it. Its two questions have different costs
+    and different stakes, so they carry different bounds: ``regency`` —
+    ``recency_max_entries`` (default ``max_entries``) — may look further than
+    the byte figure, because a size is only ever quoted in a notice while a
+    recency answer decides whether work is destroyed. Every enumerated entry is
+    statted, directories included: their own mtime changes when a file is added
+    or removed beside them.
+
+    ``truncated`` IS A FAIL-CLOSED SIGNAL: true means the walk stopped at the
+    recency bound without finishing, so "no recent entry" is NOT established and
+    the caller must keep what it was about to delete. ``fresh_since_ns`` lets a
+    caller stop the moment a recent entry is seen (nothing later can make the
+    subtree safer), which truncates the byte figure — safe only because that
+    caller then keeps the whole item; ignore ``bytes`` in that case.
 
     Shared with ``delegated_retention`` — it lives HERE because the receipt
     writer needs the same walk and cannot import that module, not the other way
     round.
     """
+    recency_cap = max_entries if recency_max_entries is None else recency_max_entries
     total = 0
     seen = 0
     newest = 0
@@ -2710,21 +2724,28 @@ def bounded_dir_scan(
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
+                    if seen >= recency_cap:
+                        return total, min(seen, max_entries), newest, True
                     seen += 1
-                    if seen > max_entries:
-                        return total, max_entries, newest
                     try:
                         info = entry.stat(follow_symlinks=False)
-                        newest = max(newest, info.st_mtime_ns)
+                    except OSError:
+                        continue
+                    newest = max(newest, info.st_mtime_ns)
+                    if fresh_since_ns is not None and info.st_mtime_ns >= fresh_since_ns:
+                        # Recent activity found: the caller keeps the whole item,
+                        # so its byte figure is never shown and the walk can stop.
+                        return total, min(seen, max_entries), newest, False
+                    try:
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
+                        elif entry.is_file(follow_symlinks=False) and seen <= max_entries:
                             total += info.st_size
                     except OSError:
                         continue
         except OSError:
             continue
-    return total, seen, newest
+    return total, seen, newest, False
 
 
 def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> tuple[int, int]:
@@ -2733,7 +2754,7 @@ def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES)
     Kept as the name every existing caller uses, so adding the mtime observation
     could not silently change their shape.
     """
-    total, seen, _newest = bounded_dir_scan(directory, max_entries)
+    total, seen, _newest, _truncated = bounded_dir_scan(directory, max_entries)
     return total, seen
 
 

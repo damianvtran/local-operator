@@ -100,8 +100,11 @@ def _idle_pads(root: Path) -> None:
     for pad in sorted((root / "sessions").glob("*/scratchpad")):
         for path in sorted(pad.rglob("*"), reverse=True):
             try:
-                if not path.is_symlink():
-                    os.utime(path, (stamp, stamp), follow_symlinks=False)
+                # SYMLINKS INCLUDED (review round 5, R5-4): skipping them left a
+                # fixture's links stamped "now", so a test about the link guard
+                # passed because the recency floor kept the pad first. Their own
+                # mtime is set, never the target's.
+                os.utime(path, (stamp, stamp), follow_symlinks=False)
             except OSError:
                 continue
         try:
@@ -1549,6 +1552,12 @@ def test_a_symlink_entry_is_skipped_not_followed(root: Path) -> None:
     _stale_file(outside / "big.log")
     os.symlink(os.fspath(outside), os.fspath(pad / "node_modules"))
     os.symlink(os.fspath(outside / "big.log"), os.fspath(pad / "copy.log"))
+    # The DRY RUN is the discriminating surface (review round 5, R5-4): a real
+    # run also refuses a symlink at the removal layer, so "nothing was removed"
+    # alone would pass even if the planner had classified the link as a shape
+    # directory. The plan itself must name nothing.
+    dry = _pass(root, dry_run=True)
+    assert dry.content == []
     result = _pass(root)
     assert result.content == []
     assert (outside / "big.log").exists()
@@ -2796,10 +2805,13 @@ def test_an_unreadable_store_raises_instead_of_reporting_empty(root: Path) -> No
         _report(not_a_store)
 
 
-def test_an_unreadable_file_refuses_the_candidate_without_aborting_the_pad(
-    root: Path,
-) -> None:
-    """Measured: a mode-000 fixture inside a real candidate must not raise."""
+def test_an_unreadable_file_aborts_the_whole_pad(root: Path) -> None:
+    """R5-1: a mode-000 fixture inside a real candidate keeps the ENTIRE pad.
+
+    Measured before this change: the candidate was kept, an earlier sibling's
+    removal still ran, and 8,192 bytes of the pad went. "Could not look" is keep,
+    for the pad — the same answer the pad's own walk gives for its own entries.
+    """
     source = _published_source(root)
     # The reference must hold the SAME path, or the proof would never open the
     # file (a path no tree has is unmatched without a read) and the test would
@@ -2811,18 +2823,21 @@ def test_an_unreadable_file_refuses_the_candidate_without_aborting_the_pad(
     private = copy / "sub" / "private.txt"
     private.write_text("secret\n")
     os.chmod(private, 0o000)
-    other = _stale_file(pad / "big.log")  # the pad's other arms must still run
+    # The pad's other arm planned a removal first (``big.log`` sorts before the
+    # copy and is stale enough to take): the abort must withdraw it too.
+    other = _stale_file(pad / "big.log")
 
     try:
+        dry = _pass(root, dry_run=True, policy=_copy_provider(source))
         result = _pass(root, policy=_copy_provider(source))
     finally:
         os.chmod(private, 0o600)
 
+    assert dry.content == []
     assert (copy / "payload").exists(), "the whole candidate is kept"
+    assert other.exists(), "the earlier shape/stale removal is withdrawn"
     reasons = [reason for name, reason in result.content_kept if name == "private"]
-    assert any("cannot read" in reason for reason in reasons), reasons
-    assert not other.exists(), "the stale-output arm on the rest of the pad still ran"
-    assert result.errors == 0
+    assert any("could not be looked at completely" in reason for reason in reasons), reasons
 
 
 def test_a_report_lists_both_provable_and_withheld_copies(root: Path) -> None:
@@ -3432,6 +3447,149 @@ def test_a_recent_entry_mtime_inside_a_shape_keeps_the_pad(root: Path) -> None:
     assert (pad / "build" / "old.bin").exists()
     assert result.content == []
     assert ("recent-shape", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
+
+
+def test_an_unreadable_entry_inside_a_copy_aborts_the_whole_pad(root: Path) -> None:
+    """R5-1: an unreadable file in ONE candidate must not spare its sibling.
+
+    ``build/`` sorts before ``copy/``, so the shape removal is planned first;
+    the copy proof then hits a file it cannot read. Keeping only that candidate
+    left ``build/`` scheduled and the real run deleted it (QA measured 8,192
+    bytes gone). "Could not look" is keep, for the PAD.
+    """
+    moment = time.time() + 60
+    source = _published_source(root)
+    pad = _kept_pad(root, "halfread")
+    _age(root / "sessions" / "halfread" / "transcript.jsonl", moment - 60 * HOUR)
+    shape = pad / "build"
+    shape.mkdir()
+    _stale_file(shape / "old.bin")
+    copy = _copy_tree(source, pad / "copy")
+    unreadable = copy / "payload"
+    os.chmod(unreadable, 0o000)
+    for path in [shape, *shape.glob("*"), *pad.rglob("*")]:
+        _age(path, moment - 72 * 3600)
+    _age(pad, moment - 72 * 3600)
+    try:
+        dry = _pass(root, idle=False, now=moment, dry_run=True, policy=_copy_provider(source))
+        assert dry.content == []
+        assert any("could not be looked at completely" in reason for _, reason in dry.content_kept)
+        result = _pass(root, idle=False, now=moment, policy=_copy_provider(source))
+        assert (shape / "old.bin").exists()
+        assert result.content == []
+        assert any(
+            "could not be looked at completely" in reason for _, reason in result.content_kept
+        )
+    finally:
+        os.chmod(unreadable, 0o644)
+
+
+def test_the_report_and_the_planner_agree_when_only_the_pad_root_is_recent(
+    root: Path,
+) -> None:
+    """R5-2: the workspace root's own mtime keeps the pad on BOTH surfaces."""
+    moment = time.time() + 60
+    source = _published_source(root)
+    pad = _kept_pad(root, "rootonly")
+    _age(root / "sessions" / "rootonly" / "transcript.jsonl", moment - 60 * HOUR)
+    copy = _copy_tree(source, pad / "copy")
+    for path in sorted(pad.rglob("*"), reverse=True):
+        _age(path, moment - 72 * HOUR)
+    # ONLY the pad root is recent: a rename in place updates it without touching
+    # any child's own mtime.
+    _age(pad, moment - 60)
+
+    # ``idle=False``: this store's freshness IS the pad root, and the fixture
+    # normalisation would backdate exactly the thing under test.
+    report = _report(root / "sessions", idle=False, references=(os.fspath(source),), now=moment)
+    row = next(row for row in report.candidates if row.session == "rootonly")
+    assert not row.would_reclaim
+    assert row.reason == dr.CONTENT_PAD_RECENT_REASON
+    assert copy.exists()
+    result = _pass(root, idle=False, now=moment, policy=_copy_provider(source))
+    assert result.content == []
+    assert ("rootonly", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
+
+
+def test_a_fresh_file_past_the_byte_cap_inside_a_shape_keeps_the_pad(root: Path) -> None:
+    """R5-3a: the recency look is wider than the 2,000-entry SIZING cap.
+
+    QA's repro: a shape directory with 2,500 entries, the fresh one beyond the
+    sizing bound, deleted with no warning anywhere.
+    """
+    moment = time.time() + 60
+    pad = _kept_pad(root, "deepshape")
+    _age(root / "sessions" / "deepshape" / "transcript.jsonl", moment - 60 * HOUR)
+    shape = pad / "build"
+    shape.mkdir()
+    for index in range(2_500):
+        (shape / f"chunk-{index:05d}.txt").write_text("")
+    for path in sorted(pad.rglob("*"), reverse=True):
+        _age(path, moment - 72 * HOUR)
+    _age(pad, moment - 72 * HOUR)
+    # THE FRESH ENTRY MUST BE BEYOND THE 2,000-ENTRY CAP IN THE ORDER THE WALK
+    # ACTUALLY SEES. Directory order is not sorted, so a named "last" file can
+    # land inside the first 2,000 and make the repro pass by luck: take the
+    # LAST entry of a live scandir instead — with 2,500 entries it cannot be
+    # among the first 2,000 whatever the order is.
+    with os.scandir(shape) as entries:
+        beyond_cap = Path(entries.__iter__().__next__().path)
+        for entry in entries:
+            beyond_cap = Path(entry.path)
+    assert len(list(shape.iterdir())) == 2_500
+    _age(beyond_cap, moment - 60)
+
+    dry = _pass(root, idle=False, now=moment, dry_run=True)
+    assert dry.content == []
+    assert ("deepshape", dr.CONTENT_PAD_RECENT_REASON) in dry.content_kept
+
+
+def test_a_shape_directory_too_large_to_prove_idle_keeps_the_pad(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-3b: past the recency bound the pass fails CLOSED, and says why."""
+    # ``raising=False`` keeps this test meaningful on a head that predates the
+    # constant: there it is simply unused, which is the defect under test.
+    monkeypatch.setattr(dr, "CONTENT_RECENCY_MAX_ENTRIES", 8, raising=False)
+    moment = time.time() + 60
+    pad = _kept_pad(root, "hugeshape")
+    _age(root / "sessions" / "hugeshape" / "transcript.jsonl", moment - 60 * HOUR)
+    shape = pad / "build"
+    shape.mkdir()
+    for index in range(40):
+        (shape / f"part-{index:02d}.txt").write_text("")
+    for path in sorted(pad.rglob("*"), reverse=True):
+        _age(path, moment - 72 * HOUR)
+    _age(pad, moment - 72 * HOUR)
+
+    dry = _pass(root, idle=False, now=moment, dry_run=True)
+    assert dry.content == []
+    reasons = dict(dry.content_kept)
+    assert "too large to prove idle" in reasons["hugeshape"]
+    assert str(dr.CONTENT_RECENCY_MAX_ENTRIES) in reasons["hugeshape"]
+    result = _pass(root, idle=False, now=moment)
+    assert (shape / "part-00.txt").exists()
+    assert "too large to prove idle" in dict(result.content_kept)["hugeshape"]
+
+
+def test_a_small_idle_shape_still_reclaims_with_the_same_byte_figure(root: Path) -> None:
+    """R5-3c: the guard is not a disable switch, and the figure is unchanged."""
+    moment = time.time() + 60
+    pad = _kept_pad(root, "smallshape")
+    _age(root / "sessions" / "smallshape" / "transcript.jsonl", moment - 60 * HOUR)
+    shape = pad / "build"
+    shape.mkdir()
+    for index in range(10):
+        (shape / f"part-{index}.txt").write_bytes(b"x" * 1024)
+    for path in sorted(pad.rglob("*"), reverse=True):
+        _age(path, moment - 72 * HOUR)
+    _age(pad, moment - 72 * HOUR)
+
+    result = _pass(root, idle=False, now=moment)
+    assert not shape.exists()
+    assert [(row.session, row.bytes, row.entries) for row in result.content] == [
+        ("smallshape", 10 * 1024, 10)
+    ]
 
 
 def test_a_fresh_file_nested_inside_a_shape_keeps_the_whole_pad(root: Path) -> None:

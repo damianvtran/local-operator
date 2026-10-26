@@ -478,6 +478,17 @@ STALE_OUTPUT_GRACE_S = 12 * 3600.0
 CONTENT_PAD_GRACE_S = 12 * 3600.0
 CONTENT_PAD_RECENT_REASON = "pad edited within 12h"
 
+#: How far the RECENCY walk may look inside an item taken whole, independently of
+#: the 2,000-entry figure the byte estimate is quoted under (``SIZE_MAX_ENTRIES``).
+#: The two questions are different: a notice can carry a lower-bound size, but a
+#: deletion decision must not be taken on a partial look. 50,000 is the
+#: scratchpad audit's order of magnitude for a pad worth reclaiming at all
+#: (``audit_scratchpads`` walks up to 50,000 entries per pad), so an ordinary
+#: ``node_modules`` is covered end to end. PAST IT THE PASS FAILS CLOSED: a shape
+#: or tree too large to prove idle keeps the pad with a named reason rather than
+#: deleting content it could not inspect.
+CONTENT_RECENCY_MAX_ENTRIES = 50_000
+
 #: WHAT THE FLOOR SEES INSIDE A SHAPE DIRECTORY: the content layer takes a
 #: shape (``node_modules``, ``build``, ``target``, …) whole on NAME, so the
 #: newest mtime comes from the same bounded walk that produces its byte figure
@@ -493,6 +504,16 @@ CONTENT_PAD_RECENT_REASON = "pad edited within 12h"
 #:
 #: Everything else the incident turned on still stands — live claim, lease,
 #: armed wake/monitor, holds, pins, origin and the session's own activity clock.
+
+
+def _fresh_since_ns(now: float) -> int:
+    """The mtime at or above which an entry counts as recent (inclusive).
+
+    Passed into the scan so it can abandon a subtree the moment it finds such an
+    entry: nothing later in the walk can make that subtree safer, and the pad is
+    kept anyway.
+    """
+    return int((now - CONTENT_PAD_GRACE_S) * 1_000_000_000)
 
 
 def _pad_recent(now: float, newest_mtime_ns: int) -> bool:
@@ -1055,14 +1076,26 @@ def _bounded_dir_stats(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> 
     return cleanup_module._bounded_dir_stats(directory, max_entries)
 
 
-def _bounded_dir_scan(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> tuple[int, int, int]:
-    """``(bytes, entries, newest_mtime_ns)``; the pass's 2,000-entry default.
+def _bounded_dir_scan(
+    directory: Path,
+    max_entries: int = SIZE_MAX_ENTRIES,
+    *,
+    recency_max_entries: int | None = None,
+    fresh_since_ns: int | None = None,
+) -> tuple[int, int, int, bool]:
+    """``(bytes, entries, newest_mtime_ns, truncated)``; the pass's own caps.
 
     See :func:`cleanup.bounded_dir_scan`. The DEFAULT stays here for the same
     reason :func:`_bounded_dir_stats` keeps it: this pass plans every pad, so
-    ``SIZE_MAX_ENTRIES`` is its measured cost bound.
+    ``SIZE_MAX_ENTRIES`` is its measured cost bound. ``recency_max_entries``
+    lets a caller look further for recent activity than it counts bytes.
     """
-    return cleanup_module.bounded_dir_scan(directory, max_entries)
+    return cleanup_module.bounded_dir_scan(
+        directory,
+        max_entries,
+        recency_max_entries=recency_max_entries,
+        fresh_since_ns=fresh_since_ns,
+    )
 
 
 def bounded_dir_bytes(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> int:
@@ -1615,20 +1648,26 @@ class _PadPlan:
     #: Newest mtime observed in this pad, including entries the arms take whole.
     newest_mtime_ns: int = 0
 
-    def keep_for_recent_edit(self, now: float) -> bool:
-        """Discard every planned removal when the pad was edited recently.
+    def keep_whole(self, reason: str) -> None:
+        """Refuse the whole pad and name the one reason the operator needs.
 
-        The whole pad is refused as one unit: taking a stale sibling while a
-        nested write survives would still destroy active work. Copy counters
-        are cleared too, so the pad cannot be counted as reclaimed.
+        The floor is a WHOLE-PAD decision in both directions: taking a stale
+        sibling while a nested write survives would still destroy active work,
+        and so would taking it while part of the pad could not be inspected.
+        Discarding rows that were already planned is the point of this method,
+        so a caller must reach it BEFORE the plan is executed.
         """
-        if not _pad_recent(now, self.newest_mtime_ns):
-            return False
         self.removals.clear()
-        self.kept[:] = [CONTENT_PAD_RECENT_REASON]
+        self.kept[:] = [reason]
         self.copy_candidates = 0
         self.copy_candidate_bytes = 0
         self.copy_deferred = 0
+
+    def keep_for_recent_edit(self, now: float) -> bool:
+        """Discard every planned removal when the pad was edited recently."""
+        if not _pad_recent(now, self.newest_mtime_ns):
+            return False
+        self.keep_whole(CONTENT_PAD_RECENT_REASON)
         return True
 
     def classes(self) -> tuple[str, ...]:
@@ -1831,9 +1870,23 @@ def _plan_pad_content(
                             # the pad floor BEFORE planning: a fresh entry here
                             # keeps the pad whole instead of being discovered
                             # after the removal row already exists.
-                            measured, counted, newest = _bounded_dir_scan(Path(entry.path))
+                            measured, counted, newest, truncated = _bounded_dir_scan(
+                                Path(entry.path),
+                                recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
+                                fresh_since_ns=_fresh_since_ns(now),
+                            )
                             plan.newest_mtime_ns = max(plan.newest_mtime_ns, newest)
                             if plan.keep_for_recent_edit(now):
+                                return plan
+                            if truncated:
+                                # FAIL CLOSED: the walk stopped at the recency
+                                # bound without finding a recent entry, so this
+                                # subtree was NOT proved idle. Deleting it on a
+                                # partial look is the incident with a larger cap.
+                                plan.keep_whole(
+                                    f"{relative}: shape directory too large to prove idle "
+                                    f"(more than {CONTENT_RECENCY_MAX_ENTRIES} entries)"
+                                )
                                 return plan
                             plan.removals.append(
                                 _PlannedRemoval(
@@ -1921,9 +1974,21 @@ def _plan_tree(path: str, root: str, plan: _PadPlan, *, now: float) -> bool:
     if not decision.reclaim:
         plan.kept.append(f"{relative}: {decision.keep}")
         return False
-    measured, counted, newest = _bounded_dir_scan(Path(path))
+    measured, counted, newest, truncated = _bounded_dir_scan(
+        Path(path),
+        recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
+        fresh_since_ns=_fresh_since_ns(now),
+    )
     plan.newest_mtime_ns = max(plan.newest_mtime_ns, newest)
     if plan.keep_for_recent_edit(now):
+        return True
+    if truncated:
+        # Same fail-closed rule as the shape arm: an unproven-idle worktree this
+        # pass would ``worktree-remove`` is not a safe removal.
+        plan.keep_whole(
+            f"{relative}: tree too large to prove idle "
+            f"(more than {CONTENT_RECENCY_MAX_ENTRIES} entries)"
+        )
         return True
     bundle_path: Path | None = None
     if decision.bundle_refs:
@@ -2561,9 +2626,19 @@ def _plan_copy(path: str, pad: Path, plan: _PadPlan, arm: _CopyArm, *, counted: 
     # past (the candidate is retried next pass).
     proof = _prove_copy(candidate, trees=arm.trees(pad), cache=arm.hash_cache, budget=arm.budget)
     # The proof's file walk is the only inspection inside a copy candidate:
-    # retain its newest mtime for the pad-wide floor. A refused/unreadable or
-    # capped proof is already a keep, never a removal proof.
+    # retain its newest mtime for the pad-wide floor.
     plan.newest_mtime_ns = max(plan.newest_mtime_ns, proof.newest_mtime_ns)
+    if proof.unreadable:
+        # FAIL CLOSED AT THE PAD, NOT AT THIS CANDIDATE (review round 5, R5-1).
+        # Keeping only the candidate leaves any EARLIER sibling's removal in the
+        # plan — a `build/` found before this one stays scheduled — so the real
+        # run deletes part of a pad the pass could not look at completely. The
+        # pad's own walk aborts for its unreadable entries; the copy arm must
+        # answer the same question the same way.
+        raise _PadAbort(
+            f"scratchpad could not be looked at completely: "
+            f"{os.path.relpath(candidate, os.fspath(pad))} cannot be read"
+        )
     arm.spend(proof.hashed_bytes)
     if proof.below_floor:
         return _COPY_BELOW
@@ -2805,7 +2880,16 @@ def scan_non_git_copies(
                 qualified = True
         trees = tuple(trees)
         cache = _HashCache()
-        pad_newest_mtime_ns = 0
+        # THE PAD ROOT COUNTS TOO (review round 5, R5-2): the planner observes
+        # it before its walk, so a pad whose only recent mtime is the root (a
+        # file renamed in place updates it without touching the file's own
+        # mtime) is kept there. A report that skipped this stat advertised a
+        # would-reclaim the pass refuses — two surfaces disagreeing about the
+        # same store.
+        try:
+            pad_newest_mtime_ns = pad.stat(follow_symlinks=False).st_mtime_ns
+        except OSError:
+            pad_newest_mtime_ns = 0
         pad_rows: list[NonGitCopyCandidate] = []
         stack: list[tuple[str, int, bool, bool]] = [(os.fspath(pad), 0, False, True)]
         while stack:
