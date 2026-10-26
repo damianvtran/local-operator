@@ -52,10 +52,8 @@ HEALTH_RETRY_BACKOFF_S = 0.05
 #: cannot change.
 HEALTH_MAX_ATTEMPTS = 2
 
-#: Sampling period of the loop-lag canary and the lateness (ms) from which a
-#: failed probe is attributed to the CHECKER's event loop rather than the host.
+#: Sampling period of the loop-lag canary (see ``_LoopLagCanary``).
 _LAG_TICK_S = 0.05
-_CHECKER_STALL_MS = 250.0
 
 
 class UiHostClient(HostClient):
@@ -399,16 +397,17 @@ async def probe_health(
 def _log_probe_failure(current: Any, probe: HealthProbe, site: str) -> None:
     """One greppable line per failed probe; never the session key.
 
-    ``suspect`` is the whole point of the line: ``checker_loop`` when the
-    checker's own loop ran >=250 ms late (the host was probably fine), else
-    ``host_or_network``. ``generation`` is the host's ``started_at``, which
-    separates "the same process, repeatedly" from "a recycled one".
+    ``loop_lag_ms`` is the evidence for "which side was late": near zero means the
+    checker's loop ran on time, so a timeout is the host's; hundreds of ms or more
+    means the checker itself was starved. It is reported, not turned into a
+    verdict, because on a loaded machine both can be true at once. ``generation``
+    is the host's ``started_at``, which separates "the same process, repeatedly"
+    from "a recycled one".
     """
-    suspect = "checker_loop" if probe.loop_lag_ms >= _CHECKER_STALL_MS else "host_or_network"
     logger.warning(
         "ui_host_health_probe_failed site=%s outcome=%s pid=%s port=%s instance_id=%s "
         "generation=%s budget_s=%.3f elapsed_s=%.3f attempts=%d loop_lag_ms=%.1f "
-        "error=%s detail=%r pid_alive=%s suspect=%s",
+        "error=%s detail=%r pid_alive=%s",
         site,
         probe.verdict.value,
         current.pid,
@@ -422,7 +421,6 @@ def _log_probe_failure(current: Any, probe: HealthProbe, site: str) -> None:
         probe.error or "none",
         probe.detail,
         state_store.pid_alive(current.pid),
-        suspect,
     )
 
 

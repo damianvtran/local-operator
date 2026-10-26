@@ -796,7 +796,10 @@ def test_the_extension_host_copy_is_unchanged_by_this_seam() -> None:
 # read at call time, and the policy under test is relative to it.
 # --------------------------------------------------------------------------
 
-_BUDGET = 0.3
+# 1.0 s, not smaller: these run on a fleet at load 50+, where the CHECKER's own
+# loop is the thing that gets starved (that is the defect under test), so a tight
+# budget would make the suite flake for the very reason the retry exists.
+_BUDGET = 1.0
 
 
 class _Host:
@@ -804,12 +807,18 @@ class _Host:
 
     ``health_script`` is consumed one entry per GET: a float delays that response
     by that many seconds before answering with the healthy body, ``"hang"`` holds
-    the connection open and never answers. After the script runs out it answers
-    instantly. ``/rpc`` always succeeds and is counted, so a test can prove the
-    command was (or was not) dispatched.
+    the connection open and never answers, and ``"until_retry"`` holds it until a
+    SECOND GET arrives (so the first attempt is late by construction, whatever the
+    machine load, rather than by a sleep the load can shorten or stretch). After
+    the script runs out it answers instantly. ``/rpc`` always succeeds and is
+    counted, so a test can prove the command was (or was not) dispatched.
     """
 
+    #: The most recently built host, for fixtures that must observe its counters.
+    current: "_Host"
+
     def __init__(self, *, pid: int, instance_id: str, health_script: list[Any] | None = None):
+        _Host.current = self
         self.gets = 0
         self.posts = 0
         self.script = list(health_script or [])
@@ -836,6 +845,10 @@ class _Host:
                 if step == "hang":
                     host._release.wait(timeout=10)
                     return
+                if step == "until_retry":
+                    deadline = time.monotonic() + 10
+                    while host.gets < 2 and time.monotonic() < deadline:
+                        time.sleep(0.01)
                 if step:
                     time.sleep(float(step))
                 self._reply({"host": "ui", "pid": host.pid, "instance_id": host.instance_id})
@@ -860,6 +873,38 @@ class _Host:
 
 
 @pytest.fixture
+def short_first_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Abandon ONLY the first /health attempt, once the host has provably received it.
+
+    The retry tests must not depend on how loaded the machine is (this fleet runs
+    at load 50+, which starves the checker — the very defect under test). A timer
+    shorter than the first request's arrival raced the host and sometimes cut the
+    first attempt BEFORE any GET landed, so the held "late" reply was then served
+    to the retry. Instead the first attempt runs for real, and is abandoned as a
+    TIMEOUT only after ``_Host.current.gets >= 1`` — i.e. the host is holding that
+    reply — while the retry gets the real, generous budget. The listener and the
+    httpx client stay real; only the first attempt's clock is replaced.
+    """
+    monkeypatch.setattr(backend, "HEALTH_PROBE_TIMEOUT_S", 5.0)
+    real = backend._probe_once
+    seen = {"n": 0}
+
+    async def probe_once(current: Any, budget: float) -> Any:
+        seen["n"] += 1
+        if seen["n"] > 1:
+            return await real(current, budget)
+        task = asyncio.ensure_future(real(current, budget))
+        deadline = time.monotonic() + 5.0
+        while _Host.current.gets < 1 and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return backend.HealthVerdict.TIMEOUT, "TimeoutError", ""
+
+    monkeypatch.setattr(backend, "_probe_once", probe_once)
+
+
+@pytest.fixture
 def small_budget(monkeypatch: pytest.MonkeyPatch) -> float:
     monkeypatch.setattr(backend, "HEALTH_PROBE_TIMEOUT_S", _BUDGET)
     return _BUDGET
@@ -873,10 +918,10 @@ def _dead_port() -> int:
 
 @pytest.mark.asyncio
 async def test_a_late_first_attempt_is_acquitted_by_exactly_one_retry(
-    tmp_path: Path, small_budget: float
+    tmp_path: Path, short_first_attempt: None
 ) -> None:
     """Healthy host, first probe late (a starved checker): the command still goes."""
-    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=[_BUDGET * 2.5])
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["until_retry"])
     try:
         publish(tmp_path, port=host.port, instance_id="instance-a")
         result = await backend.UiHostClient(tmp_path).call("open", {"url": "https://example.test"})
@@ -942,7 +987,7 @@ async def test_an_unresponsive_live_host_gets_the_overloaded_copy_not_unavailabl
             f"port={host.port}",
             "instance_id=instance-a",
             f"generation={record.started_at}",
-            "budget_s=0.300",
+            f"budget_s={_BUDGET:.3f}",
             "elapsed_s=",
             "attempts=2",
             "loop_lag_ms=",
@@ -980,6 +1025,7 @@ async def test_a_refused_port_with_a_live_pid_fails_fast_with_one_attempt(
     with caplog.at_level(logging.WARNING, logger=backend.__name__):
         with pytest.raises(HostPreDeliveryFailure) as excinfo:
             await backend.UiHostClient(tmp_path).call("open", {})
+    # Structural first (one attempt, no retry); the clock is only a coarse backstop.
     assert time.monotonic() - started < _BUDGET, "a dead socket must not wait out a budget"
     message = str(excinfo.value)
     assert f"no longer answering at 127.0.0.1:{port}" in message
@@ -1021,7 +1067,7 @@ async def test_the_retry_never_extends_past_the_callers_deadline(
         started = time.monotonic()
         with pytest.raises(HostPreDeliveryFailure):
             await client.preflight(current, deadline=loop.time() + allowance)
-        assert time.monotonic() - started < allowance + 0.25
+        assert time.monotonic() - started < allowance + 0.5
         assert host.gets <= 2
     finally:
         host.close()
@@ -1041,16 +1087,18 @@ async def test_a_retry_with_no_allowance_left_sends_no_second_get(
             await backend.UiHostClient(tmp_path).preflight(
                 current, deadline=loop.time() + _BUDGET * 0.5
             )
-        assert host.gets == 1
+        # <= 1, not == 1: on a starved machine the allowance can be gone before the
+        # first GET is even written. The invariant is that there is never a second.
+        assert host.gets <= 1
     finally:
         host.close()
 
 
 @pytest.mark.asyncio
 async def test_reachability_is_acquitted_by_the_retry_and_a_dead_listener_stays_false_fast(
-    tmp_path: Path, small_budget: float
+    tmp_path: Path, short_first_attempt: None
 ) -> None:
-    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=[_BUDGET * 2.5])
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["until_retry"])
     try:
         publish(tmp_path, port=host.port, instance_id="instance-a")
         assert state.liveness(tmp_path)[0] is state.Liveness.FRESH
