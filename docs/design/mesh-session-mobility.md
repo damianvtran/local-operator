@@ -1000,6 +1000,9 @@ sequence rather than as fifteen repetitions of one op name. Phases:
 `status`, `prepare`, `ready`, `commit`, `done`, plus `fork` (an in-place fork on the
 owner, §4.1) and `copy` (the `--keep` copy, §6.2). The copy itself rides `net_sync`
 (§7), not a move phase, because R22 needs that operation to exist on its own.
+`rollback` is the DESTINATION→owner notification added after this document (see
+§6.5's "the destination gave up" row): a copy that fails sweeps its staging, and the
+owner must hear that or it stays parked in `prepared`.
 
 ```
 {"op":"net_session_move","req":31,"phase":"prepare","session_id":"9f3ac1e0b7d2",
@@ -1195,7 +1198,8 @@ a single monotone state the owner answers.
 | `O` crashes after the delete, before `committed` reaches `D` | `O`: tombstone, no directory | `D`'s retry gets no session but **does** get the tombstone with the matching `lease_epoch` → that *is* `committed`, so `D` promotes. This is the case the epoch exists for |
 | `D` crashes after `committed`, before promoting | `D`: `ready.json` staging, `promoted: false`; `O`: tombstone | `D`'s boot reconcile finds a staging marker, asks `O` (`move.status` → no session + tombstone for the id naming `D` with epoch E) → promotes. If `O` is unreachable, `D` retries on the next catalogue refresh and the staging is **exempt from the GC** while it holds a `ready` marker naming an unreachable-but-member device (a bounded grace, then the user is asked — see §13 Q6) |
 | `D` crashes *during* the promote rename | POSIX rename is atomic: either the old or the new name exists | Reconcile idempotently re-attempts; `os.replace` of an already-promoted staging is a no-op because the staging path no longer exists |
-| The link dies mid-copy | as "before `ready`" | `D` retries `sync.fetch` from its manifest (`D` knows exactly what it has); the copy is resumable by construction |
+| The link dies mid-copy | as "before `ready`" | `D` retries `sync.fetch` from its manifest (`D` knows exactly what it has); the copy is resumable by construction. **`O` must also release its own entry**: nothing can arrive on a closed link, so once it closes with no replacement dial `O` clears a `prepared` entry it wrote for that device (`mobility.expire_for_peer`, on the relay's link-closed hook). Without this the conversation is parked — the engage guard refuses it and every retry answers `in_progress` naming a phase nobody will advance — which is the state measured on 2026-09-26 and 2026-10-25 |
+| **The destination gave up** (`D`'s copy failed, `D` rolled back) | `O`: journal `prepared`, directory intact; `D`: staging swept, entry cleared | `D` sends `move.rollback {lease_epoch}` before it sweeps (`mobility._report_destination_rollback`), and `O` clears the entry when the epoch and the device both match and the phase is still `prepared` (`mobility._source_rollback`). This row was MISSING: the table assumed `O` heard about the failure, and the instance rule stops a healthy `O` from reconciling its own entry, so the 2026-10-25 move left the source parked for hours |
 | `D` is not a member any more (revoked mid-move) | `O`: journal `prepared` or `handing-off` | At `prepared` → rollback. At `handing-off` the epoch rotation has already refused `D`'s traffic, and the rotation is itself the incident response (`mesh-incident-response.md`); `O`'s reconcile then treats the handoff as **aborted-to-owner** and keeps its directory, because a revoked device must not be the only holder of a transcript. Recorded as `session.handoff.rolled_back` with the revoke as cause |
 | **`O`'s own local viewer resumes the session during the window** (the "source resumes" case) | `O`: journal `prepared`/`handing-off` | Impossible by construction, not by luck — §6.6 |
 
