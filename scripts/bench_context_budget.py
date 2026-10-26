@@ -1696,7 +1696,24 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # What remains is unavoidably the two ops' schema surface; the 80-token margin
 # is deliberate — the brief's point was that landing at the measured number
 # would let the next small op tip it again.
-BUDGET_BILLED_TOKENS = 33_466
+# RAISED 33,466 -> 33,700 for the BROWSER network-telemetry surface: four
+# actions (`network_start`/`network_stop`/`network_read`/`network_clear`) plus
+# the read filters they need, on the tool every browser-capable session already
+# carries. Measured by THIS script on one tree with an isolated HOME:
+#   before the prose trim   93,722 chars = ~33,713 billed   FAIL, 247 over
+#   after the trim          93,564 chars = ~33,656 billed   FAIL, 190 over
+#   further trims           93,468 chars = ~33,620 billed   FAIL, 127 over
+#   budget                  33,700 (measured head + 80 headroom)
+# The trims are real and model-facing, not cosmetic: the selector, backend,
+# timeout_s, secret_ref, text, direction and tab fields each lost their second
+# sentence, and the four new network fields are one short clause apiece while
+# their contract lives in `read tool://browser` and docs/BROWSER.md. What
+# remains is the schema surface of four genuinely new actions: removing it
+# would remove the capability, and the alternative - folding `approved` into
+# `include_request_body` - was rejected because the two answer different
+# questions (opt in to a body; acknowledge that a body can carry a credential),
+# and the approval tier keys on the second.
+BUDGET_BILLED_TOKENS = 33_700
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1855,7 +1872,12 @@ BUDGET_BILLED_TOKENS = 33_466
 # the same trim applied:
 #   child head  83,741 chars = ~30,123 billed
 #   child budget 30,203 (measured head + 80 headroom, same margin as the top arm)
-BUDGET_CHILD_BILLED_TOKENS = 30_203
+# RAISED 30,203 -> 30,380 alongside ``BUDGET_BILLED_TOKENS`` for the same
+# browser network-telemetry surface: a child holds the browser tool too, so it
+# pays the same four actions' schema. Measured on the same tree:
+#   30,329 billed   FAIL, 126 over (after the prose trim)
+#   budget 30,380 (measured head + 51 headroom, the same band the parent uses)
+BUDGET_CHILD_BILLED_TOKENS = 30_380
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

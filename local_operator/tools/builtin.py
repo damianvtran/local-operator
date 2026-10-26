@@ -20207,20 +20207,18 @@ class BrowserParams(BaseModel):
     backend: str = Field(
         default="",
         description=(
-            "'open': the host for a FRESH surface — '' (default order), 'ui', "
-            "'extension' (the user's real profile), or 'cmux'. A held handle or "
-            "an adoption outranks it; a host that cannot serve refuses."
+            "'open' fresh surface only: '' (default order), 'ui', 'extension' "
+            "(the user's real profile) or 'cmux'. A held handle or adoption "
+            "outranks it."
         ),
     )
     path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
-        description="CSS selector, a snapshot ref (e5), or an accessibility "
-        'locator for the click/type target: role=checkbox[name="Active"], '
-        'label="Homepage URL", text="Create GitHub App" — resolved '
-        "against the page's a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, the query CSS, the scroll element, or the "
-        "download/upload control.",
+        description="CSS selector, snapshot ref, or a11y locator for the "
+        'click/type target (role=checkbox[name="Active"], label=…, text=…) '
+        "resolved against the a11y tree, so it survives framework ids. Also the "
+        "read/snapshot scope, query CSS, scroll element or download/upload control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -20262,7 +20260,7 @@ class BrowserParams(BaseModel):
         default_factory=list,
         description=(
             "'upload': local files to attach (credential files and this "
-            "harness's config dir are refused; relative = session cwd)."
+            "harness's config dir refused; relative = session cwd)."
         ),
     )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
@@ -20306,26 +20304,16 @@ class BrowserParams(BaseModel):
     # Bodies never use wildcard/origin-only scopes and never include responses.
     include_request_body: bool = Field(
         default=False,
-        description=(
-            "'network_start'/'network_read': explicitly include the request form body; "
-            "requires url and approved=true."
-        ),
+        description="Body opt-in: needs url and approved=true.",
     )
-    approved: bool = Field(
-        default=False,
-        description=(
-            "Network body capture only: explicit acknowledgement of the sensitive-data request."
-        ),
-    )
+    approved: bool = Field(default=False, description="Acknowledges the sensitive body.")
     request_id: str = Field(
         default="",
-        description="'network_read': return only the correlated CDP request id.",
+        description="Filter: one request id.",
     )
     after_id: int | None = Field(
         default=None,
-        description=(
-            "'network_read': return entries after this monotonically increasing capture sequence."
-        ),
+        description="Filter: after this sequence.",
     )
     method: str = Field(default="", description="'network_read': HTTP method filter, e.g. POST.")
     status: int | None = Field(default=None, description="'network_read': HTTP status filter.")
