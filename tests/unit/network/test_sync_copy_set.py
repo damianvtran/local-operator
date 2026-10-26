@@ -296,6 +296,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
     ),
+    "local_operator/session/cold_metadata.py": (
+        1,
+        "``CACHE_DIRNAME`` ('cold_replay'): the segment under the DEVICE cache root "
+        "(<config>/cache/) holding a session's deferred-open metadata record. A derived "
+        "cache file, rebuilt from the journal on the next open, never an entry of a "
+        "session directory and never part of what a sync copy carries.",
+    ),
     "local_operator/role_provenance.py": (
         2,
         "``PROVENANCE_FILENAME``/``PROVENANCE_LOCKNAME`` ('role-provenance.jsonl' and "

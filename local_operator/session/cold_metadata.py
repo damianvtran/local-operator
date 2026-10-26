@@ -61,7 +61,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from local_operator.harness.types import Usage
-from local_operator.session.transcript import TRANSCRIPT_FILENAME
+from local_operator.session.compression import transcript_source
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, the import would be a cycle
     from local_operator.session.replay_cache import ReplayKey
@@ -357,9 +357,21 @@ def _witness_of(raw: Any) -> ColdMetadataWitness | None:
 
 
 def _journal_still_at(witness: ColdMetadataWitness) -> bool:
-    """Whether the journal is still at the version ``witness`` names."""
+    """Whether the journal is still at the version ``witness`` names.
+
+    Through the ARCHIVE-AWARE resolver, not a plain-name probe: a session whose
+    journal was compressed is a different physical file from the one the record
+    describes (it records the plain journal's inode), so an archive is a MISS by
+    construction — the record cannot describe it and must not be paired with it.
+    Probing ``transcript.jsonl`` directly would answer the same thing here by
+    accident, which is exactly the silent surface the archive-aware guard exists
+    to close.
+    """
+    path, codec = transcript_source(Path(witness.journal_dir))
+    if codec is not None:
+        return False
     try:
-        stat = (Path(witness.journal_dir) / TRANSCRIPT_FILENAME).stat()
+        stat = path.stat()
     except OSError:
         return False
     return (

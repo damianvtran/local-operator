@@ -110,6 +110,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only the failed write's own mkstemp temp FILE beside the inventory sidecar",
     ),
+    # -- deferred cold-open metadata: a DERIVED cache file, not session state --
+    # ``write_cold_metadata`` publishes one session's replay-metadata record by
+    # renaming its own pid-suffixed temp FILE onto ``<config>/cache/cold_replay/
+    # <id>.json``. Both paths are built from the CONFIG ROOT, never from a
+    # session directory, and the record is regenerated from the journal on the
+    # next open, so nothing here can name or displace anything under ``sessions/``.
+    (
+        "local_operator/session/cold_metadata.py::write_cold_metadata",
+        "<path>.replace",
+        "Atomic swap of a sibling pid-temp FILE onto the derived cache record "
+        "under <config>/cache; never a session path.",
+    ),
     (
         "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
         "os.replace",
@@ -3832,6 +3844,11 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/auto_tag.py::record_fork",
         # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
         "local_operator/session/tail_anchor.py::write_anchor",
+        # tmp FILE -> <config>/cache/cold_replay/<id>.json: the deferred cold-open
+        # metadata record. A DERIVED cache file beside the store, never in it: the
+        # receiver is the config dir plus the session id, and it names a FILE
+        # under cache/, so neither side can be a session directory.
+        "local_operator/session/cold_metadata.py::write_cold_metadata",
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
         # stop-sweeps.jsonl -> stop-sweeps.jsonl.1 (a FILE under config_dir()/logs)

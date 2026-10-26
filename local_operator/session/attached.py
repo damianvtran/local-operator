@@ -1088,6 +1088,17 @@ class AttachedSession:
     #: conformance test) a viewer without reciting it.
     attach_behind: bool = False
 
+    #: Non-``None`` on a facade built with ``cold(deferred_history=True)`` whose
+    #: journal was described by a valid metadata record: the first frontend state
+    #: is complete but NO message list has been read (see :class:`_DeferredHistory`).
+    #:
+    #: DECLARED ON THE CLASS, not only assigned in ``__init__``, because a facade
+    #: is not always built through the constructor — a test or a diagnostic that
+    #: allocates one directly must still get the answer "not deferred" rather than
+    #: an ``AttributeError`` raised from inside a reader. The state has to be
+    #: readable on EVERY construction path or it is a trap for the next reader.
+    _deferred_history: "_DeferredHistory | None" = None
+
     def __init__(
         self,
         *,
@@ -1377,12 +1388,6 @@ class AttachedSession:
         #: :meth:`_replay_cold_gap`).
         self._cold_painted_ids: set[str] | None = None
         self._display_history: DisplayHistoryWindow | None = None
-        #: Non-``None`` on a facade built with ``cold(deferred_history=True)``
-        #: whose journal was described by a valid metadata record: the first
-        #: frontend state is complete but NO message list has been read. See
-        #: :class:`_DeferredHistory` — never an empty hydrated list, and every
-        #: accessor that needs messages raises until it is hydrated.
-        self._deferred_history: _DeferredHistory | None = None
         self._history_hydrated = True
         #: Whether the PRE-COMPACTION rows behind the context replay are
         #: loaded (or absent). Separate from ``_history_hydrated`` on purpose;
@@ -6576,13 +6581,26 @@ class AttachedSession:
         # nothing after the restore reads it.
         self._cold_checkpoint = None
 
-    def _require_history(self) -> None:
-        """Refuse a synchronous history read while no message list is loaded."""
+    def _require_not_deferred(self) -> None:
+        """Refuse a history read while this facade's message list is DEFERRED.
+
+        THE ONLY REFUSAL THIS CHANGE ADDS, and it is scoped to the state the
+        change creates. ``_history_hydrated`` is a pre-existing axis with its own
+        meaning — a windowed follower paints ``display_history_window()`` while
+        the MODEL's full history is not materialized, and nothing but
+        :meth:`history` ever gated on it. Conflating the two made every windowed
+        read raise, so they stay separate: this one answers "was a list
+        deferred", that one answers "is the full context materialized".
+        """
         if self._deferred_history is not None:
             raise RuntimeError(
                 "durable history is deferred on this cold facade; "
                 "await hydrate_deferred_history()"
             )
+
+    def _require_history(self) -> None:
+        """``history()``'s own gate: not deferred, and hydrated."""
+        self._require_not_deferred()
         if not self._history_hydrated:
             raise RuntimeError(
                 "display-window history is not hydrated; await materialize_history()"
@@ -9600,12 +9618,14 @@ class AttachedSession:
     def display_history_window(self) -> list[Any]:
         """Loaded durable rows plus canonical live rows, in display order.
 
-        RAISES while the message list is deferred (a desktop cold facade before
-        its first bind, see :class:`_DeferredHistory`): an empty list here would
-        be indistinguishable from an empty conversation, and every caller of
-        this either paints it or folds it into what the model sees.
+        RAISES only while the message list is DEFERRED (a desktop cold facade
+        before its first bind, see :class:`_DeferredHistory`): an empty list here
+        would be indistinguishable from an empty conversation, and every caller
+        of this either paints it or folds it into what the model sees. It does
+        NOT gate on ``_history_hydrated``, and never did: this is the accessor a
+        windowed follower paints from while the model's full history is unread.
         """
-        self._require_history()
+        self._require_not_deferred()
         durable_results = {
             m.tool_call_id for m in self._history if isinstance(m, Message) and m.role == "tool"
         }
@@ -9656,7 +9676,7 @@ class AttachedSession:
 
     @property
     def history_message_count(self) -> int:
-        self._require_history()
+        self._require_not_deferred()
         durable = (
             self._display_history.total_message_count
             if self._display_history
@@ -9666,7 +9686,7 @@ class AttachedSession:
 
     @property
     def history_theme_turn_count(self) -> int:
-        self._require_history()
+        self._require_not_deferred()
         if self._display_history is not None:
             return self._display_history.theme_turn_count + sum(
                 key not in self._history_ids and getattr(m, "role", "") in ("user", "assistant")
@@ -9678,13 +9698,13 @@ class AttachedSession:
 
     @property
     def history_opener_text(self) -> str:
-        self._require_history()
+        self._require_not_deferred()
         if self._display_history is not None:
             return self._display_history.opener_text
         return next((m.text for m in self._history if getattr(m, "role", "") == "user"), "")
 
     def history_last_message(self) -> Any:
-        self._require_history()
+        self._require_not_deferred()
         rows = self.display_history_window()
         return rows[-1] if rows else None
 

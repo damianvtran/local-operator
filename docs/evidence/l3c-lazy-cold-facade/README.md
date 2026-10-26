@@ -151,12 +151,19 @@ and rendered with `rsvg-convert`):
 
 | artifact | sha256 |
 |---|---|
-| `tui-cold-open-before.svg` (`origin/main`) | `6fbca07611c0e7210dc2b8ddc547f3c4da4eb3bb73adb5decd1588fef2cd47c0` |
-| `tui-cold-open-after.svg` (branch) | `6fbca07611c0e7210dc2b8ddc547f3c4da4eb3bb73adb5decd1588fef2cd47c0` |
+| `tui-cold-open-before.svg` (`origin/main`) | `e43defe8f0901b662bf4e3faf086d4b45a4b318578909d1a7d7fb822d9f0e017` |
+| `tui-cold-open-after.svg` (branch) | `e43defe8f0901b662bf4e3faf086d4b45a4b318578909d1a7d7fb822d9f0e017` |
 
-Byte-identical SVG, and `compare -metric AE` on the two rasters reports **0**
-differing pixels. Both frames were looked at: splash, version, cwd line, the
-slash hints, the tip line and the composer band all paint as before.
+Byte-identical SVG (and identical raster, `f01aa78b…`), with `compare -metric AE`
+reporting **0** differing pixels. Both frames were looked at: splash, version, cwd
+line, the slash hints, the tip line and the composer band all paint as before.
+
+CAPTURED BACK TO BACK, and the reason is worth recording: the boot frame carries
+environment notices, and a capture taken minutes after its partner picked up a
+`! latest is v0.90.5 → /update` line that the partner did not — a 0.06% pixel
+difference with nothing in this change behind it. Both sides are therefore
+captured seconds apart and compared byte for byte, and the pair stored here is one
+where the notice is present on BOTH sides or on neither, never on one.
 
 An earlier uncontrolled pair (each side run from its own checkout) differed in
 exactly the two fields that track the run rather than the code — the printed cwd
