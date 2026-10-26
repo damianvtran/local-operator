@@ -857,15 +857,35 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_UNVERIFIED
 
 
+def _lexical(path: str | Path) -> Path:
+    """Normalise path SYNTAX only: separators, ``.`` and ``..``. Never links.
+
+    ``resolve()`` follows symlinks, and that is precisely how a stale report from
+    a foreign arm became acceptable: with a symlinked venv, two different arms
+    share one resolved prefix, so ``verify_recorded_identity`` saw agreement where
+    the lexical paths disagreed (QA round 1 reproduced this as rc 0 / BUILT with
+    a main18 report inside a scratch arm). Discovery's own guard already refuses
+    an adapter launch path that resolves through a symlink; this check matches
+    that rule instead of relaxing it.
+    """
+
+    return Path(os.path.normpath(str(path)))
+
+
 def verify_recorded_identity(
-    recorded: Mapping[str, Any], *, source_sha: str, layout: ArmLayout
+    recorded: Mapping[str, Any],
+    *,
+    source_sha: str,
+    layout: ArmLayout,
+    interpreter_facts: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Refusals if the verification report describes a DIFFERENT build.
 
     A record may not inherit an identity it did not verify: an arm that reports a
-    commit or a venv prefix the verifier did not actually see would hand the
-    caller a receipt for a previous source (review round 3's stale-identity
-    concern). Both are compared resolved, and the mismatch is named.
+    commit, interpreter or venv prefix the verifier did not actually see would
+    hand the caller a receipt for a previous source (review round 3's stale
+    identity concern, QA round 1's symlink bypass). Comparisons are LEXICAL, so
+    only a report naming this arm's own paths passes.
     """
 
     refusals: list[str] = []
@@ -876,16 +896,36 @@ def verify_recorded_identity(
         refusals.append(
             f"the verification report covers {verified_commit}, not this build's {source_sha}"
         )
+    # The arm must own its venv directory. A symlinked one is either a hand-made
+    # link (the pre-fix workaround) or a borrowed interpreter whose reported
+    # prefix belongs to another arm; neither is this build.
+    if layout.venv.is_symlink():
+        refusals.append(f"{layout.venv} is a symlink; an arm must own its venv, not borrow one")
     prefix = recorded.get("prefix")
     if prefix is None:
         refusals.append("the verification report names no interpreter prefix")
     else:
-        try:
-            same = Path(str(prefix)).resolve() == layout.venv.resolve()
-        except OSError:  # pragma: no cover - an unresolvable path cannot be this arm
-            same = False
-        if not same:
-            refusals.append(f"the verification report describes {prefix}, not {layout.venv}")
+        text = str(prefix)
+        if not os.path.isabs(text):
+            refusals.append(f"the verification report's interpreter prefix is not absolute: {text}")
+        elif _lexical(text) != _lexical(layout.venv):
+            refusals.append(
+                f"the verification report's interpreter prefix is {text}, "
+                f"not this arm's {layout.venv}"
+            )
+    # ``python`` in the report is a VERSION (``sys.version.split()[0]``), not a
+    # path: comparing it to the arm's own reported version is the whole check.
+    version = recorded.get("python")
+    expected_version = (interpreter_facts or {}).get("reported_version")
+    if version is None:
+        refusals.append("the verification report names no interpreter version")
+    elif expected_version:
+        want = str(expected_version).split()[-1]
+        if str(version) != want:
+            refusals.append(
+                f"the verification report was produced by Python {version}, "
+                f"not this arm's {want}"
+            )
     return refusals
 
 

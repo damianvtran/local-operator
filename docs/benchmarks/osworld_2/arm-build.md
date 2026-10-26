@@ -182,7 +182,14 @@ accept it.
 The record's identity fields are taken from the verification report of **that
 run**, never from the arguments alone: `verified_commit` and
 `verified_venv_prefix` are what the verifier actually saw, and a report naming a
-different commit or a different interpreter is refused, so a record cannot cite a previous source.
+different commit, a different interpreter version or a different venv prefix is
+refused, so a record cannot cite a previous source. Paths are compared
+**lexically** — `normpath` normalises separators and `.`/`..`, but nothing calls
+`resolve()`: resolving symlinks let a stale report from a *borrowed* venv pass,
+because two different arms then shared one real prefix (QA round 1 reproduced
+`rc=0 / BUILT` that way). An arm whose `<arm>/venv` is itself a symlink is
+refused outright for the same reason: the arm must own its interpreter, which is
+exactly what the `venv --copies` recipe above guarantees.
 
 `installed-verification.json` enumerates every installed distribution, so a
 later comparison needs no re-install. The tests for all of this are

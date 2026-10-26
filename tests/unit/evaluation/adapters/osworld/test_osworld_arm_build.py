@@ -579,6 +579,7 @@ def _stub_verifiers(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
                         # another interpreter (round-3 stale-identity concern).
                         "commit": "a" * 40,
                         "prefix": str(arm_root / "venv"),
+                        "python": "3.12.13",
                         "verified": True,
                         "harness": {"version": "0.90.4"},
                         # The real shape: the builder reads this block, so a fake
@@ -847,8 +848,25 @@ def test_a_verification_report_for_another_source_is_refused(tmp_path: Path) -> 
 
     layout = arm.ArmLayout(root=tmp_path / "arm")
     layout.create_arm()
-    fresh = {"commit": "a" * 40, "prefix": str(layout.venv)}
+    fresh = {"commit": "a" * 40, "prefix": str(layout.venv), "python": "3.12.13"}
     assert arm.verify_recorded_identity(fresh, source_sha="a" * 40, layout=layout) == []
+
+    # Redundant syntax is not a different arm; a relative path is not an arm at all.
+    redundant = {**fresh, "prefix": f"{layout.venv}/."}
+    assert arm.verify_recorded_identity(redundant, source_sha="a" * 40, layout=layout) == []
+    relative = {**fresh, "prefix": "venv"}
+    assert arm.verify_recorded_identity(relative, source_sha="a" * 40, layout=layout)
+
+    # A report from another Python is another interpreter, even at this prefix.
+    other_version = arm.verify_recorded_identity(
+        {**fresh, "python": "3.11.9"},
+        source_sha="a" * 40,
+        layout=layout,
+        interpreter_facts={"reported_version": "Python 3.12.13"},
+    )
+    assert other_version == [
+        "the verification report was produced by Python 3.11.9, not this arm's 3.12.13"
+    ]
 
     stale = {**fresh, "commit": "b" * 40}
     assert arm.verify_recorded_identity(stale, source_sha="a" * 40, layout=layout) == [
@@ -862,6 +880,40 @@ def test_a_verification_report_for_another_source_is_refused(tmp_path: Path) -> 
     assert arm.verify_recorded_identity({}, source_sha="a" * 40, layout=layout) == [
         "no installed-verification report was produced, so nothing is verified"
     ]
+
+
+def test_a_symlinked_venv_cannot_borrow_another_arms_report(tmp_path: Path) -> None:
+    """QA round 1: resolve() let a foreign report pass inside a symlinked arm.
+
+    Reproduced by the reviewer as rc 0 / BUILT with a main18 report in a scratch
+    arm: ``layout.venv.resolve()`` equalled the borrowed prefix, so two arms
+    looked like one. The check is lexical now, and a symlinked venv is itself a
+    refusal -- the arm must own its interpreter (which is also why the recipe
+    builds one with ``venv --copies``).
+    """
+
+    real_arm = tmp_path / "foreign-arm"
+    real_arm.mkdir()
+    (real_arm / "venv").mkdir()
+    (real_arm / "venv" / "bin").mkdir()
+    (real_arm / "venv" / "bin" / "python3.12").write_text("")
+
+    layout = arm.ArmLayout(root=tmp_path / "arm")
+    layout.create_arm()
+    layout.venv.parent.mkdir(parents=True, exist_ok=True)
+    layout.venv.symlink_to(real_arm / "venv")
+
+    report = {
+        "commit": "a" * 40,
+        "prefix": str(real_arm / "venv"),
+        "python": "3.12.13",
+    }
+    refusals = arm.verify_recorded_identity(report, source_sha="a" * 40, layout=layout)
+    assert any("is a symlink" in reason for reason in refusals), refusals
+    assert any(str(real_arm / "venv") in reason for reason in refusals), refusals
+
+    # And the report would have passed the pre-fix resolved comparison.
+    assert (real_arm / "venv").resolve() == layout.venv.resolve()
 
 
 def test_a_stale_verification_report_cannot_reach_the_record(
@@ -959,6 +1011,7 @@ def test_a_refused_build_cannot_be_read_by_the_launcher(
                         {
                             "commit": "a" * 40,
                             "prefix": str(out / "venv"),
+                            "python": "3.12.13",
                             "verified": False,
                             "refusals": ["core module loop hash differs"],
                             "adapter": {"version": "0.1.3", "package_digest": None},
