@@ -51,7 +51,14 @@ def test_long_placeholder_free_name_stays_valid_source(i18n_generate) -> None:
     module = i18n_generate._render_keys_module("demo", {key: "A fixed label"})
     tree = ast.parse(module)
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
-    assert function.name == "one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_one_label"
+    # The generated name is `one_` x 24 plus `label`: split only for the
+    # 100-column gate. Implicit concatenation keeps the asserted text
+    # byte-identical (one Constant after parsing).
+    assert function.name == (
+        "one_one_one_one_one_one_one_one_"
+        "one_one_one_one_one_one_one_one_"
+        "one_one_one_one_one_one_one_one_label"
+    )
     assert not function.args.args and not function.args.kwonlyargs
     assert function.args.kw_defaults == []
     compile(module, "demo.py", "exec")

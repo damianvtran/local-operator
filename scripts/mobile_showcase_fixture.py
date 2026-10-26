@@ -76,7 +76,6 @@ from starlette.staticfiles import StaticFiles
 import scripts.probe_isolation  # noqa: F401  -- must be the first local import
 from local_operator.mobile import daemon as daemon_module
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry, build_app
-
 from local_operator.mobile.types import (
     PendingAskWire,
     PendingRequest,
@@ -772,7 +771,10 @@ def showcase_app(daemon: MobileDaemon):
             # fixture down mid-run and left a stale metrics.json looking fresh.
             metrics = data.get("metrics")
             if not isinstance(metrics, dict) or "viewport" not in metrics or "theme" not in metrics:
-                print("showcase: refused a /showcase/metrics POST without a metrics object", flush=True)
+                print(
+                    "showcase: refused a /showcase/metrics POST without a metrics object",
+                    flush=True,
+                )
                 return JSONResponse({"error": "metrics object required"}, status_code=400)
             width, height = metrics["viewport"]
             entries[f"{state}-{width}x{height}-{metrics['theme']}"] = metrics
