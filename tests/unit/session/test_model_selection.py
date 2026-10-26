@@ -482,3 +482,111 @@ def test_the_memo_is_bounded_and_evicts_least_recently_used(tmp_path):
     assert str(directories[0] / "transcript.jsonl") in keys
     assert str(directories[1] / "transcript.jsonl") not in keys
     assert keys[-1] == str(newest / "transcript.jsonl")
+
+
+# --- The selection-spelling prefilter -------------------------------------------
+#
+# The backward readers skip any row whose bytes lack the ``selected_model``
+# custom-type spelling, so a checkpoint row (the bulk of a long journal's bytes)
+# is never JSON-decoded. These cases write rows the way the PRODUCT does
+# (``TranscriptEntry.to_json``: compact separators), since that is the spelling
+# the filter keys on, and check the answer against the unfiltered oracle.
+
+
+def _compact_journal(directory: Path, rows: list[Any]) -> Path:
+    """Rows spelled exactly as ``TranscriptEntry.to_json`` spells them."""
+    return _journal(
+        directory,
+        [row if isinstance(row, str) else json.dumps(row, separators=(",", ":")) for row in rows],
+    )
+
+
+def _unfiltered_refusal(directory: Path) -> str | None:
+    """``_read_refusal`` with the pre-prefilter marker, as the refusal oracle."""
+    from local_operator.session import model_selection as module
+
+    original = module._may_be_selection_row
+    try:
+        module._may_be_selection_row = lambda raw: b'"custom_type"' in raw
+        return module._read_refusal(directory)
+    finally:
+        module._may_be_selection_row = original
+
+
+PREFILTER_CASES: dict[str, list[Any]] = {
+    # The case the design asked for: a checkpoint's ``state.selected_model``
+    # sits ABOVE (newer than) the v2 row, so the backward walk meets it first.
+    "checkpoint above a v2 row": [_selection_row(PROVIDER_A), _checkpoint_row()],
+    "checkpoint below a v2 row": [_checkpoint_row(), _selection_row(PROVIDER_A)],
+    "checkpoint above a legacy row": [_selection_row(PROVIDER_A, version=None), _checkpoint_row()],
+    "the spelling only inside a nested string value": [
+        _selection_row(PROVIDER_A),
+        _message_row('{"custom_type":"selected_model","details":{"version":2}}'),
+        _row({"custom_type": "note", "details": {"text": '"custom_type":"selected_model"'}}),
+    ],
+    "a malformed sibling above the selection row": [
+        _selection_row(PROVIDER_A),
+        '{"type":"custom","payload":{"custom_type":"selected_model","details":{"version":2,',
+    ],
+    "a malformed sibling above an invalid v2 row": [
+        _selection_row(PROVIDER_B),
+        _selection_row("missing-provider/model"),
+        '{"type":"custom","payload":{"custom_type":"selected_model"',
+    ],
+    "no selection row at all": [
+        _message_row("hello"),
+        _checkpoint_row(),
+        _row({"custom_type": "x"}),
+    ],
+    "a decision-only selector settled under checkpoints": [
+        _selection_row("typesafe/jev-1.13"),
+        _checkpoint_row(),
+        _checkpoint_row(provider="test", model_id="conversation-a"),
+    ],
+}
+
+
+@pytest.mark.parametrize("name", sorted(PREFILTER_CASES))
+@pytest.mark.parametrize("writer", ["compact", "spaced"])
+def test_the_prefilter_answers_exactly_what_the_unfiltered_readers_answered(tmp_path, name, writer):
+    """Both readers, both spellings a Python writer produces, against oracles."""
+    write = _compact_journal if writer == "compact" else _journal
+    directory = write(tmp_path / "sessions" / "case", PREFILTER_CASES[name])
+    assert read_model_selection(directory) == _forward_fold(directory)
+    assert refused_decision_only_selection(directory) == _unfiltered_refusal(directory)
+    if name == "a decision-only selector settled under checkpoints":
+        # Pin it, so the equality above is not "None == None" everywhere.
+        assert refused_decision_only_selection(directory) == "typesafe"
+
+
+def test_a_checkpoint_row_is_never_decoded_by_the_backward_readers(tmp_path, monkeypatch):
+    """The saving, stated as a test: checkpoint rows are skipped on their bytes.
+
+    A checkpoint ABOVE the settled row is exactly the row the old ``"custom_type"``
+    marker let through to ``json.loads``; counting decoded rows pins that it no
+    longer is, for the settle scan and the refusal walk alike.
+    """
+    from local_operator.session import model_selection as module
+
+    directory = _compact_journal(
+        tmp_path / "sessions" / "checkpoints",
+        [_selection_row(PROVIDER_A), _checkpoint_row(), _checkpoint_row(), _message_row("hi")],
+    )
+    decoded: list[str] = []
+    real_loads = module.json.loads
+
+    class _CountingJson:
+        @staticmethod
+        def loads(text, *args, **kwargs):
+            decoded.append(text)
+            return real_loads(text, *args, **kwargs)
+
+        dumps = staticmethod(json.dumps)
+
+    monkeypatch.setattr(module, "json", _CountingJson)
+    settled = module._settled_selection(directory)
+    assert settled is not None and settled.selector == PROVIDER_A
+    assert len(decoded) == 1 and CHECKPOINT_TYPE not in decoded[0]
+    decoded.clear()
+    assert module._read_refusal(directory) is None
+    assert len(decoded) == 1 and CHECKPOINT_TYPE not in decoded[0]
