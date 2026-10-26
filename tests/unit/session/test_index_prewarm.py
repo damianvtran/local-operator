@@ -726,3 +726,26 @@ async def test_teardown_cancels_a_warm_parked_in_a_request(tmp_path, monkeypatch
     workers = [t for t in threading.enumerate() if t.name == "lop-model-prewarm"]
     assert workers and all(t.daemon for t in workers)
     release.set()
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_never_selects_an_archived_journal(tmp_path, monkeypatch):
+    """An archived conversation stays out of the warm: it must not be decompressed.
+
+    Selection goes through ``compression.transcript_source`` (the archive-aware
+    resolver), so an archive is seen as an archive rather than as "no journal"
+    by a plain-name stat, and skipped.
+    """
+    from local_operator.session import compression
+
+    monkeypatch.setattr(compression, "_free_bytes", lambda _path: 10**12)
+    root = tmp_path
+    journal(root, "plain", mtime=1_000.0)
+    journal(root, "archived", mtime=2_000.0)
+    archived = root / "sessions" / "archived"
+    old = time.time() - 30 * 86400
+    os.utime(archived / "transcript.jsonl", (old, old))
+    assert compression.compress_session(archived).status == "compressed"
+    assert compression.archive_path(archived) is not None
+
+    assert prewarm._newest_journals(root, limit=8) == ["plain"]

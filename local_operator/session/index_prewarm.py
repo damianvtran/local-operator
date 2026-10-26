@@ -744,6 +744,7 @@ def _newest_journals(root: str | Path, *, limit: int) -> list[str]:
     service sessions named by their own state files.
     """
     from local_operator.resume import is_user_session_origin, session_origin
+    from local_operator.session import compression
 
     root = Path(root)
     sessions_dir = root / "sessions"
@@ -754,10 +755,18 @@ def _newest_journals(root: str | Path, *, limit: int) -> list[str]:
     service = _service_session_ids(root)
     journals: list[tuple[float, str]] = []
     for entry in entries:
-        if entry.name in service or _is_archived(entry):
+        if entry.name in service:
+            continue
+        # THE ARCHIVE-AWARE RESOLVER, not a plain-name stat (the
+        # ``test_transcript_reads_are_archive_aware`` guard): it names whatever is
+        # physically on disk, and a codec means an archive — skipped, because the
+        # warm must not decompress the store (see ``_is_archived``). A missing
+        # journal resolves to the plain path and fails the stat below.
+        journal, codec = compression.transcript_source(entry)
+        if codec is not None:
             continue
         try:
-            mtime = (entry / TRANSCRIPT_FILENAME).stat().st_mtime
+            mtime = journal.stat().st_mtime
         except OSError:
             continue
         if not is_user_session_origin(session_origin(entry)):
