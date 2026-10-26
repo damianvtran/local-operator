@@ -79,7 +79,12 @@ from local_operator.mobile.auth import (
     verify_cookie,
 )
 from local_operator.mobile.start_receipts import CAPABILITY as START_CAPABILITY
-from local_operator.mobile.start_receipts import StartReceipts, StartRefusal, canonical_request
+from local_operator.mobile.start_receipts import (
+    START_BODY_MAX_BYTES,
+    StartReceipts,
+    StartRefusal,
+    canonical_request,
+)
 from local_operator.mobile.transfer_receipts import (
     ReceiptsUnreadable,
     TransferConflict,
@@ -7854,8 +7859,27 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
+        # BOUNDED BEFORE PARSING. ``request.json()`` buffers the whole body and
+        # parses it before any field check could run, so an authenticated
+        # caller could make the relay hold and parse megabytes it would only
+        # refuse afterwards. ``Content-Length`` is the honest client's fast
+        # path; the streamed byte count is the real bound, because the header
+        # can be absent (chunked) or lie. Nothing is claimed or spawned before
+        # the whole body is known to fit.
+        too_large = JSONResponse(
+            {"error": "start_request_too_large", "code": "start_request_too_large"},
+            status_code=413,
+        )
+        declared = request.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > START_BODY_MAX_BYTES:
+            return too_large
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw += chunk
+            if len(raw) > START_BODY_MAX_BYTES:
+                return too_large
         try:
-            body = await request.json()
+            body = json.loads(raw)
         except ValueError:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):

@@ -22,13 +22,16 @@ import re
 import sqlite3
 from pathlib import Path
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
 from local_operator.mobile import attach_client
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.mobile.start_receipts import (
+    MAX_FIELD_CHARS,
     RECEIPTS_NAME,
+    START_BODY_MAX_BYTES,
     StartReceipts,
     canonical_request,
 )
@@ -376,6 +379,144 @@ def test_authentication_and_origin_precede_claim_and_replay(tmp_path, monkeypatc
     assert not r.receipts_path.exists()
 
 
+# --------------------------------------------------------------------------
+# Body byte cap: refused before buffering or parsing, with no side effect
+# --------------------------------------------------------------------------
+
+TOO_LARGE = {"error": "start_request_too_large", "code": "start_request_too_large"}
+
+
+def at_size(payload: dict, size: int) -> bytes:
+    """``payload`` as JSON padded to exactly ``size`` bytes.
+
+    The padding is insignificant whitespace, so the parsed body is unchanged and
+    a body AT the cap can be a genuinely admissible start, not merely "not 413".
+    """
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    assert len(raw) < size
+    return raw[:-1] + b" " * (size - len(raw)) + b"}"
+
+
+def stream_post(r: Rig, raw: bytes, chunk: int = 64 * 1024) -> tuple[httpx.Response, int]:
+    """POST ``raw`` chunked with NO Content-Length, through a real ASGI stream.
+
+    ``TestClient`` hands the app the whole body in one message, which cannot show
+    whether the route stops reading early. ``httpx.ASGITransport`` delivers each
+    chunk as its own ``http.request`` message, and the generator counts what the
+    route actually pulled before answering.
+    """
+    pulled = 0
+
+    async def chunks():
+        nonlocal pulled
+        for start in range(0, len(raw), chunk):
+            piece = raw[start:start + chunk]
+            pulled += len(piece)
+            yield piece
+
+    async def scenario() -> httpx.Response:
+        transport = httpx.ASGITransport(app=build_app(r.daemon))
+        # The authenticated session cookie, copied by value: the sync client's
+        # jar is not an async client's jar.
+        cookies = {name: value for name, value in r.client.cookies.items()}
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver", cookies=cookies
+        ) as client:
+            return await client.post(
+                "/api/sessions/start", content=chunks(),
+                headers={"content-type": "application/json"})
+
+    response = asyncio.run(scenario())
+    return response, pulled
+
+
+def assert_no_side_effect(r: Rig) -> None:
+    assert r.calls == 0
+    assert not r.receipts_path.exists()
+
+
+def test_oversized_declared_body_is_refused_before_parsing(tmp_path, monkeypatch):
+    """The reviewer's reproduction: an ~8 MiB keyed body with an honest length."""
+    r = rig(tmp_path, monkeypatch)
+    raw = json.dumps(body(cwd="x" * (8 * 1024 * 1024))).encode()
+    refused = r.client.post("/api/sessions/start", content=raw,
+                            headers={"content-type": "application/json"})
+    assert refused.status_code == 413
+    assert refused.json() == TOO_LARGE
+    assert_no_side_effect(r)
+
+
+def test_lying_content_length_is_bounded_by_the_bytes_read(tmp_path, monkeypatch):
+    """The header is the client's claim, never the bound."""
+    r = rig(tmp_path, monkeypatch)
+    raw = at_size(body(), START_BODY_MAX_BYTES + 1)
+    refused = r.client.post("/api/sessions/start", content=raw, headers={
+        "content-type": "application/json", "content-length": "64"})
+    assert refused.status_code == 413
+    assert refused.json() == TOO_LARGE
+    assert_no_side_effect(r)
+
+
+def test_chunked_body_without_a_length_stops_reading_at_the_cap(tmp_path, monkeypatch):
+    r = rig(tmp_path, monkeypatch)
+    raw = at_size(body(), 8 * 1024 * 1024)
+    refused, pulled = stream_post(r, raw)
+    assert "content-length" not in refused.request.headers
+    assert refused.status_code == 413
+    assert refused.json() == TOO_LARGE
+    # Stopped within one chunk of the cap rather than buffering all 8 MiB.
+    assert pulled <= START_BODY_MAX_BYTES + 64 * 1024 < len(raw)
+    assert_no_side_effect(r)
+
+
+def test_unkeyed_oversized_body_is_refused_too(tmp_path, monkeypatch):
+    """The route cannot know a body is keyed until it parses it."""
+    r = rig(tmp_path, monkeypatch)
+    raw = at_size({"cwd": "~"}, START_BODY_MAX_BYTES + 1)
+    refused, _ = stream_post(r, raw)
+    assert refused.status_code == 413
+    assert refused.json() == TOO_LARGE
+    assert_no_side_effect(r)
+
+
+@pytest.mark.parametrize("framing", ["content-length", "chunked"])
+def test_byte_cap_boundary_admits_at_and_refuses_one_over(tmp_path, monkeypatch, framing):
+    r = rig(tmp_path, monkeypatch)
+
+    def send(raw: bytes) -> httpx.Response:
+        if framing == "chunked":
+            return stream_post(r, raw, chunk=4096)[0]
+        return r.client.post("/api/sessions/start", content=raw,
+                             headers={"content-type": "application/json"})
+
+    over = send(at_size(body(), START_BODY_MAX_BYTES + 1))
+    assert over.status_code == 413
+    assert over.json() == TOO_LARGE
+    assert_no_side_effect(r)
+
+    at_cap = send(at_size(body(), START_BODY_MAX_BYTES))
+    assert at_cap.status_code == 200
+    assert r.calls == 1
+    assert [row[2] for row in r.rows()] == [at_cap.json()["session_id"]]
+
+
+def test_cap_never_refuses_the_largest_schema_valid_body(tmp_path, monkeypatch):
+    """Worst-case encoding of three maximal fields still reaches field validation.
+
+    An astral character is one code point but 12 JSON bytes when escaped, so
+    this is the most bytes a body inside the per-field bounds can take.
+    """
+    r = rig(tmp_path, monkeypatch)
+    widest = "\U0001F600" * MAX_FIELD_CHARS
+    payload = body(cwd=widest, provider=widest, model_id=widest)
+    raw = json.dumps(payload, ensure_ascii=True, indent=1).encode()
+    assert len(raw) <= START_BODY_MAX_BYTES
+    reply = r.client.post("/api/sessions/start", content=raw,
+                          headers={"content-type": "application/json"})
+    assert reply.status_code != 413
+    assert reply.json()["code"] != "start_request_too_large"
+
+
 def test_capacity_refuses_new_keys_before_side_effects_and_still_replays_known(
     tmp_path, monkeypatch
 ):
@@ -459,5 +600,7 @@ def test_protocol_doc_matches_the_advertised_contract():
         Path(__file__).resolve().parents[3] / "docs" / "design" / "mobile-start-receipts.md")
     doc = doc_path.read_text()
     for token in ("create_request_id", "session_start", "create_conflict", "create_indeterminate",
-                  "create_capacity", "create_receipts_unavailable"):
+                  "create_capacity", "create_receipts_unavailable", "start_request_too_large"):
         assert token in doc
+    # The documented byte cap is the enforced one.
+    assert f"{START_BODY_MAX_BYTES:,} bytes" in doc

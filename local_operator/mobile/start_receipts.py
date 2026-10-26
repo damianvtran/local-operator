@@ -24,6 +24,22 @@ RECEIPTS_NAME = "mobile-start-receipts.sqlite3"
 RECEIPT_CAPACITY = 4096
 CAPABILITY = {"version": 1, "durable_idempotency": True, "receipt_capacity": RECEIPT_CAPACITY}
 
+#: Per-field bound on cwd/provider/model_id, in code points.
+MAX_FIELD_CHARS = 4096
+#: The start route's whole-body byte cap, enforced BEFORE any JSON parsing.
+#:
+#: The field bounds above limit what a receipt stores, not what the relay must
+#: buffer and parse to find out that a body breaks them: an 8 MiB authenticated
+#: body was fully read and parsed only to be refused afterwards. The cap is
+#: derived from the schema, so it can never refuse a valid request: the worst
+#: JSON encoding of one code point is an escaped surrogate pair (12 bytes), so
+#: three maximal fields cost 3 x 4096 x 12 bytes; the 4 KiB slack covers the
+#: key (at most 36 escaped characters), escaped field names, punctuation and
+#: ordinary whitespace. It applies to unkeyed callers too, because the route
+#: cannot know whether a body is keyed until it has parsed it; no real legacy
+#: body (a path plus two identifiers) comes near it.
+START_BODY_MAX_BYTES = 3 * MAX_FIELD_CHARS * 12 + 4096
+
 
 class StartRefusal(Exception):
     """Machine-readable refusal; clients own localized presentation."""
@@ -53,7 +69,7 @@ def canonical_request(body: dict[str, Any]) -> tuple[str, str]:
     intent: dict[str, str | None] = {}
     for field in ("cwd", "provider", "model_id"):
         value = body.get(field)
-        if value is not None and (not isinstance(value, str) or len(value) > 4096):
+        if value is not None and (not isinstance(value, str) or len(value) > MAX_FIELD_CHARS):
             raise StartRefusal("invalid_start_request", 400)
         if not isinstance(value, str):
             intent[field] = None

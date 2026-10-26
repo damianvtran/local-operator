@@ -71,12 +71,13 @@ answers `create_indeterminate` (below) instead of a stale number.
 | Status | `code` | Meaning |
 |---|---|---|
 | 400 | `invalid_create_request_id` | Not a UUID, or longer than 36 characters |
-| 400 | `invalid_start_request` | Unknown top-level field, or a non-string/oversized value |
+| 400 | `invalid_start_request` | Unknown top-level field, or a non-string value longer than 4096 characters |
 | 400 | `invalid_start_directory` | `cwd` is not an existing directory the spawn gate admits |
 | 400 | `invalid_start_selection` | The resolved provider/model pair is missing or unusable |
 | 409 | `create_conflict` | Same key, different fingerprint or input |
 | 409 | `create_indeterminate` | Uncertain outcome; carries the authoritative `session_id` |
 | 503 | `create_capacity` | The receipt bound is full; new key refused before any side effect |
+| 413 | `start_request_too_large` | Body over 151,552 bytes; refused before it is parsed, keyed or not |
 | 503 | `create_receipts_unavailable` | Store corrupt, unreadable or unwritable |
 
 `create_indeterminate` is a **hold, not a failure to retry as new**. The
@@ -138,6 +139,13 @@ replaying while the store is full.
   must scope its own retry identity accordingly.
 - The relay proves the same owner authority as before; it does **not** prove a
   distinct signed-in account.
+- **The whole request body is capped at 151,552 bytes** (`START_BODY_MAX_BYTES`)
+  before any JSON parsing. The cap is checked on `Content-Length` and again on
+  the bytes actually read, so a chunked or lying request stops at the cap and
+  is never buffered whole. It derives from the field bounds (3 fields × 4096
+  characters × 12 bytes for the widest JSON escape, plus 4 KiB), so no request
+  the schema admits is refused by it. It applies to unkeyed callers too: the
+  route cannot tell a body is keyed until it parses it.
 
 ## Client obligations
 
