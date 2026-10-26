@@ -624,7 +624,11 @@ id/revision tokens a bulk write must echo, and the
   relay can reach the conversation now) and `durable` (its transcript survives a
   restart) — the two flags `GET /api/asks` established, so a row is never
   presented as answerable when it is not.
-- `GET /api/notifications/{id}` — one item, its context and its asks.
+- `[redacted]/{id}` — one item, its context and its asks, carrying the SAME
+  per-row `runtime_live`/`durable` pair as the reel with the same meaning. The
+  detail answered `false`/`false` for every item until QA Q4, because it read a
+  top-level `session_id` the item does not have — an item holds a nested
+  `session` block — so both routes now share one reader.
 - `PATCH /api/notifications` — `read`/`unread`/`dismiss`/`undismiss` over
   `ids[{id, revision}]`, or `session_id`+`through_seq`, or `all`+`through_seq`;
   every bulk target also needs the `observed` tokens, at most 500 per batch. A

@@ -1885,6 +1885,29 @@ def _session_folder_exists(session_id: str) -> bool:
     return (config_dir() / "sessions" / session_id).is_dir()
 
 
+def _notification_row_session_id(row: Any) -> str:
+    """The conversation a notification row belongs to, or "" when it names none.
+
+    THE ROW CARRIES ITS CONVERSATION AS A NESTED OBJECT — the desktop answer's
+    shape (`{"session": {"id": ..., "title": ...}}`) — so a top-level
+    `session_id` read yields "" and silently marks every item unsendable. That
+    mistake was paid for once on the ASKS wire and again on this route's DETAIL
+    handler (QA Q4 on #2968): the list row said `durable: True` for a session
+    while the same item's detail said `false`, so a client that honours those
+    flags (the phone's "Open conversation") disabled it on every item.
+
+    ONE FUNCTION, BOTH ROUTES: two spellings of this lookup is how the list and
+    the detail came to disagree. The fallback to a top-level `session_id` is for
+    an older writer's row, never the primary read.
+    """
+    if not isinstance(row, dict):
+        return ""
+    facts = row.get("session")
+    if isinstance(facts, dict) and facts.get("id"):
+        return str(facts.get("id") or "")
+    return str(row.get("session_id") or "")
+
+
 def _durable_user_session_dir(session_id: str) -> Path | None:
     """Return a strictly addressed durable user conversation, if it exists.
 
@@ -8235,15 +8258,9 @@ def build_app(daemon: MobileDaemon):
                 return refusal
             raise
         for row in list(page.get("items") or []) + list(page.get("waiting") or []):
-            # The row carries its conversation as a NESTED object (the desktop
-            # answer's shape), so reading a top-level id marked every row
-            # unsendable -- the failure the asks wire already paid for once.
-            facts = row.get("session")
-            session_key = (
-                str((facts.get("id") or row.get("session_id") or "") or "")
-                if isinstance(facts, dict)
-                else str(row.get("session_id") or "")
-            )
+            # One reader for the row's conversation (`_notification_row_session_id`),
+            # so this answer and the DETAIL route cannot disagree again.
+            session_key = _notification_row_session_id(row)
             row["runtime_live"] = _session_is_live(daemon, session_key)
             row["durable"] = _durable_user_session_dir(session_key) is not None
         return JSONResponse(page)
@@ -8277,7 +8294,11 @@ def build_app(daemon: MobileDaemon):
             raise
         if answer is None:
             return JSONResponse({"error": "unknown notification"}, status_code=404)
-        session_key = str((answer.get("item") or {}).get("session_id") or "")
+        # QA Q4: this read `item["session_id"]`, a key the item does not have —
+        # it carries a nested `session` block — so the detail answered
+        # false/false for EVERY item while the list row said `durable: True`.
+        # Same reader, same rules as the list row.
+        session_key = _notification_row_session_id(answer.get("item"))
         (answer.get("item") or {})["runtime_live"] = _session_is_live(daemon, session_key)
         (answer.get("item") or {})["durable"] = _durable_user_session_dir(session_key) is not None
         return JSONResponse(answer)

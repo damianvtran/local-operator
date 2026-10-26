@@ -36,6 +36,62 @@ def _store() -> NotificationStore:
     return NotificationStore(config_dir())
 
 
+def test_the_detail_row_agrees_with_the_list_row_about_its_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QA Q4 (#2968): the detail answered false/false for every item.
+
+    The handler read ``item["session_id"]``, a key the item does not carry — it
+    has a nested ``session`` block — so `durable` and `runtime_live` were both
+    false on the DETAIL while the LIST said ``durable: True`` for the same
+    conversation. A client that honours the flags (the phone's "Open
+    conversation") then disabled it on everything.
+
+    Three arms, each asserted on BOTH routes, because agreement is the claim:
+    a durable session, a live one, and neither.
+    """
+    from local_operator.mobile import daemon as mobile_daemon
+
+    durable = "feed00000001"
+    live = "feed00000002"
+    neither = "feed00000003"
+
+    for session_id in (durable, neither):
+        directory = Path(str(config_dir())) / "sessions" / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "transcript.jsonl").write_text(
+            '{"id":"e1","ts":1,"type":"message",'
+            '"payload":{"kind":"message","role":"user","content":[{"text":"go"}]}}\n'
+        )
+    # `live` has NO transcript (so it is not durable) but the relay holds a
+    # connected writer for it, which is the whole of `runtime_live`.
+    monkeypatch.setattr(
+        mobile_daemon, "_session_is_live", lambda daemon, session_id: session_id == live
+    )
+
+    store = _store()
+    items = {
+        durable: store.notify(durable, title="durable only", key="k-durable"),
+        live: store.notify(live, title="live only", key="k-live"),
+        neither: store.notify(neither, title="durable but not live", key="k-neither"),
+    }
+    client = _client()
+    page = client.get("/api/notifications").json()
+    listed = {row["id"]: row for row in page["items"]}
+    for session_id, item in items.items():
+        detail = client.get(f"/api/notifications/{item.item_id}").json()["item"]
+        row = listed[item.item_id]
+        assert (detail["durable"], detail["runtime_live"]) == (
+            row["durable"],
+            row["runtime_live"],
+        ), (session_id, detail["durable"], detail["runtime_live"], row)
+    assert listed[items[durable].item_id]["durable"] is True
+    assert listed[items[live].item_id]["runtime_live"] is True
+    assert listed[items[live].item_id]["durable"] is False
+    assert listed[items[neither].item_id]["durable"] is True
+    assert listed[items[neither].item_id]["runtime_live"] is False
+
+
 def test_the_inbox_routes_need_the_cookie() -> None:
     anonymous = TestClient(
         build_app(MobileDaemon(port=0, password="pw123")), follow_redirects=False
