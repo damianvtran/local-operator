@@ -1948,6 +1948,33 @@ async def test_glob_refuses_a_scheme_pattern_instead_of_matching_nothing(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["glob", "grep"])
+@pytest.mark.parametrize(
+    ("url", "expected", "scratch_remedy"),
+    [
+        ("skill://foo/*", 'read(path="skill://foo")', False),
+        ("spill://abc123", 'read(path="spill://abc123?q=<regex>")', False),
+        ("scratchpad://*.md", 'read(path="scratchpad://<name>")', True),
+    ],
+    ids=["skill", "spill", "scratchpad"],
+)
+async def test_the_scheme_refusal_remedy_fits_the_scheme(
+    tmp_path, tool, url, expected, scratch_remedy
+) -> None:
+    """The redirect names the call that serves THAT scheme (QA round 2 N1 on
+    #2982): ``glob skill://foo/*`` used to be told to read a scratchpad file, a
+    route that cannot lead to a skill. Scratchpad keeps the existing remedy."""
+    context, _pad, tools = _scratchpad_context(tmp_path)
+    args = {"pattern": url} if tool == "glob" else {"pattern": "x", "path": url}
+
+    result = await tools[tool].execute("c", args, None, None, context)
+    assert result.is_error is True
+    assert f"{tool} takes only filesystem paths" in result.text
+    assert expected in result.text, result.text
+    assert ("scratchpad://<name>" in result.text) is scratch_remedy, result.text
+
+
+@pytest.mark.asyncio
 async def test_a_drive_shaped_argument_is_refused_and_that_is_disclosed(tmp_path) -> None:
     """``C://x.txt`` is refused as scheme ``C`` (review round 1, R5).
 
@@ -6403,7 +6430,7 @@ def test_ripgrep_keeps_the_records_a_stop_produced_even_with_no_returncode(
     bug reopened through a narrower door, so the guard is now the stop itself. The
     process below never reports a returncode at all.
     """
-    proc = _StubbornProc([b"src/a.py:1:1:needle\n"])
+    proc = _StubbornProc([b"src/a.py\x001:1:needle\n"])
     monkeypatch.setattr(builtin, "_rg_binary", lambda: "/fake/rg")
 
     async def _spawn(*args, **kwargs):
@@ -9225,6 +9252,54 @@ async def test_grep_clips_around_the_match_after_invalid_utf8(
     body = _grep_body(result)
     assert body.startswith("lat.js:1:[\u2026"), body[:80]
     assert "NEEDLE_XYZ" in body, "the clipped window lost the match"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize("context_lines", [0, 1])
+async def test_grep_elision_range_points_at_the_hidden_matches_in_the_spill(
+    tools, context, tmp_path, monkeypatch, engine, context_lines
+) -> None:
+    """The footer's ``range=`` is followed verbatim and must return exactly the
+    matches the body elided (QA Q7 on #2982). The body carries ``--`` separators
+    and context rows the one-match-per-line spill does not, so a span counted on
+    the body returned the wrong matches — or, with context, nothing at all."""
+    (tmp_path / "many").mkdir()
+    for i in range(18):
+        (tmp_path / "many" / f"f{i:02d}.txt").write_text(
+            f"pre\nHIT_QA_{i:02d} " + "z" * 600 + "\npost\n"
+        )
+    args: dict[str, Any] = {"pattern": "HIT_QA", "path": "many"}
+    if context_lines:
+        args["context_lines"] = context_lines
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    shown = set(re.findall(r"HIT_QA_(\d\d)", result.text))
+    hidden = {f"{i:02d}" for i in range(18)} - shown
+    assert hidden, "the fixture must overflow the budget for this test to mean anything"
+    hint = re.search(r'read\(path="(spill://[^"]+)", range="(\d+-\d+)"\)', result.text)
+    assert hint, result.text[-600:]
+    assert "their matches are lines " + hint.group(2) in result.text
+    page = await _call(tools, "read", {"path": hint.group(1), "range": hint.group(2)}, context)
+    assert set(re.findall(r"HIT_QA_(\d\d)", page.text)) == hidden, page.text[:400]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_context_survives_a_path_with_a_dash_digits_dash_segment(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """``dash-3-dir/a.txt-1-before`` is ambiguous in rg's default context grammar;
+    the old parse split inside the path and dropped the row, so rg showed no
+    context where the Python engine did. ``--null`` ends the path at a NUL."""
+    (tmp_path / "dash-3-dir").mkdir()
+    (tmp_path / "dash-3-dir" / "a.txt").write_text("before\nNEEDLE here\nafter\n")
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "NEEDLE", "context_lines": 1}
+    )
+    assert "dash-3-dir/a.txt:1-before" in result.text, result.text
+    assert "dash-3-dir/a.txt:2:NEEDLE here" in result.text, result.text
+    assert "dash-3-dir/a.txt:3-after" in result.text, result.text
 
 
 @pytest.mark.asyncio
