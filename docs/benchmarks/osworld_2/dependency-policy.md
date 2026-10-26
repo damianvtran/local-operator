@@ -59,7 +59,11 @@ It therefore still reports the two intentionally superseded upstream bounds.
 Retain that raw output; do **not** describe it as a green pip check. Validate that
 these are the only conflicts, that the installed versions satisfy the declared
 overrides and current harness, and preserve the actual installed version list.
-Any other conflict blocks admission until understood and resolved.
+Any other conflict blocks admission until understood and resolved. That
+admission check is now in-repo rather than operator scratch:
+`scripts/osworld_dependency_admission.py`, driven by
+`scripts/build_osworld_arm.py` — see [arm-build.md](arm-build.md), which also
+states what such a build does and does not prove.
 
 The new pilot environment changes PyJWT2.8.0 to2.13.0; requests remains2.34.2.
 Record this alongside the source revision, wheel hashes, interpreter, complete
