@@ -2276,7 +2276,7 @@ def _apply_validated_plan(
     have: dict[str, dict[str, Any]],
     complete_members: tuple[dict[str, str], tuple[str, ...]] | None,
     stop: Callable[[], bool] | None,
-) -> dict[str, Any]:
+) -> PullResult:
     digest = str(transcript.get("digest") or "")
     written = 0
     resumed = 0
@@ -2306,8 +2306,13 @@ def _apply_validated_plan(
     links = 0
     attested: dict[str, str] = {}
     prune: list[tuple[Path, _WriteScope]] = []
+    # THE COMPLETE SOURCE SET, when the owner could attest one, is authoritative for
+    # membership AND digest below. Bound ONCE so the prune and the final attestation
+    # read the same value rather than re-testing the same optional.
+    source_members: dict[str, str]
+    source_links: tuple[str, ...]
+    source_members, source_links = complete_members if complete_members is not None else ({}, ())
     if complete_members is not None:
-        source_members, source_links = complete_members
         # HELD MEMBER DIGESTS for the prune below. ``held_report`` reports the shared
         # attachment store in its own ``attachments`` map and copy-set/tree/link members
         # in ``files``, so ``previous`` is exactly the set a replica's cursor owns. The
