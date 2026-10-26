@@ -1,0 +1,13 @@
+{
+  "relay.health.live": {
+    "role": "session status label (app bar status dot)",
+    "tone": "One short state word, sentence case, no trailing period.",
+    "maxCells": 16,
+    "note": "Accessible name and sheet title for the GREEN status dot in a conversation's header: the session's process is running on the user's computer, its heartbeat is fresh and the phone's link to it is up. Sibling states reuse existing keys: relay.chrome.session.subtitle.not_answering (yellow) and relay.chrome.session.subtitle.ended (grey); keep the same register as those two."
+  },
+  "relay.health.live_detail": {
+    "role": "status sheet explanation",
+    "tone": "Plain, reassuring statement; sentence case; no trailing period (matches relay.chrome.session.ended_hint).",
+    "note": "Body of the sheet that opens when the reader taps the green status dot. 'Your computer' is the machine running the agent session (not the phone). 'Right away' means a message is delivered to the running session now, not queued for a restart; it may still wait for the agent's current step to finish, so do not promise an instant reply."
+  }
+}

@@ -218,6 +218,10 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, stri
     "relay.chrome.snackbar.dismiss": "Dismiss",
     "relay.chrome.spend.title": "Spend & context",
   },
+  "relay.health": {
+    "relay.health.live": "Live",
+    "relay.health.live_detail": "Running on your computer \u2014 messages reach it right away",
+  },
   "relay.library": {
     "relay.library.count": "{count, plural, one {# asset} other {# assets}}",
   },

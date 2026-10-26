@@ -207,6 +207,8 @@ export type MessageParams = {
   "relay.chrome.session.tray.tasks": { "done": number; "total": number };
   "relay.chrome.snackbar.dismiss": undefined;
   "relay.chrome.spend.title": undefined;
+  "relay.health.live": undefined;
+  "relay.health.live_detail": undefined;
   "relay.library.count": { "count": number };
   "relay.login.error.password": undefined;
   "relay.login.page.title": undefined;
