@@ -199,6 +199,7 @@ from local_operator.tools import (
 from local_operator.tools.confinement import (
     ToolConfinement,
     confinement_of,
+    shell_sandbox_unavailable_reason_async,
     shell_write_confinement_of,
 )
 from local_operator.tools.spill import (
@@ -4230,6 +4231,10 @@ async def execute_bash(
         # a call that reaches here either runs inside the sandbox or does not
         # run. No cwd check: reads are open, so any cwd is legitimate, and a
         # write relative to it is refused by the kernel like any other.
+        # The first availability probe is a spawn: awaited here on a worker
+        # thread so ``wrap`` below reads it from cache instead of blocking the
+        # event loop (review round 1 R4 on PR #2987).
+        await shell_sandbox_unavailable_reason_async()
         wrapped = shell_write.wrap(shell_argv)
         if wrapped is None:
             return _error(tool_call_id, "bash", shell_write.spawn_refusal())
@@ -5436,7 +5441,8 @@ def _bash_oversized_streams(
 #: frozen instructions still say "you cannot run anything" learns otherwise.
 _WRITE_CONFINED_BASH_NOTE = (
     f" SANDBOXED: reads anywhere; writes only under ${SCRATCHPAD_PATH_ENV}; no "
-    "network (use web_fetch); credential files unreadable. A refused write or "
+    "network (use web_fetch); known credential stores unreadable (not every "
+    "secret is). A refused write, read or "
     'connect fails with "Operation not permitted" -- that is the sandbox, not a bug.'
 )
 

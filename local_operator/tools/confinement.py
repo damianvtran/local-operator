@@ -204,6 +204,7 @@ run under.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import subprocess
 import sys
@@ -584,20 +585,29 @@ def confinement_of(context: ToolContext | None) -> ToolConfinement | None:
 # loopback and AF_UNIX connects, ``kill`` of a process outside the sandbox and
 # a nested permissive ``sandbox-exec`` are all refused (see the darwin tests).
 #
-# THE RESIDUAL, stated: the shell reads whatever the user can read, minus the
-# credential stores denied below. That is no wider than the ``read`` tool a
-# scout already holds, and command output still passes the bash tool's
-# credential masking and secret-sink scan. The deny list is a list, not a
-# proof: a token in a file this list does not name (``~/.npmrc``,
-# ``~/.pypirc``, a project's own config) is readable here exactly as it is
-# through ``read``.
+# THE RESIDUAL, stated (corrected in agent review round 1 of PR #2987): the
+# shell reads whatever the user can read, minus the credential stores denied
+# below. That is NOT "no wider than ``read``": ``read`` asks before opening a
+# path outside the workspace, while this shell is ``read`` tier and never
+# asks, so a file the deny list misses is readable here with no prompt -- and
+# the scout's ``web_fetch`` could carry it out. The deny list is therefore
+# DERIVED from the sensitive-path vocabulary lop already maintains
+# (``supplements.denylist``, itself the union of ``references`` and
+# ``browser_files``) plus lop's own config-dir stores, so a class added there is
+# denied here without an edit. It is still a list, not a proof: a credential
+# in a file no rule names (a project's ``config.yaml`` with a token in it) is
+# readable, and command output then passes only the bash tool's credential
+# masking, which recognises known shapes, not every secret.
 
 #: Credential stores in the operator's HOME that a write-confined shell may
-#: not READ, relative to the resolved home directory. Each is a store whose
-#: whole purpose is holding a credential: SSH keys, the login keychain files
-#: (measured: readable as raw files without this deny), cloud and forge CLI
-#: tokens. ``.config/glab-cli`` is the GitLab twin of ``.config/gh`` and is
-#: the forge CLI this operator's other codebase uses.
+#: not READ, relative to the resolved home directory, that the DERIVED rules
+#: (:func:`_derived_denial_filters`) do not already reach by name. SSH keys,
+#: the login keychain files (measured: readable as raw files without a deny),
+#: ``.aws``, ``.config/gh`` and ``.netrc`` are derived too and stay listed
+#: here as belt and braces for the stores this module was written for.
+#: ``.config/glab-cli`` is the GitLab twin of ``.config/gh``;
+#: ``.codex/auth.json`` (an OpenAI token) and ``.config/op`` (1Password CLI)
+#: were measured readable in agent review / QA round 1 of PR #2987.
 _HOME_SECRET_SUBPATHS: tuple[str, ...] = (
     ".ssh",
     "Library/Keychains",
@@ -605,12 +615,70 @@ _HOME_SECRET_SUBPATHS: tuple[str, ...] = (
     ".config/gh",
     ".config/glab-cli",
     ".netrc",
+    ".codex/auth.json",
+    ".config/op",
 )
 
-#: Dotenv files anywhere on disk: ``.env``, ``prod.env``, ``.env.local``,
-#: ``prod.env.local`` -- and NOT ``envy.txt`` or ``.envrc`` (measured).
-#: A regex because these live in every project tree, not under one subpath.
+#: lop's OWN credential stores, relative to a config root (the active one and
+#: the default ``~/.local-operator``). ``secrets/`` holds the encrypted store
+#: and its master key; ``network/identity`` the mesh device PRIVATE key
+#: (``device.json``); ``network/credentials`` mesh-borrowed credentials;
+#: ``operator/`` the operator signing key; ``tunnel/cloudflared.token`` the
+#: tunnel token; ``push-handle.key`` the push handle; ``mcp.json`` MCP server
+#: definitions, which carry API keys in ``env``/headers. Each was measured
+#: readable from this shell in round 1 of PR #2987. These sit under one root
+#: with harmless siblings (``config.yml``), so they are listed rather than
+#: derived: the generic vocabulary deliberately does not deny ``*.json``.
+_CONFIG_SECRET_SUBPATHS: tuple[str, ...] = (
+    "secrets",
+    "network/identity",
+    "network/credentials",
+    "operator",
+    "tunnel/cloudflared.token",
+    "push-handle.key",
+    "mcp.json",
+)
+
+#: Per-network secret files: ``network/networks/<id>.secrets.json``. A regex
+#: because ``<id>`` varies and the sibling ``<id>.json`` is not a secret.
+_NETWORK_SECRETS_SUFFIX = ".secrets.json"
+
+#: Patterns from ``supplements.denylist._EXTRA_PATTERNS`` that are NOT carried
+#: into the kernel deny, each because it matches the source and data a research
+#: shell exists to read: ``*token*`` is ``tokenizer.py``, ``*secret*`` is
+#: ``secret_store.py``, and ``*.db``/``*.sqlite*`` is every project database
+#: (and the sqlite files a scout makes in its own scratchpad). The supplement
+#: pre-filter can afford them because it only decides what to OFFER a model;
+#: here they would refuse a ``grep -r`` over a source tree. Every name here
+#: must still exist upstream -- a parity test fails if one is renamed away, so
+#: this list cannot silently start excluding nothing.
+_KERNEL_EXCLUDED_PATTERNS: frozenset[str] = frozenset(
+    {"*token*", "*secret*", "*.db", "*.sqlite", "*.sqlite3"}
+)
+
+#: Components likewise NOT carried into the kernel deny. ``secrets`` is lop's
+#: own SOURCE package (``local_operator/secrets/``, ``tests/unit/secrets``)
+#: and a common module name elsewhere; a whole-tree deny would refuse a scout
+#: auditing exactly that code. lop's real ``secrets/`` store is denied by
+#: path (:data:`_CONFIG_SECRET_SUBPATHS`), and ``Library/Keychains`` by path.
+#: The residual, stated: a project-local ``secrets/`` directory of real
+#: secrets is readable from this shell.
+_KERNEL_EXCLUDED_COMPONENTS: frozenset[str] = frozenset({"secrets"})
+
+#: Dotenv files with a trailing qualifier (``prod.env.local``), which the
+#: derived name/suffix/prefix rules do not reach; ``envy.txt`` stays readable.
 _DOTENV_REGEX = r"/[^/]*\.env(\.[^/]*)?$"
+
+#: Characters a path may not contain to be written into a seatbelt profile.
+#: Measured on macOS 27.0.1: inside ``"..."`` a ``\\"`` escape works, but inside a
+#: ``#"..."`` regex literal a ``"`` cannot be expressed at all (``\\"`` ends the
+#: literal: "unbound variable"), and the same root is interpolated into both.
+#: So rather than escape one and not the other, a root (or HOME/config dir)
+#: containing ``"``, ``\\`` or a control character is REFUSED, deliberately:
+#: a lop-generated scratchpad never contains one, and a profile built from one
+#: would at best fail to parse (and show the model a raw parser error) and at
+#: worst parse as rules nobody wrote -- the ``"x) (allow default) (y`` root.
+_PROFILE_UNSAFE_CHARS = frozenset('"\\') | frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
 
 #: The no-op profile the availability probe applies. ``sandbox-exec`` can be
 #: PRESENT and still unable to apply a profile -- most commonly when lop is
@@ -621,9 +689,104 @@ _PROBE_PROFILE = "(version 1)(allow default)"
 
 
 def _seatbelt_regex_literal(path: str) -> str:
-    """``path`` with every regex metacharacter escaped, for a ``#"..."`` rule."""
+    """``path`` with every regex metacharacter escaped, for a ``#"..."`` rule.
 
-    return "".join(f"\\{ch}" if ch in r".^$*+?()[]{}|\"" else ch for ch in path)
+    ``"`` and ``\\`` are not handled here: they cannot reach this function, because
+    :func:`profile_path_refusal` refuses any path containing them first.
+    """
+
+    return "".join(f"\\{ch}" if ch in r".^$*+?()[]{}|" else ch for ch in path)
+
+
+def profile_path_refusal(path: str | Path) -> str | None:
+    """Why ``path`` cannot be written into a seatbelt profile, or ``None``.
+
+    See :data:`_PROFILE_UNSAFE_CHARS`: refusal, never escaping, so a path that
+    could change the profile's meaning never reaches ``sandbox-exec``.
+    """
+
+    text = str(path)
+    bad = sorted({repr(ch) for ch in text if ch in _PROFILE_UNSAFE_CHARS})
+    if bad:
+        return f"the path {text!r} contains {', '.join(bad)}, which a sandbox profile cannot carry"
+    return None
+
+
+def _glob_to_seatbelt_regex(pattern: str) -> str:
+    """A basename ``fnmatch`` glob as a seatbelt regex anchored to a path's leaf.
+
+    Only ``*`` and ``?`` occur in the vocabulary (a parity test pins that), so
+    this is the whole translation: ``*`` never crosses a ``/``.
+    """
+
+    body = "".join(
+        "[^/]*" if ch == "*" else "[^/]" if ch == "?" else _seatbelt_regex_literal(ch)
+        for ch in pattern
+    )
+    return f"/{body}$"
+
+
+def _derived_denial_filters() -> tuple[str, ...]:
+    """Kernel deny FILTERS derived from the sensitive-path vocabulary.
+
+    The source is ``supplements.denylist``: the ONE place that already unions
+    ``references`` (the ``@``-reference gate) and ``browser_files`` (the upload
+    gate) and adds its own rows, with parity tests keeping it a superset of
+    both. Deriving from it rather than copying is what review round 1 of PR
+    #2987 asked for: a class added there is denied here without an edit.
+
+    Each rule kind maps to the regex that means the same thing on a path:
+
+    * names / credential globs / extra names / extra patterns -> the LEAF;
+    * suffixes and name prefixes -> the leaf's end / start;
+    * components and component sequences -> that directory and all beneath;
+    * dir+file pairs -> exactly that file under that directory.
+
+    LEAF rules exclude DIRECTORIES (``require-not (vnode-type DIRECTORY)``).
+    The vocabulary names credential FILES, and a leaf regex alone also matched
+    a directory of the same name -- measured: ``(regex #"/credentials$")``
+    refused ``ls local_operator/network/credentials``, which is lop SOURCE,
+    and so silently blinded ``grep -r`` over the tree. With the vnode filter
+    the directory lists and its ``.py`` files read, while a FILE called
+    ``credentials`` (and a symlink to one) is still refused (measured).
+
+    Case: seatbelt's path match is case-insensitive on this (case-insensitive)
+    volume -- measured: ``\\.pem$`` refuses ``UPPER.PEM`` and ``/\\.ssh(/|$)``
+    refuses ``X/.SSH/id`` -- and the vocabulary is lower-case, so no folding.
+    """
+
+    from local_operator.supplements import (
+        denylist,  # local: lazy like the module itself
+    )
+
+    names, suffixes, prefixes, parts, patterns = denylist._composed()
+    leaf_globs = {
+        *names,
+        *denylist._EXTRA_NAMES,
+        *patterns,
+        *(pattern for pattern, _rule in denylist._EXTRA_PATTERNS),
+    } - _KERNEL_EXCLUDED_PATTERNS
+    leaves = [_glob_to_seatbelt_regex(glob) for glob in sorted(leaf_globs)]
+    leaves += [f"/[^/]*{_seatbelt_regex_literal(suffix)}$" for suffix in sorted(suffixes)]
+    leaves += [f"/{_seatbelt_regex_literal(prefix)}[^/]*$" for prefix in sorted(prefixes)]
+    # ``prod.env.local``: a dotenv with a trailing qualifier, which no name,
+    # suffix or prefix rule above reaches (kept from the original list).
+    leaves.append(_DOTENV_REGEX)
+    # De-duplicated in order: the composed sources overlap (``*.pem`` is both a
+    # suffix and a credential glob), and one rule per meaning keeps the
+    # profile -- compiled on every command -- no larger than it must be.
+    filters = [
+        f'(require-all (regex #"{regex}") (require-not (vnode-type DIRECTORY)))'
+        for regex in dict.fromkeys(leaves)
+    ]
+    components = {*parts, *denylist._EXTRA_COMPONENTS} - _KERNEL_EXCLUDED_COMPONENTS
+    trees = [f"/{_seatbelt_regex_literal(component)}(/|$)" for component in sorted(components)]
+    for sequence, _rule in denylist._COMPONENT_SEQUENCES:
+        trees.append("/" + "/".join(_seatbelt_regex_literal(part) for part in sequence) + "(/|$)")
+    for directory, filename, _rule in denylist._DIR_FILE_PAIRS:
+        trees.append(f"/{_seatbelt_regex_literal(directory)}/{_seatbelt_regex_literal(filename)}$")
+    filters += [f'(regex #"{regex}")' for regex in dict.fromkeys(trees)]
+    return tuple(filters)
 
 
 @functools.lru_cache(maxsize=1)
@@ -656,10 +819,54 @@ def shell_sandbox_unavailable_reason() -> str | None:
     The static check first (platform, binary present), then the cached apply
     probe. Every caller that decides whether a scout HAS a shell, and every
     spawn that decides whether to RUN one, reads this one answer, so the two
-    cannot disagree.
+    cannot disagree. SYNCHRONOUS and possibly a spawn on first use: from a
+    coroutine call :func:`shell_sandbox_unavailable_reason_async` instead.
     """
 
     return sandbox_unavailable_reason() or _sandbox_apply_probe_reason()
+
+
+def _probe_is_cached() -> bool:
+    """Whether the apply probe has already answered in this process.
+
+    ``getattr`` because tests replace the probe with a plain callable, which
+    has no cache and answers instantly -- treated as cached.
+    """
+
+    info = getattr(_sandbox_apply_probe_reason, "cache_info", None)
+    return info is None or info().currsize > 0
+
+
+async def shell_sandbox_unavailable_reason_async() -> str | None:
+    """The same answer as :func:`shell_sandbox_unavailable_reason`, off the loop.
+
+    The first probe is a ``subprocess.run`` with a 10 s timeout; on a wedged
+    host that would stall every session on the event loop for up to 10 s
+    (review round 1 R4 on PR #2987). So the FIRST probe runs on a worker
+    thread and populates the same ``lru_cache`` every later read hits; the
+    answer is then read through the synchronous function, so there is one
+    definition of it. Still fail closed: a probe that raises or exits non-zero
+    is a reason.
+    """
+
+    if sandbox_unavailable_reason() is None and not _probe_is_cached():
+        await asyncio.to_thread(_sandbox_apply_probe_reason)
+    return shell_sandbox_unavailable_reason()
+
+
+def shell_sandbox_known_unavailable_reason() -> str | None:
+    """The unavailability reason known WITHOUT spawning anything, or ``None``.
+
+    For synchronous callers on the event loop (a profile attached to a live
+    session): the full answer once the probe has run, else the static check
+    alone. ``None`` here does NOT mean the sandbox works -- only that nothing
+    yet says it does not -- which is safe because the shell's executor awaits
+    the full answer before every spawn and refuses rather than run unwrapped.
+    """
+
+    if _probe_is_cached():
+        return shell_sandbox_unavailable_reason()
+    return sandbox_unavailable_reason()
 
 
 def _secret_read_denials() -> tuple[str, ...]:
@@ -669,25 +876,51 @@ def _secret_read_denials() -> tuple[str, ...]:
     ``/tmp``-style symlinked home or config dir spelled unresolved would match
     nothing. Both the active config dir and the default ``~/.local-operator``
     are covered, so an isolated ``LOCAL_OPERATOR_CONFIG_DIR`` does not leave
-    the operator's real store readable.
+    the operator's real store readable. The caller has already refused a
+    HOME or config root that :func:`profile_path_refusal` rejects
+    (:func:`_profile_roots_refusal`), so every interpolation here is safe.
     """
+
+    home, config_roots = _profile_roots()
+    filters: list[str] = []
+    for root in config_roots:
+        filters.extend(f'(subpath "{root / rel}")' for rel in _CONFIG_SECRET_SUBPATHS)
+        # The ``credentials`` dir, ``credentials.env`` (+ backups) and
+        # ``auth.db`` (+ WAL/SHM) are matched by prefix so a sibling
+        # spelling the store writes later is covered too.
+        prefix = _seatbelt_regex_literal(str(root))
+        filters.append(f'(regex #"^{prefix}/(credentials|auth\\.db)")')
+        suffix = _seatbelt_regex_literal(_NETWORK_SECRETS_SUFFIX)
+        filters.append(f'(regex #"^{prefix}/network/networks/[^/]*{suffix}$")')
+    filters.extend(f'(subpath "{home / rel}")' for rel in _HOME_SECRET_SUBPATHS)
+    filters.extend(_derived_denial_filters())
+    return tuple(filters)
+
+
+def _profile_roots() -> tuple[Path, tuple[Path, ...]]:
+    """``(home, config roots)`` as the profile names them: resolved, sorted."""
 
     from local_operator.paths import config_dir  # local: paths imports widely
 
     home = Path.home().expanduser().resolve()
-    filters: list[str] = []
-    config_roots = {config_dir().expanduser().resolve(), home / ".local-operator"}
-    for root in sorted(config_roots):
-        # ``secrets/`` holds the encrypted store AND its master key; the
-        # ``credentials`` dir, ``credentials.env`` (+ backups) and
-        # ``auth.db`` (+ WAL/SHM) are matched by prefix so a sibling
-        # spelling the store writes later is covered too.
-        filters.append(f'(subpath "{root / "secrets"}")')
-        prefix = _seatbelt_regex_literal(str(root))
-        filters.append(f'(regex #"^{prefix}/(credentials|auth\\.db)")')
-    filters.extend(f'(subpath "{home / rel}")' for rel in _HOME_SECRET_SUBPATHS)
-    filters.append(f'(regex #"{_DOTENV_REGEX}")')
-    return tuple(filters)
+    roots = {config_dir().expanduser().resolve(), home / ".local-operator"}
+    return home, tuple(sorted(roots))
+
+
+def _profile_roots_refusal(root: Path) -> str | None:
+    """Why a profile for ``root`` cannot be built safely, or ``None``.
+
+    Every path the profile interpolates: the write root, HOME and the config
+    roots. A HOME that cannot be written into the profile means the credential
+    denials cannot be either, so that refuses too -- fail closed.
+    """
+
+    home, config_roots = _profile_roots()
+    for path in (root, home, *config_roots):
+        refusal = profile_path_refusal(path)
+        if refusal is not None:
+            return refusal
+    return None
 
 
 @dataclass(frozen=True)
@@ -722,16 +955,29 @@ class ShellWriteConfinement:
         return cls.at(raw)
 
     def wrap(self, argv: Sequence[str]) -> list[str] | None:
-        """``argv`` under the write-confining sandbox, or ``None`` to refuse."""
+        """``argv`` under the write-confining sandbox, or ``None`` to refuse.
 
-        if shell_sandbox_unavailable_reason() is not None:
+        From a coroutine, await :func:`shell_sandbox_unavailable_reason_async`
+        first so the probe this reads is already cached (``execute_bash`` does).
+        """
+
+        if self.unavailable_reason() is not None:
             return None
         return [str(SANDBOX_EXEC), "-p", self.profile(), *argv]
+
+    def unavailable_reason(self) -> str | None:
+        """Why this confinement cannot be enforced here, or ``None``.
+
+        The host's answer, or a root/HOME the profile cannot carry safely
+        (:func:`profile_path_refusal`). Both refuse the command.
+        """
+
+        return _profile_roots_refusal(self.root) or shell_sandbox_unavailable_reason()
 
     def spawn_refusal(self) -> str:
         """The failure-closed sentence for a host that cannot enforce the boundary."""
 
-        reason = shell_sandbox_unavailable_reason() or "an unknown reason"
+        reason = self.unavailable_reason() or "an unknown reason"
         return (
             f"refused: this shell may write only under {self.root} and this host "
             f"cannot enforce that for shell children ({reason}); a read-only "
@@ -764,6 +1010,11 @@ class ShellWriteConfinement:
         so the shell cannot ``kill`` the operator's processes.
         """
 
+        refusal = _profile_roots_refusal(self.root)
+        if refusal is not None:
+            # Never build the string: ``wrap`` refuses first, and a direct
+            # caller must not get a profile whose meaning a path could change.
+            raise ValueError(refusal)
         writes = " ".join(f'(literal "{path}")' for path in _SYSTEM_WRITE_LITERALS)
         mach = " ".join(f'(global-name "{name}")' for name in _MACH_LOOKUP_GLOBAL_NAMES)
         denials = " ".join(_secret_read_denials())

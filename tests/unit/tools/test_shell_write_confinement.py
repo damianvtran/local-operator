@@ -626,6 +626,248 @@ class TestSeatbeltRuleOrder:
         assert self._read(head + deny + "(allow file-read*)", secret).returncode != 0
 
 
+# ---------------------------------------------------------------------------
+# Round 1 of PR #2987: derived denials (R2/Q1), unsafe roots (R3), and the
+# non-blocking availability probe (R4)
+# ---------------------------------------------------------------------------
+
+
+class TestDerivedDenials:
+    """The kernel deny list is DERIVED from ``supplements.denylist`` so the
+    two cannot drift (R2). These pin the derivation, every platform."""
+
+    def test_every_vocabulary_class_reaches_the_profile(
+        self, scout_dirs: tuple[Path, Path, Path]
+    ) -> None:
+        from local_operator.supplements import denylist
+
+        root, _outside, _home = scout_dirs
+        denied = ShellWriteConfinement.at(root).profile().splitlines()[-1]
+        names, suffixes, prefixes, parts, patterns = denylist._composed()
+        for component in {*parts, *denylist._EXTRA_COMPONENTS}:
+            if component in confinement_module._KERNEL_EXCLUDED_COMPONENTS:
+                continue
+            literal = confinement_module._seatbelt_regex_literal(component)
+            assert f'(regex #"/{literal}(/|$)")' in denied, component
+        for suffix in suffixes:
+            literal = confinement_module._seatbelt_regex_literal(suffix)
+            assert f"/[^/]*{literal}$" in denied, suffix
+        leaf_globs = {*names, *denylist._EXTRA_NAMES, *patterns}
+        leaf_globs |= {pattern for pattern, _rule in denylist._EXTRA_PATTERNS}
+        for glob in leaf_globs - confinement_module._KERNEL_EXCLUDED_PATTERNS:
+            regex = confinement_module._glob_to_seatbelt_regex(glob)
+            assert f'(regex #"{regex}")' in denied, glob
+        for sequence, _rule in denylist._COMPONENT_SEQUENCES:
+            assert "/".join(sequence).replace(".", "\\.") in denied, sequence
+        for directory, filename, _rule in denylist._DIR_FILE_PAIRS:
+            assert f"{directory}/{filename}".replace(".", "\\.") in denied
+
+    def test_exclusions_still_name_live_upstream_rules(self) -> None:
+        """An exclusion that no longer matches an upstream rule would silently
+        exclude nothing; and the glob translation handles only ``*``/``?``."""
+        from local_operator.supplements import denylist
+
+        _names, _suffixes, _prefixes, parts, patterns = denylist._composed()
+        upstream_patterns = {*patterns, *(p for p, _rule in denylist._EXTRA_PATTERNS)}
+        assert confinement_module._KERNEL_EXCLUDED_PATTERNS <= upstream_patterns
+        assert confinement_module._KERNEL_EXCLUDED_COMPONENTS <= {
+            *parts,
+            *denylist._EXTRA_COMPONENTS,
+        }
+        for glob in upstream_patterns | set(denylist._EXTRA_NAMES):
+            assert not set(glob) & set("[]{}!"), glob
+
+    def test_lop_config_stores_are_denied_in_both_config_roots(
+        self, scout_dirs: tuple[Path, Path, Path], monkeypatch, tmp_path: Path
+    ) -> None:
+        root, _outside, home = scout_dirs
+        elsewhere = (tmp_path / "isolated-config").resolve()
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(elsewhere))
+        denied = ShellWriteConfinement.at(root).profile().splitlines()[-1]
+        for config in (elsewhere, home / ".local-operator"):
+            for rel in confinement_module._CONFIG_SECRET_SUBPATHS:
+                assert f'(subpath "{config / rel}")' in denied, (config, rel)
+            assert "network/networks/[^/]*\\.secrets\\.json$" in denied
+
+    def test_the_model_facing_note_does_not_overclaim(self, tmp_path: Path) -> None:
+        description = builtin.build_bash_tool(_context(tmp_path)).description
+        assert "known credential stores unreadable" in description
+        assert "not every secret" in description
+
+
+class TestUnsafeRoots:
+    """R3: a path that could change the profile's meaning is refused, never
+    interpolated. The reviewer's repro root is the first case."""
+
+    @pytest.mark.parametrize(
+        "name", ['"x) (allow default) (y', "back\\slash", "new\nline"], ids=["quote", "bs", "nl"]
+    )
+    @pytest.mark.asyncio
+    async def test_an_unsafe_root_refuses_with_no_spawn(
+        self, scout_dirs: tuple[Path, Path, Path], monkeypatch, name: str
+    ) -> None:
+        root, outside, _home = scout_dirs
+        unsafe = root / name
+        unsafe.mkdir()
+        confinement = ShellWriteConfinement.at(unsafe)
+        assert confinement_module.profile_path_refusal(confinement.root) is not None
+        with pytest.raises(ValueError, match="sandbox profile cannot carry"):
+            confinement.profile()
+        assert confinement.wrap(["/bin/true"]) is None
+
+        async def must_not_spawn(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(f"spawned: {args[:3]}")
+
+        monkeypatch.setattr(builtin.asyncio, "create_subprocess_exec", must_not_spawn)
+        result = await _run(unsafe, f"echo PWNED > {outside}/escaped")
+        assert result.is_error
+        assert "sandbox profile cannot carry" in result.text
+        assert "refuses to run commands it cannot confine" in result.text
+        assert not (outside / "escaped").exists()
+
+    def test_an_unsafe_home_refuses_too(
+        self, scout_dirs: tuple[Path, Path, Path], monkeypatch
+    ) -> None:
+        """The credential denials interpolate HOME: a HOME the profile cannot
+        carry means they cannot be written either, so the shell refuses."""
+        root, _outside, home = scout_dirs
+        odd = home / 'h"ome'
+        odd.mkdir()
+        monkeypatch.setenv("HOME", str(odd))
+        confinement = ShellWriteConfinement.at(root)
+        assert confinement.wrap(["/bin/true"]) is None
+        assert "sandbox profile cannot carry" in confinement.spawn_refusal()
+
+    def test_an_ordinary_root_is_accepted(self, scout_dirs: tuple[Path, Path, Path]) -> None:
+        root, _outside, _home = scout_dirs
+        spaced = root / "with space (and parens)"
+        spaced.mkdir()
+        assert confinement_module.profile_path_refusal(spaced) is None
+        assert f'(subpath "{spaced.resolve()}")' in ShellWriteConfinement.at(spaced).profile()
+
+
+class TestProbeOffTheLoop:
+    """R4: the first apply probe is a spawn; from a coroutine it runs on a
+    worker thread, is cached, and stays fail closed."""
+
+    @pytest.mark.asyncio
+    async def test_first_probe_runs_in_a_thread_then_hits_the_cache(self, monkeypatch) -> None:
+        calls: list[str] = []
+
+        def fake_run(*args: Any, **kwargs: Any) -> Any:
+            calls.append(threading.current_thread().name)
+            return subprocess.CompletedProcess(args[0], 0, b"", b"")
+
+        monkeypatch.setattr(confinement_module, "sandbox_unavailable_reason", lambda: None)
+        monkeypatch.setattr(confinement_module.subprocess, "run", fake_run)
+        confinement_module._sandbox_apply_probe_reason.cache_clear()
+        try:
+            assert confinement_module.shell_sandbox_known_unavailable_reason() is None
+            assert not confinement_module._probe_is_cached()
+            assert await confinement_module.shell_sandbox_unavailable_reason_async() is None
+            assert await confinement_module.shell_sandbox_unavailable_reason_async() is None
+            assert confinement_module.shell_sandbox_unavailable_reason() is None
+            assert len(calls) == 1
+            assert calls[0] != threading.main_thread().name
+        finally:
+            confinement_module._sandbox_apply_probe_reason.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_a_failing_probe_is_still_a_reason(self, monkeypatch) -> None:
+        def fake_run(*args: Any, **kwargs: Any) -> Any:
+            return subprocess.CompletedProcess(args[0], 1, b"", b"sandbox_apply: EPERM")
+
+        monkeypatch.setattr(confinement_module, "sandbox_unavailable_reason", lambda: None)
+        monkeypatch.setattr(confinement_module.subprocess, "run", fake_run)
+        confinement_module._sandbox_apply_probe_reason.cache_clear()
+        try:
+            reason = await confinement_module.shell_sandbox_unavailable_reason_async()
+            assert reason is not None and "EPERM" in reason
+            assert confinement_module.shell_sandbox_known_unavailable_reason() == reason
+        finally:
+            confinement_module._sandbox_apply_probe_reason.cache_clear()
+
+
+#: The stores round 1 measured READABLE from this shell (R2 and QA Q1), each
+#: with a fake marker. Relative to HOME; ``{lop}`` is the config dir.
+_ROUND1_STORES: tuple[str, ...] = (
+    "{lop}/network/identity/device.json",
+    "{lop}/network/networks/n-1.secrets.json",
+    "{lop}/network/credentials/github.json",
+    "{lop}/operator/operator-key.pem",
+    "{lop}/tunnel/cloudflared.token",
+    "{lop}/push-handle.key",
+    "{lop}/mcp.json",
+    ".codex/auth.json",
+    ".kube/config",
+    ".config/gcloud/credentials.db",
+    ".docker/config.json",
+    ".gnupg/private-keys-v1.d/k.key",
+    ".config/op/config",
+    ".terraform.d/credentials.tfrc.json",
+    ".azure/msal_token_cache.json",
+)
+
+
+@DARWIN_ONLY
+class TestRoundOneStoresAreUnreadable:
+    """Real ``sandbox-exec``: every store round 1 read is refused, and the
+    ordinary neighbours a research shell needs still read."""
+
+    @pytest.mark.asyncio
+    async def test_each_store_is_refused(self, scout_dirs: tuple[Path, Path, Path]) -> None:
+        root, _outside, home = scout_dirs
+        paths = []
+        for index, rel in enumerate(_ROUND1_STORES):
+            path = home / rel.replace("{lop}", ".local-operator")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"FAKE-STORE-{index}\n")
+            paths.append(path)
+        script = "; ".join(f"cat '{path}' 2>&1" for path in paths)
+        result = await _run(root, script)
+        for index, path in enumerate(paths):
+            assert f"FAKE-STORE-{index}" not in result.text, (path, result.text)
+        assert result.text.count("Operation not permitted") >= len(paths), result.text
+
+    @pytest.mark.asyncio
+    async def test_neighbours_and_source_trees_still_read(
+        self, scout_dirs: tuple[Path, Path, Path]
+    ) -> None:
+        """No over-deny: the config file, a network's public record, and the
+        SOURCE directories named like credential classes (lop's own
+        ``network/credentials/`` and ``secrets/`` packages, a tokenizer)."""
+        root, outside, home = scout_dirs
+        config = home / ".local-operator"
+        (config / "network" / "networks").mkdir(parents=True)
+        # Valid YAML: ``execute_bash`` reads config.yml and quarantines a
+        # malformed one, which would make this a test of the quarantine.
+        (config / "config.yml").write_text("marker: READ-CONFIG\n")
+        (config / "network" / "networks" / "n-1.json").write_text("READ-NETWORK\n")
+        source = outside / "repo" / "local_operator"
+        (source / "network" / "credentials").mkdir(parents=True)
+        (source / "network" / "credentials" / "github.py").write_text("READ-CRED-SRC\n")
+        (source / "secrets").mkdir()
+        (source / "secrets" / "store.py").write_text("READ-SECRETS-SRC\n")
+        (source / "tokenizer.py").write_text("READ-TOKENIZER\n")
+        result = await _run(
+            root,
+            f"cat {config}/config.yml {config}/network/networks/n-1.json; "
+            f"ls {source}/network/credentials; cat {source}/network/credentials/github.py; "
+            f"cat {source}/secrets/store.py {source}/tokenizer.py; "
+            f"grep -rl READ- {source} | wc -l",
+        )
+        for marker in (
+            "READ-CONFIG",
+            "READ-NETWORK",
+            "github.py",
+            "READ-CRED-SRC",
+            "READ-SECRETS-SRC",
+            "READ-TOKENIZER",
+        ):
+            assert marker in result.text, (marker, result.text)
+        assert "Operation not permitted" not in result.text, result.text
+
+
 def _make_archive(where: Path) -> Path:
     payload = where / "payload"
     payload.mkdir()

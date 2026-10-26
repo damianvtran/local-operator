@@ -1010,7 +1010,41 @@ def _with_network_floor(
 READ_ONLY_SHELL_ROLES = frozenset({"scout"})
 
 
-def _readonly_shell_root(
+def is_readonly_shell_role(*names: "str | None") -> bool:
+    """Whether any of ``names`` is a :data:`READ_ONLY_SHELL_ROLES` role.
+
+    THE one predicate for "this session is a scout", read by BOTH places a
+    scout can come into being: a delegated child (:func:`_readonly_shell_root`)
+    and a profile attached to a session that already exists
+    (``Session._apply_readonly_shell_role``, reached from ``lop exec
+    --profile``, the ``sessions`` tool's spawn, mesh ``--profile``, the SDK and
+    ``/agent``). Round 1 of PR #2987 found the second path missing: a
+    top-level ``lop exec --profile scout`` got the seed's ``bash`` UNWRAPPED
+    and, unattended, auto-approved. One predicate so the two cannot drift.
+    """
+
+    return any(name in READ_ONLY_SHELL_ROLES for name in names if name)
+
+
+def readonly_shell_write_root(
+    scratchpad: "Path | str | None", *, unavailable: "str | None"
+) -> "str | None":
+    """The write root a confined session's shell gets, or ``None`` for NO shell.
+
+    ``scratchpad`` is the session's own ``scratchpad://`` root and
+    ``unavailable`` the host's sandbox answer (whichever spelling the caller
+    can afford: the awaited probe on the async child path, the known-so-far
+    answer on the synchronous attach path). No scratchpad (an agent
+    directory) or no sandbox means no shell: a read-only role's shell runs
+    sandboxed or not at all.
+    """
+
+    if scratchpad is None or unavailable is not None:
+        return None
+    return str(scratchpad)
+
+
+async def _readonly_shell_root(
     *,
     agent: str,
     profile: "AgentProfile | None",
@@ -1024,29 +1058,34 @@ def _readonly_shell_root(
     fallback), by resolved profile name (a ``team:`` launch carries
     ``team:<name>`` as ``agent``) -- and for ANY descendant of a write-confined
     session, which is the sticky-downward rule ``confinement_root`` follows:
-    a child that was not confined would be the bypass. Scouts drop ``task``
-    today, so the descendant arm is belt and braces.
+    a child that was not confined would be the bypass. The parent may be a
+    top-level session a scout profile was ATTACHED to, which carries
+    ``_readonly_shell`` even when it got no shell root (no scratchpad, no
+    sandbox). Scouts drop ``task`` today, so the descendant arm is belt and
+    braces.
 
     ``root`` is the child's own scratchpad when the host can enforce the
     sandbox, else ``None`` -- and ``confined`` with ``root=None`` means the
     child gets NO shell (see :func:`_with_readonly_shell_floor`). Never the
     parent's scratchpad: a descendant writes into its own, as ``bash``'s
-    scratchpad export already guarantees for ordinary children.
+    scratchpad export already guarantees for ordinary children. ASYNC because
+    the host's first sandbox probe is a spawn, run off the event loop
+    (review round 1 R4).
     """
     from local_operator.scratchpad import scratchpad_root
-    from local_operator.tools.confinement import shell_sandbox_unavailable_reason
+    from local_operator.tools.confinement import shell_sandbox_unavailable_reason_async
 
     confined = (
-        agent in READ_ONLY_SHELL_ROLES
-        or (profile is not None and profile.name in READ_ONLY_SHELL_ROLES)
+        is_readonly_shell_role(agent, profile.name if profile is not None else None)
         or bool(getattr(parent_session, "_shell_write_root", None))
+        or bool(getattr(parent_session, "_readonly_shell", False))
     )
     if not confined:
         return False, None
-    root = scratchpad_root(session_dir)
-    if root is None or shell_sandbox_unavailable_reason() is not None:
-        return True, None
-    return True, str(root)
+    root = readonly_shell_write_root(
+        scratchpad_root(session_dir), unavailable=await shell_sandbox_unavailable_reason_async()
+    )
+    return True, root
 
 
 def _with_readonly_shell_floor(
@@ -3905,7 +3944,7 @@ async def _construct_child_session(
     # reads ``shell_write_root`` there to describe the sandbox and set the
     # ``read`` approval tier, and the child ``Session`` below must carry the
     # SAME root so the executor wraps what the schema promised.
-    readonly_shell, shell_write_root = _readonly_shell_root(
+    readonly_shell, shell_write_root = await _readonly_shell_root(
         agent=agent, profile=profile, parent_session=parent_session, session_dir=session_dir
     )
     tool_context = ToolContext(
@@ -4455,6 +4494,12 @@ async def _construct_child_session(
     # the stamp depend on whether MCP happened to be wired here would let the
     # boundary evaporate on exactly the path that reintroduces the surface.
     setattr(child, MCP_DENIED_ATTR, restricted)
+    if readonly_shell:
+        # A confined child with NO shell root (no sandbox here) is still a
+        # read-only shell session: marked so its own later inventory writes
+        # keep ``bash`` out (``Session._filter_declared``) and its descendants
+        # stay confined (:func:`_readonly_shell_root`'s sticky arm).
+        child._readonly_shell = True
     if target is not None:
         # Stamped facts, beside the denial and for the same reason: they are
         # properties of the LINEAGE that the child's own role cannot express,
