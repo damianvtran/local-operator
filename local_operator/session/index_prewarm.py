@@ -911,6 +911,15 @@ async def cancel_prewarm() -> None:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+    # A cancelled warm's worker thread may still hold a listing fetch lease; left
+    # standing, the NEXT process's first cold read waits it out (QA round 2,
+    # Q-2: 2209.5 ms). Only an unlink of our own lease files.
+    try:
+        from local_operator.model.catalogue import release_held_leases
+
+        release_held_leases()
+    except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
+        logger.debug("listing lease release failed at shutdown", exc_info=True)
 
 
 def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:

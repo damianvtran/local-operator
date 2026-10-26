@@ -351,6 +351,61 @@ _LISTING_LEASE_S = 60.0
 _LISTING_LEASE_WAIT_S = 2.0
 
 
+def _holder_proven_dead(holder: str) -> bool:
+    """Whether a lease's ``<pid>:<nonce>`` holder is a process PROVEN gone.
+
+    WHY (PR #2992, QA round 2 Q-2): a daemon SIGTERMed while its boot warm held
+    a lease left the file standing for its full :data:`_LISTING_LEASE_S`, and
+    the next process's first cold read sat in :meth:`await_peer_briefly` for
+    ``_LISTING_LEASE_WAIT_S`` (measured 2209.5 ms) waiting on a document nobody
+    would write. A holder that is provably not running can be stolen from at once.
+
+    Only a definite "no such process" counts (``procstate.pid_liveness`` is
+    three-valued): doubt, an unparsable holder, or a pid on ANOTHER host sharing
+    the cache dir all keep the lease's normal expiry, which is the conservative
+    direction — a live peer called dead costs a duplicate fetch, never a wrong
+    answer, but the lease exists to avoid exactly that. Pid reuse can only make a
+    dead holder read live, i.e. fall back to today's expiry.
+    """
+    from local_operator.procstate import pid_liveness
+
+    pid_text, _, _nonce = holder.partition(":")
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    if pid == os.getpid():
+        # Our own pid: a lease this process still holds is alive by definition,
+        # and one it forgot (released elsewhere) is not this function's call.
+        return False
+    return pid_liveness(pid) is False
+
+
+#: Leases THIS process currently holds, so teardown can drop them (Q-2 half a).
+_held_leases: "set[_ListingFetchLease]" = set()
+_held_leases_lock = threading.Lock()
+
+
+def release_held_leases() -> int:
+    """Release every fetch lease this process holds; returns how many.
+
+    For daemon teardown: a fetch cancelled mid-flight (the boot warm, a request
+    abandoned at shutdown) would otherwise leave its lease standing for the next
+    process to wait on. Each release is a read and an unlink of a small file in
+    the cache dir — no network, no waiting — and never raises.
+    """
+    with _held_leases_lock:
+        leases = list(_held_leases)
+    released = 0
+    for lease in leases:
+        try:
+            lease.release()
+            released += 1
+        except Exception:  # noqa: BLE001 — teardown must never be the failure
+            logger.debug("listing lease release failed", exc_info=True)
+    return released
+
+
 class _ListingFetchLease:
     """A best-effort cross-process lock on one catalogue document.
 
@@ -381,10 +436,12 @@ class _ListingFetchLease:
             # same O_EXCL race decides the single winner among the stealers.
             try:
                 raw = self._path.read_text(encoding="utf-8", errors="replace")
-                expires = float(json.loads(raw).get("expires_at", 0.0))
-            except (OSError, ValueError):
-                expires = 0.0
-            if expires > time.time():
+                standing = json.loads(raw)
+                expires = float(standing.get("expires_at", 0.0))
+                holder = str(standing.get("holder", ""))
+            except (OSError, ValueError, AttributeError):
+                expires, holder = 0.0, ""
+            if expires > time.time() and not _holder_proven_dead(holder):
                 return False
             try:
                 self._path.unlink()
@@ -403,6 +460,8 @@ class _ListingFetchLease:
         finally:
             os.close(fd)
         self._held = True
+        with _held_leases_lock:
+            _held_leases.add(self)
         return True
 
     def await_peer_briefly(self) -> None:
@@ -429,6 +488,8 @@ class _ListingFetchLease:
         if not self._held:
             return
         self._held = False
+        with _held_leases_lock:
+            _held_leases.discard(self)
         try:
             raw = self._path.read_text(encoding="utf-8", errors="replace")
             if json.loads(raw).get("holder") == self._token:
