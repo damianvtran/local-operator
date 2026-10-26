@@ -565,7 +565,14 @@ def detail_text(
         # DT4: the ASK's own pane showed no gesture at all, so the one screen
         # where answering is the obvious next step never said how.
         text.append("\n ")
-        text.append("a ↵ " + _t(_k.hint_answer()), style=ink("muted"))
+        # The ``a ↵`` prefix is the SAME chrome as the row's ask line above: a
+        # key letter and a key glyph, not copy — the translatable word beside it
+        # is `hint_answer`, which is why the escape is the file's existing one
+        # rather than a new catalogue key duplicating one word in seven locales.
+        text.append(
+            "a ↵ " + _t(_k.hint_answer()),  # i18n: ignore key glyphs, chrome
+            style=ink("muted"),
+        )
         text.append("\n")
     return text
 
