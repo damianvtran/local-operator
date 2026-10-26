@@ -4,7 +4,8 @@ Measured on the operator's mesh: ``lop sessions move 81b9f802851d --to local`` a
 ``lop-remote-node-2`` answered ``busy`` ("the conversation changed…") for a turn that
 had finished 30 s earlier, and the retry then read ``unreachable`` — "the source
 stopped answering during the copy" — about a relay that was up throughout (PID
-unchanged, NRestarts=0). Both ends logged ``link_closed cause=error`` 1.3 ms apart,
+unchanged, NRestarts=0). Both ends logged ``link_closed cause=error`` a few
+milliseconds apart,
 40.4 s after the source prepared, and the source stayed parked in ``prepared`` with no
 recovery but a relay restart.
 
@@ -22,6 +23,8 @@ Two independent defects, one per section below:
 from __future__ import annotations
 
 import json
+import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -35,12 +38,14 @@ from local_operator.session.placement import (
     read_handoff_journal,
     write_handoff_entry,
 )
-from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` is a fixture
+from tests.unit.network.conftest import wait_for
+from tests.unit.network.test_mobility import (  # noqa: F401 — `devices` and `pair` are fixtures
     SESSION,
     Devices,
     _move,
     _owned_session,
     devices,
+    pair,
 )
 from tests.unit.network.test_relay_e2e import _pair_settled
 
@@ -141,7 +146,12 @@ def test_held_report_is_bounded_however_many_blobs_the_store_holds(tmp_path: Pat
 
 
 def _prepared(
-    root: Path, *, to_device: str, instance: str, phase: str = HANDOFF_PHASE_PREPARED
+    root: Path,
+    *,
+    to_device: str,
+    instance: str,
+    phase: str = HANDOFF_PHASE_PREPARED,
+    link_id: str = "",
 ) -> None:
     write_handoff_entry(
         root,
@@ -154,6 +164,9 @@ def _prepared(
             "mode": "move",
             "requester": to_device,
             "instance_id": instance,
+            # THE LINK THE MOVE RIDES (QA round 1, Q1). Empty means "written before
+            # the binding existed", which the reaper can only answer device-wide.
+            **({"link_id": link_id} if link_id else {}),
         },
     )
 
@@ -202,21 +215,220 @@ def test_release_refuses_every_entry_it_cannot_prove_is_this_move(
     assert SESSION in read_handoff_journal(tmp_path)
 
 
-def test_the_link_closed_hook_releases_and_is_registered() -> None:
+def test_a_re_dial_keeps_the_entry_its_move_rides(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA ROUND 1, Q1(a): the replacement is a CONTINUATION, not a death.
+
+    The source is the listener (the Mac → node topology). A re-dial from the same peer
+    makes ``register_link``'s identity fence evict the old link with ``close("replaced")``
+    BEFORE the newcomer is in the table, so a device-level "is a link alive?" check
+    reads ``None`` and released a handoff whose destination was re-dialling right then
+    (QA's 3e: ``entry cleared``).
+
+    The entry now records the link it rides, and a ``replaced`` close transfers that
+    binding to the successor instead of releasing it. Fails on 7586450d07 (entry
+    cleared); passes here.
+    """
+    p: Devices = request.getfixturevalue("pair")
+    server_a, server_b, host, port = p
+    record, _h, _p = _pair_settled(p, monkeypatch, role="admin")
+    _owned_session(server_a)
+    a_dev, b_dev = server_a.identity.device_id, server_b.identity.device_id
+    server_b._ensure_link(a_dev)
+    assert wait_for(lambda: server_a._link_for(b_dev) is not None, 15)  # noqa: SLF001
+    old = server_a._link_for(b_dev)  # noqa: SLF001
+    assert old is not None
+    _prepared(
+        server_a.root,
+        to_device=b_dev,
+        instance=str(server_a.instance_id),
+        link_id=old.link_id,
+    )
+
+    # THE RE-DIAL. The fence evicts ``old`` as ``replaced`` and admits the newcomer.
+    new_b, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert new_b is not None, reason
+    assert wait_for(lambda: old.link_id not in server_a.links, 15), "the old link stayed"
+    assert wait_for(lambda: server_a._link_for(b_dev) is not None, 15)  # noqa: SLF001
+    successor = server_a._link_for(b_dev)  # noqa: SLF001
+    assert successor is not None and successor.link_id != old.link_id
+
+    journal = read_handoff_journal(server_a.root)
+    assert SESSION in journal, "a re-dial released a live handoff"
+    assert journal[SESSION]["link_id"] == successor.link_id, journal[SESSION]
+
+
+def test_the_copy_links_own_death_releases_the_entry_even_beside_a_second_link(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA ROUND 1, Q1(b): two links to one peer are normal; the copy rides ONE.
+
+    A device-level guard kept the ``prepared`` entry whenever ANY link to the peer was
+    alive, but the copy's frames ride exactly one of them — so when the copy's own link
+    died the destination's ``rollback`` had already gone over that dead link and nothing
+    ever cleared the source, which then refused every retry ``in_progress`` … "restart
+    the relay on device-a". That is the wedge this branch exists to remove, reached on
+    a healthy relay (QA's 3g).
+
+    Fails on 7586450d07 (journal keeps ``prepared``, retry refused); passes here, and
+    the retry completes — which is the recovery, not just the empty journal.
+    """
+    p: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = p
+    record, _h, _p = _pair_settled(p, monkeypatch, role="admin")
+    _owned_session(server_a)
+    a_dev, b_dev = server_a.identity.device_id, server_b.identity.device_id
+    server_b._ensure_link(a_dev)
+    host_b, port_b = server_b._listener.getsockname()[:2]  # type: ignore[union-attr]
+    second, reason = server_a.dial(record.network_id, host=f"{host_b}:{port_b}", epoch=record.epoch)
+    assert second is not None, reason
+    two = wait_for(
+        lambda: len([lk for lk in server_b.links.values() if lk.device_id == a_dev and lk.alive])
+        >= 2
+        and len([lk for lk in server_a.links.values() if lk.device_id == b_dev and lk.alive]) >= 2,
+        15,
+    )
+    assert two, "the second link did not come up on both ends"
+
+    real = mobility.LinkTransport.ask
+    state = {"fetch": 0}
+
+    def ask(self_: Any, frame: dict[str, Any], *, timeout: float | None = None) -> Any:
+        if frame.get("op") == "net_sync" and frame.get("phase") == "fetch":
+            state["fetch"] += 1
+            if state["fetch"] == 2:
+                # THE COPY'S OWN LINK, mid-copy — the live failure's branch.
+                self_.link.close("error")
+        return real(self_, frame, timeout=timeout)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+    failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    assert failed["ok"] is False, failed
+    released = wait_for(lambda: read_handoff_journal(server_a.root) == {}, 15)
+    assert released, read_handoff_journal(server_a.root)
+    # THE OTHER LINK IS STILL THERE: the release was keyed to the copy's link, not to
+    # "no link left".
+    assert server_a._link_for(b_dev) is not None  # noqa: SLF001
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", real)
+    retry = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    assert retry["ok"] is True, retry
+    assert retry["state"] == "completed", retry
+
+
+def test_a_rollback_without_an_epoch_cannot_clear_a_live_move(root: Path) -> None:
+    """REVIEW ROUND 1 m1 = QA ROUND 1 Q2: an absent epoch is not a wildcard.
+
+    ``if epoch and epoch != entry_epoch`` let a frame that carried NO epoch through,
+    and an empty epoch was reachable: a ``--keep`` prepare answered ``lease_epoch: ""``
+    and both failure branches of ``_destination_move`` report a rollback for copies
+    too. A keep and a move of one id to one device at once therefore let the keep's
+    report empty the live move's journal — the docstring's "a stale report can never
+    clear a newer handoff" did not hold.
+
+    The source requires a match, so no sender has to special-case "no epoch". A
+    ``--keep`` copy writes no journal entry of its own, so its epoch-less report was
+    only ever able to clear a MOVE's entry — the collision this closes.
+
+    Fails on 7586450d07 (``cleared``); passes here.
+    """
+    _prepared(root, to_device="d_away", instance="i_mine", link_id="l_live")
+    server = SimpleNamespace(
+        root=root, instance_id="i_mine", identity=SimpleNamespace(device_id="d_me")
+    )
+    link = SimpleNamespace(device_id="d_away", link_id="l_live")
+
+    for frame_epoch in ("", None):
+        answer = mobility._source_rollback(  # noqa: SLF001
+            cast(Any, server),
+            cast(Any, link),
+            {"session_id": SESSION, "lease_epoch": frame_epoch, "code": "unreachable"},
+        )
+        assert answer["result"] == "kept", (frame_epoch, answer)
+        assert SESSION in read_handoff_journal(root), frame_epoch
+
+    # THE CONTROL: the right epoch still clears, so the guard is a comparison and not
+    # a refusal of every report.
+    cleared = mobility._source_rollback(  # noqa: SLF001
+        cast(Any, server),
+        cast(Any, link),
+        {"session_id": SESSION, "lease_epoch": "e_1", "code": "unreachable"},
+    )
+    assert cleared["result"] == "cleared", cleared
+    assert read_handoff_journal(root) == {}
+
+
+def test_a_link_death_is_logged_once_and_a_deliberate_close_is_never_logged(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """REVIEW ROUND 1 m3 = QA ROUND 1 Q3: one line, and only when something failed.
+
+    ``close`` sets ``_closed`` BEFORE it shuts the socket down, so a reader that loses
+    the race with its own ``sock.close()`` raised EBADF and logged a SECOND line after
+    the writer's real cause — and the same misleading line appeared on a deliberate
+    ``replaced``/``we-closed`` close where nothing had failed at all. QA measured both
+    on the rig: two lines for one death on the closing side, and a line for a clean
+    close.
+
+    The guard is pinned by DRIVING THE TWO CALLS rather than by racing the threads:
+    the EBADF line depends on which side notices the teardown first, so a timing-based
+    cell is a coin flip (it passed once on the old code while this branch was being
+    written). What is not a coin flip is the rule: once ``_closed`` is set, nothing
+    more is logged.
+
+    Fails on 7586450d07 (the post-close call logs an EBADF line); passes here.
+    """
+    p: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = p
+    _pair_settled(p, monkeypatch, role="admin")
+    a_dev = server_a.identity.device_id
+    server_b._ensure_link(a_dev)
+    link = server_b._ensure_link(a_dev)
+    assert link is not None
+
+    caplog.set_level(logging.WARNING, logger="local_operator.network.relay")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        # THE ORIGINATING CAUSE: logged, once.
+        link._log_link_error(  # noqa: SLF001
+            "writer", wire.LinkCryptoError("a frame exceeds the limit", kind="limit")
+        )
+        # THE TEARDOWN'S OWN ARTEFACT: ``close`` has begun, so this is the socket
+        # this side just took away — exactly the line that used to follow the real
+        # cause (and that a deliberate close produced with no cause at all).
+        link.close("we-closed")
+        link._log_link_error("reader", OSError(9, "Bad file descriptor"))  # noqa: SLF001
+        time.sleep(0.3)
+
+    messages = [record.getMessage() for record in caplog.records]
+    caused = [m for m in messages if "closed by its writer" in m and link.link_id in m]
+    assert len(caused) == 1, messages
+    assert "LinkCryptoError" in caused[0], messages
+    noise = [m for m in messages if "Bad file descriptor" in m]
+    assert noise == [], noise
+
+
+# ---------------------------------------------------------------------------
+# 2b — the hook is wired, and it releases
+# ---------------------------------------------------------------------------
+
+
+def test_the_link_closed_hook_is_registered_and_releases_a_bound_entry(root: Path) -> None:
     """The hook is wired on the relay and does the release, on the closing thread.
 
     Registered by ``mobility.install`` rather than re-derived per call, so the release
-    cannot be forgotten by a relay whose slice installed without it.
+    cannot be forgotten by a relay whose slice installed without it. The release is
+    ASSERTED, not merely returned: an earlier draft of this cell called the hook and
+    checked ``is None``, which is true of a hook that did nothing at all (review round
+    1, n2).
     """
     hooks: dict[str, Any] = {}
-
-    class _Server:
-        root = Path("/nonexistent")
-        instance_id = "i_mine"
-        _link_for = staticmethod(lambda device_id: None)  # noqa: SLF001 — the seam
-
+    _prepared(root, to_device="d_away", instance="i_mine", link_id="l_doomed")
     server = SimpleNamespace(
-        root=Path("/nonexistent"),
+        root=root,
         instance_id="i_mine",
         _link_for=lambda device_id: None,
         register_ops=lambda *a, **k: hooks.update(k.get("on_link_closed") or {}),
@@ -224,8 +436,10 @@ def test_the_link_closed_hook_releases_and_is_registered() -> None:
     mobility.install(cast(Any, server))
 
     assert "mobility-stranded-move" in hooks, hooks
-    link = SimpleNamespace(device_id="d_away")
-    assert mobility._on_link_closed(cast(Any, server), link, "error") is None  # noqa: SLF001
+    link = SimpleNamespace(device_id="d_away", link_id="l_doomed")
+    hooks["mobility-stranded-move"](link, "error")
+
+    assert read_handoff_journal(root) == {}
 
 
 # ---------------------------------------------------------------------------

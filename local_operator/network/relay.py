@@ -4397,14 +4397,16 @@ class PeerLink:
         except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError) as exc:
             # Every failure here is fatal to the LINK and none is repaired: there is
             # no resynchronisation and no partial-trust phase.
-            self._log_link_error("reader", exc)
+            if not self._closed.is_set():
+                self._log_link_error("reader", exc)
             self.close("error")
         except Exception as exc:  # noqa: BLE001 — a handler must not kill the accept loop
-            self._log_link_error("reader", exc)
+            if not self._closed.is_set():
+                self._log_link_error("reader", exc)
             self.close("error")
 
     def _log_link_error(self, side: str, exc: BaseException) -> None:
-        """Say WHY a link died, once, in the relay's own log.
+        """Say WHY a link died, ONCE, with the cause that actually ended it.
 
         THE AUDIT ROW CARRIES ONLY ``cause=error``, and that was the whole record of
         the 2026-10-25 move failure: the Mac's writer refused a 13.67 MB frame over
@@ -4412,7 +4414,20 @@ class PeerLink:
         so the destination's "the source stopped answering" was the only story
         anyone could read. One WARNING per link death — never per frame — is the
         volume a supervised log can carry, and the exception text is the evidence.
+
+        ONLY WHEN THIS SIDE'S TEARDOWN DID NOT START IT (review round 1, m3; QA
+        round 1, Q3). ``close`` sets ``_closed`` before it shuts the socket down, so
+        a reader that loses the race with its own ``sock.close()`` raises EBADF and
+        used to log a SECOND line — `closed by its reader: OSError: [Errno 9] Bad
+        file descriptor` — after the writer's real cause, and even on a deliberate
+        ``replaced``/``we-closed`` close where there was no failure at all. A line
+        that points at the socket teardown instead of the cause is worse than no
+        line: it is the one an operator reads first. Callers therefore skip this
+        once ``_closed`` is set; the guard is repeated here so no future caller can
+        reintroduce the noise.
         """
+        if self._closed.is_set():
+            return
         logger.warning(
             "mesh link %s to %s closed by its %s: %s: %s",
             self.link_id,
@@ -4502,7 +4517,8 @@ class PeerLink:
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
         except (OSError, wire.LinkCryptoError) as exc:
-            self._log_link_error("writer", exc)
+            if not self._closed.is_set():
+                self._log_link_error("writer", exc)
             self.close("error", flush_s=0.0)
 
     def _drain(self) -> bool:
