@@ -5028,9 +5028,12 @@ class _CleanupStream:
         sys.stdout.flush()
         self._live = True
 
-    def clear(self) -> None:
+    def clear(self, *, newline: bool = False) -> None:
+        """Erase the status line. ``newline`` additionally ends the line, for the
+        interrupt path: the terminal has echoed ``^C`` onto it, and without a
+        newline the traceback starts glued to that echo."""
         if self._live:
-            sys.stdout.write("\r\033[K")
+            sys.stdout.write("\r\033[K" + ("\n" if newline else ""))
             sys.stdout.flush()
             self._live = False
 
@@ -5057,10 +5060,14 @@ class _CleanupStream:
     def kept_callback(self) -> Any:
         def on_kept(name: str, guard: str) -> None:
             if self._kept < _CLEANUP_TEXT_ROWS:
-                # The name is padded to the removal rows' session column, so on a
-                # stream where the two interleave the reasons line up as a table.
-                # Only here: the block layout's kept rows stay byte-identical.
-                self.line(f"  kept         {name:<12}  ({guard})")
+                # The name is fitted to the removal rows' session column (12 cells,
+                # the width of a session id), so on a stream where the two
+                # interleave the reasons line up as a table. A longer name (the
+                # fixtures' and hand-made ids) is cut with an ellipsis the way a
+                # long title is in a removal row, rather than pushing the reason
+                # right. Only here: the block layout's kept rows stay byte-identical.
+                shown = name if len(name) <= 12 else name[:11] + "…"
+                self.line(f"  kept         {shown:<12}  ({guard})")
             self._kept += 1
 
         return on_kept
@@ -5610,6 +5617,10 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     stream = _CleanupStream(sys.stdout.isatty() and not args.json)
     try:
         return _sessions_cleanup_run(args, stream)
+    except BaseException:
+        # Ctrl-C (or any failure): the traceback must start on its own line.
+        stream.clear(newline=True)
+        raise
     finally:
         stream.clear()
 

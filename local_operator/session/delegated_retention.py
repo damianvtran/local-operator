@@ -558,6 +558,39 @@ DECIDE_PROGRESS_EVERY = 16
 #: ``(phase, done, total_or_None, elapsed_s)``: a coarse heartbeat for a caller
 #: that wants to show motion during a pass (``lop sessions cleanup`` on a TTY).
 ProgressCallback = Callable[[str, int, "int | None", float], None]
+
+#: Every heartbeat is TIME-bounded as well as count-bounded: a phase reports again
+#: once this many seconds have passed since its last report even when fewer than
+#: its ``*_PROGRESS_EVERY`` items finished. The counts alone left real silences:
+#: 16 decisions that each ran a scratchpad git probe took ~7 s on a 4,000-session
+#: store, and a count cannot see that. What this bounds is silence from the LOOP
+#: (the clock is read at the top of every iteration). It does not pre-empt a single
+#: guard call, which cannot be interrupted from here: one candidate whose git probe
+#: or 20,000-entry walk exceeds this interval still leaves that long a gap.
+HEARTBEAT_MAX_SILENCE_S = 1.0
+
+
+class _Beat:
+    """Rate limiter for one phase's progress callback: every N items OR every interval."""
+
+    def __init__(
+        self, phase: str, every: int, on_progress: ProgressCallback | None, began: float
+    ) -> None:
+        self.phase = phase
+        self.every = every
+        self.on_progress = on_progress
+        self.began = began
+        self._last = float("-inf")
+
+    def tick(self, done: int, total: int | None) -> None:
+        if self.on_progress is None:
+            return
+        now = time.monotonic()
+        if done % self.every == 0 or now - self._last >= HEARTBEAT_MAX_SILENCE_S:
+            self._last = now
+            _notify(self.on_progress, self.phase, done, total, now - self.began)
+
+
 _PROJECT_CLOSED = frozenset({"done", "archived"})
 
 
@@ -3530,7 +3563,7 @@ def _scan(
     only for an OLD directory that has a roster.
     """
     scan = _Scan()
-    began = time.monotonic()
+    scan_beat = _Beat("scan", SCAN_PROGRESS_EVERY, on_progress, time.monotonic())
     try:
         entries = [e for e in os.scandir(sessions_dir) if not e.name.startswith(".")]
     except OSError as exc:
@@ -3544,10 +3577,9 @@ def _scan(
         ):
             scan.stopped = True
             return scan
-        if index % SCAN_PROGRESS_EVERY == 0:
-            # Index 0 included: the FIRST frame already carries the total, so the
-            # operator sees "0/4700" at once instead of a bare "scanning…".
-            _notify(on_progress, "scan", index, len(entries), time.monotonic() - began)
+        # Index 0 included (0 % N == 0): the FIRST frame already carries the total,
+        # so the operator sees "0/4700" at once instead of a bare "scanning…".
+        scan_beat.tick(index, len(entries))
         try:
             if not entry.is_dir(follow_symlinks=False):
                 continue
@@ -3660,7 +3692,7 @@ def _protected_children(
     read: on the operator's store this phase is ~4-9 s (hidden parents alone hold
     ~220 MB of rosters), the one stretch of a dry run with no other heartbeat.
     """
-    began = time.monotonic()
+    roster_beat = _Beat("rosters", 1, on_progress, time.monotonic())
     read = 0
     protected: set[str] = set()
     queue = list(scan.sources.items())
@@ -3668,7 +3700,11 @@ def _protected_children(
     settled_named: dict[str, Path] = {}
     #: Settled children already judged to go: that answer cannot change (the
     #: callback judges them without ``parents``), and the judgement can include a
-    #: git walk, so it is asked once.
+    #: git walk, so it is asked once. It is keyed to the OPENING cutoff while the
+    #: batch loop may later WIDEN the window (``run_delegated_pass``): that is safe
+    #: because widening only ever protects MORE, and the removal loop re-runs
+    #: ``_evaluate`` per candidate against the then-current cutoff, so a child
+    #: cached as "going" here is still kept at removal time if the window grew.
     going: set[str] = set()
     while True:
         while queue:
@@ -3678,7 +3714,7 @@ def _protected_children(
                 continue
             actionable, settled = _roster_ledger(roster)
             read += 1
-            _notify(on_progress, "rosters", read, None, time.monotonic() - began)
+            roster_beat.tick(read, None)
             for child in actionable:
                 protected.add(child)
                 if child in scan.hidden and child not in seen:
@@ -3989,6 +4025,8 @@ def run_delegated_pass(
     recorded = 0
     in_batch = 0
     refused = 0
+    decide_beat = _Beat("decide", DECIDE_PROGRESS_EVERY, on_progress, started)
+    content_beat = _Beat("content", CONTENT_PROGRESS_EVERY, on_progress, started)
     while position < len(todo):
         if should_stop is not None and should_stop():
             break
@@ -4042,11 +4080,12 @@ def run_delegated_pass(
                 cutoff = moment - hours * 3600.0
             in_batch = 0
         cand = todo[position]
+        # Read at the TOP of every iteration, so a candidate that was slow (a git
+        # probe) is reported the moment it finishes, and the longest silence from
+        # this loop is the slowest single candidate, not 16 of them. Keeps a
+        # terminal moving once the caller has stopped printing rows (the text cap).
+        decide_beat.tick(position, len(todo))
         position += 1
-        if position % DECIDE_PROGRESS_EVERY == 0:
-            # Keeps a terminal moving once the caller has stopped printing rows
-            # (the text cap): ~4-9 s of decisions would otherwise be silent.
-            _notify(on_progress, "decide", position, len(todo), time.monotonic() - started)
         if cand.clock >= cutoff:
             result.protected.append((cand.path.name, "inside the (widened) window"))
             _notify(on_kept, cand.path.name, "inside the (widened) window")
@@ -4230,14 +4269,7 @@ def run_delegated_pass(
             cand = content_pool[content_position]
             content_position += 1
             name = cand.path.name
-            if content_position % CONTENT_PROGRESS_EVERY == 0:
-                _notify(
-                    on_progress,
-                    "content",
-                    content_position,
-                    len(content_pool),
-                    time.monotonic() - started,
-                )
+            content_beat.tick(content_position, len(content_pool))
             try:
                 outcome = _reclaim_pad_content(
                     cand,

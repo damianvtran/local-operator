@@ -44,6 +44,10 @@ def _provider():
 def _pass(store: Store, **kwargs: Any) -> dr.DelegatedResult:
     kwargs.setdefault("now", store.now)
     kwargs.setdefault("removal_pause_s", 0)
+    # UNBOUNDED: a real pass is cut off by the 30 s wall-clock budget, which these
+    # tests are not about; on a starved host (load ~90) it fired mid-run and made
+    # the removal-set assertions measure the machine instead of the rules.
+    kwargs.setdefault("budget_s", dr.UNBOUNDED)
     dr._FILE_CACHE.clear()
     return dr.run_delegated_pass(store.root, _provider(), **kwargs)
 
@@ -377,7 +381,12 @@ def test_a_failing_observer_never_changes_a_decision(store: Store) -> None:
     assert noisy.protected == plain.protected
 
 
-def test_the_scan_heartbeat_fires_every_256_directories_not_per_directory(tmp_path: Path) -> None:
+def test_the_scan_heartbeat_fires_every_256_directories_not_per_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A frozen clock: the beat is also time-bounded, and on a starved host a real
+    # clock adds interval beats between the count boundaries this test is about.
+    monkeypatch.setattr(dr.time, "monotonic", lambda: 1000.0)
     store = Store(root=tmp_path, now=time.time())
     from local_operator.session.cleanup import mark_store
 
@@ -517,7 +526,10 @@ def test_an_open_project_settled_child_keeps_its_children(tmp_path: Path) -> Non
     assert _removed(store) == set()
 
 
-def test_a_settled_child_with_a_live_claim_keeps_its_children(tmp_path: Path) -> None:
+def test_control_a_settled_child_with_a_live_claim_keeps_its_children(tmp_path: Path) -> None:
+    """A CONTROL, not a discriminator: a live claim already kept X on the old head,
+    which is why Y and Z survived there too; it pins that the fixpoint did not
+    narrow an existing protection."""
     store = _nested(tmp_path)
     (store.sessions / "X" / ".session.pid").write_text(str(os.getpid()))
     assert _removed(store) == set()
@@ -660,3 +672,52 @@ def test_the_between_batch_window_uses_the_one_clamp(
     assert dr.effective_window_hours(CleanupPolicy(delegated_max_age_hours=0)) == (
         dr.MIN_DELEGATED_MAX_AGE_HOURS
     )
+
+
+# --------------------------------------------------------------------------
+# D1: heartbeats are time-bounded, not only count-bounded
+# --------------------------------------------------------------------------
+
+
+def test_the_beat_fires_on_elapsed_time_even_when_no_count_boundary_is_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(dr.time, "monotonic", lambda: clock[0])
+    seen: list[int] = []
+    beat = dr._Beat("decide", 1000, lambda phase, done, total, elapsed: seen.append(done), 100.0)
+    beat.tick(0, 5000)  # count boundary (0 % N == 0)
+    for done in (1, 2, 3):  # no boundary, no time passed: silent
+        beat.tick(done, 5000)
+    clock[0] += dr.HEARTBEAT_MAX_SILENCE_S + 0.1
+    beat.tick(4, 5000)  # no boundary, but the interval elapsed: reports
+    beat.tick(5, 5000)
+    assert seen == [0, 4]
+
+
+def test_a_slow_candidate_is_reported_by_the_next_iteration_not_after_n_more(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One slow decision must not hide behind a 16-candidate count."""
+    clock = [1000.0]
+    monkeypatch.setattr(dr.time, "monotonic", lambda: clock[0])
+    real = dr._evaluate
+    calls = {"n": 0}
+
+    def slow_third(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            clock[0] += 7.0  # a 7 s git probe
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dr, "_evaluate", slow_third)
+    beats: list[int] = []
+    _pass(
+        store,
+        dry_run=True,
+        on_progress=lambda phase, done, total, elapsed: (
+            beats.append(done) if phase == "decide" else None
+        ),
+    )
+    # 0 (count boundary), then 3: the iteration right after the slow candidate.
+    assert beats[:2] == [0, 3], beats[:4]

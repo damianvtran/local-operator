@@ -1221,6 +1221,31 @@ def test_kept_rows_share_the_removal_rows_name_column(
     assert "  kept         kid-new-0001  (inside the" in capsys.readouterr().out
 
 
+def test_a_long_kept_name_is_cut_to_the_shared_column(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: a name wider than the 12-cell session column must not shift the reason."""
+    _delegated(store, "kid-old-0001")
+    _delegated(store, "a-rather-long-session-name", age_h=1)
+    _delegated(store, "kid-new-0001", age_h=1)  # exactly 12 cells: the column's width
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    # Strip BEFORE splitting: str.splitlines() treats the \r as a line break.
+    lines = capsys.readouterr().out.replace("\r\x1b[K", "").splitlines()
+    kept = [ln for ln in lines if "kept" in ln and "content kept" not in ln]
+    long_line = next((ln for ln in kept if "a-rather" in ln), None)
+    short_line = next((ln for ln in kept if "kid-new-0001" in ln), None)
+    assert long_line and short_line, kept
+    # 11 characters and an ellipsis fill the 12-cell column; the reason starts at
+    # the same cell as on a row whose id is exactly 12 wide.
+    # A permanent row follows the erased status text on the same capture line, so
+    # compare each row from its own first cell, not from the start of the line.
+    long_row = long_line[long_line.index("  kept") :]
+    short_row = short_line[short_line.index("  kept") :]
+    assert long_row.startswith("  kept         a-rather-lo…  (")
+    assert long_row.index("(") == short_row.index("(")
+
+
 def test_an_interrupt_clears_the_status_line_before_the_traceback(
     store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1235,7 +1260,8 @@ def test_an_interrupt_clears_the_status_line_before_the_traceback(
     monkeypatch.setattr(dr, "run_delegated_pass", interrupted)
     with pytest.raises(KeyboardInterrupt):
         sessions_cleanup_command(_args(dry_run=True))
-    assert capsys.readouterr().out.endswith("\r\x1b[K")
+    # Erased AND ended: the terminal's echoed ^C must not stay glued to the traceback.
+    assert capsys.readouterr().out.endswith("\r\x1b[K\n")
 
 
 def test_each_phase_reports_its_own_elapsed_time(
