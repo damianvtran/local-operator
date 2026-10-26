@@ -4341,7 +4341,7 @@ class Session:
         # input with their original context index, so a turn that fails
         # before the loop re-appends them can put them back.
         self._bridge_card_fallback_attempts: dict[int, int] = {}
-        self._bridge_card_wake_moved: list[tuple[int, CustomMessage]] = []
+        self._bridge_card_wake_moved: list[tuple[int, AgentMessage]] = []
         #: The turn's terminal verdict, captured where the loop's agent_end is
         #: handled. Settlement runs in the ``finally``, after ``_flush_held_end``
         #: has already released that event, so the verdict must be captured
@@ -17645,7 +17645,9 @@ class Session:
         if last_reply < 0 or self._pending_context_journal:
             return []
         behind = {id(message) for message in messages[:last_reply]}
-        stranded = [card for card in self._bridge_cards_owed_wake if id(card) in behind]
+        stranded: list[AgentMessage] = [
+            card for card in self._bridge_cards_owed_wake if id(card) in behind
+        ]
         if not stranded:
             return []
         # Recorded before the move so ``_restore_unpresented_bridge_cards`` can
@@ -17682,6 +17684,8 @@ class Session:
 
             def binding_guard() -> bool:
                 current = getattr(self, "bridge_runtime", None)
+                if current is None:
+                    return False
                 return (
                     current is runtime
                     and current.owner == captured_owner

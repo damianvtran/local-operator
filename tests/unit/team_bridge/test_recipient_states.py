@@ -206,6 +206,18 @@ class Recipient:
     def baseline_requests(self) -> int:
         return self._baseline
 
+    @property
+    def live_session(self) -> Session:
+        """The engaged session, narrowed for callers that need a real one.
+
+        ``_make_recipient`` always sets it, but the holder is built before the
+        engagement exists, so the field is Optional; this property is the one
+        place that says so to the type checker.
+        """
+
+        assert self.session is not None, "recipient is not engaged yet"
+        return self.session
+
     _baseline: int = 0
 
 
@@ -587,13 +599,13 @@ async def test_mentioned_member_is_woken_with_a_card_that_says_mentioned(
     router = WakeRouter()
     _install_seams(monkeypatch, hub, [recipient], router)
     await _make_recipient(recipient)
-    router.register(recipient.config_dir, recipient.session_id, recipient.session)
+    router.register(recipient.config_dir, recipient.session_id, recipient.live_session)
 
     before = _delivery_state(recipient.config_dir)
     try:
         outcome = await _run(recipient)
     finally:
-        await _settle(recipient.session)
+        await _settle(recipient.live_session)
         await _dispose([recipient])
 
     # The real handler delivered the real row, and says why in its own terms.
@@ -675,16 +687,18 @@ async def test_unmentioned_member_is_woken_exactly_when_the_setting_emits_a_row(
     _install_seams(monkeypatch, hub, [all_member, mention_policy], router)
     await _make_recipient(all_member)
     await _make_recipient(mention_policy)
-    router.register(all_member.config_dir, all_member.session_id, all_member.session)
-    router.register(mention_policy.config_dir, mention_policy.session_id, mention_policy.session)
+    router.register(all_member.config_dir, all_member.session_id, all_member.live_session)
+    router.register(
+        mention_policy.config_dir, mention_policy.session_id, mention_policy.live_session
+    )
 
     before = _delivery_state(mention_policy.config_dir)
     try:
         all_outcome = await _run(all_member)
         silent_outcome = await _run(mention_policy)
     finally:
-        await _settle(all_member.session)
-        await _settle(mention_policy.session)
+        await _settle(all_member.live_session)
+        await _settle(mention_policy.live_session)
         await _dispose([all_member, mention_policy])
 
     # notify=all, unmentioned: woken, with a card that says so.
@@ -727,13 +741,13 @@ async def test_muted_member_is_not_woken_and_the_message_survives_for_a_later_re
     router = WakeRouter()
     _install_seams(monkeypatch, hub, [recipient], router)
     await _make_recipient(recipient)
-    router.register(recipient.config_dir, recipient.session_id, recipient.session)
+    router.register(recipient.config_dir, recipient.session_id, recipient.live_session)
 
     before = _delivery_state(recipient.config_dir)
     baseline_rows = len(_transcript_rows(recipient))
     try:
         outcome = await _run(recipient)
-        await _settle(recipient.session)
+        await _settle(recipient.live_session)
         # Read the transcript BEFORE dispose: teardown appends its own
         # frontend checkpoint, and that row is bookkeeping, not delivery.
         rows_after = _transcript_rows(recipient)
@@ -786,14 +800,14 @@ async def test_disabled_endpoint_receives_nothing_at_all(tmp_path, monkeypatch) 
     router = WakeRouter()
     _install_seams(monkeypatch, hub, [recipient], router)
     await _make_recipient(recipient)
-    router.register(recipient.config_dir, recipient.session_id, recipient.session)
+    router.register(recipient.config_dir, recipient.session_id, recipient.live_session)
 
     before = _delivery_state(recipient.config_dir)
     baseline_rows = len(_transcript_rows(recipient))
     baseline_requests = len(recipient.stream.requests)
     try:
         outcome = await _run(recipient)
-        await _settle(recipient.session)
+        await _settle(recipient.live_session)
         rows_after = _transcript_rows(recipient)
         state_after = _delivery_state(recipient.config_dir)
     finally:
