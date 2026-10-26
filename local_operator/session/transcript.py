@@ -1940,6 +1940,55 @@ def _custom_type_spellings(custom_type: str) -> tuple[bytes, ...] | None:
     return tuple(b'"custom_type"' + sep + encoded.encode("utf-8") for sep in _KEY_SEPARATORS)
 
 
+def custom_type_proven_absent(
+    directory: str | Path,
+    custom_type: str,
+    *,
+    max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
+) -> bool:
+    """Whether NO byte of the plain journal spells a ``custom_type`` row, proven by scan.
+
+    ``True`` is a proof that :func:`read_latest_custom_entry` would answer ``None``;
+    ``False`` means only "not proven" and the caller walks as before.
+
+    WHY (L10): ``DesktopSessions._locate`` asks for the frontend checkpoint of a
+    session with no ``desktop.json`` marker, and a legacy journal has none, so the
+    backward walk JSON-decodes the whole file to find nothing — 81-90 ms of a
+    117-191 ms open on the 8 MB legacy fixture. The tail-anchor sidecar answers the
+    same question only after core-start prewarm has written it. This is the same
+    proof made on the spot with :func:`read_cold_tail`'s scanner: a row the walk
+    could match must carry ``"custom_type"`` and the type's spelling under one of
+    ``_KEY_SEPARATORS`` (the walk's ``str(payload["custom_type"]) == custom_type``
+    has no other byte form this format writes), so if neither spelling occurs the
+    walk's answer is ``None``. A spelling found anywhere — including inside message
+    text — proves nothing, and the walk decides.
+
+    DECLINES (``False``) rather than guesses: an archive (the walk materialises it,
+    and this scan reads plain bytes only), a type with no fixed spelling, a journal
+    larger than ``max_scan_bytes``, and any read error. The scan covers the file's
+    size at ``stat`` time, torn final row included, so a row appended after that
+    instant is one the walk could equally have missed by starting a moment sooner.
+
+    PURE READ: nothing is written. The tail-anchor sidecar stays prewarm's to
+    publish (its module contract), and at ~3 ms warm per 8 MB this scan is cheaper
+    than the sidecar write's fsync it would otherwise motivate on the open path.
+    """
+    spellings = _custom_type_spellings(custom_type)
+    if spellings is None:
+        return False
+    path, codec = compression.transcript_source(Path(directory))
+    if codec is not None:
+        return False
+    try:
+        with path.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size > max_scan_bytes:
+                return False
+            return _spellings_absent(handle, 0, size, spellings)
+    except OSError:
+        return False
+
+
 def read_cold_tail(
     directory: str | Path,
     *,

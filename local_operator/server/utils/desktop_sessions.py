@@ -148,6 +148,7 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
+    custom_type_proven_absent,
     read_latest_custom,
     read_latest_custom_entry,
     validate_page_request,
@@ -9344,9 +9345,18 @@ class DesktopSessions:
             # same-size rewrite guard). When it says absent the walk would have
             # answered ``None`` too; anything unproven — no sidecar, a stale
             # one, a compressed journal — falls through to the walk unchanged.
+            #
+            # NO SIDECAR, SAME PROOF (L10). Before prewarm has written that
+            # record, ``custom_type_proven_absent`` makes it on the spot: a
+            # streaming scan of the plain journal for both spellings of the
+            # type (~3 ms warm for 8 MB, against 81-90 ms of walk). It writes
+            # nothing — publishing the sidecar stays prewarm's job — and any
+            # spelling it meets, an archive, or a journal past its cap leaves
+            # the walk as the answer.
             checkpoint = (
                 None
                 if _checkpoint_proven_absent(path)
+                or custom_type_proven_absent(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
                 else read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
             )
             return _LocatedSession(
