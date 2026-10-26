@@ -2446,7 +2446,11 @@ on save (an older core refuses it).
 `anchor_id`, `session{id, title, agent_id, live}`, `projects[{key, name,
 status}]`, `ask` (the open ask's question/dismissibility, else `null`) and
 `actions{dismiss, answer, read}`. An open ask always reports `high` and
-`actions.dismiss=false`.
+`actions.dismiss=false`. `live_state` is core's own vocabulary
+(`busy`/`idle`/`attached`/`wedged`, and `""` for a cold row); this path is a
+cold reader, so it reports `idle` when the liveness marker shows a resident
+runtime and `""` otherwise, with `live` as the boolean beside it. The detail
+route's `session` adds `cwd`.
 
 **Writes are token-bound (R10), never sweeps.** A by-id write names the
 `revision` it rendered — a newer revision is `skipped: stale_revision` and stays

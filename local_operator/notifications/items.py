@@ -97,6 +97,16 @@ class SessionFacts:
     should show) and fall back to the snapshot the item recorded. ``live`` is
     the liveness marker probe the cold ask door uses (``resume.live_runtime_pid``),
     which reads one small file and never dials a runtime.
+
+    ``live_state`` is contract §5's name for that fact, in core's own vocabulary
+    (``session/catalog.py::live_state_from_flags``: ``busy``, ``idle``,
+    ``attached``, ``wedged``, or ``""`` for a cold row). A COLD READER CAN HONESTLY
+    SAY ONLY ONE OF THEM: the marker proves a runtime is resident, which is
+    ``idle``; ``busy``/``attached``/``wedged`` need the registry record this path
+    deliberately does not walk (it runs on a list request). So a live session
+    reports ``idle`` and a cold one ``""``, and no value here over-claims. ``live``
+    stays beside it because a renderer branching on a boolean should not parse a
+    token to get one.
     """
 
     def __init__(self, config_dir: Path | str) -> None:
@@ -126,6 +136,7 @@ class SessionFacts:
             "title": cached["title"] or fallback_title,
             "agent_id": agent_id,
             "live": bool(cached["live"]),
+            "live_state": "idle" if cached["live"] else "",
         }
 
 

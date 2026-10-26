@@ -17,7 +17,15 @@ from typing import Any, Awaitable, TypeVar
 import pytest
 
 from local_operator.harness.types import TextContent, ToolContext
-from local_operator.notifications.items import apply_patch, counts, detail, list_page
+from local_operator.notifications.items import (
+    ProjectFacts,
+    SessionFacts,
+    apply_patch,
+    counts,
+    detail,
+    list_page,
+    notify_item,
+)
 from local_operator.notifications.store import (
     INPUT_EVIDENCE_MS,
     NEW_ITEMS_PER_HOUR,
@@ -647,6 +655,25 @@ def test_detail_ids_use_the_patch_regex(client) -> None:
     ):
         answer = client.get(f"/v1/desktop/notifications/{bad}", headers=AUTH)
         assert answer.status_code == 422, (bad, answer.status_code)
+
+
+def test_the_item_session_block_carries_live_state(tmp_path: Path) -> None:
+    """Contract §5 names ``live_state``; the shape sent ``live`` alone.
+
+    A cold reader can honestly say only "a runtime is resident" — core's
+    ``idle`` — so that is what a live session reports, and ``""`` is the cold-row
+    value the vocabulary already defines. ``live`` stays as the boolean beside it.
+    """
+    store = _store(tmp_path)
+    item = store.notify(SID, title="shape")
+    row, _ = store.list_items(state="all")
+    session = notify_item(row[0], SessionFacts(tmp_path), ProjectFacts(tmp_path))["session"]
+    assert session["live"] is False and session["live_state"] == ""
+    assert set(session) == {"id", "title", "agent_id", "live", "live_state"}
+    answered = detail(tmp_path, item.item_id)
+    assert answered is not None
+    assert answered["session"]["live_state"] == ""
+    assert {"id", "title", "agent_id", "live", "live_state", "cwd"} == set(answered["session"])
 
 
 def test_a_banner_claim_never_moves_the_list_watermark(tmp_path: Path) -> None:
