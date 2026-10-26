@@ -2873,8 +2873,8 @@ def expire_for_peer(
     entry is normally left alone — it is the state of a copy happening right now, and
     the instance rule exists to protect exactly that — but a copy cannot outlive the
     link it travels over: every phase of a move arrives as a frame on that link, so
-    once it is closed and no replacement link to that device exists, nothing can
-    advance the entry — not ``ready``, not the destination's ``rollback``, not
+    once it is closed, nothing can advance the entry on that transport — not
+    ``ready``, not the destination's ``rollback``, not
     ``done``. Leaving it parks the conversation: the engage guard refuses it and
     ``prepare`` refuses every retry ``in_progress`` naming a phase nobody will
     advance, until a relay restart clears it (measured 2026-09-26 and again
@@ -2942,65 +2942,6 @@ def expire_for_peer(
             continue
         cleared.append(session_id)
     return cleared
-
-
-def rebind_for_peer(
-    root: Path,
-    session_id_hint: str,
-    *,
-    instance: str,
-    to_device: str,
-    old_link: str,
-    new_link: str,
-) -> list[str]:
-    """Move a prepared entry's binding from the link a re-dial replaced to its successor.
-
-    THE ONE EXCEPTION ``_on_link_closed`` MAKES (QA round 1, Q1). A ``replaced`` close
-    is not a death: the identity fence evicted that link because a NEWER link from the
-    same device arrived, so the peer is demonstrably there and its copy can continue on
-    the successor — releasing the entry would roll back a handoff whose owner is very
-    much alive. What has to move with it is the BINDING, or the successor's own death
-    would find an entry pointing at a link that is already gone and never release it.
-
-    Rewrites the journal only. A session whose entry is not bound to ``old_link`` is
-    left alone (another move's link, or an entry written before the binding existed);
-    those keep whatever release rule applies to them.
-    """
-    from local_operator.session.placement import (
-        HANDOFF_PHASE_PREPARED,
-        read_handoff_journal,
-        write_handoff_entry,
-    )
-
-    if not old_link or not new_link or old_link == new_link:
-        return []
-    try:
-        entries = read_handoff_journal(Path(root))
-    except Exception:  # noqa: BLE001 — an unreadable journal is the guard's refusal
-        return []
-    rebound: list[str] = []
-    for session_id, entry in sorted(entries.items()):
-        if session_id_hint and session_id != session_id_hint:
-            continue
-        if str(entry.get("role") or "source") != "source":
-            continue
-        if str(entry.get("phase") or "") != HANDOFF_PHASE_PREPARED:
-            continue
-        if str(entry.get("to_device") or "") != to_device:
-            continue
-        if str(entry.get("instance_id") or "") != instance:
-            continue
-        if str(entry.get("link_id") or "") != old_link:
-            continue
-        try:
-            write_handoff_entry(Path(root), session_id, {**entry, "link_id": new_link})
-        except OSError:
-            logger.debug(
-                "mobility: could not rebind the prepared entry for %s", session_id, exc_info=True
-            )
-            continue
-        rebound.append(session_id)
-    return rebound
 
 
 # ---------------------------------------------------------------------------
@@ -4343,15 +4284,11 @@ def _source_prepare(
             "lease_epoch": lease_epoch,
             "mode": "move",
             "requester": link.device_id,
-            # WHICH LINK THIS MOVE RIDES (QA round 1, Q1). Every phase of a move
-            # arrives as a frame on ONE link, so that link's death is the event that
-            # decides whether the copy can still be finished — and "is any link to
-            # that device alive?" is the wrong question in BOTH directions, measured
-            # on a real relay: a re-dial evicts this link as ``replaced`` before the
-            # newcomer is in the table (so a live handoff looked stranded), and a
-            # second link that merely happens to exist while the copy's own link dies
-            # kept an entry nothing could ever advance. ``_on_link_closed`` keys its
-            # release, and its one exception, to THIS id.
+            # THE TRANSPORT IS BOUND TO THIS LINK (QA Q1/Q4), not merely this peer.
+            # A replacement cannot continue its copy; closing this link releases
+            # prepared so a retry can start afresh, even while another link is alive.
+            # A real PeerLink always has this id. Do not default a missing attribute
+            # to an unbound entry: that would silently restore the device-wide rule.
             "link_id": str(link.link_id),
             "plan_id": str(manifest.get("plan_id") or ""),
             # WHAT THE SOURCE WILL COMPARE THE DESTINATION'S COPY AGAINST, recorded
@@ -4787,19 +4724,17 @@ def _on_link_closed(server: "RelayServer", link: Any, reason: str) -> None:
     """A peer link closed: release the ``prepared`` move that was riding it.
 
     THE MOVE'S OWN LINK IS THE QUESTION (QA round 1, Q1). "Is any link to that device
-    alive?" answers the wrong thing in both directions on a real relay: a re-dial
-    evicts this link as ``replaced`` BEFORE the newcomer is in the table, so a live
-    handoff looked stranded; and a second link that merely exists keeps an entry a
-    dead copy can never advance. The entry records the link it rides (see
-    ``_source_prepare``), and only that link's death releases it.
+    alive?" answers the wrong thing: the transport is bound to ONE ``PeerLink``, and
+    its outstanding frames fail when that link closes even if a second link is alive.
+    The entry records the link it rides (see ``_source_prepare``), and only that
+    link's death releases it.
 
-    ``replaced`` IS NOT A DEATH, which is the one exception: the identity fence
-    evicted this link because a newer link from the SAME device arrived, so the peer
-    is there and its copy can continue on the successor. The binding is transferred
-    to that successor rather than released — otherwise the successor's own death
-    would find an entry pointing at a link that is already gone. The successor's id
-    is already the device's claim at hook time: ``IdentityUseTracker.observe``
-    records the newcomer BEFORE ``register_link`` evicts the old link.
+    ``replaced`` IS ALSO THE DEATH OF THE COPY (QA round 2, Q4). A newer link from the
+    same peer proves reachability, not continuity: ``LinkTransport`` still holds the
+    evicted link, so the copy fails and its best-effort ``rollback`` cannot arrive on
+    a replacement. Rebinding the journal therefore parks ``prepared`` forever behind
+    a link that carries no move. Releasing it is reversible: the source keeps its
+    bytes and a retry starts a fresh prepare over a live link.
 
     A RELAY THAT IS STOPPING IS NOT ASKED, and that is the same rule ``link_closed``
     itself applies before it reports a lost peer: every link goes at shutdown, and
@@ -4812,17 +4747,12 @@ def _on_link_closed(server: "RelayServer", link: Any, reason: str) -> None:
     stopping = getattr(server, "_stop", None)
     if not device_id or (stopping is not None and stopping.is_set()):  # noqa: SLF001
         return
-    link_id = str(getattr(link, "link_id", "") or "")
-    if reason == "replaced":
-        rebound = _rebind_after_replacement(server, device_id, link_id)
-        if rebound:
-            logger.info(
-                "mobility: %s now rides the link that replaced %s to %s; the copy " "continues",
-                ", ".join(rebound),
-                link_id,
-                device_id,
-            )
-            return
+    # STRICT, LIKE THE WRITER IN ``_source_prepare``: every caller is
+    # ``RelayServer.link_closed`` handing a real ``PeerLink``, which always has an id.
+    # A tolerated absence would read as ``""``, and ``expire_for_peer`` treats ``""``
+    # as "no link given" and falls back to the device-level release — the rule Q1
+    # replaced. A missing id must fail loudly in the hook runner, which logs it.
+    link_id = str(link.link_id)
     cleared = expire_for_peer(
         server.root,
         "",
@@ -4841,34 +4771,6 @@ def _on_link_closed(server: "RelayServer", link: Any, reason: str) -> None:
             device_id,
             reason,
         )
-
-
-def _rebind_after_replacement(server: Any, device_id: str, old_link: str) -> list[str]:
-    """Transfer a prepared move's link binding to the link that replaced the old one.
-
-    THE SUCCESSOR'S ID COMES FROM THE IDENTITY TRACKER, not from ``server.links``: at
-    hook time the newcomer has been OBSERVED (``observe`` runs before the eviction)
-    but not yet ADMITTED (``_admit_link`` runs after it), so the table does not hold
-    it yet and a table lookup would find nothing — the state QA's diagnostic caught as
-    ``other_links_in_table_at_close: 1`` with ``_link_for`` answering ``None``.
-
-    A close whose cause is ``replaced`` with no successor on record is not this
-    exception: the caller then falls through to the ordinary release, which is the
-    honest answer when nothing is there to continue the copy.
-    """
-    tracker = getattr(server, "identity_use", None)
-    claim = tracker.claim_for(device_id) if tracker is not None else None
-    successor = str(getattr(claim, "link_id", "") or "") if claim is not None else ""
-    if not successor or successor == old_link:
-        return []
-    return rebind_for_peer(
-        server.root,
-        "",
-        instance=str(server.instance_id),
-        to_device=device_id,
-        old_link=old_link,
-        new_link=successor,
-    )
 
 
 def _source_done(server: "RelayServer", link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:

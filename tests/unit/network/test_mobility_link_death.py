@@ -215,48 +215,78 @@ def test_release_refuses_every_entry_it_cannot_prove_is_this_move(
     assert SESSION in read_handoff_journal(tmp_path)
 
 
-def test_a_re_dial_keeps_the_entry_its_move_rides(
+def test_a_re_dial_during_a_copy_releases_the_source_and_the_retry_completes(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """QA ROUND 1, Q1(a): the replacement is a CONTINUATION, not a death.
+    """QA ROUND 2, Q4: a re-dial does not resume the evicted link's move.
 
-    The source is the listener (the Mac → node topology). A re-dial from the same peer
-    makes ``register_link``'s identity fence evict the old link with ``close("replaced")``
-    BEFORE the newcomer is in the table, so a device-level "is a link alive?" check
-    reads ``None`` and released a handoff whose destination was re-dialling right then
-    (QA's 3e: ``entry cleared``).
+    The destination's ``LinkTransport`` holds the old ``PeerLink``. The identity
+    fence fails that link's outstanding fetch, and the destination's rollback also
+    tries the same dead transport. Rebinding the source's entry to the new link (the
+    round-1 response) therefore left ``prepared`` with no move capable of finishing,
+    and a retry told the operator to restart a healthy relay. ``replaced`` is a
+    death for this move: release its entry, keep the source bytes, and let a fresh
+    prepare complete.
 
-    The entry now records the link it rides, and a ``replaced`` close transfers that
-    binding to the successor instead of releasing it. Fails on 7586450d07 (entry
-    cleared); passes here.
+    This drives an ACTUAL copy, not a planted journal entry. On 3c00f490 the journal
+    is rebound and the final retry answers ``in_progress``; here it is empty and the
+    retry completes over two real relays.
     """
     p: Devices = request.getfixturevalue("pair")
     server_a, server_b, host, port = p
     record, _h, _p = _pair_settled(p, monkeypatch, role="admin")
     _owned_session(server_a)
-    a_dev, b_dev = server_a.identity.device_id, server_b.identity.device_id
+    a_dev = server_a.identity.device_id
     server_b._ensure_link(a_dev)
-    assert wait_for(lambda: server_a._link_for(b_dev) is not None, 15)  # noqa: SLF001
-    old = server_a._link_for(b_dev)  # noqa: SLF001
-    assert old is not None
-    _prepared(
-        server_a.root,
-        to_device=b_dev,
-        instance=str(server_a.instance_id),
-        link_id=old.link_id,
+    real = mobility.LinkTransport.ask
+    fetches = 0
+    redialed = False
+
+    def ask(self_: Any, frame: dict[str, Any], *, timeout: float | None = None) -> Any:
+        nonlocal fetches, redialed
+        if frame.get("op") == "net_sync" and frame.get("phase") == "fetch":
+            fetches += 1
+            if fetches == 2:
+                # Match QA's in-flight drive: one fetch has already crossed, and
+                # this next fetch is about to use the transport the fence evicts.
+                redialed = True
+                # Eviction removes both old links from the relay registries before
+                # their readers finish the close hooks. The fixture's stop cannot
+                # join those removed links; retain and reap only this dial's pair.
+                evicted = [self_.link, server_a.links[self_.link.link_id]]
+
+                def reap_evicted_readers() -> None:
+                    # Close hooks can be waiting on another fixture-owned link's
+                    # reply. Stop the pair first so all such waiters are failed.
+                    server_a.stop()
+                    server_b.stop()
+                    for old_link in evicted:
+                        reader = old_link._reader  # noqa: SLF001 — exact fixture-owned thread
+                        if reader is not None:
+                            reader.join(timeout=5)
+                            assert not reader.is_alive(), reader.name
+
+                request.addfinalizer(reap_evicted_readers)
+                replacement, reason = server_b.dial(
+                    record.network_id, host=f"{host}:{port}", epoch=record.epoch
+                )
+                assert replacement is not None, reason
+        return real(self_, frame, timeout=timeout)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+    failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    assert failed["ok"] is False, failed
+    assert redialed, "the copy never reached its fetch"
+    assert wait_for(lambda: read_handoff_journal(server_a.root) == {}, 15), read_handoff_journal(
+        server_a.root
     )
+    monkeypatch.setattr(mobility.LinkTransport, "ask", real)
 
-    # THE RE-DIAL. The fence evicts ``old`` as ``replaced`` and admits the newcomer.
-    new_b, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
-    assert new_b is not None, reason
-    assert wait_for(lambda: old.link_id not in server_a.links, 15), "the old link stayed"
-    assert wait_for(lambda: server_a._link_for(b_dev) is not None, 15)  # noqa: SLF001
-    successor = server_a._link_for(b_dev)  # noqa: SLF001
-    assert successor is not None and successor.link_id != old.link_id
-
-    journal = read_handoff_journal(server_a.root)
-    assert SESSION in journal, "a re-dial released a live handoff"
-    assert journal[SESSION]["link_id"] == successor.link_id, journal[SESSION]
+    moved = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    assert moved["ok"] is True, moved
+    assert moved["state"] == "completed", moved
+    assert (server_b.root / "sessions" / SESSION).is_dir()
+    assert not (server_a.root / "sessions" / SESSION).exists()
 
 
 def test_the_copy_links_own_death_releases_the_entry_even_beside_a_second_link(
@@ -626,6 +656,6 @@ def test_a_relay_that_is_stopping_does_not_release_its_entries() -> None:
     """
     stopping = SimpleNamespace(is_set=lambda: True)
     server = SimpleNamespace(root=Path("/nonexistent"), instance_id="i_mine", _stop=stopping)
-    link = SimpleNamespace(device_id="d_away")
+    link = SimpleNamespace(device_id="d_away", link_id="l_stopping")
 
     assert mobility._on_link_closed(cast(Any, server), link, "we-closed") is None  # noqa: SLF001

@@ -67,10 +67,17 @@ def pair(request: pytest.FixtureRequest) -> Devices:
 
 
 class _Link:
-    """The one attribute ``_source_prepare`` reads from a peer link."""
+    """The two attributes ``_source_prepare`` reads from a peer link.
 
-    def __init__(self, device_id: str) -> None:
+    ``link_id`` IS REQUIRED, not defaulted: the prepare journals the link the move
+    rides (PR #2950, QA round 1, Q1), and a real ``PeerLink`` always carries one. A
+    stub that defaulted it would test an unbound entry, which is the wedge that
+    binding exists to prevent.
+    """
+
+    def __init__(self, device_id: str, link_id: str) -> None:
         self.device_id = device_id
+        self.link_id = link_id
 
 
 def _prepare_frame(to_device: str) -> dict[str, Any]:
@@ -82,6 +89,34 @@ def _prepare_frame(to_device: str) -> dict[str, Any]:
         "mode": "move",
         "have": {},
     }
+
+
+def test_keep_prepare_mints_an_epoch_without_parking_the_source(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep's rollback must never inherit an epoch-less wildcard (review R2-3).
+
+    Exercise the real prepare branch: the token is minted even though a keep copy
+    has no ownership handoff to journal, and repeated copies get different tokens.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    destination = server_b.identity.device_id
+    epochs: list[str] = []
+    for link_id in ("l_keep_first", "l_keep_second"):
+        answer = mobility._source_prepare(  # noqa: SLF001
+            server_a,
+            cast(Any, _Link(destination, link_id)),
+            {**_prepare_frame(destination), "mode": "keep"},
+        )
+        assert answer["result"] == "prepared", answer
+        epoch = answer["lease_epoch"]
+        assert isinstance(epoch, str) and epoch, answer
+        epochs.append(epoch)
+        assert read_handoff_journal(server_a.root) == {}
+    assert epochs[0] != epochs[1]
+    assert source.is_dir()
 
 
 def _lose_the_second_fetch(
@@ -529,7 +564,7 @@ def test_a_rollback_report_never_clears_a_handing_off_entry(
 
     answer = mobility._source_rollback(  # noqa: SLF001
         server_a,
-        cast(Any, _Link(destination)),
+        cast(Any, _Link(destination, "l_1")),
         {
             "op": "net_session_move",
             "phase": "rollback",
@@ -567,7 +602,7 @@ def test_a_rollback_report_from_another_epoch_is_ignored(
 
     answer = mobility._source_rollback(  # noqa: SLF001
         server_a,
-        cast(Any, _Link(destination)),
+        cast(Any, _Link(destination, "l_2")),
         {
             "op": "net_session_move",
             "phase": "rollback",
@@ -598,13 +633,13 @@ def test_a_prepared_handoff_for_another_destination_still_refuses_and_names_the_
     destination = server_b.identity.device_id
 
     first = mobility._source_prepare(
-        server_a, cast(Any, _Link(destination)), _prepare_frame(destination)
+        server_a, cast(Any, _Link(destination, "l_3")), _prepare_frame(destination)
     )  # noqa: SLF001
     assert first["result"] == "prepared", first
     journal_before = read_handoff_journal(server_a.root)[SESSION]
 
     refused = mobility._source_prepare(  # noqa: SLF001
-        server_a, cast(Any, _Link("device-c")), _prepare_frame("device-c")
+        server_a, cast(Any, _Link("device-c", "l_4")), _prepare_frame("device-c")
     )
 
     assert refused["result"] == "refused", refused
@@ -651,7 +686,7 @@ def test_a_handing_off_entry_is_never_cleared_by_a_retry(
     )
 
     refused = mobility._source_prepare(  # noqa: SLF001
-        server_a, cast(Any, _Link(destination)), _prepare_frame(destination)
+        server_a, cast(Any, _Link(destination, "l_5")), _prepare_frame(destination)
     )
 
     assert refused["result"] == "refused", refused
