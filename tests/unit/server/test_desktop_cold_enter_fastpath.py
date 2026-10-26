@@ -438,3 +438,65 @@ async def test_an_equal_tick_record_refuses_and_a_later_one_hits(
     calls.clear()
     assert await _bridge_cwd(root) == str(root.parent)
     assert calls == []
+
+
+def test_the_chrome_prompts_are_one_literal_behind_two_spellings() -> None:
+    """The prompt strings the renderers recognise live in the import-free leaf.
+
+    ``harness.rows`` asks "is this row the harness's own words" on every replayed
+    user row, in both renderers. Reading the strings straight out of ``harness.loop``
+    and ``session.session`` made that question import the tool stack (measured: 231
+    modules, 1.154 s on the first call). The producers re-export the leaf's objects, so
+    identity — not equality — is what keeps one literal behind both spellings.
+    """
+    from local_operator.harness import chrome_prompts, loop
+    from local_operator.harness.rows import harness_chrome_prompts
+    from local_operator.session import session as live
+
+    assert loop.CONNECTIVITY_CONTINUATION_PROMPT is chrome_prompts.CONNECTIVITY_CONTINUATION_PROMPT
+    assert (
+        loop.CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT
+        is chrome_prompts.CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT
+    )
+    assert loop.CONTINUE_TRUNCATED_ANSWER_PROMPT is chrome_prompts.CONTINUE_TRUNCATED_ANSWER_PROMPT
+    assert loop.LENGTH_STOP_RECOVERY_PROMPT is chrome_prompts.LENGTH_STOP_RECOVERY_PROMPT
+    assert loop.NAMELESS_CALL_RECOVERY_PROMPT is chrome_prompts.NAMELESS_CALL_RECOVERY_PROMPT
+    assert loop.WORDLESS_STOP_RECOVERY_PROMPT is chrome_prompts.WORDLESS_STOP_RECOVERY_PROMPT
+    assert loop.is_connectivity_continuation_instruction is (
+        chrome_prompts.is_connectivity_continuation_instruction
+    )
+    assert live._CONTINUATION_PROMPT is chrome_prompts.CONTINUATION_AFTER_COMPACTION
+    # And the renderer still recognises the session's own continuation prompt.
+    assert chrome_prompts.CONTINUATION_AFTER_COMPACTION in harness_chrome_prompts()
+
+
+def test_recognising_harness_chrome_imports_no_session_or_tool_stack(tmp_path: Path) -> None:
+    """The replayed-row decision must not pay for the live stack — in its own process.
+
+    Fresh subprocess for the reason ``tests/unit/test_import_graph.py`` gives: pytest
+    has already imported the tree here, so an in-process ``sys.modules`` check proves
+    nothing. ``harness.rows`` is the module both renderers call per row.
+    """
+    probe = (
+        "import json, sys;"
+        "from local_operator.harness.rows import harness_chrome_prompts, is_harness_chrome;"
+        "ok = is_harness_chrome(harness_chrome_prompts()[1]);"
+        "print(json.dumps({'ok': ok, 'modules': sorted(sys.modules)}))"
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(home),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / "config"),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=str(REPO), env=env
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["ok"] is True, "the probe must really recognise a chrome prompt"
+    offenders = _offenders(result["modules"])
+    assert offenders == [], (
+        "recognising harness chrome imported the live session/tool stack: " f"{offenders[:5]}"
+    )

@@ -89,6 +89,7 @@ from local_operator.compaction.marker import (
     with_capture_elision_frontier,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
+from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.guard_area import source_is_exempt
@@ -624,10 +625,12 @@ ATTENTION_REPUBLISH_DELAYS_S: tuple[float, ...] = (1.0, 5.0, 20.0, 60.0)
 
 #: Self-prompt scheduled after a compaction pass that cleared the recovery
 #: band, so the model resumes where the summary left off.
-_CONTINUATION_PROMPT = (
-    "The conversation context was just compacted into a summary. "
-    "Continue the task from where it left off."
-)
+#:
+#: DEFINED IN THE IMPORT-FREE LEAF, re-exported here: ``harness.rows`` has to
+#: RECOGNISE this text on every replayed row, and reading it from this module made
+#: the renderer import the session and its tool stack (measured: 231 modules,
+#: 1.154 s, on the first ``is_harness_chrome`` call). One literal, two spellings.
+_CONTINUATION_PROMPT = _chrome_prompts.CONTINUATION_AFTER_COMPACTION
 
 #: Cap on auto-continuation turns within one user turn
 #: MAX_PAUSED_TURN_CONTINUATIONS): a compaction pass that keeps clearing the
