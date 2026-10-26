@@ -1,6 +1,11 @@
 {
   "locales": [
-    "en"
+    "en",
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi"
   ],
   "schema": 1
 }
