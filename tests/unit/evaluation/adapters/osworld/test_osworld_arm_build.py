@@ -566,9 +566,16 @@ def _stub_verifiers(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
         if "osworld_arm_verify.py" in joined:
             out = Path(argv[argv.index("--out") + 1])
             out.parent.mkdir(parents=True, exist_ok=True)
+            arm_root = out.parent.parent
             out.write_text(
                 json.dumps(
                     {
+                        # A verification report names the build it verified; the
+                        # builder refuses one that describes another source or
+                        # another interpreter (round-3 stale-identity concern).
+                        "commit": "a" * 40,
+                        "prefix": str(arm_root / "venv"),
+                        "verified": True,
                         "harness": {"version": "0.90.4"},
                         # The real shape: the builder reads this block, so a fake
                         # report missing a key must break the test, not silently
@@ -653,7 +660,14 @@ def test_execute_binds_to_the_plan_and_is_not_refused_for_existence(
     )
     assert rc == 0, "the documented plan-then-execute sequence must succeed"
     assert calls == ["resolve", "wheels", "install", "admission", "verify"], calls
-    record = json.loads((out / "receipts" / "build-record.json").read_text())
+    canonical = out / "build-record.json"
+    receipts_copy = out / "receipts" / "build-record.json"
+    assert canonical.is_file() and receipts_copy.is_file()
+    assert canonical.read_bytes() == receipts_copy.read_bytes()
+    record = json.loads(canonical.read_text())
+    assert record["record_contract"] == "lop-osworld-arm-build-record/v1"
+    assert record["verified_commit"] == "a" * 40
+    assert record["verified_venv_prefix"] == str(out / "venv")
     assert record["plan_binding"]["verified"] is True
     assert record["refusals"] == []
     assert record["package_digest_scope"].startswith("this install only")
@@ -690,6 +704,117 @@ def _drifted(kwargs: dict[str, Any], tmp_path: Path) -> tuple[list[str], Path, d
     pins = receipts / "policy-pins.txt"
     pins.write_text("requests==2.34.2\n")
     return ["requests==2.34.2"], pins, {**FACTS, "plan_digest": "b" * 64}
+
+
+def test_the_build_record_is_written_at_the_caller_contract_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launcher reads ``<arm>/build-record.json``; the tool used to write only receipts.
+
+    ``scripts/materialize_workspace_21.sh`` takes ``package_digest`` from the arm
+    root, so an arm built by this tool needed a hand-made hard link before the
+    launcher would accept it. One document, both paths, byte-identical -- and the
+    writer says so rather than leaving two copies to drift.
+    """
+
+    layout = arm.ArmLayout(root=tmp_path / "arm")
+    layout.create_arm()
+    written = arm.write_build_record(
+        layout, {"record_contract": "x", "arm_source_commit": "a" * 40}
+    )
+
+    canonical = layout.root / "build-record.json"
+    receipts = layout.receipts / "build-record.json"
+    assert written["record_contract"] == "lop-osworld-arm-build-record/v1"
+    assert written["canonical"] == str(canonical)
+    assert canonical.read_bytes() == receipts.read_bytes()
+    assert json.loads(canonical.read_text())["arm_source_commit"] == "a" * 40
+
+
+def test_an_existing_build_record_is_never_overwritten(tmp_path: Path) -> None:
+    """An adopted or hand-repaired arm must not be relabelled by a later run."""
+
+    layout = arm.ArmLayout(root=tmp_path / "arm")
+    layout.create_arm()
+    sentinel = '{"arm_source_commit": "old"}\n'
+    canonical = layout.root / "build-record.json"
+    canonical.write_text(sentinel)
+    with pytest.raises(arm.BuildRefused, match="immutable"):
+        arm.write_build_record(layout, {"arm_source_commit": "a" * 40})
+    assert canonical.read_text() == sentinel, "the existing record must be untouched"
+    assert not (layout.receipts / "build-record.json").exists()
+
+
+def test_a_verification_report_for_another_source_is_refused(tmp_path: Path) -> None:
+    """The stale-identity case: a record may not cite a build it did not verify.
+
+    Round 3 asked for this explicitly. The report is the ONLY source of the
+    recorded identity, so a report that names a different commit or a different
+    interpreter must not be able to hand the caller a previous arm's receipt.
+    """
+
+    layout = arm.ArmLayout(root=tmp_path / "arm")
+    layout.create_arm()
+    fresh = {"commit": "a" * 40, "prefix": str(layout.venv)}
+    assert arm.verify_recorded_identity(fresh, source_sha="a" * 40, layout=layout) == []
+
+    stale = {**fresh, "commit": "b" * 40}
+    assert arm.verify_recorded_identity(stale, source_sha="a" * 40, layout=layout) == [
+        f"the verification report covers {'b' * 40}, not this build's {'a' * 40}"
+    ]
+
+    other_arm = {**fresh, "prefix": str(tmp_path / "somewhere-else" / "venv")}
+    refused = arm.verify_recorded_identity(other_arm, source_sha="a" * 40, layout=layout)
+    assert refused and "not " in refused[0]
+
+    assert arm.verify_recorded_identity({}, source_sha="a" * 40, layout=layout) == [
+        "no installed-verification report was produced, so nothing is verified"
+    ]
+
+
+def test_a_stale_verification_report_cannot_reach_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through the execute path: refusal recorded, identity not inherited."""
+
+    out = tmp_path / "arm"
+    calls = _stub_preinstall(monkeypatch, tmp_path)
+
+    def stale_verifiers(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+        def fake_run(argv: list[str], **kwargs: Any) -> Any:
+            if "osworld_arm_verify.py" in " ".join(argv):
+                target = Path(argv[argv.index("--out") + 1])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    json.dumps(
+                        {
+                            # A PREVIOUS source: exactly what must never be recorded.
+                            "commit": "b" * 40,
+                            "prefix": str(out / "venv"),
+                            "verified": True,
+                            "harness": {"version": "0.90.4"},
+                            "adapter": {"version": "0.1.3", "package_digest": "d" * 64},
+                            "installed_distributions": {
+                                "requests": "2.34.2",
+                                "local-operator": "0.90.4",
+                                "lop-osworld-v2-adapter": "0.1.3",
+                            },
+                        }
+                    )
+                )
+                calls.append("verify")
+            return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+        monkeypatch.setattr(arm.subprocess, "run", fake_run)
+
+    stale_verifiers(monkeypatch, calls)
+    rc = arm.main(["--source-sha", "a" * 40, "--out", str(out), "--execute"])
+    assert rc == 4, "a stale identity must exit as UNVERIFIED, not BUILT"
+    record = json.loads((out / "build-record.json").read_text())
+    assert record["refusals"], record
+    assert any("not this build's" in reason for reason in record["refusals"])
+    assert record["verified_commit"] == "b" * 40, "the record states what was verified"
+    assert record["cross_build_identity"]["source_commit"] == "a" * 40
 
 
 def test_a_volatile_arm_root_is_refused(tmp_path: Path) -> None:

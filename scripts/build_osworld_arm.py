@@ -104,6 +104,11 @@ _ADAPTER_DIR = "benchmarks/osworld_v2_adapter"
 _HARNESS_DISTRIBUTION = "local-operator"
 _ADAPTER_DISTRIBUTION = "lop-osworld-v2-adapter"
 _RESOLUTION_PROJECT = "lop-osworld-arm-resolution"
+# The build record's on-disk contract. Two paths, one document: the launcher
+# scripts (materialize_workspace_*.sh) read `<arm>/build-record.json`, while the
+# receipts copy is what earlier arms and arm-build.md name. Writing one and
+# hard-linking the other by hand is what this constant exists to end.
+_RECORD_CONTRACT = "lop-osworld-arm-build-record/v1"
 # The arm interpreter's own minor: the adapter requires >=3.12 and the pinned
 # osworld extra is only resolved for one interpreter, so a different minor would
 # need a different lock rather than a different flag.
@@ -852,6 +857,74 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_UNVERIFIED
 
 
+def verify_recorded_identity(
+    recorded: Mapping[str, Any], *, source_sha: str, layout: ArmLayout
+) -> list[str]:
+    """Refusals if the verification report describes a DIFFERENT build.
+
+    A record may not inherit an identity it did not verify: an arm that reports a
+    commit or a venv prefix the verifier did not actually see would hand the
+    caller a receipt for a previous source (review round 3's stale-identity
+    concern). Both are compared resolved, and the mismatch is named.
+    """
+
+    refusals: list[str] = []
+    if not recorded:
+        return ["no installed-verification report was produced, so nothing is verified"]
+    verified_commit = recorded.get("commit")
+    if verified_commit != source_sha:
+        refusals.append(
+            f"the verification report covers {verified_commit}, not this build's {source_sha}"
+        )
+    prefix = recorded.get("prefix")
+    if prefix is None:
+        refusals.append("the verification report names no interpreter prefix")
+    else:
+        try:
+            same = Path(str(prefix)).resolve() == layout.venv.resolve()
+        except OSError:  # pragma: no cover - an unresolvable path cannot be this arm
+            same = False
+        if not same:
+            refusals.append(f"the verification report describes {prefix}, not {layout.venv}")
+    return refusals
+
+
+def write_build_record(layout: ArmLayout, record: Mapping[str, Any]) -> dict[str, Any]:
+    """Write the record at BOTH documented paths from one document.
+
+    The canonical path is the durable caller contract -- ``materialize_workspace``
+    and the launcher read ``<arm>/build-record.json`` -- and the receipts copy is
+    what earlier arms and ``arm-build.md`` name. Both are serialised from the
+    same dict, then re-read and compared byte for byte: a mismatch is a refusal,
+    not a warning, because two records that disagree make every downstream
+    receipt ambiguous. Neither path is ever overwritten (exclusive create), so an
+    adopted or hand-repaired arm cannot be relabelled by a later run.
+    """
+
+    payload = json.dumps(record, indent=2) + "\n"
+    targets = (layout.root / "build-record.json", layout.receipts / "build-record.json")
+    for path in targets:
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                handle.write(payload)
+        except FileExistsError as error:
+            raise BuildRefused(
+                f"{path} already exists; an arm's build record is immutable"
+            ) from error
+    written = [path.read_text(encoding="utf-8") for path in targets]
+    if len(set(written)) != 1 or written[0] != payload:
+        raise BuildRefused(
+            "the canonical and receipts build records diverged after writing: "
+            + ", ".join(str(path) for path in targets)
+        )
+    return {
+        "record_contract": _RECORD_CONTRACT,
+        "canonical": str(targets[0]),
+        "receipts": str(targets[1]),
+        "bytes": len(payload),
+    }
+
+
 def _execute(args: argparse.Namespace) -> int:
     layout = ArmLayout(root=args.out.expanduser().resolve())
     # Volatile-root refusal BEFORE create: a refusal must not leave a directory
@@ -955,52 +1028,56 @@ def _execute(args: argparse.Namespace) -> int:
                 allowed_extra=[_HARNESS_DISTRIBUTION, _ADAPTER_DISTRIBUTION],
             )
         )
-    # Written on refusal too: an exit-4 identity failure with no record is the
-    # same dead end the verifier's own report-on-refusal fix removes.
-    (layout.receipts / "build-record.json").write_text(
-        json.dumps(
-            {
-                "arm_source_commit": args.source_sha,
-                "harness": recorded.get("harness"),
-                "adapter": recorded.get("adapter"),
-                "package_digest": (recorded.get("adapter") or {}).get("package_digest"),
-                "package_digest_scope": (
-                    "this install only (RECORD includes installer-written rows)"
-                ),
-                "cross_build_identity": {
-                    "source_commit": args.source_sha,
-                    # The verifier writes core_module_digest and core_source; a key
-                    # it never writes would silently record null here (round 2).
-                    "core_module_digest": recorded.get("core_module_digest"),
-                    "core_module_hashes": _module_hashes(recorded.get("core_source")),
-                    "source_record_digest": (recorded.get("adapter") or {}).get(
-                        "source_record_digest"
-                    ),
-                },
-                "interpreter": interpreter_facts,
-                "requirements_installed": str(pins),
-                "installation_overrides": install_overrides,
-                "policy_admission": str(layout.receipts / "policy-admission.json"),
-                "raw_pip_check": str(layout.receipts / "raw-pip-check.log"),
-                "verification": str(verification_path),
-                "plan_binding": plan_binding,
-                "uv_version": uv_version(),
-                "closure_refusals": [
-                    reason
-                    for reason in refusals
-                    if "not in the resolution plan" in reason or "differs from planned" in reason
-                ],
-                "refusals": refusals,
-                # NOT identities: zip timestamps differ between builds of the
-                # same commit (this module's docstring, point 3).
-                "wheel_sha256_informational_only": {
-                    "core": instance_sha256(wheels[0]),
-                    "adapter": instance_sha256(wheels[1]),
-                },
+    # A record that outlives a refusal is what the verifier's own report-on-refusal
+    # fix buys; it never inherits an identity it did not verify.
+    refusals.extend(verify_recorded_identity(recorded, source_sha=args.source_sha, layout=layout))
+    written = write_build_record(
+        layout,
+        {
+            "record_contract": _RECORD_CONTRACT,
+            "arm_source_commit": args.source_sha,
+            # The verifier's own facts, so a record cannot report a previous
+            # source: these are read back from THIS run's report, and
+            # verify_recorded_identity refused unless they name this build.
+            "verified_commit": recorded.get("commit"),
+            "verified_venv_prefix": recorded.get("prefix"),
+            "harness": recorded.get("harness"),
+            "adapter": recorded.get("adapter"),
+            "package_digest": (recorded.get("adapter") or {}).get("package_digest"),
+            "package_digest_scope": ("this install only (RECORD includes installer-written rows)"),
+            "cross_build_identity": {
+                "source_commit": args.source_sha,
+                # The verifier writes core_module_digest and core_source; a key
+                # it never writes would silently record null here (round 2).
+                "core_module_digest": recorded.get("core_module_digest"),
+                "core_module_hashes": _module_hashes(recorded.get("core_source")),
+                "source_record_digest": (recorded.get("adapter") or {}).get("source_record_digest"),
             },
-            indent=2,
-        )
-        + "\n"
+            "interpreter": interpreter_facts,
+            "requirements_installed": str(pins),
+            "installation_overrides": install_overrides,
+            "policy_admission": str(layout.receipts / "policy-admission.json"),
+            "raw_pip_check": str(layout.receipts / "raw-pip-check.log"),
+            "verification": str(verification_path),
+            "plan_binding": plan_binding,
+            "uv_version": uv_version(),
+            "closure_refusals": [
+                reason
+                for reason in refusals
+                if "not in the resolution plan" in reason or "differs from planned" in reason
+            ],
+            "refusals": refusals,
+            # NOT identities: zip timestamps differ between builds of the same
+            # commit (this module's docstring, point 3).
+            "wheel_sha256_informational_only": {
+                "core": instance_sha256(wheels[0]),
+                "adapter": instance_sha256(wheels[1]),
+            },
+        },
+    )
+    print(
+        f"RECORD: {written['canonical']} "
+        f"(identical copy: {written['receipts']}, {written['bytes']} bytes)"
     )
     if refusals:
         raise Unverified("; ".join(refusals))
