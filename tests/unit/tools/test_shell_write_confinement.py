@@ -38,9 +38,13 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import AbortSignal, ToolContext
-from local_operator.tools import builtin, shell_env
+from local_operator.tools import builtin
 from local_operator.tools import confinement as confinement_module
-from local_operator.tools.confinement import ShellWriteConfinement, shell_write_confinement_of
+from local_operator.tools import shell_env
+from local_operator.tools.confinement import (
+    ShellWriteConfinement,
+    shell_write_confinement_of,
+)
 
 DARWIN_ONLY = pytest.mark.skipif(
     sys.platform != "darwin" or not confinement_module.SANDBOX_EXEC.exists(),
@@ -432,9 +436,9 @@ class TestWhatAScoutCannotDo:
             "git log --oneline | head -1",
             cwd=repo,
         )
-        assert "Operation not permitted" in result.text or "Unable to create" in result.text, (
-            result.text
-        )
+        assert (
+            "Operation not permitted" in result.text or "Unable to create" in result.text
+        ), result.text
         assert _git(repo, "rev-parse", "HEAD") == head
         assert "new.txt" not in _git(repo, "diff", "--cached", "--name-only")
         assert "initial" in result.text  # the read half still answered
@@ -599,7 +603,9 @@ class TestSeatbeltRuleOrder:
         (base / "d").mkdir()
         secret = base / "d" / "s.txt"
         secret.write_text("hi\n")
-        head = "(version 1)(deny default)(allow process-fork)(allow process-exec)(allow sysctl-read)"
+        head = (
+            "(version 1)(deny default)(allow process-fork)(allow process-exec)(allow sysctl-read)"
+        )
         allow = '(allow file-read* (subpath "/"))'
         deny = f'(deny file-read* (subpath "{base / "d"}"))'
         assert self._read(head + allow + deny, secret).returncode != 0
@@ -612,7 +618,9 @@ class TestSeatbeltRuleOrder:
         (base / "d").mkdir()
         secret = base / "d" / "s.txt"
         secret.write_text("hi\n")
-        head = "(version 1)(deny default)(allow process-fork)(allow process-exec)(allow sysctl-read)"
+        head = (
+            "(version 1)(deny default)(allow process-fork)(allow process-exec)(allow sysctl-read)"
+        )
         deny = f'(deny file-read* (subpath "{base / "d"}"))'
         assert self._read(head + "(allow file-read*)" + deny, secret).returncode != 0
         assert self._read(head + deny + "(allow file-read*)", secret).returncode != 0

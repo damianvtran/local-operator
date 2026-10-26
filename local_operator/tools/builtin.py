@@ -4177,9 +4177,11 @@ async def execute_bash(
         # environment. A write-confined shell runs STRICT for the same reason
         # (the provider key in lop's own environment is a credential too).
         # Ordinary sessions keep the process's configured policy.
-        shell_env.CONFINED_SHELL_POLICY
-        if shell_write is not None
-        else shell_env.policy_for_confinement(None if confinement is None else confinement.root),
+        (
+            shell_env.CONFINED_SHELL_POLICY
+            if shell_write is not None
+            else shell_env.policy_for_confinement(None if confinement is None else confinement.root)
+        ),
         injections=injections,
     )
 

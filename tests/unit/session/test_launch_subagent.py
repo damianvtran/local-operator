@@ -3092,7 +3092,9 @@ async def test_a_scout_child_gets_a_write_confined_shell(tmp_path, monkeypatch, 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
     profile = (
-        AgentProfile(name="scout", tools=("read", "glob", "grep", "bash", "web_search", "web_fetch"))
+        AgentProfile(
+            name="scout", tools=("read", "glob", "grep", "bash", "web_search", "web_fetch")
+        )
         if with_profile
         else None
     )
@@ -3130,7 +3132,15 @@ async def test_an_installed_scout_row_without_bash_gets_the_floor(tmp_path, monk
     parent = make_session(tmp_path, OneShotStream())
     old = AgentProfile(
         name="scout",
-        tools=("read", "glob", "grep", "list_variables", "read_variable", "web_search", "web_fetch"),
+        tools=(
+            "read",
+            "glob",
+            "grep",
+            "list_variables",
+            "read_variable",
+            "web_search",
+            "web_fetch",
+        ),
     )
     child = await subagent_mod._build_child_session(
         label="research",
