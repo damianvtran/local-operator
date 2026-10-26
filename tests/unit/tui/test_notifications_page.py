@@ -607,3 +607,35 @@ async def test_the_combined_receipt_wraps_instead_of_clipping(
             )
             assert receipt.rstrip()[-8:] in painted, (locale, painted[-70:])
     set_active_locale("en")
+
+
+def test_every_shipped_locale_fits_its_time_column() -> None:
+    """zh-CN audit's own guard: the time column's copy must fit TIME_CELLS.
+
+    ``row_line`` pads the stamp to ``TIME_CELLS`` and never truncates it, so a
+    locale whose "now" word is wider than the budget widens every row that uses
+    it — the padding cannot save it. This is the only check that keeps the
+    column exact as copy changes, so it names the locale and the measured width
+    when it fails.
+    """
+    from local_operator.i18n import catalogues
+    from local_operator.i18n.keys import tui_notifications as keys
+    from local_operator.i18n.text import set_active_locale
+
+    root = catalogues.catalogue_root()
+    locales = ["en"] + sorted(
+        path.parent.name
+        for path in root.glob("*/tui.notifications.json")
+        if path.parent.name != "en"
+    )
+    assert len(locales) > 1, "no translated catalogue is on disk to check"
+    for locale in locales:
+        set_active_locale(locale)
+        painted = render._t(keys.row_now())
+        assert cell_len(painted) <= render.TIME_CELLS, (
+            locale,
+            cell_len(painted),
+            painted,
+            render.TIME_CELLS,
+        )
+    set_active_locale("en")
