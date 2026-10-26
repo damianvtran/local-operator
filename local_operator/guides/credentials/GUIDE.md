@@ -233,18 +233,22 @@ to be byte-exact.
 
 ## Sharing a credential with teammates
 
-The long-term store (`secret` tool, `lop secret`, `/credential`) is **this
-machine only**, and it is the default for every credential you keep. Nothing in
-it reaches anyone else.
+The long-term store (`secret` tool, `lop secret`, `/credential --persist`) is
+**this machine only** and the default for every credential you keep. It cannot
+share a value with a teammate; only a device the user pairs themselves can
+receive a copy (`guide://network`).
 
-A value that teammates must also use goes in **Radient Vault**, which needs the
-user signed in to Radient on an organization with a paid Team plan. Vaults,
-their members and item reveal are managed in the console at
+Radient Vault shares a value with teammates, but only for a user whose
+organization is on a paid Team plan and whose Radient console shows **Vaults**
+in the sidebar. You cannot check the plan yourself, so recommend Vault only
+after the user confirms both. Otherwise, or when you do not know, do not pitch
+it: say plainly that this store cannot share with teammates, and ask how their
+team shares secrets. A user who has Vault manages it at
 `https://console.radienthq.com/dashboard/vaults`. You cannot yet create or read
-Vault items yourself: point the user there, and they add the value by hand.
+Vault items yourself: the user adds the value there by hand.
 
 Never share a secret by pasting it into a chat message, a Team Bridge message, a
-PR or a file — that is a leak, not a share.
+PR or a shared or committed file: that is a leak, not a share.
 
 ## Published copies and secret names
 

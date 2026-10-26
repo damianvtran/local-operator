@@ -951,10 +951,15 @@ def test_credentials_guide_keeps_local_first_and_names_vault_only_for_teammates(
     """The Vault pointer is a SHARING answer, never the local default.
 
     Operator requirement (Radient Vault programme): ``lop secret`` stays the
-    local encrypted store, and Vault is only for a value teammates must share —
-    behind Radient sign-in and a paid Team plan. The section also has to say
-    plainly that the agent has no Vault tool yet, so a model reading it points
-    the user at the console instead of inventing a call to an API that refuses.
+    local encrypted store, and Vault is advertised only to a user with access
+    through a paid Team plan. The agent has no plan signal in a session, and
+    Vault is still off in production for most organizations, so the pointer must
+    be CONDITIONAL on what the user can confirm (the plan, and **Vaults** in
+    their console sidebar) with an explicit default for the unknown case: do not
+    pitch it. An unconditional "goes in Radient Vault" was review round 1's M1 /
+    C2 and is pinned out here. The section also has to say plainly that the
+    agent has no Vault tool yet, so a model reading it does not invent a call to
+    an API that refuses.
     """
     from local_operator.redaction_shapes import scrub_shapes_with_hits
 
@@ -967,10 +972,21 @@ def test_credentials_guide_keeps_local_first_and_names_vault_only_for_teammates(
     prose = " ".join(section.replace("**", "").split())
     assert "this machine only" in prose
     assert "`secret` tool" in prose and "`lop secret`" in prose
+    # Bare `/credential` is session-only (the guide's own table); only the
+    # persist form writes the long-term store this section describes.
+    assert "`/credential --persist`" in prose
+    assert "cannot share a value with a teammate" in prose
+    assert "`guide://network`" in prose
+    # The condition, both halves, and the default when it is not confirmed.
     assert "paid Team plan" in prose
+    assert "shows Vaults in the sidebar" in prose
+    assert "only after the user confirms both" in prose
+    assert "when you do not know, do not pitch it" in prose
+    assert "goes in Radient Vault" not in prose
     assert "https://console.radienthq.com/dashboard/vaults" in prose
     assert "cannot yet create or read" in prose
     assert "Team Bridge message" in prose
+    assert "shared or committed file" in prose
     # Concise by requirement: a few lines, not a second guide.
     assert len(section.splitlines()) <= 20
 

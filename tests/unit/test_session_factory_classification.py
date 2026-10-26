@@ -1699,19 +1699,23 @@ async def test_a_local_credential_intent_never_reaches_vault_through_the_roster(
     call is ruled out — so NO roster row may name Vault. The guide's sharing
     section is reachable only once a model already reads ``guide://credentials``
     for a credential task. This drives the REAL packaged guide and the REAL
-    secret tool through the roster builder, so a later description edit that
-    starts advertising Vault fails here, not in a user's prompt.
+    secret tool through the roster builder, and EVERY packaged guide rather than
+    only ``credentials``, so a later description edit to any guide that starts
+    advertising Vault fails here, not in a user's prompt.
     """
     from local_operator.guides import discover_guides
-    from local_operator.harness.types import ToolContext
-    from local_operator.tools.secret_tool import build_secret_tool
+    from scripts.real_tool_surface import build_real_tools
 
-    tool = build_secret_tool(ToolContext())
-    assert tool is not None
-    guides = [guide for guide in discover_guides() if guide.name == "credentials"]
-    assert len(guides) == 1
+    guides = discover_guides()
+    # Guard the guard: an empty catalogue would make the all() below vacuous.
+    assert len(guides) > 1
+    assert "credentials" in {guide.name for guide in guides}
+    # The whole real tool surface too, not just ``secret``: a Vault pitch in
+    # any tool description would reach the classifier the same way.
+    tools = build_real_tools(".")
+    assert "secret" in {each.name for each in tools}
     hooks = _hooks(_FakeIndex(skills=guides))  # type: ignore[arg-type]
-    hooks.tool_roster = session_factory._tool_roster_rows([tool])
+    hooks.tool_roster = session_factory._tool_roster_rows(tools)
 
     roster = session_factory._build_classification_roster(hooks)
 
@@ -1721,8 +1725,11 @@ async def test_a_local_credential_intent_never_reaches_vault_through_the_roster(
     assert ("guide", "credentials", "guide://credentials") in [
         (row.kind, row.name, row.resource_url) for row in roster
     ]
+    assert {row.name for row in roster if row.kind == "guide"} == {guide.name for guide in guides}
     assert all("vault" not in row.description.lower() for row in roster)
-    assert "vault" not in tool.description.lower()
+    # The roster lists only a subset of tools, so it cannot speak for the
+    # rest: check every description directly as well.
+    assert [each.name for each in tools if "vault" in each.description.lower()] == []
 
     secret_row = next(row for row in roster if row.name == "secret")
     classifier = _FakeClassifier(_Recommendation(resources=(secret_row,)))
