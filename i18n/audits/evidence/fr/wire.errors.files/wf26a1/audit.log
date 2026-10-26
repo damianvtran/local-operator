@@ -1,0 +1,279 @@
+# i18n audit execution log — locale fr, namespace wire.errors.files, audit id wf26a1
+# auditor agent: i18n-auditor (lopdev team); session 2674212bee8a
+# model header reported by the harness: radient/auto (concrete upstream model not surfaced)
+# date: 2026-10-26
+# host: Darwin 27.0.0 arm64; interpreter: /opt/homebrew/bin/python3 (Python 3.14.7)
+# worktree: /Users/damian/local-operator/.worktrees/i18n-fr-wire-errors-files
+# note: this file is ACTUAL command output, not audit notes.
+
+$ git rev-parse HEAD
+1c23634501a5a65a610f4d428e27aadcd52e5e09
+exit: 0
+
+$ git status --short
+?? i18n/audits/evidence/fr/wire.errors.files/
+?? local_operator/i18n/catalogues/fr/wire.errors.files.json
+exit: 0
+
+$ shasum -a 256 local_operator/i18n/catalogues/en/wire.errors.files.json local_operator/i18n/catalogues/fr/wire.errors.files.json
+ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64  local_operator/i18n/catalogues/en/wire.errors.files.json
+9a2da0e48a75c746889a6ff0fec7d1e6530a68b6ccbc408c1062c6786b4ac6d4  local_operator/i18n/catalogues/fr/wire.errors.files.json
+
+$ ls local_operator/i18n/catalogues/en/wire.errors.files.context.json
+ls: local_operator/i18n/catalogues/en/wire.errors.files.context.json: No such file or directory
+exit: 1   # no context sidecar exists for this namespace
+
+$ python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit: 0
+
+$ python3 scripts/i18n/check.py
+advisory: local_operator/compaction/snapcompact.py: 11 literal(s) against a ceiling of 10
+advisory: local_operator/evaluation/runner/provider_client.py: 11 literal(s) against a ceiling of 9
+advisory: local_operator/harness/subagent.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/harness_import/mapping.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/service.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/claude.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/codex.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/hub_sync/service.py: 4 literal(s) against a ceiling of 1
+advisory: local_operator/librarian/proactive.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/metadata.py: 8 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/store.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_cli.py: 78 literal(s) against a ceiling of 39
+advisory: local_operator/monitors/delivery.py: 19 literal(s) against a ceiling of 14
+advisory: local_operator/network/cli.py: 252 literal(s) against a ceiling of 228
+advisory: local_operator/network/meshupdate.py: 3 literal(s) against a ceiling of 2
+advisory: local_operator/network/relay.py: 32 literal(s) against a ceiling of 31
+advisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/providers/auth_cli.py: 23 literal(s) against a ceiling of 20
+advisory: local_operator/server/routes/desktop_imports.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_librarian.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_team_bridge.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/catalog.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/delegated_retention.py: 12 literal(s) against a ceiling of 6
+advisory: local_operator/session_factory.py: 16 literal(s) against a ceiling of 15
+advisory: local_operator/supervisors.py: 7 literal(s) against a ceiling of 6
+advisory: local_operator/supplements/sweep.py: 6 literal(s) against a ceiling of 5
+advisory: local_operator/supplements/validate.py: 22 literal(s) against a ceiling of 21
+advisory: local_operator/team_bridge/connector/conversation.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/store.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/tool.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/agent_tool.py: 5 literal(s) against a ceiling of 4
+advisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/builtin.py: 134 literal(s) against a ceiling of 118
+advisory: local_operator/tui/session_move.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 184 file(s) scanned, 2258 literal(s) at or below the baseline, catalogues consistent; 37 advisory finding(s) (report-only until activated)
+exit: 0
+
+# independent mechanical re-derivation (argument parity, ICU, JSON shape, NFC, typography, render)
+# reproduction script retained in this bundle as verify_wire_audit.py.txt (.py.txt per
+# i18n/audits/evidence/README.md, so the evidence is not a second executable source tree).
+# The run line was the same interpreter with that file and the worktree path as argv[1];
+# the inlined output below is what it printed.
+$ python3 <bundle>/verify_wire_audit.py.txt <worktree>
+[1] input hashes
+  en  /Users/damian/local-operator/.worktrees/i18n-fr-wire-errors-files/local_operator/i18n/catalogues/en/wire.errors.files.json
+      sha256 ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64
+  fr  /Users/damian/local-operator/.worktrees/i18n-fr-wire-errors-files/local_operator/i18n/catalogues/fr/wire.errors.files.json
+      sha256 9a2da0e48a75c746889a6ff0fec7d1e6530a68b6ccbc408c1062c6786b4ac6d4
+  context sidecar /Users/damian/local-operator/.worktrees/i18n-fr-wire-errors-files/local_operator/i18n/catalogues/en/wire.errors.files.context.json: ABSENT (namespace has none)
+
+[2] JSON shape
+  bytes en/fr: 854/971
+  utf-8 BOM: en=False fr=False
+  parses as JSON: en=True fr=True
+  ends with exactly one LF: fr=True
+  2-space indent on every member line: True
+  key count en/fr: 11/11  parity=True
+  key ORDER identical to en: True
+  keys added: []  dropped: []
+
+[3] NFC
+  file NFC: True
+
+[4] ICU structure and argument parity (name, order, kind)
+  OK   wire.errors.files.audio_type: en=(('mime_type', 'simple'),) fr=(('mime_type', 'simple'),) plural=none
+  OK   wire.errors.files.heic_conversion: en=(('error', 'simple'),) fr=(('error', 'simple'),) plural=none
+  OK   wire.errors.files.html_type: en=(('mime_type', 'simple'),) fr=(('mime_type', 'simple'),) plural=none
+  OK   wire.errors.files.html_utf8: en=() fr=() plural=none
+  OK   wire.errors.files.image_type: en=(('mime_type', 'simple'),) fr=(('mime_type', 'simple'),) plural=none
+  OK   wire.errors.files.internal_error: en=(('error', 'simple'),) fr=(('error', 'simple'),) plural=none
+  OK   wire.errors.files.sign_auth: en=() fr=() plural=none
+  OK   wire.errors.files.sign_path: en=() fr=() plural=none
+  OK   wire.errors.files.sign_route: en=(('routes', 'simple'),) fr=(('routes', 'simple'),) plural=none
+  OK   wire.errors.files.sign_ttl: en=(('maximum', 'simple'),) fr=(('maximum', 'simple'),) plural=none
+  OK   wire.errors.files.video_type: en=(('mime_type', 'simple'),) fr=(('mime_type', 'simple'),) plural=none
+  any plural/select in namespace: False (fr CLDR categories one/many/other required only if a plural exists)
+
+[5] markup / code-span / technical-token invariance
+  wire.errors.files.audio_type: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.heic_conversion: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.html_type: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.html_utf8: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.image_type: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.internal_error: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.sign_auth: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.sign_path: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.sign_route: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.sign_ttl: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+  wire.errors.files.video_type: en markup/code spans=none | spans lost in fr: none | technical tokens lost: none
+
+[6] French typography codepoints
+  wire.errors.files.audio_type: U+202F=True ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+00E9 U+202F
+  wire.errors.files.heic_conversion: U+202F=True ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+00C9 U+202F
+  wire.errors.files.html_type: U+202F=True ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+00E9 U+202F
+  wire.errors.files.html_utf8: U+202F=False ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+2019
+  wire.errors.files.image_type: U+202F=True ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+00E9 U+202F
+  wire.errors.files.internal_error: U+202F=True ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+202F
+  wire.errors.files.sign_auth: U+202F=False ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+2019 U+00E8
+  wire.errors.files.sign_path: U+202F=False ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+00EA
+  wire.errors.files.sign_route: U+202F=True ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+00EA U+2019 U+202F
+  wire.errors.files.sign_ttl: U+202F=False ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+00EA
+  wire.errors.files.video_type: U+202F=True ascii/NBSP-before-punct=none straight-apostrophe=False non-ASCII: U+00E9 U+00E9 U+202F
+
+[7] script / homoglyph scan (characters outside Latin + French punctuation)
+  wire.errors.files.audio_type: none
+  wire.errors.files.heic_conversion: none
+  wire.errors.files.html_type: none
+  wire.errors.files.html_utf8: none
+  wire.errors.files.image_type: none
+  wire.errors.files.internal_error: none
+  wire.errors.files.sign_auth: none
+  wire.errors.files.sign_path: none
+  wire.errors.files.sign_route: none
+  wire.errors.files.sign_ttl: none
+  wire.errors.files.video_type: none
+
+[8] rendered output, en vs fr (real formatter, sample args)
+  wire.errors.files.audio_type
+    en: File is not an allowed audio type: audio/x-flac
+    fr: Type de fichier audio non autorisé  : audio/x-flac
+    fr codepoints>7f: U+00E9 U+202F
+  wire.errors.files.heic_conversion
+    en: Failed to convert HEIC/HEIF file: decoder exploded
+    fr: Échec de la conversion du fichier HEIC/HEIF  : decoder exploded
+    fr codepoints>7f: U+00C9 U+202F
+  wire.errors.files.html_type
+    en: File is not an allowed HTML type: text/plain
+    fr: Type de fichier HTML non autorisé  : text/plain
+    fr codepoints>7f: U+00E9 U+202F
+  wire.errors.files.html_utf8
+    en: HTML file is not valid UTF-8 text.
+    fr: Le fichier HTML n’est pas du texte UTF-8 valide.
+    fr codepoints>7f: U+2019
+  wire.errors.files.image_type
+    en: File is not an allowed image type: application/pdf
+    fr: Type de fichier image non autorisé  : application/pdf
+    fr codepoints>7f: U+00E9 U+202F
+  wire.errors.files.internal_error
+    en: Internal Server Error: boom
+    fr: Erreur interne du serveur  : boom
+    fr codepoints>7f: U+202F
+  wire.errors.files.sign_auth
+    en: A local access token or desktop bearer is required.
+    fr: Un token d’accès local ou un bearer de bureau est requis.
+    fr codepoints>7f: U+2019 U+00E8
+  wire.errors.files.sign_path
+    en: path must not be empty.
+    fr: path ne doit pas être vide.
+    fr codepoints>7f: U+00EA
+  wire.errors.files.sign_route
+    en: route must be one of: audio, html, images, videos
+    fr: route doit être l’une des valeurs suivantes  : audio, html, images, videos
+    fr codepoints>7f: U+00EA U+2019 U+202F
+  wire.errors.files.sign_ttl
+    en: ttl_s must be between 1 and 3600.
+    fr: ttl_s doit être compris entre 1 et 3600.
+    fr codepoints>7f: U+00EA
+  wire.errors.files.video_type
+    en: File is not an allowed video type: text/plain
+    fr: Type de fichier vidéo non autorisé  : text/plain
+    fr codepoints>7f: U+00E9 U+00E9 U+202F
+
+[9] argument formatter-misuse check (a bare simple arg must stay bare)
+  callers pass strings for {maximum} (str(TTL_MAX_S)) and {routes} (', '.join(...));
+  wire.errors.files.audio_type: typed/formatted args in fr: none
+  wire.errors.files.heic_conversion: typed/formatted args in fr: none
+  wire.errors.files.html_type: typed/formatted args in fr: none
+  wire.errors.files.html_utf8: typed/formatted args in fr: none
+  wire.errors.files.image_type: typed/formatted args in fr: none
+  wire.errors.files.internal_error: typed/formatted args in fr: none
+  wire.errors.files.sign_auth: typed/formatted args in fr: none
+  wire.errors.files.sign_path: typed/formatted args in fr: none
+  wire.errors.files.sign_route: typed/formatted args in fr: none
+  wire.errors.files.sign_ttl: typed/formatted args in fr: none
+  wire.errors.files.video_type: typed/formatted args in fr: none
+
+[10] raising code (each key's actual condition)
+  local_operator/server/routes/static.py:177-180 image_type 400 (mime not in ALLOWED_IMAGE_TYPES)
+  local_operator/server/routes/static.py:194-198 heic_conversion 500 (HEIC/HEIF -> PNG convert raised)
+  local_operator/server/routes/static.py:240-243 video_type 400 (mime not in ALLOWED_VIDEO_TYPES)
+  local_operator/server/routes/static.py:285-288 audio_type 400 (mime not in ALLOWED_AUDIO_TYPES)
+  local_operator/server/routes/static.py:328-331 html_type 400 (mime not in ALLOWED_HTML_TYPES)
+  local_operator/server/routes/static.py:335-340 html_utf8 400 (read_text utf-8 raised UnicodeDecodeError)
+  local_operator/server/routes/static.py:206-208 internal_error 500 (catch-all per media route)
+  local_operator/server/routes/static.py:397-403 sign_auth 401 (no valid X-Local-Token and require_desktop refused)
+  local_operator/server/routes/static.py:429-430 sign_route 400 (body.route not in SIGNABLE_ROUTES)
+  local_operator/server/routes/static.py:431-432 sign_path 400 (body.path empty)
+  local_operator/server/routes/static.py:434-437 sign_ttl 400 (not 0 < ttl_s <= TTL_MAX_S=3600; ttl_s is int)
+  local_operator/server/desktop.py:226-250 require_desktop: needs Authorization 'Bearer {posture.token}' -> 'desktop bearer'
+exit: 0
+
+# raising code, direct evidence for the two auth/sign refusals
+$ grep -n "_wf\.sign_" local_operator/server/routes/static.py
+403:        raise HTTPException(401, _wf.sign_auth().envelope()) from exc
+430:        raise HTTPException(400, _wf.sign_route(routes=", ".join(SIGNABLE_ROUTES)).envelope())
+432:        raise HTTPException(400, _wf.sign_path().envelope())
+437:        raise HTTPException(400, _wf.sign_ttl(maximum=str(local_tokens.TTL_MAX_S)).envelope())
+
+$ sed -n "238,250p" local_operator/server/desktop.py
+            503,
+            "Desktop controls require a backend started by the desktop app.",
+        )
+    _require_allowed_origin(request, posture.origins)
+    supplied = request.headers.get("authorization", "")
+    expected = f"Bearer {posture.token}".encode("utf-8")
+    if not secrets.compare_digest(supplied.encode("utf-8"), expected):
+        raise HTTPException(
+            # i18n: ignore pairing refusal; client classifies by status, never
+            # the body
+            401,
+            "Desktop authorization is required.",
+        )
+
+$ grep -n "ttl_s: int" -A 2 local_operator/server/routes/static.py
+371:    ttl_s: int | None = Field(
+372-        None,
+373-        description=(
+
+$ grep -n "ACCESS_TOKEN_HEADER\|TTL_MAX_S =" local_operator/server/utils/local_tokens.py
+92:ACCESS_TOKEN_HEADER = "X-Local-Token"
+99:TTL_MAX_S = 3600
+
+# shipped fr terminology controls for the same surface
+$ grep -c "token" local_operator/i18n/catalogues/fr/*.json (files with a hit)
+local_operator/i18n/catalogues/fr/wire.errors.files.json:1
+local_operator/i18n/catalogues/fr/wire.memory.json:1
+local_operator/i18n/catalogues/fr/wire.settings.json:18
+local_operator/i18n/catalogues/fr/wire.slash.json:2
+
+$ grep -n "jeton\|porteur\|bearer" local_operator/i18n/catalogues/fr/*.json
+local_operator/i18n/catalogues/fr/wire.errors.files.json:8:  "wire.errors.files.sign_auth": "Un token d’accès local ou un bearer de bureau est requis.",
+
+$ grep -n "de bureau" local_operator/i18n/catalogues/fr/wire.settings.json local_operator/i18n/catalogues/fr/wire.errors.desktop.json | head -6
+local_operator/i18n/catalogues/fr/wire.settings.json:34:  "wire.settings.asks.description": "Questions qu’un agent met en file d’attente pour vous. Une modification s’applique immédiatement dans le terminal, l’application de bureau et sur votre téléphone.",
+local_operator/i18n/catalogues/fr/wire.settings.json:145:  "wire.settings.desktop.description": "Où vous mène un clic sur une notification lorsque l’application de bureau n’est pas lancée.",
+local_operator/i18n/catalogues/fr/wire.settings.json:146:  "wire.settings.desktop.title": "Application de bureau",
+local_operator/i18n/catalogues/fr/wire.settings.json:227:  "wire.settings.display_notifications.label": "Notifications de bureau",
+local_operator/i18n/catalogues/fr/wire.settings.json:252:  "wire.settings.display_turn_answer_rail.help": "Trace un fin filet à côté de la réponse qui clôt un tour (application de bureau).",
+local_operator/i18n/catalogues/fr/wire.errors.desktop.json:24:  "wire.errors.desktop.claim_origin_outside_configured": "Une revendication ne peut pas définir d’origine hors des origines de bureau configurées.",
+
+# bundle directory
+$ ls -1 /Users/damian/local-operator/.worktrees/i18n-fr-wire-errors-files/i18n/audits/evidence/fr/wire.errors.files/wf26a1
+audit.log   # listing captured while this log was being written; the companions
+# (record.json, report.md, verify_wire_audit.py.txt, receipt.json) were added after this run
+
+# end of log

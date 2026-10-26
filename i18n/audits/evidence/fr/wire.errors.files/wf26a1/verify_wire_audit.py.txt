@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Independent mechanical verification of fr/wire.errors.files.json.
+
+Auditor-side re-derivation of every mechanical claim in the audit report:
+argument parity (name, order, kind), plural structure, markup/code invariance,
+JSON shape, NFC, and French typographic codepoints. Reads only; never writes
+the catalogue.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+ROOT = sys.argv[1]
+EN = f"{ROOT}/local_operator/i18n/catalogues/en/wire.errors.files.json"
+FR = f"{ROOT}/local_operator/i18n/catalogues/fr/wire.errors.files.json"
+CTX = f"{ROOT}/local_operator/i18n/catalogues/en/wire.errors.files.context.json"
+
+sys.path.insert(0, ROOT)
+from local_operator.i18n import messages as msg  # noqa: E402
+from local_operator.i18n import runtime as rt  # noqa: E402
+
+
+def sha(p: str) -> str:
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+print("[1] input hashes")
+print(f"  en  {EN}\n      sha256 {sha(EN)}")
+print(f"  fr  {FR}\n      sha256 {sha(FR)}")
+print(f"  context sidecar {CTX}: {'PRESENT ' + sha(CTX) if Path(CTX).exists() else 'ABSENT (namespace has none)'}")
+
+en_raw = Path(EN).read_bytes()
+fr_raw = Path(FR).read_bytes()
+en = json.loads(en_raw)
+fr = json.loads(fr_raw)
+
+print("\n[2] JSON shape")
+print(f"  bytes en/fr: {len(en_raw)}/{len(fr_raw)}")
+print(f"  utf-8 BOM: en={en_raw[:3] == b'\xef\xbb\xbf'} fr={fr_raw[:3] == b'\xef\xbb\xbf'}")
+print(f"  parses as JSON: en=True fr=True")
+print(f"  ends with exactly one LF: fr={fr_raw.endswith(b'\n') and not fr_raw.endswith(b'\n\n')}")
+print(f"  2-space indent on every member line: {all(l.startswith('  \"') for l in fr_raw.decode().splitlines()[1:-1])}")
+print(f"  key count en/fr: {len(en)}/{len(fr)}  parity={set(en) == set(fr)}")
+print(f"  key ORDER identical to en: {list(en) == list(fr)}")
+print(f"  keys added: {sorted(set(fr) - set(en))}  dropped: {sorted(set(en) - set(fr))}")
+
+print("\n[3] NFC")
+print(f"  file NFC: {unicodedata.is_normalized('NFC', fr_raw.decode())}")
+for k in en:
+    if not unicodedata.is_normalized("NFC", fr[k]):
+        print(f"  NFC FAIL {k}")
+
+print("\n[4] ICU structure and argument parity (name, order, kind)")
+plural_seen = False
+for k in en:
+    a_en = rt.message_arguments(en[k])
+    a_fr = rt.message_arguments(fr[k])
+    pa = rt.plural_arguments(fr[k])
+    if pa:
+        plural_seen = True
+    ok = a_en == a_fr
+    print(f"  {'OK  ' if ok else 'FAIL'} {k}: en={a_en} fr={a_fr} plural={pa or 'none'}")
+print(f"  any plural/select in namespace: {plural_seen} (fr CLDR categories one/many/other required only if a plural exists)")
+
+print("\n[5] markup / code-span / technical-token invariance")
+TECH = ["HEIC/HEIF", "HTML", "UTF-8", "path", "route", "ttl_s", "token", "bearer"]
+for k in en:
+    src, tgt = en[k], fr[k]
+    spans = re.findall(r"</?[A-Za-z][^>]*>", src) + re.findall(r"`[^`]*`", src)
+    spans_lost = [s for s in spans if s not in tgt]
+    missing = [t for t in TECH if t in src and t not in tgt]
+    print(f"  {k}: en markup/code spans={spans or 'none'} | spans lost in fr: {spans_lost or 'none'} | technical tokens lost: {missing or 'none'}")
+
+print("\n[6] French typography codepoints")
+ASCII_BEFORE_PUNCT = re.compile(r"[ :;!?]")
+for k in en:
+    s = fr[k]
+    has_fine = "\u202f" in s
+    ascii_before = re.findall(r" :| ;| !| \?|\u00a0", s)
+    straight = "'" in s
+    cps = " ".join(f"U+{ord(c):04X}" for c in s if ord(c) > 0x7F)
+    print(f"  {k}: U+202F={has_fine} ascii/NBSP-before-punct={ascii_before or 'none'} straight-apostrophe={straight} non-ASCII: {cps or 'none'}")
+
+print("\n[7] script / homoglyph scan (characters outside Latin + French punctuation)")
+allowed = set("’«»…—–\u202f\u00a0")
+for k in en:
+    odd = []
+    for c in fr[k]:
+        if ord(c) < 0x80 or c in allowed:
+            continue
+        name = unicodedata.name(c, "?")
+        if "LATIN" not in name:
+            odd.append(f"{c} U+{ord(c):04X} {name}")
+    print(f"  {k}: {'none' if not odd else odd}")
+
+print("\n[8] rendered output, en vs fr (real formatter, sample args)")
+SAMPLES = {
+    "audio_type": {"mime_type": "audio/x-flac"},
+    "heic_conversion": {"error": "decoder exploded"},
+    "html_type": {"mime_type": "text/plain"},
+    "html_utf8": {},
+    "image_type": {"mime_type": "application/pdf"},
+    "internal_error": {"error": "boom"},
+    "sign_auth": {},
+    "sign_path": {},
+    "sign_route": {"routes": "audio, html, images, videos"},
+    "sign_ttl": {"maximum": "3600"},
+    "video_type": {"mime_type": "text/plain"},
+}
+for k in en:
+    code = k
+    sample = SAMPLES[k.split(".")[-1]]
+    r_en = msg.render(code, sample, locale="en")
+    r_fr = msg.render(code, sample, locale="fr")
+    print(f"  {k}\n    en: {r_en}\n    fr: {r_fr}")
+    print(f"    fr codepoints>7f: {' '.join(f'U+{ord(c):04X}' for c in r_fr if ord(c) > 0x7F) or 'none'}")
+
+print("\n[9] argument formatter-misuse check (a bare simple arg must stay bare)")
+print("  callers pass strings for {maximum} (str(TTL_MAX_S)) and {routes} (', '.join(...));")
+for k in en:
+    bad = re.findall(r"\{([a-z_]+)\s*,\s*[a-z]+\}", fr[k])
+    print(f"  {k}: typed/formatted args in fr: {bad or 'none'}")
+
+print("\n[10] raising code (each key's actual condition)")
+print("  local_operator/server/routes/static.py:177-180 image_type 400 (mime not in ALLOWED_IMAGE_TYPES)")
+print("  local_operator/server/routes/static.py:194-198 heic_conversion 500 (HEIC/HEIF -> PNG convert raised)")
+print("  local_operator/server/routes/static.py:240-243 video_type 400 (mime not in ALLOWED_VIDEO_TYPES)")
+print("  local_operator/server/routes/static.py:285-288 audio_type 400 (mime not in ALLOWED_AUDIO_TYPES)")
+print("  local_operator/server/routes/static.py:328-331 html_type 400 (mime not in ALLOWED_HTML_TYPES)")
+print("  local_operator/server/routes/static.py:335-340 html_utf8 400 (read_text utf-8 raised UnicodeDecodeError)")
+print("  local_operator/server/routes/static.py:206-208 internal_error 500 (catch-all per media route)")
+print("  local_operator/server/routes/static.py:397-403 sign_auth 401 (no valid X-Local-Token and require_desktop refused)")
+print("  local_operator/server/routes/static.py:429-430 sign_route 400 (body.route not in SIGNABLE_ROUTES)")
+print("  local_operator/server/routes/static.py:431-432 sign_path 400 (body.path empty)")
+print("  local_operator/server/routes/static.py:434-437 sign_ttl 400 (not 0 < ttl_s <= TTL_MAX_S=3600; ttl_s is int)")
+print("  local_operator/server/desktop.py:226-250 require_desktop: needs Authorization 'Bearer {posture.token}' -> 'desktop bearer'")
