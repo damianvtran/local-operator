@@ -1715,9 +1715,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # `include_request_body` - was rejected because the two answer different
 # questions (opt in to a body; acknowledge that a body can carry a credential),
 # and the approval tier keys on the second.
-BUDGET_BILLED_TOKENS = 33_700
 #
-# RAISED 33,466 -> 34,039 for the PUBLISHED notify schema. The completed
+# RAISED 33,700 -> 34,039 -> 34,341 by the NOTIFICATIONS INBOX, merging with the
+# line above. The inbox's `notify` schema is PUBLISHED (not deferred): a
+# completed live pilot against the deferred design made 20 wrong todo calls,
+# falsely claimed delivery, and wrote no inbox row, so a five-token headroom was
+# not worth reliable tool discovery. History and reasoning, in order: The completed
 # deferred live pilot (actual schema/nudge preflight) made 20 wrong todo calls,
 # falsely claimed delivery, and wrote no inbox row. We reject that strategy;
 # do not preserve a five-token headroom by sacrificing reliable tool discovery.
@@ -1736,10 +1739,18 @@ BUDGET_BILLED_TOKENS = 33_700
 #   this branch  94,604 chars / 34,030 billed / 37 schemas   (child 30,123)
 #   delta       +1,790 chars =   +644 billed: the published notify schema plus
 #               the has_notify clause and its inventory entry.
-# The ceiling stays 34,039: 9 billed tokens of headroom, inside the previous
-# allowance, so the measurement supports neither a raise nor a tightening.
-# The child arm is byte-identical to main's and its ceiling is unchanged.
-BUDGET_BILLED_TOKENS = 34_039
+#
+# RE-MEASURED AGAIN AFTER CONVERGING ONTO main 1c23634501a5, which brought the
+# browser network-telemetry surface in beside this one. Same script, isolated
+# HOME, this tree only (the numbers above are the pre-merge measurement):
+#   top    95,314 chars / 34,286 billed / 37 schemas   vs 34,039 — 247 OVER
+#   child  84,451 chars / 30,378 billed / 32 schemas   vs 30,380 — unchanged
+# The two raises are additive because they are different tools on the same
+# inventory, and neither is discretionary: the browser block's four actions and
+# this one's published schema are capability, not prose. The ceiling is therefore
+# the MEASURED HEAD plus this file's 55-token band (34,286 + 55), the same rule
+# the older entries above used — not a round number and not a guess.
+BUDGET_BILLED_TOKENS = 34_341
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
