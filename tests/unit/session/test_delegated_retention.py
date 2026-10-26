@@ -3434,6 +3434,35 @@ def test_a_recent_entry_mtime_inside_a_shape_keeps_the_pad(root: Path) -> None:
     assert ("recent-shape", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
 
 
+def test_a_fresh_file_nested_inside_a_shape_keeps_the_whole_pad(root: Path) -> None:
+    """QA round 3's repro: the thing that was edited is INSIDE the shape.
+
+    ``build/`` is taken whole on NAME. Every DIRECTORY here is older than the
+    grace, so only the file's own mtime can save it — which means the sizing walk
+    the removal already pays for must report it. Without that fold the dry run
+    plans ``build/`` and a real run deletes a file written 60 s ago.
+    """
+    moment = time.time() + 60
+    pad = _old_pad(root, "shape-nested", moment=moment)
+    nested = pad / "build" / "nested"
+    nested.mkdir(parents=True, exist_ok=True)
+    written = nested / "edit.txt"
+    written.write_text("someone was working here\n")
+    _age(written, moment - 60)
+    # Deliberately age every containing directory: a fresh DIRECTORY mtime would
+    # keep the pad for the wrong reason and hide a broken fold of the file's own.
+    for directory in (nested, pad / "build", pad):
+        _age(directory, moment - 72 * HOUR)
+
+    dry = _pass(root, idle=False, now=moment, dry_run=True)
+    assert dry.content == []
+    assert ("shape-nested", dr.CONTENT_PAD_RECENT_REASON) in dry.content_kept
+    result = _pass(root, idle=False, now=moment)
+    assert (pad / "build" / "nested" / "edit.txt").exists()
+    assert result.content == []
+    assert ("shape-nested", dr.CONTENT_PAD_RECENT_REASON) in result.content_kept
+
+
 def test_exactly_at_the_grace_boundary_keeps_the_pad(root: Path) -> None:
     """The floor is inclusive: exactly 12 h is still inside the safe window."""
     moment = time.time() + 60

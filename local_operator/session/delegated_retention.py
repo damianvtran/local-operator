@@ -478,15 +478,21 @@ STALE_OUTPUT_GRACE_S = 12 * 3600.0
 CONTENT_PAD_GRACE_S = 12 * 3600.0
 CONTENT_PAD_RECENT_REASON = "pad edited within 12h"
 
-#: THE HONEST LIMIT of the floor. A shape directory (``node_modules``,
-#: ``build``, ``target``, …) is judged by its OWN entry mtime and is NOT
-#: descended into, so a write nested deeper inside one is invisible here and the
-#: shape arm still takes that subtree. That is deliberate: descending into every
-#: ``node_modules`` is the multi-gigabyte walk the shape arm exists to avoid.
-#: Everything else the incident turned on still stands — live claim, lease, armed
-#: wake/monitor, holds, pins, origin and the session's own activity clock — and
-#: this is strictly safer than the rule it replaces, which had no recency signal
-#: at all for a shape taken by name.
+#: WHAT THE FLOOR SEES INSIDE A SHAPE DIRECTORY: the content layer takes a
+#: shape (``node_modules``, ``build``, ``target``, …) whole on NAME, so the
+#: newest mtime comes from the same bounded walk that produces its byte figure
+#: (``cleanup.bounded_dir_scan``, ``SIZE_MAX_ENTRIES`` = 2,000 entries). A file
+#: written inside the shape is therefore visible to the floor up to that cap —
+#: the incident's ``build/nested/edit.txt`` case — and the depth does not matter
+#: because the walk is a full stack, not one level. THE REMAINING LIMIT IS THE
+#: CAP: past 2,000 entries the walk stops (as it always has for the byte figure,
+#: which is documented as a lower bound), so a write deeper than that inside a
+#: huge shape directory is not observed and the shape is reclaimed on name. No
+#: walk is added for this: the sizing walk was already bought, and its mtime is
+#: free.
+#:
+#: Everything else the incident turned on still stands — live claim, lease,
+#: armed wake/monitor, holds, pins, origin and the session's own activity clock.
 
 
 def _pad_recent(now: float, newest_mtime_ns: int) -> bool:
@@ -1047,6 +1053,16 @@ def _bounded_dir_stats(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> 
     silently raise the per-pad cost tenfold.
     """
     return cleanup_module._bounded_dir_stats(directory, max_entries)
+
+
+def _bounded_dir_scan(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> tuple[int, int, int]:
+    """``(bytes, entries, newest_mtime_ns)``; the pass's 2,000-entry default.
+
+    See :func:`cleanup.bounded_dir_scan`. The DEFAULT stays here for the same
+    reason :func:`_bounded_dir_stats` keeps it: this pass plans every pad, so
+    ``SIZE_MAX_ENTRIES`` is its measured cost bound.
+    """
+    return cleanup_module.bounded_dir_scan(directory, max_entries)
 
 
 def bounded_dir_bytes(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> int:
@@ -1790,7 +1806,8 @@ def _plan_pad_content(
                                 "scratchpad holds more than "
                                 f"{CONTENT_MAX_REPOS} git repositories to inspect"
                             )
-                        _plan_tree(entry.path, root, plan)
+                        if _plan_tree(entry.path, root, plan, now=now):
+                            return plan
                         continue
                     refused_name = _is_refused_segment(name)
                     if refused_name:
@@ -1805,9 +1822,23 @@ def _plan_pad_content(
                                 f"{relative}: evidence path (never taken by the shape arm)"
                             )
                         else:
-                            stats = _bounded_dir_stats(Path(entry.path))
+                            # FOLD BEFORE PLANNING: the shape arm takes this
+                            # whole directory on NAME, and the file someone
+                            # wrote a minute ago can be nested INSIDE it — the
+                            # incident's exact failure mode. The sizing walk the
+                            # removal already pays for is the only cheap view
+                            # into that subtree, so fold its newest mtime into
+                            # the pad floor BEFORE planning: a fresh entry here
+                            # keeps the pad whole instead of being discovered
+                            # after the removal row already exists.
+                            measured, counted, newest = _bounded_dir_scan(Path(entry.path))
+                            plan.newest_mtime_ns = max(plan.newest_mtime_ns, newest)
+                            if plan.keep_for_recent_edit(now):
+                                return plan
                             plan.removals.append(
-                                _PlannedRemoval(Path(entry.path), CONTENT_CLASS_BUILD, *stats)
+                                _PlannedRemoval(
+                                    Path(entry.path), CONTENT_CLASS_BUILD, measured, counted
+                                )
                             )
                             continue
                     # The COPY arm owns plain directories at any depth, and
@@ -1877,14 +1908,23 @@ def _plan_pad_content(
     return plan
 
 
-def _plan_tree(path: str, root: str, plan: _PadPlan) -> None:
-    """Rule (c) for one git tree at ``path``: plan it, or record why it stays."""
+def _plan_tree(path: str, root: str, plan: _PadPlan, *, now: float) -> bool:
+    """Rule (c) for one git tree at ``path``: plan it, or record why it stays.
+
+    Returns whether the pad was kept for recent activity (the caller must stop
+    planning). The tree's own sizing walk is folded into the pad floor for the
+    same reason the shape arm's is: uncommitted or ignored work inside a
+    worktree this pass removes is still someone's work.
+    """
     relative = os.path.relpath(path, root)
     decision = _tree_reclaim_decision(Path(path))
     if not decision.reclaim:
         plan.kept.append(f"{relative}: {decision.keep}")
-        return
-    stats = _bounded_dir_stats(Path(path))
+        return False
+    measured, counted, newest = _bounded_dir_scan(Path(path))
+    plan.newest_mtime_ns = max(plan.newest_mtime_ns, newest)
+    if plan.keep_for_recent_edit(now):
+        return True
     bundle_path: Path | None = None
     if decision.bundle_refs:
         bundle_path = _unique_rescue_bundle_path(root, relative, plan.bundle_names)
@@ -1892,13 +1932,15 @@ def _plan_tree(path: str, root: str, plan: _PadPlan) -> None:
         _PlannedRemoval(
             Path(path),
             CONTENT_CLASS_MERGED,
-            *stats,
+            measured,
+            counted,
             method="worktree-remove" if decision.worktree is not None else "remove",
             shared_repo=decision.worktree,
             bundle_path=bundle_path,
             bundle_refs=decision.bundle_refs,
         )
     )
+    return False
 
 
 # ---------------------------------------------------------------------------

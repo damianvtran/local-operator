@@ -2677,20 +2677,33 @@ def measure_session_dir(
     return contents
 
 
-def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> tuple[int, int]:
-    """``(bytes, entries)`` under ``directory``, counting at most ``max_entries``.
+def bounded_dir_scan(
+    directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES
+) -> tuple[int, int, int]:
+    """``(bytes, entries, newest_mtime_ns)`` under ``directory``, at most ``max_entries``.
 
-    Both figures are LOWER BOUNDS once capped. One walk serves both the size
-    estimate a notice records and the entry count a cleanup-log row carries, so
-    the two can never disagree about what was measured. Deliberately not
-    :func:`_dir_bytes` (an unbounded ``rglob`` that also follows into
-    ``node_modules``): this runs per removed item, so its cost is bounded.
+    Bytes and entries are LOWER BOUNDS once capped. One walk serves the size
+    estimate a notice records, the entry count a cleanup-log row carries, and
+    the newest mtime a caller may use as a safety signal, so the three can never
+    disagree about what was measured. Deliberately not :func:`_dir_bytes` (an
+    unbounded ``rglob`` that also follows into ``node_modules``): this runs per
+    removed item, so its cost is bounded.
+
+    THE MTIME IS THE REASON THIS RETURNS THREE VALUES: a caller about to delete a
+    directory it takes whole (the content layer's shape arm) has no other cheap
+    sight of a file written inside it, and a second walk for that question would
+    double the per-directory cost. Every enumerated entry is statted, including
+    directories, whose own mtime changes when a file is added or removed beside
+    it. Both figures stop at ``max_entries``, so past the cap nothing beyond it is
+    observed — the same bound the byte figure already has.
+
     Shared with ``delegated_retention`` — it lives HERE because the receipt
-    writer needs it and the content pass imports this module, not the other
-    way round.
+    writer needs the same walk and cannot import that module, not the other way
+    round.
     """
     total = 0
     seen = 0
+    newest = 0
     stack = [os.fspath(directory)]
     while stack:
         current = stack.pop()
@@ -2699,16 +2712,28 @@ def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES)
                 for entry in entries:
                     seen += 1
                     if seen > max_entries:
-                        return total, max_entries
+                        return total, max_entries, newest
                     try:
+                        info = entry.stat(follow_symlinks=False)
+                        newest = max(newest, info.st_mtime_ns)
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
-                            total += entry.stat(follow_symlinks=False).st_size
+                            total += info.st_size
                     except OSError:
                         continue
         except OSError:
             continue
+    return total, seen, newest
+
+
+def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> tuple[int, int]:
+    """``(bytes, entries)``: :func:`bounded_dir_scan` without the mtime figure.
+
+    Kept as the name every existing caller uses, so adding the mtime observation
+    could not silently change their shape.
+    """
+    total, seen, _newest = bounded_dir_scan(directory, max_entries)
     return total, seen
 
 
