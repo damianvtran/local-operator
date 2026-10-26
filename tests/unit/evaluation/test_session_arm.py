@@ -2567,6 +2567,11 @@ class _ScriptedSession:
         self._script = list(script)
         self._sinks: list[Any] = []
         self._tools = [SimpleNamespace(name="mcp__episode_actions_apply_actions")]
+        #: The concrete ``Session`` member the arm reads confinement from
+        #: (``EpisodeSession.confined``). ``None`` until a test presets it --
+        #: the session factory's construction-time ``world_root`` install --
+        #: or the arm calls ``set_tool_confinement``.
+        self._confinement_root: str | None = None
         self.mcp_startup = None
         self.mcp_manager = None
         self.replies: list[dict[str, Any]] = []
@@ -2610,7 +2615,9 @@ class _ScriptedSession:
         )
 
     def set_tool_confinement(self, root: Any) -> None:
-        del root
+        # Mirrors ``Session.set_tool_confinement``: installing a root is what
+        # makes the session confined, so the arm's reading follows it.
+        self._confinement_root = None if root is None else str(root)
 
     async def wait_for_tools(self, required: Any, *, timeout_s: float = 30.0) -> ToolReadiness:
         # The arm's first-request gate now calls the typed owning API
@@ -3366,6 +3373,7 @@ class TestAgentStopOutcome:
         terminal_end: AgentEndEvent | None = None,
         hold_s: float = 0.0,
         max_wall_s: float | None = None,
+        confinement_root: Path | None = None,
     ) -> tuple[Any, _ScriptedSession, Any]:
         home = scratch_root / "home"
         config_dir = home / ".local-operator"
@@ -3433,6 +3441,7 @@ class TestAgentStopOutcome:
                 rescue=rescue,
                 session_opener=opener,
                 max_wall_s=max_wall_s,
+                confinement_root=confinement_root,
             )
 
         return run, session, adapter
@@ -3510,14 +3519,15 @@ class TestAgentStopOutcome:
         assert session.aborts == ["episode wall budget"]
         assert adapter.calls.count("execute") == 0
 
-    @pytest.mark.asyncio
-    async def test_the_first_prompt_states_the_machine_topology(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
-    ) -> None:
-        # The REAL arm path: the prompt the session receives is rendered from
-        # the live inventory the arm read, not from a constant. A session that
-        # holds local tools beside the action tool is told they are on a
-        # different machine with no shared path.
+    async def _first_prompt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        short_scratch: Path,
+        *,
+        installed_at_open: Path | str | None = None,
+        confinement_root: Path | None = None,
+    ) -> str:
         run, session, _adapter = self._fixture(
             tmp_path=tmp_path,
             monkeypatch=monkeypatch,
@@ -3525,18 +3535,67 @@ class TestAgentStopOutcome:
             script=[[{"kind": "wait", "duration_ms": 10}]],
             terminal_message=Message(role="assistant", content=[], stop_reason="stop"),
             terminal_end=AgentEndEvent(),
+            confinement_root=confinement_root,
         )
         session._tools = [
             SimpleNamespace(name=name)
             for name in ("bash", "write", "task", "mcp__episode_actions_apply_actions")
         ]
+        if installed_at_open is not None:
+            # What the session factory does for ``SessionSpec.world_root``:
+            # the root is installed at CONSTRUCTION, before the arm sees it.
+            session._confinement_root = str(installed_at_open)
         await run()
+        return session.prompts[0][0]
 
-        first = session.prompts[0][0]
+    @pytest.mark.asyncio
+    async def test_the_first_prompt_states_the_machine_topology(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # The REAL arm path: the prompt the session receives is rendered from
+        # the live inventory the arm read, not from a constant. A session that
+        # holds local tools beside the action tool is told they are on a
+        # different machine with no shared path. This control has NO installed
+        # confinement, so it must not claim isolation.
+        first = await self._first_prompt(tmp_path, monkeypatch, short_scratch)
         assert first.startswith("Act on the remote computer by calling")
         assert "share no filesystem, clipboard or network path" in first
         assert "Your other tools (`bash`, `write`) run in a local workspace" in first
+        assert "isolated" not in first
         assert "cannot reach the remote computer" in first
+
+    @pytest.mark.asyncio
+    async def test_a_world_root_only_session_is_described_as_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # R1-1 (PR #2958): no ``confinement_root`` argument, but the session
+        # was confined at construction from ``world_root``. The note follows
+        # the INSTALLED root, so it says isolated.
+        first = await self._first_prompt(
+            tmp_path, monkeypatch, short_scratch, installed_at_open=tmp_path / "world"
+        )
+        assert "run in an isolated scratch workspace on a different machine" in first
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_confinement_root_is_described_as_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # The production caller's shape (``scripts/run_episode.py`` passes
+        # ``confinement_root=world``): installed by ``open_episode_session``.
+        first = await self._first_prompt(
+            tmp_path, monkeypatch, short_scratch, confinement_root=tmp_path / "world"
+        )
+        assert "run in an isolated scratch workspace on a different machine" in first
+
+    @pytest.mark.asyncio
+    async def test_an_empty_installed_root_is_not_described_as_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # ``ToolConfinement.from_context`` treats a falsy root as unconfined,
+        # so an (artificial) ``""`` must not earn the isolation claim either.
+        first = await self._first_prompt(tmp_path, monkeypatch, short_scratch, installed_at_open="")
+        assert "run in a local workspace on a different machine" in first
+        assert "isolated" not in first
 
 
 class TestRenderPromptHeader:

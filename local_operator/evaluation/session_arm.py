@@ -2313,6 +2313,28 @@ class EpisodeSession:
 
         return session_tool_names(self.session)
 
+    @property
+    def confined(self) -> bool:
+        """Whether the session's local tools actually run under a confinement.
+
+        Read off the SESSION's installed root, never off an argument the arm
+        was handed: confinement has two independent sources -- the session
+        factory installs ``SessionSpec.world_root`` at construction
+        (``session_factory``: ``session_kwargs["confinement_root"]``), and
+        ``open_episode_session`` may install an explicit root afterwards. A
+        valid episode always carries ``world_root``, so deriving this from the
+        optional ``confinement_root`` argument alone understated a world-root-
+        only session as unconfined (PR #2958 review, R1-1). ``getattr`` for the
+        same reason ``open_episode_session`` types the session ``Any``: the
+        root is a concrete ``Session`` member the protocol does not carry.
+        TRUTHINESS, not ``is not None``, to match the enforcement:
+        ``ToolConfinement.from_context`` treats a falsy root (``""``) as
+        unconfined, and the note must never claim an isolation the tools do
+        not enforce.
+        """
+
+        return bool(getattr(self.session, "_confinement_root", None))
+
     async def aclose(self) -> None:
         """Detach the sink, exit the SDK's open context, then the observer.
 
@@ -3078,7 +3100,9 @@ async def run_session_episode(
                     tool_name=declaration.tool_name,
                     surface=surface,
                     tool_names=tool_names,
-                    confined=confinement_root is not None,
+                    # The INSTALLED confinement (see ``EpisodeSession.confined``),
+                    # not this function's optional argument.
+                    confined=handle.confined,
                 )
                 + "\n"
                 + text
