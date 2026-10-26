@@ -51,6 +51,10 @@ def proxy(tmp_path, monkeypatch):
     calls: list[tuple[str, str, Any, str | None, str | None]] = []
     state: dict[str, Any] = {"serve_type": "image/png", "serve": PNG, "error": None}
 
+    class AvatarStore(FakeStore):
+        def native_login_incarnation(self, credential_id: int) -> str | None:
+            return state["incarnation"]
+
     class Hub(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
             pass  # bytes and bearer never reach fixture logs either
@@ -113,10 +117,9 @@ def proxy(tmp_path, monkeypatch):
     hub = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
     hub_thread = threading.Thread(target=hub.serve_forever, daemon=True)
     hub_thread.start()
-    store = FakeStore()
+    store = AvatarStore()
     state["store"] = store
     state["incarnation"] = "login-a"
-    store.native_login_incarnation = lambda _id: state["incarnation"]
     real_client = bridge.TeamBridgeClient
     monkeypatch.setattr(bridge, "org_oauth_destination_allowed", lambda _base: True)
     monkeypatch.setattr(

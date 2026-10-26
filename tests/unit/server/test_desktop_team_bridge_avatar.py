@@ -2,9 +2,7 @@
 
 import pytest
 
-from tests.unit.server.test_desktop_team_bridge_attachments import (
-    PNG,
-)
+from tests.unit.server.test_desktop_team_bridge_attachments import PNG
 from tests.unit.server.test_desktop_team_bridge_attachments import (  # noqa: F401
     proxy as attachment_proxy,
 )

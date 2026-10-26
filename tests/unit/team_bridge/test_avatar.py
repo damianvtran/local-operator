@@ -13,7 +13,7 @@ PNG = b"\x89PNG\r\n\x1a\nfixture"
 
 
 class AvatarStore(FakeStore):
-    incarnation = "login-a"
+    incarnation: str | None = "login-a"
 
     def native_login_incarnation(self, credential_id):
         return self.incarnation
