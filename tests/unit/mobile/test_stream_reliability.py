@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -150,11 +152,47 @@ STREAM_ROUTES = [
 ]
 
 
-async def cancel_parked(path, park_on: str):
-    """Drive one stream's response with ``send`` parked on ``park_on``, then cancel."""
-    daemon, entry = fixture_daemon()
+async def drop_while_awaiting(path, fixture=None):
+    """Cancel a route's stream the way a plain client disconnect does.
+
+    ``send`` returns at once and the cancel lands once the generator is parked
+    on its next frame — inside the generator's own ``await``, where its
+    ``finally`` runs with the CancelledError in flight. That is the shape
+    :func:`drive_parked` cannot produce: parking on a send puts the cancellation
+    in the response's ``finally`` instead, so the two helpers cover the two
+    halves of the cleanup that share ``_cleanup_stream``.
+    """
+    from starlette.types import Message
+
+    daemon, entry = fixture if fixture is not None else fixture_daemon()
     response = await response_for(build_app(daemon), path)
-    scope = {
+    started = asyncio.Event()
+
+    async def receive() -> Message:
+        await asyncio.Future()
+        raise AssertionError("the parked receive must never return")
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            started.set()
+
+    task = asyncio.create_task(response(http_scope(path), receive, send))
+    await asyncio.wait_for(started.wait(), 5)
+    # Yield until the generator is suspended on its next frame (queue, pacing
+    # sleep or keepalive wait) so the cancellation genuinely lands inside it.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    task.cancel()
+    try:
+        await task
+    except BaseException as exc:  # noqa: BLE001 - the test asserts the exact type
+        return daemon, entry, exc
+    return daemon, entry, None
+
+
+def http_scope(path):
+    """The bare ASGI scope these stream responses are driven with."""
+    return {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
         "http_version": "1.1",
@@ -168,36 +206,76 @@ async def cancel_parked(path, park_on: str):
         "server": ("127.0.0.1", 1),
         "root_path": "",
     }
+
+
+async def drive_parked(response, path, park_on: str):
+    """Drive ``response`` as ASGI with ``send`` parked on ``park_on``, then cancel.
+
+    Returns the exception the cancelled app call ended with, so each caller
+    asserts the outcome it cares about. One spelling for the exchange the
+    parked, masking and direct-spy tests all need.
+    """
+    from starlette.types import Message
+
     parked = asyncio.Event()
 
-    async def receive():
+    async def receive() -> Message:
         await asyncio.Future()
+        raise AssertionError("the parked receive must never return")
 
     async def send(message):
         if message["type"] == park_on:
             parked.set()
             await asyncio.Future()
 
-    task = asyncio.create_task(response(scope, receive, send))
+    task = asyncio.create_task(response(http_scope(path), receive, send))
     await asyncio.wait_for(parked.wait(), 2)
     task.cancel()
-    outcome: BaseException | None = None
     try:
         await task
     except BaseException as exc:  # noqa: BLE001 - the test asserts the exact type
-        outcome = exc
-    return daemon, entry, outcome
+        return exc
+    return None
+
+
+async def cancel_parked(path, park_on: str, fixture=None):
+    """Drive one ROUTE's response through :func:`drive_parked`, then cancel it.
+
+    ``fixture`` is the ``(daemon, entry)`` pair from :func:`fixture_daemon`,
+    supplied only when the caller has already patched that daemon.
+    """
+    daemon, entry = fixture if fixture is not None else fixture_daemon()
+    response = await response_for(build_app(daemon), path)
+    return daemon, entry, await drive_parked(response, path, park_on)
+
+
+@pytest.mark.parametrize("path", STREAM_ROUTES)
+@pytest.mark.asyncio
+async def test_every_stream_route_hands_its_response_a_release(path):
+    """The route wiring, which no behavioural test can see today.
+
+    Every route here attaches inside its generator, so deleting one
+    ``release=`` keyword changes nothing observable — that is exactly why
+    R5-1's claim ("the suite would pass with the keywords deleted") stayed true
+    after the class branch was pinned. The wiring is still load-bearing for any
+    future route that attaches earlier, so it is pinned structurally.
+    """
+    daemon, _ = fixture_daemon()
+    response = await response_for(build_app(daemon), path)
+    assert callable(getattr(response, "_release", None))
+    await daemon.close_phone_views()
 
 
 @pytest.mark.parametrize("path", STREAM_ROUTES)
 @pytest.mark.asyncio
 async def test_a_cancellation_parked_on_the_headers_leaves_no_attachment(path):
-    """A stream cancelled before its body starts must leave nothing behind.
+    """Property, not a regression guard: a parked start leaves nothing attached.
 
-    The routes register their subscriber on the first pull, so the parked case
-    has nothing to detach; this pins that property together with the response
-    owning the release, so it cannot regress into a route-time attach that the
-    generator's ``finally`` would then never undo.
+    This passes on the pre-fix module too — every route registers its
+    subscriber on the first pull, so a stream cancelled before its body starts
+    has nothing to detach. It is stated here so the invariant sits beside the
+    response-side release that now owns the detach: that release is what stops
+    the guarantee from depending on where a route's attach happens to sit.
     """
     daemon, entry, outcome = await cancel_parked(path, "http.response.start")
     assert isinstance(outcome, asyncio.CancelledError)
@@ -208,48 +286,163 @@ async def test_a_cancellation_parked_on_the_headers_leaves_no_attachment(path):
 
 
 @pytest.mark.asyncio
-async def test_a_failing_stream_cleanup_does_not_replace_the_cancellation(monkeypatch):
+async def test_the_response_release_runs_when_the_body_never_starts():
+    """The response-side release is the only close a never-started body can reach.
+
+    Built directly from the class the routes return, with a spy release and a
+    body nobody pulls: the generator's ``finally`` cannot run, so a
+    ``call_count`` of one can only come from ``SessionEventResponse`` itself.
+    Delete that branch and this test fails while every route-level test above
+    stays green — which is the whole reason it exists (review round 5, R5-1).
+    """
+    daemon, _ = fixture_daemon()
+    response_type = type(await response_for(build_app(daemon), "/api/sessions/events"))
+    pulled: list[str] = []
+
+    async def body():
+        pulled.append("pulled")
+        yield "data: never\n\n"
+
+    release = Mock()
+    response = response_type(body(), release=release)
+    outcome = await drive_parked(response, "/api/sessions/events", "http.response.start")
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert release.call_count == 1
+    assert pulled == []
+
+
+@pytest.mark.asyncio
+async def test_a_raising_release_is_logged_at_warning_and_keeps_the_cancellation(caplog):
+    """A release that raises is a WARNING, not the request's outcome.
+
+    ``caplog`` rather than live log output: under the suite's default ``-n
+    auto``, worker ``--log-cli-level`` records are dropped, so the level has to
+    be asserted from inside the worker.
+    """
+    daemon, _ = fixture_daemon()
+    response_type = type(await response_for(build_app(daemon), "/api/sessions/events"))
+    release = Mock(side_effect=RuntimeError("release failed"))
+
+    async def body():
+        yield "data: never\n\n"
+
+    response = response_type(body(), release=release)
+    with caplog.at_level(logging.WARNING, logger="local_operator.mobile.daemon"):
+        outcome = await drive_parked(response, "/api/sessions/events", "http.response.start")
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert release.call_count == 1
+    assert [
+        (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+        for record in caplog.records
+    ] == [("local_operator.mobile.daemon", logging.WARNING, "stream cleanup failed", True)]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_stream_cleanup_does_not_replace_the_cancellation(monkeypatch, caplog):
     """The request's own cancellation outranks a cleanup failure.
 
     The generator's ``finally`` runs inside ``aclose()``, i.e. inside the
     response's ``finally``, where the in-flight exception is the
-    ``CancelledError``. A detach that raises there used to escape and become
-    the request's outcome.
+    ``CancelledError``. A detach that raises there used to escape and become the
+    request's outcome; it is now logged at WARNING, pinned here with ``caplog``
+    for the same worker-record reason as the test above.
     """
-    daemon, entry = fixture_daemon()
+    fixture = fixture_daemon()
+    daemon, entry = fixture
     monkeypatch.setattr(
         daemon, "leave_phone_view", Mock(side_effect=RuntimeError("release failed"))
     )
-    path = "/api/sessions/{session_id:str}/events"
-    response = await response_for(build_app(daemon), path)
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": path,
-        "raw_path": path.encode(),
-        "query_string": b"",
-        "headers": [(b"cookie", f"{COOKIE_NAME}={sign_cookie('pw')}".encode())],
-        "client": ("127.0.0.1", 1),
-        "server": ("127.0.0.1", 1),
-        "root_path": "",
-    }
-    first_body = asyncio.Event()
-
-    async def receive():
-        await asyncio.Future()
-
-    async def send(message):
-        if message["type"] == "http.response.body":
-            first_body.set()
-            await asyncio.Future()
-
-    task = asyncio.create_task(response(scope, receive, send))
-    await asyncio.wait_for(first_body.wait(), 2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    with caplog.at_level(logging.WARNING, logger="local_operator.mobile.daemon"):
+        _, _, outcome = await cancel_parked(
+            "/api/sessions/{session_id:str}/events", "http.response.body", fixture
+        )
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert [
+        (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+        for record in caplog.records
+    ] == [("local_operator.mobile.daemon", logging.WARNING, "stream cleanup failed", True)]
     assert entry.record.session_id not in daemon.table.session_subscribers
+    await daemon.close_phone_views()
+
+
+class _FailingDiscard(set[Any]):
+    """A subscriber set whose detach does its work and then raises once.
+
+    This is the shape the real failures have: the projection release removes the
+    queue and *then* dies inside ``leave_phone_view``, so the response's second
+    cleanup attempt finds nothing left to do. A set that raised before removing
+    would instead model a failure that repeats on every retry, which is why the
+    raise sits after the ``discard``.
+    """
+
+    def __init__(self, items):
+        super().__init__(items)
+        self._raised = False
+
+    def discard(self, item):
+        super().discard(item)
+        if not self._raised:
+            self._raised = True
+            raise RuntimeError("release failed")
+
+
+def _projection_release_failure(monkeypatch, daemon, entry):
+    """Fail the projection detach after its queue has left the table."""
+    monkeypatch.setattr(
+        daemon, "leave_phone_view", Mock(side_effect=RuntimeError("release failed"))
+    )
+
+
+def _list_release_failure(monkeypatch, daemon, entry):
+    """Fail the list detach after its queue has left the table."""
+    monkeypatch.setattr(
+        daemon.table, "list_subscribers", _FailingDiscard(daemon.table.list_subscribers)
+    )
+
+
+def _config_release_failure(monkeypatch, daemon, entry):
+    """Fail the config detach after the real detach has run."""
+    real = daemon.detach_config_subscriber
+    raised: list[bool] = []
+
+    def detach(queue):
+        real(queue)
+        if not raised:
+            raised.append(True)
+            raise RuntimeError("release failed")
+
+    monkeypatch.setattr(daemon, "detach_config_subscriber", detach)
+
+
+PLAIN_DISCONNECT_FAILURES = [
+    ("/api/sessions/{session_id:str}/events", _projection_release_failure),
+    ("/api/sessions/events", _list_release_failure),
+    ("/api/config/events", _config_release_failure),
+]
+
+
+@pytest.mark.parametrize("path,break_release", PLAIN_DISCONNECT_FAILURES)
+@pytest.mark.asyncio
+async def test_a_failed_cleanup_on_a_plain_disconnect_keeps_the_cancellation(
+    path, break_release, monkeypatch, caplog
+):
+    """A dropped phone must not turn a failed detach into a server error.
+
+    A plain disconnect cancels the generator inside its own ``await``, so the
+    detach raises in the GENERATOR's ``finally`` — the response's guard never
+    sees it. Unguarded, that exception replaced the CancelledError and reached
+    the operator as uvicorn's "Exception in ASGI application" for what was only
+    a failed detach (QA Q1-1, measured identically at ``c8ba60e299`` and at
+    ``d6a2c9dea45``). The record is pinned whole: after the message rename the
+    logger name is what tells the two surfaces apart.
+    """
+    daemon, entry = fixture_daemon()
+    break_release(monkeypatch, daemon, entry)
+    with caplog.at_level(logging.WARNING, logger="local_operator.mobile.daemon"):
+        _, _, outcome = await drop_while_awaiting(path, (daemon, entry))
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert [
+        (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+        for record in caplog.records
+    ] == [("local_operator.mobile.daemon", logging.WARNING, "stream cleanup failed", True)]
     await daemon.close_phone_views()

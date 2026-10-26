@@ -37,6 +37,10 @@ AUTHORIZATION_LEASE_SECONDS = 30
 
 
 logger = logging.getLogger(__name__)
+#: One message per failure CLASS, never per surface: the logger name already
+#: says which surface failed (gateway relay vs phone daemon), so both modules
+#: spell this one event the same way.
+STREAM_CLEANUP_FAILED = "stream cleanup failed"
 
 
 class RelayStreamResponse(StreamingResponse):
@@ -69,16 +73,27 @@ class RelayStreamResponse(StreamingResponse):
 
     async def _release_origin(self) -> None:
         for close in (getattr(self.body_iterator, "aclose", None), self._on_close):
-            if close is None:
-                continue
-            try:
-                await close()
-            except Exception:
-                # The in-flight exception belongs to the request — normally the
-                # CancelledError that brought us here — so a failing cleanup
-                # must not replace it. CancelledError is a BaseException and so
-                # still propagates untouched.
-                logger.warning("relay stream cleanup failed", exc_info=True)
+            await _close_stream(close)
+
+
+async def _close_stream(close: Callable[[], Awaitable[None]] | None) -> None:
+    """Close one stream, reporting a failure instead of raising it.
+
+    Both of this module's closers run while an exception is already in flight:
+    the response's ``finally`` during a cancellation parked on ``send``, and the
+    body generator's own ``finally`` when a plain client disconnect cancels the
+    read loop mid-await. The second shape is why this is shared — an exception
+    escaping the generator's cleanup replaces the request's CancelledError and
+    reaches the operator as uvicorn's "Exception in ASGI application" for what
+    is only a failed close. ``CancelledError`` is a BaseException and so still
+    propagates untouched.
+    """
+    if close is None:
+        return
+    try:
+        await close()
+    except Exception:
+        logger.warning(STREAM_CLEANUP_FAILED, exc_info=True)
 
 
 PROOF_HEADER = "x-radient-tunnel-assertion"
@@ -753,7 +768,7 @@ class Gateway:
             except (TimeoutError, httpx.HTTPError):
                 pass
             finally:
-                await upstream.aclose()
+                await _close_stream(upstream.aclose)
 
         return RelayStreamResponse(
             stream(),
