@@ -39,6 +39,7 @@ from local_operator import browser_files
 from local_operator.browser_bridge.protocol import (
     CAPABILITY_SWITCH_LABEL,
     CAPABILITY_SWITCH_PERMISSION,
+    DESKTOP_ONLY_METHODS,
     EXPECTED_EXTENSION_VERSION,
     EXTENSION_UPDATE_NOTE,
     METHODS,
@@ -89,6 +90,7 @@ def _protocol_body() -> str:
     """
     error_values = "\n".join(f"  {item.name} = {item.value!r}," for item in ErrorCode)
     methods = " | ".join(repr(item) for item in METHODS)
+    desktop_only = " | ".join(repr(item) for item in DESKTOP_ONLY_METHODS)
     switches = "\n".join(
         '  "%s": { label: %r, permission: %r },'
         % (method, CAPABILITY_SWITCH_LABEL[method], CAPABILITY_SWITCH_PERMISSION.get(method, ""))
@@ -128,6 +130,12 @@ export const CAPABILITY_SWITCHES: Record<string, {{ label: string; permission: s
 }};
 
 export type Method = {methods};
+// Wire methods ONLY the desktop app's browser host serves. They are in `Method`
+// because the vocabulary is shared, but this build must not serve or advertise
+// them: its debugger is attached for one action, so it has no standing session a
+// `Network` subscription could live on. Generated from Python's
+// `DESKTOP_ONLY_METHODS` so the handler-parity test needs no hand-kept exemption.
+export type DesktopOnlyMethod = {desktop_only};
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught

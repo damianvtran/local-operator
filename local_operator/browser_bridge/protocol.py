@@ -376,6 +376,23 @@ METHODS = (
     "network_clear",
 )
 
+#: Wire methods only the DESKTOP app's browser host can serve.
+#:
+#: They stay in ``METHODS`` because the wire vocabulary is shared and additive at
+#: protocol 1, but this build must neither serve nor advertise them: the
+#: extension attaches its debugger for the length of one action, so it holds no
+#: standing session a ``Network`` subscription could live on. The advertisement is
+#: already derived from the extension's handler table, so this constant exists for
+#: the one place that would otherwise grow a second hand-kept list — the
+#: extension's "every wire method has a handler" test. Generated into both
+#: TypeScript targets so the two sides cannot drift.
+DESKTOP_ONLY_METHODS: tuple[str, ...] = (
+    "network_start",
+    "network_stop",
+    "network_read",
+    "network_clear",
+)
+
 
 #: How long the extension's approval popup gives the user to answer an origin
 #: prompt before auto-denying with a typed ORIGIN_DENIED (origins.ts consumes

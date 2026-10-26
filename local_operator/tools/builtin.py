@@ -20786,9 +20786,7 @@ def _validate_network_fields(action: str, params: BrowserParams) -> str:
         try:
             scope = urlparse(params.url.strip())
         except ValueError:
-            return (
-                "request-body capture requires an exact HTTP(S) origin and path in 'url'"
-            )
+            return "request-body capture requires an exact HTTP(S) origin and path in 'url'"
         if (
             scope.scheme not in ("http", "https")
             or not scope.hostname
@@ -25417,11 +25415,29 @@ async def execute_browser(
 _NETWORK_BODY_KEY = "request_body_base64"
 _NETWORK_METADATA_KEYS = frozenset(
     {
-        "id", "request_id", "loader_id", "frame_id", "method", "url", "status",
-        "duration_ms", "resource_type", "wall_time", "started_at", "finished_at",
-        "encoded_data_length", "decoded_body_length", "from_cache", "failed",
-        "error_text", "canceled", "redirected_from", "redirect_count",
-        "request_body_file", "request_body_bytes", "request_body_truncated",
+        "id",
+        "request_id",
+        "loader_id",
+        "frame_id",
+        "method",
+        "url",
+        "status",
+        "duration_ms",
+        "resource_type",
+        "wall_time",
+        "started_at",
+        "finished_at",
+        "encoded_data_length",
+        "decoded_body_length",
+        "from_cache",
+        "failed",
+        "error_text",
+        "canceled",
+        "redirected_from",
+        "redirect_count",
+        "request_body_file",
+        "request_body_bytes",
+        "request_body_truncated",
     }
 )
 
@@ -25447,9 +25463,17 @@ def _network_metadata_result(payload: dict[str, Any]) -> dict[str, Any]:
     result = {
         key: value
         for key, value in payload.items()
-        if key in {
-            "active", "count", "dropped", "body_count", "body_dropped", "entries",
-            "truncated", "capture_id", "next_after_id",
+        if key
+        in {
+            "active",
+            "count",
+            "dropped",
+            "body_count",
+            "body_dropped",
+            "entries",
+            "truncated",
+            "capture_id",
+            "next_after_id",
         }
     }
     entries: list[dict[str, Any]] = []
@@ -26325,14 +26349,16 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         call_approval_tier=lambda args: (
             "read"
             if str(args.get("action") or "").strip().lower() == "inspect_ownership"
-            else "exec"
-            if str(args.get("action") or "").strip().lower() == "upload"
-            or (
-                str(args.get("action") or "").strip().lower()
-                in ("network_start", "network_read")
-                and bool(args.get("include_request_body"))
+            else (
+                "exec"
+                if str(args.get("action") or "").strip().lower() == "upload"
+                or (
+                    str(args.get("action") or "").strip().lower()
+                    in ("network_start", "network_read")
+                    and bool(args.get("include_request_body"))
+                )
+                else "write"
             )
-            else "write"
         ),
         concurrency="shared",
         interruptible=False,

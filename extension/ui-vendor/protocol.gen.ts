@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (13 modules: access-flow.ts, access-queue.ts, ax-compact.ts, ax-locator.ts, deadline.ts, element-query.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 18ce7757d229d1a3d14a67064a0712898b2eeb95f6bfabbb8e8ee800779d9e0c
+// Inputs sha256: 91de46289088171f240b540407d3b30fa3e62374221ef246b09b07e3a71ed3ac
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -72,6 +72,12 @@ export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: st
 };
 
 export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear';
+// Wire methods ONLY the desktop app's browser host serves. They are in `Method`
+// because the vocabulary is shared, but this build must not serve or advertise
+// them: its debugger is attached for one action, so it has no standing session a
+// `Network` subscription could live on. Generated from Python's
+// `DESKTOP_ONLY_METHODS` so the handler-parity test needs no hand-kept exemption.
+export type DesktopOnlyMethod = 'network_start' | 'network_stop' | 'network_read' | 'network_clear';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught

@@ -30,6 +30,19 @@ def _ctx(tmp_path: Path, surface: str = "ui:7:nonce") -> ToolContext:
     return ctx
 
 
+def _surface(surface: str = "ui:7:nonce") -> BrowserSurface:
+    """A surface the type checker can see is not None.
+
+    ``ToolContext.browser`` is optional by design (a host may inject nothing), so
+    the tool functions take the surface explicitly; a test that read the context
+    field would hand pyright an ``Optional`` and hide a real None behind an
+    ignore in every call.
+    """
+    holder = BrowserSurface()
+    holder.surface_id = surface
+    return holder
+
+
 @pytest.mark.parametrize(
     "action",
     ["network_start", "network_stop", "network_read", "network_clear"],
@@ -138,7 +151,7 @@ def test_metadata_read_never_forwards_host_body_or_arbitrary_fields(monkeypatch,
     monkeypatch.setattr(builtin, "_bridge_call", fake_bridge)
     ctx = _ctx(tmp_path)
     result = asyncio.run(
-        builtin._browser_network("call", ctx.browser, "network_read", _params(), ctx)
+        builtin._browser_network("call", _surface(), "network_read", _params(), ctx)
     )
     assert not result.is_error
     text = result.text
@@ -164,7 +177,7 @@ def test_explicit_body_read_writes_mode_0600_without_rendering_secret(monkeypatc
     result = asyncio.run(
         builtin._browser_network(
             "call",
-            ctx.browser,
+            _surface(),
             "network_read",
             _params(
                 url="https://sso.example.test/auth/saml/acs",
@@ -193,11 +206,9 @@ def test_body_oversize_is_not_persisted(monkeypatch, tmp_path):
     result = asyncio.run(
         builtin._browser_network(
             "call",
-            ctx.browser,
+            _surface(),
             "network_read",
-            _params(
-                url="https://sso.example.test/acs", include_request_body=True, approved=True
-            ),
+            _params(url="https://sso.example.test/acs", include_request_body=True, approved=True),
             ctx,
         )
     )
@@ -212,10 +223,14 @@ def test_network_actions_have_no_new_global_capability_switch():
     assert not any(action.startswith("network_") for action in CAPABILITY_SWITCH_LABEL)
 
 
-def test_body_capture_escalates_to_exec_and_metadata_stays_write():
+def test_body_capture_escalates_to_exec_and_metadata_stays_write(monkeypatch):
+    # `build_browser_tool` returns None on a host with no browser at all, which is
+    # exactly what CI is; the surface is what this test asserts on, so provide one.
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     tool = builtin.build_browser_tool(None)
     assert tool is not None
     tier = tool.call_approval_tier
+    assert tier is not None
     assert tier({"action": "network_read"}) == "write"
     assert tier({"action": "network_start"}) == "write"
     assert tier({"action": "network_stop"}) == "write"
@@ -235,7 +250,7 @@ def _body_read(ctx):
     return asyncio.run(
         builtin._browser_network(
             "call",
-            ctx.browser,
+            _surface(),
             "network_read",
             _params(
                 url="https://sso.example.test/auth/saml/acs",
