@@ -328,20 +328,18 @@ def test_a_re_dial_during_a_copy_releases_the_source_and_the_retry_completes(
     failed = _move(server_b, SESSION, monkeypatch=monkeypatch)
     assert failed["ok"] is False, failed
     assert redialed, "the copy never reached its fetch"
-    # Drive the retry even if the journal is still wedged: the old rebind control
-    # must expose the user-facing in_progress refusal, not stop at an empty-journal
-    # assertion before reaching the recovery path. The fixed path still requires
-    # the journal to clear and the retry to complete below.
-    if read_handoff_journal(server_a.root):
-        monkeypatch.setattr(mobility.LinkTransport, "ask", real)
+    # WAIT FOR THE RELEASE FIRST (#2950 R-C1): a one-shot read before the wait made
+    # a slow-but-correct release take the diagnostic branch and false-fail. Only a
+    # journal still wedged after the wait drives the retry, so the old rebind
+    # control fails on the user-facing in_progress refusal rather than on a bare
+    # journal assertion; the fixed path still requires the journal to clear.
+    released = wait_for(lambda: read_handoff_journal(server_a.root) == {}, 15)
+    monkeypatch.setattr(mobility.LinkTransport, "ask", real)
+    if not released:
         wedged_retry = _move(server_b, SESSION, monkeypatch=monkeypatch)
         assert wedged_retry["ok"] is True, wedged_retry
         assert wedged_retry["state"] == "completed", wedged_retry
-        assert not (server_b.root / "sessions" / SESSION).exists(), "the failed copy must be swept"
-    assert wait_for(lambda: read_handoff_journal(server_a.root) == {}, 15), read_handoff_journal(
-        server_a.root
-    )
-    monkeypatch.setattr(mobility.LinkTransport, "ask", real)
+    assert released, read_handoff_journal(server_a.root)
 
     moved = _move(server_b, SESSION, monkeypatch=monkeypatch)
     assert moved["ok"] is True, moved
