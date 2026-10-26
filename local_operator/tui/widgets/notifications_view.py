@@ -104,13 +104,19 @@ class _Body(ScrollableContainer):
     can_focus = False
 
 
-def _store_stamp(root: Path) -> tuple[int, int, int, int]:
+def _store_stamp(root: Path) -> tuple[int, ...]:
     """The inbox doorbell: ``notifications.db`` and its WAL, size and mtime.
 
     Every write (an agent's ``notify``, another surface's read or dismiss)
     lands in the WAL first, so the pair moves on every change the page could
-    show. Open asks live in the ask queue, not here; the page re-reads those on
-    ``r`` and on every write it makes, and their count is the sidebar's own.
+    show.
+
+    THE ASK INDEX IS PART OF THE DOORBELL (T7). Open asks live in
+    ``asks/<session>.json``, not in the inbox store, so an ask raised while the
+    page is open used to stay invisible until ``r`` — and an ask is the one
+    category that BLOCKS an agent, so it is the worst thing to miss. The index
+    directory's own stat is one syscall, and every write replaces a session file
+    (mtime moves) inside it, so the directory stamp is the whole signal.
     """
     from local_operator.notifications.store import store_path
 
@@ -122,7 +128,12 @@ def _store_stamp(root: Path) -> tuple[int, int, int, int]:
             stamp.extend((info.st_size, info.st_mtime_ns))
         except OSError:
             stamp.extend((0, 0))
-    return (stamp[0], stamp[1], stamp[2], stamp[3])
+    try:
+        index = (root / "asks").stat()
+        stamp.extend((index.st_size, index.st_mtime_ns))
+    except OSError:
+        stamp.extend((0, 0))
+    return (stamp[0], stamp[1], stamp[2], stamp[3], stamp[4], stamp[5])
 
 
 class NotificationsView(Vertical):
@@ -373,6 +384,9 @@ class NotificationsView(Vertical):
         if not rows:
             return
         index = max(0, min(len(rows) - 1, index))
+        # A MOVE releases an opened row's pin: the operator is browsing again,
+        # and the pane follows the cursor from here on (T3).
+        self._detail_row = None
         self.cursor_id = str(rows[index]["id"])
         self._cursor_index = index
         self._paint()
@@ -409,10 +423,17 @@ class NotificationsView(Vertical):
             # ``↵`` on an ask is Answer (design §8.2 "a ↵" on the ask line).
             self.action_answer()
             return
+        # T3: PIN THE OPENED ROW IN BOTH MODES. On the Unread filter, `↵` marks
+        # the row read and it leaves the list, so the cursor lands on its
+        # successor — and the wide pane, which followed the cursor, then showed
+        # a DIFFERENT item than the one the operator opened. The narrow path was
+        # fixed for exactly this; the wide path was not. The pin is released by
+        # the cursor's next MOVE (``_move_to``), never by the re-read itself,
+        # because the re-read is what the open caused.
         if not self.wide:
             self.view_mode = "detail"
-            self._detail_row = row
-            self._apply_layout()
+        self._detail_row = row
+        self._apply_layout()
         self._paint()
         self._load_detail(mark_read=True)
 
@@ -769,8 +790,13 @@ class NotificationsView(Vertical):
 
     @property
     def detail_row(self) -> dict[str, Any] | None:
-        """The row the detail paints: pinned when narrow, the cursor's when wide."""
-        if self.view_mode == "detail" and not self.wide and self._detail_row is not None:
+        """The row the detail paints: the PINNED one, else the cursor's.
+
+        Pinning is the rule in both layouts (T3): a row the operator explicitly
+        opened stays in the pane even after it leaves the list it was opened
+        from. ``_move_to`` clears the pin, so browsing is unaffected.
+        """
+        if self._detail_row is not None:
             return self._detail_row
         return self.current
 
@@ -844,6 +870,13 @@ class NotificationsView(Vertical):
                 labels.append(("↵", _t(_k.hint_answer()) if is_ask else _t(_k.hint_open())))
                 if not is_ask:
                     labels.append(("e", _t(_k.hint_dismiss())))
+                    # T8: the conversation-wide gesture was undiscoverable from
+                    # the list (only the narrow detail showed it). It costs no
+                    # new copy — `hint_dismiss_all` is the same string the
+                    # detail uses — and `hint_row` already drops the widest
+                    # hints first, so a narrow footer pays nothing for it.
+                    if (row.get("session") or {}).get("id"):
+                        labels.append(("E", _t(_k.hint_dismiss_all())))
                 read_label = _t(_k.hint_unread()) if row.get("read") else _t(_k.hint_read())
                 labels.append(("u", read_label))
                 labels.append(("space", _t(_k.hint_select())))

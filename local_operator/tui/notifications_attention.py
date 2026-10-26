@@ -30,6 +30,7 @@ session, a press before render, or a newer revision all stay unread.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -59,6 +60,8 @@ def announce_items(
     desktop_delivers_update: Callable[[], bool],
     store: Any = None,
     claimant: str = "tui",
+    held_session_id: str = "",
+    now_ms: int | None = None,
 ) -> BannerTick:
     """Raise every unclaimed, unread, undismissed ``high`` item once.
 
@@ -67,6 +70,20 @@ def announce_items(
     or an exception hands that revision's claim back, so the next surface (or
     this one, next tick) can try again — a watermark that asserts a banner
     nobody received is the hole ``release_delivery`` exists to close.
+
+    TWO HOLDS, both the desktop feed's own rules (T2, and ``delivery.py``):
+
+    * GRACE. A ``high`` revision is held for ``BANNER_GRACE_MS`` after its
+      content last changed, so an in-view receipt can cancel it. This leg runs
+      every second and would otherwise claim on the first tick, which is faster
+      than any receipt can be and also pre-empts rung 4's hold.
+    * THE WATCHED SESSION. An item written by the conversation this TUI is
+      SHOWING is not news to banner: the operator is looking at the card, and
+      the in-view receipt is the acknowledgement that fits. Those rows are left
+      UNCLAIMED (not raised, not released) so a surface that is not being
+      watched — or this one once the operator moves away — still owns them.
+      ``held_session_id`` is empty when the app cannot prove it is displaying
+      that session, which fails toward notifying.
     """
     if desktop_delivers_update():
         # Rung 2 is live: the feed claims and raises on its own 100 ms tick.
@@ -75,7 +92,15 @@ def announce_items(
         from local_operator.notifications.store import NotificationStore
 
         store = NotificationStore(root)
-    pending = list(store.undelivered(priority="high", limit=BURST_LIMIT + 1))
+    from local_operator.notifications.delivery import grace_remaining_ms
+
+    stamp = now_ms if now_ms is not None else int(time.time() * 1000)
+    pending = [
+        row
+        for row in store.undelivered(priority="high", limit=BURST_LIMIT + 1)
+        if grace_remaining_ms(row, stamp) <= 0
+        and not (held_session_id and str(row.get("session_id") or "") == held_session_id)
+    ]
     if not pending:
         return BannerTick()
     claimed: list[Mapping[str, Any]] = []

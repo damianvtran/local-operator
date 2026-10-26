@@ -240,11 +240,16 @@ def header_line(
             text.append(" · " + selection_hint, style=ink("muted"))
         return text
     text.append(_t(_k.title()), style=ink("fg", bold=True))
-    unread = snapshot.unread_count + snapshot.waiting_unread_count
-    text.append(
-        " · " + _t(_k.header_counts(unread=unread, waiting=snapshot.waiting_count)),
-        style=ink("muted"),
-    )
+    # T6: an ERRORED snapshot has no counts to substantiate. The page states its
+    # own rule elsewhere ("absence is not emptiness: paint nothing rather than a
+    # 0"), and "0 unread · 0 waiting on you" above "database disk image is
+    # malformed" is that rule contradicted one row up.
+    if not snapshot.error:
+        unread = snapshot.unread_count + snapshot.waiting_unread_count
+        text.append(
+            " · " + _t(_k.header_counts(unread=unread, waiting=snapshot.waiting_count)),
+            style=ink("muted"),
+        )
     if not snapshot.complete:
         partial = _t(_k.header_partial(count=str(len(snapshot.items))))
         text.append(" · " + partial, style=ink("muted"))

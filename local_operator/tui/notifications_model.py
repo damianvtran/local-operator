@@ -70,7 +70,10 @@ class Filters:
     kind: str = "all"
     priority: str = "any"
     grouping: str = "time"
-    #: ``/notifications here`` presets this; empty means every conversation.
+    #: Narrows the reel to one conversation; empty means every conversation.
+    #: Set by the page's own "dismiss all from this conversation" gesture (``E``)
+    #: rather than by a slash argument — ``/notifications`` takes only ``read``,
+    #: so there is no ``here`` form to preset it (T9).
     session_id: str = ""
 
     def cycled(self, attribute: str, choices: Sequence[str]) -> "Filters":
@@ -368,9 +371,22 @@ def group(
 
 
 def source_name(row: dict[str, Any]) -> str:
-    """The conversation's title, or its id when it has none (never empty)."""
+    """The conversation's title, else its directory name, else its id.
+
+    T10: a conversation with no stored title fell straight through to the raw
+    session id (``0000000000a1``), which names nothing a reader can act on. The
+    workspace's own directory name is what the asks list already shows for the
+    same situation, so it is tried first and the id stays as the last resort
+    (never empty).
+    """
     session = row.get("session") or {}
-    return str(session.get("title") or session.get("agent_id") or session.get("id") or "")
+    # The asks index carries the session's cwd on the ROW (``asks/store.py``
+    # sets ``row["cwd"]``); the detail route carries it on the session block.
+    cwd = str(row.get("cwd") or session.get("cwd") or "").rstrip("/")
+    directory = cwd.rsplit("/", 1)[-1] if cwd else ""
+    return str(
+        session.get("title") or session.get("agent_id") or directory or session.get("id") or ""
+    )
 
 
 def count_in_session(rows: Iterable[dict[str, Any]], session_id: str) -> int:

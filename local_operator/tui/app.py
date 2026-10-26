@@ -5228,6 +5228,12 @@ class OperatorApp(App[None]):
         self._inbox_notify_stamp: tuple[int, int, int, int] | None = None
         self._inbox_seen_pending = False
         self._inbox_card_seen_at: dict[str, int] = {}
+        #: Retry backoff for a banner whose spawn reported nothing (T4): the
+        #: interval doubles per barren pass up to
+        #: ``_BACKGROUND_NOTIFY_MAX_RETRY_TICKS``, the completion leg's own
+        #: bound, and resets whenever a pass raises something.
+        self._inbox_notify_retry_ticks = 0
+        self._inbox_notify_retry_wait = 0
         #: Retry backoff for a delivery that failed: how many ticks to wait
         #: before the next attempt, and how many of those are still owed. The
         #: interval doubles per barren attempt so the revision-forgetting retry
@@ -32838,11 +32844,30 @@ class OperatorApp(App[None]):
                 raise_one=self._raise_inbox_banner,
                 raise_digest=self._raise_inbox_digest,
                 desktop_delivers_update=desktop_delivers,
+                held_session_id=self._inbox_banner_held_session(),
             )
             if tick.released:
-                # The claim was handed back; forget the stamp so the next tick
-                # retries even if nothing else moved the store.
+                # THE CLAIM CAME BACK, SO THE REVISION IS STILL OWED (T4). Round
+                # 1 forgot the stamp and retried on the very next tick, which on
+                # a host whose spawn always reports nothing (Windows, Linux
+                # without notify-send) was two write transactions per unread
+                # item per second, forever. The completion announcer's own
+                # backoff is the established answer, and the store's banner
+                # cooldown bounds it further.
+                self._inbox_notify_retry_wait = min(
+                    max(1, self._inbox_notify_retry_wait * 2),
+                    _BACKGROUND_NOTIFY_MAX_RETRY_TICKS,
+                )
                 self._inbox_notify_stamp = None
+            elif tick.raised or tick.digested:
+                self._inbox_notify_retry_wait = 0
+
+        if self._inbox_notify_retry_ticks > 0:
+            # A barren attempt asked for a delay: count it down here rather than
+            # scanning again, so a host that cannot deliver does one pass per
+            # interval instead of one per second (T4, the completion leg's M2).
+            self._inbox_notify_retry_ticks -= 1
+            return
 
         async def run() -> None:
             try:
@@ -32851,23 +32876,62 @@ class OperatorApp(App[None]):
                 logger.debug("inbox item banner pass skipped", exc_info=True)
             finally:
                 self._inbox_notify_pending = False
+                self._inbox_notify_retry_ticks = self._inbox_notify_retry_wait
 
         self.run_worker(run(), group="inbox-notify")
 
-    def _raise_inbox_banner(self, row: Mapping[str, Any]) -> bool:
-        """One item's OS banner: the item's own title and body, like rungs 2 and 4.
+    def _inbox_banner_held_session(self) -> str:
+        """The session whose items this TUI must NOT banner, or ``""``.
 
-        The title IS the message the agent chose for the operator (that is the
-        tool's whole purpose), so it is shown as the desktop feed and the
-        runtime's own rung show it. ``argv_safe`` for the completion
+        T2: an item written by the conversation on screen is not news — the
+        operator is looking at its card, and the in-view receipt is the
+        acknowledgement that fits. The rule is the completion announcer's own
+        attached-session conjunction evaluated for the same reason
+        (``_background_notify_*``), narrowed to what a banner needs to know:
+
+        * this window is showing that conversation (one screen, no full-page
+          mode over the transcript, the transcript displayed);
+        * the app holds real focus, so the operator is plausibly reading it;
+        * no session transition is pending, which would make the id stale.
+
+        Anything unprovable yields ``""``, and an empty hold fails toward
+        NOTIFYING rather than toward silence (the direction every unknown takes
+        here).
+
+        The GRACE is deliberately not consulted: it is per revision, not per
+        session, and ``announce_items`` applies it to every row it examines.
+        """
+        if (
+            len(self.screen_stack) != 1
+            or not self.app_focus
+            or self._session_transition_pending
+            or self._interaction.display_only
+        ):
+            return ""
+        transcript = self._transcript_view()
+        if not transcript.display:
+            return ""
+        return self._resumable_session_id()
+
+    def _raise_inbox_banner(self, row: Mapping[str, Any]) -> bool:
+        """One item's OS banner, under the PRIVACY FLAG every other rung applies.
+
+        T1: this leg used to hand the model's own title and body straight to the
+        detached notifier, so with ``display.notification_session_name`` off the
+        item's subject line reached a lock screen while rungs 2 and 4 were
+        sending the brand and the house sentence. ``delivery.banner_text`` is the
+        one place that reads the flag (failing closed), so this rung asks it too
+        rather than keeping a second opinion. ``argv_safe`` for the completion
         announcer's reason: model-written text can begin with ``-``.
         """
+        from local_operator.notifications.delivery import banner_text
         from local_operator.tui.notify import argv_safe, detached_notify
 
+        title, body = banner_text(str(row.get("title") or ""), str(row.get("body_md") or ""))
         return bool(
             detached_notify(
-                argv_safe(str(row.get("title") or "")),
-                argv_safe(str(row.get("body_md") or "")[:240]),
+                argv_safe(title),
+                argv_safe(body),
                 session_id=str(row.get("session_id") or ""),
             )
         )
@@ -39184,11 +39248,26 @@ class OperatorApp(App[None]):
             self._select_sidebar_session(message.session_id)
 
     def _paint_notifications_total(self, counts: dict[str, int] | None) -> None:
-        """``notifications N`` on the sidebar footer: the cross-surface badge figure."""
+        """``notifications N`` on the sidebar footer: the cross-surface badge figure.
+
+        THE FORMULA IS THE BADGE'S OWN (D16): ``unread_count`` +
+        ``waiting_unread_count``, the number the desktop pill and the page header
+        also show, so no two surfaces can disagree about one inbox.
+
+        UNKNOWN PAINTS NOTHING. ``None`` means the store could not be read, and
+        the previous number is a statement about a store nobody can currently
+        see — a stale "3" is worse than no note, because the operator acts on it.
+        Clearing is therefore a deliberate write, not an early return.
+        """
         sidebar = getattr(self, "_session_sidebar", None)
-        if sidebar is None or counts is None:
+        if sidebar is None:
             return
-        total = int(counts.get("unread_count") or 0) + int(counts.get("waiting_unread_count") or 0)
+        if counts is None:
+            total = 0
+        else:
+            total = int(counts.get("unread_count") or 0) + int(
+                counts.get("waiting_unread_count") or 0
+            )
         try:
             sidebar.set_notifications_total(total)
         except Exception:  # noqa: BLE001 — a footer fact never breaks a poll

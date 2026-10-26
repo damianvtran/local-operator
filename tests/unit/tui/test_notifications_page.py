@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
@@ -23,6 +23,27 @@ from local_operator.tui import notifications_model as model
 from local_operator.tui import notifications_render as render
 
 S1, S2, S3, S4, S5 = (f"{n:012x}" for n in range(0xA1, 0xA6))
+
+
+def _age(root: Path, *, ms: int | None = None) -> None:
+    """Move every row's content stamp past ``BANNER_GRACE_MS`` (T2).
+
+    Rung 3 HOLDS a fresh revision so an in-view receipt can cancel it, exactly
+    as the desktop feed does; a test that writes and then asserts a raise would
+    be measuring the hold. Ageing is how a real elapsed grace is simulated
+    without sleeping 2.5 s per case.
+    """
+    import sqlite3
+
+    from local_operator.notifications.delivery import BANNER_GRACE_MS
+
+    stamp = int(time.time() * 1000) - (BANNER_GRACE_MS if ms is None else ms) - 1
+    conn = sqlite3.connect(root / "notifications.db")
+    try:
+        with conn:
+            conn.execute("UPDATE items SET updated_at=?", (stamp,))
+    finally:
+        conn.close()
 
 
 def _seed(root: Path, count: int) -> NotificationStore:
@@ -179,6 +200,7 @@ def test_rung_three_raises_high_once_and_never_normal_or_low(tmp_path: Path) -> 
     high = store.notify(S1, title="high", priority="high")
     store.notify(S1, title="normal", priority="normal")
     store.notify(S1, title="low", priority="low")
+    _age(tmp_path)
     raised: list[str] = []
     for _ in range(2):  # a second TUI process on the same revision
         attention.announce_items(
@@ -194,6 +216,7 @@ def test_rung_three_digests_the_overflow_and_releases_a_failed_digest(tmp_path: 
     store = NotificationStore(tmp_path)
     for index in range(5):
         store.notify((S1, S2, S3, S4, S5)[index], title=f"h{index}", priority="high")
+    _age(tmp_path)
     tick = attention.announce_items(
         tmp_path,
         raise_one=lambda row: True,
@@ -224,6 +247,7 @@ def test_rung_three_stands_down_for_a_desktop_that_delivers_update(tmp_path: Pat
 def test_a_failed_spawn_hands_the_claim_back(tmp_path: Path) -> None:
     store = NotificationStore(tmp_path)
     item = store.notify(S1, title="high", priority="high")
+    _age(tmp_path)
     tick = attention.announce_items(
         tmp_path,
         raise_one=lambda row: False,
@@ -232,6 +256,240 @@ def test_a_failed_spawn_hands_the_claim_back(tmp_path: Path) -> None:
     )
     assert tick.released == (item.item_id,)
     assert [row["id"] for row in store.undelivered(priority="high")] == [item.item_id]
+
+
+def test_rung_three_banners_respect_the_privacy_flag(tmp_path: Path, monkeypatch) -> None:
+    """T1: with session names off, no model-written text reaches a banner.
+
+    The rung-3 leg handed ``row["title"]``/``body_md`` straight to the detached
+    notifier while rungs 2 and 4 sent the brand and the house sentence, so a
+    lock screen showed the agent's subject line on exactly the surface the flag
+    exists to protect. Driven through the REAL chain: the settings read, the
+    compose-side flag, and the app's own method.
+    """
+    from local_operator.tui import notify as tui_notify
+    from local_operator.tui.app import OperatorApp
+
+    monkeypatch.setattr(tui_notify, "settings_get", lambda key, default=None: False)
+    captured: list[tuple[str, str]] = []
+
+    def fake_detached(title: str, body: str, *, session_id: str = "") -> int:
+        captured.append((title, body))
+        return 1
+
+    monkeypatch.setattr(tui_notify, "detached_notify", fake_detached)
+    sent = OperatorApp._raise_inbox_banner(
+        cast(Any, object()),  # the method reads nothing off self
+        {"title": "Secret campaign numbers", "body_md": "revenue 42", "session_id": S1},
+    )
+    assert sent is True
+    assert captured == [(tui_notify.APP_NAME, tui_notify.BODY_UPDATE)]
+    assert "Secret" not in captured[0][0] and "42" not in captured[0][1]
+    # And the flag ON still shows the item's own words, so the test is not
+    # merely asserting that the leg always hides.
+    monkeypatch.setattr(tui_notify, "settings_get", lambda key, default=None: True)
+    captured.clear()
+    OperatorApp._raise_inbox_banner(
+        cast(Any, object()),
+        {"title": "PR #9 needs review", "body_md": "two files", "session_id": S1},
+    )
+    assert captured and captured[0][0] == "PR #9 needs review", captured
+
+
+@pytest.mark.asyncio
+async def test_a_focus_report_alone_never_reads_an_item(tmp_path: Path, monkeypatch) -> None:
+    """D12 on the TUI: focus is not an input edge.
+
+    ``_attention_input_at`` is stamped only by real Key/MouseDown events
+    (``OperatorApp.on_event``), never by a focus report, so a window that simply
+    gains focus must not acknowledge anything. This pins the guard: with focus
+    observed and a card on screen but NO input edge, the receipt path returns
+    before it can write.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    store = NotificationStore(tmp_path)
+    item = store.notify(S1, title="on screen", anchor_id="call_focus")
+    app = _app()
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a focus report alone must never submit a receipt")
+
+    monkeypatch.setattr(attention, "submit_seen", refuse)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        # The app reads the id off its live session; the property is
+        # overridden on the class for this test (monkeypatch undoes it), so the
+        # real object keeps every other member the app's teardown needs.
+        monkeypatch.setattr(
+            type(app._session), "session_id", property(lambda self: S1), raising=False
+        )
+        app._attention_focus_observed = True
+        app._attention_input_at = 0.0
+        monkeypatch.setattr(
+            app,
+            "_visible_notify_cards",
+            lambda: [attention.VisibleCard(anchor_id="call_focus", visible_since_ms=1)],
+        )
+        app._receipt_inbox_items_in_view()
+        await _settle(pilot)
+    row = store.get(item.item_id)
+    assert row is not None and row["read_rev"] == 0 and row["read_via"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_sidebar_note_counts_the_badge_and_hides_when_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """D16: ``unread + waiting_unread``, and unknown paints nothing."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = _app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        painted: list[int] = []
+
+        class Sidebar:
+            def set_notifications_total(self, total: int) -> None:
+                painted.append(total)
+
+        monkeypatch.setattr(app, "_session_sidebar", Sidebar(), raising=False)
+        app._paint_notifications_total({"unread_count": 2, "waiting_unread_count": 1})
+        assert painted == [3], "the badge's own figure"
+        app._paint_notifications_total(None)
+        assert painted == [3, 0], "an unreadable store paints nothing, not a stale count"
+
+
+def test_a_barren_banner_pass_backs_off_and_resets_on_progress() -> None:
+    """T4: a host that cannot deliver must not rescan at 1 Hz forever.
+
+    Round 1 forgot the stamp on a failed spawn and retried on the very next
+    tick; the completion announcer's own backoff (doubling, capped at
+    ``_BACKGROUND_NOTIFY_MAX_RETRY_TICKS``) is the established answer. This pins
+    the schedule itself, which is where the bug was.
+    """
+    from local_operator.tui import app as app_module
+
+    wait = 0
+    schedule: list[int] = []
+    for _ in range(8):
+        wait = min(max(1, wait * 2), app_module._BACKGROUND_NOTIFY_MAX_RETRY_TICKS)
+        schedule.append(wait)
+    assert schedule == [1, 2, 4, 8, 16, 32, 64, 64], schedule
+    # Progress resets it: a partly-working backend drains at full speed.
+    wait = 0
+    assert min(max(1, wait * 2), app_module._BACKGROUND_NOTIFY_MAX_RETRY_TICKS) == 1
+
+
+def test_the_header_states_no_counts_for_an_errored_snapshot() -> None:
+    """T6/D16: unknown renders nothing, never a zero.
+
+    The page's own rule (stated in its empty/error states) is that absence is
+    not emptiness. A header reading "0 on you" above "database disk image is
+    malformed" is that rule contradicted one row up.
+    """
+    failed = model.Snapshot(error="database disk image is malformed")
+    line = render.header_line(failed, model.Filters(), 100).plain
+    assert "0" not in line, line
+    assert "Notification" in line or line.strip(), line
+    healthy = model.Snapshot(unread_count=2, waiting_count=1, waiting_unread_count=1)
+    wide = render.header_line(healthy, model.Filters(), 100).plain
+    # D16's formula: the badge's own `unread + waiting_unread`, and the waiting
+    # GROUP beside it — 2 unread + 1 unread ask reads "3 unread · 1 waiting".
+    assert "3 unread" in wide and "1 waiting" in wide, wide
+
+
+def test_the_doorbell_rings_for_a_new_open_ask(tmp_path: Path) -> None:
+    """T7: the ask index is part of the page's change detector.
+
+    Open asks live in ``asks/<session>.json``, not in the inbox store, so before
+    this an ask raised while the page was open stayed invisible until ``r`` —
+    and an ask is the one category that BLOCKS an agent.
+    """
+    from local_operator.tui.widgets.notifications_view import _store_stamp
+
+    NotificationStore(tmp_path).notify(S1, title="one", priority="high")
+    before = _store_stamp(tmp_path)
+    index = tmp_path / "asks"
+    index.mkdir(parents=True, exist_ok=True)
+    (index / f"{S1}.json").write_text(
+        '{"schema":1,"session_id":"' + S1 + '","cwd":"/w","updated_at":1,"asks":[]}'
+    )
+    assert _store_stamp(tmp_path) != before, "a new ask file must ring the doorbell"
+
+
+def test_source_name_prefers_the_directory_over_the_bare_id() -> None:
+    """T10:``0000000000a1`` names nothing a reader can act on."""
+    row = {
+        "session": {"id": "0000000000a1", "title": "", "agent_id": ""},
+        "cwd": "/Users/damian/workspace/repos/lo-notifications-l1",
+    }
+    assert model.source_name(row) == "lo-notifications-l1"
+    assert model.source_name({"session": {"id": "0000000000a1"}, "cwd": ""}) == "0000000000a1"
+    assert model.source_name({"session": {"id": "x", "title": "Named"}}) == "Named"
+
+
+def test_rung_three_holds_a_fresh_revision_for_the_grace(tmp_path: Path) -> None:
+    """T2: the desktop feed's grace, on the TUI's rung.
+
+    Rung 3 ticks every second, so without the hold it claims before any in-view
+    receipt can land — and it also pre-empts rung 4's own hold. The row is left
+    UNCLAIMED (never claimed-and-released), so the surface it belongs to still
+    owns it once the grace expires.
+    """
+    store = NotificationStore(tmp_path)
+    item = store.notify(S1, title="just landed", priority="high")
+    held = attention.announce_items(
+        tmp_path,
+        raise_one=lambda row: pytest.fail("a fresh revision is held"),
+        raise_digest=lambda rows: pytest.fail("a fresh revision is held"),
+        desktop_delivers_update=lambda: False,
+    )
+    assert held.raised == () and held.released == ()
+    row = store.get(item.item_id)
+    assert row is not None and row["delivered_rev"] == 0, "not claimed, not released"
+
+    _age(tmp_path)
+    raised: list[str] = []
+    tick = attention.announce_items(
+        tmp_path,
+        raise_one=lambda row: raised.append(str(row["id"])) or True,
+        raise_digest=lambda rows: True,
+        desktop_delivers_update=lambda: False,
+    )
+    assert raised == [item.item_id] and tick.raised == (item.item_id,)
+
+
+def test_rung_three_leaves_the_watched_session_unclaimed(tmp_path: Path) -> None:
+    """T2: an item from the conversation on screen is not news to banner.
+
+    The operator is looking at its card, and the in-view receipt is the
+    acknowledgement that fits. The row is SKIPPED, not claimed and released, so
+    another surface (or this one after the operator moves away) still owns it.
+    """
+    store = NotificationStore(tmp_path)
+    watched = store.notify(S1, title="on screen", priority="high")
+    other = store.notify(S2, title="elsewhere", priority="high")
+    _age(tmp_path)
+    raised: list[str] = []
+    attention.announce_items(
+        tmp_path,
+        raise_one=lambda row: raised.append(str(row["id"])) or True,
+        raise_digest=lambda rows: True,
+        desktop_delivers_update=lambda: False,
+        held_session_id=S1,
+    )
+    assert raised == [other.item_id]
+    row = store.get(watched.item_id)
+    assert row is not None and row["delivered_rev"] == 0 and row["read_rev"] == 0
+    # An EMPTY hold notifies: the rule fails toward the banner when the app
+    # cannot prove what it is displaying.
+    raised.clear()
+    attention.announce_items(
+        tmp_path,
+        raise_one=lambda row: raised.append(str(row["id"])) or True,
+        raise_digest=lambda rows: True,
+        desktop_delivers_update=lambda: False,
+    )
+    assert watched.item_id in raised
 
 
 # -- in-view receipts: only real evidence -------------------------------------
@@ -367,6 +625,39 @@ async def test_e_on_an_open_ask_never_dismisses_it(tmp_path: Path, monkeypatch) 
         await _settle(pilot)
         assert "answer" in view.notice.lower()
         assert log.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_open_pins_its_row_in_wide_mode_too(tmp_path: Path, monkeypatch) -> None:
+    """T3: ↵ on the second item keeps the SECOND item in the wide pane.
+
+    The Unread filter is the reproduction: opening marks that row read, it
+    leaves the list, the cursor lands on its successor — and the pane, which
+    followed the cursor, showed a different item than the one just opened. The
+    narrow path was pinned against exactly this; the wide path was not.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed(tmp_path, 3)
+    app = _app()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _settle(pilot)
+        app._cmd_notifications_page("", app._system_notice)
+        await _settle(pilot)
+        view = _page(app)
+        assert view.wide, "140 columns is the split layout"
+        await pilot.press("down")
+        await _settle(pilot)
+        second = view.current
+        assert second is not None
+        await pilot.press("enter")
+        await _settle(pilot, 10)
+        assert view.detail_row is not None
+        assert view.detail_row["id"] == second["id"], "the opened row stays in the pane"
+        # Browsing releases the pin: the pane follows the cursor again.
+        await pilot.press("down")
+        await _settle(pilot)
+        assert view.detail_row is not None
+        assert view.detail_row["id"] == view.current["id"]
 
 
 @pytest.mark.asyncio
