@@ -41,6 +41,7 @@ NAME_B_AFTER = "ENG-3708 weekly rollup"
 NAME_C = "Operator's own title"
 NAME_D = "Locked asset"
 NAME_T = "Hyundai POC batch runner"
+TAG_NAME = "hyundai-poc"
 
 
 def journal(root: Path, calls: list[dict[str, Any]], *, session_id: str = LIB) -> Path:
@@ -68,13 +69,14 @@ def journal(root: Path, calls: list[dict[str, Any]], *, session_id: str = LIB) -
     return path
 
 
-def her_calls(tag_id: str) -> list[dict[str, Any]]:
+def her_calls(tag_name: str) -> list[dict[str, Any]]:
     """The three call shapes her journal held, with the values she wrote.
 
-    ``tag_id`` is spelled out inside the cell, the way her own cells held it
-    (``sets={asset: [id]}``, ids taken from a ``tags list`` call): the pass
-    matches a tag assignment by that id, so a journal that only named the asset
-    would prove nothing about which set she applied.
+    The tags cell is her REAL shape, verified against her journal: ``sets`` holds
+    the tag NAME, and the id is resolved at runtime from a ``tags list`` call
+    (``idm={t['name']:t['id'] …}``, ``tags=[idm[x] for x in t]``), so no id
+    literal reaches the journal on that path. The pass matches a tag by name or
+    by id, which is why this cell moves the row on the name alone.
     """
     return [
         {
@@ -107,9 +109,12 @@ def her_calls(tag_id: str) -> list[dict[str, Any]]:
                     f'upd=[("{T}","{NAME_T}")]\n'
                     "for a,n in upd:\n"
                     '    r=tool("library",op="update",asset_id=a,name=n)\n'
-                    f'sets={{"{T}":["{tag_id}"]}}\n'
+                    f'sets={{"{T}":["{tag_name}"]}}\n'
+                    "idm={t['name']:t['id'] for t in "
+                    "tool('library',op='tags',action='list')['tags']}\n"
                     "for a,t in sets.items():\n"
-                    '    r=tool("library",op="tags",action="set",asset_id=a,tags=t,primary=t[0])\n'
+                    '    r=tool("library",op="tags",action="set",asset_id=a,'
+                    "tags=[idm[x] for x in t],primary=t[0])\n"
                 )
             },
         },
@@ -117,8 +122,8 @@ def her_calls(tag_id: str) -> list[dict[str, Any]]:
 
 
 def her_tag_id(store: MetadataStore) -> str:
-    """The id the registry minted for ``hyundai-poc`` — what her cell passed."""
-    return next(tag["id"] for tag in store.list_tags() if tag["name"] == "hyundai-poc")
+    """The id the registry minted for the tag her journal names by name."""
+    return next(tag["id"] for tag in store.list_tags() if tag["name"] == TAG_NAME)
 
 
 def seed(root: Path) -> MetadataStore:
@@ -162,9 +167,8 @@ def seed(root: Path) -> MetadataStore:
 def attributed(isolated_root) -> tuple[Path, MetadataStore]:
     """Her state, her journal and the store, with the pass NOT yet run."""
     state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    journal(isolated_root, her_calls(her_tag_id(store)))
-    return isolated_root, store
+    journal(isolated_root, her_calls(TAG_NAME))
+    return isolated_root, seed(isolated_root)
 
 
 def test_matched_rows_flip_with_her_own_timestamp(attributed) -> None:
@@ -190,8 +194,15 @@ def test_matched_rows_flip_with_her_own_timestamp(attributed) -> None:
 
 
 def test_her_tag_assignment_moves_with_the_row(attributed) -> None:
-    """A tag SHE applied — id and all — is re-sourced, and its row organized."""
+    """A tag SHE named is re-sourced — by NAME, because that is all she wrote.
+
+    Her cell holds ``sets={asset: ["hyundai-poc"]}`` and resolves the id at
+    runtime, so the id appears NOWHERE in her journal: an id-only match leaves
+    this row an agent's, which is what the round-2 finding measured.
+    """
     root, store = attributed
+    transcript = (root / "sessions" / LIB / "transcript.jsonl").read_text(encoding="utf-8")
+    assert her_tag_id(store) not in transcript
     assert [row["source"] for row in store.asset_tags(T)] == ["agent"]
 
     assert backfill.reattribute_organized(root) == 2
@@ -212,16 +223,19 @@ def test_a_later_ordinary_agents_tag_set_stays_theirs(isolated_root) -> None:
 
     The finding: requiring only the asset id in a tags call re-sourced every
     agent tag row on the row she named — including a set another agent applied
-    afterwards (a delete plus re-insert), which this pass may not claim. Only
-    the ids her own call spells out move; the asset itself is still hers.
+    afterwards (a delete plus re-insert), which this pass may not claim. A tag
+    neither of whose names her call holds moves nothing; the asset stays hers.
     """
-    state.write_state(isolated_root, {"session_id": LIB})
-    store = seed(isolated_root)
-    journal(isolated_root, her_calls(her_tag_id(store)))
+    root = isolated_root
+    state.write_state(root, {"session_id": LIB})
+    store = seed(root)
+    journal(root, her_calls(TAG_NAME))
     theirs = store.create_tag("eng-3631")
     store.set_asset_tags(T, [theirs["id"]], actor="agent")
+    transcript = (root / "sessions" / LIB / "transcript.jsonl").read_text(encoding="utf-8")
+    assert theirs["name"] not in transcript
 
-    assert backfill.reattribute_organized(isolated_root) == 2
+    assert backfill.reattribute_organized(root) == 2
 
     tagged = store.asset(T)
     assert tagged is not None and tagged["organized_by"] == "librarian"
@@ -441,7 +455,7 @@ def test_her_archived_journal_is_read_without_being_re_inflated(isolated_root) -
     """
     state.write_state(isolated_root, {"session_id": LIB})
     store = seed(isolated_root)
-    directory = journal(isolated_root, her_calls(her_tag_id(store))).parent
+    directory = journal(isolated_root, her_calls(TAG_NAME)).parent
     assert compression.compress_session(directory).status == "compressed"
     archive = compression.archive_path(directory)
     assert archive is not None and not (directory / compression.PLAIN_FILENAME).exists()
@@ -468,7 +482,7 @@ def test_an_unmakeable_cache_copy_never_restores_the_journal_in_place(
     """
     state.write_state(isolated_root, {"session_id": LIB})
     store = seed(isolated_root)
-    directory = journal(isolated_root, her_calls(her_tag_id(store))).parent
+    directory = journal(isolated_root, her_calls(TAG_NAME)).parent
     assert compression.compress_session(directory).status == "compressed"
 
     def no_cache(*_args: object, **_kwargs: object) -> Path:

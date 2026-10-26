@@ -21,14 +21,20 @@ a serialized call). Requiring both is what makes the pass self-limiting:
 - so a rerun moves nothing new, whatever the guard says.
 
 ``op="tags"`` in a call that names the asset is the same proof for her tag
-assignments — but for the tags the value that has to match is the tag ID
-itself, not merely the asset: a call that only names the asset would re-label a
-set an ordinary agent replaced afterwards, which is exactly the work this pass
-claims it cannot take. So each ``asset_tags`` row moves on its own id, and the
-rows whose ids her journal never spells out stay an agent's. The op is read in
-both forms a journal holds it — a native call's ``arguments["op"]``, and the
-text inside an eval cell's code — because every tag write of hers came through
-the eval bridge, where it is text.
+assignments — but the value that has to match is the TAG, not merely the asset:
+a call that only names the asset would re-label a set an ordinary agent replaced
+afterwards, which is exactly the work this pass claims it cannot take. The tag
+is matched by NAME or by ID, because her cells do not hold the id: they write
+the name (``sets={asset: ["eng-3708", "review"]}``) and resolve it at runtime
+(``idm={t['name']:t['id'] for t in L(op="tags",action="list")['tags']}``), so an
+ID-only match finds 2 of the 37 assignments on this install. A renamed tag stops
+matching, which is the safe direction. The match is a substring of the
+serialized call, so a very short tag name could in principle match text that is
+not a tag reference; the same-call scope, and the fact that only rows on an
+asset already proven hers by name or description are considered, is what bounds
+it. The op is read in both forms a journal holds it — a native call's
+``arguments["op"]``, and the text inside an eval cell's code — because every tag
+write of hers came through the eval bridge, where it is text.
 
 WHAT IT DELIBERATELY DOES NOT DO.
 
@@ -183,16 +189,19 @@ def _attributions(store: MetadataStore, calls: list[dict[str, Any]]) -> list[Att
             logger.debug("library backfill: no edit row for %s; leaving it alone", asset_id)
             continue
         # The calls that BOTH name this asset and carry a tags op: the same call
-        # a tag id has to appear in for its assignment to be hers. A set another
-        # agent replaced afterwards carries ids her journal never spells out, so
-        # those rows keep their agent provenance.
+        # a tag has to be named in for its assignment to be hers. A set another
+        # agent replaced afterwards is named by neither its name nor its id in
+        # her call, so those rows keep their agent provenance.
         tag_texts = [
             text for text, is_tag_call in evidence if is_tag_call and _escaped(asset_id) in text
         ]
         tag_ids = tuple(
             tag["id"]
             for tag in store.asset_tags(asset_id)
-            if tag["source"] == "agent" and any(_escaped(tag["id"]) in text for text in tag_texts)
+            if tag["source"] == "agent"
+            and any(
+                _escaped(tag["name"]) in text or _escaped(tag["id"]) in text for text in tag_texts
+            )
         )
         attributions.append(Attribution(asset_id, fields, at, tag_ids=tag_ids))
     return attributions
