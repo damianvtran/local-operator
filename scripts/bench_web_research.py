@@ -117,6 +117,13 @@ class Task:
     # "1000" or "10000".
     expected: tuple[str, ...] = ()
     distractors: tuple[str, ...] = ()
+    # Regexes for phrases where a distractor is legitimate ADJACENT context,
+    # not the asked answer (e.g. SQLite's compile-time maximum 32767 next to
+    # the default 2000). Each match is scrubbed before the distractor scan, so
+    # a wrong value is only ever forgiven in a context the task author named.
+    # Declared per task rather than inferred: an inferred exemption is how the
+    # clause-level grader re-admitted "50, but the default is 100".
+    allowed_context: tuple[str, ...] = ()
 
 
 TASKS: tuple[Task, ...] = (
@@ -141,6 +148,15 @@ TASKS: tuple[Task, ...] = (
         r"default setting for SQLITE\\?_MAX\\?_COLUMN is 2000",
         expected=("2000", "2,000"),
         distractors=("32767", "1000", "4000", "200"),
+        # 32767 is the compile-time MAXIMUM, legitimately mentioned next to the
+        # default. Forgive it only in a raise/max/up-to/at-most/upper-bound
+        # phrase; "the default is 32767" is not scrubbed and still fails.
+        allowed_context=(
+            r"(?:max(?:imum)?|raise[sd]?|raising|up to|at most|increas\w*|"
+            r"upper (?:bound|limit)|compile[- ]time (?:max(?:imum)?|limit)|larger than)"
+            r"[^.\n]{0,60}?32,?767",
+            r"32,?767[^.\n]{0,30}?(?:max(?:imum)?|at most|upper (?:bound|limit))",
+        ),
     ),
     Task(
         "h2-initial-window",
@@ -174,6 +190,18 @@ TASKS: tuple[Task, ...] = (
         r"limited to 72",
         expected=("72",),
         distractors=("79", "80", "88", "120"),
+        # 79 is the CODE line limit; 72 is the docstring/comment one. Forgive
+        # 79 only where it is attached to code (either order, incl. table rows
+        # and parentheticals), never as the docstring/comment answer itself.
+        allowed_context=(
+            r"(?:code|program|source)[^\n]{0,40}?\b79\b",
+            r"\b79\b[^\n]{0,40}?(?:code|program|source)",
+            # The document's own words for the general line limit, which a
+            # correct answer quotes alongside the 72 docstring limit: "Limit
+            # all lines to a maximum of 79 characters", "other lines … 79".
+            r"(?:all lines|other lines|every line|lines in general)[^\n]{0,50}?\b79\b",
+            r"\b79\b[^\n]{0,30}?(?:for all lines|for other lines|all lines)",
+        ),
     ),
     Task(
         "rfc9110-misdirected",
@@ -203,7 +231,7 @@ TASKS: tuple[Task, ...] = (
         r"guido",
         "https://docs.python.org/3/faq/general.html",
         expected=("guido van rossum", "guido"),
-        distractors=("rossum not", "van rossum is not"),
+        distractors=(),
     ),
     Task(
         "git-first-release",
@@ -259,66 +287,95 @@ class RunRecord:
 
 # -- correctness -------------------------------------------------------------
 
-#: A wrong answer stated as a correction ("50, not 100") must not grade correct.
+#: Negations that turn a value into a NON-answer. Case-insensitive: a
+#: sentence-initial "Not"/"Never"/"No" negates just as much as a lower-case one
+#: (round-2 R3: the case-sensitive pattern let "Not 100" through).
 _NEGATION_RE = re.compile(
-    r"(?:\bnot\b|\bnever\b|\bisn't\b|\bwasn't\b|\bno\b|\binstead of\b|\brather than\b)"
+    r"(?:\bnot\b|\bnever\b|\bno\b|\bisn't\b|\bwasn't\b|\bdon't\b"
+    r"|\binstead of\b|\brather than\b)",
+    re.IGNORECASE,
 )
+
+#: How far around a value a negation is looked for. Both directions: "100 is
+#: not the default" negates AFTER the value, "not 100" before it.
+_NEGATION_WINDOW = 24
 
 
 def _literal_pattern(value: str) -> re.Pattern[str]:
-    """Whole-token literal match: '100' does not match inside '1000'/'10000'.
-
-    A value that is mostly digits gets digit boundaries (so '65,535' matches
-    but not '165,535'); words get ordinary word boundaries.
+    """Whole-value literal match: "100" must not match inside "1000", "10000",
+    "100,000" or "100.5" (M2: the digit-only lookahead allowed the last two).
     """
     if any(ch.isdigit() for ch in value):
-        return re.compile(rf"(?<![\d.,]){re.escape(value)}(?![\d])", re.IGNORECASE)
+        return re.compile(rf"(?<![\d.,]){re.escape(value)}(?![\d]|[.,]\d)", re.IGNORECASE)
     return re.compile(rf"\b{re.escape(value)}\b", re.IGNORECASE)
 
 
-def _clauses(answer: str) -> list[str]:
-    """Split into answer-sized clauses: sentences, bullets and contrast joins.
+#: Forward negation needs a COPULA: "100 is not the default" negates the value,
+#: but "100, not 50" does not (the "not" belongs to the OTHER value). Only the
+#: copula form is looked for after the value; a bare "not" after it is someone
+#: else's negation (M1).
+_FORWARD_NEGATION_RE = re.compile(
+    r"^\s*(?:is|was|are|were|be|being|been|do|does|did)\s+(?:not|never)\b"
+    r"|^\s*(?:isn't|wasn't|aren't|weren't|don't|doesn't|didn't)\b",
+    re.IGNORECASE,
+)
 
-    "72 for docstrings, while code lines are 79" is two statements about two
-    subjects; grading the whole sentence as one unit would read the aside as a
-    contradiction. "2005, not 2006" deliberately stays ONE clause, because the
-    negation is exactly what makes it a wrong answer.
+
+def _is_negated(text: str, match: re.Match[str]) -> bool:
+    """Whether this value occurrence is negated, looking BOTH ways.
+
+    Backwards: any negation word in the window ("not 100", "Never 2005").
+    Forwards: only a copula negation ("100 is not the default"). Case-insensitive
+    throughout (R3: sentence-initial Not/Never/No must count).
     """
-    parts = re.split(
-        r"(?<=[.!?;])\s+|\n+|\s+[—–]\s+" r"|\s+(?:while|whereas|but|although|though)\s+",
-        answer,
-        flags=re.IGNORECASE,
-    )
-    return [p.strip() for p in parts if p.strip()]
+    before = text[max(0, match.start() - _NEGATION_WINDOW) : match.start()]
+    after = text[match.end() : match.end() + _NEGATION_WINDOW]
+    # "not only / not just / no doubt" are additive idioms, not negations:
+    # "Guido van Rossum is not only Python's creator but also …" is a correct
+    # answer, and scanning the raw window would negate his name (round-2 N1).
+    before = re.sub(r"not (?:only|just)|no doubt", "", before, flags=re.IGNORECASE)
+    return bool(_NEGATION_RE.search(before)) or bool(_FORWARD_NEGATION_RE.match(after))
+
+
+def _scrub_allowed_context(task: Task, answer: str) -> str:
+    """Blank out task-declared adjacent-context phrases (same length, so match
+    offsets elsewhere are unaffected). Everything NOT scrubbed is still scanned
+    for distractors, so an undeclared wrong value fails wherever it appears.
+    """
+    for pattern in task.allowed_context:
+        answer = re.sub(pattern, lambda m: " " * len(m.group(0)), answer, flags=re.IGNORECASE)
+    return answer
 
 
 def validate_answer(task: Task, answer: str) -> bool:
     """Whether ``answer`` states the task's answer, without contradicting it.
 
-    Clause-level. Only a clause that CONTAINS an expected value is judged:
-    - the expected value must not be negated ("not 100" does not count);
-    - no distractor may share that clause ("2005, not 2006", "50, not 100"
-      and "the default is 32767, not 2000" all fail).
-    A distractor in a clause with no expected value is adjacent context, not
-    the asked answer — PEP 8's "code lines are limited to 79" next to
-    "docstrings are 72", or SQLite's "you can raise it up to 32767" next to
-    "the default is 2000". That is the false-REJECT the document-level grader
-    had; the R1 false-POSITIVES stay rejected because their wrong value shares
-    the expected value's clause. Both arms are graded identically.
+    Document-level, with narrow declared exemptions (round-2 R3/Q4 design):
+    - any distractor anywhere fails the run, EXCEPT inside a task-declared
+      ``allowed_context`` phrase (scrubbed first). A wrong value in a different
+      clause/sentence/bullet from the right one is still a wrong answer — the
+      clause-level grader missed exactly that mirror case;
+    - the expected value must appear at least once UNNEGATED (negation checked
+      on both sides of the value, case-insensitively).
+
+    Adjacent documented values are handled by naming their context, not by
+    relaxing the distractor rule: SQLite's "up to 32767" and PEP 8's "79 for
+    code" are declared on those tasks, so those correct answers pass while
+    "the default is 50, not 100" and "50. Not 100." still fail.
     """
     if not answer.strip() or not task.expected:
         return False
-    for clause in _clauses(answer):
-        expected_hits = [
-            match for value in task.expected for match in _literal_pattern(value).finditer(clause)
-        ]
-        if not expected_hits:
-            continue
-        if any(_literal_pattern(wrong).search(clause) for wrong in task.distractors):
-            continue
-        for match in expected_hits:
-            window = clause[max(0, match.start() - 24) : match.end()]
-            if not _NEGATION_RE.search(window):
+    scrubbed = _scrub_allowed_context(task, answer)
+    for wrong in task.distractors:
+        for match in _literal_pattern(wrong).finditer(scrubbed):
+            # A NEGATED distractor is not a wrong answer — "100, not 50" and
+            # "2005, not 2006" state the right value and reject the wrong one
+            # (M1). Only an unnegated distractor fails the run.
+            if not _is_negated(scrubbed, match):
+                return False
+    for value in task.expected:
+        for match in _literal_pattern(value).finditer(scrubbed):
+            if not _is_negated(scrubbed, match):
                 return True
     return False
 

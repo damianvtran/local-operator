@@ -397,3 +397,32 @@ def test_passages_never_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
     spans = sorted((p.start, p.end) for p in sel.passages)
     for (_a, b), (c, _d) in zip(spans, spans[1:]):
         assert b < c, spans
+
+
+@pytest.mark.asyncio
+async def test_no_match_fallback_keeps_spill_handle_when_header_exceeds_cap(
+    context: ToolContext,
+) -> None:
+    """M3: a URL long enough that the header alone exceeds the cap must not
+    cause the fallback to slice off the spill footer — the handle is the only
+    way the model can still read the page."""
+    long_url = "https://example.com/" + "a" * 7900
+    page = _long_markdown()
+    preview, details, _e = await run_fetch(
+        long_url,
+        tool_name="web_fetch",
+        context=context,
+        transport=_transport(page),
+        query="zyzzyva quokka",
+    )
+    handle = details["spill"]["handle"]
+    # The handle must survive in some readable form even when the framing is
+    # over budget; the no-query shape is the fallback of last resort.
+    assert details["query_passages"] == []
+    assert handle is not None
+    # The point of M3: the handle is IN THE MODEL-FACING TEXT, not only in
+    # details (which never reaches the provider).
+    assert handle in preview
+    # A subsequent range read through that handle still works.
+    back = await execute_read("r", {"path": handle, "range": "1-3"}, None, None, context)
+    assert back.is_error is False
