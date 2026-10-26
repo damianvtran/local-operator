@@ -43,7 +43,7 @@ from typing import Any, Callable
 import pytest
 
 from local_operator.harness.types import Message, MessageRole, TextContent, Usage
-from local_operator.session import cold_metadata, replay_cache
+from local_operator.session import cold_metadata, compression, replay_cache
 from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import (
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -53,6 +53,7 @@ from local_operator.session.frontend_state import (
     TodoItemState,
     TodoPhaseState,
 )
+from local_operator.session.replay_cache import replay_key
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import Transcript
 
@@ -737,5 +738,107 @@ async def test_a_cache_write_failure_never_fails_the_open(
     try:
         assert again._deferred_history is None
         assert len(again.history()) == 8
+    finally:
+        await again.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_warm_record_is_a_miss_once_the_journal_is_archived(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record written for the PLAIN journal never describes an archive.
+
+    TWO LAYERS ENFORCE THAT, and this test separates them because only one of them
+    was obvious. ``replay_key`` is archive-aware, so a session compressed BEFORE
+    the open already presents a different witness and misses on the comparison
+    alone. The ``codec is not None`` branch in ``_journal_still_at`` covers the
+    narrower window the comparison cannot: the key was taken while the journal was
+    plain and the archive landed before the record read's re-stat. That window has
+    no other guard, so it is asserted here directly by compressing inside the read.
+
+    Without that branch a stale record would be paired with an archived journal —
+    the one hit this record must never serve — and the eager path's answer looks
+    identical either way, so nothing else in the suite would notice.
+    """
+    directory = await seed_journal(isolated_config, turns=3)
+    record = _record_path(isolated_config)
+    eager = await cold_open(isolated_config, deferred=False)
+    try:
+        expected_payload = frontend_payload(eager)
+        expected_rows = [m.id for m in eager.history()]
+    finally:
+        await eager.dispose()
+    assert record.exists(), "the eager open is the write"
+    # The witness the record holds: taken while the journal is still plain.
+    plain_key = replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE,),
+        opportunistic_types=(SESSION_SPEND_CUSTOM_TYPE,),
+    )
+    assert plain_key is not None, "the seeded journal exists, so it has a key"
+    plain_witness = cold_metadata.witness_for(plain_key)
+
+    # PRECONDITION: on the plain journal this record is a hit.
+    replay_cache.replay_cache().clear()
+    warm = await cold_open(isolated_config, deferred=True)
+    try:
+        assert warm._deferred_history is not None, "precondition: a plain journal hits"
+    finally:
+        await warm.dispose()
+
+    # THE RACE THE BRANCH EXISTS FOR: the archive lands between the key snapshot
+    # and the re-stat. ``_witness_of`` is that seam — the step after the record is
+    # parsed and before the journal is re-checked.
+    original = cold_metadata._witness_of
+
+    def witness_then_archive(raw: Any) -> Any:
+        witness = original(raw)
+        outcome = compression.compress_session(directory)
+        assert outcome.status == "compressed", outcome
+        return witness
+
+    monkeypatch.setattr(cold_metadata, "_witness_of", witness_then_archive)
+    try:
+        assert (
+            cold_metadata.read_cold_metadata(record, plain_witness) is None
+        ), "a plain-journal record must not be served once the journal is archived"
+    finally:
+        monkeypatch.setattr(cold_metadata, "_witness_of", original)
+    assert not (directory / "transcript.jsonl").exists(), "the session is archived now"
+
+    # END TO END on that archived session: no deferral, the eager read, the same
+    # rows — the behaviour a stale hit would have broken.
+    replay_cache.replay_cache().clear()
+    calls = counting_replay(monkeypatch)
+    archived = await cold_open(isolated_config, deferred=True)
+    try:
+        assert (
+            archived._deferred_history is None
+        ), "an archived journal must not be served from a plain-journal record"
+        assert frontend_payload(archived) == expected_payload
+        assert [m.id for m in archived.history()] == expected_rows
+        assert sum(calls) > 0, "the miss takes the eager path and replays"
+    finally:
+        await archived.dispose()
+
+    # RESTORED: a new file, so the OLD record is not revived — a fresh eager
+    # replay writes the record for the version that now exists, and the next
+    # deferred open hits it again.
+    assert compression.restore_for_write(directory) is True
+    assert (directory / "transcript.jsonl").exists()
+    replay_cache.replay_cache().clear()
+    rebuilt = await cold_open(isolated_config, deferred=False)
+    try:
+        assert [m.id for m in rebuilt.history()] == expected_rows
+    finally:
+        await rebuilt.dispose()
+    replay_cache.replay_cache().clear()
+    again = await cold_open(isolated_config, deferred=True)
+    try:
+        assert again._deferred_history is not None, "the restored version hits its own record"
+        await again.hydrate_deferred_history()
+        assert [m.id for m in again.history()] == expected_rows
     finally:
         await again.dispose()
