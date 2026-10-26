@@ -1902,6 +1902,23 @@ class DesktopSessionBridge:
                     surface="desktop",
                     initial_model=birth,
                     model_selection_override=birth is not None,
+                    # THE ONE CALLER OF THE DEFERRED OPT-IN (`AttachedSession.
+                    # cold`'s docstring names the contract). This surface's
+                    # first frame paints its transcript from
+                    # ``load_transcript_page`` in ``_open_frame_history``, never
+                    # from this facade's message list, so a durable metadata
+                    # record for an unchanged journal can restore the same
+                    # durable details while leaving the message list unread
+                    # until the bind actually needs it — the parse that dominates
+                    # a cold desktop open (1,619 / 533 / 685 ms of backend CPU on
+                    # 8 / 30 / 100 MB journals) is skipped for a repeat open.
+                    #
+                    # NOT A BRIDGE FLAG AND NOT A SECOND MODE: the TUI, peer
+                    # viewers, mobile, resume, new sessions and the sidebar's
+                    # saved preview all construct their facades without this
+                    # argument and stay eager, because each of them paints or
+                    # folds ``history()`` and none has a page reader behind it.
+                    deferred_history=True,
                 )
             self.remote = remote
             # A detached interval has no receipt feed. A new epoch makes

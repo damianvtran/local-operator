@@ -75,6 +75,11 @@ from typing import Any, Callable
 
 from local_operator.session import compression
 from local_operator.session.attachments import store_for_transcript_dir
+from local_operator.session.cold_metadata import (
+    ColdMetadata,
+    witness_for,
+    write_cold_metadata,
+)
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
@@ -304,6 +309,7 @@ def build_cold_replay(
     want_checkpoint: bool,
     through_id: str | None,
     strict_cut: bool,
+    metadata_path: Path | None = None,
 ) -> ColdReplay:
     """One cold parse of the journal, published under its file version.
 
@@ -407,7 +413,41 @@ def build_cold_replay(
     )
     if fresh != key:
         return ColdReplay(messages=tuple(messages), retained=0, **values)
+    _record_cold_metadata(metadata_path, key, values)
     return publish_replay(key, messages=messages, **values)
+
+
+def _record_cold_metadata(path: Path | None, key: "ReplayKey", values: dict[str, Any]) -> None:
+    """Write this replay's metadata behind it, for the NEXT process's cold open.
+
+    WRITE-BEHIND AND NEVER LOAD-BEARING. This runs only after the answer above
+    is already final and its after-read recheck has passed, so the record
+    describes exactly the answer the caller is about to receive. Storage is the
+    one thing a reader may ignore, so the write swallows every failure: a cache
+    that cannot be written costs the next open the parse it was already paying,
+    and must never fail the open, the append or the turn.
+
+    ONLY FOR THE COLD-OPEN REQUEST (``through_id is None``, non-strict, wants the
+    durable checkpoint). Every other shape -- a reconnect's negotiated cut, a
+    preheat that wanted no custom rows -- is a request no cold open makes, so a
+    record written for it could only sit on disk unread and push the record a
+    cold open does use out of its single slot.
+    """
+    if path is None:
+        return
+    if key.through_id is not None or key.strict_cut or not key.checkpoint_types:
+        return
+    write_cold_metadata(
+        path,
+        ColdMetadata(
+            witness=witness_for(key),
+            checkpoint=values.get("checkpoint"),
+            checkpoints=values.get("checkpoints") or {},
+            order=values.get("order") or {},
+            seed_usage=values.get("seed_usage"),
+            bytes_read=int(values.get("bytes_read") or 0),
+        ),
+    )
 
 
 async def load_cold_replay(
