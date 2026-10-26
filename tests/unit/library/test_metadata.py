@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -20,6 +21,14 @@ B = "la_fedcba9876543210"
 
 
 def store(tmp_path: Path) -> MetadataStore:
+    """A store in this test's own scratch root.
+
+    The process-wide schema-readiness cache is cleared first: pytest hands two
+    tests the same ``tmp_path`` when their names truncate to the same 30
+    characters, and a recycled directory holds no schema even though the cache
+    still claims one (measured: a 0-byte store and "no such table: assets").
+    """
+    reset_schema_readiness()
     return MetadataStore(tmp_path / "cfg")
 
 
@@ -175,7 +184,7 @@ def test_apply_attributions_moves_the_rows_and_sets_the_guard(tmp_path) -> None:
     revision = s.metadata_revision()
 
     moved = s.apply_attributions(
-        [Attribution(A, ("name",), 1234.5, tags=True)],
+        [Attribution(A, ("name",), 1234.5, tag_ids=(tag["id"],))],
         guard_key="backfill:test:v1",
         guard_value='{"matched":1}',
     )
@@ -195,7 +204,7 @@ def test_apply_attributions_moves_the_rows_and_sets_the_guard(tmp_path) -> None:
     # pass still records its guard.
     assert (
         s.apply_attributions(
-            [Attribution(A, ("name",), 9999.0, tags=True)],
+            [Attribution(A, ("name",), 9999.0, tag_ids=(tag["id"],))],
             guard_key="backfill:test:v1",
             guard_value='{"matched":0}',
         )
@@ -203,6 +212,54 @@ def test_apply_attributions_moves_the_rows_and_sets_the_guard(tmp_path) -> None:
     )
     again = s.asset(A)
     assert again is not None and again["organized_at"] == 1234.5
+
+
+def test_apply_attributions_only_moves_the_tag_ids_it_is_given(tmp_path) -> None:
+    """A tag row moves by ID, so a set someone else applied stays theirs.
+
+    ``asset_tags`` holds a set, so a later write IS a replacement of hers (a
+    delete plus re-insert, which is how the column is written). Only the id the
+    evidence carries may move; every other row on the asset keeps its own
+    provenance. The guard key is opaque to this test: only the rows matter.
+    """
+    s = store(tmp_path)
+    s.ensure_asset(A, "p:/a")
+    s.update_fields(A, {"name": "Hyundai re-screen"}, actor="agent")
+    hers = s.create_tag("hyundai-poc")
+    theirs = s.create_tag("eng-3631")
+    s.set_asset_tags(A, [hers["id"], theirs["id"]], actor="agent")
+
+    assert (
+        s.apply_attributions(
+            [Attribution(A, ("name",), 1234.5, tag_ids=(hers["id"],))],
+            guard_key="scratch-pass",
+            guard_value='{"matched":1}',
+        )
+        == 1
+    )
+    assert {tag["id"]: tag["source"] for tag in s.asset_tags(A)} == {
+        hers["id"]: "librarian",
+        theirs["id"]: "agent",
+    }
+
+
+def test_apply_attributions_without_tag_ids_leaves_every_tag_alone(tmp_path) -> None:
+    """No tag evidence means no tag row moves — not "all of them"."""
+    s = store(tmp_path)
+    s.ensure_asset(A, "p:/a")
+    s.update_fields(A, {"name": "Hyundai re-screen"}, actor="agent")
+    tag = s.create_tag("hyundai-poc")
+    s.set_asset_tags(A, [tag["id"]], actor="agent")
+
+    assert (
+        s.apply_attributions(
+            [Attribution(A, ("name",), 1234.5)],
+            guard_key="scratch-pass",
+            guard_value='{"matched":1}',
+        )
+        == 1
+    )
+    assert [row["source"] for row in s.asset_tags(A)] == ["agent"]
 
 
 def test_apply_attributions_leaves_locked_and_user_rows_alone(tmp_path) -> None:
@@ -253,3 +310,30 @@ def test_last_edit_at_reads_the_newest_row_by_actor(tmp_path) -> None:
     assert s.last_edit_at(A) == 300.0
     assert s.last_edit_at(A, actor="agent") == 200.0
     assert s.last_edit_at(A, actor="librarian") is None
+
+
+def test_last_edit_at_can_narrow_to_the_edits_that_touched_a_field(tmp_path) -> None:
+    """``fields`` is what makes the stamp her naming edit, not a later edit.
+
+    A favorite and a tag set are both ordinary agent edits on the same asset,
+    and neither of them organized it.
+    """
+    s = store(tmp_path)
+    s.ensure_asset(A, "p:/a")
+    s.update_fields(A, {"name": "First"}, actor="agent", at=100.0)
+    s.update_fields(A, {"favorite": True}, actor="agent", at=200.0)
+    tag = s.create_tag("hyundai-poc")
+    s.set_asset_tags(A, [tag["id"]], actor="agent")
+
+    newest = s.last_edit_at(A, actor="agent")
+    assert newest is not None and newest > 200.0
+    assert s.last_edit_at(A, actor="agent", fields=("name", "description")) == 100.0
+    # The narrowing filters the SAME rows: it is not a second clock.
+    assert s.last_edit_at(A, actor="agent", fields=("favorite",)) == 200.0
+    assert s.last_edit_at(A, actor="user", fields=("name",)) is None
+    # An edit row whose ``fields`` column cannot be parsed is skipped, not fatal.
+    with sqlite3.connect(s.path) as connection:
+        connection.execute("UPDATE edits SET fields = 'not json' WHERE asset_id = ?", (A,))
+    assert s.last_edit_at(A, actor="agent", fields=("name",)) is None
+    unfiltered = s.last_edit_at(A, actor="agent")
+    assert unfiltered is not None and unfiltered > 200.0

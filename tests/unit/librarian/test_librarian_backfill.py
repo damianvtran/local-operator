@@ -14,14 +14,17 @@ the escaped form.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.librarian import backfill, state
-from local_operator.library.metadata import MetadataStore
+from local_operator.library.metadata import MetadataStore, reset_schema_readiness
+from local_operator.session import compression
 
 LIB = "f3cce3edac6a"
 A = "la_07d83ff15563c0a2"
@@ -65,8 +68,14 @@ def journal(root: Path, calls: list[dict[str, Any]], *, session_id: str = LIB) -
     return path
 
 
-def her_calls() -> list[dict[str, Any]]:
-    """The three call shapes her journal held, with the values she wrote."""
+def her_calls(tag_id: str) -> list[dict[str, Any]]:
+    """The three call shapes her journal held, with the values she wrote.
+
+    ``tag_id`` is spelled out inside the cell, the way her own cells held it
+    (``sets={asset: [id]}``, ids taken from a ``tags list`` call): the pass
+    matches a tag assignment by that id, so a journal that only named the asset
+    would prove nothing about which set she applied.
+    """
     return [
         {
             "id": "toolu_1",
@@ -98,7 +107,7 @@ def her_calls() -> list[dict[str, Any]]:
                     f'upd=[("{T}","{NAME_T}")]\n'
                     "for a,n in upd:\n"
                     '    r=tool("library",op="update",asset_id=a,name=n)\n'
-                    f'sets={{"{T}":["hyundai-poc"]}}\n'
+                    f'sets={{"{T}":["{tag_id}"]}}\n'
                     "for a,t in sets.items():\n"
                     '    r=tool("library",op="tags",action="set",asset_id=a,tags=t,primary=t[0])\n'
                 )
@@ -107,8 +116,20 @@ def her_calls() -> list[dict[str, Any]]:
     ]
 
 
+def her_tag_id(store: MetadataStore) -> str:
+    """The id the registry minted for ``hyundai-poc`` — what her cell passed."""
+    return next(tag["id"] for tag in store.list_tags() if tag["name"] == "hyundai-poc")
+
+
 def seed(root: Path) -> MetadataStore:
-    """One store holding every case the predicate has to tell apart."""
+    """One store holding every case the predicate has to tell apart.
+
+    The process-wide schema-readiness cache is cleared first: pytest hands two
+    tests the same ``tmp_path`` when their names truncate to the same 30
+    characters, and a recycled directory holds no schema even though the cache
+    still claims one (measured here: a 0-byte store and "no such table").
+    """
+    reset_schema_readiness()
     store = MetadataStore(root)
     # A: her work, still standing — both fields, and no tag edit, so the
     # timestamp it moves to is exactly the one its audit rows carry.
@@ -141,8 +162,9 @@ def seed(root: Path) -> MetadataStore:
 def attributed(isolated_root) -> tuple[Path, MetadataStore]:
     """Her state, her journal and the store, with the pass NOT yet run."""
     state.write_state(isolated_root, {"session_id": LIB})
-    journal(isolated_root, her_calls())
-    return isolated_root, seed(isolated_root)
+    store = seed(isolated_root)
+    journal(isolated_root, her_calls(her_tag_id(store)))
+    return isolated_root, store
 
 
 def test_matched_rows_flip_with_her_own_timestamp(attributed) -> None:
@@ -168,7 +190,7 @@ def test_matched_rows_flip_with_her_own_timestamp(attributed) -> None:
 
 
 def test_her_tag_assignment_moves_with_the_row(attributed) -> None:
-    """A tag SHE applied is re-sourced, and the row it sits on is organized."""
+    """A tag SHE applied — id and all — is re-sourced, and its row organized."""
     root, store = attributed
     assert [row["source"] for row in store.asset_tags(T)] == ["agent"]
 
@@ -178,8 +200,33 @@ def test_her_tag_assignment_moves_with_the_row(attributed) -> None:
     assert tagged is not None
     assert tagged["name_source"] == "librarian"
     assert tagged["organized_by"] == "librarian"
-    assert tagged["organized_at"] == store.last_edit_at(T, actor="agent")
+    # Her NAMING edit, not the tag set written seconds later: the stamp is the
+    # moment she organized the asset, and a later agent edit is not it.
+    assert tagged["organized_at"] == store.last_edit_at(T, actor="agent", fields=("name",))
+    assert tagged["organized_at"] < store.last_edit_at(T, actor="agent")
     assert [row["source"] for row in store.asset_tags(T)] == ["librarian"]
+
+
+def test_a_later_ordinary_agents_tag_set_stays_theirs(isolated_root) -> None:
+    """The tags half is a VALUE match, not "her call mentions this asset".
+
+    The finding: requiring only the asset id in a tags call re-sourced every
+    agent tag row on the row she named — including a set another agent applied
+    afterwards (a delete plus re-insert), which this pass may not claim. Only
+    the ids her own call spells out move; the asset itself is still hers.
+    """
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    journal(isolated_root, her_calls(her_tag_id(store)))
+    theirs = store.create_tag("eng-3631")
+    store.set_asset_tags(T, [theirs["id"]], actor="agent")
+
+    assert backfill.reattribute_organized(isolated_root) == 2
+
+    tagged = store.asset(T)
+    assert tagged is not None and tagged["organized_by"] == "librarian"
+    assert [row["id"] for row in store.asset_tags(T)] == [theirs["id"]]
+    assert [row["source"] for row in store.asset_tags(T)] == ["agent"]
 
 
 def test_a_native_tags_call_is_read_as_a_tags_op(isolated_root) -> None:
@@ -202,12 +249,108 @@ def test_a_native_tags_call_is_read_as_a_tags_op(isolated_root) -> None:
             {
                 "id": "toolu_m",
                 "name": "library",
-                "arguments": {"op": "tags", "action": "set", "asset_id": T, "tags": []},
+                "arguments": {
+                    "op": "tags",
+                    "action": "set",
+                    "asset_id": T,
+                    "tags": [her_tag_id(store)],
+                },
             },
         ],
     )
     assert backfill.reattribute_organized(isolated_root) == 1
     assert [row["source"] for row in store.asset_tags(T)] == ["librarian"]
+
+
+def tags_cell(tag_id: str) -> dict[str, Any]:
+    """One eval cell whose tags op is written as a DICT — the missed spelling."""
+    return {
+        "id": "toolu_dict",
+        "name": "eval",
+        "arguments": {
+            "code": (
+                f'upd=[("{T}","{NAME_T}")]\n'
+                "for a,n in upd:\n"
+                '    r=tool("library",op="update",asset_id=a,name=n)\n'
+                f'    r=tool("library",{{"op": "tags", "action": "set", '
+                f'"asset_id": "{T}", "tags": ["{tag_id}"]}})\n'
+            )
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"op": "tags"},  # a native call: the op is an argument
+        {"code": 'r=tool("library", op="tags", asset_id="la_x")'},
+        {"code": "r=tool('library', op='tags', asset_id='la_x')"},
+        {"code": 'r=tool("library", {"op": "tags", "asset_id": "la_x"})'},
+        {"code": "r=tool('library', {'op': 'tags', 'asset_id': 'la_x'})"},
+    ],
+)
+def test_every_spelling_of_a_tags_op_is_read_as_one(arguments: dict[str, Any]) -> None:
+    """The op reaches a journal as an argument, or as text in four spellings.
+
+    The finding: one literal matched one of them, and the miss is SILENT — the
+    rows simply stay an agent's: nothing errors, nothing is logged.
+    """
+    assert backfill._is_tag_call({"name": "library", "arguments": arguments}) is True
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        'stop="tags"',  # a word ending in ``op`` is not the op
+        "opts='tags'",
+        'tool("library", op="update", asset_id="la_x")',
+        'tool("library", op="tagged", asset_id="la_x")',
+    ],
+)
+def test_a_near_miss_is_not_a_tags_op(code: str) -> None:
+    """Only the op itself counts, in either quote style and either position."""
+    assert backfill._is_tag_call({"name": "library", "arguments": {"code": code}}) is False
+
+
+def test_a_dict_form_tags_op_in_a_cell_still_moves_her_tag_row(isolated_root) -> None:
+    """End to end, through the real pass: the spelling the old literal missed."""
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    journal(isolated_root, [tags_cell(her_tag_id(store))])
+
+    assert backfill.reattribute_organized(isolated_root) == 1
+    assert [row["source"] for row in store.asset_tags(T)] == ["librarian"]
+
+
+def test_a_word_ending_in_op_is_not_a_tags_op(isolated_root) -> None:
+    """``stop="tags"`` is not ``op="tags"``: no row moves on that alone.
+
+    A bare substring match calls this cell a tag write — the id is in it — and
+    re-sources a row on no evidence, which is the direction of error this pass
+    must not make.
+    """
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    journal(
+        isolated_root,
+        [
+            {
+                "id": "toolu_stop",
+                "name": "eval",
+                "arguments": {
+                    "code": (
+                        f'upd=[("{T}","{NAME_T}")]\n'
+                        "for a,n in upd:\n"
+                        '    r=tool("library",op="update",asset_id=a,name=n)\n'
+                        'stop="tags"\n'
+                        f'print("{T}", "{her_tag_id(store)}")\n'
+                    )
+                },
+            }
+        ],
+    )
+    assert backfill.reattribute_organized(isolated_root) == 1
+    assert [row["source"] for row in store.asset_tags(T)] == ["agent"]
 
 
 def test_a_row_an_agent_re_edited_afterwards_is_left_alone(attributed) -> None:
@@ -287,3 +430,73 @@ def test_a_torn_journal_line_costs_the_pass_a_row_not_an_error(attributed) -> No
     assert backfill.reattribute_organized(root) == 2
     row = store.asset(A)
     assert row is not None and row["organized_at"] == 200.0
+
+
+def test_her_archived_journal_is_read_without_being_re_inflated(isolated_root) -> None:
+    """The pass is a PURE READER of a compressed transcript.
+
+    It reads her archive through ``transcript_for_read`` and must leave it
+    exactly as it found it: no plain journal back in the session directory, and
+    the archive byte-identical.
+    """
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    directory = journal(isolated_root, her_calls(her_tag_id(store))).parent
+    assert compression.compress_session(directory).status == "compressed"
+    archive = compression.archive_path(directory)
+    assert archive is not None and not (directory / compression.PLAIN_FILENAME).exists()
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    assert backfill.reattribute_organized(isolated_root) == 2
+
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == digest
+    assert not (directory / compression.PLAIN_FILENAME).exists()
+    assert store.asset(A) is not None
+
+
+def test_an_unmakeable_cache_copy_never_restores_the_journal_in_place(
+    isolated_root, monkeypatch
+) -> None:
+    """With no cache copy to be had, the pass gives up instead of inflating it.
+
+    The finding: without ``read_only=True`` the reader falls into
+    ``restore_for_write``, which publishes the plain file back into the session
+    directory WITHOUT the writer lock — a pure reader undoing the compression on
+    exactly the low-disk device the archive exists for. Refused, the typed error
+    reaches the boot hook's best-effort handler: the guard stays unwritten, so
+    the next boot (with a cache it can write) retries the pass.
+    """
+    state.write_state(isolated_root, {"session_id": LIB})
+    store = seed(isolated_root)
+    directory = journal(isolated_root, her_calls(her_tag_id(store))).parent
+    assert compression.compress_session(directory).status == "compressed"
+
+    def no_cache(*_args: object, **_kwargs: object) -> Path:
+        raise compression.ArchiveCacheUnavailable("the volume filled")
+
+    monkeypatch.setattr(compression, "_materialise", no_cache)
+    with pytest.raises(compression.ArchiveCacheUnavailable):
+        backfill.reattribute_organized(isolated_root)
+
+    assert not (directory / compression.PLAIN_FILENAME).exists()
+    assert compression.archive_path(directory) is not None
+    assert store.state_value(backfill.GUARD_KEY) is None
+
+
+def test_the_stamp_falls_back_when_no_naming_edit_row_survives(attributed) -> None:
+    """A store whose audit row for her naming edit is gone still gets a stamp.
+
+    The narrowed timestamp is the naming edit; only when the audit log holds no
+    name or description row for the asset at all does its newest agent edit do,
+    because a stamp a little early beats none.
+    """
+    root, store = attributed
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("DELETE FROM edits WHERE asset_id = ? AND fields LIKE '%name%'", (T,))
+    assert store.last_edit_at(T, actor="agent", fields=("name", "description")) is None
+
+    assert backfill.reattribute_organized(root) == 2
+
+    row = store.asset(T)
+    assert row is not None
+    assert row["organized_at"] == store.last_edit_at(T, actor="agent")

@@ -21,8 +21,11 @@ a serialized call). Requiring both is what makes the pass self-limiting:
 - so a rerun moves nothing new, whatever the guard says.
 
 ``op="tags"`` in a call that names the asset is the same proof for her tag
-assignments: those ``asset_tags`` rows move to ``librarian`` rather than being
-re-written, because the assignment itself is what she did. The op is read in
+assignments — but for the tags the value that has to match is the tag ID
+itself, not merely the asset: a call that only names the asset would re-label a
+set an ordinary agent replaced afterwards, which is exactly the work this pass
+claims it cannot take. So each ``asset_tags`` row moves on its own id, and the
+rows whose ids her journal never spells out stay an agent's. The op is read in
 both forms a journal holds it — a native call's ``arguments["op"]``, and the
 text inside an eval cell's code — because every tag write of hers came through
 the eval bridge, where it is text.
@@ -48,6 +51,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -64,9 +68,13 @@ GUARD_KEY = "backfill:librarian_organized:v1"
 #: The fields a call in her transcript can prove she wrote.
 _FIELDS = ("name", "description")
 
-#: The tag op as it appears INSIDE an eval cell's code. A native call carries the
-#: same op as an argument instead, which :func:`_is_tag_call` reads structurally.
-_TAG_OP_IN_CODE = 'op="tags"'
+#: The tag op as it appears INSIDE an eval cell's code: ``op="tags"``,
+#: ``op='tags'``, and the dict forms ``{"op": "tags"}`` / ``'op': 'tags'``. A
+#: native call carries the same op as an argument instead, which
+#: :func:`_is_tag_call` reads structurally. Matching one spelling would silently
+#: under-recover on a journal written in another, and the miss is invisible: the
+#: rows simply stay an agent's.
+_TAG_OP_IN_CODE = re.compile(r"""\bop\b["']?\s*[=:]\s*["']tags["']""")
 
 
 def _escaped(value: str) -> str:
@@ -97,7 +105,13 @@ def _calls(config: Path) -> list[dict[str, Any]]:
         return []
     # ``<config>/sessions/<id>`` is the shape the session factory and the
     # bootstrap both build; there is no shared helper for it to call.
-    path = compression.transcript_for_read(config / "sessions" / session_id)
+    #
+    # ``read_only=True``: this pass only ever READS. Without it, an archive
+    # whose cache copy cannot be made falls back to ``restore_for_write``,
+    # which re-inflates her transcript in place without the writer lock — a
+    # pure reader re-inflating the very journal the pass compressed (see
+    # ``compression.transcript_for_read``).
+    path = compression.transcript_for_read(config / "sessions" / session_id, read_only=True)
     if path is None:
         return []
     calls: list[dict[str, Any]] = []
@@ -135,7 +149,7 @@ def _is_tag_call(call: dict[str, Any]) -> bool:
     if arguments.get("op") == "tags":
         return True
     code = arguments.get("code")
-    return isinstance(code, str) and _TAG_OP_IN_CODE in code
+    return isinstance(code, str) and _TAG_OP_IN_CODE.search(code) is not None
 
 
 def _attributions(store: MetadataStore, calls: list[dict[str, Any]]) -> list[Attribution]:
@@ -157,14 +171,30 @@ def _attributions(store: MetadataStore, calls: list[dict[str, Any]]) -> list[Att
         )
         if not fields:
             continue
-        at = store.last_edit_at(asset_id, actor="agent")
+        at = store.last_edit_at(asset_id, actor="agent", fields=_FIELDS)
+        if at is None:
+            # Her naming edit is what organized the asset; only if the audit log
+            # holds no agent row for either field does any agent edit do, so the
+            # stamp stays the moment she acted rather than a later favorite's.
+            at = store.last_edit_at(asset_id, actor="agent")
         if at is None:
             # The value stands but the journal has no actor row for it, so there
             # is no honest timestamp to stamp. Leave the row an agent's.
             logger.debug("library backfill: no edit row for %s; leaving it alone", asset_id)
             continue
-        tagged = any(_escaped(asset_id) in text and is_tag_call for text, is_tag_call in evidence)
-        attributions.append(Attribution(asset_id, fields, at, tags=tagged))
+        # The calls that BOTH name this asset and carry a tags op: the same call
+        # a tag id has to appear in for its assignment to be hers. A set another
+        # agent replaced afterwards carries ids her journal never spells out, so
+        # those rows keep their agent provenance.
+        tag_texts = [
+            text for text, is_tag_call in evidence if is_tag_call and _escaped(asset_id) in text
+        ]
+        tag_ids = tuple(
+            tag["id"]
+            for tag in store.asset_tags(asset_id)
+            if tag["source"] == "agent" and any(_escaped(tag["id"]) in text for text in tag_texts)
+        )
+        attributions.append(Attribution(asset_id, fields, at, tag_ids=tag_ids))
     return attributions
 
 

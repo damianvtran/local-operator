@@ -227,6 +227,45 @@ async def test_a_non_librarian_session_records_agent_and_does_not_organize(libra
 
 
 @pytest.mark.asyncio
+async def test_a_child_of_the_librarian_is_not_the_librarian(library) -> None:
+    """(v) Her SUBAGENT is a different session, so it writes as an agent.
+
+    ``harness/subagent.py`` gives the child a fresh ``sessions/<id>`` directory
+    and sets its context's ``session_id`` from that directory's name, inheriting
+    only the parent's ``agent_id``. The derivation reads ``session_id``, so a
+    child of hers that decides to write to the catalog is recorded as an
+    ordinary agent and organizes nothing — and it cannot claim her rank either,
+    which is where the child used to be honoured.
+    """
+    root, asset_id = library
+    is_librarian(root)
+    child = ToolContext(
+        session_id="9f2b1c0d4e5a6071",
+        agent_id="librarian-agent",
+        job_id="job_child",
+    )
+    result = await call(
+        "c27", context=child, op="update", asset_id=asset_id, name="A child's title"
+    )
+    assert result.is_error is False, text(result)
+    row = MetadataStore(root).asset(asset_id)
+    assert row is not None
+    assert row["name_source"] == "agent" and row["organized_at"] is None
+
+    claimed = await call(
+        "c28",
+        context=child,
+        op="update",
+        asset_id=asset_id,
+        name="Claimed",
+        actor="librarian",
+    )
+    assert claimed.is_error is True
+    assert "reserved for the Librarian session" in text(claimed)
+    assert MetadataStore(root).asset(asset_id) == row
+
+
+@pytest.mark.asyncio
 async def test_claiming_to_be_the_librarian_is_refused(library) -> None:
     """(iii) ``actor='librarian'`` is reserved: an error, and nothing written."""
     root, asset_id = library

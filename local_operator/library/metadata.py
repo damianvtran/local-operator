@@ -157,16 +157,18 @@ _ATTRIBUTABLE_FIELDS: Final = ("name", "description")
 class Attribution:
     """One row a re-attribution hands to the Librarian, with her own evidence.
 
-    ``fields`` names the ``*_source`` columns that flip; ``tags`` says the
-    row's tag assignments came out of the same call, so their ``source`` moves
-    with it. ``organized_at`` is WHEN SHE did it, taken from the audit log
-    rather than from the clock of the pass that re-reads it.
+    ``fields`` names the ``*_source`` columns that flip; ``tag_ids`` names the
+    tag assignments whose ``source`` moves with it — the ids HER call is seen
+    to assign, matched by value exactly as the fields are, so a tag set someone
+    else replaced afterwards stays theirs. ``organized_at`` is WHEN SHE did it,
+    taken from the audit log rather than from the clock of the pass that
+    re-reads it.
     """
 
     asset_id: str
     fields: tuple[str, ...]
     organized_at: float
-    tags: bool = False
+    tag_ids: tuple[str, ...] = ()
 
 
 class MetadataStore:
@@ -1016,11 +1018,19 @@ class MetadataStore:
                     if not cursor.rowcount:
                         continue
                     moved += 1
-                    if item.tags:
+                    if item.tag_ids:
+                        # The same value-match the fields above carry: only the
+                        # ids HER call is seen to assign move. Another agent's
+                        # later set does not carry them, so its rows stay that
+                        # agent's; the ids come from the asset's own rows, so
+                        # the list is bounded by MAX_TAGS_PER_ASSET.
+                        ids = list(dict.fromkeys(item.tag_ids))
+                        placeholders = ",".join("?" for _ in ids)
                         connection.execute(
                             "UPDATE asset_tags SET source = 'librarian' "
-                            "WHERE asset_id = ? AND source = 'agent'",
-                            (item.asset_id,),
+                            "WHERE asset_id = ? AND source = 'agent' "
+                            f"AND tag_id IN ({placeholders})",
+                            (item.asset_id, *ids),
                         )
                 if moved:
                     self._bump_revision(connection)
@@ -1150,26 +1160,43 @@ class MetadataStore:
                 )
             return [dict(row) for row in rows]
 
-    def last_edit_at(self, asset_id: str, *, actor: str | None = None) -> float | None:
-        """The newest edit's timestamp for an asset, optionally by one actor.
+    def last_edit_at(
+        self,
+        asset_id: str,
+        *,
+        actor: str | None = None,
+        fields: Sequence[str] | None = None,
+    ) -> float | None:
+        """The newest edit's timestamp for an asset, by actor and/or field.
 
         The re-attribution dates an organization to when it actually happened
         (the edit that made it), not to the later pass that noticed it — and it
         cannot use :meth:`edits` for that, whose window is bounded and could cut
-        off the row it is looking for.
+        off the row it is looking for. ``fields`` narrows to the edits that
+        touched one of these fields: without it the newest edit by an agent can
+        be a favorite or a later tag set rather than the naming edit that
+        organized the asset.
         """
+        clauses = ["asset_id = ?"]
+        values: list[Any] = [asset_id]
+        if actor is not None:
+            clauses.append("actor = ?")
+            values.append(actor)
+        if fields:
+            placeholders = ",".join("?" for _ in fields)
+            # ``json_valid`` keeps ONE corrupt row from failing the read: the
+            # column is written by ``json.dumps`` and nothing else.
+            clauses.append(
+                "json_valid(fields) AND EXISTS (SELECT 1 FROM json_each(edits.fields) "
+                f"WHERE json_each.value IN ({placeholders}))"
+            )
+            values.extend(fields)
         with self._read() as connection:
             if connection is None:
                 return None
-            if actor is None:
-                row = connection.execute(
-                    "SELECT MAX(at) AS at FROM edits WHERE asset_id = ?", (asset_id,)
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT MAX(at) AS at FROM edits WHERE asset_id = ? AND actor = ?",
-                    (asset_id, actor),
-                ).fetchone()
+            row = connection.execute(
+                f"SELECT MAX(at) AS at FROM edits WHERE {' AND '.join(clauses)}", tuple(values)
+            ).fetchone()
             return float(row["at"]) if row is not None and row["at"] is not None else None
 
     def stats(self) -> dict[str, Any]:
