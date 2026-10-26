@@ -37,6 +37,10 @@ AUTHORIZATION_LEASE_SECONDS = 30
 
 
 logger = logging.getLogger(__name__)
+#: One message per failure CLASS, never per surface: the logger name already
+#: says which surface failed (gateway relay vs phone daemon), so both modules
+#: spell this one event the same way.
+STREAM_CLEANUP_FAILED = "stream cleanup failed"
 
 
 class RelayStreamResponse(StreamingResponse):
@@ -78,7 +82,7 @@ class RelayStreamResponse(StreamingResponse):
                 # CancelledError that brought us here — so a failing cleanup
                 # must not replace it. CancelledError is a BaseException and so
                 # still propagates untouched.
-                logger.warning("relay stream cleanup failed", exc_info=True)
+                logger.warning(STREAM_CLEANUP_FAILED, exc_info=True)
 
 
 PROOF_HEADER = "x-radient-tunnel-assertion"

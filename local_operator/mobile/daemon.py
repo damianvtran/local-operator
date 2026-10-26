@@ -112,6 +112,9 @@ from local_operator.session.store_failures import store_failure
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
 logger = logging.getLogger(__name__)
+#: The gateway's own spelling (``tunnels.gateway.STREAM_CLEANUP_FAILED``): one
+#: name for the one failure class, with the logger name carrying the surface.
+STREAM_CLEANUP_FAILED = "stream cleanup failed"
 
 #: How often the record directory is scanned. Records change rarely (a
 #: session starts or dies); the scan is cheap, and 2 s makes a new terminal
@@ -5186,12 +5189,12 @@ def build_app(daemon: MobileDaemon):
                         # The in-flight exception belongs to the request — the
                         # CancelledError that brought us here — and a failing
                         # detach must not replace it.
-                        logger.warning("phone stream cleanup failed", exc_info=True)
+                        logger.warning(STREAM_CLEANUP_FAILED, exc_info=True)
                 if self._release is not None:
                     try:
                         self._release()
                     except Exception:
-                        logger.warning("session stream cleanup failed", exc_info=True)
+                        logger.warning(STREAM_CLEANUP_FAILED, exc_info=True)
 
     # -- auth helpers -----------------------------------------------------------
 

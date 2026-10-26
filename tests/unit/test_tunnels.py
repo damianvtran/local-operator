@@ -8,6 +8,7 @@ import copy
 import datetime
 import hashlib
 import json
+import logging
 import socket
 import sqlite3
 import time
@@ -3858,8 +3859,17 @@ async def test_a_cancellation_before_the_body_starts_still_releases_the_origin(
 
 
 @pytest.mark.asyncio
-async def test_a_failing_origin_close_does_not_mask_the_cancellation(connection, signing_key):
-    """Cleanup failure is logged, never substituted for the request's outcome."""
+async def test_a_failing_origin_close_does_not_mask_the_cancellation(
+    connection, signing_key, caplog
+):
+    """Cleanup failure is logged at WARNING, never substituted for the outcome.
+
+    The level is load-bearing (review round 4, R4-1): this helper also runs in
+    ``stream_response``'s ``finally`` on normal completion, where a failed
+    origin close has no in-flight exception to hide behind. ``caplog`` and not
+    live log output, because the suite's default ``-n auto`` drops worker
+    ``--log-cli-level`` records.
+    """
     closed = asyncio.Event()
 
     class Broken(httpx.AsyncByteStream):
@@ -3885,12 +3895,14 @@ async def test_a_failing_origin_close_does_not_mask_the_cancellation(connection,
                 first.set()
                 await asyncio.Future()
 
-        task = asyncio.create_task(gateway.app()(scope, receive, send))
-        await asyncio.wait_for(first.wait(), 2)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        with caplog.at_level(logging.WARNING, logger="local_operator.tunnels.gateway"):
+            task = asyncio.create_task(gateway.app()(scope, receive, send))
+            await asyncio.wait_for(first.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
         assert closed.is_set()
+        assert [record.getMessage() for record in caplog.records] == ["stream cleanup failed"]
 
 
 @pytest.mark.asyncio
