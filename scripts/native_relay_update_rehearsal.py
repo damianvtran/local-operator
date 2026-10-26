@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -270,6 +271,17 @@ def cell_readiness(root: Path) -> str:
         # host's supervisor and, on macOS, the operator's LIVE relay — a read-only
         # leak the comment above claimed did not exist.
         probe._observation = never_ready  # type: ignore[assignment]
+        # R13-1: ``_write_readiness_diagnostics`` would otherwise shell out to
+        # ``journalctl --user -u <live unit>`` on a Linux box and copy a tail of
+        # the operator's own relay journal into this artifact. Read-only, but the
+        # same isolation break as R12-1 one level down.
+        saved["run"] = probe._run
+
+        def no_run(*_a: Any, **_k: Any) -> SimpleNamespace:
+            """Never reaches a host binary; the diagnostics read a fake receipt."""
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        probe._run = no_run  # type: ignore[assignment]
         saved["time"] = probe.time
         probe.time = Clock()  # type: ignore[assignment]
         calls["n"] = 0
@@ -283,6 +295,7 @@ def cell_readiness(root: Path) -> str:
         probe.time = saved["time"]  # type: ignore[assignment]
         probe._require = saved["require"]  # type: ignore[assignment]
         probe._observation = original_observation  # type: ignore[assignment]
+        probe._run = saved["run"]  # type: ignore[assignment]
         for key, value in saved_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -364,7 +377,10 @@ def cell_live_relay(root: Path) -> str:
         # are supplied here and named in the returned sentence, so the cell says
         # exactly how much of the contract it exercised.
         generation = root / "generations" / "head"
+        # R13-3: comparing sha with itself proved nothing. Assert the measured
+        # state instead, so a tree that starts publishing a wrong ref fails here.
         sha = str(record.get("source_ref") or "")
+        _check(sha == "", f"an unstamped checkout advertised source_ref={sha!r}")
         observation: dict[str, Any] = {
             "pid": process.pid,
             "loaded_generation": str(generation),
@@ -441,7 +457,9 @@ def main(argv: list[str] | None = None) -> int:
             + "\n",
             encoding="utf-8",
         )
-        print("not covered: " + "; ".join(not_covered))
+    # R13-2: unconditional, so a bare run's stdout summary carries the same
+    # limits as the receipt.
+    print("not covered: " + "; ".join(not_covered))
     print(f"rehearsal {'FAILED' if failed else 'passed'} ({len(results)} cells)")
     return 1 if failed else 0
 
