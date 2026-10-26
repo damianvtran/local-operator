@@ -1111,7 +1111,17 @@ def _execute(args: argparse.Namespace) -> int:
         )
     # A record that outlives a refusal is what the verifier's own report-on-refusal
     # fix buys; it never inherits an identity it did not verify.
-    refusals.extend(verify_recorded_identity(recorded, source_sha=args.source_sha, layout=layout))
+    refusals.extend(
+        verify_recorded_identity(
+            recorded,
+            source_sha=args.source_sha,
+            layout=layout,
+            # Without this the version binding is dead code: the report's `python`
+            # field is only comparable to the arm interpreter this run created
+            # (review round 2, R2-1).
+            interpreter_facts=interpreter_facts,
+        )
+    )
     written = write_build_record(
         layout,
         {

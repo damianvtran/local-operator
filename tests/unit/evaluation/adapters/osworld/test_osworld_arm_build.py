@@ -562,8 +562,15 @@ def _stub_preinstall(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[st
     return calls
 
 
-def _stub_verifiers(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
-    """Stand in for the two child interpreters, writing the report they would."""
+def _stub_verifiers(
+    monkeypatch: pytest.MonkeyPatch, calls: list[str], report_python: str = "3.12.13"
+) -> None:
+    """Stand in for the two child interpreters, writing the report they would.
+
+    ``report_python`` is the version the fake report claims to have run under; the
+    arm's own version comes from the stubbed ``create_arm_venv``. They must be
+    compared through the REAL execute path (review round 2, R2-1).
+    """
 
     def fake_run(argv: list[str], **kwargs: Any) -> Any:
         joined = " ".join(argv)
@@ -579,7 +586,7 @@ def _stub_verifiers(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
                         # another interpreter (round-3 stale-identity concern).
                         "commit": "a" * 40,
                         "prefix": str(arm_root / "venv"),
-                        "python": "3.12.13",
+                        "python": report_python,
                         "verified": True,
                         "harness": {"version": "0.90.4"},
                         # The real shape: the builder reads this block, so a fake
@@ -1082,6 +1089,50 @@ def test_a_malformed_verification_report_is_a_refusal_with_evidence(
     assert not (out / "build-record.json").exists()
     evidence = json.loads((out / "receipts" / "build-record.json").read_text())
     assert any("not readable JSON" in reason for reason in evidence["refusals"])
+
+
+def test_an_interpreter_version_mismatch_cannot_reach_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1: the version binding must run in ``_execute``, not only in a unit call.
+
+    The first cut of this check compared nothing in production, because
+    ``_execute`` called ``verify_recorded_identity`` without the interpreter facts
+    that carry the arm's own version -- an otherwise-valid report from Python
+    3.11.9 was published with rc 0. Both directions are exercised here through
+    ``main --execute``: mismatch refuses and publishes nothing, match publishes.
+    """
+
+    def arm_version(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            arm,
+            "create_arm_venv",
+            lambda venv, receipts: {
+                "interpreter": "stub",
+                "reported_version": "Python 3.12.13",
+            },
+        )
+
+    out = tmp_path / "arm-mismatch"
+    calls = _stub_preinstall(monkeypatch, tmp_path)
+    arm_version(monkeypatch)
+    _stub_verifiers(monkeypatch, calls, report_python="3.11.9")
+    rc = arm.main(["--source-sha", "a" * 40, "--out", str(out), "--execute"])
+    assert rc == 4, "a report from another Python must exit as UNVERIFIED"
+    assert not (out / "build-record.json").exists(), "nothing to read for the launcher"
+    evidence = json.loads((out / "receipts" / "build-record.json").read_text())
+    assert evidence["published"] is False
+    assert any("3.11.9" in reason for reason in evidence["refusals"]), evidence["refusals"]
+
+    # Same construction, matching version: the control that makes the above meaningful.
+    out_ok = tmp_path / "arm-match"
+    calls_ok = _stub_preinstall(monkeypatch, tmp_path)
+    arm_version(monkeypatch)
+    _stub_verifiers(monkeypatch, calls_ok, report_python="3.12.13")
+    assert arm.main(["--source-sha", "a" * 40, "--out", str(out_ok), "--execute"]) == 0
+    assert (out_ok / "build-record.json").is_file()
+    good = json.loads((out_ok / "build-record.json").read_text())
+    assert good["published"] is True
 
 
 def test_a_volatile_arm_root_is_refused(tmp_path: Path) -> None:
