@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -2398,6 +2399,87 @@ class _PromoteOutcome(NamedTuple):
 _PROMOTE_REFUSED = _PromoteOutcome(ok=False, carry=None)
 
 
+def _validated_session_id(value: Any) -> str:
+    """Keep opaque legacy ids, but never let one become path syntax.
+
+    The storage validator deliberately does not impose the current hex-id mint on
+    older sessions. Its refusal is translated to the move protocol's malformed-
+    request error at the receiving boundary.
+    """
+    from local_operator.network.store import safe_component
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        return safe_component(value)
+    except MeshRefusal:
+        # Translate the storage contract to the move protocol's malformed-request
+        # error without coercing a non-string into a different identifier.
+        raise _peer_error(
+            "bad_request", "a move needs a conversation id without path syntax"
+        ) from None
+
+
+def _contained_handoff_path(
+    root: Path,
+    path: Path,
+    *,
+    parent_parts: tuple[str, ...],
+    leaf: str,
+    create_parent: bool = False,
+    require_leaf: bool = False,
+) -> Path | None:
+    """Resolve one handoff directory only through real directories.
+
+    ``root`` is the operator-selected configuration anchor; everything below it
+    is checked with ``lstat`` so a pre-existing alias cannot redirect rename or
+    recursive deletion. The selected root is resolved once, and an absent final
+    ``sessions`` directory may be created, but no missing staging path is made.
+
+    These checks fail closed against static traversal and pre-existing links.
+    They are not filesystem-namespace locking against another same-UID process
+    replacing components between the final check and the following syscall.
+    """
+    from local_operator.network.store import safe_component
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        safe_component(leaf)
+    except MeshRefusal:
+        return None
+    try:
+        lexical = Path(os.path.abspath(root))
+        # THE ROOT'S OWN SPELLING IS NOT A TRUST QUESTION (macOS /var -> /private/var,
+        # an isolation mktemp root): resolve the anchor once and compare the caller's
+        # spelling against it. Everything BELOW the anchor is still checked by lstat,
+        # so a link there refuses exactly as before.
+        anchor = lexical.resolve(strict=True)
+        if not stat.S_ISDIR(anchor.stat().st_mode):
+            return None
+        parent = anchor.joinpath(*parent_parts)
+        candidate = parent / leaf
+        if Path(os.path.abspath(path)) != lexical.joinpath(*parent_parts) / leaf:
+            return None
+        current = anchor
+        for component in parent_parts:
+            current = current / component
+            if create_parent:
+                try:
+                    current.mkdir()
+                except FileExistsError:
+                    pass
+            if not stat.S_ISDIR(current.lstat().st_mode):
+                return None
+        try:
+            if not stat.S_ISDIR(candidate.lstat().st_mode):
+                return None
+        except FileNotFoundError:
+            if require_leaf:
+                return None
+        return candidate
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
 def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOutcome:
     """``os.replace(staging, sessions/<id>)`` — the ONE atomic promote (§6.3 step 16).
 
@@ -2424,7 +2506,29 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
     lease stays unclaimed and the FIRST runtime to engage claims it, which is
     exactly what happens to a session that has just been resumed.
     """
-    target = Path(server.root) / "sessions" / target_id
+    target = _contained_handoff_path(
+        Path(server.root),
+        Path(server.root) / "sessions" / target_id,
+        parent_parts=("sessions",),
+        leaf=target_id,
+        create_parent=True,
+    )
+    source = _contained_handoff_path(
+        Path(server.root),
+        staging,
+        parent_parts=("network", "staging"),
+        leaf=staging.name,
+        require_leaf=True,
+    )
+    if target is None or source is None:
+        logger.warning(
+            "mobility: refusing to adopt %s: staging and destination must be real "
+            "directories beneath the configured staging and sessions roots",
+            target_id,
+        )
+        return _PROMOTE_REFUSED
+    if target.is_symlink():
+        return _PROMOTE_REFUSED
     if target.exists():
         # A BARE REMNANT IS NOT AN OWNER (measured 2026-09-29 — see
         # ``_bare_remnant`` for the shape). A corpse holds nothing a session
@@ -2483,7 +2587,7 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         )
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.replace(str(staging), str(target))
+        os.replace(str(source), str(target))
     except OSError as exc:
         logger.warning("mobility: could not adopt %s on this device: %s", target_id, exc)
         return _PROMOTE_REFUSED
@@ -2620,11 +2724,35 @@ def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path
     """
     import shutil
 
+    from local_operator.network.types import MeshRefusal
     from local_operator.session.placement import clear_handoff_entry
 
+    try:
+        _validated_session_id(session_id)
+    except MeshRefusal:
+        logger.error("mobility: refusing rollback for an unsafe conversation id")
+        return
+    safe_staging = _contained_handoff_path(
+        Path(server.root),
+        staging,
+        parent_parts=("network", "staging"),
+        # THE DIRECTORY ACTUALLY HANDED OVER. A ``--keep`` copy stages under a MINTED
+        # id, so validating the SOURCE session id here refused the sweep of every
+        # failed copy while the refusal sentence said the copy was discarded. The
+        # leaf is what this call is about; ``session_id`` stays the journal key.
+        leaf=Path(staging).name,
+    )
+    if safe_staging is None:
+        logger.error(
+            "mobility: refusing to sweep unsafe staging path %s; expected one real "
+            "directory beneath %s",
+            staging,
+            Path(server.root) / "network" / "staging",
+        )
+        return
     clear_handoff_entry(server.root, session_id)
     try:
-        shutil.rmtree(staging)
+        shutil.rmtree(safe_staging)
     except OSError:
         logger.debug("mobility: could not sweep %s", staging, exc_info=True)
     _audit(server, AUDIT_ROLLED_BACK, session_id, "")
@@ -4313,7 +4441,8 @@ def _destination_invite(
         write_handoff_entry,
     )
 
-    session_id = str(frame["session_id"])
+    # Direct callers use this handler too; do not rely on the dispatcher alone.
+    session_id = _validated_session_id(frame.get("session_id"))
     keep = bool(frame.get("keep"))
     # THE ``--wait`` THAT WAS DROPPED HERE. The destination's own flow re-probes a
     # busy owner every ``MOVE_WAIT_POLL_S`` for as long as it is given (the loop in
@@ -5240,14 +5369,7 @@ def make_handler(
 
     def _move(link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
         phase = str(frame.get("phase") or "")
-        session_id = str(frame.get("session_id") or "")
-        if not session_id:
-            # A MALFORMED FRAME IS A REFUSAL, not a result: the family's own answer,
-            # shaped by ``_run_handler``. The expected refusals of this protocol
-            # (busy, not_owner, in_progress) travel as DATA inside the ack instead,
-            # because a front end branches on their codes and the wire deliberately
-            # drops a code from a refusal frame.
-            raise _peer_error("bad_request", "a move needs a conversation id")
+        session_id = _validated_session_id(frame.get("session_id"))
         if phase == "invite":
             return _destination_invite(server, link, frame)
         if phase == "refused":
@@ -5420,6 +5542,12 @@ def _recall(
     asks for an engage here, and nothing has to cross a link to carry it.
     """
     from local_operator.network import sync as sync_mod
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        _validated_session_id(session_id)
+    except MeshRefusal as exc:
+        return _move_refusal(session_id, "bad_request", str(exc))
 
     if _owned_here(server, session_id):
         return _move_refusal(
@@ -5597,8 +5725,13 @@ def _offload(
     over the link this device may be serving, and because the phases it must report
     are the ones it can prove.
     """
+    from local_operator.network.types import MeshRefusal
     from local_operator.session.placement import handoff_in_flight
 
+    try:
+        _validated_session_id(session_id)
+    except MeshRefusal as exc:
+        return _move_refusal(session_id, "bad_request", str(exc))
     if not _owned_here(server, session_id):
         if (Path(server.root) / "sessions" / session_id).is_dir():
             return _move_refusal(

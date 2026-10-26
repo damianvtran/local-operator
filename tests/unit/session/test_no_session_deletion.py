@@ -2838,48 +2838,50 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # A replica lives at network/replicas/<id>/ — outside the session store, so it
     # can never be a second directory for an id the owner holds (INV-1). Its cursor
     # is written through a temp in that same directory.
-    # THE FETCH THAT STAGES, THEN REPLACES (review round 1, M-5). ``_fetch_item``
-    # writes every file into ``.<name>.<pid>.fetch`` beside its target and adopts it
-    # with ONE ``os.replace``, so a killed append can never leave a truncated
-    # conversation where a complete one was. The target is ``dest_dir / name``, where
-    # ``dest_dir`` is the move's STAGING directory or a replica directory — both
-    # outside ``sessions/`` — plus the shared attachment store; the only path into a
-    # session directory is ``_promote`` above, which is allow-listed by name. The two
-    # unlinks are that attempt's own staging file (before the attempt, and on the way
-    # out of a failed one), and the replace is the adoption itself.
+    # THE FETCH THAT STAGES, THEN ADOPTS (review round 1, M-5) now goes through the
+    # three shared helpers below, so the guard's call sites moved out of
+    # ``_fetch_item`` / ``_write_link`` and into them. `_open_stage` opens the staged
+    # file with O_NOFOLLOW; ``_replace_at`` renames that one staged child over its
+    # target with a single dirfd ``os.replace`` (so a killed append cannot leave a
+    # truncated conversation); ``_unlink_at`` clears staging garbage and a replaced
+    # member. Each helper first walks the ancestor chain from the CONFIG ANCHOR with
+    # O_NOFOLLOW on every component, refusing a symlinked component, and the path
+    # spaces they can address are exactly: a pull destination
+    # (``network/replicas/<id>/`` or ``network/staging/<id>/`` — both deliberately
+    # outside ``sessions/``; the only route into the session store is
+    # ``mobility._promote`` above, allow-listed by name), the shared attachment store
+    # ``<config>/attachments/``, and — in ``promote_replica`` — the
+    # ``<config>/sessions/<new_id>/`` directory that call has just refused to reuse
+    # (an existing id raises) and then created and claimed itself. In every case the
+    # operation names ONE member component inside an already-open directory.
     (
-        "local_operator/network/sync.py::_fetch_item",
+        "local_operator/network/sync.py::_replace_at",
         "os.replace",
-        "Adopts a fully VERIFIED staged file into its destination (staging dir, "
-        "replica dir or the attachment store); never renames a session directory",
+        "Publishes THIS attempt's own staged file/link onto one member name as a "
+        "same-directory dirfd rename (replica or staging tree, attachment store, or "
+        "recovery's just-created sessions/<new_id>); both operands are direct "
+        "children of that opened directory, so no directory is ever renamed",
     ),
     (
-        "local_operator/network/sync.py::_fetch_item",
+        "local_operator/network/sync.py::_unlink_at",
+        "os.unlink",
+        "Unlinks ONE member name, dirfd-relative, in the same scopes (an existing "
+        "directory is refused rather than removed): staging garbage, a replaced "
+        "file/link, or the member a verified complete plan pruned; never a session "
+        "directory and never a path under sessions/ in pull",
+    ),
+    (
+        "local_operator/network/sync.py::_restore_transcript_state",
         "<path>.unlink",
-        "Removes this attempt's own .<name>.<pid>.fetch staging file, beside its "
-        "target rather than inside a session",
-        2,
+        "Deletes only regular, non-symlink files at the PULL DESTINATION root that "
+        "this pull itself introduced, restoring the pre-pull state after a refused "
+        "plan; iterdir is one level and dest_dir is a replica or staging directory, "
+        "never a session directory",
     ),
     (
         "local_operator/network/sync.py::write_replica_cursor",
         "os.replace",
         "Atomic tmp -> sync.json inside one network/replicas/<id>/ directory",
-    ),
-    # A CARRIED SYMLINK, staged beside its own target and renamed over it (review round 2's
-    # real-store finding). The targets are a move's staging directory or a replica's own
-    # tree — never a path under sessions/ except through ``_promote`` above — and the two
-    # unlinks are that attempt's own staging LINK.
-    (
-        "local_operator/network/sync.py::_write_link",
-        "os.replace",
-        "Adopts a staged symlink over its destination inside a staging or replica tree",
-    ),
-    (
-        "local_operator/network/sync.py::_write_link",
-        "<path>.unlink",
-        "Removes this attempt's own .<name>.<pid>.link staging file, beside its target "
-        "rather than inside a session",
-        2,
     ),
     # The handoff journal's own atomic writer (see the module's fail-closed rule):
     # both the replacement and the temp cleanup are under <config>/network/.

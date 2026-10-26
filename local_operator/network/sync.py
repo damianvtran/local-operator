@@ -52,6 +52,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 import time
 from dataclasses import dataclass, field
@@ -574,6 +575,19 @@ class SyncSettings:
 # Paths
 # ---------------------------------------------------------------------------
 
+_O_BINARY = getattr(os, "O_BINARY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _session_component(session_id: str) -> str:
+    """Session IDs cross the wire and become path components on BOTH peers."""
+    from local_operator.network import store
+
+    try:
+        return store.safe_component(session_id)
+    except store.MeshRefusal as exc:
+        raise SyncRefused("no_session", f"Invalid session id {session_id!r}: {exc}") from exc
+
 
 def network_dir(root: Path) -> Path:
     return Path(root) / NETWORK_DIRNAME
@@ -586,11 +600,11 @@ def staging_dir(root: Path, session_id: str) -> Path:
     see a half-copied session the moment it were inside ``sessions/``, and the
     promote is one ``os.replace`` precisely so that window never exists.
     """
-    return network_dir(root) / STAGING_DIRNAME / session_id
+    return network_dir(root) / STAGING_DIRNAME / _session_component(session_id)
 
 
 def replica_dir(root: Path, session_id: str) -> Path:
-    return network_dir(root) / REPLICA_DIRNAME / session_id
+    return network_dir(root) / REPLICA_DIRNAME / _session_component(session_id)
 
 
 def read_replica_cursor(root: Path, session_id: str) -> dict[str, Any]:
@@ -625,7 +639,7 @@ def write_replica_cursor(root: Path, session_id: str, payload: dict[str, Any]) -
 
 def session_dir(root: Path, session_id: str) -> Path:
     """One session's directory. THE path both ends build their digests from."""
-    return Path(root) / "sessions" / session_id
+    return Path(root) / "sessions" / _session_component(session_id)
 
 
 def copy_set(root: Path, session_id: str) -> list[str]:
@@ -1615,6 +1629,11 @@ def build_manifest(
         },
         "items": items,
         "attachments": blobs,
+        # COMPLETE source membership, not merely the transfer delta. The holder may
+        # prune only when this set recomputes plan_id; an old or partial plan without
+        # it remains a conservative no-deletion sync.
+        "members": {name: stamp.digest for name, stamp in sorted(stamps.items())},
+        "member_links": sorted(name for name, stamp in stamps.items() if stamp.link),
         "copy_set": copy_set(root, session_id),
         # The trees this plan carries, as flat names, and the entries it deliberately
         # does not: a symlink out of the session (refused by a deleting move) and a fifo
@@ -2067,6 +2086,29 @@ class PullResult:
     links: tuple[str, ...] = ()
 
 
+def _capture_transcript_state(directory: Path) -> dict[str, bytes]:
+    """Capture the replica's root files before a temporary archive restore.
+
+    ``restore_for_write`` also removes compression sidecars such as preview.json.
+    A journal containing only transcript/archive payloads would therefore lose
+    state on a refused append or a failed apply, despite preserving the transcript.
+    """
+    return {
+        path.name: path.read_bytes()
+        for path in directory.iterdir()
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def _restore_transcript_state(directory: Path, state: dict[str, bytes]) -> None:
+    """Restore every pre-pull root file and remove files this attempt introduced."""
+    for path in directory.iterdir():
+        if path.is_file() and not path.is_symlink() and path.name not in state:
+            path.unlink()
+    for name, payload in state.items():
+        (directory / name).write_bytes(payload)
+
+
 def pull(
     root: Path,
     session_id: str,
@@ -2089,31 +2131,34 @@ def pull(
     """
     have = have or {}
     dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    # THE REPLICATION LAYER WRITES PLAIN TRANSCRIPTS. A destination that holds a
-    # COMPRESSED replica must turn it back into the plain file before an append:
-    # the plan's ``prefix_bytes`` are byte offsets into the plain journal, and
-    # appending to a decompressed copy that is published under no name would
-    # either lose the prefix or splice it twice. Restoring first keeps the wire
-    # protocol untouched — both ends still speak plain transcript bytes.
+    attachments_root = Path(attachments_root)
+    anchor = _common_anchor(Path(root), dest_dir, attachments_root)
+    session_scope = _write_scope(anchor, dest_dir)
+    attachment_scope = _write_scope(anchor, attachments_root / ATTACHMENTS_DIRNAME)
     from local_operator.session import compression
 
-    if not _restore_for_serving(dest_dir) and compression.archive_path(dest_dir) is not None:
-        # REFUSE, DO NOT SHADOW. Writing the plain name beside an archive this
-        # build cannot decode would leave a truncated journal that every reader
-        # prefers over the archive holding the rest of the conversation.
-        raise SyncRefused(
-            "no_session",
-            f"{session_id} holds an archived transcript this device cannot decode, "
-            "so it cannot be appended to",
-        )
+    # Capture before ANY plan request or mutation: a refused plan must leave both the
+    # archive and the previous plain transcript byte-for-byte unchanged. ONLY a
+    # compressed destination can be changed before plan validation (the temporary
+    # restore), so an ordinary replica refresh must not read its whole transcript.
+    transcript_state = (
+        _capture_transcript_state(dest_dir)
+        if dest_dir.is_dir() and compression.archive_path(dest_dir) is not None
+        else {}
+    )
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    restored = False
     # THE PLAN IS ASKED FOR AGAIN WHEN IT CANNOT DESCRIBE THIS DESTINATION. An
     # "append" plan is a claim that this destination already holds the source's
     # first ``prefix_bytes``; if the file here is not that long, the claim is
     # about a copy that is no longer on disk, and continuing would splice. One
     # extra round trip re-plans as a full copy.
     plan: dict[str, Any] = {}
+
     for _ in range(2):
+        if restored:
+            _restore_transcript_state(dest_dir, transcript_state)
+            restored = False
         plan = ask(
             {
                 "op": "net_sync",
@@ -2127,14 +2172,38 @@ def pull(
             }
         )
         transcript = plan.get("transcript") or {}
+        # Validate the candidate, including LINK destinations, before even the
+        # temporary restore used to measure a compressed append.
+        try:
+            _validate_plan_destinations(
+                dest_dir,
+                attachments_root,
+                plan,
+                session_scope,
+                attachment_scope,
+                session_id=session_id,
+            )
+        except SyncRefused:
+            if restored:
+                _restore_transcript_state(dest_dir, transcript_state)
+            raise
         if str(transcript.get("mode") or "replace") != "append":
             break
         start = int(transcript.get("prefix_bytes") or 0)
         try:
-            # The PLAIN file, which ``_restore_for_serving`` above guarantees when
-            # a transcript is held at all; an absent one reads as "no prefix",
-            # which re-plans this as a full copy (``have``'s cursor is dropped).
+            if compression.archive_path(dest_dir) is not None:
+                if not _restore_for_serving(dest_dir):
+                    raise SyncRefused(
+                        "no_session",
+                        f"{session_id} holds an archived transcript this device cannot decode, "
+                        "so it cannot be appended to",
+                    )
+                restored = True
             existing = compression.plain_path(dest_dir).stat().st_size
+        except SyncRefused:
+            if restored:
+                _restore_transcript_state(dest_dir, transcript_state)
+            raise
         except OSError:
             existing = 0
         if existing == start:
@@ -2143,6 +2212,8 @@ def pull(
 
     plan_value = str(plan.get("plan_id") or "")
     if not plan_value:
+        if restored:
+            _restore_transcript_state(dest_dir, transcript_state)
         raise SyncRefused("stale_plan", "the owner answered no plan for that conversation")
 
     transcript = plan.get("transcript") or {}
@@ -2150,6 +2221,62 @@ def pull(
     start = int(transcript.get("prefix_bytes") or 0)
     resize = int(transcript.get("region_bytes") or 0)
     total = int(transcript.get("total_bytes") or 0)
+    if compression.archive_path(dest_dir) is not None and mode != "append":
+        try:
+            if not _restore_for_serving(dest_dir):
+                raise SyncRefused(
+                    "no_session",
+                    f"{session_id} holds an archived transcript this device cannot decode, "
+                    "so it cannot be replaced",
+                )
+            restored = True
+        except (OSError, SyncRefused):
+            _restore_transcript_state(dest_dir, transcript_state)
+            raise
+    try:
+        return _apply_validated_plan(
+            ask,
+            session_id=session_id,
+            plan=plan,
+            plan_value=plan_value,
+            transcript=transcript,
+            mode=mode,
+            start=start,
+            resize=resize,
+            total=total,
+            dest_dir=dest_dir,
+            attachments_root=attachments_root,
+            session_scope=session_scope,
+            attachment_scope=attachment_scope,
+            have=have,
+            complete_members=_complete_plan_members(plan, session_id),
+            stop=stop,
+        )
+    except (OSError, SyncRefused):
+        if restored:
+            _restore_transcript_state(dest_dir, transcript_state)
+        raise
+
+
+def _apply_validated_plan(
+    ask: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    session_id: str,
+    plan: dict[str, Any],
+    plan_value: str,
+    transcript: dict[str, Any],
+    mode: str,
+    start: int,
+    resize: int,
+    total: int,
+    dest_dir: Path,
+    attachments_root: Path,
+    session_scope: _WriteScope,
+    attachment_scope: _WriteScope,
+    have: dict[str, dict[str, Any]],
+    complete_members: tuple[dict[str, str], tuple[str, ...]] | None,
+    stop: Callable[[], bool] | None,
+) -> PullResult:
     digest = str(transcript.get("digest") or "")
     written = 0
     resumed = 0
@@ -2164,6 +2291,7 @@ def pull(
         source_start=start,
         source_end=start + resize,
         dest_path=dest_dir / TRANSCRIPT_NAME,
+        scope=session_scope,
         whole_digest=digest,
         final_bytes=total,
         stop=stop,
@@ -2177,6 +2305,29 @@ def pull(
     blobs = 0
     links = 0
     attested: dict[str, str] = {}
+    prune: list[tuple[Path, _WriteScope]] = []
+    # THE COMPLETE SOURCE SET, when the owner could attest one, is authoritative for
+    # membership AND digest below. Bound ONCE so the prune and the final attestation
+    # read the same value rather than re-testing the same optional.
+    source_members: dict[str, str]
+    source_links: tuple[str, ...]
+    source_members, source_links = complete_members if complete_members is not None else ({}, ())
+    if complete_members is not None:
+        # HELD MEMBER DIGESTS for the prune below. ``held_report`` reports the shared
+        # attachment store in its own ``attachments`` map and copy-set/tree/link members
+        # in ``files``, so ``previous`` is exactly the set a replica's cursor owns. The
+        # shared store is content-addressed and used by every session on this device, so
+        # a pull never prunes it; only names ``files`` carries can be removed here.
+        previous = dict(have.get("files") or {})
+        for name in sorted(previous):
+            if name == TRANSCRIPT_NAME or name in source_members:
+                continue
+            target = _destination_for(dest_dir, attachments_root, name)
+            if target is None:
+                raise SyncRefused("unknown_item", f"Held sync member {name!r} is unsafe to prune.")
+            scope = attachment_scope if name.startswith(ATTACHMENT_PREFIX) else session_scope
+            _assert_contained(scope, target, leaf_link=True)
+            prune.append((target, scope))
     link_names: list[str] = []
     for item in list(plan.get("items") or []) + list(plan.get("attachments") or []):
         name = str(item.get("name") or "")
@@ -2191,7 +2342,7 @@ def pull(
             # and a link is written as a link, never as the bytes of whatever it points
             # at. Still staged and replaced, so a reader of this directory sees the old
             # link or the new one and never neither.
-            _write_link(dest_dir, name, str(item["link"]), item_digest)
+            _write_link(session_scope, name, str(item["link"]), item_digest)
             attested[name] = item_digest
             link_names.append(name)
             links += 1
@@ -2208,6 +2359,7 @@ def pull(
             source_start=0,
             source_end=size,
             dest_path=target,
+            scope=attachment_scope if name.startswith(ATTACHMENT_PREFIX) else session_scope,
             whole_digest=item_digest,
             final_bytes=size,
             stop=stop,
@@ -2221,6 +2373,11 @@ def pull(
             blobs += 1
         else:
             items += 1
+
+    # Publish deletions only after every planned transfer succeeded. A failed fetch
+    # must not turn an otherwise recoverable held member into an early deletion.
+    for target, scope in prune:
+        _unlink_at(target.parent, target.name, scope)
 
     # EVERY MEMBER THE HOLDER NOW HOLDS, whether this pull fetched it or it was already
     # there (``have["files"]`` is the holder's own digest report, re-verified by the plan
@@ -2240,6 +2397,17 @@ def pull(
         # cursor.
         file_name = name if name.endswith(ATTACHMENT_SIDECAR_SUFFIX) else f"{name}.bin"
         attested.setdefault(f"{ATTACHMENT_PREFIX}{file_name}", str(value))
+    # Unchanged links are present in have["files"] but are not re-sent as plan
+    # items. Carry their on-disk classification into the attestation just as the
+    # recovery digest does, otherwise an append cursor forgets every held link.
+    for name, _target in tree_link_entries(dest_dir):
+        if name in attested and name not in link_names:
+            link_names.append(name)
+    if complete_members is not None:
+        # The complete source set is authoritative for both membership and digest.
+        # No prior held entry may survive merely because this was an append.
+        attested = dict(source_members)
+        link_names = list(source_links)
     attested[TRANSCRIPT_NAME] = digest
     return PullResult(
         session_id=session_id,
@@ -2270,6 +2438,162 @@ def transcript_exists(directory: Path) -> bool:
     from local_operator.session import compression
 
     return compression.has_transcript(directory)
+
+
+def _complete_plan_members(
+    plan: dict[str, Any], session_id: str
+) -> tuple[dict[str, str], tuple[str, ...]] | None:
+    """Return deletion authority only for a digest-bound complete source member set."""
+    raw = plan.get("members")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(digest, str)
+        or not digest.startswith("sha256:")
+        for name, digest in raw.items()
+    ):
+        raise SyncRefused("unknown_item", "The complete sync member set is malformed.")
+    links_raw = plan.get("member_links")
+    if not isinstance(links_raw, list) or any(not isinstance(name, str) for name in links_raw):
+        raise SyncRefused("unknown_item", "The complete sync link member set is malformed.")
+    links = tuple(sorted(set(links_raw)))
+    if len(links) != len(links_raw) or any(name not in raw for name in links):
+        raise SyncRefused("unknown_item", "The complete sync link member set is inconsistent.")
+    members = dict(raw)
+    transcript = plan.get("transcript") or {}
+    if (
+        TRANSCRIPT_NAME not in members
+        or members[TRANSCRIPT_NAME] != str(transcript.get("digest") or "")
+        or str(plan.get("plan_id") or "") != _attested_digest(members, links, session_id)
+    ):
+        raise SyncRefused(
+            "unknown_item", "The complete sync member set does not match its plan identity."
+        )
+    for item in [
+        *list(plan.get("items") or []),
+        *list(plan.get("attachments") or []),
+    ]:
+        if not isinstance(item, dict):
+            raise SyncRefused("unknown_item", "A sync transfer item is malformed.")
+        name = str(item.get("name") or "")
+        if name not in members or str(item.get("digest") or "") != members[name]:
+            raise SyncRefused(
+                "unknown_item", f"Sync item {name!r} is outside the complete source member set."
+            )
+    return members, links
+
+
+def _validate_plan_destinations(
+    session_root: Path,
+    attachments_root: Path,
+    plan: dict[str, Any],
+    session_scope: _WriteScope,
+    attachment_scope: _WriteScope,
+    session_id: str | None = None,
+) -> None:
+    """Validate all peer paths before any member, including the transcript, lands."""
+    complete = _complete_plan_members(plan, session_id) if session_id is not None else None
+    items = [dict(item) for item in plan.get("items") or [] if isinstance(item, dict)]
+    attachments = [dict(item) for item in plan.get("attachments") or [] if isinstance(item, dict)]
+    if complete is not None:
+        members, member_links = complete
+        for name in members:
+            if _destination_for(session_root, attachments_root, name) is None:
+                raise SyncRefused(
+                    "unknown_item", f"Complete sync member {name!r} has an unsafe destination."
+                )
+        for name in member_links:
+            if _destination_for(session_root, attachments_root, name) is None or name.startswith(
+                ATTACHMENT_PREFIX
+            ):
+                raise SyncRefused("unknown_item", f"Complete sync link {name!r} is unsafe.")
+    links: dict[Path, tuple[str, str]] = {}
+    for item in [*items, *attachments]:
+        name = str(item.get("name") or "")
+        path = _destination_for(session_root, attachments_root, name)
+        if path is None:
+            raise SyncRefused(
+                "unknown_item",
+                f"Sync destination {name!r} must be a relative copy-set member inside its root.",
+            )
+        scope = attachment_scope if name.startswith(ATTACHMENT_PREFIX) else session_scope
+        # The link's own parent chain is as untrusted as its target. Validate BOTH
+        # before the transcript restore or any other mutation.
+        _assert_contained(scope, path, leaf_link=isinstance(item.get("link"), str))
+        target = item.get("link")
+        if isinstance(target, str):
+            if (
+                not target
+                or Path(target).is_absolute()
+                or any(part in {"", "."} for part in Path(target).parts)
+            ):
+                raise SyncRefused(
+                    "unknown_item",
+                    f"Sync link {name!r} has unsafe target {target!r}; use a relative "
+                    "target without empty or '.' components.",
+                )
+            if name.startswith(ATTACHMENT_PREFIX):
+                raise SyncRefused(
+                    "unknown_item", f"Attachment {name!r} may not be a symbolic link."
+                )
+            links[path] = (name, target)
+        else:
+            # Validate parent components even when the leaf does not exist yet: a
+            # malicious plan must be refused before the transcript write, not only
+            # when its own turn arrives. The no-follow open rechecks the leaf later.
+            root = (
+                attachments_root / ATTACHMENTS_DIRNAME
+                if name.startswith(ATTACHMENT_PREFIX)
+                else session_root
+            )
+            _assert_contained(_write_scope(root, root), path, leaf_link=False)
+
+    def check_target(path: Path, name: str, seen: frozenset[Path]) -> None:
+        # abspath alone collapses .. only at the OS-string layer; normpath is needed
+        # BEFORE testing membership, otherwise ``inside/../../outside`` looks nested.
+        lexical = Path(os.path.normpath(os.path.abspath(path)))
+        root = Path(os.path.normpath(os.path.abspath(session_root)))
+        if lexical != root and root not in lexical.parents:
+            raise SyncRefused(
+                "unknown_item", f"Sync link {name!r} resolves outside the destination session."
+            )
+        if lexical in seen:
+            raise SyncRefused("unknown_item", f"Sync link cycle includes {name!r}.")
+        if lexical in links:
+            _child_name, target = links[lexical]
+            check_target(lexical.parent / target, name, seen | {lexical})
+            return
+        # A planned link may be the parent of a target, even though no such path
+        # exists on disk yet. Resolve that ancestor in the graph, not the filesystem.
+        probe = lexical
+        while probe != root and root in probe.parents:
+            if probe in links:
+                _child_name, target = links[probe]
+                suffix = lexical.relative_to(probe)
+                check_target(probe.parent / target / suffix, name, seen | {probe})
+                return
+            probe = probe.parent
+        if lexical.is_symlink():
+            target = os.readlink(lexical)
+            if Path(target).is_absolute():
+                raise SyncRefused(
+                    "unknown_item", f"Existing absolute symbolic link at {str(lexical)!r}."
+                )
+            check_target(lexical.parent / target, name, seen | {lexical})
+            return
+        # Existing parent links and mixed existing/planned chains are resolved here;
+        # strict=False deliberately preserves support for dangling in-tree targets.
+        resolved = lexical.resolve(strict=False)
+        physical_root = session_root.resolve()
+        if resolved != physical_root and physical_root not in resolved.parents:
+            raise SyncRefused(
+                "unknown_item", f"Sync link {name!r} resolves outside the destination session."
+            )
+
+    for path, (name, target) in links.items():
+        check_target(path.parent / target, name, frozenset({path}))
 
 
 def _destination_for(dest_dir: Path, attachments_root: Path, name: str) -> Path | None:
@@ -2305,6 +2629,266 @@ class _FetchOutcome:
     resumed: int
 
 
+def _refuse_io(name: str, reason: str) -> SyncRefused:
+    return SyncRefused(
+        "unknown_item",
+        f"Sync member {name!r} was not written: {reason} Remove the unsafe path or link.",
+    )
+
+
+@dataclass(frozen=True)
+class _WriteScope:
+    """A trusted anchor plus the one descendant root a writer may mutate.
+
+    ``anchor``/``allowed_root`` are PHYSICAL: the configured root is resolved ONCE,
+    so a config directory reached through a symbolic link — macOS ``/var`` is
+    ``/private/var``, and an isolation ``mktemp`` root is exactly that — is spelled
+    the way the kernel walks it. ``lexical_*`` keep the caller's spelling so a path
+    built from it maps onto the physical root. Components BELOW the anchor are never
+    resolved: a link there is refused, by :func:`_assert_contained` and by
+    ``O_NOFOLLOW`` in :func:`_open_directory`.
+    """
+
+    anchor: Path
+    allowed_root: Path
+    lexical_anchor: Path
+    lexical_root: Path
+
+    def physical(self, path: Path) -> Path:
+        """Map a caller-spelled path onto this scope's physical roots."""
+        absolute = Path(os.path.abspath(path))
+        for base, target in (
+            (self.allowed_root, self.allowed_root),
+            (self.anchor, self.anchor),
+            (self.lexical_root, self.allowed_root),
+            (self.lexical_anchor, self.anchor),
+        ):
+            try:
+                return target / absolute.relative_to(base)
+            except ValueError:
+                continue
+        raise _refuse_io(path.name, "its destination escapes the allowed root.")
+
+    def relative_in(self, directory: Path) -> Path:
+        """``directory`` as a path relative to the physical allowed root."""
+        return self.physical(directory).relative_to(self.allowed_root)
+
+
+def _write_scope(anchor: Path, allowed_root: Path) -> _WriteScope:
+    lexical_anchor = Path(os.path.abspath(anchor))
+    lexical_root = Path(os.path.abspath(allowed_root))
+    try:
+        relative = lexical_root.relative_to(lexical_anchor)
+    except ValueError:
+        raise _refuse_io(
+            allowed_root.name, "its allowed root escapes the trusted anchor."
+        ) from None
+    # THE ROOT'S OWN SPELLING IS NOT A TRUST QUESTION. Resolving the anchor once is
+    # what makes a configured directory reached through a link work; every component
+    # BELOW it is still checked, so network/replica -> out refuses exactly as before.
+    physical_anchor = lexical_anchor.resolve()
+    scope = _WriteScope(
+        anchor=physical_anchor,
+        allowed_root=physical_anchor / relative,
+        lexical_anchor=lexical_anchor,
+        lexical_root=lexical_root,
+    )
+    _assert_contained(scope, scope.allowed_root, leaf_link=False)
+    return scope
+
+
+def _common_anchor(*paths: Path) -> Path:
+    absolute = [Path(os.path.abspath(path)) for path in paths]
+    try:
+        return Path(os.path.commonpath([os.fspath(path) for path in absolute]))
+    except ValueError:
+        raise _refuse_io(
+            "destination", "the configured roots have no common safe anchor."
+        ) from None
+
+
+def _assert_contained(scope: _WriteScope, path: Path, *, leaf_link: bool) -> None:
+    """Check every component from the resolved anchor, not from a derived root."""
+    physical = scope.physical(path)
+    relative = physical.relative_to(scope.allowed_root)
+    from_anchor = physical.relative_to(scope.anchor)
+    probe = scope.anchor
+    for index, part in enumerate(from_anchor.parts):
+        probe = probe / part
+        is_leaf = index == len(from_anchor.parts) - 1
+        if probe.is_symlink() and not (is_leaf and leaf_link):
+            raise _refuse_io(str(path), f"path component {part!r} is a symbolic link.")
+        if not is_leaf and probe.exists() and not probe.is_dir():
+            raise _refuse_io(str(path), f"parent component {part!r} is not a directory.")
+    # ``physical`` is already physical down to the anchor; the component walk above
+    # refused any link below it, and this comparison catches a destination reached
+    # by a route the walk did not name.
+    resolved = physical.resolve(strict=False)
+    physical_root = scope.allowed_root
+    if resolved != physical_root and physical_root not in resolved.parents:
+        raise _refuse_io(str(relative), "its resolved destination escapes the allowed root.")
+
+
+def _opened_regular(fd: int, before: os.stat_result, name: str) -> int:
+    after = os.fstat(fd)
+    if not stat.S_ISREG(after.st_mode) or (before.st_dev, before.st_ino) != (
+        after.st_dev,
+        after.st_ino,
+    ):
+        os.close(fd)
+        raise _refuse_io(name, "the file changed or is not a regular no-follow file.")
+    return fd
+
+
+def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
+    """Open every parent no-follow from the stable anchor, never a derived root."""
+    flags = os.O_RDONLY | _O_BINARY | _O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+    _assert_contained(scope, scope.allowed_root / relative, leaf_link=False)
+    scope.allowed_root.mkdir(parents=True, exist_ok=True)
+    # The anchor is already resolved, so its own spelling is not a link question;
+    # only a root that is not a real directory (or was swapped for one) refuses.
+    if scope.anchor.is_symlink() or not scope.anchor.is_dir():
+        raise _refuse_io(name, "the trusted anchor is not a real directory.")
+    try:
+        fd = os.open(scope.anchor, flags)
+    except OSError as error:
+        raise _refuse_io(name, f"the allowed root cannot be opened safely: {error}.") from error
+    try:
+        full_relative = scope.allowed_root.relative_to(scope.anchor) / relative
+        for part in full_relative.parts:
+            try:
+                before = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                child = os.open(part, flags, dir_fd=fd)
+                after = os.fstat(child)
+                if not stat.S_ISDIR(after.st_mode) or (before.st_dev, before.st_ino) != (
+                    after.st_dev,
+                    after.st_ino,
+                ):
+                    os.close(child)
+                    raise _refuse_io(name, f"parent component {part!r} changed during open.")
+            except FileNotFoundError:
+                os.mkdir(part, dir_fd=fd)
+                child = os.open(part, flags, dir_fd=fd)
+            except OSError as error:
+                raise _refuse_io(name, f"parent component {part!r} is unsafe: {error}.") from error
+            os.close(fd)
+            fd = child
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_for_read(path: Path, scope: _WriteScope) -> int:
+    _assert_contained(scope, path, leaf_link=False)
+    parent = _open_directory(scope, scope.relative_in(path.parent), path.name)
+    try:
+        try:
+            before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            return _opened_regular(
+                os.open(path.name, os.O_RDONLY | _O_BINARY | _O_NOFOLLOW, dir_fd=parent),
+                before,
+                path.name,
+            )
+        except SyncRefused:
+            raise
+        except OSError as error:
+            raise _refuse_io(path.name, f"it is not a regular no-follow file: {error}.") from error
+    finally:
+        os.close(parent)
+
+
+def _open_stage(path: Path, scope: _WriteScope, flags: int, *, suffix: str) -> tuple[int, Path]:
+    _assert_contained(scope, path, leaf_link=False)
+    parent = _open_directory(scope, scope.relative_in(path.parent), path.name)
+    stage_name = f".{path.name}.{os.getpid()}.{os.urandom(4).hex()}.{suffix}"
+    try:
+        try:
+            fd = os.open(stage_name, flags | _O_NOFOLLOW, 0o600, dir_fd=parent)
+            return _opened_regular(fd, os.fstat(fd), path.name), path.parent / stage_name
+        except OSError as error:
+            raise _refuse_io(
+                path.name, f"its staging file could not be opened safely: {error}."
+            ) from error
+    finally:
+        os.close(parent)
+
+
+def _unlink_at(root: Path, name: str, scope: _WriteScope) -> None:
+    try:
+        parent = _open_directory(scope, scope.relative_in(root), name)
+    except SyncRefused:
+        return
+    try:
+        try:
+            os.unlink(name, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        except IsADirectoryError:
+            raise _refuse_io(name, "an existing directory cannot be replaced by a file.") from None
+    finally:
+        os.close(parent)
+
+
+def _replace_at(
+    stage: Path, destination: Path, scope: _WriteScope, *, replacing_link: bool = False
+) -> None:
+    # A file may replace a just-created honest link, but an existing unrelated link
+    # is refused. The rename itself is dirfd-relative and never follows the leaf.
+    _assert_contained(scope, destination, leaf_link=replacing_link)
+    parent = _open_directory(scope, scope.relative_in(destination.parent), destination.name)
+    try:
+        try:
+            if destination.is_symlink() and not replacing_link:
+                raise _refuse_io(destination.name, "the destination leaf became a symbolic link.")
+            os.replace(stage.name, destination.name, src_dir_fd=parent, dst_dir_fd=parent)
+        except SyncRefused:
+            raise
+        except OSError as error:
+            raise _refuse_io(
+                destination.name, f"the final no-follow rename failed: {error}."
+            ) from error
+    finally:
+        os.close(parent)
+
+
+def _symlink_at(target: str, root: Path, name: str, scope: _WriteScope) -> None:
+    _assert_contained(scope, root / name, leaf_link=True)
+    parent = _open_directory(scope, scope.relative_in(root), name)
+    try:
+        os.symlink(target, name, dir_fd=parent)
+    finally:
+        os.close(parent)
+
+
+def _copy_contained(source: Path, destination: Path, scope: _WriteScope) -> None:
+    """Copy real source bytes through a verified, no-follow destination stage."""
+    if source.is_symlink() or not source.is_file():
+        raise SyncRefused(
+            "incomplete_replica", f"Recovery source {source.name!r} is not a real file."
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY
+    fd, staged = _open_stage(destination, scope, flags, suffix="copy")
+    source_scope = _write_scope(source.parent, source.parent)
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(fd, "wb") as output:
+            with os.fdopen(_open_for_read(source, source_scope), "rb") as origin:
+                while block := origin.read(1 << 20):
+                    digest.update(block)
+                    output.write(block)
+        expected = _stream_digest(source)
+        if f"sha256:{digest.hexdigest()}" != expected:
+            raise SyncRefused(
+                "incomplete_replica",
+                f"Recovery source {source.name!r} changed while it was copied; retry recovery.",
+            )
+        _replace_at(staged, destination, scope)
+    except BaseException:
+        _unlink_at(destination.parent, staged.name, scope)
+        raise
+
+
 def _fetch_item(
     ask: Callable[[dict[str, Any]], dict[str, Any]],
     *,
@@ -2314,6 +2898,7 @@ def _fetch_item(
     source_start: int,
     source_end: int,
     dest_path: Path,
+    scope: _WriteScope,
     whole_digest: str,
     final_bytes: int,
     stop: Callable[[], bool] | None,
@@ -2331,7 +2916,7 @@ def _fetch_item(
     truncates and starts the file again: an unverified splice is a corrupt
     conversation that no later check would catch, and a re-send is only slow.
     """
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    _assert_contained(scope, dest_path, leaf_link=False)
     existing = dest_path.stat().st_size if dest_path.is_file() else 0
     offset = source_start
     resumed = 0
@@ -2357,7 +2942,7 @@ def _fetch_item(
                         "plan_id": plan,
                         "name": name,
                         "prefix_bytes": existing,
-                        "prefix_digest": _file_prefix_digest(dest_path, existing),
+                        "prefix_digest": _file_prefix_digest(dest_path, existing, scope=scope),
                         # The holder's copy of the plan's stamp for this member, so the
                         # owner answers "may I serve this?" with ONE stat instead of
                         # re-hashing the copy set (review round 2, MAJOR 2).
@@ -2394,12 +2979,12 @@ def _fetch_item(
     # ``os.replace`` on the same filesystem means a reader of this directory sees
     # either the previous complete copy or the new complete copy, and an
     # interrupted attempt costs a re-send rather than the last good copy.
-    staged = dest_path.with_name(f".{dest_path.name}.{os.getpid()}.fetch")
-    staged.unlink(missing_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY | (os.O_APPEND if keep else 0)
+    fd, staged = _open_stage(dest_path, scope, flags, suffix="fetch")
     try:
-        with staged.open("ab" if keep else "wb") as handle:
+        with os.fdopen(fd, "ab" if keep else "wb") as handle:
             if keep:
-                _copy_prefix(dest_path, handle, keep)
+                _copy_prefix(dest_path, handle, keep, scope=scope)
             written = 0
             while offset < source_end:
                 if stop is not None and stop():
@@ -2443,17 +3028,16 @@ def _fetch_item(
             raise SyncRefused(
                 "digest_mismatch", f"the copy of {name} did not verify, so it was not kept"
             )
-        os.replace(staged, dest_path)
+        _replace_at(staged, dest_path, scope)
     except BaseException:
-        # The staging file is this attempt's own garbage and NEVER the live copy:
-        # removing it is what leaves the previous complete copy in place.
-        staged.unlink(missing_ok=True)
+        # The staging file is this attempt's own garbage and NEVER the live copy.
+        _unlink_at(dest_path.parent, staged.name, scope)
         raise
     return _FetchOutcome(written=written, resumed=resumed)
 
 
-def _write_link(dest_dir: Path, name: str, target: str, digest: str) -> None:
-    """Write the carried symlink ``name`` under ``dest_dir``, pointing at ``target``.
+def _write_link(scope: _WriteScope, name: str, target: str, digest: str) -> None:
+    """Write the carried symlink ``name`` under the scope, pointing at ``target``.
 
     ``target`` is the RELATIVE text the owner computed (``_portable_link_target``), never
     the source's absolute spelling, which is what makes the link mean the same thing on
@@ -2465,6 +3049,7 @@ def _write_link(dest_dir: Path, name: str, target: str, digest: str) -> None:
     Staged and ``os.replace``d like every other member, so a reader of this directory sees
     the previous link or the new one and never a half-written one.
     """
+    dest_dir = scope.allowed_root
     path = _tree_entry_path(Path(dest_dir), name, landed=True)
     if path is None:
         raise SyncRefused("unknown_item", f"{name} is not part of a session copy")
@@ -2473,20 +3058,20 @@ def _write_link(dest_dir: Path, name: str, target: str, digest: str) -> None:
             "digest_mismatch",
             f"the link {name} did not arrive as the owner described it, so it was not " "written",
         )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    staged = path.with_name(f".{path.name}.{os.getpid()}.link")
-    staged.unlink(missing_ok=True)
+    staged = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(4).hex()}.link")
     try:
-        os.symlink(target, staged)
-        os.replace(staged, path)
-    except OSError as exc:
-        staged.unlink(missing_ok=True)
+        _symlink_at(target, path.parent, staged.name, scope)
+        _replace_at(staged, path, scope, replacing_link=True)
+    except (OSError, SyncRefused) as exc:
+        _unlink_at(path.parent, staged.name, scope)
+        if isinstance(exc, SyncRefused):
+            raise
         raise SyncRefused(
             "no_replica", f"the link {name} could not be written on this device ({exc})"
         ) from exc
 
 
-def _copy_prefix(source: Path, handle: Any, count: int) -> None:
+def _copy_prefix(source: Path, handle: Any, count: int, *, scope: _WriteScope) -> None:
     """Copy ``source``'s first ``count`` bytes into the staging ``handle``.
 
     The bytes are the caller's already-verified prefix (``keep`` is only ever set
@@ -2495,7 +3080,7 @@ def _copy_prefix(source: Path, handle: Any, count: int) -> None:
     still has to pass before the file is adopted.
     """
     remaining = count
-    with source.open("rb") as origin:
+    with os.fdopen(_open_for_read(source, scope), "rb") as origin:
         while remaining > 0:
             block = origin.read(min(1 << 20, remaining))
             if not block:
@@ -2510,11 +3095,14 @@ def _copy_prefix(source: Path, handle: Any, count: int) -> None:
         )
 
 
-def _file_prefix_digest(path: Path, prefix_bytes: int) -> str:
+def _file_prefix_digest(path: Path, prefix_bytes: int, *, scope: _WriteScope | None = None) -> str:
     """sha256 of the first ``prefix_bytes`` of ``path``, streamed."""
     digest = hashlib.sha256()
     remaining = prefix_bytes
-    with path.open("rb") as handle:
+    fd = (
+        _open_for_read(path, scope) if scope is not None else os.open(path, os.O_RDONLY | _O_BINARY)
+    )
+    with os.fdopen(fd, "rb") as handle:
         while remaining > 0:
             block = handle.read(min(1 << 20, remaining))
             if not block:
@@ -2586,8 +3174,12 @@ def sync_from(
     a copy to a device that had already been handed the id, and made a REFUSED move
     mutate the source's stamp (review round 1, MINOR 1).
     """
+    _session_component(session_id)
     destination = Path(into) if into is not None else replica_dir(root, session_id)
     blobs = Path(attachments_root) if attachments_root is not None else destination
+    anchor = _common_anchor(Path(root), destination, blobs)
+    _write_scope(anchor, destination)
+    _write_scope(anchor, blobs / ATTACHMENTS_DIRNAME)
     destination.mkdir(parents=True, exist_ok=True)
     cursor = read_replica_cursor(root, session_id).get("cursor") if write_cursor else None
     have: dict[str, Any] = held_report(destination, blobs)
@@ -2795,8 +3387,6 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
     ``origin`` supplies ("copy of <id> from <device>"); a resurrected id costs a
     forked trajectory.
     """
-    import shutil
-
     from local_operator.fork import (
         FORK_BOUNDARY_NAME,
         FORK_BOUNDARY_VERSION,
@@ -2827,7 +3417,9 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
             f"a copy of {session_id} cannot be recovered under the same id; the device "
             "that holds the original would become a second writer",
         )
-    target = Path(root) / "sessions" / new_id
+    target = session_dir(root, _session_component(new_id))
+    target_scope = _write_scope(Path(root), target)
+    store_scope = _write_scope(Path(root), Path(root) / ATTACHMENTS_DIRNAME)
     if target.exists():
         raise SyncRefused("in_progress", f"{new_id} already exists on this device")
     # CLAIM BEFORE the first byte, exactly as ``fork_session`` does, so a
@@ -2840,13 +3432,35 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
     copied: list[str] = []
     try:
         target.mkdir(parents=True, exist_ok=True)
+        # The replica is peer-authored too. Validate its links as one graph against
+        # the NEW session root before copying files or publishing shared attachments.
+        carried_links = [{"name": name, "link": link} for name, link in tree_link_entries(source)]
+        _validate_plan_destinations(
+            target, target, {"items": carried_links}, target_scope, target_scope
+        )
+        for name in [*tree_entry_names(source), *family_entries(source)]:
+            _assert_contained(_write_scope(source, source), source / name, leaf_link=False)
+        blob_source = source / ATTACHMENTS_DIRNAME
+        _assert_contained(_write_scope(source, source), blob_source, leaf_link=False)
+        if blob_source.is_dir():
+            for blob in sorted(blob_source.glob("*.bin")):
+                _assert_contained(_write_scope(blob_source, blob_source), blob, leaf_link=False)
+                sidecar = blob.with_name(f"{blob.stem}{ATTACHMENT_SIDECAR_SUFFIX}")
+                if sidecar.exists() or sidecar.is_symlink():
+                    _assert_contained(
+                        _write_scope(blob_source, blob_source), sidecar, leaf_link=False
+                    )
         for name in COPY_SET_NAMES:
             if name in NEVER_COPIED:
                 continue
             candidate = source / name
-            if not candidate.is_file():
+            if not candidate.is_file() or candidate.is_symlink():
+                if candidate.is_symlink():
+                    raise SyncRefused(
+                        "incomplete_replica", f"Recovery member {name!r} is a symbolic link."
+                    )
                 continue
-            shutil.copyfile(candidate, target / name)
+            _copy_contained(candidate, target / name, target_scope)
             copied.append(name)
         # THE KEYED FAMILY MEMBERS COME TOO (the child-attribution receipts). They are
         # top-level FILES in the session directory exactly like the names above, but
@@ -2854,7 +3468,7 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         # an exact-name loop. Without this a recovered session loses the only evidence
         # of how its children ended.
         for name in family_entries(source):
-            shutil.copyfile(source / name, target / name)
+            _copy_contained(source / name, target / name, target_scope)
             copied.append(name)
         # THE COPY SET'S TREES COME TOO, or the recovered conversation silently
         # loses the files its own agent wrote for it (``scratchpad/``), which is
@@ -2862,8 +3476,7 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         for name in tree_entry_names(source):
             candidate = source / name
             landing = target / name
-            landing.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(candidate, landing)
+            _copy_contained(candidate, landing, target_scope)
             copied.append(name)
         # AND THE CARRIED LINKS, recreated as links rather than as copies of what they
         # point at (review round 2's real-store finding: 6,629 of the operator's symlinks
@@ -2871,9 +3484,8 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         # a different thing from the move that filled the replica).
         for name, link_target in tree_link_entries(source):
             landing = target / name
-            landing.parent.mkdir(parents=True, exist_ok=True)
             try:
-                os.symlink(link_target, landing)
+                _symlink_at(link_target, landing.parent, landing.name, target_scope)
             except FileExistsError as exc:
                 # The directory was claimed and created by this call, so a name already
                 # present is either a member copied a moment ago (impossible: one name, one
@@ -2888,24 +3500,45 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         # recovered conversation renders broken images. The ``.json`` sidecar
         # carries the mime type and was already copied below; a blob without it is
         # a download of the wrong type, which is why the two travel together.
-        blob_source = source / "attachments"
+        if blob_source.is_symlink():
+            raise SyncRefused(
+                "incomplete_replica", "The replica attachment directory is a symbolic link."
+            )
         if blob_source.is_dir():
             store = Path(root) / "attachments"
-            store.mkdir(parents=True, exist_ok=True)
+            _assert_contained(store_scope, store, leaf_link=False)
             for blob in sorted(blob_source.glob("*.bin")):
-                shutil.copyfile(blob, store / blob.name)
+                if blob.is_symlink() or not blob.is_file():
+                    raise SyncRefused(
+                        "incomplete_replica", f"Recovery blob {blob.name!r} is not a real file."
+                    )
+                _copy_contained(blob, store / blob.name, store_scope)
                 sidecar = blob.with_name(f"{blob.stem}{ATTACHMENT_SIDECAR_SUFFIX}")
+                if sidecar.is_symlink():
+                    raise SyncRefused(
+                        "incomplete_replica",
+                        f"Recovery sidecar {sidecar.name!r} is a symbolic link.",
+                    )
                 if sidecar.is_file():
-                    shutil.copyfile(sidecar, store / sidecar.name)
+                    _copy_contained(sidecar, store / sidecar.name, store_scope)
         # The lineage boundary rides EVERY recovered copy, exactly as it rides a
         # fork: the transcript is inherited, and the model must be told not to
         # continue work that may still be running on the device it came from.
-        (target / FORK_BOUNDARY_NAME).write_text(
-            json.dumps({"version": FORK_BOUNDARY_VERSION, "created_at": time.time()}),
-            encoding="utf-8",
+        boundary = target / FORK_BOUNDARY_NAME
+        fd, staged_boundary = _open_stage(
+            boundary, target_scope, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY, suffix="fork"
         )
-    except OSError as exc:
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"version": FORK_BOUNDARY_VERSION, "created_at": time.time()}, handle)
+            _replace_at(staged_boundary, boundary, target_scope)
+        except BaseException:
+            _unlink_at(target, staged_boundary.name, target_scope)
+            raise
+    except (OSError, SyncRefused) as exc:
         release_session(target)
+        if isinstance(exc, SyncRefused):
+            raise
         raise SyncRefused(
             "no_replica", f"the synced copy could not be recovered on this device ({exc})"
         ) from exc

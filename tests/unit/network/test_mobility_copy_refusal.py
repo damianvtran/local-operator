@@ -265,6 +265,11 @@ def test_a_keep_copy_failure_leaves_the_source_running(
     assert "restart" not in message, message
     assert "nothing was changed" not in message, message
     assert "nothing has changed" not in message, message
+    # THE PARTIAL COPY IS ACTUALLY SWEPT, not merely described as discarded: a keep
+    # copy stages under a MINTED id, so the sweep must use the directory it was
+    # handed rather than the source's session id.
+    left = sorted((server_b.root / "network" / "staging").glob("*"))
+    assert left == [], f"the refused keep copy left its partial staging behind: {left}"
     # THE SOURCE ENGINE STILL RUNS: ``--keep`` never retires it, and no journal
     # entry was written for a copy (the launch guard reads that file).
     assert retired == [], retired
