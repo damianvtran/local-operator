@@ -105,14 +105,20 @@ const desktopManifest = join(sibling, "scripts/fixtures/condense.parity.manifest
 const desktopFixture = join(sibling, "scripts/fixtures/condense.parity.json");
 
 if (!existsSync(desktopManifest) || !existsSync(desktopFixture)) {
-	const message =
-		`the desktop checkout (${sibling}) has no generated condense fixture manifest, so drift cannot be compared. ` +
-		"This is ADVISORY: set LOCAL_OPERATOR_UI_REPO to a checkout of local-operator-ui, or pass " +
-		"--sibling <path>, to run the comparison. Pass --require-sibling to make this a failure instead.";
-	if (requireSibling) fail(message);
+	/*
+	 * ONE MESSAGE PER MODE, because they make opposite claims. The required mode is
+	 * failing on purpose, so telling the reader to "pass --require-sibling" (a flag
+	 * they already passed) sent whoever hit it looking in the wrong place - measured
+	 * while staging the CI ref swap: the required run printed the advisory sentence
+	 * with a FAILED prefix.
+	 */
+	const where = `the desktop checkout (${sibling}) has no generated condense fixture manifest`;
+	if (requireSibling)
+		fail(`${where}, so drift cannot be compared - and this lane requires the comparison (--require-sibling)`);
 	else
 		console.log(
-			`check-condense-parity: SKIPPED (advisory) - ${message}`,
+			`check-condense-parity: SKIPPED (advisory) - ${where}. Set LOCAL_OPERATOR_UI_REPO to a checkout of ` +
+				"local-operator-ui, or pass --sibling <path>; pass --require-sibling to make its absence a failure.",
 		);
 	process.exit(process.exitCode ?? 0);
 }
