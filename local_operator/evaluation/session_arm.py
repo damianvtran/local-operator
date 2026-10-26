@@ -2327,9 +2327,13 @@ class EpisodeSession:
         only session as unconfined (PR #2958 review, R1-1). ``getattr`` for the
         same reason ``open_episode_session`` types the session ``Any``: the
         root is a concrete ``Session`` member the protocol does not carry.
+        TRUTHINESS, not ``is not None``, to match the enforcement:
+        ``ToolConfinement.from_context`` treats a falsy root (``""``) as
+        unconfined, and the note must never claim an isolation the tools do
+        not enforce.
         """
 
-        return getattr(self.session, "_confinement_root", None) is not None
+        return bool(getattr(self.session, "_confinement_root", None))
 
     async def aclose(self) -> None:
         """Detach the sink, exit the SDK's open context, then the observer.

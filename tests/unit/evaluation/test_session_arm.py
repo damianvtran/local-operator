@@ -3525,7 +3525,7 @@ class TestAgentStopOutcome:
         monkeypatch: pytest.MonkeyPatch,
         short_scratch: Path,
         *,
-        installed_at_open: Path | None = None,
+        installed_at_open: Path | str | None = None,
         confinement_root: Path | None = None,
     ) -> str:
         run, session, _adapter = self._fixture(
@@ -3586,6 +3586,16 @@ class TestAgentStopOutcome:
             tmp_path, monkeypatch, short_scratch, confinement_root=tmp_path / "world"
         )
         assert "run in an isolated scratch workspace on a different machine" in first
+
+    @pytest.mark.asyncio
+    async def test_an_empty_installed_root_is_not_described_as_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # ``ToolConfinement.from_context`` treats a falsy root as unconfined,
+        # so an (artificial) ``""`` must not earn the isolation claim either.
+        first = await self._first_prompt(tmp_path, monkeypatch, short_scratch, installed_at_open="")
+        assert "run in a local workspace on a different machine" in first
+        assert "isolated" not in first
 
 
 class TestRenderPromptHeader:
