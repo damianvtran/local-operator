@@ -570,6 +570,14 @@ def _stub_verifiers(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
                 json.dumps(
                     {
                         "harness": {"version": "0.90.4"},
+                        # The real shape: the builder reads this block, so a fake
+                        # report missing a key must break the test, not silently
+                        # record null (review round 2, R2-1).
+                        "core_module_digest": "f" * 64,
+                        "core_source": {
+                            "sdk": {"module": "local_operator.sdk", "hash": "1" * 64},
+                            "loop": {"module": "local_operator.harness.loop", "hash": "2" * 64},
+                        },
                         "adapter": {
                             "version": "0.1.3",
                             "package_digest": "d" * 64,
@@ -614,6 +622,10 @@ def test_plan_mode_writes_nothing_under_out_and_is_refused_by_it(
     receipt = json.loads(plan_path.read_text())
     assert receipt["plan_digest"] == "a" * 64
     assert receipt["source_commit"] == "a" * 40
+    # R2-1/Q2-1: the plan directory is temporary, so a path to its pins file
+    # would dangle; the content digest is what survives the run.
+    assert "requirements_installed" not in receipt
+    assert len(receipt["requirements_digest"]) == 64
 
     assert arm.main(["--source-sha", "a" * 40, "--out", str(out)]) == 2
     assert not out.exists()
@@ -646,6 +658,12 @@ def test_execute_binds_to_the_plan_and_is_not_refused_for_existence(
     assert record["refusals"] == []
     assert record["package_digest_scope"].startswith("this install only")
     assert record["cross_build_identity"]["source_record_digest"] == "e" * 64
+    # R2-1: these were read from keys the producer never wrote, so they were null.
+    assert record["cross_build_identity"]["core_module_digest"] == "f" * 64
+    assert record["cross_build_identity"]["core_module_hashes"] == {
+        "sdk": "1" * 64,
+        "loop": "2" * 64,
+    }
     assert record["uv_version"] == "uv 0.10.8"
 
     # A drifted resolution must not install: the plan was the reviewed state.
@@ -681,8 +699,11 @@ def test_a_volatile_arm_root_is_refused(tmp_path: Path) -> None:
     ``runner.durable_root``, so the arm and the episode agree on "durable".
     """
 
+    # Explicitly under /private/tmp rather than tmp_path: pytest's basetemp is not
+    # always there (a custom --basetemp made this pass for the wrong reason), and
+    # the refusal is a property of the path, not of the runner.
     with pytest.raises(arm.BuildRefused, match="purge"):
-        arm.refuse_volatile(tmp_path / "arm", "arm root")
+        arm.refuse_volatile(Path("/private/tmp/lop-arm-volatile-probe"), "arm root")
 
 
 # --- the verifier ----------------------------------------------------------
@@ -713,8 +734,8 @@ def test_the_cross_build_digest_ignores_installer_written_rows() -> None:
     """``package_digest`` moves between installs of one commit; this must not.
 
     ``direct_url.json`` records the wheel path and ``uv_cache.json`` a timestamp,
-    and both live in the installed RECORD -- which is exactly why the selector
-    digest is a this-install identity and needs a companion for drift questions.
+    and both live in the installed RECORD -- which is why the selector digest is a
+    this-install identity and needs a companion for drift questions.
     """
 
     def record(extra: str) -> list[str]:
@@ -735,6 +756,40 @@ def test_the_cross_build_digest_ignores_installer_written_rows() -> None:
         ]
     )
     assert changed != first
+
+
+def test_the_record_self_row_is_excluded_by_its_path_field() -> None:
+    """A real RECORD self-row ends in ``,,``; a suffix test on the whole row missed it.
+
+    Excluding it matters because ``source_record_digest`` is meant to cover the
+    wheel's OWN files: RECORD cannot hash itself, and its row carries the
+    dist-info directory name.
+    """
+
+    without_self = ["lop_osworld_v2_adapter/__init__.py,sha256=aaa,1"]
+    with_self = [*without_self, "lop_osworld_v2_adapter-0.1.3.dist-info/RECORD,,"]
+    assert verify._source_record_digest(with_self) == verify._source_record_digest(without_self)
+
+
+def test_a_source_file_whose_name_contains_an_installer_row_is_kept() -> None:
+    """The installer rows are matched by exact path component, not by substring.
+
+    A prefix match would drop ``REQUESTED_handlers.py`` — real code — from the
+    identity, and would do it silently.
+    """
+
+    base = ["lop_osworld_v2_adapter/__init__.py,sha256=aaa,1"]
+    decoy = [
+        *base,
+        "lop_osworld_v2_adapter/REQUESTED_handlers.py,sha256=ccc,3",
+    ]
+    assert verify._source_record_digest(decoy) != verify._source_record_digest(base)
+    # ... and the installer's own exact-name row is still dropped.
+    with_installer = [
+        *base,
+        "lop_osworld_v2_adapter-0.1.3.dist-info/REQUESTED,sha256=ddd,0",
+    ]
+    assert verify._source_record_digest(with_installer) == verify._source_record_digest(base)
 
 
 # --- fixtures and helpers --------------------------------------------------

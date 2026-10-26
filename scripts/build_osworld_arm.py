@@ -734,7 +734,10 @@ def _plan(args: argparse.Namespace) -> int:
             "source_commit": args.source_sha,
             "overrides": overrides,
             "installation_overrides": install_overrides,
-            "requirements_installed": str(pins),
+            # A plan resolves inside a TemporaryDirectory, so a path here would
+            # name a file the receipt cannot outlive. The digest is the part that
+            # outlives it, and it is what a build can check itself against.
+            "requirements_digest": requirements_digest(pins),
             "dropped_rows": dropped,
             "uv_version": uv_version(),
             **plan_metadata_digests(metadata),
@@ -751,6 +754,29 @@ def _plan(args: argparse.Namespace) -> int:
     if args.plan is not None:
         print(f"PLAN RECEIPT: {args.plan}")
     return 0
+
+
+def requirements_digest(pins: Path) -> str:
+    """sha256 of the pinned rows, so a plan receipt outlives its temp directory."""
+
+    rows = [
+        line.strip()
+        for line in pins.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    return hashlib.sha256("\n".join(sorted(rows)).encode()).hexdigest()
+
+
+def _module_hashes(rows: Any) -> dict[str, str] | None:
+    """Per-module hashes from the verifier's ``core_source`` block, if present."""
+
+    if not isinstance(rows, Mapping):
+        return None
+    return {
+        key: value["hash"]
+        for key, value in rows.items()
+        if isinstance(value, dict) and isinstance(value.get("hash"), str)
+    }
 
 
 def policy(metadata: Metadata) -> tuple[list[str], list[str]]:
@@ -925,7 +951,10 @@ def _execute(args: argparse.Namespace) -> int:
                 ),
                 "cross_build_identity": {
                     "source_commit": args.source_sha,
-                    "core_module_hashes": recorded.get("core_module_hashes"),
+                    # The verifier writes core_module_digest and core_source; a key
+                    # it never writes would silently record null here (round 2).
+                    "core_module_digest": recorded.get("core_module_digest"),
+                    "core_module_hashes": _module_hashes(recorded.get("core_source")),
                     "source_record_digest": (recorded.get("adapter") or {}).get(
                         "source_record_digest"
                     ),

@@ -52,9 +52,13 @@ from typing import Any
 
 # RECORD rows the INSTALLER writes. Their content is a path or a timestamp, not
 # a property of the wheel, so they are excluded from the cross-build identity
-# while staying part of the selector's ``distribution_digest``.
+# while staying part of the selector's ``distribution_digest``. Matched by exact
+# PATH COMPONENT: a substring test would also drop a real source file such as
+# ``.../REQUESTED_handlers.py`` and quietly change the identity (round 2).
 _INSTALLER_ROWS = frozenset({"INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json"})
-_INSTALLER_SUFFIXES = tuple(f"/{name}" for name in _INSTALLER_ROWS)
+# RECORD's own row: ``<dist-info>/RECORD,,`` -- unhashed, and its path names the
+# metadata directory rather than a wheel file.
+_RECORD_SELF = "RECORD"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -172,13 +176,18 @@ def _source_record_digest(record_rows: list[str]) -> str:
     for row in record_rows:
         if not row.strip():
             continue
-        if row.endswith("/RECORD") or row == "RECORD":
-            continue
-        if any(part in row for part in _INSTALLER_SUFFIXES):
+        component = _record_path(row).rsplit("/", 1)[-1]
+        if component == _RECORD_SELF or component in _INSTALLER_ROWS:
             continue
         kept.append(row)
     canonical = "\n".join(sorted(kept))
     return hashlib.sha256(f"adapter-source-record-v1\n{canonical}".encode()).hexdigest()
+
+
+def _record_path(row: str) -> str:
+    """The path field of a RECORD row: ``path,hash,size``, or ``path,,``."""
+
+    return row.split(",", 1)[0]
 
 
 def _installed_versions() -> dict[str, str]:
