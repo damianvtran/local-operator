@@ -241,15 +241,82 @@ async def test_an_unrelated_400_is_not_retried() -> None:
     assert clients._ANTHROPIC_DIAGNOSTICS_REFUSED[0] is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "tools.0.name: run_diagnostics is not a valid tool name",
+        "tools.0.input_schema.properties.diagnostics_level: invalid type",
+        "messages.1.content.0.tool_use.input: diagnostics_report too long",
+        "diagnostics_level: Extra inputs are not permitted",
+        "tools.0.input_schema.properties.diagnostics: invalid type",
+    ],
+)
+async def test_a_400_that_merely_mentions_diagnostics_does_not_latch(message: str) -> None:
+    """Only the field's own refusal shape latches; a tool/schema path containing
+    the word is an ordinary request defect and must surface unretried."""
+    from local_operator.providers.failover import ProviderError
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(
+            400, json={"error": {"type": "invalid_request_error", "message": message}}
+        )
+
+    with pytest.raises(ProviderError):
+        await _collect(_client(handler).stream(_request(cache_diagnostics=True), "sk-test"))
+    assert len(calls) == 1
+    assert clients._ANTHROPIC_DIAGNOSTICS_REFUSED[0] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "diagnostics: Extra inputs are not permitted",
+        "diagnostics.previous_message_id: Input should be a valid string",
+        "messages: ok, but diagnostics: Extra inputs are not permitted",
+    ],
+)
+async def test_the_field_refusal_shapes_latch(message: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "diagnostics" in json.loads(request.content):
+            return httpx.Response(
+                400, json={"error": {"type": "invalid_request_error", "message": message}}
+            )
+        return httpx.Response(
+            200, content=_sse({"id": "msg_ok"}), headers={"content-type": "text/event-stream"}
+        )
+
+    await _collect(_client(handler).stream(_request(cache_diagnostics=True), "sk-test"))
+    assert clients._ANTHROPIC_DIAGNOSTICS_REFUSED[0] is True
+
+
 # -- the conversation chain (SessionStreamFn) ------------------------------------
 
 
-def _anthropic_stream_fn(tmp_path, monkeypatch, session_id: str, bodies: list[dict[str, Any]]):
+def _anthropic_stream_fn(
+    tmp_path,
+    monkeypatch,
+    session_id: str,
+    bodies: list[dict[str, Any]],
+    snapshots: list[CallSnapshot] | None = None,
+    diagnostics: Any = None,
+):
+    """A real ``create_stream_fn`` over a mock Anthropic wire.
+
+    ``snapshots`` collects what ``_record_usage`` hands the recorder, so the
+    ledger wiring is asserted end to end; ``diagnostics`` is the
+    ``message_start.diagnostics`` every response carries.
+    """
     from local_operator import analytics
     from local_operator.model.configure import create_stream_fn
     from local_operator.providers.auth_store import AuthStore
 
-    monkeypatch.setattr(analytics, "record_call", lambda snapshot: None)
+    sink = snapshots if snapshots is not None else []
+    monkeypatch.setattr(analytics, "record_call", sink.append)
     counter = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -258,7 +325,10 @@ def _anthropic_stream_fn(tmp_path, monkeypatch, session_id: str, bodies: list[di
         counter["n"] += 1
         return httpx.Response(
             200,
-            content=_sse({"id": f"msg_{session_id}_{counter['n']}", "diagnostics": None}),
+            content=_sse(
+                {"id": f"msg_{session_id}_{counter['n']}", "diagnostics": diagnostics},
+                cache_write=30_000,
+            ),
             headers={"content-type": "text/event-stream"},
         )
 
@@ -302,6 +372,68 @@ async def test_turns_chain_per_conversation_and_helpers_stay_out(tmp_path, monke
         {"previous_message_id": "msg_p_1"},  # turn 2 skips the aside's response
         {"previous_message_id": None},  # the fork starts its OWN chain
         {"previous_message_id": "msg_p_3"},  # parent unaffected by the child's id
+    ]
+
+
+async def _mounted(tmp_path, monkeypatch, bodies, **kwargs):
+    stream, store, handler = _anthropic_stream_fn(tmp_path, monkeypatch, "p", bodies, **kwargs)
+    await stream._http.aclose()
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream._transport.http = stream._http
+    return stream, store
+
+
+def _turn() -> ChatRequest:
+    spec = ModelSpec(provider="anthropic", model_id="claude-haiku-4-5")
+    return ChatRequest(model=spec, messages=[Message.user("hi")])
+
+
+@pytest.mark.asyncio
+async def test_an_undiagnosed_start_does_not_advance_the_chain(tmp_path, monkeypatch) -> None:
+    """A turn whose response carries no verdict (here: the latch is on, so the
+    key was not sent and the API kept no fingerprint) must not become the next
+    turn's ``previous_message_id``: the comparison could never find it."""
+    bodies: list[dict[str, Any]] = []
+    stream, store = await _mounted(tmp_path, monkeypatch, bodies)
+    try:
+        await _collect(stream(_turn(), None))  # msg_p_1, diagnosed
+        clients._ANTHROPIC_DIAGNOSTICS_REFUSED[0] = True
+        await _collect(stream(_turn(), None))  # msg_p_2, NOT diagnosed
+        clients._ANTHROPIC_DIAGNOSTICS_REFUSED[0] = False
+        await _collect(stream(_turn(), None))
+    finally:
+        await stream.close()
+        store.close()
+    diag = [body.get("diagnostics", "absent") for body in bodies]
+    assert diag == [
+        {"previous_message_id": None},
+        "absent",
+        {"previous_message_id": "msg_p_1"},  # skips the undiagnosed msg_p_2
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_verdict_reaches_the_call_snapshot(tmp_path, monkeypatch) -> None:
+    """``StreamStartEvent`` -> ``_record_stream`` -> ``_record_usage`` ->
+    ``CallSnapshot``: the ledger columns are the deliverable, so the wiring is
+    asserted on what the recorder actually receives, not on a hand-built row."""
+    bodies: list[dict[str, Any]] = []
+    snapshots: list[CallSnapshot] = []
+    reason = {"cache_miss_reason": {"type": "tools_changed", "cache_missed_input_tokens": 777}}
+    stream, store = await _mounted(
+        tmp_path, monkeypatch, bodies, snapshots=snapshots, diagnostics=reason
+    )
+    try:
+        await _collect(stream(_turn(), None))
+        await _collect(stream(_turn(), None))
+        await _collect(stream(_turn().model_copy(update={"purpose": "aside"}), None))
+    finally:
+        await stream.close()
+        store.close()
+    assert [(s.purpose, s.cache_miss_type, s.cache_missed_tokens) for s in snapshots] == [
+        ("turn", "tools_changed", 777),
+        ("turn", "tools_changed", 777),
+        ("aside", "", 0),  # undiagnosed: the column reads '' rather than a guess
     ]
 
 

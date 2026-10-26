@@ -3689,6 +3689,13 @@ class SessionStreamFn:
         # never shared: ``fork`` builds a fresh stream, so a subagent starts its
         # own chain at ``None`` and can never be diffed against its parent's
         # prompt (a guaranteed, meaningless ``system_changed``).
+        #
+        # KNOWN GAP: not persisted, so a RESUMED session (a new process) starts
+        # again at ``None`` and its first turn records ``baseline``, even when
+        # an edited instruction file just rewrote the whole prefix. Seeding it
+        # from the transcript would recover those attributions (a stale id is
+        # harmless: the API answers ``previous_message_not_found``); deferred
+        # on PR #2984 (QA Q1).
         self._cache_diagnostics_previous_id: str | None = None
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
@@ -6826,6 +6833,11 @@ class SessionStreamFn:
                 # turn served elsewhere (or with the latch off) would name an id
                 # the comparison cannot find. The latest attempt supersedes,
                 # exactly as ``StreamStartEvent`` documents for retries.
+                # Advanced on ``message_start`` rather than at stream end on
+                # purpose: the API fingerprints the REQUEST when it accepts
+                # it, so even a stream that dies afterwards left a comparable
+                # entry, and the worst case is a benign
+                # ``previous_message_not_found`` on the next turn.
                 self._cache_diagnostics_previous_id = event.response_id
             yield event
 

@@ -4200,6 +4200,14 @@ def _anthropic_stream_error(error: Mapping[str, Any]) -> ProviderError:
 #: rejects the key must cost one retried request, never a turn, and never one
 #: wasted round trip per call for the rest of the process. A list so the latch
 #: is a mutation rather than a ``global`` rebinding; tests reset it.
+#:
+#: PROCESS-wide rather than keyed by credential/workspace/model, deliberately.
+#: The cost is that one refusing org or model (e.g. a ZDR "covered model" that
+#: answers 400 rather than ``unavailable``) blinds diagnostics for every other
+#: account in the same process until it restarts. That costs telemetry only,
+#: never a turn, and no refusal has ever been observed, while a keyed latch adds
+#: state whose key (org id is not known for API keys) would itself be a guess.
+#: Revisit with a ``(credential, model)`` key if a real refusal shows up.
 _ANTHROPIC_DIAGNOSTICS_REFUSED: list[bool] = [False]
 
 #: ``StreamStartEvent.cache_miss_type`` values that are NOT a prefix break:
@@ -4242,15 +4250,21 @@ def _anthropic_cache_diagnosis(
 async def _refuses_diagnostics(response: httpx.Response) -> bool:
     """Whether an error response is the API rejecting the ``diagnostics`` key.
 
-    Matched on status 400 plus the field NAME in the provider's own message
-    (the shape of every unknown-field refusal, e.g. ``diagnostics: Extra
-    inputs are not permitted``), never on status alone: an ordinary 400 is a
-    defect in the request and must surface unchanged rather than be retried.
+    Matched on status 400 plus the field NAME in the refusal's own shape — the
+    message starts with ``diagnostics`` or names it as a path (``diagnostics:``
+    / ``diagnostics.``, e.g. ``diagnostics: Extra inputs are not permitted``) —
+    never on status alone: an ordinary 400 is a defect in the request and must
+    surface unchanged. Never on a bare substring either: a 400 about a tool or
+    schema path that merely CONTAINS the word (``tools.0.name: run_diagnostics
+    ...``) would otherwise switch the feature off for the whole process.
     """
     if response.status_code != 400:
         return False
     await response.aread()
-    return "diagnostics" in _extract_error_message(response, _error_payload(response)).lower()
+    message = _extract_error_message(response, _error_payload(response)).strip().lower()
+    # ``^diagnostics\b`` (not a bare ``startswith``) so ``diagnostics_level: ...``
+    # opening a message about some OTHER field cannot latch either.
+    return bool(re.search(r"^diagnostics\b|(?<![\w.])diagnostics[:.]", message))
 
 
 def _anthropic_cache_marker_ttl_ms(body: dict[str, Any]) -> int:

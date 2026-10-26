@@ -4368,8 +4368,10 @@ class ChatRequest(BaseModel):
     #: compared against another conversation's response. Metadata, not
     #: content: only ``AnthropicClient._build_body`` reads it, and only for the
     #: first-party API (Bedrock/Vertex/proxies do not offer the feature).
-    cache_diagnostics: bool = False
-    cache_diagnostics_previous_id: str | None = None
+    #: Excluded from dumps and ``repr`` like the neighbouring transport
+    #: metadata: it is request policy for one wire, not conversation state.
+    cache_diagnostics: bool = Field(default=False, exclude=True, repr=False)
+    cache_diagnostics_previous_id: str | None = Field(default=None, exclude=True, repr=False)
     # Native reasoning is opaque: use provider-reported token counts rather
     # than treating encrypted bytes as text. Populated only after replay checks.
     native_context_tokens: int = Field(default=0, exclude=True, repr=False)
