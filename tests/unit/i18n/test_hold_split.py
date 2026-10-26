@@ -48,8 +48,12 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # release: `relay.approvals` (17 keys, the approval-scope copy main added
     # as literals) and the restored 77-key `relay.asks`. Both were independently
     # audited at these bytes on 2026-10-25 (four MINOR findings on relay.asks,
-    # nits elsewhere, no blocker/major), so the cardinality is 83.
-    assert len(chinese) == 83
+    # nits elsewhere, no blocker/major), so the cardinality went 81 -> 83.
+    # The borderless relay redesign's own audited `relay.chrome` row (the
+    # namespace its English freeze minted, translated and independently audited
+    # at these bytes on 2026-10-25) is the eighty-fourth: it is CARRIED, so the
+    # set equality below already requires its row, and the pin moves with it.
+    assert len(chinese) == 84
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -95,8 +99,11 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # `wire.errors.desktop` -- THIRTY-FIVE (both newly carried, 30 and 84 keys).
     # The relay.asks re-audit adds the 77-key `hi/relay.asks` row -- THIRTY-SIX.
     # The approvals slice adds the independently audited 17-key
-    # `hi/relay.approvals` row -- THIRTY-SEVEN.
-    assert len(hindi) == 37
+    # `hi/relay.approvals` row -- THIRTY-SEVEN. The borderless relay redesign's
+    # audited `relay.chrome` row (its English freeze minted the namespace; the
+    # Hindi bytes were translated and independently audited on 2026-10-25 at
+    # these source bytes) makes it THIRTY-EIGHT.
+    assert len(hindi) == 38
     assert all(entry["status"] == "passed" for entry in hindi)
 
 
