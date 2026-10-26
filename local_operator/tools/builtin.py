@@ -22162,6 +22162,17 @@ def _browser_ownership_text(state: str, has_surface: bool) -> str:
             "Nothing to recover: an allocation was started but no tab exists. If 'open' "
             "reported the 8-tab limit, none can be allocated until a tab is released."
         )
+    if has_surface:
+        # The desktop app reports a live, already-held tab as ``allocated``
+        # (local-operator-ui src/main/browser/ownership.ts), a state this table
+        # did not name, so it fell through to the "no browser tab" default while
+        # the same record held ``ui:<n>`` and ``open`` would reuse it. The handle
+        # being present is the fact that matters: any state not settled above
+        # that comes WITH a tab means the tab is usable.
+        return (
+            f"Browser tab available ({state or 'unknown'}); it is still held by this "
+            "session, so 'open' reuses it."
+        )
     return "Nothing to recover: this session has no browser tab. Use 'open' to start one."
 
 
