@@ -1948,6 +1948,33 @@ async def test_glob_refuses_a_scheme_pattern_instead_of_matching_nothing(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["glob", "grep"])
+@pytest.mark.parametrize(
+    ("url", "expected", "scratch_remedy"),
+    [
+        ("skill://foo/*", 'read(path="skill://foo")', False),
+        ("spill://abc123", 'read(path="spill://abc123?q=<regex>")', False),
+        ("scratchpad://*.md", 'read(path="scratchpad://<name>")', True),
+    ],
+    ids=["skill", "spill", "scratchpad"],
+)
+async def test_the_scheme_refusal_remedy_fits_the_scheme(
+    tmp_path, tool, url, expected, scratch_remedy
+) -> None:
+    """The redirect names the call that serves THAT scheme (QA round 2 N1 on
+    #2982): ``glob skill://foo/*`` used to be told to read a scratchpad file, a
+    route that cannot lead to a skill. Scratchpad keeps the existing remedy."""
+    context, _pad, tools = _scratchpad_context(tmp_path)
+    args = {"pattern": url} if tool == "glob" else {"pattern": "x", "path": url}
+
+    result = await tools[tool].execute("c", args, None, None, context)
+    assert result.is_error is True
+    assert f"{tool} takes only filesystem paths" in result.text
+    assert expected in result.text, result.text
+    assert ("scratchpad://<name>" in result.text) is scratch_remedy, result.text
+
+
+@pytest.mark.asyncio
 async def test_a_drive_shaped_argument_is_refused_and_that_is_disclosed(tmp_path) -> None:
     """``C://x.txt`` is refused as scheme ``C`` (review round 1, R5).
 
@@ -6403,7 +6430,7 @@ def test_ripgrep_keeps_the_records_a_stop_produced_even_with_no_returncode(
     bug reopened through a narrower door, so the guard is now the stop itself. The
     process below never reports a returncode at all.
     """
-    proc = _StubbornProc([b"src/a.py:1:1:needle\n"])
+    proc = _StubbornProc([b"src/a.py\x001:1:needle\n"])
     monkeypatch.setattr(builtin, "_rg_binary", lambda: "/fake/rg")
 
     async def _spawn(*args, **kwargs):
@@ -9225,6 +9252,156 @@ async def test_grep_clips_around_the_match_after_invalid_utf8(
     body = _grep_body(result)
     assert body.startswith("lat.js:1:[\u2026"), body[:80]
     assert "NEEDLE_XYZ" in body, "the clipped window lost the match"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize("context_lines", [0, 1])
+async def test_grep_elision_range_points_at_the_hidden_matches_in_the_spill(
+    tools, context, tmp_path, monkeypatch, engine, context_lines
+) -> None:
+    """The footer's ``range=`` is followed verbatim and must return exactly the
+    matches the body elided (QA Q7 on #2982). The body carries ``--`` separators
+    and context rows the one-match-per-line spill does not, so a span counted on
+    the body returned the wrong matches — or, with context, nothing at all."""
+    (tmp_path / "many").mkdir()
+    for i in range(18):
+        (tmp_path / "many" / f"f{i:02d}.txt").write_text(
+            f"pre\nHIT_QA_{i:02d} " + "z" * 600 + "\npost\n"
+        )
+    args: dict[str, Any] = {"pattern": "HIT_QA", "path": "many"}
+    if context_lines:
+        args["context_lines"] = context_lines
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    shown = set(re.findall(r"HIT_QA_(\d\d)", result.text))
+    hidden = {f"{i:02d}" for i in range(18)} - shown
+    assert hidden, "the fixture must overflow the budget for this test to mean anything"
+    hint = re.search(r'read\(path="(spill://[^"]+)", range="(\d+-\d+)"\)', result.text)
+    assert hint, result.text[-600:]
+    assert "body lines elided — their matches are lines " + hint.group(2) in result.text
+    page = await _call(tools, "read", {"path": hint.group(1), "range": hint.group(2)}, context)
+    assert set(re.findall(r"HIT_QA_(\d\d)", page.text)) == hidden, page.text[:400]
+
+
+async def _follow_grep_footer(tools, context, result) -> tuple[str, ToolResult]:
+    """Run the footer's printed ``read`` call verbatim; returns ``(range, page)``."""
+    hint = re.search(r'read\(path="(spill://[^"]+)", range="(\d+-\d+)"\)', result.text)
+    assert hint, result.text[-600:]
+    page = await _call(tools, "read", {"path": hint.group(1), "range": hint.group(2)}, context)
+    assert page.is_error is False, page.text
+    return hint.group(2), page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize(("skip", "context_lines"), [(10, 0), (50, 0), (10, 2)])
+async def test_grep_a_page_past_the_end_is_a_clean_empty_result(
+    tools, context, tmp_path, monkeypatch, engine, skip, context_lines
+) -> None:
+    """``skip`` at or past the match count is a page a model reaches by obeying
+    the previous page's own ``use skip=N`` — it must answer ``0 match(es)``, not
+    crash. The empty body has no match row to map the spill pointer onto, and
+    that IndexError'd in ``_grep_spill_remap`` (QA Q1 on #2997)."""
+    (tmp_path / "t.txt").write_text("".join(f"NEEDLE row {i}\nfiller\n" for i in range(10)))
+    args = {"pattern": "NEEDLE", "skip": skip, "context_lines": context_lines}
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    assert result.is_error is False, result.text
+    assert result.text.startswith("0 match(es) for 'NEEDLE' of 10 "), result.text
+    # Every stored match is one this page did not show; the pointer serves them.
+    span, page = await _follow_grep_footer(tools, context, result)
+    assert span == "1-10"
+    assert len(re.findall(r"NEEDLE row \d", page.text)) == 10, page.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize("context_lines", [0, 1])
+async def test_grep_the_last_page_points_back_at_the_skipped_matches(
+    tools, context, tmp_path, monkeypatch, engine, context_lines
+) -> None:
+    """On the final page nothing follows it, so ``shown + 1`` printed
+    ``range="252-251"``, which ``read`` rejects (QA Q2 on #2997). What the page
+    hides is the matches before it; the printed range must be followable and
+    return only those."""
+    (tmp_path / "t.txt").write_text("".join(f"N{i:03d}\nfiller\n" for i in range(251)))
+    args = {"pattern": "^N", "skip": 200, "context_lines": context_lines}
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    assert result.is_error is False, result.text
+    assert result.text.startswith("51 match(es) for '^N' of 251 "), result.text
+    shown = set(re.findall(r":N(\d{3})", _grep_body(result).split("\n[Full output", 1)[0]))
+    assert shown == {f"{i:03d}" for i in range(200, 251)}
+    span, page = await _follow_grep_footer(tools, context, result)
+    assert span == "1-200", span
+    assert set(re.findall(r":N(\d{3})", page.text)) == {f"{i:03d}" for i in range(200)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_a_line_separator_in_match_text_keeps_one_spill_line_per_match(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """rg splits lines only on ``\\n``, so its text could carry ``\\r``, form
+    feed, U+2028 … — and the spill store counts lines with ``splitlines``, so one
+    record became 2+ spill lines and the elision pointer drifted onto shown and
+    missed hidden matches (review R1 on #2997). A CR-rewritten progress log is
+    the realistic case. The Python engine splits with ``splitlines`` already, so
+    it is the parity control."""
+    seps = ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+    rows = [f"step {i}{seps[i % len(seps)]}HIT_{i:02d} " + "q" * 600 for i in range(18)]
+    (tmp_path / "build.log").write_text("\n".join(rows) + "\n", newline="")
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "HIT_"})
+
+    body = _grep_body(result).split("\n[Full output", 1)[0]
+    shown = set(re.findall(r"HIT_(\d\d)", body))
+    hidden = {f"{i:02d}" for i in range(18)} - shown
+    assert hidden, "the fixture must overflow the budget for this test to mean anything"
+    _span, page = await _follow_grep_footer(tools, context, result)
+    assert set(re.findall(r"HIT_(\d\d)", page.text)) == hidden, page.text[:600]
+    # One body row per match: no raw separator survives into the rendered text.
+    assert not any(sep in body for sep in seps), repr(body[:300])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_a_context_only_gap_does_not_claim_a_hidden_match(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """When the elided body span holds only context rows, the pointer collapses
+    onto the nearest match — which the body already shows here. The marker must
+    say no match was hidden rather than "their matches are lines k-k" (review R3
+    on #2997), and the printed range must still resolve."""
+    rows = ["HIT_FIRST"] + [f"ctx {i} " + "c" * 480 for i in range(20)] + ["HIT_LAST"]
+    (tmp_path / "t.txt").write_text("\n".join(rows) + "\n")
+    args = {"pattern": "HIT_", "context_lines": 10}
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    body = _grep_body(result)
+    assert "t.txt:1:HIT_FIRST" in body and "t.txt:22:HIT_LAST" in body, body[-800:]
+    assert "body lines elided — context rows only, no match hidden; the nearest match is " in body
+    assert "their matches are" not in body
+    span, page = await _follow_grep_footer(tools, context, result)
+    assert "HIT_" in page.text, page.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_context_survives_a_path_with_a_dash_digits_dash_segment(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """``dash-3-dir/a.txt-1-before`` is ambiguous in rg's default context grammar;
+    the old parse split inside the path and dropped the row, so rg showed no
+    context where the Python engine did. ``--null`` ends the path at a NUL."""
+    (tmp_path / "dash-3-dir").mkdir()
+    (tmp_path / "dash-3-dir" / "a.txt").write_text("before\nNEEDLE here\nafter\n")
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "NEEDLE", "context_lines": 1}
+    )
+    assert "dash-3-dir/a.txt:1-before" in result.text, result.text
+    assert "dash-3-dir/a.txt:2:NEEDLE here" in result.text, result.text
+    assert "dash-3-dir/a.txt:3-after" in result.text, result.text
 
 
 @pytest.mark.asyncio
