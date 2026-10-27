@@ -1222,7 +1222,13 @@ def test_admission_applies_the_granted_shares(
     # The audit trail: one placement row for the grant, and the admission itself.
     import tests.unit.network.test_relay_e2e as relay_e2e
 
-    events = relay_e2e._events(server_a)
+    # Wait for ``member_admitted``, don't read once: the relay seals the joiner's
+    # result frame (``sock.sendall``) BEFORE it records that row, so the ceremony
+    # this test drove can return while the relay thread has not written it yet —
+    # observed as a CI flake. ``credential.placement`` and ``pairing_confirmed``
+    # are written before the reply and need no wait; this bounded poll still fails
+    # the ``in`` check if the row never lands.
+    events = relay_e2e._await_event(server_a, "member_admitted")
     assert "credential.placement" in events
     assert "member_admitted" in events
     assert "pairing_confirmed" in events
