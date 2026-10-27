@@ -5765,6 +5765,126 @@ async def test_stop_and_cancel_stay_chained_behind_a_parked_prompt(
         runtime.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("frame", "ran"),
+    [
+        ({"op": "set_model", "provider": "openai", "model_id": "b"}, "set_model"),
+        (
+            {"op": "set_model", "provider": "openai", "model_id": "b", "effort": "high"},
+            "set_model_effort",
+        ),
+        ({"op": "set_effort", "effort": "high"}, "set_effort"),
+        # The desktop picker's route: ``/model`` forwarded as ``slash_result``.
+        (
+            {"op": "slash_result", "command": "model", "args": "openai/b", "images": []},
+            "run_slash_authoritative",
+        ),
+    ],
+    ids=["set_model", "set_model_effort", "set_effort", "slash_result-model"],
+)
+async def test_a_model_switch_is_not_queued_behind_a_parked_prompt(
+    frame: dict[str, Any], ran: str
+) -> None:
+    """The operator's ``/model did not run`` on a long manager: the switch's own lane.
+
+    A ``prompt`` sent mid-turn parks until the turn lock frees, and every later op
+    on that connection used to chain behind it — measured on a real runtime
+    (``scripts/bench_model_switch.py --condition parked``) as a ``set_model`` first
+    reaching the dispatcher 31.3 s after it was sent, long after the client's 15 s
+    ack bound and the desktop's 20 s deadline.
+
+    STRUCTURAL, not timed: the switch must RUN while the prompt ahead of it is
+    still parked (``turn_a_over`` is never set before the assertion), which the
+    old chain made impossible. The second half pins what the lane must keep: an
+    op admitted AFTER the switch still waits for it, so a send that follows a
+    ``/model`` cannot overtake it onto the old model.
+    """
+    handle = _BusyTurnHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+
+        writer.write(json.dumps({"op": "prompt", "req": 1, "text": "msg B"}).encode() + b"\n")
+        await writer.drain()
+        assert await asyncio.to_thread(handle.prompt_entered.wait, 5), "the prompt never parked"
+
+        writer.write(json.dumps({**frame, "req": 2}).encode() + b"\n")
+        # Sent behind the switch on the same connection: must not run before it.
+        writer.write(json.dumps({"op": "set_effort", "effort": "low", "req": 3}).encode() + b"\n")
+        await writer.drain()
+        # 5 s is the backstop, not the assertion: the red mode is "never, until
+        # the parked prompt's 10 s gate" — the switch is answered while it parks.
+        answer = "result" if ran == "run_slash_authoritative" else "ack"
+        await asyncio.wait_for(_until(reader, answer, 2), timeout=5.0)
+        assert not handle.turn_a_over.is_set(), "the switch must land while the prompt is parked"
+        names = [call[0] for call in handle.calls]
+        assert ran in names
+
+        await _until(reader, "ack", 3)
+        names = [call[0] for call in handle.calls]
+        followed = [i for i, call in enumerate(handle.calls) if call[1] == ("low",)]
+        assert followed and followed[0] > names.index(
+            ran
+        ), "an op sent after the switch ran before it — the lane broke ordering"
+
+        handle.turn_a_over.set()
+        assert (await _until(reader, "ack", 1))["detail"] == "prompt ok"
+    finally:
+        handle.turn_a_over.set()
+        if handle.tool.poll() is None:
+            handle.tool.kill()
+        handle.tool.wait()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_op_after_a_switch_still_waits_for_the_parked_op_the_switch_overtook() -> None:
+    """The chain stays TRANSITIVE across the switch lane.
+
+    A switch overtakes a parked ``prompt``; a ``steer`` sent after the switch must
+    still wait for that prompt as well as for the switch, or the lane would have
+    reordered two mutations that never asked to be (the reason the chain exists).
+    """
+    handle = _BusyTurnHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        writer.write(json.dumps({"op": "prompt", "req": 1, "text": "msg B"}).encode() + b"\n")
+        await writer.drain()
+        assert await asyncio.to_thread(handle.prompt_entered.wait, 5), "the prompt never parked"
+
+        writer.write(json.dumps({"op": "set_effort", "effort": "high", "req": 2}).encode() + b"\n")
+        writer.write(json.dumps({"op": "steer", "text": "after", "req": 3}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", 2)
+        await asyncio.sleep(0.2)  # a window in which an unchained steer would have run
+        assert "steer" not in [
+            call[0] for call in handle.calls
+        ], "the steer overtook the parked prompt through the switch lane"
+
+        handle.turn_a_over.set()
+        assert (await _until(reader, "ack", 1))["detail"] == "prompt ok"
+        await _until(reader, "ack", 3)
+        assert "steer" in [call[0] for call in handle.calls]
+    finally:
+        handle.turn_a_over.set()
+        if handle.tool.poll() is None:
+            handle.tool.kill()
+        handle.tool.wait()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
 class _SlowAdmissionHandle(FakeHandle):
     """A handle whose ``prompt`` is still being ADMITTED (no turn live) for a while.
 

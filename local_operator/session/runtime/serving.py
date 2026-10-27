@@ -5594,15 +5594,56 @@ class ServingSessionHandle(SessionHandle):
         if effort:
             switch["effort_choice"] = effort
         self._session.set_model(spec, **switch)
-        self._refresh_state()
+        # ``roster=False``: the child roster does not depend on the parent's
+        # model, and the full registry pass is the one cost here that grows
+        # with the roster (2.7 MB on the reported manager). The scheduled
+        # coalescer keeps the roster current on its own cadence.
+        self._refresh_state(roster=False)
         # The claim follows the model it is about: a switch can land on a
         # provider this host has no credential for, and a reader must not keep
         # reading the previous model's answer. ALL switch routes land here —
         # the phone's sheet, a peer's ``peer_set_model``, the desktop's
         # ``rehome_if_current`` — so this is the one place the claim can go
-        # stale from a model change.
-        self.publish_model_access()
+        # stale from a model change. Its credential read is SQLite, so it runs
+        # off the session loop; the switch itself has already landed above.
+        await self._publish_model_access_off_loop()
         return f"model: {self._projection.model_label}"
+
+    async def _publish_model_access_off_loop(self) -> None:
+        """:meth:`publish_model_access` with the credential read on a worker thread.
+
+        WHY. The read is a SQLite open + query against the auth store, and on
+        the session loop of a busy manager it was measured at up to 1.0 s
+        (``scripts/bench_model_switch.py --condition parked``) — a stall every
+        other client of that loop shared, during the one request the user is
+        actively waiting on. The read moves to a thread; the store write stays
+        on the loop that owns the store.
+
+        STALE-READ GUARD. Another switch can land while the read is in flight
+        (a second connection, a fallback edge); the claim is applied only if
+        the model it was computed for is still the one serving, so a slow read
+        can never overwrite a newer claim with an older model's answer. The
+        newer switch publishes its own.
+
+        Never raises, like the synchronous form.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            return
+        try:
+            from local_operator.providers.model_access import serving_model_access_here
+
+            spec = getattr(self._session, "effective_model", None) or self._session.model
+            selector = f"{spec.provider}/{spec.model_id}"
+            claim = await asyncio.to_thread(
+                serving_model_access_here, selector, config_dir=self._config_dir
+            )
+            now = getattr(self._session, "effective_model", None) or self._session.model
+            if f"{now.provider}/{now.model_id}" != selector:
+                return
+            store.refresh_model_access(claim)
+        except Exception:  # noqa: BLE001 — additive state never fails its edge
+            logger.debug("model access publication failed", exc_info=True)
 
     def publish_model_access(self) -> None:
         """Publish "can the session's model actually run here" (the composer band).
@@ -6025,7 +6066,9 @@ class ServingSessionHandle(SessionHandle):
         self._session.set_model(
             spec.model_copy(update={"reasoning_effort": effort}), effort_choice=effort
         )
-        self._refresh_state()
+        # No roster pass: an effort change cannot move a child row (see
+        # ``set_model_effort``), and that pass is what scaled with the roster.
+        self._refresh_state(roster=False)
         return f"effort: {effort}"
 
     @_on_session_loop

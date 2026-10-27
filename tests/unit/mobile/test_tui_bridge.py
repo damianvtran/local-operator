@@ -1169,7 +1169,7 @@ async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() 
     handle = TuiSessionHandle(App())  # type: ignore[arg-type]
     # The projection push is not what this test is about, and a fake app has no
     # runtime to fold.
-    handle._refresh_state = lambda: None  # type: ignore[method-assign]
+    handle._refresh_state = lambda **_: None  # type: ignore[method-assign]
 
     # THE PHONE'S OWN FRAME: ``locality="remote"`` and no capability claim at all.
     for command, args, lane in _PHONE_COMMANDS:

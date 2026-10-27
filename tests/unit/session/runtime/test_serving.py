@@ -2220,7 +2220,7 @@ async def test_a_chosen_effort_is_applied_with_the_model_on_this_owner(
         lambda spec, explicit=False, **kw: applied.append((spec, explicit)),
         raising=False,
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     await handle.set_model_effort("deepseek", "deepseek-flash", "max")
     await handle.set_model("deepseek", "deepseek-flash")
@@ -2263,7 +2263,7 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
     monkeypatch.setattr(
         session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     chosen = build_model_spec("deepseek", "deepseek-flash").model_copy(
         update={"reasoning_effort": "max"}
@@ -2323,7 +2323,7 @@ async def test_a_pair_only_switch_keeps_the_fast_dial(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     fast = build_model_spec("anthropic", "claude-opus-5").model_copy(update={"fast_mode": True})
     assert fast.supports_fast_mode, "the registry must sell this tier"
@@ -2360,7 +2360,7 @@ async def test_a_level_less_switch_carries_the_choice_not_the_clamp(
         session.model = spec
 
     monkeypatch.setattr(session, "set_model", _apply, raising=False)
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     session.model = build_model_spec("anthropic", "claude-opus-5").model_copy(
         update={"reasoning_effort": "max"}
@@ -2455,7 +2455,7 @@ async def test_a_level_this_model_cannot_express_is_clamped_not_refused(
     monkeypatch.setattr(
         session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     await handle.set_model_effort("deepseek", "deepseek-flash", "xhigh")
 
@@ -3186,7 +3186,7 @@ async def test_the_wire_op_refuses_a_decision_only_provider(
     monkeypatch.setattr(
         session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     with pytest.raises(ValueError) as refused:
         # MIXED CASE, deliberately: the wire takes the frame's strings verbatim, so the

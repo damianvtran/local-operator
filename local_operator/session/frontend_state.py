@@ -8387,6 +8387,49 @@ class FrontendStateStore:
         self._released_rows.adopt_from(self._state.jobs)
         return update
 
+    def refresh_model_selection(self, session: Any) -> FrontendUpdate | None:
+        """Publish ONLY the fields a model or effort switch moves.
+
+        WHY NOT ``refresh_from_session``. A switch changes the selected spec,
+        the serving spec, the chosen level and the window, and nothing else.
+        The full refresh rebuilds every job row, re-reads todos, wakes,
+        monitors, asks and the spend ledger as well, which on a long manager
+        costs time proportional to its roster: measured with
+        ``scripts/bench_model_switch.py`` (a 1,000-child roster),
+        ``refresh_from_session`` took 19 ms p50 / 133 ms max per call on the
+        session loop, and a genuine switch paid it twice (once directly, once
+        through the tier-tool rebuild). This is a constant-size mutate.
+
+        The fields and their derivations are exactly the ones
+        :meth:`refresh_from_session` writes for them, so the two cannot
+        disagree; keep them in step if one changes.
+        """
+        current = self._state
+        selected = getattr(session, "model", None)
+        effective = getattr(session, "effective_model", None) or selected
+        return self.mutate(
+            selected_model=(
+                selected.model_dump(mode="json") if isinstance(selected, ModelSpec) else selected
+            ),
+            effective_model=(
+                effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
+            ),
+            effort_displacement=effort_displacement(
+                selected, effective, getattr(session, "chosen_effort", None)
+            ),
+            # Same guard as the full refresh: a claim about a provider that is
+            # no longer serving is withdrawn until the owner republishes it.
+            model_access=(
+                current.model_access
+                if current.model_access is None
+                or current.model_access.provider == getattr(effective, "provider", None)
+                else None
+            ),
+            context_window=(
+                getattr(effective, "context_window", None) if effective is not None else None
+            ),
+        )
+
     def refresh_model_access(self, access: "FrontendModelAccess | None") -> FrontendUpdate | None:
         """Publish whether the session's selected model can run on this host.
 

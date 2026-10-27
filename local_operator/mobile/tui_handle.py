@@ -850,7 +850,8 @@ class TuiSessionHandle(SessionHandle):
                 self._app._run_slash_command(f"/effort {effort}")
 
         await self._on_app(apply)
-        self._refresh_state()
+        # No roster pass on a switch: see ``_refresh_state``.
+        self._refresh_state(roster=False)
         return f"model: {self._projection.model_label}"
 
     async def receive_peer_model(
@@ -1003,7 +1004,7 @@ class TuiSessionHandle(SessionHandle):
             self._app._run_slash_command(f"/effort {effort}")
 
         await self._on_app(apply)
-        self._refresh_state()
+        self._refresh_state(roster=False)
         return f"effort: {effort}"
 
     async def slash(
@@ -1936,7 +1937,7 @@ class TuiSessionHandle(SessionHandle):
             if task is asyncio.current_task():
                 self._detail_tasks.pop(job_id, None)
 
-    def _refresh_state(self) -> None:
+    def _refresh_state(self, *, roster: bool = True) -> None:
         session = self._session()
         self._fold.set_state(
             model_label=_effective_label(session),
@@ -1981,7 +1982,11 @@ class TuiSessionHandle(SessionHandle):
                 usage=usage,
                 spend_channels=store.spend_channels_copy(),
             )
-        comms = getattr(session, "_subagent_comms", None)
+        # ``roster=False`` is the model/effort switch's call: the child roster
+        # does not depend on the parent's model, and this registry pass is the
+        # part of the refresh that grows with the roster. Every folded event
+        # still runs it (the handler's call), so the roster stays current.
+        comms = getattr(session, "_subagent_comms", None) if roster else None
         if comms is not None:
             self._fold.set_subagent_details(comms)
 
