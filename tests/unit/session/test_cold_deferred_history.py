@@ -1565,3 +1565,28 @@ async def test_the_startup_replay_prewarm_files_no_record_for_an_archive_or_a_mo
     assert not _record_path(isolated_config, "archived000").exists()
     assert not _record_path(isolated_config, "moving00000").exists()
     assert moving.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_second_prewarm_over_an_untouched_journal_leaves_the_record_alone(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3009 review MINOR-1: a valid record is not rewritten by the next boot.
+
+    The parse still runs (the record carries no message list, and the RAM entry
+    needs one), but re-filing an identical record costs a temp file and a rename
+    every boot for nothing. Bytes AND mtime are asserted: equal bytes alone would
+    pass a rewrite that happened to produce the same content.
+    """
+    from local_operator.session import index_prewarm as prewarm
+
+    monkeypatch.setattr(prewarm, "free_bytes", lambda _root=None: 1 << 40)
+    monkeypatch.setattr(prewarm, "load_per_cpu", lambda: 0.0)
+    await seed_journal(isolated_config)
+    assert await prewarm.warm_replay_cache(isolated_config) == 1
+    record = _record_path(isolated_config)
+    before = (record.read_bytes(), record.stat().st_mtime_ns, record.stat().st_ino)
+
+    replay_cache.replay_cache().clear()  # the next boot: an empty RAM cache
+    assert await prewarm.warm_replay_cache(isolated_config) == 1
+    assert (record.read_bytes(), record.stat().st_mtime_ns, record.stat().st_ino) == before

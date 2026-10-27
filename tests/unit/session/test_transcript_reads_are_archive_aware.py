@@ -95,9 +95,6 @@ _ALLOWED: dict[str, str] = {
     "local_operator/session/index_prewarm.py::sessions_needing_warm": (
         "_is_archived(entry) continues before this stat"
     ),
-    "local_operator/session/index_prewarm.py::sessions_needing_replay": (
-        "_is_archived(entry) continues before this stat"
-    ),
     "local_operator/session/index_prewarm.py::_anchor_current": (
         "returns before the stat when the session is archived"
     ),

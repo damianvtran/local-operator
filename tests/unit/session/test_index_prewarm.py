@@ -732,9 +732,10 @@ async def test_teardown_cancels_a_warm_parked_in_a_request(tmp_path, monkeypatch
 async def test_the_model_warm_never_selects_an_archived_journal(tmp_path, monkeypatch):
     """An archived conversation stays out of the warm: it must not be decompressed.
 
-    This pins the INVARIANT, not a fix: the earlier selection already excluded an
-    archive, because ``_is_archived(entry)`` skipped it before any stat (this test
-    passes on that code too). What #2992 changed is HOW: selection now goes
+    The ARCHIVE ARM pins an INVARIANT, not a fix: the earlier selection already
+    excluded an archive, because ``_is_archived(entry)`` skipped it before any
+    stat, so that arm passes on both. The third session below is the
+    discriminator, and it fails on that code. What #2992 changed is HOW: selection now goes
     through ``compression.transcript_source``, the archive-aware resolver the
     ``test_transcript_reads_are_archive_aware`` guard requires, and skips a codec.
 
@@ -767,3 +768,74 @@ async def test_the_model_warm_never_selects_an_archived_journal(tmp_path, monkey
     assert compression.archive_path(both) == archive, "the archive must still sit beside it"
 
     assert prewarm._newest_journals(root, limit=8) == ["both", "plain"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["limit-1", "busy-host"])
+async def test_the_replay_warm_files_its_one_slot_for_the_users_journal(
+    tmp_path, monkeypatch, shape
+):
+    """PR #3009 review MAJOR-1: the replay warm's slot must go to a USER journal.
+
+    On a booted store the newest journals are the ones the boot itself writes
+    (Aida, the Librarian), and a loaded host cuts the pass to ONE journal. The
+    replay selection used to lack the model warm's exclusions, so that one slot,
+    and the cold record it files, went to a service session nobody opens; QA saw
+    the user's first open after a restart miss 5/5 under real load. A subagent
+    and an archive-only session are newer still and must not win the slot either.
+    """
+    from local_operator.aida import state as aida_state
+    from local_operator.librarian import state as librarian_state
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+    from local_operator.session import compression, replay_cache
+    from local_operator.session.cold_metadata import cold_metadata_path
+
+    monkeypatch.setattr(compression, "_free_bytes", lambda _path: 10**12)
+    root = tmp_path
+    await replay_ready_journal(root, "user0000001", mtime=1_000.0)
+    await replay_ready_journal(root, "archived001", mtime=500.0)
+    assert compression.compress_session(root / "sessions" / "archived001").status == "compressed"
+    archive = compression.archive_path(root / "sessions" / "archived001")
+    assert archive is not None
+    # The archive is the NEWEST file in the store, so mtime order alone would pick it.
+    os.utime(archive, (5_000.0, 5_000.0))
+    await replay_ready_journal(root, "child000001", mtime=2_000.0)
+    mark_session_origin(root / "sessions" / "child000001", ORIGIN_SUBAGENT)
+    await replay_ready_journal(root, "aida0000001", mtime=3_000.0)
+    await replay_ready_journal(root, "libr0000001", mtime=4_000.0)
+    aida_state.write_state(root, {"session_id": "aida0000001"})
+    librarian_state.write_state(root, {"session_id": "libr0000001"})
+    replay_cache.replay_cache().clear()
+
+    if shape == "busy-host":
+        monkeypatch.setattr(prewarm, "load_per_cpu", lambda: 5.0)
+        assert await prewarm.warm_replay_cache(root) == 1
+    else:
+        assert await prewarm.warm_replay_cache(root, limit=1) == 1
+
+    filed = sorted(p.stem for p in cold_metadata_path(root, "x").parent.glob("*.json"))
+    assert filed == ["user0000001"]
+
+
+def test_the_replay_selection_skips_cached_entries_before_spending_its_limit(tmp_path):
+    """The shared predicate runs BEFORE the limit, and the RAM-cache skip is kept.
+
+    A journal this process already holds is not a candidate and must not consume
+    the budget, so the next user journal still gets the slot (the reason the
+    replay path does not call ``_newest_journals``, which cuts first).
+    """
+    from local_operator.session import replay_cache
+
+    root = tmp_path
+    journal(root, "older", mtime=1_000.0)
+    journal(root, "newer", mtime=2_000.0)
+    replay_cache.replay_cache().clear()
+    key = prewarm._cold_replay_key(root / "sessions" / "newer")
+    assert key is not None
+    replay_cache.publish_replay(
+        key, messages=[], checkpoint=None, checkpoints={}, order={}, seed_usage=None, bytes_read=0
+    )
+    try:
+        assert prewarm.sessions_needing_replay(root, limit=1) == ["older"]
+    finally:
+        replay_cache.replay_cache().clear()
