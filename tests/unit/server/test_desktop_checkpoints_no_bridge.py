@@ -479,3 +479,183 @@ async def test_a_markerless_journal_never_reconstructs_the_unused_cwd(api, monke
     body = await _ready(client)
     assert body["result"]["index"]["state"] == "ready"
     assert cold == [] and app.state.desktop_sessions.bridges == {}
+
+
+# ---------------------------------------------------------------------------
+# R1: the early paint hold, taken before the middleware stack
+# ---------------------------------------------------------------------------
+#
+# The route's own hold starts only after every ``BaseHTTPMiddleware`` layer has
+# run, which under load was 215-245 ms of GIL hand-offs against other
+# conversations' background scans. These cells drive the early hold through a
+# stand-in middleware stack (one ``BaseHTTPMiddleware`` layer, the kind the real
+# app stacks five of) and pin: it is live before that stack, it is handed to the
+# route's hold under the SAME key, both drop at the snapshot, every other exit
+# releases it, and an unauthenticated request never takes it at all.
+
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+
+from local_operator.server import early_paint_hold  # noqa: E402
+
+OPEN = f"/v1/desktop/sessions/{SID}/events?open_frame=1"
+
+
+@pytest_asyncio.fixture
+async def early(api, monkeypatch: pytest.MonkeyPatch):
+    """``api`` with the early hold outermost and one recording layer inside it."""
+    client, app, root = api
+    seen: dict[str, Any] = {"inner": []}
+
+    async def inner(request, call_next):
+        seen["inner"].append(dict(ti._PAINT_HOLDS))
+        hook = seen.get("hook")
+        if hook is not None:
+            await hook()
+        return await call_next(request)
+
+    app.add_middleware(BaseHTTPMiddleware, dispatch=inner)
+    app.add_middleware(early_paint_hold.EarlyPaintHoldMiddleware)
+    yield client, app, root, seen
+
+
+@pytest.mark.asyncio
+async def test_the_real_app_takes_the_early_hold_outermost() -> None:
+    """Mutant: registered anywhere but last -> some layer runs before the hold."""
+    from local_operator.server.app import app as real_app
+
+    assert real_app.user_middleware[0].cls is early_paint_hold.EarlyPaintHoldMiddleware
+
+
+@pytest.mark.asyncio
+async def test_the_early_hold_is_live_before_the_stack_and_handed_to_the_route(
+    early, monkeypatch
+) -> None:
+    """The handoff counts: early (1) under the route's own key, then early +
+    route (2) at the first frame, then nothing once the snapshot is written --
+    the hold never outlives the snapshot, so this session's deferred scan starts
+    exactly when it did before."""
+    client, app, root, seen = early
+    _write_session(root, big=True)
+    key = ti._key(app.state.desktop_sessions.root, SID)
+    after_snapshot = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def frames(self, *_args: Any, **_kwargs: Any):
+        seen["at_route"] = dict(ti._PAINT_HOLDS)
+        task, _ = ti.start_refresh(self.root, self.session_id)
+        seen["task"] = task
+        yield {"type": "open", "session_id": self.session_id, "payload": {}}
+        yield {"type": "snapshot", "session_id": self.session_id, "payload": {}}
+        seen["after"] = dict(ti._PAINT_HOLDS)
+        after_snapshot.set()
+        await finish.wait()
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "events", frames)
+    real_hand_off = early_paint_hold.hand_off
+    handoffs: list[tuple[dict[Any, int], dict[Any, int]]] = []
+
+    def spy(scope: Any) -> None:
+        before = dict(ti._PAINT_HOLDS)
+        real_hand_off(scope)
+        handoffs.append((before, dict(ti._PAINT_HOLDS)))
+
+    monkeypatch.setattr(early_paint_hold, "hand_off", spy)
+
+    async def consume() -> None:
+        async with client.stream("GET", OPEN) as response:
+            async for _line in response.aiter_lines():
+                if after_snapshot.is_set():
+                    break
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(after_snapshot.wait(), 30)
+    assert seen["inner"] == [{key: 1}], "the hold was not live before the middleware stack"
+    assert handoffs == [({key: 2}, {key: 1})], "the handoff did not go 1 -> 2 -> 1 on one key"
+    assert seen["at_route"] == {key: 1}
+    assert seen["after"] == {}, "the early hold outlived the snapshot frame"
+    assert await asyncio.wait_for(seen["task"], 30) is not None
+    finish.set()
+    consumer.cancel()
+    with pytest.raises((asyncio.CancelledError, Exception)):
+        await consumer
+    assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+async def test_an_unauthorized_open_never_takes_the_early_hold(early) -> None:
+    """A wrong bearer is refused by the route's 401 and must not have held
+    anything on the way there: otherwise any local process could stall indexing
+    by flooding opens. Mutant: no bearer gate -> the inner layer sees a hold."""
+    client, _app, root, seen = early
+    _write_session(root)
+    response = await client.get(OPEN, headers={"Authorization": "Bearer wrong"})
+    assert response.status_code == 401
+    assert seen["inner"] == [{}]
+    response = await client.get(OPEN, headers={"Authorization": ""})
+    assert response.status_code == 401
+    assert seen["inner"] == [{}, {}]
+    assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_session_releases_the_early_hold(early) -> None:
+    """Authenticated but unknown: the hold lives one request, then is gone."""
+    client, _app, _root, seen = early
+    response = await client.get("/v1/desktop/sessions/ffffffff9999/events?open_frame=1")
+    assert response.status_code == 404
+    assert len(seen["inner"]) == 1 and sum(seen["inner"][0].values()) == 1
+    assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+async def test_a_client_gone_before_the_route_releases_the_early_hold(early) -> None:
+    """Disconnect while still inside the middleware stack: the route never runs,
+    so nothing but the early layer's own ``finally`` can release."""
+    client, _app, root, seen = early
+    _write_session(root)
+
+    async def gone() -> None:
+        raise asyncio.CancelledError
+
+    seen["hook"] = gone
+    with pytest.raises(BaseException):
+        await client.get(OPEN)
+    assert seen["inner"] and sum(seen["inner"][0].values()) == 1
+    assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+async def test_an_exception_in_the_stack_releases_the_early_hold(early) -> None:
+    client, _app, root, seen = early
+    _write_session(root)
+
+    async def boom() -> None:
+        raise RuntimeError("synthetic middleware failure")
+
+    seen["hook"] = boom
+    with pytest.raises(RuntimeError, match="synthetic middleware failure"):
+        await client.get(OPEN)
+    assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+async def test_only_a_first_paint_open_takes_the_early_hold(early) -> None:
+    """A reconnect (no ``open_frame``) and other routes pass straight through."""
+    client, _app, root, seen = early
+    _write_session(root)
+    await client.get(f"/v1/desktop/sessions/{SID}/checkpoints?open_frame=1")
+    assert seen["inner"] == [{}]
+    assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_query_releases_the_early_hold(early) -> None:
+    """FastAPI refuses an invalid query (422) before the route body runs, so the
+    route's handoff never happens and only the early layer's ``finally`` can
+    release. (The 404 above is released through the handoff instead.)"""
+    client, _app, root, seen = early
+    _write_session(root)
+    response = await client.get(OPEN + "&after_seq=-1")
+    assert response.status_code == 422
+    assert len(seen["inner"]) == 1 and sum(seen["inner"][0].values()) == 1
+    assert ti._PAINT_HOLDS == {}
