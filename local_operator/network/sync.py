@@ -510,8 +510,14 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # and its sibling the first-publication store, ``publication-previews``, which
     # is a default argument there and so was never seen by the constant guard).
     # They live under ``<config>/hub/``, beside ``sessions/``, so no session
-    # directory holds one today; they are named here so that a directory with
-    # this name is refused rather than silently adopted. A receipt is a 15-minute
+    # directory holds one today. What naming them here DOES do is narrow and
+    # silent: ``EXCLUDED_ENTRIES`` matches by exact name at the session's TOP
+    # LEVEL only, and a matching top-level entry is LEFT BEHIND without a refusal
+    # (a deleting move deletes it with the source). A top-level ``push-previews/``
+    # that used to travel as a content tree no longer does; a top-level FILE named
+    # ``publication-previews`` that used to refuse the move no longer does; the
+    # same name nested inside ``scratchpad/`` still travels. It is not a refusal
+    # and not a guard against adoption. A receipt is a 15-minute
     # authorization to send ONE reviewed proposal to ONE hub link, bound to this
     # machine's local-bytes fingerprint, policy revision and credential. On
     # another device it can never be confirmed (the fingerprint, link and
