@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import functools
 import inspect
@@ -28,6 +29,7 @@ import json
 import logging
 import re
 import secrets
+import threading
 import time
 import unicodedata
 import uuid
@@ -375,6 +377,38 @@ MAX_QUEUED_PROMPTS = 32
 #: as ``RuntimeServer._push_later`` (the repaint it feeds) and
 #: ``Session._schedule_frontend_jobs``; see ``_schedule_roster_refresh``.
 _ROSTER_REFRESH_COALESCE_S = 0.05
+
+#: The worker pool a model switch's blocking reads run on, built on first use.
+#:
+#: WHY NOT ``asyncio.to_thread``. That is the loop's DEFAULT executor, and on a
+#: busy manager it is shared with every lane's blocking work (transcript and
+#: ledger writes, token counting, store reads). A switch that queued its spec
+#: build and its credential read there waited for that backlog: measured with
+#: ``scripts/bench_model_switch.py --condition busy`` (12 lanes, a 1,000-child
+#: roster, a 110 MB transcript), the build started up to 750 ms and the read up
+#: to 690 ms after the handler asked, for work that takes ~1 ms and ~15 ms. The
+#: switch is the one request the user is actively waiting on, so its reads get a
+#: pool nothing else queues on.
+#:
+#: TWO workers: one build and one read per switch at most, and switches on one
+#: connection are serialised by the server's switch lane, so a deeper pool would
+#: only hold idle threads. Process-wide and lazy because most runtimes never
+#: switch, and the test suite builds hundreds of handles that never do.
+_SWITCH_EXECUTOR_WORKERS = 2
+_switch_executor_pool: concurrent.futures.ThreadPoolExecutor | None = None
+_switch_executor_lock = threading.Lock()
+
+
+def _switch_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """The dedicated pool for a switch's blocking reads (see above)."""
+    global _switch_executor_pool
+    with _switch_executor_lock:
+        if _switch_executor_pool is None:
+            _switch_executor_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_SWITCH_EXECUTOR_WORKERS, thread_name_prefix="lop-switch"
+            )
+        return _switch_executor_pool
+
 
 #: THE RUNG-4 RETRY LADDER (review round 1, R7).
 #:
@@ -1050,6 +1084,10 @@ class ServingSessionHandle(SessionHandle):
         # so the event loop cannot garbage-collect one mid-flight and drop the
         # title silently. Each task removes itself on completion.
         self._background_tasks: set[asyncio.Future[Any]] = set()
+        #: The access-claim publish in flight, if any: see
+        #: :meth:`_schedule_model_access_publish`.
+        self._model_access_publish: asyncio.Task[None] | None = None
+        self._model_access_publish_selector = ""
         #: ``(selected_selector, provider, model_id)`` of a re-home this owner
         #: REFUSED because the conversation was busy, retried at the turn end
         #: (``_retry_deferred_rehome``). Also serves as the reply classified by
@@ -1869,6 +1907,11 @@ class ServingSessionHandle(SessionHandle):
         task = self._completion_task
         if task is not None and not task.done():
             task.cancel()
+        # The access-claim read is additive state about a session that is going
+        # away; nothing may publish into its store after disposal.
+        publish = self._model_access_publish
+        if publish is not None and not publish.done():
+            publish.cancel()
         # The supplement job is droppable by contract: shutdown never waits on it.
         await self._supplements.cancel()
         # The dispose rung of EVERY exit that is not a viewer-driven retirement:
@@ -3571,7 +3614,12 @@ class ServingSessionHandle(SessionHandle):
             if isinstance(event, ModelChangeEvent):
                 # Fallback/recovery is an access edge too: publishing only at
                 # primary selection leaves a signed-out Meta claim on OpenAI.
-                self.publish_model_access()
+                # SCHEDULED, never inline: this handler runs on the session
+                # loop, and the synchronous form is a SQLite read there (PR
+                # #3053 review round 1, R1-1). A switch made through
+                # ``set_model_effort`` has already scheduled the same read, and
+                # the schedule coalesces onto it rather than reading twice.
+                self._schedule_model_access_publish()
                 self._retry_naming_after_route_change()
             self._notify()
             # LAST, and guarded inside, because it is additive: the goal judge
@@ -5469,7 +5517,20 @@ class ServingSessionHandle(SessionHandle):
             established=established,
             native=native_chat_provider_ids(),
         )
-        spec = await asyncio.to_thread(build_model_spec, provider, model_id)
+        # INLINE when the model's metadata is already in memory, which is every
+        # switch back to a model this process has run: the build is then pure
+        # CPU (well under 1 ms) and needs no thread hop at all. Only a cold
+        # build can reach discovery's synchronous HTTP legs, and that one goes
+        # to the switch's own pool rather than the default executor the lanes
+        # saturate (see :data:`_SWITCH_EXECUTOR_WORKERS` for the measurement).
+        from local_operator.model.configure import model_spec_is_warm
+
+        if model_spec_is_warm(provider, model_id):
+            spec = build_model_spec(provider, model_id)
+        else:
+            spec = await self._loop.run_in_executor(
+                _switch_executor(), build_model_spec, provider, model_id
+            )
         if provider == "meta-muse":
             from local_operator.harness.types import ModelSpec
 
@@ -5605,9 +5666,49 @@ class ServingSessionHandle(SessionHandle):
         # the phone's sheet, a peer's ``peer_set_model``, the desktop's
         # ``rehome_if_current`` — so this is the one place the claim can go
         # stale from a model change. Its credential read is SQLite, so it runs
-        # off the session loop; the switch itself has already landed above.
-        await self._publish_model_access_off_loop()
+        # off the session loop, and the reply does NOT wait for it: the switch
+        # has already landed above, the selection publish has already withdrawn
+        # a claim about a different provider (``refresh_model_selection``), and
+        # under load each extra await is another wait for a saturated loop to
+        # come back round. The claim follows within one read.
+        self._schedule_model_access_publish()
         return f"model: {self._projection.model_label}"
+
+    def _schedule_model_access_publish(self) -> "asyncio.Task[None] | None":
+        """Start (or join) the off-loop access-claim publish for the serving model.
+
+        ONE READ PER MODEL EDGE. A genuine switch reaches this twice — from
+        ``set_model_effort`` and from the ``ModelChangeEvent`` the switch emits —
+        and both are asking about the same selector. A publish already in flight
+        for that selector is returned rather than duplicated; a different
+        selector starts a new one (the old one's stale guard then drops its
+        answer). Kept on ``self`` for a strong reference, and deliberately NOT in
+        ``_background_tasks``: that set is what ``is_busy`` reads as work a clean
+        exit would destroy, and an additive claim read is not that.
+
+        Outside a running loop (a synchronous host or test) it publishes inline,
+        the historical behaviour.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.publish_model_access()
+            return None
+        spec = getattr(self._session, "effective_model", None) or getattr(
+            self._session, "model", None
+        )
+        selector = f"{spec.provider}/{spec.model_id}" if spec is not None else ""
+        pending = self._model_access_publish
+        if (
+            pending is not None
+            and not pending.done()
+            and self._model_access_publish_selector == selector
+        ):
+            return pending
+        task = loop.create_task(self._publish_model_access_off_loop())
+        self._model_access_publish = task
+        self._model_access_publish_selector = selector
+        return task
 
     async def _publish_model_access_off_loop(self) -> None:
         """:meth:`publish_model_access` with the credential read on a worker thread.
@@ -5623,7 +5724,10 @@ class ServingSessionHandle(SessionHandle):
         (a second connection, a fallback edge); the claim is applied only if
         the model it was computed for is still the one serving, so a slow read
         can never overwrite a newer claim with an older model's answer. The
-        newer switch publishes its own.
+        newer switch publishes its own. The invariant is selector EQUALITY, not
+        switch identity: an A→B→A sequence inside one read applies the first
+        read's answer, which is correct because the claim is a function of the
+        selector and the credential store alone (review round 1, R1-2).
 
         Never raises, like the synchronous form.
         """
@@ -5635,8 +5739,9 @@ class ServingSessionHandle(SessionHandle):
 
             spec = getattr(self._session, "effective_model", None) or self._session.model
             selector = f"{spec.provider}/{spec.model_id}"
-            claim = await asyncio.to_thread(
-                serving_model_access_here, selector, config_dir=self._config_dir
+            claim = await self._loop.run_in_executor(
+                _switch_executor(),
+                functools.partial(serving_model_access_here, selector, config_dir=self._config_dir),
             )
             now = getattr(self._session, "effective_model", None) or self._session.model
             if f"{now.provider}/{now.model_id}" != selector:

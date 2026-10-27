@@ -34,9 +34,22 @@ Conditions:
             what a desktop send during a long manager turn does), then the
             switch — the connection's op chain is what this cell measures
 
-Per probe the child records when the dispatcher SAW the op (``rpc_ms``), when
-the handle's body STARTED on the session loop (``body_ms``), and the CPU each
+Per probe the child records when the dispatcher SAW the op (``rpc_ms``; both
+``_dispatch`` and ``_dispatch_payload``, so ``slash_result`` is covered), when
+the handle's body STARTED on the session loop (``body_ms``), when the spec
+build and the credential read STARTED on their threads (``build_ms``,
+``access_ms``: the gap from ``body_ms`` is executor queueing), and the CPU each
 sub-step took; the viewer records the round trip (``ack_ms``).
+
+The child also samples its own loop: ``loop_lag_ms`` is a 5 ms heartbeat's
+lateness, and ``stall_offenders_ms`` attributes every stalled sample to the
+innermost ``local_operator`` frame then on the loop thread, so a late
+``rpc_ms`` can be traced to the synchronous work that held the loop. A
+``selectors.py:select`` row is the loop waiting for the GIL after its poll
+returned, i.e. worker threads' CPU, not loop work. Under an isolated ``HOME``
+``resolve.py:_macos_defaults_language`` appears too: with no
+``.GlobalPreferences.plist`` the language probe falls back to a subprocess,
+which a real home does not.
 
 ISOLATION
 =========
@@ -122,6 +135,9 @@ async def _child_main(args: argparse.Namespace) -> None:
     original_build = configure.build_model_spec
 
     def build(provider: str, model_id: str, *a: Any, **kw: Any) -> Any:
+        # When the build STARTS (on whichever thread runs it): the gap from the
+        # body mark is the executor queue wait a saturated pool imposes.
+        marks.append(("build", current_tag[0], time.perf_counter()))
         spec = original_build(provider, model_id, *a, **kw)
         if provider == "test":
             spec = spec.model_copy(
@@ -130,6 +146,22 @@ async def _child_main(args: argparse.Namespace) -> None:
         return spec
 
     configure.build_model_spec = build  # type: ignore[assignment]
+
+    # The switch's second worker-thread hop: the credential read behind the
+    # access claim. ``access`` marks when it STARTS on its thread, ``accessed``
+    # when it returns; with ``build`` this splits the switch into queue waits.
+    from local_operator.providers import model_access as access_module
+
+    original_access = access_module.serving_model_access_here
+
+    def access(*a: Any, **kw: Any) -> Any:
+        marks.append(("access", current_tag[0], time.perf_counter()))
+        try:
+            return original_access(*a, **kw)
+        finally:
+            marks.append(("accessed", current_tag[0], time.perf_counter()))
+
+    access_module.serving_model_access_here = access  # type: ignore[assignment]
 
     stream = base.PacedStream(marks, args.lane_turns)
     session = Session(
@@ -160,6 +192,21 @@ async def _child_main(args: argparse.Namespace) -> None:
         return await original_dispatch(self, op, frame, **kw)
 
     server_module.RuntimeServer._dispatch = dispatch  # type: ignore[method-assign]
+
+    # ``slash_result`` answers with a payload, so it is dispatched through
+    # ``_dispatch_payload`` and never reaches ``_dispatch``: without this mark
+    # the desktop's own ``/model`` route had no dispatcher-receipt time.
+    original_payload = server_module.RuntimeServer._dispatch_payload
+
+    async def dispatch_payload(
+        self: Any, op: str, frame: dict[str, Any], *a: Any, **kw: Any
+    ) -> Any:
+        tag = str(frame.get("tag") or "")
+        if tag:
+            marks.append(("rpc", tag, time.perf_counter()))
+        return await original_payload(self, op, frame, *a, **kw)
+
+    server_module.RuntimeServer._dispatch_payload = dispatch_payload  # type: ignore[method-assign]
 
     # Body-start marks: the first statement the handle runs ON the session loop.
     current_tag: list[str] = [""]
@@ -216,6 +263,55 @@ async def _child_main(args: argparse.Namespace) -> None:
     for i in range(args.lanes):
         session._launch_subagent(label=f"lane-{i}", prompt=base._PREAMBLE + f" lane {i} work")
 
+    # LOOP-STALL SAMPLER. A frame the dispatcher sees late was sent while the
+    # session loop was running something synchronous. A watchdog thread samples
+    # the loop thread's stack whenever the loop's heartbeat is older than
+    # ``STALL_MS``, and attributes each stalled sample to the innermost
+    # ``local_operator`` frame on that stack — the code that held the loop.
+    stall_ms = 20.0
+    beat = [time.perf_counter()]
+    loop_ident = threading.get_ident()
+    offenders: dict[str, float] = {}
+    lags: list[float] = []
+
+    async def heartbeat() -> None:
+        while True:
+            t = time.perf_counter()
+            lags.append((t - beat[0]) * 1000)
+            beat[0] = t
+            await asyncio.sleep(0.005)
+
+    def watchdog() -> None:
+        import traceback
+
+        period = 0.005
+        last = time.perf_counter()
+        while True:
+            time.sleep(period)
+            # Weighted by the REAL time since the previous sample, not the
+            # nominal period: under load this thread is GIL-starved too, and a
+            # fixed weight would under-count exactly the longest stalls.
+            now = time.perf_counter()
+            weight, last = (now - last) * 1000, now
+            age = (now - beat[0]) * 1000
+            if age < stall_ms:
+                continue
+            frame = sys._current_frames().get(loop_ident)
+            if frame is None:
+                continue
+            stack = traceback.extract_stack(frame)
+            ours = [f for f in stack if "/local_operator/" in f.filename]
+            where = ours[-1] if ours else stack[-1]
+            outer = ours[0] if ours else stack[0]
+            key = (
+                f"{Path(where.filename).name}:{where.name}"
+                f" <- {Path(outer.filename).name}:{outer.name}"
+            )
+            offenders[key] = offenders.get(key, 0.0) + weight
+
+    heartbeat_task = asyncio.ensure_future(heartbeat())
+    threading.Thread(target=watchdog, daemon=True).start()
+
     # A control line from the parent sets the tag the next body mark carries.
     def control() -> None:
         for line in sys.stdin:
@@ -226,8 +322,16 @@ async def _child_main(args: argparse.Namespace) -> None:
     stopped = asyncio.Event()
     loop.add_signal_handler(signal.SIGTERM, stopped.set)
     await stopped.wait()
+    heartbeat_task.cancel()
     Path(args.report).write_text(
-        json.dumps({"marks": marks, "cpu_ms": {k: base._pcts(v) for k, v in cpu.items()}})
+        json.dumps(
+            {
+                "marks": marks,
+                "cpu_ms": {k: base._pcts(v) for k, v in cpu.items()},
+                "loop_lag_ms": base._pcts(lags),
+                "stall_offenders_ms": dict(sorted(offenders.items(), key=lambda kv: -kv[1])[:15]),
+            }
+        )
     )
     os._exit(0)
 
@@ -346,7 +450,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
     summary = {
         kind: {
             key: base._pcts([r[key] for r in rows if r["kind"] == kind and key in r])
-            for key in ("rpc_ms", "body_ms", "ack_ms")
+            for key in ("rpc_ms", "body_ms", "build_ms", "access_ms", "accessed_ms", "ack_ms")
         }
         for kind in ("set_model", "set_effort", "slash_model")
     }
@@ -358,6 +462,8 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         "transcript_mb": args.transcript_mb if busy else 0,
         "summary": summary,
         "child_cpu_ms": child_report.get("cpu_ms"),
+        "loop_lag_ms": child_report.get("loop_lag_ms"),
+        "stall_offenders_ms": child_report.get("stall_offenders_ms"),
         "errors": [r for r in rows if r["error"]],
         "rows": rows,
     }

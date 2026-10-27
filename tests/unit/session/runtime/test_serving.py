@@ -3882,6 +3882,10 @@ async def test_the_serve_side_publishes_the_access_claim_at_open_and_on_switch(
     assert (opened.state, opened.provider, opened.label) == ("signed_out", "radient", "Radient")
 
     await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    # The reply does not wait for the claim (PR #3053 R1-1): it follows in the
+    # background publish the switch scheduled.
+    assert handle._model_access_publish is not None
+    await handle._model_access_publish
     switched = session._frontend_state_store.state.model_access
     assert switched is not None
     assert (switched.state, switched.provider, switched.label) == (

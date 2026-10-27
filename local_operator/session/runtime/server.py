@@ -1176,25 +1176,46 @@ _UNCHAINED_OPS = frozenset({"ping", "abort"})
 #: switch would have done to the turn in flight anyway.
 #:
 #: ``slash``/``slash_result`` belong here only for the commands that ARE
-#: switches (:data:`_SWITCH_SLASH_COMMANDS`): the desktop's model picker
+#: switches, or dials a switch resets (:data:`_SWITCH_SLASH_COMMANDS`): the desktop's model picker
 #: dispatches its choice as ``slash_result`` ``/model`` (see
 #: ``AttachedSession.route_shared_slash``), and every other slash keeps its
 #: place in the main chain. See :func:`_is_switch_frame`.
 _SWITCH_OPS = frozenset({"set_model", "set_effort"})
 
-#: The routed slash commands that are model/effort switches. ``/fast`` is not
-#: one: it is a pricing tier, and nothing has measured it stalling.
-_SWITCH_SLASH_COMMANDS = frozenset({"model", "effort"})
+#: The routed slash commands that ride the switch lane, by registry PRIMARY name.
+#:
+#: ``/fast`` is here for ORDER, not speed (PR #3053 QA round 1, Q1-2). It is a
+#: dial on the model's spec, and a genuine ``/model`` switch drops it. Left on
+#: the main chain while ``/model`` overtook, a ``/fast on`` sent BEFORE a
+#: ``/model B`` behind a parked prompt landed AFTER the switch, so the session
+#: ended on B with the premium tier on, where the send order (and the base
+#: behaviour) ends on B with it off. On the same lane the two keep send order
+#: among themselves, which is the lane's first guarantee.
+_SWITCH_SLASH_COMMANDS = frozenset({"model", "effort", "fast"})
 
 
 def _is_switch_frame(frame: Any) -> bool:
-    """Whether ``frame`` is a model/effort switch that rides the switch lane."""
+    """Whether ``frame`` is a model/effort switch that rides the switch lane.
+
+    The slash command is resolved through the registry's alias table
+    (``primary_slash_name``) because the owner's dispatcher resolves it the same
+    way before it runs (``run_slash_authoritative``): a client sending the
+    advertised alias ``/models`` reaches the same ``/model`` branch, and must
+    reach it through the same lane (review round 1, R1-3).
+    """
     if not isinstance(frame, dict):
         return False
     op = frame.get("op")
     if op in _SWITCH_OPS:
         return True
-    return op in ("slash", "slash_result") and frame.get("command") in _SWITCH_SLASH_COMMANDS
+    if op not in ("slash", "slash_result"):
+        return False
+    command = frame.get("command")
+    if not isinstance(command, str):
+        return False
+    from local_operator.slash_commands import primary_slash_name
+
+    return primary_slash_name(command.strip().lower()) in _SWITCH_SLASH_COMMANDS
 
 
 #: Connection-LOCAL ops admitted alongside the priority set above. Not a widening

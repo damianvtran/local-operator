@@ -5780,8 +5780,26 @@ async def test_stop_and_cancel_stay_chained_behind_a_parked_prompt(
             {"op": "slash_result", "command": "model", "args": "openai/b", "images": []},
             "run_slash_authoritative",
         ),
+        # The registry's advertised alias reaches the same lane (R1-3): the
+        # owner resolves it to ``/model`` before it runs, so must the lane.
+        (
+            {"op": "slash_result", "command": "models", "args": "openai/b", "images": []},
+            "run_slash_authoritative",
+        ),
+        # ``/fast`` rides the lane so it keeps send order with ``/model`` (Q1-2).
+        (
+            {"op": "slash_result", "command": "fast", "args": "on", "images": []},
+            "run_slash_authoritative",
+        ),
     ],
-    ids=["set_model", "set_model_effort", "set_effort", "slash_result-model"],
+    ids=[
+        "set_model",
+        "set_model_effort",
+        "set_effort",
+        "slash_result-model",
+        "slash_result-models-alias",
+        "slash_result-fast",
+    ],
 )
 async def test_a_model_switch_is_not_queued_behind_a_parked_prompt(
     frame: dict[str, Any], ran: str
@@ -5880,6 +5898,86 @@ async def test_an_op_after_a_switch_still_waits_for_the_parked_op_the_switch_ove
         if handle.tool.poll() is None:
             handle.tool.kill()
         handle.tool.wait()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_fast_then_model_behind_a_parked_prompt_keep_send_order() -> None:
+    """``/fast on`` sent BEFORE ``/model B`` lands before it (QA round 1, Q1-2).
+
+    A genuine switch drops the fast dial, so the order decides the paid tier
+    the parked prompt then runs on. With ``/fast`` on the main chain the switch
+    overtook it and the session ended on B with fast ON; on the switch lane the
+    two run in send order, both while the prompt is still parked.
+    """
+    handle = _BusyTurnHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        writer.write(json.dumps({"op": "prompt", "req": 1, "text": "msg B"}).encode() + b"\n")
+        await writer.drain()
+        assert await asyncio.to_thread(handle.prompt_entered.wait, 5), "the prompt never parked"
+
+        for req, (command, args) in enumerate((("fast", "on"), ("model", "openai/b")), start=2):
+            frame = {
+                "op": "slash_result",
+                "command": command,
+                "args": args,
+                "images": [],
+                "req": req,
+            }
+            writer.write(json.dumps(frame).encode() + b"\n")
+        await writer.drain()
+        await asyncio.wait_for(_until(reader, "result", 3), timeout=5.0)
+        assert not handle.turn_a_over.is_set(), "both must land while the prompt is parked"
+        ran = [call[1][0] for call in handle.calls if call[0] == "run_slash_authoritative"]
+        assert ran == ["fast", "model"], ran
+
+        handle.turn_a_over.set()
+        assert (await _until(reader, "ack", 1))["detail"] == "prompt ok"
+    finally:
+        handle.turn_a_over.set()
+        if handle.tool.poll() is None:
+            handle.tool.kill()
+        handle.tool.wait()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_switch_with_nothing_parked_becomes_the_chain_head_itself() -> None:
+    """With no op in flight the switch IS the new head, not a join (R1-5).
+
+    Pins the ``head is None or head.done()`` arm of ``_dispatch_frame``: a later
+    refactor that always built a join (or never updated the head) would either
+    leak a join task per idle switch or let the next op overtake the switch.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        writer.write(json.dumps({"op": "set_effort", "effort": "high", "req": 1}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", 1)
+        (conn,) = list(runtime._clients.values())
+        assert conn.switch_chain is not None
+        assert conn.op_chain is conn.switch_chain, "an idle switch must be the head itself"
+
+        writer.write(json.dumps({"op": "set_effort", "effort": "low", "req": 2}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", 2)
+        efforts = [call[1] for call in handle.calls if call[0] == "set_effort"]
+        assert efforts == [("high",), ("low",)], efforts
+    finally:
         if writer is not None:
             writer.close()
         runtime.close()

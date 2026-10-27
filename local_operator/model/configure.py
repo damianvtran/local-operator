@@ -2825,6 +2825,50 @@ _paint_refreshing: set[tuple[str, str]] = set()
 _paint_memo: dict[tuple[str, str, int], ModelInfo] = {}
 
 
+def model_spec_is_warm(provider: str, model_id: str) -> bool:
+    """Whether :func:`build_model_spec` would answer from memory, with no IO.
+
+    WHY. A live ``/model`` builds its spec on the session loop's critical path,
+    and the serving handle used to send EVERY build to the default executor
+    (``asyncio.to_thread``) because a cold build can run discovery's synchronous
+    HTTP legs. On a busy manager that executor is shared with every lane's
+    blocking work, and the switch queued behind it: measured with
+    ``scripts/bench_model_switch.py --condition busy`` (12 lanes, a 1,000-child
+    roster), the build STARTED up to 750 ms after the handler asked for it, for
+    a body that takes well under 1 ms once the memo holds the model. A caller
+    that gets ``True`` here may run the build inline.
+
+    CONSERVATIVE by construction: ``False`` whenever the answer could involve IO.
+
+    * ``openai``/``meta-muse`` resolve through ``_catalogue_credential`` on
+      every call (a credential-store read that keys the memo), so they are
+      never warm here;
+    * local runtimes resolve through their own endpoint-scoped path;
+    * a key that DEGRADED is re-resolved once its short TTL expires
+      (``_memo_attempt``), so a degraded key is never warm;
+    * otherwise warm means the full resolver answered this exact key in the
+      CURRENT TTL bucket, which is what ``_paint_memo`` records (it is written
+      only by :func:`resolve_model_info`, after the cached body ran).
+
+    Canonicalised exactly as :func:`build_model_spec` does before it resolves,
+    so the key checked is the key the build would read.
+    """
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+    try:
+        bare = _hosting_qualified_bare_id(provider, model_id)
+        name = bare if bare is not None else model_id
+        canonical = "test" if provider.strip().lower() == "noop" else provider.strip().lower()
+        if canonical in ("openai", "meta-muse") or canonical in LOCAL_PROVIDER_IDS:
+            return False
+        bucket = int(time.time() // DEFAULT_TTL_S)
+        if (canonical, name, bucket, "", None) in _degraded_until:
+            return False
+        return (canonical, name, bucket) in _paint_memo
+    except Exception:  # noqa: BLE001 — "not warm" is always a safe answer
+        return False
+
+
 def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, bool]:
     """The paint-safe metadata for a model, plus whether the memo answered.
 
