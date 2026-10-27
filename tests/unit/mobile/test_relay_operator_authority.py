@@ -790,13 +790,64 @@ def test_the_command_route_refuses_a_revoked_devices_certificate(
     assert reply.status_code == 403, reply.text
     assert reply.json() == {
         "error": (
-            "This phone's approval access was removed on the computer. "
-            "Pair it again to approve from here."
+            "This phone's approval access was removed on the computer, and only that "
+            "machine can restore it — pairing again will be refused until then. Ask Local "
+            "Operator on that machine to allow this phone again, then pair this phone again."
         ),
         "code": "operator_device_revoked",
     }
     assert writer.written == [], "a revoked device's signature reached the session"
     assert daemon._pending_reqs == {}, "a refusal left a future parked"
+
+
+def test_a_new_anchor_lifts_a_local_revocation_on_the_command_route_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-2 on the command path: a SUPERSEDED anchor's local record does not refuse.
+
+    The command-route twin of
+    ``test_a_new_anchor_lifts_a_revocation_recorded_on_this_machine``. The guard asks
+    ``devices.is_revoked``, which ignores a ``revoked.json`` stamped with a key id
+    that is no longer installed; a refactor to an unscoped local-only check would
+    brick every re-anchored phone on this route while the ``/api/pair`` cell stayed
+    green. So the same record that refuses under its own anchor must FORWARD once a
+    genuinely new anchor is installed.
+    """
+    from local_operator.operator import trust
+    from local_operator.operator.keychain import FILE_ONLY
+    from local_operator.operator.sign import anchor_for_handle, create_key
+
+    _daemon, writer, client = _command_rig(tmp_path, monkeypatch)
+    certificate, device_id, anchor = _paired_certificate(tmp_path, monkeypatch)
+
+    def load(which: Any) -> Any:
+        return lambda uid=None: trust.AnchorLoad(
+            anchor=which, path=trust.anchor_path(uid), root_owned=True, reason="ok", exists=True
+        )
+
+    def send() -> Any:
+        return client.post(
+            "/api/sessions/revoked-cert-session/command", json=_signed_command(certificate)
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", load(anchor))
+    devices.record_revocation(tmp_path, device_id)
+    assert json.loads(devices.revoked_path(tmp_path).read_text())["operator_key_id"] == (
+        anchor.key_id
+    ), "the record was not stamped with the anchor it belongs to"
+    refused = send()
+    assert refused.status_code == 403, refused.text
+    assert writer.written == []
+
+    # Only the root-owned INSTALL fact is supplied; the key and anchor are real.
+    fresh = anchor_for_handle(
+        create_key(config_root=tmp_path / "fresh", preference=FILE_ONLY), label="second"
+    )
+    assert fresh.key_id != anchor.key_id
+    monkeypatch.setattr(trust, "load_anchor", load(fresh))
+    forwarded = send()
+    assert forwarded.status_code == 200, "a superseded anchor's record still refused the command"
+    assert writer.written[-1]["operator_cert"] == certificate
 
 
 def test_the_command_route_still_forwards_a_live_devices_certificate(

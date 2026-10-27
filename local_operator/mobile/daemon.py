@@ -2822,11 +2822,16 @@ def _ask_gone_copy(op: str) -> str:
 OPERATOR_DEVICE_REVOKED_CODE = "operator_device_revoked"
 
 #: Worded for the phone holding the revoked certificate: what happened, and the
-#: one move that still works. Plain English beside a typed code, like the sibling
-#: ``/api/pair`` revoked refusal in this module.
+#: way back IN ORDER. Re-pairing alone is refused while the revocation stands
+#: (``/api/pair`` asks ``devices.is_revoked`` too, and the phone reuses its stored
+#: key, so its device id is unchanged), so the machine-side lift comes first —
+#: the same route and tone as the phone's pair screen (``screens/pair.tsx``, the
+#: ``revoked`` state), which the phone shows verbatim as a fallback. Plain English
+#: beside a typed code, like the sibling ``/api/pair`` revoked refusal here.
 _OPERATOR_DEVICE_REVOKED = (
-    "This phone's approval access was removed on the computer. "
-    "Pair it again to approve from here."
+    "This phone's approval access was removed on the computer, and only that "
+    "machine can restore it — pairing again will be refused until then. Ask Local "
+    "Operator on that machine to allow this phone again, then pair this phone again."
 )
 
 
@@ -2863,13 +2868,11 @@ def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
     parsed = read_device_cert(certificate)
     if parsed is None:
         return None
-    try:
-        revoked = devices.is_revoked(config_dir(), parsed.device_id)
-    except (OSError, ValueError):  # pragma: no cover — an unreadable store
-        # Fail toward today's behaviour, not toward a refusal: the runtime's own
-        # anchor check still stands behind this belt.
-        return None
-    if not revoked:
+    # No try/except: ``is_revoked`` already treats an unreadable store or anchor
+    # as "not revoked" (``_read_json`` swallows ``OSError``; ``load_anchor`` never
+    # raises), which is the fail-open direction this belt wants — the runtime's
+    # own anchor check still stands behind it.
+    if not devices.is_revoked(config_dir(), parsed.device_id):
         return None
     return JSONResponse(
         {"error": _OPERATOR_DEVICE_REVOKED, "code": OPERATOR_DEVICE_REVOKED_CODE},
