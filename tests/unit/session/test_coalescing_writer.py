@@ -198,3 +198,80 @@ def test_a_failing_op_does_not_stop_the_writer() -> None:
 
     assert writer.flush(timeout=5.0)
     assert ran == ["ok"]
+
+
+def test_the_notify_path_rereads_the_ask_log_at_most_once_per_floor(monkeypatch) -> None:
+    """``_refresh_ask_projection`` runs on EVERY ``_notify``; its disk re-read
+    of ``asks.jsonl`` was ~950 loop syscalls per 40 s on a busy manager. A burst
+    of notifies reads once, an install from the queue's own sink counts as
+    fresh, and once the floor elapses the next notify reads again (so another
+    process's change still lands, at most one floor late)."""
+    from local_operator.session import frontend_state
+    from local_operator.session.runtime import serving
+
+    reads: list[int] = []
+    installed: list[object] = []
+
+    def fake_ask_wire(session: object) -> tuple[list[dict], int]:
+        reads.append(1)
+        return [], 0
+
+    class _Fold:
+        def set_asks(self, rows: object, count: object) -> None:
+            installed.append((rows, count))
+
+    monkeypatch.setattr(frontend_state, "ask_wire", fake_ask_wire)
+    handle = serving.ServingSessionHandle.__new__(serving.ServingSessionHandle)
+    handle._session = object()  # type: ignore[attr-defined]
+    handle._fold = _Fold()  # type: ignore[attr-defined]
+
+    for _ in range(50):
+        handle._refresh_ask_projection()
+    assert len(reads) == 1, "a notify burst re-read the ask log more than once"
+
+    monkeypatch.setattr(serving, "_ASK_REFRESH_MIN_S", 0.0)
+    handle._refresh_ask_projection()
+    assert len(reads) == 2, "an elapsed floor did not re-read"
+
+    monkeypatch.setattr(serving, "_ASK_REFRESH_MIN_S", 3600.0)
+    handle._ask_fold_installed_at = float("-inf")  # type: ignore[attr-defined]
+    handle._publish_pending_gate = lambda: None  # type: ignore[method-assign]
+    handle._on_projection = None  # type: ignore[attr-defined]
+    handle._ask_state_changed([{"ask_id": "a"}], 1)
+    handle._refresh_ask_projection()
+    assert len(reads) == 2, "the queue's own fresh install did not count as fresh"
+    assert installed[-1] == ([{"ask_id": "a"}], 1)
+
+
+def test_the_channel_sidecar_is_read_at_most_once_per_floor_on_the_tick_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``pending_channel_records`` runs on every jobs tick; its sidecar read is
+    throttled there, while a dedicated money publish still reads fresh."""
+    from local_operator.session import session as session_module
+
+    reads: list[int] = []
+
+    def fake_read(directory: object) -> list[dict]:
+        reads.append(1)
+        return []
+
+    monkeypatch.setattr(session_module, "read_pending_records", fake_read)
+
+    class _Transcript:
+        directory = tmp_path
+
+    class _Channels:
+        def has(self, record_id: str) -> bool:
+            return False
+
+    host = session_module.Session.__new__(session_module.Session)
+    host._transcript = _Transcript()  # type: ignore[attr-defined]
+    host.channels = _Channels()  # type: ignore[attr-defined]
+    for _ in range(20):
+        host.pending_channel_records()
+    assert len(reads) == 1, "a burst of ticks re-read the sidecar"
+
+    host._publish_channel_spend()  # no store: only the cache drop matters here
+    host.pending_channel_records()
+    assert len(reads) == 2, "a money edge did not read the sidecar fresh"

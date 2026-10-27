@@ -577,6 +577,10 @@ _FRONTEND_JOBS_FLOOR_S = 0.05
 _FRONTEND_JOBS_MAX_SHARE = 0.25
 _FRONTEND_JOBS_CEILING_S = 1.0
 
+#: Floor between two disk reads of the channel-spend pending sidecar on the
+#: frontend refresh path (see ``Session.pending_channel_records``).
+_CHANNEL_PENDING_MIN_S = 1.0
+
 
 def _frontend_jobs_delay(last_cost_s: float) -> float:
     """How long to wait before the next job-roster tick, given the last one's cost.
@@ -14722,6 +14726,9 @@ class Session:
         """
         store = getattr(self, "_frontend_state_store", None)
         publish = getattr(store, "refresh_spend_channels", None) if store is not None else None
+        # A money edge reads the sidecar fresh; only the per-tick refresh path
+        # is throttled (see ``pending_channel_records``).
+        self._channel_pending_cache = None
         if callable(publish):
             try:
                 publish(self)
@@ -14745,14 +14752,30 @@ class Session:
         one — a lost marker degrades to "nothing pending", never a broken
         publish.
         """
-        try:
-            directory = getattr(self._transcript, "directory", None)
-            if directory is None:
+        # THROTTLED DISK READ. This runs from every jobs tick and every
+        # per-event frontend refresh ON THE SESSION LOOP; even the common
+        # no-sidecar answer is an ``isfile`` syscall, and returning from any
+        # syscall costs the loop a GIL re-acquire behind every busy lane
+        # (measured ~0.5-0.75 s of sampled loop stall per 40 s on a 12-lane
+        # manager). The sidecar is written by ANOTHER process (the voice
+        # routes, ``server/utils/voice_spend.py``) on human timescales, so the
+        # raw entries are re-read at most once per ``_CHANNEL_PENDING_MIN_S``;
+        # the fold exclusion below still runs every call, so a marker the fold
+        # has absorbed retires immediately.
+        now = time.monotonic()
+        cached = getattr(self, "_channel_pending_cache", None)
+        if cached is not None and now - cached[0] < _CHANNEL_PENDING_MIN_S:
+            entries = cached[1]
+        else:
+            try:
+                directory = getattr(self._transcript, "directory", None)
+                if directory is None:
+                    return []
+                entries = read_pending_records(directory)
+            except Exception:  # noqa: BLE001 — a marker read must never break a publish
+                logger.debug("channel pending read failed", exc_info=True)
                 return []
-            entries = read_pending_records(directory)
-        except Exception:  # noqa: BLE001 — a marker read must never break a publish
-            logger.debug("channel pending read failed", exc_info=True)
-            return []
+            self._channel_pending_cache = (now, entries)
         return [
             entry
             for entry in entries
