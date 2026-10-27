@@ -1555,6 +1555,22 @@ async def test_attach_seeds_streaming_from_flag_for_mid_turn_subscriber() -> Non
     assert handle._fold.projection.streaming is True
 
 
+def test_a_committed_departure_ignores_the_warm_window() -> None:
+    """#3028 node control (c): an idle signalled runtime must leave, not wait 120 s.
+
+    Residency keeps a runtime warm for an imminent wake; a signal drain is not
+    residency. The warm-window term therefore stops holding once ``_draining``
+    is latched, so the turn boundary ends the runtime and its successor owns
+    the next occurrence.
+    """
+    handle, _ = make_handle()
+    handle.next_wake_due_at = lambda: 0  # type: ignore[method-assign]
+    handle._draining = False
+    assert handle.may_refresh() == "wake due within the warm window"
+    handle._draining = True
+    assert handle.may_refresh() == ""
+
+
 # --- next_wake_due_at: the reaper's warmth signal ----------------------------
 
 

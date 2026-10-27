@@ -75,7 +75,9 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -2406,6 +2408,33 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     pass or the next one (≤ ``SLICE_S``). ``--once`` awaits the pass inline for
     the same reason.
     """
+    from local_operator.wakes.owned_runtimes import OWNER_ENV, spawn_token, sweep
+
+    # This token belongs to THIS supervisor invocation, not to the store. It is
+    # propagated only to candidates launch actually forks for this process;
+    # adoption or another root's runtime cannot be claimed. The stop handler
+    # installed just below turns a unit SIGTERM into cancellation, so the same
+    # ownership sweep in serve()'s finally covers a stop and an ordinary
+    # self-retirement.
+    owner_token = spawn_token()
+    os.environ[OWNER_ENV] = owner_token
+    os.environ["LOP_WAKE_SUPERVISOR_ACTIVE"] = "1"
+    # A UNIT STOP MUST REACH THE SWEEP. Under KillMode=process systemd signals
+    # only this process, and SIGTERM's default action terminates without running
+    # any cleanup: measured on a real store, `systemctl stop` exited -15 and the
+    # supervisor's owned runtime outlived it. Installing a stop handler turns a
+    # signal into task cancellation, so serve()'s finally block runs the
+    # ownership sweep and the runtimes drain (#3028 Q-S1).
+    stop_signals: list[signal.Signals] = []
+    running = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    if running is not None and threading.current_thread() is threading.main_thread():
+        for stop_signal in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(stop_signal, running.cancel)
+                stop_signals.append(stop_signal)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
     sweeper = _Sweeper()
     triggers_seat = _TriggerSweep(config_dir)
     residency = _ResidencySweep(config_dir)
@@ -2584,6 +2613,17 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                     cleanup_error is old for old in cleanup_errors
                 ):
                     cleanup_errors.append(cleanup_error)
+        # KillMode=process means systemd signalled only this process. Forward
+        # SIGTERM to the runtimes this invocation owns so a working turn drains
+        # and a parked approval is denied instead of surviving the unit stop.
+        # Do this after engagement seats have shut down, so no new candidate is
+        # spawned behind the sweep.
+        sweep(config_dir, owner=owner_token)
+        for stop_signal in stop_signals:
+            try:
+                loop.remove_signal_handler(stop_signal)
+            except (RuntimeError, ValueError):
+                pass
         if cleanup_errors:
             if primary_error is not None:
                 cleanup_errors.insert(0, primary_error)
@@ -2686,6 +2726,12 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(serve(config_dir(), once=args.once))
     except KeyboardInterrupt:
         return 130
+    except asyncio.CancelledError:
+        # A unit stop (SIGTERM/SIGINT) cancels the loop so serve()'s finally
+        # block runs the ownership sweep. That is a REQUESTED stop, not a crash:
+        # 0 keeps `Restart=on-failure` from restarting a supervisor a person
+        # just stopped.
+        return 0
 
 
 if __name__ == "__main__":

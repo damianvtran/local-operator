@@ -2135,3 +2135,32 @@ async def test_serve_once_is_silent_for_a_fresh_project(
     assert engagements == []
     assert not (root / "wakes" / "triggers").exists()
     assert sorted(str(p.relative_to(root)) for p in root.rglob("*")) == before
+
+
+@pytest.mark.asyncio
+async def test_a_supervisor_stop_sweeps_only_its_own_runtime_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The systemd stop boundary forwards SIGTERM through the real serve cleanup.
+
+    No process is needed for this integration cell: the sweep receives the
+    invocation token recorded by serve(), and its exact-pid/argv/root guards
+    are exercised with real processes in test_owned_runtimes.py.
+    """
+    from local_operator.wakes import owned_runtimes
+    from local_operator.wakes.supervisor import _Sweeper
+
+    swept: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        owned_runtimes,
+        "sweep",
+        lambda root, *, owner, why="supervisor stop": swept.append((root, owner)) or [],
+    )
+
+    # An empty store retires through serve()'s normal finally path; this is
+    # the same cleanup a SIGTERM/cancellation reaches, without a live unit.
+    monkeypatch.setattr(_Sweeper, "sweep", lambda self, *args, **kwargs: 0)
+    assert await serve(tmp_path) == 0
+    assert len(swept) == 1
+    root, owner = swept[0]
+    assert root == tmp_path and owner

@@ -139,6 +139,17 @@ imports inside the functions that need them.
   drain. The relay's unit made the same choice for the same reason
   (`supervisors.render_systemd_unit`). An installed unit picks it up on the
   next `install` (the rendered text differs, so it is rewritten and reloaded).
+- THE SUPERVISOR FORWARDS THE STOP, rather than leaving its runtimes behind.
+  `serve()` gives each candidate a unique owner token and records it under
+  `supervisor/owner.json`; its cleanup and the systemd uninstall path call
+  `wakes.owned_runtimes.sweep`. That sweep SIGTERMs only exact pids whose argv,
+  owner token, config root and session still match, with a start-age check for
+  pid recycling. It never signals by process name, never reaches a sibling
+  root's runtime, and never SIGKILLs. A working runtime drains its turn and a
+  parked approval is denied by the runtime's signal path; the supervisor does
+  not wait for them, so the unit needs no longer stop timeout. A stopped or
+  uninstalled supervisor no longer owns future wake delivery, and any next
+  supervisor/engage applies the existing live-runtime lease rules.
 
 ## 7. The project-staleness source
 
