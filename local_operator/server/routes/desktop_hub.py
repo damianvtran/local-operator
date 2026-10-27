@@ -524,6 +524,7 @@ _PUSH_STATE_REFUSALS = frozenset(
         "hub-moved",
         "local-concurrent-edit",
         "lineage-not-clean",
+        "reconciliation-required",
     }
     | _BUNDLE_STATE_REFUSALS
 )
@@ -623,11 +624,12 @@ async def push(
         # A settled refusal: a deterministic hub answer or a lost CAS. The receipt
         # stays unspent so the person can review again; the status carries the cause.
         if outcome.get("outage"):
-            # The hub produced NO DECISION (transport failure or 5xx): the 502 retry
-            # class under the code the renderer words as "a retry is scheduled"
-            # (hub-link-copy.ts maps hub-error to its transport sentence). The hub's
-            # own code (``internal``, ``http-500``) means nothing to the renderer and
-            # a 422 would read as a validation error. The receipt stays valid.
+            # The hub produced NO DECISION (transport failure or 5xx): answered as the
+            # 502 retry class under ``hub-error`` rather than a 422 carrying the hub's
+            # own code (``internal``, ``http-500``). Today the renderer shows its
+            # generic action-failed message for any push error, so 502 vs 422 does
+            # not change what the person sees; the class is for clients that retry
+            # on 5xx. The receipt stays valid.
             raise _refusal(
                 502, "the hub could not be reached; a retry is scheduled", code="hub-error"
             )

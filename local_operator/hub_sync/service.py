@@ -5555,38 +5555,54 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
             raise changed("the link changed while it was being checked")
         record = fresh
 
-        # RECONCILE A COMMIT THAT LANDED. A commit that timed out leaves a
-        # pending-reconciliation outbox record holding the VERBATIM intent. If the
-        # hub now serves exactly that content, our write landed and the hub's new
-        # revision is ours: settle it as pushed instead of reading our own success
-        # as somebody else's edit (the check below) -- and never replay the old
-        # conditional commit, which the moved revision would 412. Content equality
-        # is the proof; a hub that moved to anything else still falls through to
-        # the refusal.
-        reconciled = _reconcile_landed_commit(ctx, check, f"push-skill-{check.local_id}")
+        # LOCAL BYTES FIRST: everything below speaks about THIS receipt's reviewed
+        # proposal, which is only meaningful while the local skill is still the one
+        # that was reviewed.
+        if check.local is None or (
+            prov.fingerprint_snapshot("skill", dict(check.local))
+            != receipt.get("local_fingerprint")
+        ):
+            raise changed("the local skill changed since the preview was reviewed")
+
+        # RECONCILE A COMMIT THAT LANDED -- only ever "this exact reviewed proposal
+        # is already on the hub". A commit that timed out leaves a
+        # pending-reconciliation outbox record holding the VERBATIM intent. The
+        # outbox record is per LINK, not per receipt, so the intent alone proves
+        # nothing about THIS confirm: it must equal this receipt's proposal AND the
+        # hub's current content. Anything else (a later edit, a different reviewed
+        # proposal, a hub that moved elsewhere) falls through to the normal path,
+        # which pushes once or refuses -- never reports a push that did not happen.
+        reconciled, landed_revision = _reconcile_landed_commit(
+            ctx, check, f"push-skill-{check.local_id}", receipt
+        )
         if reconciled is not None:
-            outcome = reconciled
-            record_push_outcome(ctx, check, outcome)
             _delete_publication_preview(ctx.config_dir, preview_receipt, PUSH_PREVIEW_DIR)
-            return _push_answer(identity, check, outcome, outage=False)
+            return _push_answer(identity, check, reconciled)
+        if landed_revision:
+            # An EARLIER commit of this link landed (and its outbound receipt was
+            # just advanced to it), but it is not this receipt's proposal: the hub's
+            # new revision is ours, so it is an allowed base for the push below.
+            fresh = prov.read_baseline(ctx.config_dir, "skill", record.local_id)
+            if fresh is None or fresh.identity is None or fresh.identity.link_id != link_id:
+                raise changed("the link changed while it was being reconciled")
+            record = fresh
 
         # THE HUB DID NOT MOVE: its revision is either the one the link last saw or
         # the one this machine's own last push produced. Anything else is somebody
         # else's edit, and the answer is to pull, never to resend over it.
         allowed = {
             value
-            for value in (receipt.get("expected_remote_revision"), receipt.get("outbound_revision"))
+            for value in (
+                receipt.get("expected_remote_revision"),
+                receipt.get("outbound_revision"),
+                landed_revision,
+            )
             if value
         }
         if not check.remote_revision or check.remote_revision not in allowed:
             raise LinkError(
                 "remote-revision-changed", "the hub changed since the preview was reviewed"
             )
-        if check.local is None or (
-            prov.fingerprint_snapshot("skill", dict(check.local))
-            != receipt.get("local_fingerprint")
-        ):
-            raise changed("the local skill changed since the preview was reviewed")
 
         record = seed_manual_outbound_receipt(ctx, record, check)
         outbound = record.outbound
@@ -5639,17 +5655,27 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
             # SPENT: a second confirm with this receipt (any request id) finds nothing.
             _delete_publication_preview(ctx.config_dir, preview_receipt, PUSH_PREVIEW_DIR)
 
-    # An OUTAGE (transport failure or hub 5xx) is settled in the outbox with a
-    # streak; read it back so the route can answer the retry class rather than
-    # the hub's own code.
-    settled = Outbox(ctx.config_dir).read(operation_id)
-    return _push_answer(
-        identity, check, outcome, outage=bool(settled is not None and settled.outage_streak > 0)
-    )
+    return _push_answer(identity, check, outcome)
 
 
-def _reconcile_landed_commit(ctx: HubSyncContext, check: chk.ItemCheck, operation_id: str) -> Any:
-    """A ``pushed`` outcome when a stored uncertain commit already landed, else None."""
+def _reconcile_landed_commit(
+    ctx: HubSyncContext, check: chk.ItemCheck, operation_id: str, receipt: Mapping[str, Any]
+) -> tuple[Any, str | None]:
+    """Settle an uncertain earlier commit; ``(outcome, None)`` only for THIS receipt.
+
+    The outbox record is per LINK, not per receipt, so a stored intent says nothing
+    about the proposal being confirmed now. Two facts are therefore kept apart:
+
+    * did the stored commit LAND (the hub serves exactly its content)? If so the
+      outbox is settled and the outbound receipt advanced -- a fact about the past;
+    * is it THIS receipt's reviewed proposal? Only then is a ``pushed`` outcome
+      returned, because only then is "already on the hub" a true answer to this
+      confirm. Otherwise ``(None, <the landed revision>)`` lets the caller push
+      the new proposal once on top of it.
+
+    A stored intent that did NOT land and is not this proposal refuses: letting
+    ``push_item`` replay it would send bytes this confirm never reviewed.
+    """
 
     from local_operator.hub_sync.outbox import Outbox
     from local_operator.hub_sync.push import PushOutcome, reconcilable
@@ -5657,36 +5683,82 @@ def _reconcile_landed_commit(ctx: HubSyncContext, check: chk.ItemCheck, operatio
     outbox = Outbox(ctx.config_dir)
     record = outbox.read(operation_id)
     if not reconcilable(record) or record is None or not isinstance(record.intent, Mapping):
-        return None
+        return None, None
     document = record.intent.get("document")
-    if (
-        not isinstance(document, Mapping)
-        or check.remote is None
-        or not check.remote_revision
-        or not _same_content(document, check.remote)
-    ):
-        return None
+    if not isinstance(document, Mapping):
+        return None, None
+    proposal = receipt.get("proposal")
+    reviewed = proposal.get("fields") if isinstance(proposal, Mapping) else None
+    is_this_proposal = (
+        isinstance(reviewed, Mapping)
+        and _proposal_fingerprint(dict(reviewed)) == receipt.get("proposal_fingerprint")
+        and _same_content(document, reviewed)
+    )
+    landed = (
+        check.remote is not None
+        and bool(check.remote_revision)
+        and _same_content(document, check.remote)
+    )
+    if not landed:
+        if is_this_proposal:
+            return None, None  # push_item's verbatim replay IS this proposal
+        if check.remote_revision and check.remote_revision != record.intent.get(
+            "expected_revision"
+        ):
+            # The hub moved to something else, so the stored conditional commit can
+            # only ever 412: it is dead. Retire it so it cannot wedge the link; the
+            # revision check that follows decides whether THIS push may proceed.
+            outbox.settle(operation_id, generation=record.generation, error_class="superseded")
+            return None, None
+        raise LinkError(
+            "reconciliation-required",
+            "an earlier publication of different content is still unresolved; "
+            "check the link again before publishing",
+        )
+    assert check.remote_revision is not None and check.remote is not None
     outbox.settle(
         operation_id,
         generation=record.generation,
         result={"revision": check.remote_revision, "reconciled": True},
     )
-    return PushOutcome(
+    # A = the local input that was SENT (this receipt's local bytes when it is the
+    # same proposal; otherwise the intent's document, never today's newer edits --
+    # those must still read as an unsent delta), P = what the hub accepted.
+    record_outbound_receipt(
+        ctx,
+        "skill",
+        check.local_id,
+        accepted=check.remote,
+        current_local=(check.local or {}) if is_this_proposal else document,
+        revision=check.remote_revision,
+        operation_id=operation_id,
+    )
+    if not is_this_proposal:
+        return None, check.remote_revision
+    outcome = PushOutcome(
         "pushed",
         operation_id=operation_id,
         accepted={"accepted_document": dict(check.remote), "operation_id": operation_id},
         revision=check.remote_revision,
     )
+    key = st.item_key("skill", check.local_id)
+
+    def fold(doc: dict[str, Any]) -> None:
+        item = doc.get("items", {}).get(key)
+        if item is not None:
+            item["last_pushed_at"] = st.now_iso()
+            st.clear_push_skipped(item)
+
+    ctx.store().mutate(fold)
+    return outcome, check.remote_revision
 
 
-def _push_answer(
-    identity: LinkIdentity, check: chk.ItemCheck, outcome: Any, *, outage: bool
-) -> dict[str, Any]:
+def _push_answer(identity: LinkIdentity, check: chk.ItemCheck, outcome: Any) -> dict[str, Any]:
     """The confirm answer: state, reason, outage class and the directional report."""
 
     return {
         "state": outcome.state,
-        "outage": outage,
+        "outage": bool(getattr(outcome, "outage", False)),
         "reason": outcome.reason,
         "report": {
             "kind": "skill",

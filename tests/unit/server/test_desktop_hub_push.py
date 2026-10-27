@@ -508,3 +508,95 @@ async def test_a_commit_that_landed_before_the_response_reconciles_on_retry(api)
     (report,) = retry.json()["result"]["reports"]
     assert report["outcome"] == "pushed" and report["remote_revision"] == '"hub-rev-2"'
     assert len(transport.commit_calls) == 1  # reconciled, never re-sent
+
+
+class HubSpy:
+    """Counts what actually reached the hub: the write count is the assertion."""
+
+    def __init__(self, transport: Any) -> None:
+        self.transport = transport
+
+    @property
+    def writes(self) -> int:
+        return len(self.transport.commit_calls)
+
+
+async def _timeout_then_land(api):
+    """Shared rig: the first commit times out, then the hub serves E1 at rev-2."""
+
+    client, root, _, _ = api
+    link_id, anon = await link_skill(api)
+    transport = arm_transport(api, hang_commit=True)
+    edit_locally(root)  # E1
+    receipt = (await preview(client, link_id))["preview"]["preview_receipt"]
+    body = confirm_body(link_id, receipt)
+    first = await client.post("/v1/desktop/hub/updates/push", json=body)
+    assert first.json()["result"]["reports"][0]["outcome"] == "pending-reconciliation"
+    anon.payload = envelope(manifest(ALIAS, body="Say hello, loudly.\n"), revision='"hub-rev-2"')
+    return client, root, link_id, anon, transport, body
+
+
+async def test_reconcile_never_claims_a_push_after_a_later_local_edit(api) -> None:
+    """R3-1 (2): E1 landed, the user edited again WITHOUT re-previewing -> refused."""
+
+    client, root, link_id, anon, transport, body = await _timeout_then_land(api)
+    edit_locally(root, body="E2 written after the review.\n")
+
+    retry = await client.post("/v1/desktop/hub/updates/push", json=body)
+
+    assert retry.status_code == 409, retry.text
+    assert retry.json()["detail"]["code"] == "publication-preview-changed"
+    assert HubSpy(transport).writes == 1  # nothing further left the machine
+    # The next preview still sees the unsent edit: no phantom "no-changes".
+    again = (await preview(client, link_id))["preview"]
+    assert again["reason"] != "no-changes"
+
+
+async def test_a_new_proposal_after_a_landed_commit_is_pushed_exactly_once(api) -> None:
+    """R3-1 (3): E1 landed; E2 is previewed as a NEW receipt and confirmed -> E2 is sent."""
+
+    client, root, link_id, anon, transport, _ = await _timeout_then_land(api)
+    edit_locally(root, body="E2 is the new reviewed proposal.\n")
+    transport.accepted = manifest(ALIAS, body="E2 is the new reviewed proposal.\n")
+    transport.revision = '"hub-rev-2"'  # the hub is at E1's revision now
+    transport.hang_commit = False  # the second attempt answers normally
+    pv = (await preview(client, link_id))["preview"]
+    assert pv["can_confirm"] is True, pv
+
+    response = await client.post(
+        "/v1/desktop/hub/updates/push", json=confirm_body(link_id, pv["preview_receipt"])
+    )
+
+    assert response.status_code == 200, response.text
+    (report,) = response.json()["result"]["reports"]
+    assert report["outcome"] == "pushed"
+    assert HubSpy(transport).writes == 2  # E1's (timed out) + exactly one for E2
+    assert "E2 is the new reviewed proposal" in json.dumps(transport.commit_calls[1]["document"])
+
+
+async def test_a_hub_already_holding_the_proposal_never_records_a_push_that_did_not_happen(
+    api,
+) -> None:
+    """R3-1 (4): hub content equals the proposal BEFORE any attempt.
+
+    The preview is local-only, so it cannot know; the confirm's fresh hub read sees a
+    revision it never reviewed and refuses. No commit is sent and no push is recorded.
+    """
+
+    client, root, _, _ = api
+    link_id, anon = await link_skill(api)
+    transport = arm_transport(api)
+    edit_locally(root)
+    # Someone (or an earlier tool) already put the edited bytes on the hub.
+    anon.payload = envelope(manifest(ALIAS, body="Say hello, loudly.\n"), revision='"hub-rev-2"')
+
+    pv = (await preview(client, link_id))["preview"]
+    response = await client.post(
+        "/v1/desktop/hub/updates/push", json=confirm_body(link_id, pv["preview_receipt"])
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "remote-revision-changed"
+    assert HubSpy(transport).writes == 0
+    # No outbound receipt was minted or advanced: no push is on record.
+    assert prov.iter_baselines(root)[0].outbound is None
