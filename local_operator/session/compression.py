@@ -1295,14 +1295,44 @@ def _drain_deferred_releases() -> None:
         if not _WRITERS_GUARD.acquire(blocking=False):
             return
         try:
-            while True:
-                try:
-                    key = _DEFERRED_RELEASES.popleft()
-                except IndexError:
-                    break
-                _release_held_locked(key)
+            _apply_deferred_locked()
         finally:
             _WRITERS_GUARD.release()
+
+
+def _apply_deferred_locked() -> None:
+    """Apply every queued release; the caller holds :data:`_WRITERS_GUARD`."""
+    while True:
+        try:
+            key = _DEFERRED_RELEASES.popleft()
+        except IndexError:
+            return
+        _release_held_locked(key)
+
+
+def _settle_deferred_releases() -> None:
+    """Wait out any in-process guard holder, then apply its deferred releases.
+
+    For the readers of the KERNEL lock that bypass the registry
+    (:func:`compress_session`, :func:`lock_is_busy`). A finaliser that ran while
+    another thread held the guard queued its release and returned; before
+    deferral existed, that ``del`` blocked until the holder let go and released
+    in place, so "drop the writer, then compress" on one thread always found the
+    session idle. Passing through the guard here restores that: the holder's
+    post-release drain (or this one) has applied the queued key by the time the
+    probe opens the lock file.
+
+    The queue is applied UNDER the guard, not left to the post-release drain:
+    that drain only tries the guard, so a third thread taking it in between
+    would leave the key queued while this caller goes on to probe. Anything
+    queued before this call is therefore applied when it returns.
+
+    BLOCKS on the guard, so it must never run under it or from a finaliser. That
+    is cheap: no holder sleeps or does I/O-bound waiting under the guard (see
+    the poll loop in :func:`acquire_writer`).
+    """
+    with _writers_guarded():
+        _apply_deferred_locked()
 
 
 def _release_held_locked(key: str) -> None:
@@ -1398,6 +1428,7 @@ def lock_is_busy(directory: Path) -> bool:
     means no holder (the only way to hold the lock is to have created it), and
     an unreadable one reads as busy — fail closed, like every guard here.
     """
+    _settle_deferred_releases()
     path = _lock_path(directory)
     try:
         fd = os.open(os.fspath(path), os.O_RDWR)
@@ -1794,6 +1825,10 @@ def compress_session(
     directory = Path(directory)
     started = time.monotonic()
     chosen = codec or available_codec()
+    # Not ``_try_acquire_lock`` alone: it reads the kernel lock directly, so a
+    # writer this process already dropped would still read as "in use" while
+    # its finaliser's release waits in the deferred queue.
+    _settle_deferred_releases()
     lock = _try_acquire_lock(directory)
     if lock is None:
         return Outcome(directory.name, "skipped", "session in use", codec=chosen)

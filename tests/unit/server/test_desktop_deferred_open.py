@@ -145,6 +145,14 @@ async def _seed(
             },
         )
     transcript.flush()
+    # CLOSE, do not just drop: the lock must be free when this returns, and a
+    # dropped writer frees it only when its LAST reference dies. The executor
+    # worker behind ``asyncio.to_thread`` keeps one (its work item holds the
+    # write closure, which holds this object) until it runs ``del work_item``
+    # after waking the loop, so a descheduled worker leaves the lock held while
+    # the caller already runs ``compress_session`` -> "session in use". Seen
+    # as a CI flake on unrelated PRs (runs 40423185038, 40430478001).
+    transcript.close()
     if head_cut:
         # A compaction marker whose kept window starts ABOVE row zero is what the
         # index reports as ``head_cut``; the rows above it stay on disk, which is

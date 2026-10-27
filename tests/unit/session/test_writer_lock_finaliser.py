@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
@@ -93,6 +94,23 @@ def _open_in_thread(directory: Path) -> tuple[threading.Thread, list[Any]]:
 
 def _key(directory: Path) -> str:
     return os.path.realpath(os.fspath(directory))
+
+
+def _kernel_lock_busy(directory: Path) -> bool:
+    """Whether the flock is held, read straight from the kernel.
+
+    A second open file description conflicts with this process's own hold, so
+    this sees the registry's fd. Unlike ``lock_is_busy`` it never touches the
+    guard, which is what a probe taken WHILE another thread holds it needs.
+    """
+    fd = os.open(os.fspath(directory / compression.LOCK_NAME), os.O_RDWR)
+    try:
+        if compression._flock(fd):
+            compression._funlock(fd)
+            return False
+        return True
+    finally:
+        os.close(fd)
 
 
 def test_a_transcript_dropped_under_the_guard_does_not_deadlock_the_open(
@@ -187,8 +205,10 @@ def test_a_finaliser_on_another_thread_defers_and_the_holder_applies_it(
         dropper.join(_JOIN_S)
         assert not dropper.is_alive(), "the finaliser blocked on another thread's guard"
 
-        # Deferred, not applied under the other thread's hold.
-        assert compression.lock_is_busy(first_dir)
+        # Deferred, not applied under the other thread's hold. A RAW kernel
+        # probe: ``lock_is_busy`` settles the queue first, so it would wait for
+        # the parked holder rather than report this in-between state.
+        assert _kernel_lock_busy(first_dir)
         assert _key(first_dir) in compression._WRITERS
     finally:
         leave_window.set()
@@ -253,3 +273,98 @@ def test_explicit_close_still_releases_synchronously(
     assert not compression.lock_is_busy(directory)
     assert compression._WRITERS == {}
     transcript.close()  # idempotent
+
+
+def _queue_a_deferred_release(directory: Path, guard: threading.Lock) -> None:
+    """Leave ``directory``'s writer release QUEUED, the state a lost race leaves.
+
+    A finaliser that fires while another thread holds the guard queues its key,
+    and that holder's post-release drain only TRIES the guard; a third thread
+    taking the guard in between leaves the key queued. That interleaving is a
+    scheduling accident, so this builds its end state directly: the guard is
+    held while the last reference dies on another thread, and the hold is
+    dropped with ``guard.release()`` itself, which skips the drain.
+    """
+    holders = [Transcript(directory)]
+    assert guard.acquire(timeout=_JOIN_S)
+    try:
+        dropper = threading.Thread(target=holders.clear, daemon=True)
+        dropper.start()
+        dropper.join(_JOIN_S)
+        assert not dropper.is_alive(), "the finaliser blocked on another thread's guard"
+    finally:
+        guard.release()
+    assert list(compression._DEFERRED_RELEASES) == [_key(directory)], "precondition: queued"
+
+
+def _stale_session(tmp_path: Path, sid: str) -> tuple[Path, Path]:
+    """A marked store with one session old enough for the default policy."""
+    from local_operator.session import cleanup
+
+    config = tmp_path / "config"
+    sessions = config / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / cleanup.STORE_MARKER_NAME).write_text("{}", encoding="utf-8")
+    directory = sessions / sid
+    Transcript(directory).close()
+    (directory / compression.PLAIN_FILENAME).write_text(
+        '{"type":"message","payload":{"role":"user","content":"hello"}}\n', encoding="utf-8"
+    )
+    stamp = time.time() - 40 * 86400
+    os.utime(directory / compression.PLAIN_FILENAME, (stamp, stamp))
+    os.utime(directory, (stamp, stamp))
+    return config, directory
+
+
+def test_a_queued_release_does_not_make_compress_session_skip_the_session(
+    tmp_path: Path, private_guard: threading.Lock
+) -> None:
+    """``compress_session`` reads the KERNEL lock, so it must settle the queue first.
+
+    Without that, a writer this process already dropped reads as "session in
+    use" — the CI failure in ``test_tail_miss_wire_matrix[archive]`` on #3011.
+    """
+    _, directory = _stale_session(tmp_path, "queued000001")
+    _queue_a_deferred_release(directory, private_guard)
+
+    outcome = compression.compress_session(directory)
+
+    assert outcome.status == "compressed", outcome
+    assert list(compression._DEFERRED_RELEASES) == []
+    assert _key(directory) not in compression._WRITERS
+
+
+def test_a_queued_release_does_not_read_as_busy_to_the_dry_run_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, private_guard: threading.Lock
+) -> None:
+    """The rehearsal's ``lock_is_busy`` probe settles the queue the same way."""
+    config, directory = _stale_session(tmp_path, "queued000002")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    _queue_a_deferred_release(directory, private_guard)
+
+    result = compression.run_compression(
+        config, compression.CompressionPolicy(enabled=True, after_days=30), dry_run=True
+    )
+
+    assert [row.session for row in result.candidates] == [directory.name], result
+    assert "session in use" not in result.skipped_by_reason
+    assert list(compression._DEFERRED_RELEASES) == []
+
+
+def test_a_finaliser_with_the_guard_free_releases_before_del_returns(
+    tmp_path: Path, private_guard: threading.Lock
+) -> None:
+    """The ordinary case defers nothing: the release lands inside ``del`` itself.
+
+    So a CI "session in use" after a dropped writer means the writer was NOT yet
+    finalised (another reference was still alive), never that its release sat
+    in the queue with the guard free.
+    """
+    directory = tmp_path / "sessions" / "freegc000001"
+    holders = [Transcript(directory)]
+    assert _kernel_lock_busy(directory)
+    holders.clear()
+    assert list(compression._DEFERRED_RELEASES) == []
+    assert compression._WRITERS == {}
+    assert not _kernel_lock_busy(directory)
