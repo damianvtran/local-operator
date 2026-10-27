@@ -261,3 +261,32 @@ async def test_route_undecodable_archive_is_unavailable_not_empty(
     monkeypatch.setattr(user_attachments, "list_user_attachments", boom)
     result = (await client.get(URL)).json()["result"]
     assert result == {"state": "unavailable", "items": [], "truncated": False}
+
+
+@pytest.mark.asyncio
+async def test_materialise_copies_a_listed_attachment_and_refuses_others(
+    api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The hardened copy needs dir_fd support; CI's Linux has it. This host's interpreter does
+    # not report it, so the platform gate is lifted here exactly as test_route.py does.
+    monkeypatch.setattr(
+        os, "supports_dir_fd", os.supports_dir_fd | {os.open, os.mkdir, os.unlink, os.stat}
+    )
+    client, cfg = api
+    directory, digests = _seed(cfg)
+    (directory / "scratchpad").mkdir(exist_ok=True)
+    base = f"/v1/desktop/sessions/{SESSION}/user-attachments"
+    ok = await client.post(f"{base}/{digests['pdf']}/materialise")
+    assert ok.status_code == 200, ok.text
+    receipt = ok.json()["result"]
+    assert receipt["name"] == "IP Assignment.pdf"
+    assert Path(receipt["path"]).read_bytes() == b"%PDF-1.7 hello"
+    again = (await client.post(f"{base}/{digests['pdf']}/materialise")).json()["result"]
+    assert again["path"] == receipt["path"] and again["created"] is False
+    # Listed, but the store copy is gone -> 410.
+    gone = await client.post(f"{base}/{'0' * 32}/materialise")
+    assert gone.status_code == 410
+    # In the store, but never attached to this conversation -> 404 (the store is shared).
+    foreign, _ = _stored(directory, b"someone else's bytes", "text/plain")
+    assert (await client.post(f"{base}/{foreign}/materialise")).status_code == 404
+    assert (await client.post(f"{base}/not-a-digest/materialise")).status_code == 422

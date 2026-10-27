@@ -979,6 +979,17 @@ def materialise(
 _COPY_LOCK = threading.Lock()
 
 
+def materialise_bytes(session_dir: Path, name: str, digest: str, data: bytes) -> dict[str, Any]:
+    """The hardened scratchpad copy, for a caller that has already proved membership.
+
+    Public so the user-attachment materialise route (whose membership rule is "the person
+    attached this digest here", not "this row is in the file index") reuses the ONE confined
+    copy rather than growing a second, weaker one. ``name`` must come from
+    :func:`sanitise_name`.
+    """
+    return _copy_artifact(session_dir, name, digest, data)
+
+
 def _copy_artifact(session_dir: Path, name: str, digest: str, data: bytes) -> dict[str, Any]:
     """Pin every destination ancestor; all leaf operations use the pinned directory fd.
 
@@ -1111,6 +1122,7 @@ __all__ = [
     "list_files",
     "make_deny",
     "materialise",
+    "materialise_bytes",
     "parse_csv",
     "sanitise_name",
     "session_cwd",

@@ -71,6 +71,8 @@ router = APIRouter(tags=["Desktop session files"], dependencies=[Depends(require
 #: by FastAPI (422) before any handler runs.
 SessionID = Annotated[str, PathParam(pattern=r"^[a-f0-9]{12}$")]
 FileID = Annotated[str, PathParam(pattern=r"^[a-f0-9]{16}$")]
+#: The attachment store's digest shape (``attachments._DIGEST_CHARS``); the traversal gate.
+AttachmentDigest = Annotated[str, PathParam(pattern=r"^[a-f0-9]{32}$")]
 
 #: In-flight background completions, keyed ``(config_dir, session_id, scope)``. Single-flight:
 #: a 1 s client poll that arrives while a scan runs joins it rather than queueing another. The
@@ -331,3 +333,66 @@ async def list_user_attachments(session_id: SessionID, request: Request):
         logger.info("user-attachments: undecodable archive for %s", session_id, exc_info=True)
         return reply(UserAttachmentsListing(state="unavailable"))
     return reply(UserAttachmentsListing(state="ready", **listing))
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/user-attachments/{digest}/materialise",
+    response_model=CRUDResponse[MaterialiseReceipt],
+)
+async def materialise_user_attachment(
+    session_id: SessionID, digest: AttachmentDigest, request: Request
+):
+    """Copy one user attachment's RETAINED bytes to ``<session scratchpad>/generated/<name>``.
+
+    WHY: a pasted screenshot has no path at all, and a document whose origin was moved has
+    only ``<store>/<digest>.bin`` - a name no OS app opens. "Open", "reveal" and "copy path"
+    need a real, correctly named file, which is exactly what the file index's materialise
+    gives an artifact; this is the same copy (``service._copy_artifact``: pinned no-follow
+    directory fds, sanitised name with a MIME-derived extension, idempotent, never
+    overwrites) over a different membership rule. NOT a byte transport: the response is a
+    path, and the bytes stay on the existing digest route.
+
+    MEMBERSHIP: the digest must be one the person attached to THIS conversation
+    (:func:`user_attachments.find_user_attachment`); the shared store means a bare digest
+    proves nothing. 404 otherwise (and for a draft or a peer, whose journal is not here); 410
+    when the store copy is gone; 409 for an unsafe destination. Capability:
+    ``features.session_attachments``.
+    """
+    async with errors(request):
+        kind_of_target, directory = await host(request).files_target(session_id)
+    not_found = HTTPException(
+        404, _wd.session_files_file_not_found().envelope(code="session_files_file_not_found")
+    )
+    if kind_of_target != "local" or directory is None:
+        raise not_found
+
+    def run() -> dict[str, Any]:
+        from local_operator.scratchpad import scratchpad_root
+        from local_operator.session.attachments import store_for_transcript_dir
+
+        item = user_attachments.find_user_attachment(directory, digest)
+        if item is None:
+            raise service.MaterialiseError("file_not_found")
+        blob = store_for_transcript_dir(directory).get_bytes(digest)
+        if blob is None:
+            raise service.MaterialiseError("artifact_missing")
+        data, stored_mime = blob
+        if scratchpad_root(directory) is None:
+            raise service.MaterialiseError("materialise_failed", "session has no scratchpad")
+        name = service.sanitise_name(
+            item.get("filename"), digest, item.get("mime_type") or stored_mime
+        )
+        return service.materialise_bytes(directory, name, digest, data)
+
+    try:
+        receipt = await asyncio.to_thread(run)
+    except service.MaterialiseError as error:
+        status, message = _MATERIALISE_REFUSALS.get(
+            error.code, (500, _wd.session_files_materialise_failed(reason=str(error)))
+        )
+        if error.code == "materialise_failed":
+            message = _wd.session_files_materialise_failed(reason=str(error))
+        raise HTTPException(status, message.envelope(code=f"session_files_{error.code}")) from None
+    except compression.ArchiveError:
+        raise not_found from None
+    return reply(receipt)

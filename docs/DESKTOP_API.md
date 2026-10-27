@@ -766,6 +766,7 @@ readings.
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1`, `open_frame=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
 | GET `.../{id}/files` | optional `scope=family\|self`, `kind`, `origin`, `highlighted=0\|1`, `q`, `sort=recent\|name\|kind\|modified\|created\|size`, `order=asc\|desc`, `limit` 1..200 (default 100), `cursor` | `{state,revision,scope,sort,order,total,counts,rows,next_cursor,cursor_reset,stat_complete,scan}` — the per-session file index (`session_files`); see §"The per-session file index" |
 | GET `.../{id}/user-attachments` | — | `{state:ready\|unsupported\|unavailable,items,truncated}` — every document and picture the USER attached, oldest first, metadata only (`session_attachments`); see §"The user-attachment inventory" |
+| POST `.../{id}/user-attachments/{digest}/materialise` | — | `{path,name,size_bytes,created}`; copies a user attachment's retained bytes to `<session scratchpad>/generated/` so open/reveal/copy-path have a real, correctly named file (`session_attachments`) |
 | POST `.../{id}/files/{file_id}/materialise` | — | `{path,name,size_bytes,created}`; copies a digest-only artifact to `<session scratchpad>/generated/` (`session_files`) |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
@@ -2421,6 +2422,14 @@ States: `ready` (complete), `unsupported` (a peer's conversation), `unavailable`
 this host cannot decode). `truncated: true` past 2000 items. Admission is the file index's
 (404 unknown id, 409 silent peer, empty `ready` for a draft). Absent key: the renderer
 aggregates loaded rows and must not call the route.
+
+`POST …/user-attachments/{digest}/materialise` copies a listed attachment's RETAINED bytes to
+`<session scratchpad>/generated/<name>` (the file index's hardened copy: pinned no-follow
+directories, sanitised name, MIME-derived extension, idempotent, never overwrites). The
+digest must be one the person attached to this conversation (the store is shared, so a bare
+digest proves nothing). Refusals reuse the file index's codes: `404
+session_files_file_not_found`, `410 session_files_artifact_missing`, `409
+session_files_unsafe_destination`.
 
 ### Verification
 

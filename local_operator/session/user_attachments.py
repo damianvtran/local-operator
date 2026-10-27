@@ -264,3 +264,18 @@ def list_user_attachments(session_dir: Path) -> dict[str, Any]:
         if truncated:
             break
     return {"items": items, "truncated": truncated}
+
+
+def find_user_attachment(session_dir: Path, digest: str) -> dict[str, Any] | None:
+    """The newest listed attachment carrying ``digest``, or ``None``.
+
+    The materialise route's MEMBERSHIP check: the attachment store is shared across
+    conversations, so a digest alone proves nothing about this session. Only a digest the
+    person attached HERE may be copied into this session's scratchpad. Newest wins so a file
+    attached twice under two names materialises under the name used most recently.
+    """
+    found = None
+    for item in list_user_attachments(session_dir)["items"]:
+        if item.get("attachment") == digest:
+            found = item
+    return found
