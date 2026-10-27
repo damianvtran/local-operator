@@ -1177,3 +1177,33 @@ def test_a_warm_thread_finishing_after_a_reset_cannot_poison_counts(monkeypatch)
     assert tokens_mod._ENCODING_FAILED is False, "a late warm re-armed the failure latch"
     _require_real_encoding()
     tokens_mod.reset_tokenizer_state()
+
+
+def test_streaming_deltas_never_fill_the_preserved_turn_memo():
+    """The exact-length memo is opt-in; a delta stream must leave it empty.
+
+    ``estimate_tokens`` deliberately never caches an unsettled streaming
+    assistant (RC-20). Memoizing the text ruler itself would re-introduce that
+    cache by another door: every growing prefix is a distinct key, so a delta
+    stream would pin all of them — and evict the preserved turns the memo exists
+    for. A thousand deltas is the shape a long answer actually takes.
+    """
+    text = ""
+    for index in range(1000):
+        text = f"{text}chunk {index} "
+        estimate_tokens(Message(role="assistant", content=[TextContent(type="text", text=text)]))
+
+    assert len(tokens_mod._TEXT_LENGTH_CACHE) == 0
+
+
+def test_resetting_the_tokenizer_drops_the_preserved_turn_memo():
+    """Old-epoch entries are unreachable; they must not keep their bytes alive."""
+    tokens_mod.reset_tokenizer_state()
+    if tokens_mod._get_encoding() is None:
+        pytest.skip("tiktoken is an optional dependency")
+    tokens_mod._encode_len("a preserved constraint", memo=True)
+    assert len(tokens_mod._TEXT_LENGTH_CACHE) == 1
+
+    tokens_mod.reset_tokenizer_state()
+
+    assert len(tokens_mod._TEXT_LENGTH_CACHE) == 0

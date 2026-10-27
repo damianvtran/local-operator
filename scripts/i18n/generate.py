@@ -126,6 +126,11 @@ OWNED_SPA_NAMESPACES = (
     # namespace keeps the frozen relay.chrome source bytes and ledger hashes
     # untouched while its English copy is prepared for the translation wave.
     "relay.transcript",
+    # The session header's status dot (live / not answering / ended). Its own
+    # owned namespace for the same reason relay.transcript has one: the two new
+    # keys must not change relay.chrome's frozen English bytes, which would stale
+    # every locale's passed ledger row for that namespace.
+    "relay.health",
 )
 
 GENERATED_HEADER = (

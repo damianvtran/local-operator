@@ -335,8 +335,24 @@ def session_not_found(*, session_id: str) -> Msg:
     return Msg("wire.errors.desktop.session_not_found", {"session_id": session_id})
 
 
+def skill_alias_occupied() -> Msg:
+    return Msg("wire.errors.desktop.skill_alias_occupied", {})
+
+
+def skill_local_changes_unpublished() -> Msg:
+    return Msg("wire.errors.desktop.skill_local_changes_unpublished", {})
+
+
+def skill_not_editable() -> Msg:
+    return Msg("wire.errors.desktop.skill_not_editable", {})
+
+
 def skill_not_found() -> Msg:
     return Msg("wire.errors.desktop.skill_not_found", {})
+
+
+def skill_stale() -> Msg:
+    return Msg("wire.errors.desktop.skill_stale", {})
 
 
 def sort_unknown(*, sorts: str) -> Msg:

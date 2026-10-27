@@ -911,6 +911,16 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # the hand-written list is what missed this row.
     "event_mute": "view",  # stop sending THIS connection deltas; affects nobody else
     "event_unmute": "view",  # the matching resume, on the same connection
+    # ``view``, and for the same reason as the mute pair: the op writes ONE
+    # number onto the SENDING connection's own record (``conn.tui_input_at_ms``,
+    # session/runtime/server.py), so it changes nothing any other viewer or the
+    # owner's own state can observe. It carries no content either — an epoch
+    # millisecond and nothing else, because the ladder asks only "is the
+    # operator here NOW" — so ``view`` (the capability that already opens this
+    # stream) is the narrowest word that covers it, and no narrower row exists.
+    # Without this row the relay refused it closed, and the stream with it
+    # (test_stream_op_gate.py found it: R6-1's ``activity`` had no decision).
+    "activity": "view",  # this connection's own input freshness; timestamp only
     # session-scoped WRITE, not a per-viewer mark: it clears the OWNER's own
     # attention state (serving.py ``acknowledge_attention`` →
     # ``Session.acknowledge_attention``), and the runtime then pushes the new

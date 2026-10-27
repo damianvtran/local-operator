@@ -73,6 +73,11 @@ RTL & bidi section before translating a single string.
   FSI/PDI cost 0 cells. Keep within `maxCells`; prefer short.
 - Budgets: `maxCells` from the en sidecar; pinned: PERSIST_HINT 42/43 cells,
   tip pool 59, `/help` ≈ 55.
+- Recorded width exception: relay.health.reconnecting reads «پھر منسلک ہو رہا»
+  — the consistent «دوبارہ منسلک ہو رہا» (relay.chrome.link.*) is 19 cells
+  against the 16-cell cap; «پھر» before a verb reads "again", and dropping
+  «ہے» matches the sibling «جواب نہیں دے رہا». Revisit only with a budget
+  change.
 
 ## Punctuation & typography
 

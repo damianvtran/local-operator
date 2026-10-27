@@ -56,8 +56,9 @@ TOKEN = "synthetic-sidebar-layout-token"
 
 SHIPPED = {
     "version": 1,
-    "visible": ["aida", "library", "projects", "agents", "schedules", "browser"],
-    "more": ["team-bridge", "agent-hub", "mesh"],
+    # Notifications under Aida, Schedules folded into More (decision D10).
+    "visible": ["aida", "notifications", "library", "projects", "agents", "browser"],
+    "more": ["schedules", "team-bridge", "agent-hub", "mesh"],
 }
 
 
@@ -78,6 +79,8 @@ def test_the_shipped_arrangement_is_the_design_table() -> None:
         "team-bridge",
         "agent-hub",
         "mesh",
+        # APPENDED, never inserted: the tuple is wire vocabulary (D10).
+        "notifications",
     )
     assert DEFAULT_SIDEBAR_LAYOUT == {"visible": SHIPPED["visible"], "more": SHIPPED["more"]}
     assert read_layout(Path("/nonexistent-config-root")) == SHIPPED
@@ -114,7 +117,6 @@ def test_a_subset_is_stored_as_given(tmp_path: Path) -> None:
         ("{not json", "malformed JSON"),
         ("[]", "not an object"),
         ('{"version": 2, "visible": [], "more": []}', "a newer schema version"),
-        ('{"version": 1, "visible": ["nope"], "more": []}', "an unknown destination"),
         ('{"version": 1, "visible": ["aida", "aida"], "more": []}', "a duplicate"),
         ('{"version": 1, "visible": ["aida"], "more": ["aida"]}', "a cross-region duplicate"),
         ('{"version": 1, "visible": ["aida"]}', "a missing region"),
@@ -135,6 +137,36 @@ def test_a_bad_file_degrades_to_the_defaults(
     with caplog.at_level("WARNING", logger="local_operator.server.sidebar_layout"):
         assert read_layout(tmp_path) == SHIPPED, because
     assert SIDEBAR_LAYOUT_FILE in caplog.text, because
+
+
+def test_an_unknown_id_is_dropped_from_the_read_not_the_whole_layout(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A newer build's id costs only its own row, never the operator's order (D10).
+
+    The read used to refuse the whole layout and serve defaults when a file
+    named an id this build had never heard of — so the first core older than
+    the build that added ``notifications`` threw away a custom order. Now the
+    unknown id is dropped from the answer with a warning, the rest is kept,
+    and the file on disk is left byte-identical (a read never writes).
+    """
+    raw = '{"version": 1, "visible": ["mesh", "future-row", "aida"], "more": ["nope", "library"]}'
+    (tmp_path / SIDEBAR_LAYOUT_FILE).write_text(raw, encoding="utf-8")
+    with caplog.at_level("WARNING", logger="local_operator.server.sidebar_layout"):
+        assert read_layout(tmp_path) == {
+            "version": 1,
+            "visible": ["mesh", "aida"],
+            "more": ["library"],
+        }
+    assert "future-row" in caplog.text and "nope" in caplog.text
+    assert (tmp_path / SIDEBAR_LAYOUT_FILE).read_text(encoding="utf-8") == raw
+
+
+def test_the_write_path_still_refuses_an_unknown_id(tmp_path: Path) -> None:
+    """Tolerance is a READ property only: a client sending an unknown id is refused."""
+    with pytest.raises(ValidationError):
+        write_layout(tmp_path, {"visible": ["future-row"], "more": []})
+    assert not (tmp_path / SIDEBAR_LAYOUT_FILE).exists()
 
 
 def test_an_unreadable_file_degrades_to_the_defaults(tmp_path: Path) -> None:
@@ -189,7 +221,7 @@ def test_the_model_refuses_more_ids_than_there_are_destinations() -> None:
     entry must repeat one. The explicit bound exists so the invariant does not
     depend on a later reader noticing that inference.
     """
-    assert len(SIDEBAR_DESTINATION_IDS) == 9
+    assert len(SIDEBAR_DESTINATION_IDS) == 10
     with pytest.raises(ValidationError):
         SidebarLayout(visible=list(SIDEBAR_DESTINATION_IDS) + ["aida"], more=[])
 

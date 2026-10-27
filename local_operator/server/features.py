@@ -146,9 +146,22 @@ def static_feature_flags() -> dict[str, Any]:
         # `name` arm adds `skill_detail` (body, files, fingerprint, publish budget).
         # Its OWN key rather than a bump of `hub_skills` or `skill_catalogue`: a
         # renderer gated on those keeps the plain name/description list and never
-        # draws a card from a field this backend does not send. Read-only in this
-        # version; writes will advertise their own key.
+        # draws a card from a field this backend does not send. Read-only: the
+        # write routes advertise their own key, `skill_write`, below.
         "skill_library": 1,
+        # THE SKILL LIBRARY WRITES: `POST /v1/desktop/skills` (create, or a copy
+        # of a read-only skill via `copy_from`), `PUT /v1/desktop/skills/{name}`
+        # (replace the whole file set, guarded by `expected_fingerprint`) and
+        # `DELETE /v1/desktop/skills/{name}` (backup-move of a local skill, unpull
+        # of a hub-linked one, with `discard_local_changes`). Every write carries
+        # a `request_id` and is receipted. Its OWN key rather than a bump of
+        # `skill_library`: v0.90.17 already shipped `skill_library: 1` as the READ
+        # side, and those cores answer these routes with 405/404, so a renderer
+        # that offered create/edit/remove on `skill_library >= 1` would draw
+        # controls that fail on every released core. It implies nothing about
+        # `skill_library`: a renderer that draws the editor needs BOTH (the rows
+        # and fingerprints it edits come from the read side).
+        "skill_write": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #
@@ -812,6 +825,13 @@ def static_feature_flags() -> dict[str, Any]:
         "approvals": 1,
         # Existing signed SSH onboarding, surfaced without a new trust engine.
         "mesh_onboard": 1,
+        # TYPED CREDENTIAL APPROVAL: `POST /v1/desktop/approvals/{id}/approve-credential`
+        # (review -> sign -> apply in one call, phase-by-phase answer) and
+        # `.../apply-credential` (the retry of a signed card), plus the `typed_approval`
+        # block on a credential row. ITS OWN KEY, not a bump of `approvals`: a renderer
+        # without it keeps the CLI-remedy card (`can_approve_here: False`) and never
+        # POSTs a body this backend would not understand.
+        "credential_approvals": 1,
         # THE ONE DIAL on the projects surface: `POST
         # /v1/desktop/projects/{key}/request-update`, which asks the linked
         # sessions for a progress update through the same peer-send core the
@@ -964,6 +984,27 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the first contract revision; row/occurrence fields are
         # additive and do not bump it.
         "library": 1,
+        # THE OPERATOR'S INBOX (`docs/design/notifications-inbox.md`): the
+        # `/v1/desktop/notifications` routes (list, count, detail, PATCH, seen)
+        # over the items agents raise with `notify` plus the open asks, and the
+        # `notifications` invalidation frame on `GET /v1/desktop/events`. Its OWN
+        # key: the page, the sidebar destination, the `/notifications` slash
+        # destination and the feed branch are all NEW surfaces, so a renderer
+        # must recognise an older backend as "no inbox" and offer none of them
+        # (the sidebar strips the `notifications` id on save unless this key is
+        # present, decision D10). `1` is the first contract revision; item and
+        # answer fields are additive and do not bump it. Served to the relay
+        # through `_feature_flags()` like every key here.
+        "notifications": 1,
+        # THE NATIVE SEEN DOOR (D11): this core's inbox accepts per-item
+        # ``evidence.surface: "native"`` receipts — touch/press/scroll edges
+        # re-checked exactly like the desktop's, recorded as ``in_view`` with
+        # their surface. It exists as its own key because the CONSUMER is the
+        # relay: the phone turns its receipt feed on only when this is present,
+        # and a core that predates it must be recognisable as "no native
+        # receipts" rather than silently refusing every one (the refusal native
+        # #117 would retry every 500 ms). ``1`` is the first contract revision.
+        "notifications_seen": 1,
         # THE DESKTOP SIDEBAR'S DESTINATION LAYOUT: the route pair
         # `GET`/`PUT /v1/desktop/sidebar-layout` over one stored preference (the
         # rows above the `More` fold and the rows below it). ADDITIVE — an older

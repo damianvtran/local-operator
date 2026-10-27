@@ -1310,6 +1310,11 @@ class Usage(BaseModel):
     #: :data:`_DECODE_WINDOW_ATTR` — private so it costs the wire nothing, and read
     #: through :func:`decode_window_of` so a future shape change is one function.
     _decode_window: tuple[int, int] | None = PrivateAttr(default=None)
+    #: The Anthropic response id of the DIAGNOSED request this usage belongs
+    #: to, or unset. See :data:`CACHE_DIAGNOSTICS_ID_KEY` — private for the same
+    #: zero-frame-bytes reason as the decode window; the transcript encoder is
+    #: the one writer that puts it on disk.
+    _cache_diagnostics_id: str | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(
@@ -2448,6 +2453,17 @@ class ToolContext(BaseModel):
     #: SENTENCE the model must act on (write text instead) or ``None`` when the
     #: quiet end is allowed. A refusal is never coerced into a message.
     quiet_end: Callable[[], Awaitable[str | None]] | None = None
+    #: THE INBOX DOOR (``docs/design/notifications-inbox.md`` §3.2): the
+    #: ``notify`` tool's whole availability fact, bound by
+    #: ``Session._notify_inbox_callable``. ``None`` for a delegated child (it
+    #: reports through ``hub`` and its parent decides), a session the operator's
+    #: own listings hide (``resume.is_user_session``), a one-shot host or an
+    #: output-contract session (the ``quiet_end`` exclusions), and under
+    #: ``LOP_NOTIFY=0``. Present, it is called with the validated arguments and
+    #: the tool call id, writes the item as unread, and returns
+    #: the sentence the model reads; it raises only for a store refusal the
+    #: tool reports as a retryable error.
+    notify_inbox: Callable[..., Awaitable[str]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per
@@ -4276,6 +4292,31 @@ def turn_output_budget(model: "ModelSpec", ceiling: int | None = None) -> int:
     return min(limit, advertised) if advertised > 0 else limit
 
 
+class ConsumerCut:
+    """A consumer's receipt that it cut one provider call short on purpose.
+
+    See ``ChatRequest._consumer_cut`` for why it exists and who reads it. A
+    plain mutable object rather than a model: it is local bookkeeping between
+    two layers of ONE process, never serialized, and every request copy must
+    share the SAME instance.
+    """
+
+    __slots__ = ("output_chars", "estimated_usage")
+
+    def __init__(self) -> None:
+        #: Output characters (reasoning + text) streamed before the cut, or
+        #: ``None`` while the call has not been cut.
+        self.output_chars: int | None = None
+        #: The recorder's estimated ``Usage`` for the cut call, handed BACK so the
+        #: loop can put the same figure on the cut message (the session's spend
+        #: band reads ``message.usage``). ``None`` until the recorder ran, and on
+        #: a host whose stream fn does not record (a bare test stream).
+        self.estimated_usage: "Usage | None" = None
+
+    def mark(self, output_chars: int) -> None:
+        self.output_chars = max(0, int(output_chars))
+
+
 class ChatRequest(BaseModel):
     """One provider call. System prompt is a LIST of blocks so providers can
     place cache breakpoints per block (stable instruction block first,
@@ -4735,6 +4776,39 @@ class ChatRequest(BaseModel):
     #: from "the harness bounded it" when it prefers a provider's own default.
     _max_tokens_from_policy: bool = PrivateAttr(default=False)
 
+    #: The consumer's cut receipt for this call, or ``None`` when the consumer
+    #: never armed one. The loop arms it BEFORE dispatch (one fresh
+    #: :class:`ConsumerCut` per model call) and its in-stream degeneration guard
+    #: (``harness.degeneration``) fills it the moment it cancels the stream; the
+    #: usage recorder (``model.configure.SessionStreamFn._record_stream``) reads
+    #: it in its ``finally``.
+    #:
+    #: WHY A REQUEST-OWNED, SHARED OBJECT. Providers report usage only in the
+    #: stream's closing frames, so a call the guard cancels arrives at the
+    #: recorder with no usage at all -- and an unreported call is booked as
+    #: UNKNOWN spend, which for a call that really billed its whole input context
+    #: plus ~10 KB of output reads as free (review round 1, m3). The recorder is
+    #: the one place that sees every provider call, but it sits BELOW the loop
+    #: and cannot see why its stream stopped; the request is the one thing both
+    #: hold. It must be an OBJECT armed before dispatch, not a scalar set at the
+    #: cut: ``SessionStreamFn`` decorates the request with ``model_copy`` before
+    #: streaming, and a copy made before a scalar is set never sees it (measured
+    #: while writing this), whereas every copy shares the one armed object.
+    #: Private, so it never reaches a wire body, a serialized request or the
+    #: one-turn-secret template.
+    _consumer_cut: "ConsumerCut | None" = PrivateAttr(default=None)
+
+    def arm_consumer_cut(self) -> "ConsumerCut":
+        """Arm (once) and return this call's cut receipt; copies share it."""
+        if self._consumer_cut is None:
+            self._consumer_cut = ConsumerCut()
+        return self._consumer_cut
+
+    @property
+    def consumer_cut(self) -> "ConsumerCut | None":
+        """The armed receipt, or ``None`` when no consumer armed one."""
+        return self._consumer_cut
+
     @property
     def max_tokens_from_policy(self) -> bool:
         """Whether ``max_tokens`` is the harness's bound rather than an ask.
@@ -4914,6 +4988,46 @@ StreamEvent = (
     | StreamEndEvent
     | StreamModelEvent
 )
+
+
+#: The key a transcript row's ``usage`` payload carries the diagnosed Anthropic
+#: response id under (PR #2984 QA Q1). The cache-diagnostics chain
+#: (``SessionStreamFn._cache_diagnostics_previous_id``) is per-process state, so
+#: without a durable copy a RESUMED session restarted at ``previous_message_id:
+#: null`` and recorded a prefix break caused by an edited instruction file as
+#: ``baseline``. Persisted on the usage row because that row already IS the
+#: per-call provider record a resume reads (``at_ms`` seeds the provider clock
+#: from the same rows).
+#:
+#: Never in a ``Usage`` dump; present in served journal rows. The in-memory
+#: value is a PRIVATE attribute (:meth:`Usage._cache_diagnostics_id`), so every
+#: surface built from a ``Usage`` dump — the attach frame, the
+#: ``usage_components`` receipts, job snapshots — pays nothing. Surfaces that
+#: serve journal rows verbatim (desktop history pages, the peer
+#: ``net_session_history``) DO carry the key, ~40 bytes per assistant row; it is
+#: not a secret and their consumers ignore unknown keys (PR #3018 review round
+#: 1, n1). ``Usage`` ignores unknown keys on validation, so a row carrying it
+#: replays on this build and on older ones alike.
+CACHE_DIAGNOSTICS_ID_KEY = "cache_diagnostics_id"
+
+
+def stamp_cache_diagnostics_id(usage: Any, response_id: str) -> None:
+    """Record on ``usage`` that its request was diagnosed as ``response_id``.
+
+    Best-effort like the decode window: a frozen or foreign usage records
+    nothing, which a resume reads as "no chain to continue" — the pre-fix
+    behaviour, never a raise into the stream.
+    """
+    try:
+        usage._cache_diagnostics_id = response_id
+    except Exception:  # noqa: BLE001 — telemetry must never fail a call
+        pass
+
+
+def cache_diagnostics_id_of(usage: Any) -> str | None:
+    """The diagnosed response id stamped on ``usage``, or ``None``."""
+    value = getattr(usage, "_cache_diagnostics_id", None)
+    return value if isinstance(value, str) and value else None
 
 
 def decode_window_of(usage: Any) -> tuple[int, int] | None:

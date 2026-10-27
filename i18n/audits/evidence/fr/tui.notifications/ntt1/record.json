@@ -1,0 +1,254 @@
+{
+  "schema": 1,
+  "audit_id": "ntt1",
+  "audit_id_assigned_by": "translation-auditor, assigned by delegation on 2026-10-25",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "fr",
+  "namespace": "tui.notifications",
+  "audit_date": "2026-10-25",
+  "source_audit_revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+  "observed_checkout_head": "b33846f2feba0e33acc9292b8dd16947de404be5",
+  "current_bytes_match_audited_hashes": true,
+  "audited_revision_note": "The target is an UNTRACKED working-tree file; its bytes were copied into the auditor scratchpad as the first action, before the coder's unrelated branch switch in that worktree, and the copy was audited. Re-checked at the end of the audit: worktree target sha256 unchanged (87866da0...a29905) and the worktree HEAD had moved to b33846f2... with unrelated modified files (mobile/daemon.py, notifications/delivery.py, notifications/store.py) that are neither the pinned source nor the target. English source, context sidecar and sibling catalogues were read at the pin d25392f3553.",
+  "key_count": {
+    "en": 72,
+    "target": 72
+  },
+  "context_entries_read": 72,
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "verdict_reason": "All 72 key pairs and all 72 context entries compared. ICU argument names/kinds/order identical to English on every key; fr one/many/other complete with the obligatory `de` and `#` in the `many`/`other` branches; literals /notifications, /unread, `/unread read`, read, y/n, a, f byte-exact; NFC, no manual bidi controls; vous register; fr typography (’, « », U+202F) correct in every value. Three budget-forced terminology/abbreviation drifts and one one-cell fit overshoot at 4-digit counts are recorded as minors; nothing blocks the namespace.",
+  "fit_decision": {
+    "key": "tui.notifications.updates_since",
+    "question": "Is 31 cells at 4-digit counts a realistic fit failure (major) or acceptable (minor)?",
+    "decision": "minor",
+    "measurements": "fr first exceeds maxCells 30 at count 1000 (31 cells) and stays 31 through 9999; 29 cells at 999; 33 at 100000; 38 at 1000000. English never exceeds 30 up to 1500000 (29 at 10^6). header_counts breaches its 40-cell budget at 10^6 in BOTH locales (fr 44, en 43).",
+    "reasoning": "No 1-3 digit count overflows and the overshoot is one cell; the affected segment is appended to a Text(no_wrap=False) meta line in the pinned notifications_render.py, so the consequence is a wrap inside a wrapping pane, not a cropped column or a lost label; and repeat_count reaching 1000 requires 1000 keyed updates to one item (HISTORY_CAP=20 caps history rows only; NEW_ITEMS_PER_HOUR=30 caps new items only). The fr value is byte-identical to the already-audited desktop string ui.notifications.detail.meta.updates_since.",
+    "would_change_if": "a breach at 3-digit counts, a non-wrapping or cropped container for the meta line, or evidence that repeat_count reaches 1000 in operator use."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, tui-audit-fr)",
+    "instance": "429b867caa2e",
+    "session": "429b867caa2e",
+    "model": "radient/auto",
+    "actual_model_source": "Session model-switch notices during this task: anthropic/claude-opus-5-5 -> anthropic/claude-sonnet-5-5 (provider failure: quota) -> openai/gpt-6.1-sol (quota) -> radient/auto (quota). The audit was performed by the last of these, radient/auto; neither the requested primary nor the intermediates served it. Not a role/default pin and no tool set was changed.",
+    "fallback_used": true,
+    "date": "2026-10-25",
+    "independence": "Separate agent/context from the translator (coder / Opus5.5, per delegation provenance). This auditor drafted, polished and modified none of the English, French, desktop or wire values audited here, and edited no catalogue, code, generated asset, git object or ledger row; the worktree was read only. Parser, plural, width and negative-control results were derived here."
+  },
+  "translator": {
+    "agent": "coder",
+    "model": "Opus5.5",
+    "date": "2026-10-25",
+    "source": "Delegation brief; separate translator, not this auditor. Declared choices (row_now `<1m`, hint_select cocher, hint_read/hint_unread lu/non lu, seen_live vue aussitôt, seen_in_chat vue en conv., kind_updates/update_kind infos/info, header_counts waiting en attente, typography) were each verified against the bytes."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.json",
+      "sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+      "matches_supplied_frozen_source_sha256": true
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+      "sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+      "matches_supplied_frozen_context_sha256": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/tui.notifications.json",
+      "sha256": "87866da0d850589f04c12d28599bfc9235c0facf9aa5cc37b39ac20cbea29905",
+      "matches_supplied_target_sha256": true,
+      "tracked": false
+    }
+  },
+  "guidance": {
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "b916f3d1c30b0a2e18fc94ca51d130f60e86b3b17b1918aa51f5c5da6d52ec39"
+    }
+  },
+  "cross_surface_terminology_inputs": {
+    "namespace": "ui.notifications",
+    "input_hashes": {
+      "en": {
+        "path": "src/i18n/catalogues/en/ui.notifications.json",
+        "sha256": "ce0c8d6d9af80980667741dd6d289ab7312d04aaea0e717e5cef4cf55c2b37ae"
+      },
+      "fr": {
+        "path": "src/i18n/catalogues/fr/ui.notifications.json",
+        "sha256": "c9176eb1f3a692cda0ce73c511862e729b039b38bf111277f8d56c6ebfc6e50c"
+      },
+      "context": {
+        "path": "src/i18n/catalogues/en/ui.notifications.context.json",
+        "sha256": "3804068c75073ce9663f73539b508cbb46e495488dc47e5dd97aa80fd1a6918e"
+      }
+    },
+    "core_wire_siblings_at_pin": {
+      "fr/wire.slash.json": "361f316d7bb03d1596e8dc1b02f124303859dfdd61b6f06d91b709630282dab9",
+      "fr/wire.errors.notifications.json": "a8b19b6cd569d4525bc84eb2e08e206b0d80523b9c760fa9bc8e5a719b672122",
+      "fr/wire.slash.notifications_page.json": "b7e183e9efbd5a40c1819556433bca46ed5c98029fefd152e6a1352dca4b3952"
+    },
+    "read_terms": {
+      "ui.notifications.filter.kind_asks": "Demandes",
+      "ui.notifications.filter.kind_updates": "Mises à jour",
+      "ui.notifications.detail.kind.update": "Mise à jour",
+      "ui.notifications.seen.live": "Vue en direct",
+      "ui.notifications.seen.in_view": "Vue dans la conversation",
+      "ui.notifications.nav.unread": "non lue / de non-lues / non lues",
+      "ui.notifications.action.mark_all_read": "Tout marquer comme lu",
+      "ui.notifications.select.count": "Sélection : {count}",
+      "wire.slash.notifications": "Tours terminés non lus ; read les marque comme lus"
+    }
+  },
+  "checks": {
+    "icu_parses": 144,
+    "argument_contract_keys": 72,
+    "plural_keys": 7,
+    "plural_render_counts": [
+      0,
+      1,
+      2,
+      5,
+      21,
+      1000,
+      1000000,
+      1500000
+    ],
+    "maxcells_keys_measured": 53,
+    "maxcells_within_budget": 51,
+    "maxcells_over_budget": {
+      "header_counts": "fr 44 at 10^6; en also over (43) — inherited limit, not an fr regression",
+      "updates_since": "fr 31 at 4-digit counts (1000-9999); en never over up to 1.5M"
+    },
+    "literal_tokens_verified": [
+      "/notifications",
+      "/unread",
+      "/unread read",
+      "read",
+      "y/n",
+      "a",
+      "f"
+    ],
+    "nfc": "pass",
+    "manual_bidi_controls": "none",
+    "register": "vous throughout; no tu/te/ton/ta/tes; no vouvoiement slip in either direction",
+    "negative_controls": {
+      "count": 9,
+      "all_failed_closed": true,
+      "list": [
+        "renamed argument {unread}->{unreads}: rejected by _arguments_problem",
+        "dropped {time} placeholder: rejected (2 args -> 1) and value no longer renders",
+        "wrong plural category `few`: rejected (not in fr one/many/other)",
+        "missing `many` category: rejected",
+        "non-NFC value (decomposed e-grave): detected",
+        "manual bidi control U+202E: detected",
+        "typed command literal lost (/unread read -> /unread): detected",
+        "overflow past maxCells (11 > 6): detected",
+        "plain space before a colon: detected"
+      ]
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "audit.py.txt",
+    "budget_rows.json",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "run_by": "429b867caa2e",
+    "actual_output": true,
+    "note": "Real stdout of `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B audit.py` from the pinned tree. Includes an earlier failing attempt? No — the failing attempt was a separate run; this file is the final successful run's stdout, and report.md records the earlier rig failures (PIN_SHA key name, and a negative control that did not fail closed because a replace(..., 2) left a third {time}) so they are not rewritten as uninterrupted success."
+  },
+  "findings": [
+    {
+      "id": "FX-NTT-1",
+      "severity": "MINOR",
+      "key": "tui.notifications.kind_updates",
+      "also_keys": [
+        "tui.notifications.update_kind"
+      ],
+      "current_text": "infos / info",
+      "proposed_text": "majs / maj (optional; not recommended as default)",
+      "reason": "The same English concept is Mises à jour / Mise à jour in the audited desktop copy, and mise à jour / mises à jour in five values of this catalogue (confirm_dismiss_session, dismissed, empty_none_body, updates_since, Mises à jour précédentes); infos/info is a different word for the concept rather than an abbreviation of it.",
+      "evidence": "rich.cells.cell_len on real renders: infos 5 <= maxCells 8, info 4 <= 8; mises à jour 12 > 8 and mise à jour 11 > 8, so no full-form rendering fits either slot. ui.notifications.filter.kind_updates=Demandes/Mises à jour read from c9176eb1...",
+      "disposition": "accepted as declared (budget-forced); drift recorded with both spellings; non-blocking"
+    },
+    {
+      "id": "FX-NTT-2",
+      "severity": "MINOR",
+      "key": "tui.notifications.updates_since",
+      "current_text": "{count, plural, one {# mise à jour depuis {time}} many {# de mises à jour depuis {time}} other {# mises à jour depuis {time}}}",
+      "proposed_text": "{count, plural, one {# mise à jour} many {# de mises à jour} other {# mises à jour}} ({time}) — optional headroom, 28 cells worst case 1..100000",
+      "reason": "fr renders 31 cells at 4-digit counts against maxCells 30. Judged minor, not major: the breach starts at 1000 (999 and below fit), the overshoot is one cell, the segment sits in a wrapping Text(no_wrap=False) meta line so it wraps rather than crops, and 1000 repeats in one item is outside realistic use.",
+      "evidence": "Threshold scan: 999:29 1000:31 9999:31 100000:33 1000000:38 for fr; en 99:22 999:23 1000:25 9999:25 100000:27 1000000:29 (never over). Repeat count unbounded in code (store.py: repeat = int(current[\"repeat_count\"]) + 1) but HISTORY_CAP=20 caps history rows and NEW_ITEMS_PER_HOUR=30 caps new items. Container measured in pinned notifications_render.py: meta appended to Text(no_wrap=False).",
+      "disposition": "accepted; no change required to ship; optional headroom form recorded"
+    },
+    {
+      "id": "FX-NTT-3",
+      "severity": "MINOR",
+      "key": "tui.notifications.seen_live",
+      "current_text": "vue aussitôt",
+      "proposed_text": "vue en direct (does not fit: 13 > 12) — no actionable replacement",
+      "reason": "The audited desktop term is Vue en direct; the TUI uses a different word because the desktop form measures one cell over the 12-cell budget. Sense (seen as it arrived) is preserved.",
+      "evidence": "rich.cells.cell_len: vue aussitôt 12 == maxCells 12; vue en direct 13 > 12. ui.notifications.seen.live='Vue en direct' read from c9176eb1...",
+      "disposition": "accepted; drift recorded with both spellings; non-blocking"
+    },
+    {
+      "id": "FX-NTT-4",
+      "severity": "NIT",
+      "key": "tui.notifications.seen_in_chat",
+      "current_text": "vue en conv.",
+      "proposed_text": "vue dans la conversation (does not fit: 25 > 12)",
+      "reason": "Abbreviation of the desktop term, forced by the 12-cell chip budget; conv. is the standard French abbreviation and the sense is intact.",
+      "evidence": "cell_len: 12 == maxCells 12; desktop ui.notifications.seen.in_view 25 cells.",
+      "disposition": "accepted"
+    },
+    {
+      "id": "FX-NTT-5",
+      "severity": "NIT",
+      "key": "tui.notifications.arg_read",
+      "current_text": "Marquer toutes les notifications comme lues",
+      "proposed_text": "Marquer les notifications non lues comme lu (43 cells, fits 44)",
+      "reason": "English restricts the scope to unread; the French says all notifications. No behavioural difference because already-read rows are no-ops, and the inclusive wording matches the desktop's own Tout marquer comme lu.",
+      "evidence": "cell_len: current 43 <= maxCells 44; proposed 43 <= 44; 'Marquer les notifications non lues comme lues' is 45 and does NOT fit. Desktop ui.notifications.action.mark_all_read='Tout marquer comme lu'.",
+      "disposition": "accepted; literal-parity option recorded, not required"
+    },
+    {
+      "id": "FX-NTT-6",
+      "severity": "NIT",
+      "key": "tui.notifications.header_partial",
+      "current_text": "{count} visibles",
+      "proposed_text": "none available inside budget ({count} premières is 13 > 12; {count} premiers is 12 but masculine)",
+      "reason": "English 'first {count}' carries a nuance the French drops; every gender-correct alternative overflows the 12-cell budget, so the current text is the best available.",
+      "evidence": "renders at count 100: en 'first 100' 9 cells; fr '100 visibles' 12 == maxCells 12; '100 premières' 13 > 12; '100 premiers' 12 but disagrees with the feminine notifications. Count is bounded by LIST_LIMIT_MAX=100, so 3 digits is the worst case.",
+      "disposition": "accepted; budget limit, not a translation error"
+    }
+  ],
+  "noted_outside_scope": [
+    "Ages in the row time column and in {age} are preformatted by format_age with English unit letters (4m/3h/2d) in every locale; that is en-side and outside this namespace, and it is why row_now `<1m` is consistent rather than odd.",
+    "header_counts exceeds its 40-cell budget at 10^6 in English (43) as well as French (44); inherited design limit, not an fr regression, not reported as an fr finding.",
+    "The worktree moved branch and gained unrelated modified files during the audit (coder's own work); the audited bytes are the hash-verified copies in this scratchpad and were unchanged at the end of the audit."
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 3,
+    "rejected": 0,
+    "findings_total": 6
+  },
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Static copy/ICU audit: maxCells figures are rich.cells.cell_len numbers on real renders, not rendered frames or screenshots; no release-eligibility or runtime-service claim.",
+    "Only audit artifacts were written, and only inside the auditor scratchpad; no catalogue, code, generated asset, git object or ledger row was modified."
+  ]
+}

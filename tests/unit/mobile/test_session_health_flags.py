@@ -162,3 +162,32 @@ async def test_the_seed_frame_carries_ended_or_degraded(tmp_path, monkeypatch) -
     payload = await _seed_payload(app, "sick-session")
     assert payload["degraded"] is True
     assert payload["ended"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_live_session_seeded_from_disk_carries_its_running_pid(
+    tmp_path, monkeypatch
+) -> None:
+    """A live entry with no payload yet seeds the OWNER's pid (review round 1, M2).
+
+    The disk fold carries ``pid=0`` — a rebuild alone is no evidence about a
+    process — and ``pid=0`` is the header dot's "no running owner" rung. A phone
+    that opens a session it just started, before the dial's welcome lands,
+    would otherwise paint grey "Ended" plus Resume over a running session.
+    """
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    directory = config / "sessions" / "fresh-session"
+    directory.mkdir(parents=True)
+    await Transcript(directory).append_message(Message.user("hello", id="u-fresh"))
+
+    daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
+    app = build_app(daemon)
+    live = SessionEntry(_record("fresh-session", 103))
+    assert live.projection is None
+    daemon.table.entries[103] = live
+    payload = await _seed_payload(app, "fresh-session")
+    assert payload["pid"] == 103
+    assert payload["ended"] is False
+    assert payload["degraded"] is False

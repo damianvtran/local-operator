@@ -507,9 +507,10 @@ async def run_hook(hook: HookCommand, payload: Mapping[str, Any], cwd: str) -> H
     # same withholding every model child gets (#3022 r2 M2). Only that, not the
     # shell policy: hooks are the operator's configured tools and keep the rest
     # of the environment, as they did before. Lazy: this module stays light.
-    from local_operator.tools.shell_env import withhold_harness_plane
+    from local_operator.agent_shell import without_daemon_bearer
 
-    env = withhold_harness_plane(dict(os.environ))
+    env = dict(os.environ)
+    without_daemon_bearer(env)
     env["CLAUDE_PROJECT_DIR"] = str(_project_root(cwd))
     if hook.plugin_root:
         env["CLAUDE_PLUGIN_ROOT"] = hook.plugin_root

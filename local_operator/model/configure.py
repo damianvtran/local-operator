@@ -43,6 +43,7 @@ from local_operator.harness.types import (
     StreamEvent,
     StreamStartEvent,
     Usage,
+    stamp_cache_diagnostics_id,
 )
 from local_operator.model import tariff
 from local_operator.model.catalogue import (
@@ -3624,6 +3625,68 @@ def _decode_measure(
     return (decode_us, output_tokens, 1) if eligible else (0, 0, 0)
 
 
+#: Characters per output token for :func:`_estimate_consumer_cut_usage`. The same
+#: coarse 4:1 the local context estimators use when no tokenizer is in play
+#: (``providers/clients._CHARS_PER_TOKEN``, ``compaction/tokens.py``). Measured on
+#: the trace that motivated the guard, it is CONSERVATIVE for looping reasoning:
+#: 225,423 characters were billed as 131,072 output tokens (~1.7 chars/token),
+#: so the estimate undercounts output by roughly 2x there and never overcounts.
+_CUT_CHARS_PER_OUTPUT_TOKEN = 4
+
+
+def _estimate_consumer_cut_usage(
+    request: ChatRequest, final_usage: Usage | None, *, cut_chars: int
+) -> Usage:
+    """An ESTIMATED ``Usage`` for a call the consumer cut before usage arrived.
+
+    Why: a provider reports usage in the stream's closing frames, so a call the
+    loop's degeneration guard cancels has none, and an unreported call is booked
+    as UNKNOWN spend -- for a call that billed its whole input plus ~10 KB of
+    output, that reads as free (review round 1, m3). Benchmark cost accounting
+    sums these usages, so the cut call has to carry a figure.
+
+    The estimator, and what it is not:
+
+    - INPUT: the provider's own partial count when one arrived before the cut
+      (some wires send input usage at stream start), else the local request
+      estimate ``providers.context.measure_request`` already uses for admission
+      sizing (messages tokenized, system blocks and tool schemas at 4 chars per
+      token). Not cache-aware: a cached prefix is billed lower, so this can
+      overstate input for a warm cache.
+    - OUTPUT: the provider's partial count when larger, else the characters
+      streamed before the cut divided by :data:`_CUT_CHARS_PER_OUTPUT_TOKEN`
+      (counted toward ``reasoning_tokens`` too, since the guard cuts reasoning).
+    - PROVENANCE: ``billing_basis="estimated"``, the vocabulary the spend ledger
+      already reads as "a figure, never a charge" (``session.channel_spend``).
+      NO money is stamped -- neither ``usd_cost`` (a provider receipt) nor
+      ``estimated_usd_cost``, which ``model.costs._recorded_cost`` counts as
+      RECORDED money and would therefore book this guess as known spend. The
+      tokens alone are priced downstream by the ordinary table estimate
+      (``cost_summary(recorded_only=False)``, the analytics writer), while
+      ``recorded_only=True`` keeps treating the call as unknown. An unpriceable
+      model stays unpriced, exactly as for any other call.
+    """
+    from local_operator.providers.context import measure_request
+
+    estimate = Usage()
+    if final_usage is not None:
+        estimate = final_usage.model_copy(deep=True)
+        # A partial provider frame is not a receipt for the whole call.
+        estimate.usd_cost = None
+    if not estimate.input_tokens:
+        try:
+            estimate.input_tokens = int(measure_request(request).tokens)
+        except Exception:  # noqa: BLE001 -- an estimate is never worth a broken turn
+            logger.debug("consumer-cut input estimate failed", exc_info=True)
+    streamed = max(0, int(cut_chars)) // _CUT_CHARS_PER_OUTPUT_TOKEN
+    if streamed > estimate.output_tokens:
+        estimate.output_tokens = streamed
+        estimate.reasoning_tokens = max(estimate.reasoning_tokens, streamed)
+    estimate.estimated_usd_cost = None
+    estimate.billing_basis = "estimated"
+    return estimate
+
+
 def _stamp_decode_window(
     usage: Any,
     *,
@@ -3814,12 +3877,13 @@ class SessionStreamFn:
         # own chain at ``None`` and can never be diffed against its parent's
         # prompt (a guaranteed, meaningless ``system_changed``).
         #
-        # KNOWN GAP: not persisted, so a RESUMED session (a new process) starts
-        # again at ``None`` and its first turn records ``baseline``, even when
-        # an edited instruction file just rewrote the whole prefix. Seeding it
-        # from the transcript would recover those attributions (a stale id is
-        # harmless: the API answers ``previous_message_not_found``); deferred
-        # on PR #2984 (QA Q1).
+        # PERSISTED through the transcript: every diagnosed turn stamps this
+        # value on its usage (``stamp_cache_diagnostics_id``), the transcript
+        # writes it into the row, and a resumed ``Session`` hands the newest
+        # one back through :meth:`seed_cache_diagnostics` — so a new process
+        # continues the chain instead of recording ``baseline`` after an
+        # edited instruction file rewrote the prefix (PR #2984 QA Q1). A
+        # transcript FORK ignores the rows it copied and starts at ``None``.
         self._cache_diagnostics_previous_id: str | None = None
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
@@ -4675,6 +4739,7 @@ class SessionStreamFn:
         ok: bool,
         outcome: str,
         duration_ms: float,
+        usage_estimated: bool = False,
     ) -> None:
         """Build and deliver one record; never raises into the request path.
 
@@ -4700,6 +4765,7 @@ class SessionStreamFn:
                 ok=ok,
                 outcome=outcome,
                 duration_ms=duration_ms,
+                usage_estimated=usage_estimated,
             )
             holder.notify(handlers, observation)
         except asyncio.CancelledError:
@@ -4946,6 +5012,23 @@ class SessionStreamFn:
         # a fresh probe at the next boundary instead of inheriting the stale
         # verdict.
         self._usage_checked_at = 0.0
+
+    def seed_cache_diagnostics(self, previous_id: str) -> None:
+        """Continue a persisted cache-diagnostics chain after a resume.
+
+        ``Session`` calls this at construction with the newest diagnosed id its
+        transcript recorded, so the first turn of a resumed process compares
+        against the previous process's last turn instead of opening at
+        ``previous_message_id: null`` (which recorded a prefix break caused by
+        an edited instruction file as ``baseline``; PR #2984 QA Q1). A stale
+        id is harmless: the API answers ``previous_message_not_found`` once
+        its fingerprint has expired, and that verdict is already handled.
+
+        Never overwrites a live chain: a stream that already diagnosed a turn
+        in THIS process holds a fresher id than any transcript row.
+        """
+        if self._cache_diagnostics_previous_id is None and previous_id:
+            self._cache_diagnostics_previous_id = previous_id
 
     def begin_message(self) -> None:
         """Mark the next model call as a user-message boundary."""
@@ -6974,6 +7057,18 @@ class SessionStreamFn:
                 # entry, and the worst case is a benign
                 # ``previous_message_not_found`` on the next turn.
                 self._cache_diagnostics_previous_id = event.response_id
+            if (
+                request.cache_diagnostics
+                and usage is not None
+                and self._cache_diagnostics_previous_id
+            ):
+                # The chain's position travels on the turn's usage so the
+                # transcript can persist it and a RESUME can continue the chain
+                # (``seed_cache_diagnostics``; PR #2984 QA Q1). The chain value
+                # rather than this response's own id: on a turn served by an
+                # undiagnosed fallback the chain did not advance, and the row
+                # must say what the NEXT turn would have compared against.
+                stamp_cache_diagnostics_id(usage, self._cache_diagnostics_previous_id)
             yield event
 
     @property
@@ -7285,6 +7380,20 @@ class SessionStreamFn:
                     last_output_at=last_output_at,
                     output_deltas=output_deltas,
                 )
+            # A CONSUMER CUT (the loop's degeneration guard) arrives with no
+            # final usage: the provider's usage frame never came. Book it as an
+            # ESTIMATE rather than as unknown spend -- see
+            # ``_estimate_consumer_cut_usage`` for the estimator and its labels.
+            # Only when the consumer actually marked a cut: an ordinary abort or
+            # failure keeps today's honest "unknown".
+            cut = request.consumer_cut
+            cut_chars = cut.output_chars if cut is not None else None
+            usage_estimated = cut_chars is not None
+            if cut is not None and cut_chars is not None:
+                final_usage = _estimate_consumer_cut_usage(
+                    request, final_usage, cut_chars=cut_chars
+                )
+                cut.estimated_usage = final_usage
             duration_ms = (time.monotonic() - started_at) * 1000
             self._record_usage(
                 request,
@@ -7302,7 +7411,11 @@ class SessionStreamFn:
                     else -1
                 ),
                 outcome=outcome,
-                usage_reported=final_usage is not None,
+                # An estimate is NOT a provider report: the ledger's
+                # ``usage_reported`` column stays honest, and ``usage_estimated``
+                # is what lets the writer price the estimated tokens anyway.
+                usage_reported=final_usage is not None and not usage_estimated,
+                usage_estimated=usage_estimated,
                 # The decode window, closed here rather than inside the loop:
                 # ``first_output_at is None`` means the stream produced no
                 # output deltas at all, which is "no window" (0 microseconds),
@@ -7326,6 +7439,7 @@ class SessionStreamFn:
                     ok=ok and outcome != "incomplete",
                     outcome=outcome,
                     duration_ms=duration_ms,
+                    usage_estimated=usage_estimated,
                 )
 
     def _record_usage(
@@ -7345,8 +7459,16 @@ class SessionStreamFn:
         output_deltas: int = 0,
         cache_miss_type: str = "",
         cache_missed_tokens: int = 0,
+        usage_estimated: bool = False,
     ) -> None:
-        """Enqueue one call sample. Off the hot path; never raises."""
+        """Enqueue one call sample. Off the hot path; never raises.
+
+        ``usage_estimated`` marks ``usage`` as the harness's estimate for a call
+        the consumer cut (``_estimate_consumer_cut_usage``): it is priced by the
+        background writer like any tokens-only call, but its basis is recorded
+        as ``estimated`` and ``usage_reported`` stays False, so no reader can
+        mistake it for a provider receipt.
+        """
         self._log_cache_break(usage, cache_miss_type, cache_missed_tokens)
         try:
             import time as _time
@@ -7475,8 +7597,11 @@ class SessionStreamFn:
                     usage_reported=usage_reported,
                     # A failed request with no usage is unknown spend, not a
                     # known zero-dollar call. Keep it visible without pricing
-                    # invented token counts on the background writer.
-                    priced=not usage_reported,
+                    # invented token counts on the background writer. The ONE
+                    # exception is a consumer-cut estimate: its tokens are a
+                    # documented estimate (basis ``estimated``), and leaving it
+                    # unpriced is the "cut calls read as free" gap (review m3).
+                    priced=not (usage_reported or usage_estimated),
                     # Ineligible writes 0 to all three, so "no window" is one
                     # value on every surface and the coverage count is what
                     # disambiguates it from a measured zero-length window.

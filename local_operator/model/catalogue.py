@@ -361,11 +361,15 @@ def _holder_proven_dead(holder: str) -> bool:
     would write. A holder that is provably not running can be stolen from at once.
 
     Only a definite "no such process" counts (``procstate.pid_liveness`` is
-    three-valued): doubt, an unparsable holder, or a pid on ANOTHER host sharing
-    the cache dir all keep the lease's normal expiry, which is the conservative
-    direction — a live peer called dead costs a duplicate fetch, never a wrong
-    answer, but the lease exists to avoid exactly that. Pid reuse can only make a
-    dead holder read live, i.e. fall back to today's expiry.
+    three-valued): doubt or an unparsable holder keeps the lease's normal expiry,
+    which is the conservative direction. Pid reuse can only make a dead holder
+    read live, i.e. fall back to today's expiry.
+
+    A CACHE DIR SHARED ACROSS HOSTS IS UNSUPPORTED. The token carries no host
+    identity, so a live holder on another host is judged by THIS host's pid
+    table and can be read as dead and taken over. The cost is bounded: one
+    duplicate fetch, never a wrong answer (both writers publish the same kind of
+    document atomically) — but avoiding that fetch is the lease's whole purpose.
     """
     from local_operator.procstate import pid_liveness
 
@@ -424,6 +428,10 @@ class _ListingFetchLease:
         self._path = document.with_name(document.name + ".fetching")
         self._token = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._held = False
+        # Set on release, so a sibling THREAD of this process that lost the lease
+        # to this holder can wait for the attempt to END rather than for a
+        # document to appear (see :func:`_held_by_this_process`).
+        self._released = threading.Event()
 
     def acquire(self) -> bool:
         """Take the lease if free or expired. True means THIS process fetches."""
@@ -490,6 +498,7 @@ class _ListingFetchLease:
         self._held = False
         with _held_leases_lock:
             _held_leases.discard(self)
+        self._released.set()
         try:
             raw = self._path.read_text(encoding="utf-8", errors="replace")
             if json.loads(raw).get("holder") == self._token:
@@ -615,6 +624,28 @@ def _revalidation_threads() -> list[threading.Thread]:
     """
     with _revalidate_lock:
         return [thread for thread in _threads.values() if thread.is_alive()]
+
+
+def _held_by_this_process(path: Path) -> _ListingFetchLease | None:
+    """The lease on ``path``'s document that ANOTHER THREAD of this process holds.
+
+    WHY (l12b-boot-open). A lease loser used to treat every holder as a peer
+    process and poll for the document for :data:`_LISTING_LEASE_WAIT_S`. When the
+    holder is a sibling thread whose fetch FAILS (401, offline, 5xx) it writes no
+    document, so the loser sat out the whole 2 s and then fetched again itself.
+    The daemon's boot model warm (``index_prewarm.warm_model_metadata``) and the
+    first desktop open resolve the same saved model at the same moment, so on a
+    real ``lop serve`` with no usable listing the open right after ``/health``
+    measured bimodal: 140-230 ms, or 2177-2352 ms (3 of 6 reps at N=0) with a
+    second ``GET /v1/models`` exactly 2.06 s after the first. In-process, the
+    attempt's END is observable (:meth:`_ListingFetchLease.release`), so the loser
+    waits for that, not for a rename that may never come.
+    """
+    with _held_leases_lock:
+        for held in _held_leases:
+            if held._path == path.with_name(path.name + ".fetching"):
+                return held
+    return None
 
 
 def _in_flight_revalidation(path: Path) -> threading.Thread | None:
@@ -933,8 +964,35 @@ def read_listing(
             # until midnight — the incident this trigger exists to prevent.
             own.join(timeout=_LISTING_LEASE_WAIT_S)
         else:
-            lease.await_peer_briefly()
+            sibling = _held_by_this_process(path)
+            if sibling is not None:
+                # Same ceiling as the peer poll, but it returns the instant the
+                # sibling's attempt ends — success or failure (see the helper).
+                sibling._released.wait(timeout=_LISTING_LEASE_WAIT_S)
+            elif not _failure_backoff_active(path):
+                # No sibling found AND no failure on record: a foreign holder.
+                # The backoff check covers a sibling that failed and released
+                # between our lost ``acquire`` and the lookup (review M1, forced:
+                # 2193-2230 ms) — its attempt is already over, so polling 2 s for
+                # the document it never wrote would be the stall this fixes.
+                lease.await_peer_briefly()
         payload, age = _read_cache(path)
+        # The attempt we waited on FAILED moments ago in this process (it recorded
+        # the failure before releasing): answer as the backoff branch above does
+        # rather than re-issuing the request it just made. Only an in-process
+        # failure can be on record here — ``_last_failure`` is per process — so a
+        # foreign holder's outcome still falls through to our own fetch.
+        #
+        # Checked BEFORE serving a document (review M3): a STALE document beside
+        # a just-failed attempt is the holder's own ``failed=True`` answer, and
+        # ``configure``'s degraded memo (#2992) keys its 60 s-vs-day choice on
+        # that flag — reported as clean, a week-old payload would be day-pinned.
+        # A holder that SUCCEEDED replaced the document, whose new stamp no
+        # longer matches the recorded failure, so this stays False for it.
+        if _failure_backoff_active(path):
+            if payload is None:
+                note_unavailable(key)
+            return Listing(payload=payload, age_s=age, failed=True)
         if payload is not None:
             return Listing(payload=payload, age_s=age)
         # No document even after the peer's window: fall through and fetch.
@@ -943,8 +1001,13 @@ def read_listing(
     try:
         fresh = fetch()
     except Exception as exc:  # noqa: BLE001 - any client/transport error degrades
-        lease.release()
-        _record_failure(path)
+        # Recorded BEFORE the release: a sibling thread waiting on this lease
+        # wakes on the release and reads the failure memory to decide whether to
+        # re-ask, so the other order would let it repeat the request just failed.
+        try:
+            _record_failure(path)
+        finally:
+            lease.release()
         if payload is not None:
             # Stale beats absent: the numbers are days old at worst, whereas
             # the static fallback is wrong by nearly a factor of six.

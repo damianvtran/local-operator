@@ -1,0 +1,24 @@
+PASS prior nt25a1 companion hashes
+RETAINED slash en 9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594
+RETAINED slash en_context_sidecar 2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0
+RETAINED errors en f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c
+RETAINED errors en_context_sidecar 07ad1e5da403a5fccde5648f04cd10bf1263cabc50f5e1804644630c7ce13106
+RETAINED errors target 57e1ee92a42b1ee80b1de3c13d7236feba902e19b8cffe60dac6200df948cb4d
+RETAINED UI en ce0c8d6d9af80980667741dd6d289ab7312d04aaea0e717e5cef4cf55c2b37ae
+RETAINED UI target 1234696a29eb8c99c828a11b2d920f95358f700fb96a32e95d8e031391e86dd6
+RETAINED UI context 3804068c75073ce9663f73539b508cbb46e495488dc47e5dd97aa80fd1a6918e
+PASS 8 prior input hashes unchanged; no re-audit of retained namespaces
+EN Asks and agent updates; read marks all read
+VI Câu hỏi, cập nhật; read: đánh dấu tất cả đã đọc
+PASS V3 repair exactly matches previous proposed text; 1 key reviewed
+PASS core parser: 2 messages; placeholder parity: (); NFC; literal read; explicit all scope
+RENDER Câu hỏi, cập nhật; read: đánh dấu tất cả đã đọc
+WIDTH 47 maxCells 50
+NEGATIVE CONTROL PASS original missing-all defect rejected: AssertionError bulk all scope missing
+NEGATIVE CONTROL PASS dropped read token rejected: AssertionError literal read command token missing
+NEGATIVE CONTROL PASS overwidth label rejected: AssertionError maxCells exceeded
+NEGATIVE CONTROL PASS malformed ICU rejected: MessageSyntaxError expected ',' or '}' after argument name 'broken' (at offset 55 of 'Câu hỏi, cập nhật; read: đánh dấu tất cả đã đọc {broken')
+SHA256 local_operator/i18n/catalogues/en/wire.slash.notifications_page.json 9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594
+SHA256 local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json 2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0
+SHA256 local_operator/i18n/catalogues/vi/wire.slash.notifications_page.json 3cbc1d280d381eebbfc05436aafbb33b67ab15af7f3c2c61db71f35b4b64e9d5
+PASS round 2: V3 fixed; unresolved blocker=0 major=0 minor=0 nit=0

@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, cast
 
+from local_operator.agent_shell import without_daemon_bearer
 from local_operator.harness.approval import (
     mint_operator_cap,
     open_operator_cap_handoff,
@@ -442,15 +443,11 @@ def _spawn_runtime(
     the next caller, and a window bought by a deferral nobody engaged for is
     exactly the leak the scrub below exists to prevent (review round 1, M4).
     """
-    # The runtime hosts the model's tools, and its children read THIS launch
-    # environment with `ps eww $PPID` whatever their own says, so the desktop
-    # plane's bearer must never be in it (PR #3022 QA round 1, Q1). The runtime
-    # does not need it: it talks to the daemon over the session socket.
-    # Lazy: ``shell_env`` pulls the config stack, which these spawn modules keep
-    # off their import path (the standby warmer imports them before any config).
-    from local_operator.tools.shell_env import withhold_harness_plane
-
-    env = withhold_harness_plane(dict(os.environ))
+    env = dict(os.environ)
+    # The session runtime never reads the daemon's desktop bearer, and anything it
+    # holds its tool children can read (``ps -E`` showed it in cell 14 on #3002), so
+    # it is never handed one (operator ask a-772b; ``agent_shell.DAEMON_BEARER_ENVS``).
+    without_daemon_bearer(env)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
     env["LOP_MOBILE_CHILD_RESUME"] = session_id
     # A viewer's birth sample seeds only a new conversation. It is NOT a

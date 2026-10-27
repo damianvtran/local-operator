@@ -49,6 +49,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, P
 if TYPE_CHECKING:
     from starlette.requests import Request
 
+    # Both names serve ANNOTATIONS here and neither is redundant: this block is
+    # `TYPE_CHECKING`-only, so the runtime objects come from the function-local
+    # imports (`JSONResponse` at :2963, `Response` at :5529), while the
+    # annotations spell the wider `Response` for the notification refusal helper
+    # and `JSONResponse` for the rest of the module.
+    from starlette.responses import JSONResponse, Response
+
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.mobile.push_worker import PushWorker
     from local_operator.providers.auth_store import StoredCredential
@@ -158,6 +165,26 @@ async def _cleanup_stream(close: Callable[..., Any] | None) -> None:
 #: session starts or dies); the scan is cheap, and 2 s makes a new terminal
 #: session appear on the phone before the user reaches for it.
 SCAN_INTERVAL_S = 2.0
+
+#: THE ONE HEALTH WINDOW behind the phone header's status dot
+#: (``SessionProjection.heartbeat_stale``): an owner is "not answering" once
+#: BOTH its record's ``heartbeat_at`` and the last projection frame this relay
+#: received from it are older than this.
+#:
+#: WHY ``HEARTBEAT_TIMEOUT_S`` (45 s = three ``HEARTBEAT_INTERVAL_S`` beats).
+#: It is the bound ``registry.classify`` already calls ``wedged`` and the
+#: catalogue words as "not answering", so the dot, the session list and the
+#: desktop catalogue flip on the same evidence at the same moment instead of
+#: three surfaces disagreeing for 30 s. One interval would flicker on a single
+#: late beat — the beat is written by the runtime's own event loop, which a
+#: busy turn starves (see ``HEARTBEAT_INTERVAL_S``) — and anything longer only
+#: delays a true report.
+#:
+#: WHY THE FRAME CLOCK TOO. A streaming turn starves exactly that loop, so its
+#: beat can go 100 s+ stale while the session pushes frames many times a
+#: second: alive and answering, which the dot must paint GREEN. A fresh frame
+#: is therefore as good as a fresh beat; yellow needs both to be quiet.
+SESSION_HEALTH_WINDOW_S = registry.HEARTBEAT_TIMEOUT_S
 
 #: The bound on ONE push-worker pass, for the tick hook in ``_scan_once`` (S5).
 #:
@@ -492,6 +519,10 @@ class SessionEntry:
         self.next_dial_at: float = 0.0
         self.degraded = False
         self.ended = False
+        #: ``time.monotonic()`` of the last projection frame this relay received
+        #: from the owner, the second clock of ``SESSION_HEALTH_WINDOW_S``.
+        #: ``None`` until the first frame: no frame is no evidence of answering.
+        self.last_frame_at: float | None = None
         # SSE ownership is session-level in SessionTable. A process entry is a
         # replaceable routing generation and must never own a conversation view.
         # Kept as an alias only for compatibility with focused diagnostics.
@@ -1854,6 +1885,29 @@ def _session_folder_exists(session_id: str) -> bool:
     return (config_dir() / "sessions" / session_id).is_dir()
 
 
+def _notification_row_session_id(row: Any) -> str:
+    """The conversation a notification row belongs to, or "" when it names none.
+
+    THE ROW CARRIES ITS CONVERSATION AS A NESTED OBJECT — the desktop answer's
+    shape (`{"session": {"id": ..., "title": ...}}`) — so a top-level
+    `session_id` read yields "" and silently marks every item unsendable. That
+    mistake was paid for once on the ASKS wire and again on this route's DETAIL
+    handler (QA Q4 on #2968): the list row said `durable: True` for a session
+    while the same item's detail said `false`, so a client that honours those
+    flags (the phone's "Open conversation") disabled it on every item.
+
+    ONE FUNCTION, BOTH ROUTES: two spellings of this lookup is how the list and
+    the detail came to disagree. The fallback to a top-level `session_id` is for
+    an older writer's row, never the primary read.
+    """
+    if not isinstance(row, dict):
+        return ""
+    facts = row.get("session")
+    if isinstance(facts, dict) and facts.get("id"):
+        return str(facts.get("id") or "")
+    return str(row.get("session_id") or "")
+
+
 def _durable_user_session_dir(session_id: str) -> Path | None:
     """Return a strictly addressed durable user conversation, if it exists.
 
@@ -2329,6 +2383,52 @@ def _optional_capabilities() -> dict[str, Any]:
     return flags
 
 
+def _lapsed_window(config_dir: Path) -> int:
+    """``asks.lapsed_visible_for``, polled once per request (the desktop route's rule).
+
+    Reading it here, on the event loop, is the same choice the runtime-facing
+    desktop route documents: the window is a config read plus an expiry, and the
+    request that follows is the only consumer.
+    """
+    from local_operator.asks.visibility import lapsed_visible_ms
+
+    return lapsed_visible_ms(config_dir, poll_now=True)
+
+
+def _notifications_block() -> dict[str, Any] | None:
+    """The list payload's ``notifications`` block: the inbox badge, one read.
+
+    A SIBLING of ``unread`` on the list payload, for that block's own reason: a
+    missing key must read as "this relay has no inbox", never as a zero the
+    phone could paint over a perfectly real badge. So a store that cannot be
+    read answers ``None`` -- and the caller OMITS the key entirely (Q4-2).
+
+    ``{}`` was the old answer and it was the wrong shape twice over: the frame
+    says absent-means-unknown, and an empty object is a PRESENT block whose
+    numbers happen to be missing -- a renderer walking the documented keys reads
+    zero. Omitting the key leaves exactly one spelling of "cannot tell".
+
+    The numbers are the desktop's own (``notifications.items.counts``), never
+    recomputed here: ``waiting_unread_count`` is the ask half of the badge and
+    ``waiting_count`` is every pending ask, and a second implementation of that
+    split is a second thing that can disagree with the reel.
+    """
+    from local_operator.notifications.items import counts as inbox_counts
+    from local_operator.paths import config_dir
+
+    try:
+        return dict(inbox_counts(config_dir()))
+    except Exception:  # noqa: BLE001 -- absent means unknown, never zero
+        logger.debug("relay: notifications block unavailable", exc_info=True)
+        return None
+
+
+def _notifications_frame() -> dict[str, dict[str, Any]]:
+    """The frame's inbox key, present only when the store could be read."""
+    block = _notifications_block()
+    return {} if block is None else {"notifications": block}
+
+
 def _feature_flags() -> dict[str, Any]:
     """The lifted feature-flag dict for the mobile capabilities payload.
 
@@ -2516,12 +2616,17 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     continue
                 incoming.degraded = False
                 incoming.ended = False
+                # A frame IS the owner answering: it clears the health verdict
+                # here, and the scan (``_sync_heartbeat_stale``) is what raises it
+                # again once both clocks go quiet.
+                entry.last_frame_at = time.monotonic()
                 try:
                     captured = daemon.capture_subagent_details(incoming, record=record)
                 except _StaleProjection:
                     # A predecessor frame can arrive after its payload cache entry
                     # was evicted. Its identity remains fenced by the epoch ledger.
                     continue
+                captured.heartbeat_stale = False
                 entry.projection = captured
                 entry.ready.set()
                 if op == "welcome" and daemon.phone_viewing(record.session_id):
@@ -2813,6 +2918,93 @@ def _ask_gone_copy(op: str) -> str:
     if op in ("ask_decline", "ask_revise"):
         return _ASK_GONE_HANDOFF
     return _ASK_GONE_RESPONSE
+
+
+#: The typed category of :func:`_revoked_device_refusal`, so the phone can key on
+#: WHICH refusal this is rather than pattern-match the sentence (the rule the
+#: command route's ``ValueError`` arm already follows for authority refusals).
+OPERATOR_DEVICE_REVOKED_CODE = "operator_device_revoked"
+
+#: Worded for the phone holding the revoked certificate: what happened, and the
+#: way back IN ORDER. Re-pairing alone is refused while the revocation stands
+#: (``/api/pair`` asks ``devices.is_revoked`` too, and the phone reuses its stored
+#: key, so its device id is unchanged), so the machine-side lift comes first —
+#: the same route and tone as the phone's pair screen (``screens/pair.tsx``, the
+#: ``revoked`` state), which the phone shows verbatim as a fallback. Plain English
+#: beside a typed code, like the sibling ``/api/pair`` revoked refusal here.
+_OPERATOR_DEVICE_REVOKED = (
+    "This phone's approval access was removed on the computer, and only that "
+    "machine can restore it — pairing again will be refused until then. Ask Local "
+    "Operator on that machine to allow this phone again, then pair this phone again."
+)
+
+
+def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
+    """A 403 for a command presenting a REVOKED device's certificate, else ``None``.
+
+    THE TWO-LIST GAP. ``lop operator devices --revoke`` writes the relay's own
+    ``revoked.json`` and deletes the stored certificate, but the phone keeps its
+    copy and can keep presenting it. The runtime re-checks only the root-owned
+    ANCHOR, so a revocation recorded locally but not (yet) in the anchor —
+    ``--revoke --print-only``, or the window before the privileged anchor write —
+    left the phone with approval authority through this relay. ``/api/pair``
+    already refuses such a device with ``devices.is_revoked`` (both lists); this
+    is the same question asked on the command path, before any frame is written
+    or future registered, so a refusal leaves nothing parked.
+
+    THE RELAY STAYS A COURIER. The check reads only public data — the device id
+    in an operator-signed public statement, and two revocation lists — and mints
+    nothing. It can only WITHHOLD a signature, never produce one. The certificate
+    is parsed, not verified: an unparsable one keeps today's behaviour (it is
+    forwarded and the runtime refuses it), and a forged certificate naming a
+    revoked id gains nothing by being refused here.
+    """
+    if not isinstance(certificate, str) or not certificate:
+        return None
+    # Function-local, as in ``build_app``: ``lop`` without the server extra never
+    # pays for starlette at import.
+    from starlette.responses import JSONResponse
+
+    from local_operator.operator import devices
+    from local_operator.operator.verify import read_device_cert
+    from local_operator.paths import config_dir
+
+    parsed = read_device_cert(certificate)
+    if parsed is None:
+        return None
+    try:
+        revoked = devices.is_revoked(config_dir(), parsed.device_id)
+    except OSError:
+        # ``load_anchor`` is NOT total: a root-owned DIRECTORY at the anchor path
+        # passes its owner and mode checks and then raises ``IsADirectoryError``
+        # on the read (agent review round 2, R2-1 — reproduced). Swallowing it
+        # forwards the command, as round 1 did, rather than failing it with a 500.
+        # Failing OPEN is deliberate (agent review round 3, R3-1), for three
+        # reasons. (1) Only root can create this state — the anchor directory is
+        # root-owned and an entry must be uid 0 to pass ``load_anchor`` — and root
+        # can already rewrite the anchor's revocation list, delete it, or install
+        # another key, so a refusal here protects nothing from the one actor who
+        # can trigger it. (2) It keeps the three "anchor unusable" states
+        # consistent: a DELETED anchor and a mode-0666 one already lose a stamped
+        # local revocation and forward the command (R9-2: a stamp counts only
+        # while its key is the installed anchor), and failing closed on this one
+        # alone would not change that. (3) The ``operator_device_revoked`` refusal
+        # would be false for a phone that is not revoked and would send it to a
+        # re-pair, and ``/api/pair`` itself 500s in this state; an honest refusal
+        # needs its own typed code and phone copy.
+        # RESIDUAL: the runtime serves its pinned pre-failure anchor for up to
+        # ``ANCHOR_REFRESH_S`` (~30 s), so in that window it can admit a
+        # certificate revoked only in the stamped local record. The fix at the
+        # source is ``load_anchor`` rejecting a non-regular file (a follow-up),
+        # which makes this arm dead code. Only ``OSError``: anything else is a bug
+        # and should surface.
+        return None
+    if not revoked:
+        return None
+    return JSONResponse(
+        {"error": _OPERATOR_DEVICE_REVOKED, "code": OPERATOR_DEVICE_REVOKED_CODE},
+        status_code=403,
+    )
 
 
 def _session_is_live(daemon: "MobileDaemon", session_id: str) -> bool:
@@ -3300,6 +3492,50 @@ def _latest_projection_frame(
             return best
         if candidate.get("version", 0) >= best.get("version", 0):
             best = candidate
+
+
+def heartbeat_stale(
+    entry: SessionEntry, *, now: float | None = None, monotonic_now: float | None = None
+) -> bool:
+    """Whether ``entry``'s owner has gone quiet past ``SESSION_HEALTH_WINDOW_S``.
+
+    True only when BOTH clocks are quiet: the record's ``heartbeat_at`` (wall
+    clock, written by the runtime) and ``last_frame_at`` (monotonic, stamped by
+    this relay on every frame it receives). A streaming turn starves the beat
+    but floods frames, so it reads fresh; an idle runtime sends no frames but
+    keeps beating, so it reads fresh too. A record that was never stamped
+    (``heartbeat_at <= 0``) is no evidence of answering, the same reading
+    ``_advertisable_counts`` gives it.
+    """
+    wall = time.time() if now is None else now
+    mono = time.monotonic() if monotonic_now is None else monotonic_now
+    beat = float(getattr(entry.record, "heartbeat_at", 0.0) or 0.0)
+    beat_quiet = beat <= 0.0 or wall - beat > SESSION_HEALTH_WINDOW_S
+    frame_quiet = (
+        entry.last_frame_at is None or mono - entry.last_frame_at > SESSION_HEALTH_WINDOW_S
+    )
+    return beat_quiet and frame_quiet
+
+
+def _sync_heartbeat_stale(entry: SessionEntry, daemon: "MobileDaemon") -> None:
+    """Publish ``entry``'s health verdict onto its payload, repainting on change.
+
+    Called from every scan pass (``SCAN_INTERVAL_S``), so a verdict lags its
+    evidence by at most one scan. Only a TRANSITION fans out: the frame is a
+    full snapshot, and re-sending an unchanged one every 2 s would cost every
+    watching phone a repaint for nothing. An ended entry or one with no payload
+    yet has nothing to publish — ``ended`` outranks the verdict on the phone,
+    and a payload-less entry is served a durable rebuild whose ``None`` already
+    means "not measured".
+    """
+    projection = entry.projection
+    if entry.ended or projection is None:
+        return
+    stale = heartbeat_stale(entry)
+    if projection.heartbeat_stale is stale:
+        return
+    projection.heartbeat_stale = stale
+    _fan_out(entry, daemon)
 
 
 def _mirror_dial_health(entry: SessionEntry) -> None:
@@ -3925,6 +4161,7 @@ class MobileDaemon:
         terminal: bool = False,
         ended: bool = False,
         degraded: bool = False,
+        live_pid: int = 0,
     ) -> SessionProjection | None:
         """Fold ``session_id`` from disk, then capture it for a phone route.
 
@@ -3946,7 +4183,12 @@ class MobileDaemon:
         relay cannot raise. The fold itself has no opinion — a disk rebuild
         alone is not evidence about a process — so the flags ride the repaint
         the caller is building, set before the capture so its summary carries
-        them.
+        them. ``live_pid`` is the same kind of knowledge (agent review round 1,
+        M2): the pid of a LIVE entry whose first payload has not landed yet.
+        The fold's own ``pid`` is 0, and 0 is the header dot's "no running
+        owner" rung, so a phone opening a session it just started would paint
+        it grey with a Resume offer until the dial's welcome arrived. 0 (the
+        default) leaves history and wake rebuilds exactly as they were.
 
         Extra folds are only paid by a fold that actually raced a display write;
         no lock or new cache. Loop-thread only: every caller runs on the loop,
@@ -3963,6 +4205,8 @@ class MobileDaemon:
                 projection.ended = True
             if degraded:
                 projection.degraded = True
+            if live_pid:
+                projection.pid = live_pid
             try:
                 projection = self.capture_subagent_details(
                     projection,
@@ -3998,6 +4242,7 @@ class MobileDaemon:
         from local_operator.session.attention import AttentionStore
 
         await self._refresh_pins_if_changed()
+        await self._refresh_notifications_if_changed()
         await self.refresh_tags_if_changed()
         revision = await asyncio.to_thread(AttentionStore().revision)
         if revision != getattr(self, "_attention_revision", None):
@@ -4142,6 +4387,7 @@ class MobileDaemon:
                     self._dial_tasks[record.pid] = asyncio.ensure_future(_dial(self, entry))
             if not entry.ended and self.phone_viewing(record.session_id):
                 self._schedule_phone_attach(record)
+            _sync_heartbeat_stale(entry, self)
         # Reap entries whose record vanished entirely.
         for pid in list(self.table.entries):
             if pid not in seen:
@@ -4198,6 +4444,41 @@ class MobileDaemon:
                 )
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push worker tick failed", exc_info=True)
+
+    async def _refresh_notifications_if_changed(self) -> None:
+        """Wake the list stream when the INBOX store moved.
+
+        The badge travels on the list payload (``_notifications_block``), and the
+        store is written by every runtime and by the desktop routes -- processes
+        this daemon never hears from. Without this pass the phone's badge only
+        moved when an unrelated session event happened to repaint the list, which
+        is the same defect ``_refresh_pins_if_changed`` was added for.
+
+        ONE fingerprint per scan tick over ``notifications.db`` and its ``-wal``,
+        not a watcher and not a poll of the inbox: the store is SQLite in WAL
+        mode, so an in-flight writer moves the sidecar before the database does
+        and a single-file stat would miss the tick that matters.
+        """
+        from local_operator.notifications.store import store_path
+        from local_operator.paths import config_dir
+
+        def fingerprint() -> tuple[Any, ...]:
+            database = store_path(config_dir())
+            out: list[Any] = []
+            for path in (database, database.with_name(database.name + "-wal")):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    out.append(None)
+                    continue
+                out.append((stat.st_ino, stat.st_size, stat.st_mtime_ns))
+            return tuple(out)
+
+        current = await asyncio.to_thread(fingerprint)
+        if current == getattr(self, "_notifications_fingerprint", None):
+            return
+        self._notifications_fingerprint = current
+        self.table.notify_list_changed()
 
     async def _refresh_pins_if_changed(self) -> None:
         """Wake the list stream when ANOTHER surface changed the shared pins.
@@ -4615,9 +4896,29 @@ class MobileDaemon:
             if entry is None:
                 entry = SessionEntry(record)
                 self.table.entries[record.pid] = entry
+            # THE OWNER'S PID, restamped on every viewer frame (agent review
+            # round 1, B1). ``AttachClient._pump`` rebuilds each repaint after
+            # the welcome against a placeholder ``pid=0`` record — the attach
+            # screen keys nothing on it — but this callback publishes the frame
+            # as the session's live projection, and the epoch ledger keeps the
+            # later of two same-epoch frames, so the viewer's copy is the one
+            # the phone is served. A ``pid`` of 0 there is the "no running owner"
+            # rung of the header dot (``lib/session-health.ts``) and the pid
+            # the supplement's ``jobLive`` rule reads, so a viewed session
+            # would read as ended while it streams. ``record`` is the one this
+            # client dialled and the identity check above fenced.
+            projection.pid = record.pid
+            captured = self.capture_subagent_details(projection, record=record)
+            # A viewer frame IS the owner answering, exactly as a dial frame is
+            # (``_dial``): clear the verdict and stamp the frame clock (M1).
+            # Left ``None``, the next scan reads ``None -> False`` as a
+            # transition and fans out a full frame every pass while the phone
+            # watches — 4 scans, 4 pushes, measured in review.
+            entry.last_frame_at = time.monotonic()
+            captured.heartbeat_stale = False
             # AttachClient verifies the welcome's durable identity before this
             # callback. Retain that first paint before acknowledging creation.
-            entry.projection = self.capture_subagent_details(projection, record=record)
+            entry.projection = captured
             self.table.notify_list_changed()
             _fan_out(entry, self)
 
@@ -4870,9 +5171,10 @@ class MobileDaemon:
         # The runtime hosts the model's tools; withhold the desktop plane's
         # bearer from its launch environment as ``session.runtime.launch`` does
         # (PR #3022 QA round 1, Q1). Lazy for the same import-path reason.
-        from local_operator.tools.shell_env import withhold_harness_plane
+        from local_operator.agent_shell import without_daemon_bearer
 
-        env = withhold_harness_plane(dict(os.environ))
+        env = dict(os.environ)
+        without_daemon_bearer(env)
         env["LOP_MOBILE_CHILD_CWD"] = cwd
         if provider:
             env["LOP_MOBILE_CHILD_PROVIDER"] = provider
@@ -5209,6 +5511,56 @@ _SUPPLEMENT_POLICY: dict[str, str] = {
 }
 
 
+def _notification_models() -> Any:
+    """The desktop route module, imported lazily for its shared models.
+
+    ONE VALIDATION, TWO TRANSPORTS (round-1 R7/Q5). The relay used to
+    hand-roll these checks, and the two drifted exactly where a phone
+    client would notice: five PATCH bodies and four list queries answered
+    422 on the desktop and 200 here. The models, the item-id check, the
+    transcript-anchor reader and the store-failure sentence now come from
+    ``server/routes/desktop_notifications`` — server-tier, so imported at
+    call time, the same rule the other relay adapters follow.
+    """
+    from local_operator.server.routes import desktop_notifications
+
+    return desktop_notifications
+
+
+def _notification_refusal(error: BaseException) -> Response | None:
+    """This relay's answer for a classified store failure, or None (Q5).
+
+    The same ``store_unavailable`` code and sentence the desktop route sends,
+    so the phone can word it instead of painting a bare "Internal Server
+    Error". ``None`` means "not a store failure": the caller re-raises rather
+    than inventing a disposition.
+    """
+    from starlette.responses import JSONResponse
+
+    from local_operator.paths import config_dir
+    from local_operator.server.routes.desktop_notifications import notifications_refusal
+    from local_operator.session.store_failures import store_failure
+
+    # A cursor sqlite cannot bind is the WIRE's refusal, not a store failure:
+    # the shared `NotificationsQuery` validator answers 422 for it, and this is
+    # the backstop for any path that reaches the store first (QA round 2).
+    if isinstance(error, OverflowError):
+        return JSONResponse(
+            {"error": "cursor is out of range", "code": "invalid_cursor"},
+            status_code=422,
+        )
+    failure = store_failure(error, config_dir())
+    if failure is None:
+        return None
+    return JSONResponse(
+        {
+            "error": notifications_refusal(failure, config_dir()),
+            "code": failure.code,
+        },
+        status_code=failure.status,
+    )
+
+
 def build_app(daemon: MobileDaemon):
     """The Starlette app. Imported inside the function so ``lop`` without the
     server extra never pays for starlette at startup."""
@@ -5461,7 +5813,18 @@ def build_app(daemon: MobileDaemon):
             # computed (see ``unread_snapshot``), so the block cannot be served
             # from a later rebuild than the rows it sits beside.
             "unread": daemon.table.unread_block(),
+            # The inbox badge (docs/design/notifications-inbox.md §5.4), read
+            # per frame like ``unread``: a stale badge is the one thing a phone
+            # must not show, and this answer is cheap beside it. AN UNREADABLE
+            # STORE OMITS THE KEY (Q4-2): the wire's contract is that a missing
+            # block reads as "this relay has no inbox", and a present ``{}``
+            # would let a renderer paint a zero over a real badge.
+            **_notifications_frame(),
             "capabilities": {
+                # D11: the relay's own inbox receipt door, advertised so native
+                # can turn its receipt feed on instead of probing a refusal.
+                # Sourced from core's feature registry (`notifications_seen`), so
+                # the phone keys on ONE fact rather than a relay-side literal.
                 "features": _feature_flags(),
                 "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
@@ -5680,6 +6043,8 @@ def build_app(daemon: MobileDaemon):
                         session_id,
                         ended=ended,
                         degraded=live is not None and bool(live.degraded),
+                        # Live but payload-less: the owner IS running (M2).
+                        live_pid=live.record.pid if live is not None else 0,
                     )
                 loop = asyncio.get_running_loop()
                 sent_at: float | None = None
@@ -7355,6 +7720,9 @@ def build_app(daemon: MobileDaemon):
         op = body.pop("op", None)
         if not isinstance(op, str) or not op:
             return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)
+        revoked = _revoked_device_refusal(body.get("operator_cert"))
+        if revoked is not None:
+            return revoked
         try:
             from local_operator.mobile.types import (
                 ContinuationCommand,
@@ -7773,13 +8141,27 @@ def build_app(daemon: MobileDaemon):
         # has to say — and it is the same predicate the runtime and the pairing
         # receipt use, so the three surfaces cannot disagree.
         from local_operator.operator import operator_authority_unusable
+        from local_operator.operator.trust import load_anchor
 
+        # THE KEY THE CERTIFICATE IS CHECKED AGAINST (B2), so the phone can verify
+        # its own certificate instead of trusting this answer. Public material: the
+        # installed anchor's point, the same read `_installed_key_id` makes. Sent
+        # only when the installed anchor IS the key that signed this certificate —
+        # a superseded anchor's point would verify nothing and look like a forgery.
+        loaded = load_anchor()
+        anchor = loaded.anchor if loaded.usable else None
+        operator_spki = (
+            devices.encode_spki(anchor.spki)
+            if anchor is not None and anchor.key_id == stored.operator_key_id
+            else ""
+        )
         return JSONResponse(
             {
                 "paired": True,
                 "device_id": stored.device_id,
                 "certificate": stored.certificate,
                 "operator_key_id": stored.operator_key_id,
+                "operator_spki": operator_spki,
                 "scope": list(stored.scope),
                 "exp": stored.not_after,
                 "name": stored.name,
@@ -7826,6 +8208,234 @@ def build_app(daemon: MobileDaemon):
             # and the route's behaviour stay one statement.
             row["durable"] = _durable_user_session_dir(session_id) is not None
         return JSONResponse({"asks": rows})
+
+    async def api_notifications(request: Request) -> Response:
+        """``GET /api/notifications``: the inbox reel, the desktop route's answer.
+
+        A THIN ADAPTER over ``notifications.items.list_page`` -- the same call the
+        desktop route makes -- so the phone and the app cannot describe one store
+        two ways: the paging cursor, the conservative ``through_seq`` boundary,
+        the ``observed`` id/revision tokens a bulk write must echo, and the
+        ``waiting_count``/``waiting_unread_count`` split all come from there.
+
+        The QUERY is validated by the desktop route's own model (round-1 R7), so
+        a bound the app refuses is refused here with the same status.
+
+        PER-ROW LIVENESS, like ``/api/asks``: the index knows an item is durable,
+        not whether the conversation behind it can answer now, so each row carries
+        ``runtime_live`` (this process's dial table) and ``durable`` (a session
+        directory that survives a restart). A row with neither is a receipt the
+        reader can see and cannot open, which is what the two fields are for.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from pydantic import ValidationError
+
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        try:
+            query = models.NotificationsQuery.model_validate(dict(request.query_params))
+        except ValidationError as error:
+            return JSONResponse(
+                {"error": error.errors()[0].get("msg", "invalid query")}, status_code=422
+            )
+        try:
+            window = _lapsed_window(config_dir())
+            page = await asyncio.to_thread(
+                inbox.list_page,
+                config_dir(),
+                state=query.state,
+                source=query.source,
+                priority=query.priority,
+                session_id=query.session_id,
+                cursor=query.cursor,
+                limit=query.limit,
+                lapsed_visible_ms=window,
+                through_seq=query.through_seq,
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid cursor"}, status_code=422)
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        for row in list(page.get("items") or []) + list(page.get("waiting") or []):
+            # One reader for the row's conversation (`_notification_row_session_id`),
+            # so this answer and the DETAIL route cannot disagree again.
+            session_key = _notification_row_session_id(row)
+            row["runtime_live"] = _session_is_live(daemon, session_key)
+            row["durable"] = _durable_user_session_dir(session_key) is not None
+        return JSONResponse(page)
+
+    async def api_notification_detail(request: Request) -> Response:
+        """``GET /api/notifications/{id}``: one item, its context and the calls."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        item_id = str(request.path_params["item_id"])
+        if not models.valid_item_id(item_id):
+            return JSONResponse({"error": "invalid item id"}, status_code=422)
+        try:
+            answer = await asyncio.to_thread(
+                inbox.detail,
+                config_dir(),
+                item_id,
+                lapsed_visible_ms=_lapsed_window(config_dir()),
+                # Round-1 R7: the transcript anchor the desktop detail carries.
+                # Without it the phone's detail always showed ``anchor: null``.
+                anchor_excerpt=models.anchor_excerpt,
+            )
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        if answer is None:
+            return JSONResponse({"error": "unknown notification"}, status_code=404)
+        # QA Q4: this read `item["session_id"]`, a key the item does not have —
+        # it carries a nested `session` block — so the detail answered
+        # false/false for EVERY item while the list row said `durable: True`.
+        # Same reader, same rules as the list row.
+        session_key = _notification_row_session_id(answer.get("item"))
+        (answer.get("item") or {})["runtime_live"] = _session_is_live(daemon, session_key)
+        (answer.get("item") or {})["durable"] = _durable_user_session_dir(session_key) is not None
+        return JSONResponse(answer)
+
+    async def api_notifications_patch(request: Request) -> Response:
+        """``PATCH /api/notifications``: the desktop write, byte for byte.
+
+        The BODY is ``NotificationsPatch`` itself (round-1 R7): one validator,
+        so the phone and the app refuse the same bodies for the same reasons.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from pydantic import ValidationError
+
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": "a JSON body is required"}, status_code=422)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "a JSON object is required"}, status_code=422)
+        try:
+            patch = models.NotificationsPatch.model_validate(body)
+        except ValidationError as error:
+            return JSONResponse(
+                {"error": error.errors()[0].get("msg", "invalid body")}, status_code=422
+            )
+        try:
+            answer = await asyncio.to_thread(
+                inbox.apply_patch,
+                config_dir(),
+                patch.op,
+                ids=[entry.model_dump() for entry in patch.ids] if patch.ids is not None else None,
+                session_id=patch.session_id,
+                through_seq=patch.through_seq,
+                all_items=patch.all,
+                observed=(
+                    [entry.model_dump() for entry in patch.observed]
+                    if patch.observed is not None
+                    else None
+                ),
+            )
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=422)
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        return JSONResponse(answer)
+
+    async def api_notifications_seen(request: Request) -> Response:
+        """``POST /api/notifications/seen`` — the PHONE's own in-view receipt (D11).
+
+        WHAT CHANGED, AND WHY. Round 1 refused every receipt here (R6), on
+        contract §6.4's "explicit read only" for the relay. The manager replaced
+        that rule (D11) after native #117 shipped its receipt feed as the inbox's
+        only auto-read path: the refusal left a phone that had plainly viewed an
+        item with no way to say so, retrying the refused write every 500 ms and
+        painting an error where the list should be.
+
+        The gate is the SAME ONE THE DESKTOP USES, not a second opinion. The
+        evidence is validated by ``NativeSeenEvidence`` (surface pinned to
+        ``native``; ``touch``/``press``/``scroll`` only), and
+        ``notifications.items.apply_seen`` re-checks every item against the store
+        exactly as the desktop route does: the row belongs to
+        ``evidence.session_id``, names its current revision and anchor,
+        ``visible_since`` sits between that row's own ``updated_at`` and the input
+        edge, the edge is fresh (≤120 s) and old enough for the dwell. Anything
+        else is ``skipped`` with its reason. A receipt is a claim about what the
+        operator saw, so nothing here trusts the client: it only refuses fewer
+        claims than round 1, each on the same evidence.
+
+        A phone that labels itself ``desktop`` is still refused, with its own
+        code (``relay_surface_mismatch``) so native can tell "wrong door" from
+        "bad evidence" — the R6 negative, kept.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from pydantic import ValidationError
+
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 - a body that is not JSON is a refusal
+            return JSONResponse({"error": "a JSON body is required"}, status_code=422)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "a JSON object body is required"}, status_code=422)
+        evidence = payload.get("evidence")
+        surface = str((evidence or {}).get("surface") or "") if isinstance(evidence, dict) else ""
+        if surface != "native":
+            # ANY other surface, including the desktop's own: this route serves
+            # the phone, and an unlabelled or mislabelled claim has no evidence
+            # story this transport can honour.
+            return JSONResponse(
+                {
+                    "error": "read receipts on the relay are for the native surface, "
+                    "which reports touch, press or scroll edges",
+                    "code": "relay_surface_mismatch",
+                },
+                status_code=422,
+            )
+        try:
+            body = models.NativeNotificationsSeen.model_validate(payload)
+        except ValidationError as error:
+            return JSONResponse(
+                {"error": error.errors()[0].get("msg", "invalid receipt")}, status_code=422
+            )
+        try:
+            answer = await asyncio.to_thread(
+                inbox.apply_seen,
+                config_dir(),
+                [entry.model_dump(exclude_none=True) for entry in body.items],
+                body.evidence.model_dump(),
+            )
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        # The receipt's own answer carries the badge too, so the client need not
+        # poll for it after a read.
+        return JSONResponse(answer)
 
     async def api_schedules(request: Request) -> Response:
         """What is ARMED on this machine: the machine-wide wake and monitor
@@ -9286,6 +9896,13 @@ def build_app(daemon: MobileDaemon):
         Route("/api/pair", api_pair, methods=["POST"]),
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/asks", api_asks),
+        # The inbox (docs/design/notifications-inbox.md §5.4): the reel, one
+        # item, the token-bound write and the in-view receipt. The SAME module
+        # functions the desktop routes call, so the two surfaces cannot drift.
+        Route("/api/notifications", api_notifications),
+        Route("/api/notifications/{item_id:str}", api_notification_detail),
+        Route("/api/notifications", api_notifications_patch, methods=["PATCH"]),
+        Route("/api/notifications/seen", api_notifications_seen, methods=["POST"]),
         # The armed index (mobile parity, read half): one fetch feeds the
         # phone's Schedules surface — the machine-wide wakes and monitors
         # listings, straight off the derived indexes. Read-only by design:

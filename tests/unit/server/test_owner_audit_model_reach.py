@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from local_operator import agent_shell
 from local_operator.harness.types import AbortSignal, ToolContext
 from local_operator.server import desktop
 from local_operator.tools import builtin
@@ -124,7 +125,7 @@ async def test_the_eval_kernel_cannot_use_the_desktop_bearer(proxy, tmp_path: Pa
 
 
 def test_the_withheld_names_match_the_daemon() -> None:
-    assert desktop.TOKEN_ENV in shell_env.HARNESS_PLANE_CREDENTIALS
+    assert desktop.TOKEN_ENV in agent_shell.DAEMON_BEARER_ENVS
 
 
 @pytest.mark.parametrize("mode", [shell_env.MODE_INHERIT, shell_env.MODE_ALLOWLIST])

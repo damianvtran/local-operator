@@ -200,7 +200,7 @@ def capture_launch_token() -> None:
     * every child the daemon spawns (``dict(os.environ)`` is the norm here)
       starts without it, so a model's tools never inherit it — the runtime and
       tool spawn sites also withhold it by name
-      (``tools.shell_env.HARNESS_PLANE_CREDENTIALS``) as the second layer;
+      (``agent_shell.DAEMON_BEARER_ENVS``) as the second layer;
     * ``ps eww``/``/proc/<pid>/environ`` on the daemon show the overwritten
       bytes, not the bearer.
 

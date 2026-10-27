@@ -1770,3 +1770,46 @@ async def test_a_draining_record_is_reported_as_leaving_then_the_next_engage_spa
     assert outcome.detail == "runtime ready", outcome.detail
     assert fleet.winners == 1, "no runtime took the transcript"
     assert fleet.losers == 0, "a doomed candidate was spawned into the drain window"
+
+
+def test_spawn_runtime_never_hands_the_desktop_bearer_to_a_session_runtime(
+    tmp_path, monkeypatch
+) -> None:
+    """A session runtime must not HOLD the daemon's desktop bearer (operator ask a-772b).
+
+    QA #3002 cell 14 read the bearer out of the runtime's own environment
+    (``KERN_PROCARGS2``) as well as the bash tool child's. The runtime never reads it --
+    ``server.desktop.desktop_posture`` is the one reader and it runs in the daemon -- so
+    the spawn drops it, and every process the runtime starts inherits nothing to leak.
+    The standby warm (adopted later with this same environment) is covered by the same
+    builder; its adopt request carries this dict.
+    """
+    from local_operator.session.runtime import launch as launch_module
+
+    recorded: list[dict[str, str]] = []
+
+    class _Popen:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+    def fake_popen(argv, **kwargs: Any):
+        recorded.append(dict(kwargs.get("env") or {}))
+        return _Popen()
+
+    monkeypatch.setattr(launch_module, "spawn_disclaimed", fake_popen)
+    monkeypatch.setattr("local_operator.session.runtime.standby.adoption_possible", lambda: False)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "sentinel-desktop-bearer")
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "null")
+    spawned = launch_module._spawn_runtime("sess-bearer", str(tmp_path), defer_materialise=True)
+    capture = getattr(spawned, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+
+    assert recorded, "the real spawn path ran"
+    assert "LOCAL_OPERATOR_DESKTOP_TOKEN" not in recorded[0]
+    assert "sentinel-desktop-bearer" not in recorded[0].values()

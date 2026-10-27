@@ -1057,6 +1057,18 @@ def remove_session_dir(
             ask_store.remove_entry(config_dir, target.name)
         except Exception:  # noqa: BLE001 — the sweep is the backstop
             logger.debug("session cleanup: could not drop the ask index entry", exc_info=True)
+        # The inbox's items for this conversation go with it
+        # (docs/design/notifications-inbox.md §1.4): an item whose conversation
+        # cannot be opened is a link to nowhere. Same site and same reason as
+        # the ask index above — this is the one place a directory is destroyed.
+        # Best-effort: an absent store is a no-op, and a contended one leaves
+        # rows the retention pass ages out.
+        try:
+            from local_operator.notifications.store import NotificationStore
+
+            NotificationStore(config_dir).delete_session(target.name)
+        except Exception:  # noqa: BLE001 — retention is the backstop
+            logger.debug("session cleanup: could not drop the inbox items", exc_info=True)
     return True
 
 

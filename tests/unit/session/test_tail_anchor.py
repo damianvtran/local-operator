@@ -412,11 +412,14 @@ async def test_an_absence_record_from_a_compact_only_version_proves_nothing(tmp_
     record = forged.as_dict()
     record["version"] = version
     (tmp_path / ANCHOR_FILENAME).write_text(json.dumps(record))
-    # Control: the same record at the current version WOULD be trusted — the
-    # refusal below is about the version, not a broken fixture.
+    # The disk still holds the v2/v3 record (only the in-memory copy is bumped
+    # here, for the control below): it reads, so its selection evidence
+    # survives, but its absence claim is refused.
     record["version"] = ANCHOR_VERSION
     loaded = read_anchor(tmp_path)
     assert loaded is not None and loaded.checkpoint_absent is False
     assert proves_absent(tmp_path) is False
+    # Control: the same record rewritten at the current version IS trusted, so
+    # the refusal above is about the version, not a broken fixture.
     (tmp_path / ANCHOR_FILENAME).write_text(json.dumps(record))
     assert proves_absent(tmp_path) is True

@@ -218,6 +218,17 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, stri
     "relay.chrome.snackbar.dismiss": "Dismiss",
     "relay.chrome.spend.title": "Spend & context",
   },
+  "relay.health": {
+    "relay.health.dropped_detail": "Your computer can't reach this session right now and keeps trying. Until it does, a send fails straight away and your text stays in the message box.",
+    "relay.health.ended_detail": "History is kept. Send a message or tap Resume to reopen it in your home folder.",
+    "relay.health.ended_placeholder": "Send to reopen in your home folder\u2026",
+    "relay.health.ended_send_failed": "This session has ended and couldn't be reopened just now. Try again, or tap \u201cEnded\u201d at the top and choose Resume.",
+    "relay.health.live": "Live",
+    "relay.health.live_detail": "Running on your computer \u2014 messages reach it right away",
+    "relay.health.quiet_detail": "This session on your computer has stopped responding \u2014 it may be busy or stuck. A send can show a failure and still arrive once it catches up. Retrying won't send it twice.",
+    "relay.health.reconnecting": "Reconnecting",
+    "relay.health.reconnecting_detail": "This phone lost its connection to your computer and keeps trying. The session may still be running there; sending may fail until the connection is back.",
+  },
   "relay.library": {
     "relay.library.count": "{count, plural, one {# asset} other {# assets}}",
   },

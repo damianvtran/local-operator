@@ -48,6 +48,7 @@ from local_operator.network.projection import ProjectionRefusal
 
 # Preserve the private import surface while sharing cancellation-safe ownership.
 from local_operator.owned_tasks import join_owned as _join_owned
+from local_operator.server import early_paint_hold
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_mesh import MESH_ID_PATTERN
 from local_operator.server.models.desktop_sessions import (
@@ -6028,6 +6029,11 @@ async def events(
     # only the pool (`SimpleNamespace`), and the app-state attribute is not part
     # of what this route needs.
     release_paint = transcript_index.hold_paint(pool.root, session_id)
+    # R1 HANDOFF: a first-paint open was already holding since before the
+    # middleware stack (``server.early_paint_hold``). Dropped only AFTER the
+    # route's hold is taken, so the count never reaches zero in between, and
+    # from here on the snapshot-frame release above is the only one owed.
+    early_paint_hold.hand_off(getattr(request, "scope", None))
     context = pool.session(session_id, read=True, allow_draft=True)
     try:
         async with errors(request):

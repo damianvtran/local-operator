@@ -23,6 +23,7 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
+from local_operator.i18n.keys import tui_notifications as _inbox_keys
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.text import tr
@@ -33,9 +34,11 @@ from local_operator.resume import (
     peer_reason_words,
 )
 from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
+from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.composer_focus import composer_may_take_focus, focus_is_claimed
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
 from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.ask_queue import ASK_MARKER
@@ -48,6 +51,13 @@ from local_operator.tui.widgets.session_picker import (
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 _t = tr("tui.small")
+_inbox_t = display_tr(
+    "tui.notifications",
+    # The literal /commands ride as islands (see model.SHELL_COMMANDS):
+    # per-string isolation alone reorders them in Urdu.
+    technical_literals=model.SHELL_COMMANDS,
+    technical_commands=model.SHELL_COMMAND_TEMPLATES,
+)
 _t_tags = tr("tui.tags")
 
 if TYPE_CHECKING:
@@ -686,6 +696,12 @@ class SessionSidebar(Widget, can_focus=True):
         #: footer ladder (like the chip and the ask note), never a new lane, so
         #: the sidebar's hit-test geometry is untouched.
         self._hub_total: int = 0
+        #: The inbox badge figure (notifications design §11): unread updates
+        #: plus unread live asks. Painted as a footer FACT beside the ask note,
+        #: only while > 0, and never a door of its own — the page is reached by
+        #: `/notifications`, and a second pressable span here would be a third
+        #: control on a line the hit tests already resolve twice.
+        self._notifications_total: int = 0
         #: Hidden-population size for the footer chip, from `subagent_population`.
         self._subagent_total: int = 0
         #: Whether the pointer rests on that chip. The chip is a CONTROL (issue
@@ -1332,6 +1348,21 @@ class SessionSidebar(Widget, can_focus=True):
         self._asks_total = max(0, total)
         self.refresh()
 
+    def set_notifications_total(self, total: int) -> None:
+        """The inbox's unread figure for the footer note (design §11).
+
+        The SAME number every surface badges (``unread_count`` +
+        ``waiting_unread_count``), so the terminal and the desktop never
+        disagree about one inbox. Zero paints nothing: absence is not
+        emptiness, the ask note's rule, so a machine with an empty inbox paints
+        exactly the footer it painted before this feature existed.
+        """
+        total = max(0, int(total or 0))
+        if total == self._notifications_total:
+            return
+        self._notifications_total = total
+        self.refresh()
+
     def set_hub_total(self, total: int) -> None:
         """The Hub links count, for the footer's hub DOOR (the architect's placement).
 
@@ -1614,6 +1645,7 @@ class SessionSidebar(Widget, can_focus=True):
             self._asks_hover,
             self._hub_total,
             self._hub_hover,
+            self._notifications_total,
         )
 
     def refresh(
@@ -2979,6 +3011,7 @@ class SessionSidebar(Widget, can_focus=True):
         # `truncate_cells` would crop it mid-word.
         ask_note = self._asks_note()
         hub_note = self._hub_note()
+        inbox_note = self._notifications_note()
 
         # THE HUB DOOR IS THE FIRST TAIL FACT TO DROP (round-2 D9). The door is a
         # CONTROL whose route outlives it (the mouse and `/hub` both remain), so
@@ -2991,11 +3024,20 @@ class SessionSidebar(Widget, can_focus=True):
             kept = [part for part in parts if part]
             return f" · {' · '.join(kept)}" if kept else ""
 
-        tail_full = _tail(ask_note, hub_note, chip)
-        tail_nohub = _tail(ask_note, chip)
+        # THE INBOX NOTE IS A FACT, BUT A SECOND-HAND ONE (notifications design
+        # §11): it restates a count the `/notifications` page owns, whereas the
+        # ask note is the fleet list's only door. So it sits AFTER the ask note
+        # and yields before every other tail fact — each tail is tried with it,
+        # then without — and it never displaces the hub door's own variant.
+        tail_full = _tail(ask_note, inbox_note, hub_note, chip)
+        tail_nohub = _tail(ask_note, inbox_note, chip)
         tail_variants = [tail_full]
         if hub_note and tail_nohub != tail_full:
             tail_variants.append(tail_nohub)
+        if inbox_note:
+            for plain in (_tail(ask_note, hub_note, chip), _tail(ask_note, chip)):
+                if plain not in tail_variants:
+                    tail_variants.append(plain)
 
         def expand(rung_templates: list[str]) -> list[str]:
             """Every rung, expanded full-tail then hub-free, in preference order."""
@@ -3121,9 +3163,12 @@ class SessionSidebar(Widget, can_focus=True):
                 # before the hub-free ones).
                 head_hide = f"{position} · {lead}{_t(_x.session_sidebar_hide_suffix())}"
                 head_plain = f"{position} · {lead}"
-                candidates = [head_hide + tail_full, head_plain + tail_full]
-                if hub_note and tail_nohub != tail_full:
-                    candidates.extend([head_hide + tail_nohub, head_plain + tail_nohub])
+                # Every tail variant, widest first, each with and without the
+                # hide hint: the inbox note's yield-first rule (above) reaches
+                # this ladder through ``tail_variants`` alone.
+                candidates = [
+                    head + tail for tail in tail_variants for head in (head_hide, head_plain)
+                ]
             else:
                 # THE NOTE AND THE CHIP OUTLIVE THE HINT THEY REPLACE (round 2:
                 # U3), and since the pre-release batch so does the HUB DOOR
@@ -3143,9 +3188,7 @@ class SessionSidebar(Widget, can_focus=True):
                 # displaces asks or the chip — those candidates come first and
                 # the hub-free variants drop the DOOR before either fact yields.
                 templates = [f"{base}", f"{lead}"]
-                candidates = [t + tail_full for t in templates]
-                if hub_note and tail_nohub != tail_full:
-                    candidates.extend(t + tail_nohub for t in templates)
+                candidates = [t + tail for tail in tail_variants for t in templates]
             if chip:
                 candidates.append(f"{lead} · {chip}")
         hint = next(
@@ -3213,6 +3256,15 @@ class SessionSidebar(Widget, can_focus=True):
         if at < 0 or not painted[:at].endswith(" · "):
             return None
         return (at, at + len(note))
+
+    def _notifications_note(self) -> str:
+        """``notifications N`` in the footer, or "" at zero (design §11, no emoji)."""
+        if self._notifications_total <= 0:
+            return ""
+        # ``tui.notifications``, not ``tui.small``: adding a key to the audited
+        # ``tui.small`` catalogue would void every translated locale's ledger
+        # hash for one footer word (docs/I18N.md, the ``/library`` precedent).
+        return _inbox_t(_inbox_keys.sidebar_note(count=str(self._notifications_total)))
 
     def _hub_note(self) -> str:
         """The hub links door's footer note, or "" when there is nothing to state.

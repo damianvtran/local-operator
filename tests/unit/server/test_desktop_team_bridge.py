@@ -450,6 +450,7 @@ class FakeClient:
         before: str | None = None,
         cursor: str | None = None,
         scope: str | None = None,
+        status: str | None = None,
         access: Any = None,
     ) -> dict[str, Any]:
         FakeClient.behavior["last_conversations_kwargs"] = {
@@ -458,6 +459,7 @@ class FakeClient:
             "before": before,
             "cursor": cursor,
             "scope": scope,
+            "status": status,
         }
         return self._answer("conversations")
 
@@ -486,6 +488,17 @@ class FakeClient:
     ):
         FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
         return self._answer("conversation_lifecycle")
+
+    async def conversation_delete(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id=None,
+        access: Any = None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_deleted"] = (conversation_id, tenant_id, expected_account_id)
+        return self._answer("conversation_delete")
 
     async def conversation_members(
         self,
@@ -2667,7 +2680,49 @@ async def test_conversation_list_forwards_tenant_and_paging(api):
         "before": "2026-10-18T00:00:00Z",
         "cursor": None,
         "scope": None,
+        "status": None,
     }
+
+
+async def test_conversation_list_forwards_the_archived_status_and_refuses_unknown_ones(api):
+    """The archived half is one closed selector; the server owns who sees what in it."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversations"] = {"conversations": [{"id": "bcv_1"}], "has_more": False}
+    for status in ("archived", "open"):
+        response = await client.get(
+            f"/v1/desktop/team-bridge/conversations?tenant_id=tnt_1&status={status}"
+        )
+        assert response.status_code == 200, response.text
+        assert FakeClient.behavior["last_conversations_kwargs"]["status"] == status
+    # The account-wide page takes it too (the merged "Archived channels" list).
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?scope=account&status=archived"
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_conversations_kwargs"]["status"] == "archived"
+    calls_before = FakeClient.calls
+    for bad in ("deleted", "ARCHIVED", ""):
+        response = await client.get(f"/v1/desktop/team-bridge/conversations?status={bad}")
+        assert response.status_code == 422, (bad, response.text)
+    assert FakeClient.calls == calls_before
+
+
+async def test_conversation_delete_forwards_the_receipt_and_answers_the_server(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_delete"] = {
+        "id": "bcv_abc12345",
+        "tenant_id": "tnt_1",
+        "deleted": True,
+        "messages_erased": 3,
+    }
+    response = await client.delete(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+        "?tenant_id=tnt_1&expected_account_id=acc_a"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["messages_erased"] == 3
+    assert FakeClient.behavior["last_deleted"] == ("bcv_abc12345", "tnt_1", "acc_a")
 
 
 async def test_conversation_list_forwards_the_account_scope_and_cursor(api):
@@ -2698,6 +2753,7 @@ async def test_conversation_list_forwards_the_account_scope_and_cursor(api):
         "before": None,
         "cursor": "bcur_abc",
         "scope": "account",
+        "status": None,
     }
 
 
@@ -2735,6 +2791,7 @@ async def test_conversation_list_forwards_a_cursor_on_a_tenant_page(api):
         "before": None,
         "cursor": "bcur_abc",
         "scope": None,
+        "status": None,
     }
 
 
@@ -2947,6 +3004,7 @@ async def test_every_desktop_write_refuses_a_scope(api):
         ("post", "/v1/desktop/team-bridge/conversations?scope=account", {"kind": "dm"}),
         ("post", f"{base}/archive?scope=account", None),
         ("post", f"{base}/unarchive?scope=account", None),
+        ("delete", f"{base}?scope=account", None),
         (
             "post",
             f"{base}/members?scope=account",
@@ -3019,6 +3077,7 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
         ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/archive", None),
         ("post", "/v1/desktop/team-bridge/conversations/nope/unarchive", None),
+        ("delete", "/v1/desktop/team-bridge/conversations/nope", None),
         (
             "post",
             "/v1/desktop/team-bridge/conversations/nope/members",
@@ -3036,7 +3095,13 @@ async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
     calls_before = FakeClient.calls
     for method, path, payload in cases:
         response = (
-            await client.get(path) if method == "get" else await client.post(path, json=payload)
+            await client.get(path)
+            if method == "get"
+            else (
+                await client.delete(path)
+                if method == "delete"
+                else await client.post(path, json=payload)
+            )
         )
         assert response.status_code == 422, (path, response.text)
     # None of the guards admitted a transport call.

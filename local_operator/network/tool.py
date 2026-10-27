@@ -306,9 +306,9 @@ class NetworkParams(BaseModel):
 def _withheld_env() -> dict[str, str]:
     """This process's environment minus the harness's own plane credentials."""
 
-    from local_operator.tools.shell_env import withhold_harness_plane
+    from local_operator.agent_shell import without_daemon_bearer
 
-    return withhold_harness_plane(dict(os.environ))
+    return without_daemon_bearer(dict(os.environ))
 
 
 def _cli_argv() -> list[str]:

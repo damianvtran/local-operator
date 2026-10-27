@@ -244,24 +244,9 @@ CREDENTIAL_NAME_MARKERS: tuple[str, ...] = (
 #:
 #: This removes the key from the child's OWN environment. The parent halves are
 #: closed where those environments are made: the session runtime's launch
-#: environment (:func:`withhold_harness_plane`) and the daemon's own launch
-#: environment (``server.desktop.capture_launch_token``).
-HARNESS_PLANE_CREDENTIALS: tuple[str, ...] = ("LOCAL_OPERATOR_DESKTOP_TOKEN",)
-
-
-def withhold_harness_plane(env: dict[str, str]) -> dict[str, str]:
-    """``env`` without the harness's control-plane credentials, in place.
-
-    For every environment a process the MODEL can reach is launched with: the
-    model's own children (via :func:`child_environment`) and the session runtime
-    that is their parent, whose launch environment a same-uid child reads with
-    ``ps eww $PPID`` (Darwin) or ``/proc/$PPID/environ`` (Linux) whatever the
-    child's own environment says.
-    """
-
-    for name in HARNESS_PLANE_CREDENTIALS:
-        env.pop(name, None)
-    return env
+#: environment (``agent_shell.without_daemon_bearer`` at every runtime spawn) and
+#: the daemon's own launch environment (``server.desktop.capture_launch_token``).
+#: The names themselves live once, in ``agent_shell.DAEMON_BEARER_ENVS``.
 
 
 @dataclass(frozen=True)
@@ -651,6 +636,10 @@ def child_environment(
         )
     for name in policy.exclude:
         env.pop(name, None)
-    # LAST, after the injections and ``exclude``, and in BOTH modes: no policy
-    # and no injection may hand a model child the harness's own plane bearer.
-    return withhold_harness_plane(env)
+    # LAST, and in BOTH modes: the daemon's desktop bearer never reaches a tool child,
+    # however the policy or an injection named it (operator ask a-772b; see
+    # ``agent_shell.DAEMON_BEARER_ENVS`` for the demonstrated path and the limit).
+    from local_operator.agent_shell import without_daemon_bearer
+
+    without_daemon_bearer(env)
+    return env

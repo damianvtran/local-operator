@@ -207,6 +207,15 @@ export type MessageParams = {
   "relay.chrome.session.tray.tasks": { "done": number; "total": number };
   "relay.chrome.snackbar.dismiss": undefined;
   "relay.chrome.spend.title": undefined;
+  "relay.health.dropped_detail": undefined;
+  "relay.health.ended_detail": undefined;
+  "relay.health.ended_placeholder": undefined;
+  "relay.health.ended_send_failed": undefined;
+  "relay.health.live": undefined;
+  "relay.health.live_detail": undefined;
+  "relay.health.quiet_detail": undefined;
+  "relay.health.reconnecting": undefined;
+  "relay.health.reconnecting_detail": undefined;
   "relay.library.count": { "count": number };
   "relay.login.error.password": undefined;
   "relay.login.page.title": undefined;
@@ -456,7 +465,11 @@ export type MessageParams = {
   "wire.errors.desktop.session_is_remote_open": { "session_id": string; "label": string };
   "wire.errors.desktop.session_is_remote_write": { "noun": string; "session_id": string; "label": string };
   "wire.errors.desktop.session_not_found": { "session_id": string };
+  "wire.errors.desktop.skill_alias_occupied": undefined;
+  "wire.errors.desktop.skill_local_changes_unpublished": undefined;
+  "wire.errors.desktop.skill_not_editable": undefined;
   "wire.errors.desktop.skill_not_found": undefined;
+  "wire.errors.desktop.skill_stale": undefined;
   "wire.errors.desktop.sort_unknown": { "sorts": string };
   "wire.errors.desktop.start_after_end": undefined;
   "wire.errors.desktop.unknown_command": undefined;
@@ -492,6 +505,10 @@ export type MessageParams = {
   "wire.errors.media.transcription_unexpected": { "error": string };
   "wire.errors.media.unknown_model": { "provider": string; "model": string; "error": string };
   "wire.errors.media.unknown_provider": { "provider": string };
+  "wire.errors.notifications.store_busy": undefined;
+  "wire.errors.notifications.store_full": { "where": string };
+  "wire.errors.notifications.store_unavailable": { "where": string };
+  "wire.errors.notifications.unknown_item": undefined;
   "wire.errors.sdk_spec.agent_identity_conflict": undefined;
   "wire.errors.sdk_spec.approval_callback_gate_required": undefined;
   "wire.errors.sdk_spec.approval_declared_tools_empty": undefined;
@@ -1505,6 +1522,7 @@ export type MessageParams = {
   "wire.slash.usage": undefined;
   "wire.slash.library.help": undefined;
   "wire.slash.library.librarian_help": undefined;
+  "wire.slash.notifications_page.help": undefined;
   "wire.tunnel_setup.checking": undefined;
   "wire.tunnel_setup.corrupt_intent": undefined;
   "wire.tunnel_setup.deadline": undefined;

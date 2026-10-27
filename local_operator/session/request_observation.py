@@ -31,6 +31,10 @@ attempts (retry/fallback live below this wrapper, in ``stream_with_failover``).
 ``usage_coverage="reported_final"`` therefore claims only what its name says --
 the FINAL attempt's receipt is present and raw -- and is NOT proof that every
 retry bill was reported. ``"missing"`` means no usage frame arrived at all.
+``"estimated"`` means the CONSUMER cut the call short (the loop's degeneration
+guard) before the usage frame could arrive, and ``usage`` is the harness's own
+estimate -- billing basis ``estimated``, never a receipt (see
+``model.configure._estimate_consumer_cut_usage``).
 Consumers that need invoice totals must mark fallback-involved requests as
 incomplete coverage; a transport-attempt observation would be a separate,
 narrower seam.
@@ -130,8 +134,9 @@ class RequestFinalObservation:
     usage_reported: bool = False
     #: ``"reported_final"`` covers the final attempt's receipt only (earlier
     #: retry/fallback attempts may be unreported -- see the module docstring);
-    #: ``"missing"`` means nothing arrived.
-    usage_coverage: Literal["reported_final", "missing"] = "missing"
+    #: ``"missing"`` means nothing arrived; ``"estimated"`` means ``usage`` is
+    #: the harness's estimate for a call the consumer cut (module docstring).
+    usage_coverage: Literal["reported_final", "missing", "estimated"] = "missing"
     #: The wrapper's own outcome vocabulary: a stop reason ("stop",
     #: "tool_use", ...), an exception class name, or "incomplete".
     outcome: str = "unknown"
@@ -342,6 +347,7 @@ def build_request_final_observation(
     ok: bool,
     outcome: str,
     duration_ms: float,
+    usage_estimated: bool = False,
 ) -> RequestFinalObservation:
     """Build the one immutable record for a finished request.
 
@@ -392,8 +398,10 @@ def build_request_final_observation(
         served_identity_source=served_source,
         upstream_host=upstream_host,
         usage=detached_usage,
-        usage_reported=usage is not None,
-        usage_coverage="reported_final" if usage is not None else "missing",
+        usage_reported=usage is not None and not usage_estimated,
+        usage_coverage=(
+            "missing" if usage is None else "estimated" if usage_estimated else "reported_final"
+        ),
         outcome=outcome,
         ok=ok,
         duration_ms=duration_ms,

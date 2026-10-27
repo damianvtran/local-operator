@@ -842,6 +842,8 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # unreachable from the completion path, which is the `/login` line this
         # sits on the other side of.
         "notifications": ArgumentMode.OPTIONAL,
+        # The receipt listing's new name (decision D2): same row, same reason.
+        "unread": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/mcp`, whose shape this family borrows: bare `/network`
         # opens the panel (this device's networks, peers and relay state) and the
         # space opens the subcommand vocabulary. NOT REQUIRED — the listing is

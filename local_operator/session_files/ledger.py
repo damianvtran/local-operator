@@ -44,6 +44,7 @@ multi-megabyte cache.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -83,6 +84,21 @@ _RESIDENT_CAP: Final = 24
 #: contribute a separator or ``..`` to a path (``code_requests.ledger._derived_stem``'s guard,
 #: which ``tests/unit/session/test_no_session_deletion.py`` relies on to argue its allow-list).
 _STEM: Final = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+#: A pause called between journal lines, or ``None`` (the default: never pause).
+#:
+#: Set ONLY by the library indexer's watcher batch, to
+#: ``transcript_index.yield_to_any_open()``: that thread scans a journal the
+#: moment it changes, which is the moment the user opens it, and a desktop first
+#: paint must not share the GIL with it (R3; the measurement is on that
+#: function). A ``ContextVar`` rather than a ``refresh`` argument because the
+#: indexer reaches this module through ``library.index``'s parent/child helpers,
+#: and every request-path caller (the files route, the Library service's budgeted
+#: reads) must stay unpaused without having to say so. Being thread-local, a
+#: value set on the indexer thread is invisible to every other thread.
+YIELD_TO: contextvars.ContextVar[Callable[[], None] | None] = contextvars.ContextVar(
+    "session_files_ledger_yield_to", default=None
+)
 
 
 @dataclass(frozen=True)
@@ -316,12 +332,18 @@ def _read_into(
     """
     tail: list[Any] | None = None
     complete = True
+    yield_to = YIELD_TO.get()
     with path.open("rb") as handle:
         handle.seek(offset)
         count = 0
         for line in iter(handle.readline, b""):
             if not line.endswith(b"\n"):
                 break
+            if yield_to is not None:
+                # Per line, not per stride: one dict ``len`` when nothing is
+                # held, and a journal row can be ~900 KB, so a stride would let
+                # a paint wait out dozens of megabytes.
+                yield_to()
             scan.feed(scan.rows, line)
             offset += len(line)
             tail = _line_digest(line) if len(line) <= _MAX_TAIL_LINE else [0, ""]
