@@ -41,7 +41,7 @@ import { AboveComposerStack } from "../components/above-composer";
 import { Sheet } from "../components/ui/sheet";
 import { Chip } from "../components/ui/chip";
 import { cn } from "../lib/cn";
-import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR } from "../lib/column";
+import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR, SHORT_COLUMN_PX } from "../lib/column";
 import { navigate, parseHash } from "../router";
 import { consumePendingFocus } from "../lib/pending-focus";
 import { pinRefusalText } from "../lib/pin-refusal";
@@ -590,6 +590,12 @@ export function SessionScreen({
 			   box this column is pinned to. */
 			el.style.setProperty(COLUMN_HEIGHT_VAR, `${vv.height}px`);
 			el.style.setProperty(COLUMN_TOP_VAR, `${vv.offsetTop}px`);
+			/* THE SHORT LAYOUT FOLLOWS THE SAME NUMBER (review R1-1). The
+			   composer's one-line footer and the compact usage reading key
+			   off `data-short` through the `short-column:` variant, never off
+			   a `max-height` media query: that reads the layout viewport,
+			   which a phone keyboard leaves alone. */
+			el.toggleAttribute("data-short", vv.height <= SHORT_COLUMN_PX);
 		};
 		sync();
 		vv.addEventListener("resize", sync);
@@ -601,6 +607,7 @@ export function SessionScreen({
 			el.style.top = "";
 			el.style.removeProperty(COLUMN_HEIGHT_VAR);
 			el.style.removeProperty(COLUMN_TOP_VAR);
+			el.removeAttribute("data-short");
 		};
 	}, []);
 
@@ -671,10 +678,11 @@ export function SessionScreen({
 	   prompt this device just sent makes the column non-empty the instant it
 	   leaves the composer, and hiding its row behind "no messages yet" would put
 	   the placeholder in front of the very message that proves the send worked. */
-	/* THE SCREEN'S ONE "ENDED" (review round 3, R3-5): the header dot's
-	   verdict, derived once here and handed to the header and the composer, so
-	   the dot, its ⋮ Resume, the message box's placeholder and its failure copy
-	   cannot drift apart. Pinned in source by `session-view.one-ended.test.ts`. */
+	/* THE SCREEN'S ONE "ENDED" (review round 3, R3-5): derived once here and
+	   handed to the header and the composer, so the header's ⋮ Resume, the
+	   message box's placeholder and its failure copy cannot drift apart. The
+	   dot and health sheet still derive their own labels; this is the shared
+	   ended action state, not a second health rule. */
 	const ended = sessionHealth(projection, connected) === "ended";
 	const needsApproval = blocking?.kind === "approval";
 	/* The pending card's identity: its React key (one remount per question of

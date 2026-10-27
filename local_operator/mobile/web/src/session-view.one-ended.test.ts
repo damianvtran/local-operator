@@ -26,6 +26,6 @@ describe("the session screen derives `ended` once (R3-5)", () => {
 
 	it("hands that one value to the header and the composer", () => {
 		expect(SOURCE).toMatch(/<Header\b[^>]*\bended=\{ended\}/);
-		expect(SOURCE).toMatch(/<Composer[\s\S]*?\bended=\{ended\}/);
+		expect(SOURCE).toMatch(/<Composer(?![A-Za-z])[\s\S]*?\bended=\{ended\}/);
 	});
 });

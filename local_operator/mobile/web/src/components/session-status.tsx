@@ -98,7 +98,7 @@ function isTextEntry(target: EventTarget | null): boolean {
 	);
 }
 
-export function SessionStatus({ projection, compact = false, detail = false }: { projection: SessionProjection; compact?: boolean; detail?: boolean }) {
+export function SessionStatus({ projection, compact = false, detail = false, mode = "auto" }: { projection: SessionProjection; compact?: boolean; detail?: boolean; mode?: "auto" | "full" | "short" | "hidden" }) {
 	// THE PUBLISHED OBJECT WINS when the runtime has one: its `total_micro`
 	// already spans this session's inference, its channels AND its children,
 	// computed in one backend place — so the row renders that figure rather
@@ -192,14 +192,17 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 				   `pe-[7px]` moves the TEXT 7 px in from the composer's 8 px padding, so
 				   the reading's right edge lands at 15 px like the field's left inset.
 				   The slot's own outer edge still lines up with the stop/send discs. */
+				data-foot="reading"
+				data-foot-form={mode === "full" || mode === "short" ? mode : (typeof document !== "undefined" && document.querySelector("[data-short]") ? "short" : "full")}
 				className={cn(
 					"flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap pe-[7px] text-meta tabular-nums text-ink-dim active:text-ink",
-					"min-w-11 max-[359px]:[@media(max-height:480px)]:w-auto",
+					"min-w-11 max-w-full short-column:w-auto",
+					mode === "hidden" && "hidden",
 				)}>
 				{/* Literal class strings: Tailwind only emits the utilities it finds
 				    spelled out in source. */}
-				<span className="max-[359px]:[@media(max-height:480px)]:hidden">{label}</span>
-				<span aria-hidden className="hidden max-[359px]:[@media(max-height:480px)]:inline">{short}</span>
+				<span className={cn(mode === "full" || mode === "short" ? "hidden" : "short-column:hidden")}>{label}</span>
+				<span aria-hidden className={cn(mode === "full" || mode === "short" ? "inline" : "hidden short-column:inline")}>{short}</span>
 			</button>
 			<Sheet open={expanded} onClose={() => setExpanded(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
 				<SessionStatus projection={projection} detail />

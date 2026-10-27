@@ -618,11 +618,11 @@ describe("SessionStatus — the composer's compact reading on a short, narrow sc
 		expect(short!.textContent).toBe("30.9%");
 		// Which one paints is decided by the viewport, not by JS state, so the
 		// first frame and a stop button appearing cannot reflow the row.
-		expect(full!.className).toContain("max-[359px]:[@media(max-height:480px)]:hidden");
-		expect(short!.className.split(/\s+/)).toEqual(expect.arrayContaining(["hidden", "max-[359px]:[@media(max-height:480px)]:inline"]));
+		expect(full!.className).toContain("short-column:hidden");
+		expect(short!.className.split(/\s+/)).toEqual(expect.arrayContaining(["hidden", "short-column:inline"]));
 		// The slot gives up its fixed 96 px only in that mode, and keeps a 44 px target.
 		expect(button.className).toContain("w-24");
-		expect(button.className).toContain("max-[359px]:[@media(max-height:480px)]:w-auto");
+		expect(button.className).toContain("short-column:w-auto");
 		expect(button.className).toContain("min-w-11");
 		// Nothing is lost to assistive tech: the name still carries both facts.
 		expect(button.getAttribute("aria-label")).toContain("30.9% · $1.25");

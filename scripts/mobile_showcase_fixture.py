@@ -432,6 +432,18 @@ def _approval_projection() -> SessionProjection:
     return projection
 
 
+def _crowded_projection(queued: bool = False) -> SessionProjection:
+    """The worst short-footer case: a long model name, usage, and optional queue."""
+    projection = _approval_projection()
+    projection.session_id = "5c01c0ffee01" if not queued else "5c01c0ffee02"
+    projection.conversation_name = "Crowded composer" + (" with queue" if queued else "")
+    projection.model_label = "Claude Opus 5.5 with an unusually long model name"
+    projection.queued_count = 2 if queued else 0
+    projection.pending = None
+    projection.pending_count = 0
+    return projection
+
+
 def _ended_projection() -> SessionProjection:
     return SessionProjection(
         session_id="5c04ba92ed73",
@@ -537,6 +549,8 @@ def _live_rows() -> list[tuple[SessionProjection, int, bool]]:
     return [
         (_showcase_projection(), 1, False),
         (_approval_projection(), 0, False),
+        (_crowded_projection(), 0, False),
+        (_crowded_projection(queued=True), 0, False),
         (_ask_only_projection(), 0, False),
         (
             _plain_projection(
@@ -719,6 +733,14 @@ def _substitute_readers() -> None:
     See the module doc: the ROUTES stay real; only what they read changes."""
     import local_operator.mobile.daemon as daemon_module
 
+    # The mic's capability is a fixture input, not a new product default.
+    if os.environ.get("LOP_SHOWCASE_MIC") == "1":
+        import local_operator.mobile.stt as stt_module
+        stt_module.stt_availability = lambda: {
+            "available": True,
+            "path": "/fixture/stt",
+            "reason": "fixture",
+        }  # type: ignore[assignment]
     ranked = json.loads(
         (
             Path(__file__).resolve().parents[1]

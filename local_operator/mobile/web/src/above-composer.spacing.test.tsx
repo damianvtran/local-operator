@@ -448,3 +448,34 @@ describe("the rest re-runs when the slot's own box resizes, and lets go (review 
 		expect(second.disconnected).toBe(true);
 	});
 });
+
+describe("a long ask's first option is revealed inside the card (review R1-4)", () => {
+	it("scrolls the card's inner scroller as well as the slot", () => {
+		slot = { projection: projection({ pending: { ...APPROVAL, kind: "ask", title: "A very long question ".repeat(20), detail: "More detail ".repeat(50), options: [{ label: "first", description: "" }, { label: "second", description: "" }] } }), connected: true };
+		const rowBox = new DOMRect(0, 300, 304, 44);
+		const originalRect = Element.prototype.getBoundingClientRect;
+		const originalScrollHeight = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight")!;
+		const originalClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight")!;
+		vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+			if (this.hasAttribute("data-above-composer")) return new DOMRect(0, 72, 320, 65);
+			if (this.hasAttribute("data-slot-rest")) return new DOMRect(0, rowBox.y, 304, 44);
+			if (this.classList.contains("lo-scroll") && this.closest("[data-testid=pending-card]")) return new DOMRect(0, 72, 304, 100);
+			return originalRect.call(this);
+		});
+		vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(function (this: Element) {
+			if (this.hasAttribute("data-above-composer")) return 400;
+			if (this.classList.contains("lo-scroll") && this.closest("[data-testid=pending-card]")) return 800;
+			return originalScrollHeight.get!.call(this) as number;
+		});
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+			if (this.hasAttribute("data-above-composer")) return 65;
+			if (this.classList.contains("lo-scroll") && this.closest("[data-testid=pending-card]")) return 100;
+			return originalClientHeight.get!.call(this) as number;
+		});
+		render(<SessionScreen sessionId="s1" />);
+		const scroller = document.querySelector<HTMLElement>("[data-testid=pending-card] .lo-scroll")!;
+		expect(scroller.scrollTop).toBe(172);
+		expect(document.querySelector<HTMLElement>("[data-above-composer]")!.scrollTop).toBeGreaterThan(0);
+		vi.restoreAllMocks();
+	});
+});

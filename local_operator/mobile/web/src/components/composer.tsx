@@ -9,6 +9,7 @@
  * command) and a stop button appears beside it.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useFootFit } from "../lib/use-foot-fit";
 import { getCommands, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	getPendingContinuation,
@@ -420,7 +421,7 @@ const COMPOSER_PLACEHOLDER = "Message…";
      folder glyph gets `ps-1.5` in `WorkingDirectoryChip` for the same reason.
    Total height fits: 6 + 52 + 44 + 44 + 2 = 148 px, against 152 before. */
 const COMPOSER_SHELL =
-	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-2 pb-0";
+	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-2 pb-0.5";
 /* THE RIGHT-SIDE CONTROL CLUSTER, one shared constant for the real composer and
    the first-paint frame (operator finding A). The stop and send discs are 44 px
    `shrink-0` controls and the row carried no gap: the two circles touched, and
@@ -475,7 +476,7 @@ const COMPOSER_LEADING = "-ms-1.5";
    element and truncates, and the reading compacts itself below 359 px wide
    (`SessionStatus` compact), so nothing on the line needs to wrap. */
 const COMPOSER_CHIP_ROW =
-	"order-last flex min-w-0 basis-full items-center gap-1 [@media(max-height:480px)]:order-none [@media(max-height:480px)]:basis-0 [@media(max-height:480px)]:flex-1";
+	"order-last flex min-w-0 basis-full items-center gap-1 overflow-x-clip short-column:order-none short-column:basis-0 short-column:flex-1";
 const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
 
 /** The composer's box, empty, for the frames before a session's projection.
@@ -550,7 +551,7 @@ export function Composer({
 	effortOpen,
 	onCloseEffort,
 	autoFocus = false,
-	ended = projection.ended,
+	ended,
 }: {
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
@@ -586,7 +587,7 @@ export function Composer({
 	    calls it Ended, and a send to it is the same wake, so the placeholder
 	    and the failure copy must say the same thing the header does. Defaults
 	    to the projection's own flag for callers without the screen's health. */
-	ended?: boolean;
+	ended: boolean;
 }) {
 	const [text, setText] = useDraft(pid);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
@@ -663,6 +664,7 @@ export function Composer({
 	   plain-HTTP case is deliberately excluded — a mic that appears and fails is
 	   worse than one that never does. */
 	const capabilities = useCapabilities();
+	const foot = useFootFit();
 	const micAvailable =
 		capabilities?.stt?.available === true &&
 		typeof window !== "undefined" &&
@@ -1537,27 +1539,24 @@ export function Composer({
 				{/* A single meta cluster replaces two 44 px bands. Each reading keeps
 				    its real picker; only the presentation changes, never send/retry
 				    routing or the pending-envelope lifetime. */}
-				<div className={COMPOSER_CHIP_ROW}>
+				<div ref={foot.rowRef} data-foot-level={foot.level} className={COMPOSER_CHIP_ROW}>
 					{projection.queued_count > 0 ? (
-						<span className={cn(COMPOSER_CHIP, "shrink-0")}>
+						<span data-foot="queued" className={cn(COMPOSER_CHIP, "shrink-0")}>
 							{messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })}
 						</span>
 					) : null}
-					<div className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
-					{/* SHORT VIEWPORTS KEEP THE MODEL CONTROL (design round 2 D6, corrected in
-					   code round 3 C3-3). D6's saving is VERTICAL — the meta facts stop
-					   taking a line of their own — so hiding the model button on top of
-					   that bought no height and cost two things: the active-model fact,
-					   and the only touch door to the model/effort sheet (this button is
-					   `onOpenModels`' sole caller; the sheet's other opener lives inside
-					   the sheet). The button now stays, `min-w-0 truncate` and all, so a
-					   narrow-and-short viewport truncates the NAME rather than losing the
-					   control. */}
-					<button type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink")}
+					<div data-foot="cwd" className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
+					{/* SHORT VIEWPORTS DEGRADE IN PRIORITY ORDER (review R1-2):
+					   the model name truncates first, then the reading compacts,
+					   then it yields, then the model control and mic yield. This
+					   last step preserves the row's 44 px controls instead of
+					   letting a reading paint over stop/send. The sheet remains
+					   reachable from the header's model action. */}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink", foot.level >= 3 && "hidden")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
 						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
-					<SessionStatus projection={projection} compact />
+					<SessionStatus projection={projection} compact mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "auto"} />
 				</div>
 
 				<div className={COMPOSER_ACTION_CLUSTER}>

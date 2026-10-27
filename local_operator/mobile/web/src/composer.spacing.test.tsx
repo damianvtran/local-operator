@@ -32,7 +32,7 @@ describe("the composer's spacing constants", () => {
 		   does no layout. */
 		expect(shell?.className).toContain("px-2");
 		expect(shell?.className).toContain("pt-2");
-		expect(shell?.className).toContain("pb-0");
+		expect(shell?.className).toContain("pb-0.5");
 	});
 
 	it("puts every control in the row 2 px apart, and groups the right-hand pair", () => {
@@ -74,9 +74,10 @@ describe("the composer's spacing constants", () => {
 		const row = container.querySelector(".lo-composer > div");
 		const meta = [...(row?.children ?? [])].find((child) => child.className.includes("order-last"));
 		const cls = meta?.className.split(/\s+/) ?? [];
-		expect(cls).toContain("[@media(max-height:480px)]:basis-0");
-		expect(cls).not.toContain("[@media(max-height:480px)]:basis-auto");
+		expect(cls).toContain("short-column:basis-0");
+		expect(cls).not.toContain("short-column:basis-auto");
 		// It never wraps on its own minimum either: the minimum is made to fit.
 		expect(cls).toContain("min-w-0");
+		expect(cls).toContain("overflow-x-clip");
 	});
 });
