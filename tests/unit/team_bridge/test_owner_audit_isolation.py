@@ -323,6 +323,50 @@ async def test_a_built_audit_path_is_refused_before_any_request(tmp_path: Path, 
     assert requests == []
 
 
+#: Dot-segment spellings (#3022 r3 m1). httpx resolves ``.``/``..`` when it
+#: builds the URL, so the first one left the gate as a member path and reached
+#: the wire as ``/messaging/agents/owned/conversations``. Each is refused before
+#: any request -- in scope or not, since no hub path the client builds has one.
+_DOT_SEGMENT_PATHS = [
+    "/messaging/conversations/../agents/x/../owned/conversations",
+    "/messaging/conversations/%2e%2e/agents/owned/conversations",
+    "/messaging/conversations/%252E%252E/agents/owned/conversations",
+    "/messaging/agents/./owned/conversations",
+    "/messaging/conversations/bcv_abcd1234/messages/..",
+]
+
+
+@pytest.mark.parametrize("path", _DOT_SEGMENT_PATHS)
+@pytest.mark.parametrize("in_scope", [False, True])
+@pytest.mark.asyncio
+async def test_a_dot_segment_path_is_refused_before_any_request(
+    tmp_path: Path, path: str, in_scope: bool
+) -> None:
+    requests: list[httpx.Request] = []
+    client = TeamBridgeClient(
+        tmp_path,
+        base_url="https://hub.example/v1",
+        store=FakeStore(),
+        transport=httpx.MockTransport(lambda r: (requests.append(r), _hub_answer(r))[1]),
+    )
+    with pytest.raises(tb_client.BridgeRefusal) as refused:
+        if in_scope:
+            with tb_client._owner_audit_scope():
+                await client._send("GET", path)
+        else:
+            await client._send("GET", path)
+    assert refused.value.code == "invalid_request"
+    assert requests == []
+
+
+def test_the_dot_segment_reproduction_is_what_httpx_sends() -> None:
+    """Pins WHY the refusal exists: httpx itself turns the first spelling into
+    the audit route, so a gate that only pattern-matched would be bypassed."""
+
+    sent = httpx.URL("https://hub.example/v1" + _DOT_SEGMENT_PATHS[0]).raw_path
+    assert sent == b"/v1/messaging/agents/owned/conversations"
+
+
 @pytest.mark.asyncio
 async def test_the_audit_methods_themselves_still_dispatch(tmp_path: Path) -> None:
     """Positive control: the gate admits the four methods (and only by scope)."""

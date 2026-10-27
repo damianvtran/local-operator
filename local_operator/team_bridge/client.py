@@ -638,6 +638,9 @@ OWNER_AUDIT_ATTACHMENT_MIME_TYPES = (*ATTACHMENT_MIME_TYPES, OWNER_AUDIT_FILE_MI
 #: The hub's owner-audit route family (agent-server #221). ONE spelling, used
 #: by the four ``owner_audit_*`` methods and by the gate below and nowhere else.
 _OWNER_AUDIT_HUB_PATH = "/messaging/agents/owned/conversations"
+DOT_SEGMENT_SENTENCE = (
+    "A hub path may not contain a dot segment."  # i18n: ignore local guard, no copy
+)
 OWNER_AUDIT_SCOPE_SENTENCE = (  # i18n: ignore local guard; a code path, never shown to a person
     "The owner audit is readable only through the desktop owner-audit routes."
 )
@@ -666,7 +669,12 @@ def _refuse_unscoped_owner_audit(path: str) -> None:
 
     Matched after percent-decoding and collapsing slashes and case, so
     ``//messaging/Agents/%6Fwned`` is the same path to this check as it is to
-    the hub's router.
+    the hub's router. A ``.`` or ``..`` segment is refused outright, before the
+    match: httpx resolves dot segments when it builds the URL, so
+    ``conversations/../agents/x/../owned`` would leave this check as a member
+    path and reach the wire as the audit route (#3022 r3 m1). Normalising here
+    would mean tracking httpx's resolver; refusing is exact, and no hub path
+    this client builds has a dot segment (every id is grammar-checked first).
     """
 
     # Percent-decoded first (repeatedly, so ``%256F`` is not a second spelling):
@@ -675,6 +683,12 @@ def _refuse_unscoped_owner_audit(path: str) -> None:
     decoded, previous = path, None
     while decoded != previous:
         previous, decoded = decoded, urllib.parse.unquote(decoded)
+    if any(segment in (".", "..") for segment in decoded.split("/")):
+        raise BridgeRefusal(
+            "invalid_request",
+            DOT_SEGMENT_SENTENCE,
+            http_status=400,
+        )
     normalized = re.sub(r"/+", "/", decoded).lower()
     if "/agents/owned" in normalized and not _OWNER_AUDIT_SCOPE.get():
         raise BridgeRefusal(
