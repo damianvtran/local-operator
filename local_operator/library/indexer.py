@@ -52,6 +52,7 @@ from local_operator.library.store import (
     STATE_SESSIONS_TOTAL,
     LibraryStore,
 )
+from local_operator.session_files import ledger
 from local_operator.session_files import service as files_service
 
 logger = logging.getLogger(__name__)
@@ -611,16 +612,34 @@ class LibraryIndexer:
     # -- scanning -----------------------------------------------------------
 
     def process_dirty(self, session_ids: Iterable[str]) -> int:
-        """Scan every dirty session once. Returns how many were rescanned."""
+        """Scan every dirty session once. Returns how many were rescanned.
+
+        A watcher batch gives way to a desktop first paint: while any open
+        holds its paint (``transcript_index.hold_paint``), the ledger pauses
+        between journal lines in 2 ms slices, at most
+        ``transcript_index._YIELD_BUDGET_S`` per batch (R3; the why and the
+        measurement are on ``transcript_index.yield_to_any_open``). Only here:
+        :meth:`rebuild` (the CLI's and the tests' synchronous path) and every
+        request-path ledger read run unpaused.
+        """
+        # Deferred: the index module graph costs ~0.4 s to import, and the
+        # Library's readers (the TUI, the phone portal) load this module without
+        # ever running a batch. A daemon that serves opens has it loaded already.
+        from local_operator.session import transcript_index
+
         scanned = 0
-        for session_id in session_ids:
-            if self._stop.is_set():
-                break
-            try:
-                if self.scan_session(session_id):
-                    scanned += 1
-            except Exception:  # noqa: BLE001 - one session cannot poison the batch
-                logger.warning("library: scan failed for %s", session_id, exc_info=True)
+        token = ledger.YIELD_TO.set(transcript_index.yield_to_any_open())
+        try:
+            for session_id in session_ids:
+                if self._stop.is_set():
+                    break
+                try:
+                    if self.scan_session(session_id):
+                        scanned += 1
+                except Exception:  # noqa: BLE001 - one session cannot poison the batch
+                    logger.warning("library: scan failed for %s", session_id, exc_info=True)
+        finally:
+            ledger.YIELD_TO.reset(token)
         return scanned
 
     def _cwd(self, session_id: str, session_dir: Path) -> str:
