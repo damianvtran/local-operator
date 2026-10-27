@@ -43,6 +43,7 @@ from local_operator.harness.types import (
     StreamEvent,
     StreamStartEvent,
     Usage,
+    stamp_cache_diagnostics_id,
 )
 from local_operator.model import tariff
 from local_operator.model.catalogue import (
@@ -3814,12 +3815,13 @@ class SessionStreamFn:
         # own chain at ``None`` and can never be diffed against its parent's
         # prompt (a guaranteed, meaningless ``system_changed``).
         #
-        # KNOWN GAP: not persisted, so a RESUMED session (a new process) starts
-        # again at ``None`` and its first turn records ``baseline``, even when
-        # an edited instruction file just rewrote the whole prefix. Seeding it
-        # from the transcript would recover those attributions (a stale id is
-        # harmless: the API answers ``previous_message_not_found``); deferred
-        # on PR #2984 (QA Q1).
+        # PERSISTED through the transcript: every diagnosed turn stamps this
+        # value on its usage (``stamp_cache_diagnostics_id``), the transcript
+        # writes it into the row, and a resumed ``Session`` hands the newest
+        # one back through :meth:`seed_cache_diagnostics` — so a new process
+        # continues the chain instead of recording ``baseline`` after an
+        # edited instruction file rewrote the prefix (PR #2984 QA Q1). A
+        # transcript FORK ignores the rows it copied and starts at ``None``.
         self._cache_diagnostics_previous_id: str | None = None
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
@@ -4946,6 +4948,23 @@ class SessionStreamFn:
         # a fresh probe at the next boundary instead of inheriting the stale
         # verdict.
         self._usage_checked_at = 0.0
+
+    def seed_cache_diagnostics(self, previous_id: str) -> None:
+        """Continue a persisted cache-diagnostics chain after a resume.
+
+        ``Session`` calls this at construction with the newest diagnosed id its
+        transcript recorded, so the first turn of a resumed process compares
+        against the previous process's last turn instead of opening at
+        ``previous_message_id: null`` (which recorded a prefix break caused by
+        an edited instruction file as ``baseline``; PR #2984 QA Q1). A stale
+        id is harmless: the API answers ``previous_message_not_found`` once
+        its fingerprint has expired, and that verdict is already handled.
+
+        Never overwrites a live chain: a stream that already diagnosed a turn
+        in THIS process holds a fresher id than any transcript row.
+        """
+        if self._cache_diagnostics_previous_id is None and previous_id:
+            self._cache_diagnostics_previous_id = previous_id
 
     def begin_message(self) -> None:
         """Mark the next model call as a user-message boundary."""
@@ -6974,6 +6993,18 @@ class SessionStreamFn:
                 # entry, and the worst case is a benign
                 # ``previous_message_not_found`` on the next turn.
                 self._cache_diagnostics_previous_id = event.response_id
+            if (
+                request.cache_diagnostics
+                and usage is not None
+                and self._cache_diagnostics_previous_id
+            ):
+                # The chain's position travels on the turn's usage so the
+                # transcript can persist it and a RESUME can continue the chain
+                # (``seed_cache_diagnostics``; PR #2984 QA Q1). The chain value
+                # rather than this response's own id: on a turn served by an
+                # undiagnosed fallback the chain did not advance, and the row
+                # must say what the NEXT turn would have compared against.
+                stamp_cache_diagnostics_id(usage, self._cache_diagnostics_previous_id)
             yield event
 
     @property
