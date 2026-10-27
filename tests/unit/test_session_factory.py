@@ -7971,12 +7971,16 @@ async def test_factory_records_the_guidance_its_prompt_injected(
 # --- configuration runs author the ACCOUNT catalogue (F0) ------------------------
 
 
-def _seed_config_run(config_dir: Path, session_id: str, *, damaged_marker: bool = False) -> Path:
+def _seed_config_run(
+    config_dir: Path, session_id: str, *, damaged_marker: bool = False, stamp_origin: bool = True
+) -> Path:
     """A session directory the desktop ``create`` with ``purpose`` would leave.
 
     The origin stamp FIRST, then the marker, in the create path's own order
     (``desktop_sessions.persist``). ``damaged_marker`` leaves the origin as the
-    only witness, the fail-closed case ``is_config_run_dir`` must still answer.
+    only witness, the fail-closed case ``is_config_run_dir`` must still answer;
+    ``stamp_origin=False`` leaves the marker as the only one, so each witness is
+    proved on its own rather than only beside the other.
     A transcript line because ``--resume`` resolves a session by its activity file.
     """
     import json
@@ -7989,7 +7993,8 @@ def _seed_config_run(config_dir: Path, session_id: str, *, damaged_marker: bool 
 
     directory = config_dir / "sessions" / session_id
     directory.mkdir(parents=True)
-    mark_session_origin(directory, ORIGIN_AGENT_CONFIG)
+    if stamp_origin:
+        mark_session_origin(directory, ORIGIN_AGENT_CONFIG)
     marker = (
         "{ not json"
         if damaged_marker
@@ -8017,9 +8022,13 @@ async def _run_tool(session: Session, tool_name: str, **args: Any) -> Any:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damaged_marker", [False, True], ids=["marker", "origin-only"])
+@pytest.mark.parametrize(
+    ("damaged_marker", "stamp_origin"),
+    [(False, True), (True, True), (False, False)],
+    ids=["both-witnesses", "origin-only", "marker-only"],
+)
 async def test_a_config_run_writes_agents_and_teams_to_the_account(
-    tmp_config_dir: Path, damaged_marker: bool
+    tmp_config_dir: Path, damaged_marker: bool, stamp_origin: bool
 ) -> None:
     """The Agents page's composer must change what the Agents page lists.
 
@@ -8060,7 +8069,9 @@ async def test_a_config_run_writes_agents_and_teams_to_the_account(
         TeamEditFields(name="acct-team", description="before", manager="manager")
     )
     session_id = "c0f1a2b3c4d5"
-    run_dir = _seed_config_run(tmp_config_dir, session_id, damaged_marker=damaged_marker)
+    run_dir = _seed_config_run(
+        tmp_config_dir, session_id, damaged_marker=damaged_marker, stamp_origin=stamp_origin
+    )
 
     session = cast(
         Session,
@@ -8164,6 +8175,7 @@ def test_is_config_run_dir_reads_either_witness(tmp_path: Path) -> None:
 
     assert is_config_run_dir(_seed_config_run(tmp_path, "a")) is True
     assert is_config_run_dir(_seed_config_run(tmp_path, "b", damaged_marker=True)) is True
+    assert is_config_run_dir(_seed_config_run(tmp_path, "m", stamp_origin=False)) is True
     plain = tmp_path / "sessions" / "c"
     plain.mkdir(parents=True)
     assert is_config_run_dir(plain) is False

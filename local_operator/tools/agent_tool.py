@@ -272,8 +272,8 @@ class AgentParams(BaseModel):
     scope: Literal["global", "session"] | None = Field(
         default=None,
         description=(
-            "'session' (default) is this conversation only; 'global' is the "
-            "user's account and needs their confirmation."
+            "Default: this conversation if it has a store, else the account. "
+            "'global': the account, needs confirmation."
         ),
     )
     # ``as`` is a Python keyword, so the field carrying the design's ``[as=Y]`` is

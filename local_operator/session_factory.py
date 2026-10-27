@@ -1283,10 +1283,18 @@ def is_config_run_dir(session_dir: Path) -> bool:
     A purpose marker of ``agents-config`` OR an origin of ``agent-config``: either
     one is enough, which is what makes every reader FAIL CLOSED on a damaged
     marker (see :func:`apply_config_run_shape` for why the origin is the second
-    witness rather than a fallback). ONE predicate for every reader, because the
-    run's boundary is applied in two places -- the registry scoping in
-    ``_prepare`` and the tool declaration after construction -- and two copies of
-    the test would let a run be bounded by one and not the other.
+    witness rather than a fallback). ONE predicate for both halves of the run's
+    boundary the composition root applies -- the registry scoping in ``_prepare``
+    and the tool declaration after construction -- because two copies of the
+    test would let a run be bounded by one and not the other.
+
+    NOT read by the viewer: ``session/attached.py``'s lazy registries still wrap
+    a run's registries in the conversation scope. That is deliberately left
+    alone and harmless: the run's own registries are unscoped, so ``<run>/roles``
+    is never written and the scoped view equals the account view, while the
+    page's own writes name ``scope='global'``. Routing the viewer through this
+    predicate is a viewer change with its own surface (``/agent`` and ``/team`` on
+    a cold session), not part of this fix.
 
     Reads two small sidecars and never raises: both readers are tolerant by
     contract, and an ordinary session (neither record) answers ``False``.
