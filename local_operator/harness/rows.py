@@ -802,6 +802,75 @@ def typed_line_of(text: str) -> str | None:
         return None
 
 
+def _strip_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
+    """``text`` without ``spans``, separated the way the blocks were joined.
+
+    The single join rule for every block grammar a user row has to hide, so the
+    reference strip and the skill strip cannot disagree about spacing. The
+    resolver appends a block as ``JOIN + block``, so the separator BEFORE one
+    belongs to the block rather than to the operator's prose: each segment is
+    right-stripped, or the row paints a blank line where the block stood.
+
+    A SEPARATOR goes back where two surviving segments would otherwise fuse. A
+    caller that appends text to an expanded message with no space of its own
+    painted `first @a.txtand next` (review round 2, NIT-1). One space only when
+    the next segment starts on a non-space character: the ordinary shapes
+    already carry their own leading whitespace, so they are joined
+    byte-identically to before.
+
+    Spans are sorted and clipped to each other, because the two grammars can
+    nest: a SKILL.md body may quote a complete reference block, and then one
+    span lies inside the other.
+    """
+    kept: list[str] = []
+    cursor = 0
+    for start, end in sorted(spans):
+        if end <= cursor:
+            continue
+        start = max(start, cursor)
+        kept.append(text[cursor:start].rstrip())
+        cursor = end
+    kept.append(text[cursor:].rstrip())
+    joined = ""
+    for segment in kept:
+        if not segment:
+            continue
+        if joined and not segment[0].isspace():
+            joined += " "
+        joined += segment
+    return joined
+
+
+def _skill_block_spans(text: str) -> list[tuple[int, int]]:
+    """Complete skill-block spans, or none when the grammar cannot load.
+
+    Lazy-imported and failure-swallowing for the same reason
+    :func:`typed_line_of` is: a transcript replay must never fail on this, and
+    the grammar lives in a host-free module rather than under ``skills/`` so
+    this is a leaf import, not the discovery tree.
+    """
+    try:
+        from local_operator.sigils import skill_block_spans
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return []
+    return skill_block_spans(text)
+
+
+def _reference_block_spans(text: str) -> list[tuple[int, int]]:
+    """Complete reference-block spans, or none when the resolver cannot load.
+
+    Lazy-imported and failure-swallowing by contract, like :func:`typed_line_of`
+    above and for the same reason: this module stays host-free, and a broken or
+    absent resolver must never stop a transcript replaying. Every failure
+    degrades to "no block here", so the caller paints the text verbatim.
+    """
+    try:
+        from local_operator.references import reference_block_spans
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return []
+    return reference_block_spans(text)
+
+
 def reference_block_stripped(text: str) -> str:
     """``text`` without the ``<operator-references>`` blocks appended to it.
 
@@ -860,54 +929,27 @@ def reference_block_stripped(text: str) -> str:
     absent resolver must never stop a transcript replaying. Every failure
     degrades to "no block here", so the caller paints the text verbatim.
     """
-    try:
-        from local_operator.references import reference_block_spans
-    except Exception:  # noqa: BLE001 — replay must never fail on this
-        return text
-    spans = reference_block_spans(text)
+    spans = _reference_block_spans(text)
     if not spans:
         return text
-    kept: list[str] = []
-    cursor = 0
-    for start, end in spans:
-        # The resolver appends a block as ``JOIN + block``, so the separator
-        # before one belongs to the block rather than to the operator's prose:
-        # keeping it would paint a blank line where the block stood, turning
-        # "first @a.txt and now @b.txt" into a two-paragraph row.
-        kept.append(text[cursor:start].rstrip())
-        cursor = end
-    kept.append(text[cursor:].rstrip())
-    # A SEPARATOR where two segments would otherwise fuse. Each segment is
-    # right-stripped, because the separator BEFORE a block belongs to the block
-    # rather than to the operator's prose, so a segment can end at a word — and
-    # a caller that appends text to an expanded message with no space of its own
-    # then painted `first @a.txtand next` (review round 2, NIT-1). A single
-    # space only when the next segment starts on a non-space character: the
-    # ordinary shapes already carry their own leading whitespace, so they are
-    # joined byte-identically to before.
-    joined = ""
-    for segment in kept:
-        if not segment:
-            continue
-        if joined and not segment[0].isspace():
-            joined += " "
-        joined += segment
-    return joined
+    return _strip_spans(text, spans)
 
 
 def user_row_text(text: str) -> str:
     """What a surface paints for a ``role="user"`` message.
 
-    Collapses a skill payload to the line the user actually typed, strips an
-    expanded reference block, and leaves every other message alone. Kept beside
-    :func:`is_harness_chrome` because the two are the whole of the "what did the
-    user really say" decision, and splitting them across hosts is how one
-    surface got the skill rule and the other did not.
+    Collapses the old ``$skill`` payload shape to the line the user actually
+    typed, strips the expanded reference and skill blocks, and leaves every
+    other message alone. Kept beside :func:`is_harness_chrome` because the two
+    are the whole of the "what did the user really say" decision, and splitting
+    them across hosts is how one surface got the skill rule and the other did
+    not.
 
-    The reference block is removed FIRST, before the skill fallback: a
-    `$skill` invocation whose request cited a file carries both, and
-    :func:`typed_line_of` parses the payload envelope, which a trailing block
-    would sit outside of and survive.
+    BOTH blocks go in ONE pass (the union of their spans), then the legacy
+    fallback runs: an old payload's typed line lives in its tag, not in prose,
+    so :func:`typed_line_of` still has to recover it. A new payload needs no
+    recovery — its user text sits verbatim before the block — which is what
+    makes live and replay rows agree by construction.
 
     Strips for the same reason :func:`is_harness_chrome` does: the two hosts
     normalise differently, so an envelope with surrounding whitespace would
@@ -915,7 +957,8 @@ def user_row_text(text: str) -> str:
     phone. The fallback returns the stripped text so both surfaces paint one
     row, not one padded and one not.
     """
-    stripped = reference_block_stripped(text).strip()
+    spans = _reference_block_spans(text) + _skill_block_spans(text)
+    stripped = _strip_spans(text, spans).strip()
     return typed_line_of(stripped) or stripped
 
 

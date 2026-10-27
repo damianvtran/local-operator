@@ -145,7 +145,7 @@ from local_operator.clipboard import (
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
-from local_operator.sigils import at_token_spans, split_token
+from local_operator.sigils import at_token_spans, skill_mentions, split_token
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.autocomplete import file_completion_token as at_token
 from local_operator.tui.widgets.command_picker import (
@@ -154,6 +154,7 @@ from local_operator.tui.widgets.command_picker import (
     PickerMode,
     completion_for,
     ghost_for,
+    skill_scan_region,
     skill_token,
     skill_token_spans,
     slash_argument,
@@ -2092,11 +2093,11 @@ class Editor(TextArea):
         # prose beside it, because there was no rule at all). See
         # `_reference_runs` for what "resolvable" is asked, and why.
         "text-area--at-reference",
-        # The `$skill` pair (see `_paint_skill`): a leading `$name` that IS a
-        # discovered skill — the fifth sentence in the composer's vocabulary
-        # of "structure that will NOT be sent as message text" — and the muted
-        # ink for one that will. The same component-class/stylesheet reason as
-        # the five above.
+        # The `$skill` pair (see `_skill_runs`): a `$name` the submit trigger
+        # ACCEPTS, wherever it sits on a line that will be scanned — the fifth
+        # sentence in the composer's vocabulary of "structure that will NOT be
+        # sent as message text" — and the muted ink for one that will not. The
+        # same component-class/stylesheet reason as the five above.
         "text-area--skill",
         "text-area--skill-unknown",
     }
@@ -2375,6 +2376,12 @@ class Editor(TextArea):
         #: the start of a question. Default on; the main chat is the only
         #: surface that runs commands.
         self._allows_shell = True
+        #: Off while the ``/btw`` aside owns this composer. Submit hands the
+        #: aside its text WITHOUT the skill expansion (`on_editor_submitted`'s
+        #: aside branch returns first), so a `$name` in an aside question is
+        #: literal — and the ink must not claim otherwise any more than it does
+        #: in bang mode.
+        self._allows_skill_expansion = True
         #: Buffer offsets of the ``/credential`` token that has ARMED the next
         #: paste, or ``None``. Latched (see :meth:`_arm_credential`) rather
         #: than re-derived at paste time, because an invisible rule that
@@ -2968,10 +2975,13 @@ class Editor(TextArea):
         Pushed by the app where it fills the picker's skill rows — the answer
         to ``SkillQueryOpened`` — and again whenever a rescan replaces the
         vocabulary at submit, so the ink can never resolve against a set older
-        than the one a submit would read. Lower-cased HERE so the membership
-        test is the resolver's own case-insensitive one while costing no
-        per-keystroke lowering, and a frozenset so the render pass tests
-        membership in O(1).
+        than the one a submit would read.
+
+        EXACT names, not lower-cased: the trigger resolves case at the position
+        the token sits in (a leading token keeps the legacy case-insensitive
+        rule; an inline one needs a lowercase letter), so a lower-cased set here
+        would claim ``$RESEARCH`` fires inline when the resolver says it does
+        not. A frozenset so the render pass tests membership in O(1).
 
         Refreshes when the snapshot actually changes, mirroring
         :meth:`set_name_choices` and for its measured reason: the names arrive
@@ -2981,10 +2991,9 @@ class Editor(TextArea):
         the NEXT keystroke. Gated on a real change so an unchanged re-push is
         not a repaint.
         """
-        lowered = frozenset(name.lower() for name in names)
-        if lowered == self._skill_names:
+        if names == self._skill_names:
             return
-        self._skill_names = lowered
+        self._skill_names = names
         self._skill_runs_cache = None
         self.refresh()
 
@@ -3009,15 +3018,29 @@ class Editor(TextArea):
         self.placeholder = SHELL_PLACEHOLDER if active else self.resting_placeholder
         self.post_message(ShellModeChanged(active))
 
-    def set_allows_shell(self, allowed: bool) -> None:
-        """Whether bang-mode may be entered from this composer.
+    def set_aside_owns(self, owns: bool) -> None:
+        """Borrow the composer for the ``/btw`` aside, or give it back.
 
-        The aside turns this off; leaving bang-mode first so a mode that
-        started in the main chat cannot survive the card taking the field.
+        ONE call for both affordances the aside withdraws. Bang-mode and
+        `$skill` expansion are the same fact — "this text is a question to the
+        aside, not a chat turn" — and as two separate setters the sidebar's
+        park/restore path kept one and lost the other: a restored source with
+        no parked aside was left with expansion off in the main chat, and a
+        restored aside inked tokens whose submit never expands them (review
+        round 2, M2). The pair cannot drift when there is only one.
+
+        Returning does NOT restore bang-mode: the caller restores that from the
+        source's own draft, because "allowed" and "active" are different
+        questions.
         """
-        if not allowed:
+        if owns:
             self.set_shell_mode(False)
-        self._allows_shell = allowed
+        self._allows_shell = not owns
+        if self._allows_skill_expansion == (not owns):
+            return
+        self._allows_skill_expansion = not owns
+        self._skill_runs_cache = None
+        self.refresh()
 
     def clear_content(self) -> None:
         """Empty the buffer and leave history navigation."""
@@ -3995,6 +4018,20 @@ class Editor(TextArea):
         self._cancel_escape()
 
     # -- submit -------------------------------------------------------------
+    def _submits_as_shell(self) -> bool:
+        """Whether Enter would run the current buffer as a shell command.
+
+        THE definition, used by :meth:`_submit` to decide what to post and by
+        the `$` ink to decide whether any skill can fire — a shell line is
+        never scanned, so painting a `$name` there would claim an attachment
+        that cannot happen. Bang-mode is a mode, but a recalled ``! ls`` is
+        TEXT that still means the same thing; both are covered.
+        """
+        stripped = self.text.lstrip()
+        return self._shell_mode or (
+            self._allows_shell and stripped.startswith("!") and not stripped.startswith("/")
+        )
+
     def _submit(self) -> None:
         # A session transition leaves the ordinary composer visible and editable,
         # but Enter must not post an event that can still reach the old session.
@@ -4011,11 +4048,7 @@ class Editor(TextArea):
         # the same thing — omp's submit path, which treats a leading bang as
         # the command even when the dedicated mode is off. Detected HERE so
         # the history entry and the message agree about what was sent.
-        shell = self._shell_mode or (
-            self._allows_shell
-            and text.lstrip().startswith("!")
-            and not text.lstrip().startswith("/")
-        )
+        shell = self._submits_as_shell()
         recorded = text
         if shell and self._shell_mode and text.strip() and not text.lstrip().startswith("!"):
             # History of a dedicated-mode submit is stored WITH the bang so
@@ -4962,6 +4995,12 @@ class Editor(TextArea):
             self._picker.mode,
             self._picker.is_open(),
             self._picker.is_pending(),
+            # Shell is an input the computation reads through the surface rule,
+            # and it changes without the text changing (Esc leaves bang mode
+            # with the line kept). Left out of the key, the stale empty runs
+            # survived until the next keystroke although the same text would
+            # now send as a prompt that attaches the skill (review round 2, m2).
+            self._submits_as_shell(),
         )
         cached = self._skill_runs_cache
         if cached is not None and cached[0] == key:
@@ -4973,27 +5012,32 @@ class Editor(TextArea):
     def _compute_skill_runs(self) -> dict[int, list[tuple[int, int, str]]]:
         """The uncached body of :meth:`_skill_runs` — see its docstring.
 
-        The gates, in the order they are asked:
+        The trigger is :func:`local_operator.sigils.skill_mentions`, the SAME
+        function the submit path calls, so what is inked and what fires are one
+        decision, not two that agree today. The SURFACE gate is
+        :func:`command_picker.skill_scan_region`: bang/shell lines, a `/btw`
+        aside and every leading command that does not expand a skill ink
+        nothing, while a `/team`/`/agent`/`/goal` argument tail is scanned as its
+        own string — so a `$RESEARCH` opening that tail is *leading* there and
+        gets the legacy case-insensitive rule, exactly as submit resolves it.
 
-        - LEADING only, and that is a whole-BUFFER question
-          (:func:`skill_token_is_leading`): until an inline `$name` is
-          reassembled to the front by an accept, it is not what the anchored
-          submit-side parser reads, so nothing about it is true yet.
-        - a name that IS in the settled vocabulary paints resolved — even
-          while the list is open, where its own row is one keystroke away.
-          The ink claims "this token will fire", which is exactly what the
-          submit-side membership test will say.
-        - an unresolved token paints NOTHING while the skill list owns it
-          (rows offered, or the one-tick fill window): a prefix under an open
-          list is in progress, not a typo — the suppression
-          `text-area--slash-unknown` already gets.
+        Elision is the point: the rule is
+
+        - a name the trigger ACCEPTS paints resolved, wherever the token sits;
+        - an unresolved token paints NOTHING while the skill list owns it (rows
+          offered, or the one-tick fill window): a prefix under an open list is
+          in progress, not a typo;
         - otherwise the INERT muted ink, but only for the narrow shape its
           sentence is true of: the token IS the whole trimmed draft, so a
-          submit would send exactly this word as prose. `$zzz fix this` is
-          prose too, but dimming its head would say "inert" about a line that
-          is going somewhere. Lowercase evidence is required as well (the
-          picker's own inline rule), which is what keeps `$5` and `$PATH` —
-          money and shell — out.
+          submit would send exactly this word as prose. `$zzz fix this` is prose
+          too, but dimming its head would say "inert" about a line that is going
+          somewhere. Lowercase evidence is required as well, which is what keeps
+          `$5` and `$PATH` — money and shell — out.
+
+        The inert pass reads the UNTRIMMED span (:func:`skill_token_spans`)
+        because :func:`skill_mentions` only returns tokens that resolve; a token
+        whose start the trigger accepted is skipped so the two inks cannot
+        paint the same characters.
         """
         names = self._skill_names
         if names is None or "$" not in self.text:
@@ -5002,31 +5046,54 @@ class Editor(TextArea):
             # nothing to decide, and the early out is what keeps the split and
             # the per-line scan off every prose frame.
             return {}
+        if not self._allows_skill_expansion:
+            # The aside borrows this composer and its submit never expands a
+            # skill, so a `$name` there is literal text.
+            return {}
+        region = skill_scan_region(
+            self.text,
+            self._command_names,
+            self._prompt_command_names,
+            self._name_prompt_commands,
+            shell=self._submits_as_shell(),
+        )
+        if region is None:
+            return {}
         picking = self._picker.mode is PickerMode.SKILL and (
             self._picker.is_open() or self._picker.is_pending()
         )
         trimmed = self.text.strip()
-        runs: dict[int, list[tuple[int, int, str]]] = {}
-        offset = 0
-        for line_index, line in enumerate(self.text.split("\n")):
+        segment = self.text[region.start : region.end]
+        line_starts = [0]
+        for index, char in enumerate(self.text):
+            if char == "\n":
+                line_starts.append(index + 1)
+        resolved = skill_mentions(segment, names)
+        resolved_starts = {region.start + mention.start for mention in resolved}
+        spans: list[tuple[int, int, str]] = [
+            (region.start + mention.start, region.start + mention.end, "text-area--skill")
+            for mention in resolved
+        ]
+        offset = region.start
+        for line in segment.split("\n"):
             for start, end, name in skill_token_spans(line):
-                # Leading is the buffer's first token question, so only the
-                # first span of the buffer can ever answer it: any earlier
-                # non-whitespace disqualifies every later span.
-                if self.text[: offset + start].strip():
+                absolute = offset + start
+                if absolute in resolved_starts:
                     continue
-                if name.lower() in names:
-                    component = "text-area--skill"
-                elif (
+                if (
                     not picking
                     and line[start:end] == trimmed
                     and any(char.islower() for char in name)
                 ):
-                    component = "text-area--skill-unknown"
-                else:
-                    continue
-                runs.setdefault(line_index, []).append((start, end, component))
+                    spans.append((absolute, offset + end, "text-area--skill-unknown"))
             offset += len(line) + 1
+        runs: dict[int, list[tuple[int, int, str]]] = {}
+        for start, end, component in spans:
+            line_index = bisect_right(line_starts, start) - 1
+            line_start = line_starts[line_index]
+            runs.setdefault(line_index, []).append(
+                (start - line_start, end - line_start, component)
+            )
         return runs
 
     def _skill_cells(self, y: int) -> list[tuple[int, int, str]]:
@@ -9006,30 +9073,22 @@ class Editor(TextArea):
         self._run_argument(name)
 
     def _complete_skill(self, name: str) -> None:
-        """Put ``$name `` in the buffer, leaving the caret in the request.
+        """Put ``$name`` in the buffer in place, leaving the caret in the request.
 
-        The trailing space is deliberate and is what the picker's close depends
-        on: it terminates the token, so the list drops away on the same
-        keystroke that chose from it and the caret lands where the request is
-        typed.
+        A SPAN replacement and nothing else: the token at the caret becomes
+        ``$<name>`` and every other character the user typed survives verbatim,
+        including a line break after the token. The trailing space goes in only
+        when no whitespace already terminates the token; it is what closes the
+        list on the same keystroke that chose from it.
 
-        The same shape as :meth:`_complete_name_argument`, inline reassembly
-        included. A ``$`` is inline now, so a draft can survive outside the
-        token (``fix this $res``, or a ``$`` opening line 2); accepting a row
-        then moves the whole construct to the FRONT with that draft as the
-        request — ``$research fix this `` — and STAGES it. Nothing submits:
-        neither Tab nor Enter ever does for a skill row, because a completed
-        ``$skill `` is the opening of a prompt the user is still writing (see the
-        key routing). The user reads the assembled line and presses Enter.
+        Nothing submits: neither Tab nor Enter ever does for a skill row,
+        because a completed ``$skill`` is the opening of a prompt the user is
+        still writing (see the key routing). The user reads the line and presses
+        Enter.
 
-        Reassembly is what lets the submit-side parser stay ANCHORED at the
-        buffer start (:mod:`local_operator.skills.invoke`) while the composer is
-        inline: by the time Enter is pressed the token IS the prefix.
-
-        ``completion_for`` models both edits — the span replacement and the
-        reassembly — so the buffer written here is the exact buffer the ghost
-        predicted, structurally rather than by two edits happening to agree
-        (review round 1, B1).
+        ``completion_for`` models the same edit, so the buffer written here is
+        exactly the buffer the ghost predicted, structurally rather than by two
+        edits happening to agree (review round 1, B1).
         """
         completed = self._completion_for(CompletionMode.SKILL, name)
         if completed is None:
@@ -9084,12 +9143,10 @@ class Editor(TextArea):
         still navigating down. This is the rule an enum-tail ARGUMENT gets, and
         for the identical reason.
 
-        NO REASSEMBLY either, unlike :meth:`_complete_skill`. That method moves
-        the whole construct to the buffer front because the skill parser is
-        ANCHORED at offset 0 and cannot read an inline token. A reference has no
-        anchored parser: it is resolved wherever it sits, so the span
-        replacement is the entire edit and the user's draft is never reordered
-        around it.
+        NO REASSEMBLY, exactly like :meth:`_complete_skill` now. Both replace
+        only their own token's span: a reference is resolved wherever it sits,
+        and a `$name` is accepted wherever it sits, so the user's draft is never
+        reordered around either.
 
         Nothing submits here, on either key or a click. Enter SENDS instead of
         completing only when the row is already what the buffer holds — see
