@@ -849,3 +849,75 @@ async def test_an_incrementally_refreshed_index_serves_the_full_rebuilds_frame(
 
         assert full["head_cut"] is True  # the shape under test: the head is out of reach
         assert canonical(incremental) == canonical(full)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [20, 100])
+@pytest.mark.parametrize("case", ["one", "fifty", "new_run"])
+async def test_a_frame_whose_index_lands_during_the_hunt_is_the_steady_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, limit: int
+) -> None:
+    """The desktop twin of the relay's pre-index cell (#3037 QA, O1).
+
+    ``_frame_index`` at attempt 0 can answer ``None`` (the refresh did not land
+    inside the open budget) and the final call after the hunt can answer a
+    resident index (it landed meanwhile). The frame then carried the hunt's rows
+    under ``ready`` — rows the steady read refuses because the index calls the
+    tail run's head out of reach. Held still here: the first call answers None,
+    every later one is the real call.
+    """
+    from local_operator.server.utils.desktop_sessions import DesktopSessionBridge
+
+    async with _Harness(tmp_path) as harness:
+        rows: list[Any] = []
+        for turn in range(1, 3):
+            rows.extend(_long_turn(turn, 2))
+        rows.extend(_long_turn(99, 110))
+        rows.pop()  # the tail run is still LIVE: no closing answer yet
+        directory = harness.root / "sessions" / harness.session_id
+        _write(directory, rows)
+        await harness.warm()
+        transcript = Transcript(directory)
+        if case == "new_run":
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text="done")])
+            )
+            await transcript.append_message(
+                Message(role="user", content=[TextContent(text="next")])
+            )
+        else:
+            for call in range(1 if case == "one" else 50):
+                await transcript.append_message(
+                    Message(
+                        role="tool", content=[TextContent(text="output")], tool_call_id=f"x{call}"
+                    )
+                )
+        await harness.warm()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": limit, "open_frame": 1}
+
+        original = DesktopSessionBridge._frame_index
+        calls: list[int] = []
+
+        async def _lands_during_the_hunt(self: Any, deadline: float) -> Any:
+            calls.append(1)
+            return None if len(calls) == 1 else await original(self, deadline)
+
+        monkeypatch.setattr(DesktopSessionBridge, "_frame_index", _lands_during_the_hunt)
+        first = (await harness.client.get(url, params=params)).json()["result"]
+        assert len(calls) >= 2, "the read never re-asked for the index"
+        monkeypatch.setattr(DesktopSessionBridge, "_frame_index", original)
+        steady = (await harness.client.get(url, params=params)).json()["result"]
+
+        def canonical(page: dict[str, Any]) -> dict[str, Any]:
+            return {
+                k: v for k, v in page.items() if k not in {"epoch", "journal_generation", "cwd"}
+            }
+
+        assert steady["runs_state"] == "ready" and first["runs_state"] == "ready"
+        assert (len(first["entries"]), first["head_cut"]) == (
+            len(steady["entries"]),
+            steady["head_cut"],
+        )
+        assert canonical(first) == canonical(steady)
