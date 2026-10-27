@@ -175,6 +175,37 @@ def update(
     return _result(config_dir, name, authored)
 
 
+def run_skill_roots(config_dir: Path) -> list[Path]:
+    """The discovery roots a CONFIGURATION RUN judges skills by (``tools/skill_tool``).
+
+    ``_discovered``'s home-derived set, plus THIS profile's managed root when that
+    walk does not reach it. With ``LOCAL_OPERATOR_CONFIG_DIR`` moved,
+    ``<home>/.local-operator/skills`` is another profile's store and
+    ``<config_dir>/skills`` is scanned by nothing, so a run could ``update`` a skill
+    it could not ``show`` (and so never learn its fingerprint). It is inserted
+    where the home native root sits -- after the project roots, ahead of the
+    ecosystem and packaged ones -- the precedence it has in the default layout.
+
+    ONE helper for both of the run's readers (its ``list``/``show`` and
+    :func:`require_unshadowed`), so what the run is shown as editable and what its
+    ``create`` refuses are decided over the same roots and answer with the same
+    codes (review R3). The Skills tab's routes keep ``_discovered``: changing what
+    they resolve under a moved profile is not this feature's to decide.
+    """
+    from local_operator.skills import default_skill_roots
+
+    roots = default_skill_roots(Path.home())
+    managed = Path(config_dir) / "skills"
+    if os.path.realpath(managed) not in {os.path.realpath(root) for root in roots}:
+        home_store = os.path.realpath(Path.home() / ".local-operator" / "skills")
+        at = next(
+            (i for i, root in enumerate(roots) if os.path.realpath(root) == home_store),
+            len(roots) - 1,
+        )
+        roots.insert(at, managed)
+    return roots
+
+
 def require_unshadowed(config_dir: Path, name: str) -> None:
     """Refuse a CREATE whose name a read-only root already supplies.
 
@@ -193,8 +224,11 @@ def require_unshadowed(config_dir: Path, name: str) -> None:
     ``skill-not-editable`` because its remedy is the one that code already names
     -- the operator's own Copy to my skills -- not "pick another name".
     """
+    from local_operator.skills import discover_skills
+
     validate_name(name)
-    found = _discovered(config_dir, name)
+    skills, _warnings = discover_skills(run_skill_roots(config_dir), config_dir=config_dir)
+    found = next((skill for skill in skills if skill.name == name), None)
     if found is None:
         return
     managed = os.path.realpath(Path(config_dir) / "skills")
@@ -208,29 +242,14 @@ def require_unshadowed(config_dir: Path, name: str) -> None:
     )
 
 
-def patch(
-    config_dir: Path,
-    name: str,
-    files: Iterable[Mapping[str, str]],
-    remove_paths: Iterable[str],
-    expected_fingerprint: str,
-) -> dict[str, Any]:
-    """Change SOME files of a managed skill and keep the rest (CAS on the folder).
+def _current_document(
+    config_dir: Path, name: str, expected_fingerprint: str
+) -> tuple[ManagedSkillStorage, SkillDocument]:
+    """The managed skill's current document, after proving it is the one the caller read.
 
-    WHY AN OVERLAY AND NOT ``update``. ``author`` replaces the whole file set, so
-    an editor that sends only ``SKILL.md`` deletes every reference file. The
-    Skills tab's editor sends the full set on purpose; a model revising one file
-    will not reliably resend the others, and the loss would be silent. Here the
-    named ``files`` replace or add, ``remove_paths`` delete, and every other file
-    is carried over byte for byte.
-
-    THE CAS IS CHECKED TWICE. Once here, against the document the overlay is built
-    on -- an overlay on bytes the caller never saw would merge their edit into
-    someone else's -- and again by ``author`` under ``config_write_lock`` right
-    before the swap, which is what closes the gap between this read and the write.
-    Strict on purpose: unlike the route this has no lost-response retry to
-    tolerate, so a stale fingerprint is always refused, even for an edit that
-    would change nothing.
+    Shared by :func:`patch` and :func:`edit_files`. Strict on purpose: unlike the
+    route this has no lost-response retry to tolerate, so a stale fingerprint is
+    always refused, even for an edit that would change nothing.
     """
     storage = require_managed(config_dir, name)
     # The same refusal ``author`` gives, made BEFORE the read: a bundle link may
@@ -251,24 +270,133 @@ def patch(
         current = SkillDocument.from_directory(destination)
     if current.fingerprint != expected_fingerprint:
         raise LinkError("local-concurrent-edit", "the skill changed since it was read")
-    merged = {file.path: file.content for file in current.files}
-    changed = {item["path"]: item["content"] for item in files}
-    removed = list(remove_paths)
-    both = sorted(set(changed) & set(removed))
-    if both:
-        raise SkillValidationError(
-            "skill-validation", f"a path cannot be both written and removed: {both[0]}"
-        )
-    for path in removed:
-        if path not in merged:
-            raise SkillValidationError("skill-validation", f"no file to remove: {path}")
-        del merged[path]
-    merged.update(changed)
+    return storage, current
+
+
+def _commit(
+    config_dir: Path,
+    storage: ManagedSkillStorage,
+    name: str,
+    merged: Mapping[str, str],
+    expected_fingerprint: str,
+) -> dict[str, Any]:
+    """Author the overlaid file set; ``author`` re-checks the CAS under the lock."""
     document = document_from_files(
         name, ({"path": path, "content": content} for path, content in merged.items())
     )
     authored = storage.author(name, document, expected_fingerprint)
     return _result(config_dir, name, authored)
+
+
+def _refuse_duplicates(paths: list[str], what: str) -> None:
+    # A dict built from a list keeps the LAST of two same-path entries, so two
+    # conflicting versions of one file would silently lose one (review R4).
+    # ``create`` refuses the same input through SkillDocument's collision check.
+    seen: set[str] = set()
+    for path in paths:
+        if path in seen:
+            raise SkillValidationError("skill-validation", f"{what} names {path} twice")
+        seen.add(path)
+
+
+def patch(
+    config_dir: Path,
+    name: str,
+    files: Iterable[Mapping[str, str]],
+    remove_paths: Iterable[str],
+    expected_fingerprint: str,
+    *,
+    whole_file_max_chars: int | None = None,
+) -> dict[str, Any]:
+    """Change SOME files of a managed skill and keep the rest (CAS on the folder).
+
+    WHY AN OVERLAY AND NOT ``update``. ``author`` replaces the whole file set, so
+    an editor that sends only ``SKILL.md`` deletes every reference file. The
+    Skills tab's editor sends the full set on purpose; a model revising one file
+    will not reliably resend the others, and the loss would be silent. Here the
+    named ``files`` replace or add, ``remove_paths`` delete, and every other file
+    is carried over byte for byte.
+
+    ``whole_file_max_chars`` refuses REPLACING an existing file longer than that
+    (new files are unaffected). The configuration run passes the largest file one
+    of its reads can deliver whole through the loop's replay bound: a longer file
+    reached the model only in pages, and a whole-file rewrite composed from a
+    partial view commits whatever the model filled the gaps with (review R1).
+    :func:`edit_files` is the path for those.
+
+    THE CAS IS CHECKED TWICE. Once against the document the overlay is built on --
+    an overlay on bytes the caller never saw would merge their edit into someone
+    else's -- and again by ``author`` under ``config_write_lock`` right before the
+    swap, which is what closes the gap between this read and the write.
+    """
+    files = list(files)
+    removed = list(remove_paths)
+    _refuse_duplicates([item["path"] for item in files], "files")
+    _refuse_duplicates(removed, "remove_paths")
+    storage, current = _current_document(config_dir, name, expected_fingerprint)
+    merged = {file.path: file.content for file in current.files}
+    changed = {item["path"]: item["content"] for item in files}
+    both = sorted(set(changed) & set(removed))
+    if both:
+        raise SkillValidationError(
+            "skill-validation", f"a path cannot be both written and removed: {both[0]}"
+        )
+    if whole_file_max_chars is not None:
+        for path in changed:
+            existing = merged.get(path)
+            if existing is not None and len(existing) > whole_file_max_chars:
+                raise SkillValidationError(
+                    "skill-file-too-long-to-replace",
+                    f"{path} is {len(existing)} characters, more than one read shows "
+                    f"whole ({whole_file_max_chars}), so it cannot be replaced whole",
+                )
+    for path in removed:
+        if path not in merged:
+            raise SkillValidationError("skill-validation", f"no file to remove: {path}")
+        del merged[path]
+    merged.update(changed)
+    return _commit(config_dir, storage, name, merged, expected_fingerprint)
+
+
+def edit_files(
+    config_dir: Path,
+    name: str,
+    edits: Iterable[Mapping[str, str]],
+    expected_fingerprint: str,
+) -> dict[str, Any]:
+    """Exact ``old_text`` -> ``new_text`` replacements in a managed skill's files.
+
+    WHY THIS EXISTS. A configuration run reads files through a replay bound, so a
+    long file reaches the model in pages and a whole-file rewrite of it is refused
+    (:func:`patch`). An anchored replacement needs only the text it replaces, so
+    the model can change any part it has read and every byte it did not touch is
+    carried over unchanged -- the property is that no write is built from content
+    the model never received.
+
+    The semantics are the file ``edit`` tool's, minus its whitespace-tolerant
+    fallback (a skill is short and the CAS already proves the model read this
+    revision): ``old_text`` must be non-empty and occur EXACTLY ONCE in the file
+    as it stands after the previous edits in this call, or nothing is written.
+    All edits land in one swap.
+    """
+    edits = list(edits)
+    storage, current = _current_document(config_dir, name, expected_fingerprint)
+    merged = {file.path: file.content for file in current.files}
+    for index, item in enumerate(edits, start=1):
+        path, old, new = item["path"], item["old_text"], item["new_text"]
+        if path not in merged:
+            raise SkillValidationError("skill-validation", f"edit {index}: no file {path}")
+        if not old:
+            raise SkillValidationError("skill-validation", f"edit {index}: old_text is empty")
+        count = merged[path].count(old)
+        if count != 1:
+            raise SkillValidationError(
+                "skill-edit-no-unique-match",
+                f"edit {index}: old_text occurs {count} times in {path}; it must occur "
+                "exactly once (copy it exactly from show, with enough context to be unique)",
+            )
+        merged[path] = merged[path].replace(old, new, 1)
+    return _commit(config_dir, storage, name, merged, expected_fingerprint)
 
 
 def folder_differs_from_baseline(storage: ManagedSkillStorage, record: prov.BaselineRecord) -> bool:

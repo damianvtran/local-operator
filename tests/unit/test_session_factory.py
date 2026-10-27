@@ -7862,6 +7862,7 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
             "show",
             "create",
             "update",
+            "edit",
         ]
         shown = await skill.execute("c1", {"op": "show", "name": "demo"}, None, None, context)
         text = _result_text(shown)

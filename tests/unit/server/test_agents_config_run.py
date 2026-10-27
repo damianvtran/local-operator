@@ -489,7 +489,7 @@ def test_the_declaration_names_skill_with_its_own_op_scope() -> None:
     )
 
     assert "skill" in AGENTS_CONFIG_TOOLS
-    assert AGENTS_CONFIG_TOOL_OPS["skill"] == ("list", "show", "create", "update")
+    assert AGENTS_CONFIG_TOOL_OPS["skill"] == ("list", "show", "create", "update", "edit")
     assert set(AGENTS_CONFIG_TOOL_OPS) == set(AGENTS_CONFIG_TOOLS), "every declared tool is scoped"
 
 

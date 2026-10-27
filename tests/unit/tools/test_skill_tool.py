@@ -135,7 +135,13 @@ async def test_the_tool_mirrors_agent_and_team_and_needs_a_profile_root() -> Non
         "exclusive",
         False,
     )
-    assert tool.parameters["properties"]["op"]["enum"] == ["list", "show", "create", "update"]
+    assert tool.parameters["properties"]["op"]["enum"] == [
+        "list",
+        "show",
+        "create",
+        "update",
+        "edit",
+    ]
     # createIf: no profile root, no tool.
     assert create_tools(ToolContext(), ["skill"]) == []
 
@@ -158,10 +164,13 @@ async def test_show_returns_skill_md_and_the_file_listing_and_one_file_by_path(e
     error, text = await _call(env, op="show", name="demo")
     assert not error, text
     assert _fingerprint_line(text) == SkillDocument.from_directory(folder).fingerprint
-    assert "description: A skill." in text and "- references/notes.md (8 bytes)" in text
+    assert "description: A skill." in text and "- references/notes.md (8 chars)" in text
     assert "keep me" not in text, "the other files are listed, not inlined"
     error, text = await _call(env, op="show", name="demo", path="references/notes.md")
-    assert not error and text.endswith("--- references/notes.md ---\nkeep me\n"), text
+    assert (
+        not error and "--- references/notes.md: lines 1-1 of 1, 8 chars ---\nkeep me\n" in text
+    ), text
+    assert "MORE" not in text
 
 
 async def test_show_of_a_builtin_is_readable_but_says_read_only(env) -> None:
@@ -450,6 +459,8 @@ async def test_hostile_paths_are_refused_by_storage(env, path: str) -> None:
 
 
 async def test_an_oversize_file_is_refused_by_storage(env) -> None:
+    """Under the schema's CHARACTER bound but over storage's BYTE bound: the
+    storage layer is still the authority (two-byte characters)."""
     folder = _make_local(env)
     before = _tree(folder)
     error, text = await _call(
@@ -457,10 +468,22 @@ async def test_an_oversize_file_is_refused_by_storage(env) -> None:
         op="update",
         name="demo",
         expected_fingerprint=SkillDocument.from_directory(folder).fingerprint,
-        files=[{"path": "references/big.md", "content": "x" * (200 * 1024 + 1)}],
+        files=[{"path": "references/big.md", "content": "é" * (110 * 1024)}],
     )
     assert error and text.startswith("skill-too-large:"), text
     assert _tree(folder) == before
+
+
+async def test_the_schema_refuses_a_file_over_the_storage_limit_before_parsing(env) -> None:
+    """Review R5: the per-file bound is the storage limit, not 1 MiB."""
+    error, text = await _call(
+        env,
+        op="create",
+        name="fresh",
+        files=[{"path": "SKILL.md", "content": "x" * (200 * 1024 + 1)}],
+    )
+    assert error and "at most 204800 characters" in text, text
+    assert not (env.config_dir / "skills" / "fresh").exists()
 
 
 async def test_editing_a_linked_skill_keeps_the_baseline_and_the_check_says_local_only(env) -> None:
@@ -513,3 +536,363 @@ async def test_editing_a_linked_skill_keeps_the_baseline_and_the_check_says_loca
 async def test_malformed_calls_are_refused_before_any_read(env, args, needle) -> None:
     error, text = await _call(env, **args)
     assert error and needle in text, text
+
+
+# -- through the REAL loop: what the model receives, not what the tool returned --------
+#
+# Review R1: the loop cuts every tool result to the replay bound before the next
+# request, so a test of ``tool.execute`` alone cannot see what the model reads. These
+# drive the real ``AgentLoop`` with a scripted provider and assert on the REQUESTS it
+# sent, which is the only place "what the model received" exists.
+
+
+def _big_skill_md(name: str = "big", lines: int = 1000) -> str:
+    body = "".join(
+        f"line {index:04d}: step {index} of the long procedure\n" for index in range(lines)
+    )
+    return _skill_md(name, body=body)
+
+
+class _ScriptedModel:
+    """A provider that answers each request with the next scripted tool call.
+
+    ``plan(previous_tool_text) -> args | None`` decides the next call from the text
+    the model was SENT for the previous result (after the loop's replay bound), so
+    a test can only act on what actually reached the model.
+    """
+
+    def __init__(self, plan: Any) -> None:
+        self.plan = plan
+        self.requests: list[Any] = []
+
+    def __call__(self, request: Any, signal: Any) -> Any:
+        import json
+
+        from local_operator.harness.types import (
+            Message,
+            StreamEndEvent,
+            StreamTextDelta,
+            StreamToolCallDelta,
+            TextContent,
+        )
+
+        self.requests.append(request)
+        tool_rows = [m for m in request.messages if isinstance(m, Message) and m.role == "tool"]
+        seen = None
+        if tool_rows:
+            block = tool_rows[-1].content[0]
+            assert isinstance(block, TextContent)
+            seen = block.text
+        args = self.plan(seen)
+
+        async def gen() -> Any:
+            if args is None:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+                return
+            yield StreamToolCallDelta(
+                index=0, id=f"c{len(self.requests)}", name="skill", argument_delta=json.dumps(args)
+            )
+            yield StreamEndEvent(stop_reason="tool_calls")
+
+        return gen()
+
+
+async def _drive(env: SimpleNamespace, plan: Any) -> _ScriptedModel:
+    from local_operator.harness.loop import AgentLoop, LoopContext
+    from local_operator.harness.types import LoopConfig, Message, ModelSpec
+
+    model = _ScriptedModel(plan)
+    context = LoopContext(system_blocks=["sys"], tools=[env.tool], tool_context=env.context)
+    config = LoopConfig(
+        model=ModelSpec(provider="test", model_id="test-model", context_window=200_000),
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=model,
+    )
+    await AgentLoop().run_to_end([Message.user("revise the big skill")], context, config, None)
+    return model
+
+
+def _page_body(seen: str) -> str:
+    """The file text of one ``show`` page as the model received it."""
+    start = seen.index(
+        "---\n", seen.index("--- SKILL.md: lines") if "--- SKILL.md: lines" in seen else 0
+    )
+    body = seen[start + 4 :]
+    cut = min(
+        (body.find(marker) for marker in ("\n[", "\n\nother files") if marker in body), default=-1
+    )
+    return body[: cut + 1] if cut >= 0 else body
+
+
+async def test_paging_through_the_loop_delivers_every_line(env) -> None:
+    import re
+
+    content = _big_skill_md()
+    assert len(content) > 32 * 1024
+    writes.create(env.config_dir, "big", files=[{"path": "SKILL.md", "content": content}])
+    received: list[str] = []
+
+    def plan(seen: str | None) -> dict[str, Any] | None:
+        if seen is None:
+            return {"op": "show", "name": "big"}
+        assert "elided on replay" not in seen, "a page was cut on replay"
+        received.append(_page_body(seen))
+        more = re.search(r"\[MORE: op='show' path='SKILL.md' offset=(\d+)\]", seen)
+        return {"op": "show", "name": "big", "offset": int(more.group(1))} if more else None
+
+    model = await _drive(env, plan)
+    assert len(model.requests) > 5, "a 32 KB file needs several pages"
+    assert "".join(received) == content, "every line, in order, exactly once"
+
+
+async def test_negative_control_one_whole_show_loses_the_middle_on_replay(env) -> None:
+    """Why paging is needed: a result over the bound DOES lose its middle in the
+    loop. Bypasses the pager by returning the whole file from a stand-in tool."""
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+
+    content = _big_skill_md()
+
+    async def whole(tool_call_id: str, args: dict[str, Any], *_rest: Any) -> ToolResult:
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="skill", content=[TextContent(text=content)]
+        )
+
+    env.tool = AgentTool(
+        name="skill", label="x", description="x", parameters={"type": "object"}, execute=whole
+    )
+    seen_texts: list[str] = []
+
+    def plan(seen: str | None) -> dict[str, Any] | None:
+        if seen is None:
+            return {"op": "show", "name": "big"}
+        seen_texts.append(seen)
+        return None
+
+    await _drive(env, plan)
+    assert "elided on replay" in seen_texts[0]
+    assert "line 0500" not in seen_texts[0]
+
+
+async def test_a_whole_file_update_of_a_long_file_is_refused_through_the_loop(env) -> None:
+    content = _big_skill_md()
+    folder = env.config_dir / "skills" / "big"
+    writes.create(env.config_dir, "big", files=[{"path": "SKILL.md", "content": content}])
+    before = _tree(folder)
+    results: list[str] = []
+
+    def plan(seen: str | None) -> dict[str, Any] | None:
+        if seen is None:
+            return {"op": "show", "name": "big"}
+        if not results:
+            results.append(seen)
+            # What a model would compose from a partial view: the head it saw.
+            return {
+                "op": "update",
+                "name": "big",
+                "expected_fingerprint": _fingerprint_line(seen),
+                "files": [{"path": "SKILL.md", "content": _page_body(seen)}],
+            }
+        results.append(seen)
+        return None
+
+    await _drive(env, plan)
+    assert results[1].startswith("skill-file-too-long-to-replace:"), results[1]
+    assert "op='edit'" in results[1]
+    assert _tree(folder) == before
+
+
+async def test_an_edit_through_the_loop_changes_only_its_text(env) -> None:
+    content = _big_skill_md()
+    folder = env.config_dir / "skills" / "big"
+    writes.create(
+        env.config_dir,
+        "big",
+        files=[
+            {"path": "SKILL.md", "content": content},
+            {"path": "references/notes.md", "content": "keep me\n"},
+        ],
+    )
+    results: list[str] = []
+
+    def plan(seen: str | None) -> dict[str, Any] | None:
+        if seen is None:
+            return {"op": "show", "name": "big"}
+        results.append(seen)
+        if len(results) == 1:
+            line = "line 0007: step 7 of the long procedure\n"
+            assert line in seen, "the edit's old_text is text the model received"
+            return {
+                "op": "edit",
+                "name": "big",
+                "expected_fingerprint": _fingerprint_line(seen),
+                "edits": [
+                    {
+                        "path": "SKILL.md",
+                        "old_text": line,
+                        "new_text": line + "## Troubleshooting\n",
+                    }
+                ],
+            }
+        return None
+
+    await _drive(env, plan)
+    assert results[1].startswith("updated skill"), results[1]
+    after = (folder / "SKILL.md").read_text()
+    head, _, tail = content.partition("line 0008:")
+    assert after == head + "## Troubleshooting\n" + "line 0008:" + tail
+    assert (folder / "references" / "notes.md").read_text() == "keep me\n"
+
+
+async def test_every_result_fits_the_replay_bound(env) -> None:
+    """The structural invariant behind R1/R2: no op answers past ``RESULT_MAX_CHARS``."""
+    from local_operator.harness.replay_bound import DEFAULT_REPLAY_BOUND_CHARS
+    from local_operator.tools.skill_tool import RESULT_MAX_CHARS
+
+    assert RESULT_MAX_CHARS < DEFAULT_REPLAY_BOUND_CHARS
+    many = [{"path": "SKILL.md", "content": _big_skill_md("wide", 300)}] + [
+        {"path": f"references/{'n' * 60}-{index:02d}.md", "content": "x\n"} for index in range(60)
+    ]
+    writes.create(env.config_dir, "wide", files=many)
+    # A long single line, too: the pager must cut it rather than overflow.
+    writes.create(
+        env.config_dir,
+        "oneline",
+        files=[{"path": "SKILL.md", "content": _skill_md("oneline", body="y" * 20_000 + "\n")}],
+    )
+    for index in range(80):
+        writes.create(
+            env.config_dir,
+            f"skill-{index:02d}",
+            files=[{"path": "SKILL.md", "content": _skill_md(f"skill-{index:02d}", "d" * 300)}],
+        )
+    calls = [
+        {"op": "list"},
+        {"op": "show", "name": "wide"},
+        {"op": "show", "name": "wide", "offset": 200},
+        {"op": "show", "name": "oneline"},
+        {"op": "show", "name": _builtin_name()},
+    ]
+    for args in calls:
+        error, text = await _call(env, **args)
+        assert not error, (args, text)
+        assert len(text) <= RESULT_MAX_CHARS, (args, len(text))
+    _error, text = await _call(env, op="show", name="wide")
+    assert "more, not listed to fit this page" in text
+
+
+async def test_list_pages_and_names_every_skill(env) -> None:
+    """Review R2: following MORE reaches every skill; none is silently dropped."""
+    import re
+
+    for index in range(80):
+        writes.create(
+            env.config_dir,
+            f"skill-{index:02d}",
+            files=[{"path": "SKILL.md", "content": _skill_md(f"skill-{index:02d}", "d" * 300)}],
+        )
+    names: list[str] = []
+    offset = 1
+    pages = 0
+    while True:
+        error, text = await _call(env, op="list", offset=offset)
+        assert not error, text
+        pages += 1
+        names += re.findall(r"^- (skill-\d\d) \[", text, flags=re.M)
+        more = re.search(r"MORE: op='list' offset=(\d+)", text)
+        if more is None:
+            break
+        offset = int(more.group(1))
+    assert pages > 1
+    assert names == [f"skill-{index:02d}" for index in range(80)]
+
+
+async def test_edit_refuses_a_missing_or_ambiguous_match_and_writes_nothing(env) -> None:
+    folder = env.config_dir / "skills" / "rep"
+    writes.create(
+        env.config_dir,
+        "rep",
+        files=[{"path": "SKILL.md", "content": _skill_md("rep", body="same\nsame\nonce\n")}],
+    )
+    fingerprint = SkillDocument.from_directory(folder).fingerprint
+    before = _tree(folder)
+    for old_text, count in (("same\n", 2), ("absent\n", 0)):
+        error, text = await _call(
+            env,
+            op="edit",
+            name="rep",
+            expected_fingerprint=fingerprint,
+            edits=[
+                {"path": "SKILL.md", "old_text": "once\n", "new_text": "ONCE\n"},
+                {"path": "SKILL.md", "old_text": old_text, "new_text": "x\n"},
+            ],
+        )
+        assert error and text.startswith("skill-edit-no-unique-match:"), text
+        assert f"occurs {count} times" in text
+        assert _tree(folder) == before, "all edits land in one write, or none do"
+
+
+async def test_edit_with_a_stale_fingerprint_is_refused(env) -> None:
+    folder = _make_local(env)
+    stale = SkillDocument.from_directory(folder).fingerprint
+    writes.patch(
+        env.config_dir, "demo", [{"path": "references/notes.md", "content": "theirs\n"}], (), stale
+    )
+    error, text = await _call(
+        env,
+        op="edit",
+        name="demo",
+        expected_fingerprint=stale,
+        edits=[{"path": "SKILL.md", "old_text": "body\n", "new_text": "mine\n"}],
+    )
+    assert error and text.startswith("local-concurrent-edit:"), text
+    assert b"mine" not in (folder / "SKILL.md").read_bytes()
+
+
+async def test_duplicate_paths_in_an_update_are_refused(env) -> None:
+    """Review R4: two versions of one file must not silently become one."""
+    folder = _make_local(env)
+    before = _tree(folder)
+    error, text = await _call(
+        env,
+        op="update",
+        name="demo",
+        expected_fingerprint=SkillDocument.from_directory(folder).fingerprint,
+        files=[
+            {"path": "references/notes.md", "content": "first\n"},
+            {"path": "references/notes.md", "content": "second\n"},
+        ],
+    )
+    assert error and "names references/notes.md twice" in text, text
+    assert _tree(folder) == before
+
+
+async def test_list_and_create_agree_on_a_moved_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R3: with the profile moved off HOME, a managed copy of a built-in is
+    shown as THIS profile's editable skill, and a create over it is answered the
+    way that row implies (``alias-occupied``: it exists and you may edit it), not
+    "read-only, use Copy to my skills"."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    config_dir = tmp_path / "moved-profile"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", raising=False)
+    context = ToolContext(cwd=str(config_dir), memory_config_dir=str(config_dir))
+    moved = SimpleNamespace(
+        home=home, config_dir=config_dir, context=context, tool=create_tools(context, ["skill"])[0]
+    )
+    builtin = _builtin_name()
+    writes.create(config_dir, builtin, copy_from=builtin)
+    error, text = await _call(moved, op="list")
+    assert not error and f"- {builtin} [local, editable]" in text, text
+    error, text = await _call(
+        moved,
+        op="create",
+        name=builtin,
+        files=[{"path": "SKILL.md", "content": _skill_md(builtin)}],
+    )
+    assert error and text.startswith("alias-occupied:"), text

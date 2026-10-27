@@ -517,19 +517,25 @@ unchanged. The design it implements lives in the UI repository
 - Gated by `features.agents_config` — its own key, because an older backend
   answers the unknown field with a 422 (``Input`` is ``extra="forbid"``).
 - **Skills (`features.agents_config_skills`).** `skill` is an opt-in tool
-  (`tools/skill_tool.py`: `list`/`show`/`create`/`update`, read tier like
+  (`tools/skill_tool.py`: `list`/`show`/`create`/`update`/`edit`, read tier like
   `agent`/`team`), absent from `DEFAULT_TOOL_NAMES` so no other session builds it;
   `apply_config_run_shape` merges it in after the declaration. It writes only
   `<config_dir>/skills` through `server/utils/desktop_skill_writes` (the
-  `skill_write` routes' module). Two rules are the run's own: `update` is a patch
-  (named files change, `remove_paths` delete, every other file is kept; fingerprint
-  CAS checked before the overlay and again under the storage lock), and `create`
-  refuses a name a built-in/external/project skill already has (Copy to my skills
-  stays the operator's click). Built-in, external, project, bundle-form and
-  unpulled-link skills are read-only; a hub-linked edit leaves the baseline
-  untouched. No delete, publish or pull. The target skill reaches the run as text
-  only, like agents and teams. Its own key because an older core has
-  `agents_config` but no `skill` tool; the renderer also needs `skill_library`.
+  `skill_write` routes' module). Every result fits the loop's replay bound
+  (`harness/replay_bound.py`, 8 KiB): `show` pages a file by lines and `list`
+  pages its rows, each saying where the next page starts. No write is built from
+  text the model never received: `edit` makes exact `old_text` -> `new_text`
+  replacements (unique match, all-or-nothing), and `update` replaces whole only
+  files short enough to show in one page (it also adds and removes files; every
+  file it does not name is kept). The fingerprint CAS is checked before the
+  change is built and again under the storage lock. `create` refuses a name a
+  built-in/external/project skill already has (Copy to my skills stays the
+  operator's click). Built-in, external, project, bundle-form and unpulled-link
+  skills are read-only; a hub-linked edit leaves the baseline untouched. No
+  delete, publish or pull. The target skill reaches the run as text only, like
+  agents and teams. Its own key because an older core has `agents_config` but no
+  `skill` tool; the renderer also needs `skill_library`. The renderer's run-activity
+  projection reads an op it does not know (`edit`) as a write once it landed.
 
 Deliberately out of scope in v1: any conversational DELETE (no desktop op and no
 page control deletes a profile or a team today), an undo, a model picker, and a

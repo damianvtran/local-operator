@@ -1269,7 +1269,9 @@ def _env_details(cwd: str | None = None, session_id: str = "") -> str:
 #: ``skill`` is the run's skill editor (``tools/skill_tool.py``). Unlike the other
 #: two it is NOT a default tool: the factory never builds it, so naming it here is
 #: only half of reaching it -- :func:`apply_config_run_shape` merges it in after
-#: the declaration is set. Its ops stop at create/update for the same reason
+#: the declaration is set. ``edit`` is its anchored-replacement op (a long file
+#: reaches the run in pages, so it is changed by exact replacements, never
+#: rewritten whole). Its ops stop at create/update/edit for the same reason
 #: ``team_delete`` is unnamed, and it has no publish/pull op for the reason
 #: ``agent sync`` is excluded.
 AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team", "skill")
@@ -1281,7 +1283,7 @@ AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team", "skill")
 AGENTS_CONFIG_TOOL_OPS: dict[str, tuple[str, ...]] = {
     "agent": ("list", "show", "search", "install", "create", "update"),
     "team": ("list", "show", "create", "update"),
-    "skill": ("list", "show", "create", "update"),
+    "skill": ("list", "show", "create", "update", "edit"),
 }
 
 #: The preamble injected as the run's ``<configuration-run>`` system block.
@@ -1316,12 +1318,15 @@ instead of retrying.
 Do not pass `scope`; everything you write is saved to the operator's account.
 
 You can also revise the operator's own skills with the `skill` tool. `show` a
-skill before you `update` it, pass the `expected_fingerprint` that `show`
-returned, and send only the files you change -- the others are kept. Built-in,
-external and project skills are read-only here: say so and point the operator to
-Copy to my skills on the Skills tab; never create a same-named copy. Edit only the
-skill the operator's message names unless they ask for more. You cannot publish,
-pull or delete skills: say what you changed and leave publishing to the operator.
+skill before you change it and pass the `expected_fingerprint` it returned.
+`show` returns one page of a file; follow its MORE line until you have read every
+part you change. Change text with `edit` (exact `old_text` copied from `show`,
+unique in the file); `update` replaces only short whole files, and files you do
+not name are kept. Built-in, external and project skills are read-only here: say
+so and point the operator to Copy to my skills on the Skills tab; never create a
+same-named copy. Edit only the skill the operator's message names unless they ask
+for more. You cannot publish, pull or delete skills: say what you changed and
+leave publishing to the operator.
 
 Prefer the smallest change that answers the request, and prefer reporting what
 you did over asking permission you cannot be given."""
