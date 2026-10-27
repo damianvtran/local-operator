@@ -61,7 +61,11 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # on 2026-10-26, the round-2 seven added and the whole namespace's zh-CN
     # bytes doubly audited at the current English source on 2026-10-27) is
     # the eighty-sixth, CARRIED on the same terms.
-    assert len(chinese) == 86
+    # The skill-write error keys (PR #3013) re-audited `wire.errors.desktop`, a
+    # namespace the locale already carried, and the append-only ledger gained a
+    # second zh-CN row for it (the earlier row is retained at its superseded
+    # source hash): the eighty-seventh.
+    assert len(chinese) == 87
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
