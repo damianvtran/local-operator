@@ -735,10 +735,11 @@ def _plan(args: argparse.Namespace) -> int:
         overrides, core_requirements = policy(metadata)
         adapter_rows, dropped = export_adapter_requirements(metadata, receipts)
         interpreter = Path(sys.executable)
-        if sys.version_info[:2] != tuple(int(part) for part in _PYTHON_MINOR.split(".")):
+        running = running_python_version()
+        if running.split(".")[:2] != _PYTHON_MINOR.split("."):
             raise BuildRefused(
                 f"a plan must be resolved with a {_PYTHON_MINOR} interpreter (this one is "
-                f"{sys.version.split()[0]}); run it with the arm's python or a {_PYTHON_MINOR} venv"
+                f"{running}); run it with the arm's python or a {_PYTHON_MINOR} venv"
             )
         constraints = _constraint_versions(
             lock_versions(metadata.adapter_lock.read_text()), overrides
@@ -810,6 +811,18 @@ def policy(metadata: Metadata) -> tuple[list[str], list[str]]:
         list(adapter["tool"]["uv"]["override-dependencies"]),
         list(core["project"]["dependencies"]),
     )
+
+
+def running_python_version() -> str:
+    """The version of the interpreter a plan resolves with (``sys.executable``).
+
+    A seam, not a convenience: the plan guard is a function of the process it
+    runs in, and the unit suite runs on 3.12 AND 3.13. Read inline, the guard
+    made the plan tests pass or fail by CI leg; behind this function each test
+    names the interpreter it is about.
+    """
+
+    return sys.version.split()[0]
 
 
 def uv_version() -> str:
