@@ -7014,6 +7014,19 @@ class TranscriptView(ScrollableContainer):
         """
         self._on_user_scroll = hook
 
+    def on_show(self) -> None:
+        """Announce a SHOW to the same listener that hears about extents.
+
+        Showing a view changes what the app can measure about it, and Textual
+        owes no extent change when the new extent happens to match the last
+        laid-out one — so a listener keyed only on extents can miss the state
+        change itself. The deferred resume fill re-arms from this hook, and
+        standing that fill down while hidden is only safe if showing the view
+        resumes it (review round 1, M1).
+        """
+        if self._on_extent_changed is not None:
+            self._on_extent_changed()
+
     def set_on_extent_changed(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired whenever the scrollable extent changes.
 

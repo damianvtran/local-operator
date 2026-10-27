@@ -1514,6 +1514,10 @@ async def test_a_raising_fill_does_not_leave_the_pessimistic_copy_suppressed() -
         # that normally arm it.
         unscrollable = SimpleNamespace(
             parent=app,
+            # A laid-out, shown view: the fill stands down while the transcript
+            # cannot be laid out (M1), so the double has to report the state the
+            # branch under examination is reached from.
+            display=True,
             container_size=SimpleNamespace(height=40),
             size=SimpleNamespace(height=40),
             virtual_size=SimpleNamespace(height=10),

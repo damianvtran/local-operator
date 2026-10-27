@@ -1011,3 +1011,98 @@ async def test_the_resume_fill_mounts_a_bounded_number_of_pages(monkeypatch) -> 
         "the fill mounted past its total budget (a history-exhausting chain)",
         len(mounted),
     )
+
+
+@pytest.mark.asyncio
+async def test_a_fill_on_a_hidden_transcript_mounts_nothing() -> None:
+    """A view that cannot be laid out must not page: the goal is unmeasurable.
+
+    `_fill_resume_attempt` reads its goal from `container_size.height`, which
+    keeps its last real value when the transcript is hidden (the subagent view,
+    the org chart, settings and the file viewer all set `display = False`). No
+    layout pass runs while hidden, so `scroll_y` stays 0 and `virtual_size` does
+    not move however many blocks are mounted, while `settled()` measures
+    progress by the pending head, which always shrinks. Every page therefore
+    "progresses", the goal is never reached, and the fill runs until the head
+    empties: 1,123 pages / 20,254 blocks on the legacy fixture (review round 1,
+    M1). The total budget caps that; standing down while the view cannot be
+    laid out prevents it.
+    """
+    app = OperatorApp(lambda: _factory(SidebarRemote("hidden-fill")))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+        view = app._transcript_view()
+        assert view is not None
+        app._resume_pending_head = [
+            _message("assistant", "older row " + "x" * 100) for _ in range(200)
+        ]
+        app._resume_fill_active = True
+        before = len(view.blocks())
+        view.display = False
+        for _ in range(4):
+            await pilot.pause()
+        app._fill_resume_until_scrollable(0)
+        for _ in range(12):
+            await pilot.pause()
+        mounted_hidden = len(app._resume_pending_head)
+        after = len(view.blocks())
+        # Un-hiding lays the view out, which fires the extent hook the fill
+        # re-arms from; that resume is the next cell's subject.
+        view.display = True
+        for _ in range(2):
+            await pilot.pause()
+
+    assert after == before, (
+        "pages were mounted into a transcript that could not be laid out",
+        before,
+        after,
+    )
+    assert mounted_hidden == 200, ("the fill consumed pending history while hidden", mounted_hidden)
+
+
+@pytest.mark.asyncio
+async def test_a_fill_deferred_on_a_hidden_transcript_resumes_when_shown() -> None:
+    """The complement of standing down: the reader still gets their reserve.
+
+    Standing the fill down while hidden is only safe if un-hiding re-arms it.
+    The re-arm is keyed on the EXTENT (``_transcript_extent_changed``), the one
+    place already told about every geometry change — showing the view lays it
+    out, which changes the extent. A resumed reserve needs one or two pages, not
+    the budget.
+    """
+    app = OperatorApp(lambda: _factory(SidebarRemote("deferred-fill")))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+        view = app._transcript_view()
+        app._resume_pending_head = [
+            _message("assistant", "older row " + "x" * 100) for _ in range(200)
+        ]
+        mounts: list[int] = []
+        real_mount = app._mount_older_resume_page
+
+        def counted(*args, **kwargs):  # type: ignore[no-untyped-def]
+            mounts.append(1)
+            return real_mount(*args, **kwargs)
+
+        app._mount_older_resume_page = counted  # type: ignore[method-assign]
+        view.display = False
+        for _ in range(4):
+            await pilot.pause()
+        app._resume_fill_active = True
+        app._fill_resume_until_scrollable(0)
+        for _ in range(12):
+            await pilot.pause()
+        hidden_mounts = len(mounts)
+        view.display = True
+        for _ in range(60):
+            await pilot.pause()
+        resumed = len(mounts) - hidden_mounts
+        goal = float(view.container_size.height or view.size.height)
+        scroll = float(view.scroll_y)
+
+    assert hidden_mounts == 0, ("the hidden fill mounted pages", hidden_mounts)
+    assert resumed, "the fill never resumed after the view was shown"
+    assert resumed <= 2, ("the resumed fill needed more than two pages", resumed)
+    assert scroll >= goal, ("the resumed fill did not reach its reserve", scroll, goal)
