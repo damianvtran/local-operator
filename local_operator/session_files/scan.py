@@ -69,7 +69,9 @@ from local_operator.supplements.contract import (
 #: tool, a changed rule): a cache written under another version is discarded and rebuilt, so a
 #: rule change is never half-applied to an old session. Also covers the denylist's verdicts,
 #: which are baked into the stored records.
-SCAN_SCHEMA: Final = 4
+#: 5: assistant directory listings (``_directory_listing``) are admitted as mentions; the bump
+#: is what makes an existing session's cached ledger rescan and gain them on its next read.
+SCAN_SCHEMA: Final = 5
 
 #: ``origin`` vocabulary, strongest evidence first. A file seen under several origins keeps the
 #: strongest (``write`` then a later ``bash > same`` is still "written"), so the filter chips are
@@ -179,6 +181,200 @@ _MENTION_ARG_KEYS: Final = (
     "cwd",
 )
 _TRAILING_PUNCTUATION: Final = ".,;:!?)]}'\""
+
+# -- assistant directory listings ----------------------------------------------------------
+# THE IDIOM. An agent closing a turn names its deliverables as a directory plus a list of bare
+# names ("Files are in `~/Documents/Radient/`:\n- Report.pdf\n- Report (editable).docx — notes").
+# The full path is never spelled out, so the prose pass cannot see it, and the command that
+# wrote the files often used shell variables (`"$D/$N.pdf"`) the bash grammar cannot resolve.
+#
+# THE CONTRACT is the desktop renderer's, MIRRORED 1:1 so the ledger and the renderer's
+# transcript links / old-daemon fallback list the same files. Source: local-operator-ui
+# src/renderer/src/features/chat/utils/link-grammar.ts at 6dfe529fbd - `listingDirectoryIn`
+# :1128, `listedTargetFor` :1151, `LISTED_ANNOTATION_SEPARATORS` :1189, `listedEntryFor` :1252,
+# `itemText` :1318, `listedTargetsIn` :1352. A change there is a change here;
+# tests/unit/session_files/test_dir_listing.py carries the renderer suite's cases.
+#
+# Why so narrow: a bare name ANYWHERE else in assistant prose is a guess about which directory
+# was meant, and a wrong guess is a catalog row pointing at nothing. The introducer (a rooted
+# directory, then ":") is what turns the guess into a statement; resolving only the IMMEDIATE
+# list is what keeps a later, unrelated bullet list from inheriting it. Every candidate still
+# goes through `_note_mention`, whose stat IS the renderer's evidence oracle: an annotated head
+# is admitted only when `<dir>/<head>` exists as a regular file, and the denylist and dedupe
+# apply unchanged.
+#
+# COST. Assistant prose is the bulk of a journal, so a row is JSON-parsed only when its RAW
+# bytes hold the idiom's seam: a ":" ending a line, then (after optional blank lines and
+# indent) a list marker. In compact JSON a newline is the two bytes `\n` (a tab `\t`, a CR
+# `\r`), which is what this probe matches; a row without it costs one regex scan, zero parses.
+_DIR_LISTING_PROBE: Final = re.compile(
+    rb":(?:[ ]|\\[tr])*(?:\\n(?:[ ]|\\[tr])*)+(?:[-*+]|[0-9]{1,9}[.)])(?:[ ]|\\t)"
+)
+_ASSISTANT_ROW_PROBE: Final = re.compile(rb'"role"\s*:\s*"assistant"')
+#: A rooted path-shaped token (the renderer's `targetsIn` is narrower to rooted forms by the
+#: `rooted` test anyway): preceded by a boundary, so "and/or" is not a path.
+_LISTING_DIR_TOKEN: Final = re.compile(r"(?:^|(?<=[\s(\[`\"'*_]))(?:file://|~/|/)[^\s<>\"'`)\]]*")
+_LISTING_INTRODUCER_TAIL: Final = re.compile(r"^[`*_]*\s*:\s*$")
+_LISTED_EXTENSION: Final = re.compile(r"^[a-z0-9]{1,10}$")
+_LISTED_TRAILING_PUNCTUATION: Final = re.compile(r"[.,;:]+$")
+_PLACEHOLDER_MARKERS: Final = re.compile(r"[$*?{}<>\u2026]")
+_LIST_ITEM_LINE: Final = re.compile(r"^(\s*)([-*+]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?(.*)$")
+_CONTENT_INDENT: Final = re.compile(r"^\s*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?")
+_WHOLE_CODE_SPAN: Final = re.compile(r"^`([^`]+)`$")
+_LEADING_CODE_SPAN: Final = re.compile(r"^`([^`]+)`(.*)$", re.DOTALL)
+_MARKDOWN_ESCAPE: Final = re.compile(r"\\([!-/:-@\[-`{-~])")
+#: Spaces included on both sides of every dash, so a hyphen inside a filename ("2026-10-27")
+#: never splits it; ": " needs only the trailing space because that is how a note is written.
+_LISTED_ANNOTATION_SEPARATORS: Final = (" \u2014 ", " \u2013 ", " - ", ": ")
+_MAX_LISTED_CHARS: Final = 4096
+
+
+def _extension_of(path: str) -> str | None:
+    """The renderer's ``extensionOf``: lowercase suffix, ``None`` for none/dotfile/trailing dot."""
+    name = path[max(path.rfind("/"), path.rfind("\\")) + 1 :]
+    dot = name.rfind(".")
+    if dot <= 0 or dot == len(name) - 1:
+        return None
+    return name[dot + 1 :].lower()
+
+
+def _listing_directory(line: str) -> str | None:
+    """``listingDirectoryIn``: the rooted directory ``line`` introduces a list under, or None.
+
+    A one-segment ``/word`` is refused: it is as likely a slash command (``Run /new:``) as a
+    folder, so a list under ``/tmp:`` deliberately stays unresolved.
+    """
+    if not line.rstrip().endswith(":"):
+        return None
+    spans = list(_LISTING_DIR_TOKEN.finditer(line))
+    if not spans:
+        return None
+    last = spans[-1]
+    token = _LISTED_TRAILING_PUNCTUATION.sub("", last.group(0))
+    if not _LISTING_INTRODUCER_TAIL.match(line[last.start() + len(token) :]):
+        return None
+    is_url = token.startswith("file://")
+    directory = unquote(urlsplit(token).path) if is_url else token
+    if not directory or not (directory.endswith("/") or _extension_of(directory) is None):
+        return None
+    rooted = is_url or directory.startswith("~/") or directory.find("/", 1) != -1
+    return directory if rooted else None
+
+
+def _listed_target(directory: str, item: str) -> str | None:
+    """``listedTargetFor`` under the panel's known-extension policy: ``<dir>/<name>`` or None."""
+    name = _LISTED_TRAILING_PUNCTUATION.sub("", item.strip())
+    if not name or len(name) > _MAX_LISTED_CHARS:
+        return None
+    if "\n" in name or "\r" in name or "/" in name or "\\" in name:
+        return None
+    if _PLACEHOLDER_MARKERS.search(name):
+        return None
+    extension = _extension_of(name)
+    if not extension or not _LISTED_EXTENSION.match(extension) or not is_known_extension(name):
+        return None
+    return f"{directory.rstrip('/' + chr(92))}/{name}"
+
+
+def _listed_entry(directory: str, item: str) -> str | None:
+    """``listedEntryFor``: the ONE candidate a list item names, unresolved, or None.
+
+    An annotated head (text before the FIRST separator by position) that qualifies by shape is
+    final: when the disk refuses it, the item is not retried as a whole name, because the whole
+    item is then a name plus prose. The renderer asks its evidence oracle here; the ledger
+    returns the head and lets ``_note_mention``'s stat be that oracle.
+    """
+    text = item.strip()
+    cuts = [at for at in (text.find(sep) for sep in _LISTED_ANNOTATION_SEPARATORS) if at > 0]
+    if cuts:
+        head = text[: min(cuts)]
+        target = _listed_target(directory, head)
+        if target is not None and target.endswith(f"/{head}"):
+            return target
+    return _listed_target(directory, text)
+
+
+def _item_text(content: str) -> str:
+    """``itemText``: a list item's name text, code span unwrapped, markdown escapes decoded."""
+    trimmed = content.strip()
+    whole = _WHOLE_CODE_SPAN.match(trimmed)
+    if whole:
+        return whole.group(1)
+    leading = _LEADING_CODE_SPAN.match(trimmed)
+    if leading:
+        return leading.group(1) + _MARKDOWN_ESCAPE.sub(r"\1", leading.group(2))
+    return _MARKDOWN_ESCAPE.sub(r"\1", trimmed)
+
+
+def _marker_kind(marker: str) -> str:
+    """One CommonMark list: the bullet character, or an ordered list's delimiter."""
+    return f"ordered{marker[-1]}" if marker[0].isdigit() else marker
+
+
+def _directory_listing(text: str) -> list[str]:
+    """``listedTargetsIn``: unresolved ``<dir>/<name>`` candidates, in document order.
+
+    Follows CommonMark list structure as the renderer's mdast sees it: blank lines may separate
+    the introducer and the items; the first item sits inside the introducer's block (its content
+    indent, under four more); all items share one marker kind; a deeper marker is a nested list
+    and is skipped; a non-marker line straight after an item continues it, so that item is
+    dropped. Known gap, shared with the renderer: a list inside a blockquote is not walked.
+    """
+    if ":" not in text:
+        return []
+    found: list[str] = []
+    lines = text.split("\n")
+    index = 0
+    while index < len(lines):
+        introducer = lines[index]
+        directory = _listing_directory(introducer)
+        if directory is None:
+            index += 1
+            continue
+        indent_match = _CONTENT_INDENT.match(introducer)
+        floor = len(indent_match.group(0)) if indent_match else 0
+        base: int | None = None
+        marker = ""
+        pending: str | None = None
+        blank = False
+        cursor = index + 1
+        while cursor < len(lines):
+            row = lines[cursor].removesuffix("\r")
+            cursor += 1
+            if not row.strip():
+                blank = True
+                continue
+            item = _LIST_ITEM_LINE.match(row)
+            indent = len(row) - len(row.lstrip())
+            if item is None:
+                if base is None:
+                    cursor -= 1
+                    break
+                if not blank or indent > base:
+                    pending = None
+                    continue
+                cursor -= 1
+                break
+            blank = False
+            kind = _marker_kind(item.group(2))
+            if base is None:
+                if indent < floor or indent > floor + 3:
+                    cursor -= 1
+                    break
+                base, marker = indent, kind
+            if indent > base:
+                continue
+            if indent < base or kind != marker:
+                cursor -= 1
+                break
+            if pending is not None:
+                found.append(pending)
+            pending = _listed_entry(directory, _item_text(item.group(3)))
+        if pending is not None:
+            found.append(pending)
+        # The list's own lines cannot introduce another list at this level.
+        index = max(index + 1, cursor)
+    return found
 
 
 @dataclass(slots=True)
@@ -384,6 +580,11 @@ class FileScan:
             return
         if b'"role"' in line and _USER_ROW_PROBE.search(line):
             self._on_user_row(seq, line)
+            return
+        # The listing seam is probed FIRST (a memchr-backed regex over the row) and the role
+        # second, so ordinary assistant prose, the bulk of a journal, is never parsed.
+        if b":" in line and _DIR_LISTING_PROBE.search(line) and _ASSISTANT_ROW_PROBE.search(line):
+            self._on_assistant_text_row(seq, line)
             return
         if b'"tool_name"' in line:
             match = _TOOL_NAME_PROBE.search(line)
@@ -870,6 +1071,35 @@ class FileScan:
             if not is_known_extension(os.path.basename(raw)):
                 continue
             self._note_mention(raw, "prose", None, seq, ts, seen=seen)
+
+    def _on_assistant_text_row(self, seq: int, line: bytes) -> None:
+        """Admit the files an assistant reply lists under a directory (``_directory_listing``).
+
+        Reached only after :meth:`feed`'s byte probes saw the listing seam in an assistant row.
+        Only the directory-listing idiom is read here: ordinary assistant prose paths stay
+        unadmitted, because the agent narrates paths it merely considered far more often than
+        a user names a file.
+        """
+        row = _row(line)
+        payload = row.get("payload") if row else None
+        if not isinstance(payload, dict):
+            return
+        content = payload.get("content")
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            ]
+        else:
+            return
+        ts = _row_ts(line)
+        seen: set[str] = set()
+        for text in texts:
+            for raw in _directory_listing(text):
+                self._note_mention(raw, "prose", None, seq, ts, seen=seen)
 
     def _note_argument_mentions(
         self,
