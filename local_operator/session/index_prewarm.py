@@ -69,6 +69,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from local_operator.session.cold_metadata import safe_metadata_path
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.replay_cache import (
     REPLAY_CACHE_ENTRIES,
@@ -618,13 +619,24 @@ async def warm_replay_cache(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         try:
             replay = await load_cold_replay(
                 key,
-                lambda directory=directory, key=key: asyncio.to_thread(
+                lambda directory=directory, key=key, session_id=session_id: asyncio.to_thread(
                     build_cold_replay,
                     directory,
                     key=key,
                     want_checkpoint=True,
                     through_id=None,
                     strict_cut=False,
+                    # FILE THE COLD RECORD, at the path ``AttachedSession.cold``
+                    # files it (``root`` is the config dir that owns
+                    # ``sessions/``). The RAM entry above dies with this process;
+                    # the record is the only part of this parse the NEXT start's
+                    # first open can use, and without it most first opens missed
+                    # (a real store: 827 of 850 recently touched journals had
+                    # none). Same witness discipline as the open path, because it
+                    # IS the open path's code: ``build_cold_replay`` files only
+                    # after its after-read re-stat equals ``key``, and only for
+                    # the cold-open request shape this call makes.
+                    metadata_path=safe_metadata_path(root, session_id),
                 ),
             )
         except Exception:  # noqa: BLE001 — one unreadable journal must not end the preheat

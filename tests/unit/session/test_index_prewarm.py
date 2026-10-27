@@ -732,9 +732,17 @@ async def test_teardown_cancels_a_warm_parked_in_a_request(tmp_path, monkeypatch
 async def test_the_model_warm_never_selects_an_archived_journal(tmp_path, monkeypatch):
     """An archived conversation stays out of the warm: it must not be decompressed.
 
-    Selection goes through ``compression.transcript_source`` (the archive-aware
-    resolver), so an archive is seen as an archive rather than as "no journal"
-    by a plain-name stat, and skipped.
+    This pins the INVARIANT, not a fix: the earlier selection already excluded an
+    archive, because ``_is_archived(entry)`` skipped it before any stat (this test
+    passes on that code too). What #2992 changed is HOW: selection now goes
+    through ``compression.transcript_source``, the archive-aware resolver the
+    ``test_transcript_reads_are_archive_aware`` guard requires, and skips a codec.
+
+    That resolver also changed one answer, pinned by the third session: a
+    session holding BOTH a plain journal and an archive (the shape a crash
+    between ``_compress_session_locked``'s quarantine rename and its unlink
+    leaves) is now SELECTED, because every reader resolves it to the plain
+    journal — so it is exactly a conversation the user can open uncompressed.
     """
     from local_operator.session import compression
 
@@ -748,4 +756,14 @@ async def test_the_model_warm_never_selects_an_archived_journal(tmp_path, monkey
     assert compression.compress_session(archived).status == "compressed"
     assert compression.archive_path(archived) is not None
 
-    assert prewarm._newest_journals(root, limit=8) == ["plain"]
+    both = root / "sessions" / "both"
+    journal(root, "both", mtime=old)
+    assert compression.compress_session(both).status == "compressed"
+    archive = compression.archive_path(both)
+    assert archive is not None
+    plain_bytes = (root / "sessions" / "plain" / "transcript.jsonl").read_bytes()
+    (both / "transcript.jsonl").write_bytes(plain_bytes)
+    os.utime(both / "transcript.jsonl", (3_000.0, 3_000.0))
+    assert compression.archive_path(both) == archive, "the archive must still sit beside it"
+
+    assert prewarm._newest_journals(root, limit=8) == ["both", "plain"]

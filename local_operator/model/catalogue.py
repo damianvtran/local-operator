@@ -361,11 +361,15 @@ def _holder_proven_dead(holder: str) -> bool:
     would write. A holder that is provably not running can be stolen from at once.
 
     Only a definite "no such process" counts (``procstate.pid_liveness`` is
-    three-valued): doubt, an unparsable holder, or a pid on ANOTHER host sharing
-    the cache dir all keep the lease's normal expiry, which is the conservative
-    direction — a live peer called dead costs a duplicate fetch, never a wrong
-    answer, but the lease exists to avoid exactly that. Pid reuse can only make a
-    dead holder read live, i.e. fall back to today's expiry.
+    three-valued): doubt or an unparsable holder keeps the lease's normal expiry,
+    which is the conservative direction. Pid reuse can only make a dead holder
+    read live, i.e. fall back to today's expiry.
+
+    A CACHE DIR SHARED ACROSS HOSTS IS UNSUPPORTED. The token carries no host
+    identity, so a live holder on another host is judged by THIS host's pid
+    table and can be read as dead and taken over. The cost is bounded: one
+    duplicate fetch, never a wrong answer (both writers publish the same kind of
+    document atomically) — but avoiding that fetch is the lease's whole purpose.
     """
     from local_operator.procstate import pid_liveness
 
