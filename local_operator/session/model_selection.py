@@ -30,6 +30,44 @@ from local_operator.session.transcript import _iter_complete_lines_backward
 SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
 SELECTION_VERSION = 2
 
+#: The byte spellings a selection row's ``custom_type`` member can take: the
+#: compact one :meth:`TranscriptEntry.to_json` writes, and Python's default
+#: ``json.dumps`` separators (``": "``), the only other spelling a Python writer
+#: produces for this all-ASCII member — ``ensure_ascii`` cannot escape it.
+#:
+#: WHY THE BACKWARD READERS FILTER ON THEM rather than on bare ``"custom_type"``:
+#: ``frontend_state_checkpoint_v1`` rows also carry that marker and are by far
+#: the largest rows in a long journal (~0.7 MB each, 160 of them in a measured
+#: real journal), yet neither :func:`_settled_selection` nor
+#: :func:`_read_refusal` can use one — both stop only on a ``selected_model``
+#: row. Decoding them was the whole cost of the settle scan there. The VALUE is
+#: what discriminates: a checkpoint's ``state`` carries ``"selected_model"`` as a
+#: KEY, so a needle on the bare word would match every checkpoint row.
+#:
+#: SOUND ONLY BECAUSE NO WRITER SPELLS IT ANY OTHER WAY. Audited 2026-10-26:
+#: every journal row is serialized by ``TranscriptEntry.to_json``, whose
+#: ``separators=(",", ":")`` date from the file's first commit (381377fe82d),
+#: including ``harness_import``; fork, compression, sync and mesh moves copy row
+#: bytes verbatim and never re-serialize. ``tail_anchor._SELECTION_NEEDLES`` and
+#: ``transcript.find_row_for_custom_type`` already depend on the compact
+#: spelling. The spaced one is accepted too because it is free (one more
+#: substring search on a skipped row) and is what a hand-written or test journal
+#: built with plain ``json.dumps`` contains. A NEW writer that escapes key
+#: characters (``\\u`` sequences) would make these readers skip its selection
+#: rows: route it through ``to_json``. A false presence — the spelling inside
+#: some string value — is harmless: the row is decoded and judged exactly as
+#: before (and inside a JSON string the quotes are escaped, so it is rare).
+_SELECTION_ROW_NEEDLES = tuple(
+    b'"custom_type"' + separator + json.dumps(SELECTED_MODEL_CUSTOM_TYPE).encode("utf-8")
+    for separator in (b":", b": ")
+)
+
+
+def _may_be_selection_row(raw: bytes) -> bool:
+    """Whether ``raw`` could be a selection row; ``False`` is a proof it is not."""
+    return any(needle in raw for needle in _SELECTION_ROW_NEEDLES)
+
+
 #: Revision of the RULES that turn journal rows into a ``StoredModelSelection``:
 #: :func:`_selection`, :func:`selection_from_payloads` and :func:`_settled_selection`.
 #:
@@ -470,10 +508,11 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
         unusable = False
         for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
             for raw in lines:
-                # The same cheap prefilter the forward scan uses, in bytes: a
-                # row without the marker cannot be a selection row, and most
-                # rows are messages that would otherwise be JSON-decoded.
-                if b'"custom_type"' not in raw:
+                # A row without the selection spelling cannot be a selection
+                # row, and the checkpoint rows this skips are most of the bytes
+                # (see _SELECTION_ROW_NEEDLES for why the narrow spelling is
+                # sound). The forward fold stays broad: it folds checkpoints.
+                if not _may_be_selection_row(raw):
                     continue
                 try:
                     row = json.loads(raw.decode("utf-8", errors="replace"))
@@ -702,7 +741,8 @@ def _read_refusal(directory: Path) -> str | None:
         handle.seek(0, os.SEEK_END)
         for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
             for raw in lines:
-                if b'"custom_type"' not in raw:
+                # In step with _settled_selection: the same rows, the same filter.
+                if not _may_be_selection_row(raw):
                     continue
                 try:
                     row = json.loads(raw.decode("utf-8", errors="replace"))
