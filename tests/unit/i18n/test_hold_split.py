@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from rich.cells import cell_len
@@ -35,7 +36,7 @@ from local_operator.i18n.messages import Msg, envelope
 REPO = Path(__file__).resolve().parents[3]
 
 
-def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict]) -> None:
+def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict[str, Any]]) -> None:
     """Judge ledger freshness on the LATEST row per namespace, and prove the rest superseded.
 
     WHY NOT EVERY ROW. ``i18n/ledger.json`` is append-only: re-auditing a namespace at
@@ -49,7 +50,7 @@ def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict]) ->
     at a DIFFERENT hash (a second row at the same hash is a duplicate, not history).
     """
 
-    by_namespace: dict[str, list[dict]] = {}
+    by_namespace: dict[str, list[dict[str, Any]]] = {}
     for entry in rows:  # file order: the ledger is read last-wins
         by_namespace.setdefault(entry["namespace"], []).append(entry)
     for namespace, entries in by_namespace.items():

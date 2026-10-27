@@ -586,11 +586,11 @@ def _tree_bytes(root: Path) -> set[bytes]:
 
 def _interleaved_remove(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch, *, hold_lock: bool
-) -> tuple[Any, str]:
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
     """Force the order: dirty check says CLEAN -> an edit commits -> the unpull runs.
 
     The edit is started from the check's own return path (the exact window the
-    review found), in another thread. Returns ``(edit outcome, edit marker)``.
+    review found), in another thread. Returns ``(edit outcome, edit marker, remove result)``.
     """
     import contextlib
     import threading
@@ -638,7 +638,7 @@ def _interleaved_remove(
         monkeypatch.setattr(writes, "config_write_lock", lambda *_a, **_k: contextlib.nullcontext())
     result = writes.remove_linked(_ctx(config_dir), record, discard_local_changes=False)
     outcome["thread"].join(timeout=10)
-    return outcome, marker, result  # type: ignore[return-value]
+    return outcome, marker, result
 
 
 async def test_an_edit_racing_a_linked_remove_is_refused_not_destroyed(
