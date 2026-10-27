@@ -1006,14 +1006,22 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         # with the version this build writes, and reading it back compares
         # against the same live constant (see ``_index_from_raw``).
         "version": TRANSCRIPT_INDEX_VERSION,
+        # THE RESUME HEAD: ``version``, ``sig``, ``scan`` and
+        # ``journal_generation`` come FIRST and in this order, so that
+        # :func:`_read_resume_head` can say how many bytes the next refresh would
+        # re-read from a few KB at the top of the file, with no parse of the
+        # whole multi-MB document (the paint hold decides that on the event
+        # loop). Readers of the document are order-blind (``json.loads``); only
+        # the head reader depends on this, and it falls back to the pre-head
+        # rule for any file laid out otherwise.
         "sig": index.sig,
+        "scan": index.scan.to_payload(),
+        "journal_generation": index.journal_generation,
         "coverage": index.coverage,
         "checkpoints": [c.to_payload() for c in index.checkpoints],
         "messages": [m.to_payload() for m in index.messages],
         "runs": [r.to_payload() for r in index.runs],
         "naming": index.naming,
-        "scan": index.scan.to_payload(),
-        "journal_generation": index.journal_generation,
         "journal_rows": index.journal_rows,
         "journal_ranges": index.journal_ranges,
         "source_projection_facts": index.source_projection_facts,
@@ -1025,6 +1033,103 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         tmp.replace(path)
     except OSError:
         logger.warning("could not write the transcript index for %s", session_id, exc_info=True)
+
+
+#: How much of the cache file :func:`_read_resume_head` reads. The head holds
+#: four small fields (an id, a uuid and a handful of integers: ~300 bytes
+#: measured on the 51.7 MB fixture), so 4 KiB is generous; a head that does not
+#: fit simply answers "unknown" and the caller keeps the pre-head rule.
+_RESUME_HEAD_BYTES = 4096
+
+_HEAD_KEYS = ("version", "sig", "scan", "journal_generation")
+
+
+def _read_resume_head(
+    config_dir: str | Path, session_id: str
+) -> tuple[dict[str, Any], ScanState, str] | None:
+    """``(sig, scan, journal_generation)`` from the cache file's first bytes.
+
+    WHY (conversation-first-paint R2): the paint hold must decide whether a
+    refresh is payable by the bytes it will RE-READ, and that is
+    ``journal size - scan.window_offset`` -- a figure that lives inside a cache
+    document of up to several MB. Parsing it on the event loop would be the very
+    cost the hold exists to keep off the first frame, so :func:`write_index`
+    puts these fields first and this decodes only them, value by value, from a
+    bounded read.
+
+    ``None`` for anything it cannot vouch for: no file, an unreadable one, the
+    wrong version, or a head laid out otherwise (every cache written before
+    this). The caller then keeps its pre-head answer, so an old cache costs the
+    old behaviour until its next write, never a wrong deferral.
+    """
+    try:
+        with index_path(config_dir, session_id).open("rb") as handle:
+            head = handle.read(_RESUME_HEAD_BYTES)
+    except OSError:
+        return None
+    # A cut multibyte character can only sit at the END of the read, past the
+    # fields this decodes; ``ignore`` keeps the prefix intact.
+    text = head.decode("utf-8", errors="ignore")
+    decoder = json.JSONDecoder()
+    values: dict[str, Any] = {}
+    position = 1 if text.startswith("{") else -1
+    try:
+        for expected in _HEAD_KEYS:
+            if position < 0:
+                return None
+            key, position = decoder.raw_decode(text, position)
+            if key != expected or text[position : position + 1] != ":":
+                return None
+            values[key], position = decoder.raw_decode(text, position + 1)
+            if text[position : position + 1] != ",":
+                return None
+            position += 1
+    except ValueError:
+        return None
+    sig = values["sig"]
+    scan = ScanState.from_payload(values["scan"])
+    generation = values["journal_generation"]
+    if (
+        values["version"] != TRANSCRIPT_INDEX_VERSION
+        or not isinstance(sig, dict)
+        or scan is None
+        or not isinstance(generation, str)
+    ):
+        return None
+    return sig, scan, generation
+
+
+def _rederive_bytes(
+    st: os.stat_result, sig: dict[str, Any], scan: ScanState, generation: str
+) -> int:
+    """How many journal bytes :func:`refresh_index` would read for this cache.
+
+    The same ladder, in the same order, minus the one check that needs the
+    journal's bytes (``_verify_tail``; a tail that fails it rescans, which this
+    reports as the cheaper incremental figure -- the pre-R2 direction, and rare):
+    current -> nothing; grown on the same inode -> from the resume WINDOW, not
+    from the old end, because the incremental path re-derives the window's run
+    whole; anything else -> the whole journal.
+    """
+    if generation and _sig_matches(sig, st):
+        return 0
+    if generation and st.st_ino == sig.get("inode") and st.st_size > scan.offset:
+        return max(0, st.st_size - scan.window_offset)
+    return st.st_size
+
+
+def _cached_refresh_cost(
+    config_dir: str | Path, session_id: str, journal: os.stat_result
+) -> tuple[bool, int | None]:
+    """``(has_previous, rederive_bytes)`` for the paint-path payability rule.
+
+    ``has_previous`` is "a cache file exists" exactly as before; the byte figure
+    is ``None`` when the head cannot state it (see :func:`_read_resume_head`).
+    """
+    head = _read_resume_head(config_dir, session_id)
+    if head is not None:
+        return True, _rederive_bytes(journal, *head)
+    return _stat_or_none(index_path(config_dir, session_id)) is not None, None
 
 
 def _sweep_missing(config_dir: str | Path) -> None:
@@ -2698,20 +2803,37 @@ def _key(config_dir: str | Path, session_id: str) -> tuple[str, str]:
     return (str(config_dir), session_id)
 
 
-def scan_payable_in_budget(journal_bytes: int | None, *, has_previous: bool, wait_s: float) -> bool:
+def scan_payable_in_budget(
+    journal_bytes: int | None,
+    *,
+    has_previous: bool,
+    wait_s: float,
+    rederive_bytes: int | None = None,
+) -> bool:
     """Whether a refresh can plausibly land inside a first-paint wait of ``wait_s``.
 
     THE ONE RULE for "is this scan worth paying for on the paint path", shared
     by :func:`checkpoints_view`'s first-paint wager and the paint hold below so
-    the two can never disagree about which journals are small enough. A usable
-    previous index makes the refresh incremental (milliseconds), so it is always
-    payable; otherwise the journal's size is planned against
-    :data:`_FIRST_PAINT_SCAN_BYTES_PER_S` (see that constant for the
-    measurement and why it is not a fraction of it).
+    the two can never disagree about which journals are small enough. Every
+    byte figure is planned against :data:`_FIRST_PAINT_SCAN_BYTES_PER_S` (see
+    that constant for the measurement and why it is not a fraction of it).
+
+    WITH A PREVIOUS INDEX THE FIGURE IS THE RE-READ, NOT ZERO
+    (conversation-first-paint R2, 2026-10-27). The incremental path re-derives
+    from the resume window -- the start of the run holding the last user turn --
+    so a long agent run puts the window arbitrarily far back: on the 51.7 MB
+    fixture a ONE-ROW append re-read 37.9 MB / 6,973 rows at 304-637 ms CPU,
+    more than its cold scan, and the old "a previous index is always payable"
+    let that run straight through the paint hold (append opens 351-375 ms under
+    load; 101 ms with the scan deferred). ``rederive_bytes`` is that re-read;
+    ``None`` means the caller could not state it (a cache laid out before the
+    resume head) or chose not to (the manifest wager -- see the note at its call
+    in :func:`checkpoints_view`), which keeps the old answer: payable.
     """
-    return has_previous or (
-        journal_bytes is not None and journal_bytes <= _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
-    )
+    budget = _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
+    if has_previous:
+        return rederive_bytes is None or rederive_bytes <= budget
+    return journal_bytes is not None and journal_bytes <= budget
 
 
 # ---------------------------------------------------------------------------
@@ -2907,10 +3029,16 @@ def _yield_to_other_opens(
         nonlocal unpayable
         if unpayable is None:
             journal = _stat_or_none(_journal_path(config_dir, session_id))
-            has_previous = _stat_or_none(index_path(config_dir, session_id)) is not None
-            unpayable = journal is not None and not scan_payable_in_budget(
-                journal.st_size, has_previous=has_previous, wait_s=_FIRST_PAINT_WAIT_S
-            )
+            if journal is None:
+                unpayable = False
+            else:
+                has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+                unpayable = not scan_payable_in_budget(
+                    journal.st_size,
+                    has_previous=has_previous,
+                    rederive_bytes=rederive,
+                    wait_s=_FIRST_PAINT_WAIT_S,
+                )
         return unpayable
 
     def pause() -> None:
@@ -2952,13 +3080,18 @@ def _defer_for_paint(config_dir: str | Path, session_id: str) -> asyncio.Event |
     journal = _stat_or_none(_journal_path(config_dir, session_id))
     if journal is None:
         return None
-    # A cache file on disk stands in for "a previous index": parsing it here would
-    # be the very work this defers. A cache that exists but does not parse makes
-    # this answer "payable" and the scan run now -- today's behaviour, never a
-    # deferral the manifest's own rule would not have made.
-    has_previous = _stat_or_none(index_path(config_dir, session_id)) is not None
+    # A cache file on disk stands in for "a previous index", and its HEAD for
+    # what the refresh will re-read: parsing the whole document here would be
+    # the very work this defers. A cache that exists but whose head does not
+    # state the figure makes this answer "payable" and the scan run now --
+    # today's behaviour, never a deferral the manifest's own rule would not have
+    # made.
+    has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
     if scan_payable_in_budget(
-        journal.st_size, has_previous=has_previous, wait_s=_FIRST_PAINT_WAIT_S
+        journal.st_size,
+        has_previous=has_previous,
+        rederive_bytes=rederive,
+        wait_s=_FIRST_PAINT_WAIT_S,
     ):
         return None
     return entry[1]
@@ -3397,6 +3530,15 @@ async def checkpoints_view(
         # `ready` — which the consumer does not re-read. So the size gate is for
         # the COLD case only, where the build is a full scan and the wait really
         # does cost the whole budget.
+        #
+        # NO `rederive_bytes` HERE, DELIBERATELY (conversation-first-paint R2).
+        # The paint hold judges an incremental refresh by its re-read, because
+        # there a wrong "payable" puts a 300-640 ms scan on the GIL beside a
+        # first frame. This wager's errors run the other way: an over-generous
+        # wait is an idle `await` (no CPU, no paint) that answers `building` at
+        # the budget, while a refused wait answers `building` where the scan
+        # might have landed — the regression QA Q1 pinned. And a refresh the
+        # hold deferred is already never awaited (`refresh_deferred` below).
         payable = scan_payable_in_budget(
             probe.journal_bytes, has_previous=probe.index is not None, wait_s=wait_s
         )
