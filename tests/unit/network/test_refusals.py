@@ -368,6 +368,48 @@ def test_init_in_an_isolated_home_explains_the_missing_launchagent(
     assert json.loads(capsys.readouterr().out)["relay"] == ""
 
 
+def test_init_port_is_the_port_serve_binds(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-INIT-PORT: `init --port N` advertised N but never saved it, so `serve`
+    (which reads ``network.port``) tried the default and failed "address in use".
+    The port the record publishes and the port the relay resolves must be one."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    args = Namespace(
+        name="port-net",
+        listen_address="",
+        port=47811,
+        advertise_hosts=[],
+        no_start=True,
+        json=True,
+    )
+    assert net_cli._cmd_init(args) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["listen"]["port"] == 47811
+
+    # The serve/autostart path's own resolver, read fresh from the config store.
+    assert relay.NetworkSettings.from_config().port == 47811
+
+
+def test_init_without_port_writes_no_port_setting(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Negative control: no `--port` leaves ``network.port`` unset (still the default)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    args = Namespace(
+        name="default-net",
+        listen_address="",
+        port=0,
+        advertise_hosts=[],
+        no_start=True,
+        json=True,
+    )
+    assert net_cli._cmd_init(args) == 0  # noqa: SLF001
+    capsys.readouterr()
+    assert store.read_config(("network", "port"), None, root=root) is None
+    assert relay.NetworkSettings.from_config().port == relay.DEFAULT_PORT
+
+
 # ---------------------------------------------------------------------------
 # R7 — the audit bounds are real config keys
 # ---------------------------------------------------------------------------

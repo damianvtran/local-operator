@@ -1346,6 +1346,23 @@ def _cmd_init(args: argparse.Namespace) -> int:
     settings = imported.NetworkSettings.from_config()
     listen_address = args.listen_address or settings.listen_address
     port = args.port or settings.port
+    if args.port and args.port != settings.port:
+        # THE PORT THE RECORD ADVERTISES MUST BE THE PORT THE RELAY BINDS. The
+        # record's listen block and our member row (below) publish ``port`` to
+        # every joiner, but ``serve``/autostart read ``network.port`` from the
+        # config — so a port given only here was advertised and never bound:
+        # measured, init advertised :47811 and the relay tried the default :4097
+        # ("address in use") until ``network.port`` was set by hand. Persisted
+        # through the registry writer (range-validated, watcher-notified) BEFORE
+        # the record exists, so a refused value creates no network either.
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        setting = settings_io.BY_KEY.get("network.port")
+        if setting is None:  # pragma: no cover - registry guarantee
+            raise RuntimeError("network.port is not registered in settings_io")
+        settings_io.write_setting(ConfigManager(config_dir=Path(config_dir())), setting, port)
     identity = load_or_mint()
 
     # ONE ANSWER TO "WHERE CAN PEERS REACH US", used for BOTH the record's listen
