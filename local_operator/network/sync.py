@@ -506,6 +506,25 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # about a transcript to save exactly nothing. Leaving it behind costs one
     # bounded tail read, once: the process that paid it records the answer.
     "preview.json": "a listing cache derived from the archive's tail; the destination rebuilds it",
+    # THE HUB PUBLICATION RECEIPTS (``hub_sync/service.py``: ``PUSH_PREVIEW_DIR``,
+    # and its sibling the first-publication store, ``publication-previews``, which
+    # is a default argument there and so was never seen by the constant guard).
+    # They live under ``<config>/hub/``, beside ``sessions/``, so no session
+    # directory holds one today; they are named here so that a directory with
+    # this name is refused rather than silently adopted. A receipt is a 15-minute
+    # authorization to send ONE reviewed proposal to ONE hub link, bound to this
+    # machine's local-bytes fingerprint, policy revision and credential. On
+    # another device it can never be confirmed (the fingerprint, link and
+    # credential do not match) and, worse, a copied accepted-but-unreconciled
+    # first-publication receipt is the only record of a hub row, so duplicating
+    # it would invite a double reconciliation. Never copied.
+    "push-previews": (
+        "a short-lived, machine-bound authorization to republish one reviewed hub link"
+    ),
+    "publication-previews": (
+        "a machine-bound first-publication receipt (and the only record of an accepted-but-"
+        "unreconciled hub row); never duplicated onto another device"
+    ),
     # The conversation's own approval choice (``session.approval_policy``). A
     # copy is a NEW conversation and must not inherit a loosened consent; the
     # same rule `fork` applies. Classified here rather than left unlisted, and
