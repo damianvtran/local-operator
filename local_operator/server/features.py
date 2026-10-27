@@ -627,6 +627,15 @@ def static_feature_flags() -> dict[str, Any]:
         # and are deliberately not re-declared here: a client requires the
         # conjunction, it does not get a second spelling of the same fact.
         "agents_config": 1,
+        # The configuration run can also revise the operator's OWN skills: its
+        # declaration names the opt-in `skill` tool (list/show/create/update,
+        # through the same write path as `skill_write`). ITS OWN KEY for the
+        # reason `agents_config` states: an older backend has `agents_config`
+        # but builds no `skill` tool, so a run there would answer "I can't edit
+        # skills" -- the Skills tab must not mount its composer against it.
+        # The renderer requires it together with `agents_config` and
+        # `skill_library` (its settle diff reads the skills list).
+        "agents_config_skills": 1,
         # Durable conversation pins: the `pinned` flag on every catalogue
         # row, and POST /v1/desktop/sessions/{id}/pin.
         #

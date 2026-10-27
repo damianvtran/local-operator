@@ -373,6 +373,9 @@ async def test_the_capability_key_is_published(config_app) -> None:
     response = await client.get("/v1/capabilities")
     features = response.json()["result"]["features"]
     assert features["agents_config"] == 1
+    # The Skills tab's composer: its own key, because an older core has
+    # `agents_config` but builds no `skill` tool.
+    assert features["agents_config_skills"] == 1
     # The run needs these to be stoppable and to show its results; the client
     # requires the conjunction rather than a second spelling of the same fact.
     for needed in ("session_interrupt", "profile_catalogue", "team_catalogue"):
@@ -471,6 +474,23 @@ async def test_the_declaration_bounds_the_run_by_name_and_by_op(tmp_path: Path) 
     allowed = await agent.execute("call-2", {"op": "list"})
     assert not allowed.is_error
     assert agent_calls == ["list"]
+
+
+def test_the_declaration_names_skill_with_its_own_op_scope() -> None:
+    """``skill`` is declared, and SCOPED: list/show/create/update and nothing else.
+
+    Pinned as a literal rather than compared with the tool's own enum, because
+    today they are the same four ops -- an omitted scope would be invisible until
+    the tool grew a ``delete`` or ``publish``, which is exactly when it matters.
+    """
+    from local_operator.session_factory import (
+        AGENTS_CONFIG_TOOL_OPS,
+        AGENTS_CONFIG_TOOLS,
+    )
+
+    assert "skill" in AGENTS_CONFIG_TOOLS
+    assert AGENTS_CONFIG_TOOL_OPS["skill"] == ("list", "show", "create", "update")
+    assert set(AGENTS_CONFIG_TOOL_OPS) == set(AGENTS_CONFIG_TOOLS), "every declared tool is scoped"
 
 
 def test_the_op_scope_is_one_way(tmp_path: Path) -> None:
@@ -575,8 +595,10 @@ def test_a_run_whose_marker_lost_its_purpose_still_shapes(tmp_path: Path) -> Non
         damaged, [_op_tool("agent", ["list", "sync"], []), _op_tool("bash", [], [])]
     )
     assert apply_config_run_shape(session) is True
+    # ``skill`` is merged in by the shape itself (real builder, opt-in tool).
     assert {tool.name for tool in session._tools} == {
-        "agent"
+        "agent",
+        "skill",
     }, "an origin of agent-config must shape the run even when its marker is unreadable"
 
 
@@ -617,7 +639,10 @@ def test_applying_the_run_shape_needs_the_marker(tmp_path: Path) -> None:
     )
     assert apply_config_run_shape(run) is True
     assert run._goal_state.run_brief == AGENTS_CONFIG_PREAMBLE
-    assert {tool.name for tool in run._tools} == {"agent"}, "the declaration must be in force"
+    assert {tool.name for tool in run._tools} == {
+        "agent",
+        "skill",
+    }, "the declaration must be in force"
 
 
 def test_the_preamble_rides_the_tail_and_round_trips() -> None:

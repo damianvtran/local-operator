@@ -175,6 +175,102 @@ def update(
     return _result(config_dir, name, authored)
 
 
+def require_unshadowed(config_dir: Path, name: str) -> None:
+    """Refuse a CREATE whose name a read-only root already supplies.
+
+    WHY THE ROUTE DOES NOT CALL THIS. ``create`` over a builtin/external/project
+    name is exactly what "Copy to my skills" is: the operator, on the Skills tab,
+    deliberately makes an editable copy that shadows the original. A configuration
+    run (``tools/skill_tool.py``) is a model acting on a typed request, and a
+    same-named local skill silently replaces the original for EVERY later session
+    -- the same harm ``profile_scope.shadow_refusal`` exists to stop for agents.
+    So the run must not, and the shadowing decision stays a click the operator
+    makes.
+
+    Only the read-only roots are judged here. A name the managed root (or a hub
+    link) already owns is left to ``ManagedSkillStorage.author``, whose
+    ``alias-occupied`` answer is the precise one for that case. The refusal is
+    ``skill-not-editable`` because its remedy is the one that code already names
+    -- the operator's own Copy to my skills -- not "pick another name".
+    """
+    validate_name(name)
+    found = _discovered(config_dir, name)
+    if found is None:
+        return
+    managed = os.path.realpath(Path(config_dir) / "skills")
+    base = os.path.realpath(found.base_dir)
+    if base == managed or base.startswith(managed.rstrip(os.sep) + os.sep):
+        return
+    raise LinkError(
+        "skill-not-editable",
+        f"a read-only skill named {name!r} already exists; a same-named copy would "
+        "replace it in every session",
+    )
+
+
+def patch(
+    config_dir: Path,
+    name: str,
+    files: Iterable[Mapping[str, str]],
+    remove_paths: Iterable[str],
+    expected_fingerprint: str,
+) -> dict[str, Any]:
+    """Change SOME files of a managed skill and keep the rest (CAS on the folder).
+
+    WHY AN OVERLAY AND NOT ``update``. ``author`` replaces the whole file set, so
+    an editor that sends only ``SKILL.md`` deletes every reference file. The
+    Skills tab's editor sends the full set on purpose; a model revising one file
+    will not reliably resend the others, and the loss would be silent. Here the
+    named ``files`` replace or add, ``remove_paths`` delete, and every other file
+    is carried over byte for byte.
+
+    THE CAS IS CHECKED TWICE. Once here, against the document the overlay is built
+    on -- an overlay on bytes the caller never saw would merge their edit into
+    someone else's -- and again by ``author`` under ``config_write_lock`` right
+    before the swap, which is what closes the gap between this read and the write.
+    Strict on purpose: unlike the route this has no lost-response retry to
+    tolerate, so a stale fingerprint is always refused, even for an edit that
+    would change nothing.
+    """
+    storage = require_managed(config_dir, name)
+    # The same refusal ``author`` gives, made BEFORE the read: a bundle link may
+    # hold binary files, and reading it as a text document would answer
+    # "invalid skill" instead of the true "not editable here".
+    owner = prov.alias_owner(config_dir, "skill", name)
+    record = prov.read_baseline(config_dir, "skill", owner) if owner is not None else None
+    if record is not None and (
+        "bundle" in (record.fields or {}) or record.content_state == "absent"
+    ):
+        raise LinkError("skill-not-editable", "this skill's link has no editable text copy here")
+    # Under the root lock: the swap holds it, so the read never sees a half-swapped
+    # directory.
+    with config_write_lock(config_dir):
+        destination = storage.path(name)
+        if not destination.is_dir():
+            raise LinkError("skill-not-found", "no such skill in the managed skills folder")
+        current = SkillDocument.from_directory(destination)
+    if current.fingerprint != expected_fingerprint:
+        raise LinkError("local-concurrent-edit", "the skill changed since it was read")
+    merged = {file.path: file.content for file in current.files}
+    changed = {item["path"]: item["content"] for item in files}
+    removed = list(remove_paths)
+    both = sorted(set(changed) & set(removed))
+    if both:
+        raise SkillValidationError(
+            "skill-validation", f"a path cannot be both written and removed: {both[0]}"
+        )
+    for path in removed:
+        if path not in merged:
+            raise SkillValidationError("skill-validation", f"no file to remove: {path}")
+        del merged[path]
+    merged.update(changed)
+    document = document_from_files(
+        name, ({"path": path, "content": content} for path, content in merged.items())
+    )
+    authored = storage.author(name, document, expected_fingerprint)
+    return _result(config_dir, name, authored)
+
+
 def folder_differs_from_baseline(storage: ManagedSkillStorage, record: prov.BaselineRecord) -> bool:
     """Whether the linked folder holds bytes the hub has never been given.
 

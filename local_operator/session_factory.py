@@ -1265,7 +1265,14 @@ def _env_details(cwd: str | None = None, session_id: str = "") -> str:
 #: named -- and that is deliberate on the product's side too: no desktop op and no
 #: page control deletes a profile or a team today, so a conversational delete
 #: would be the first delete in the product.
-AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team")
+#:
+#: ``skill`` is the run's skill editor (``tools/skill_tool.py``). Unlike the other
+#: two it is NOT a default tool: the factory never builds it, so naming it here is
+#: only half of reaching it -- :func:`apply_config_run_shape` merges it in after
+#: the declaration is set. Its ops stop at create/update for the same reason
+#: ``team_delete`` is unnamed, and it has no publish/pull op for the reason
+#: ``agent sync`` is excluded.
+AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team", "skill")
 
 #: The ops of :data:`AGENTS_CONFIG_TOOLS` a configuration run may reach, per tool
 #: name. Every declared tool is listed: an omission would mean "every op this
@@ -1274,6 +1281,7 @@ AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team")
 AGENTS_CONFIG_TOOL_OPS: dict[str, tuple[str, ...]] = {
     "agent": ("list", "show", "search", "install", "create", "update"),
     "team": ("list", "show", "create", "update"),
+    "skill": ("list", "show", "create", "update"),
 }
 
 #: The preamble injected as the run's ``<configuration-run>`` system block.
@@ -1291,9 +1299,9 @@ AGENTS_CONFIG_TOOL_OPS: dict[str, tuple[str, ...]] = {
 #: is nevertheless ENFORCED by the inventory and not by these sentences -- a
 #: prompt is a statement, and the declaration is the mechanism.
 AGENTS_CONFIG_PREAMBLE = """This session is a CONFIGURATION RUN: the operator started it from the
-Agents page to author reusable agents and teams by conversation. It is not their
-conversation with you -- they watch this run on that page, and nothing here
-reaches any other chat.
+Agents page to author reusable agents, teams and skills by conversation. It is
+not their conversation with you -- they watch this run on that page, and nothing
+here reaches any other chat.
 
 What you do here: find, create and update agent profiles and teams with the
 `agent` and `team` tools, then say plainly what you changed.
@@ -1301,11 +1309,19 @@ What you do here: find, create and update agent profiles and teams with the
 What you cannot do here, and must not promise: reset or sync an agent profile
 (`agent reset` / `agent sync` overwrite instructions the operator wrote or fetch
 from the hub with their credentials), delete a team, run shell commands, or read
-and write files. Those tools are genuinely unreachable in this session, not
-merely discouraged -- if a call is refused, say so and offer the manual path
+and write arbitrary files. Those tools are genuinely unreachable in this session,
+not merely discouraged -- if a call is refused, say so and offer the manual path
 instead of retrying.
 
 Do not pass `scope`; everything you write is saved to the operator's account.
+
+You can also revise the operator's own skills with the `skill` tool. `show` a
+skill before you `update` it, pass the `expected_fingerprint` that `show`
+returned, and send only the files you change -- the others are kept. Built-in,
+external and project skills are read-only here: say so and point the operator to
+Copy to my skills on the Skills tab; never create a same-named copy. Edit only the
+skill the operator's message names unless they ask for more. You cannot publish,
+pull or delete skills: say what you changed and leave publishing to the operator.
 
 Prefer the smallest change that answers the request, and prefer reporting what
 you did over asking permission you cannot be given."""
@@ -1398,6 +1414,12 @@ def apply_config_run_shape(session: Any) -> bool:
         )
     session.set_run_preamble(AGENTS_CONFIG_PREAMBLE)
     session.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops=AGENTS_CONFIG_TOOL_OPS)
+    # `skill` is opt-in (absent from DEFAULT_TOOL_NAMES), so the factory built
+    # none to keep: build it NOW, after the declaration, through the one merge
+    # that re-filters by name and op scope -- so it can never enter a session
+    # whose declaration does not name it. A name subset, so this cannot rescue
+    # any other capability tool the declaration already dropped.
+    session._merge_capability_tools(("skill",))
     return True
 
 
