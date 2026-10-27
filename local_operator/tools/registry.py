@@ -53,7 +53,9 @@ from local_operator.web_search.tool import build_web_search_tool
 #: session without wakes never advertises a tool that can only error; the
 #: table order below is also the provider-visible tool order.
 TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
-    "bash": lambda _context: builtin.build_bash_tool(),
+    # Takes the context: a scout's write-confined shell is described as
+    # sandboxed and approved at ``read`` tier (see ``build_bash_tool``).
+    "bash": lambda context: builtin.build_bash_tool(context),
     "read": lambda _context: builtin.build_read_tool(),
     "read_public_copy": lambda _context: build_read_public_copy_tool(),
     "write": lambda _context: builtin.build_write_tool(),

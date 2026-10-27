@@ -884,6 +884,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``proc-groups`` under the store root, plus the ``.lock`` suffix on its own lock file",
     ),
     "local_operator/tools/spill.py": (1, "``spill``, where elided tool output is parked"),
+    # Declared, not classified: the shell confinement profile only DENIES this suffix
+    # to sandboxed children. The files it matches live under the config root
+    # (`network/store.py` writes `networks/<id>.secrets.json`), so listing it in the
+    # copy set or EXCLUDED_ENTRIES would claim a session entry that never exists.
+    "local_operator/tools/confinement.py": (
+        1,
+        "``_NETWORK_SECRETS_SUFFIX`` ('.secrets.json'): a kernel-deny regex suffix for "
+        "``network/networks/<id>.secrets.json`` under the CONFIG dir, never an entry of a "
+        "session directory",
+    ),
     "local_operator/tools/builtin.py": (
         3,
         "the ripgrep excludes file under the agent home, plus two HOST-id fragments "

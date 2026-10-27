@@ -2038,6 +2038,15 @@ class ToolContext(BaseModel):
     #: may reach, and what the boundary explicitly does not cover, is stated in
     #: ``local_operator.tools.confinement``.
     confinement_root: str | None = None
+    #: The ONLY directory this session's SHELL may write to, or ``None`` for an
+    #: ordinary shell. Unlike ``confinement_root`` it confines nothing else:
+    #: reads stay open and ``read``/``glob``/``web_fetch`` are untouched. Set
+    #: for ``scout`` children (``harness.subagent._with_readonly_shell_floor``)
+    #: so a read-only role can run ``strings`` or unpack an archive into its
+    #: scratchpad and still change nothing; enforced by the kernel sandbox in
+    #: ``local_operator.tools.confinement.ShellWriteConfinement``, and a host
+    #: that cannot enforce it refuses the command rather than run it.
+    shell_write_root: str | None = None
     #: This session's own DIRECTORY on disk (``.../sessions/<id>``), absolute,
     #: or ``None`` wherever ``scratchpad_dir`` is ``None`` (agent directories
     #: are exported wholesale and stay free of runtime files). Its one consumer

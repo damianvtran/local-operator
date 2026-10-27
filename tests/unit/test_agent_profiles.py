@@ -137,12 +137,17 @@ def test_a_read_only_role_changes_nothing_but_can_still_reach_the_web() -> None:
     network access in this session" and fell back to grepping the local disk
     for facts it had been asked to find on the web. Retrieval mutates no more
     than reading a file does, so it belongs in a surface that is defined by
-    making no local change — while ``bash``, ``eval``, ``browser``, ``write``
-    and ``edit`` stay out by name, tier check or not."""
+    making no local change — while ``eval``, ``browser``, ``write`` and
+    ``edit`` stay out by name, tier check or not. (``bash`` is in, but only
+    ever write-confined by the kernel sandbox — see the comment below.)"""
     names = {tool.name for tool in filter_tools(ALL_TOOLS, seed("scout"))}
-    assert names <= {"read", "glob", "grep", "web_search", "web_fetch"}
+    assert names <= {"read", "glob", "grep", "bash", "web_search", "web_fetch"}
     assert {"web_search", "web_fetch"} <= names
-    assert not names & {"bash", "eval", "browser", "write", "edit"}
+    # ``bash`` IS in the scout seed (1.3.0), and is safe there only because
+    # child construction write-confines it in a kernel sandbox or strips it
+    # (``harness.subagent._with_readonly_shell_floor``) -- pinned in
+    # ``tests/unit/session/test_launch_subagent.py``.
+    assert not names & {"eval", "browser", "write", "edit"}
 
 
 def test_every_allowlisted_seed_carries_the_read_only_network_tools() -> None:
