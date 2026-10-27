@@ -77,7 +77,10 @@ decodes. What stays true from before: this reader never starts an owner.
 
 from __future__ import annotations
 
+import copy
 import os
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -115,6 +118,14 @@ PREVIEW_SCAN_BYTES = 32 * 1024 * 1024
 #: unbounded decode loop on the sidebar's first-paint path.
 PREVIEW_SCAN_ROWS = 40_000
 
+# A small process-wide LRU matches the sidebar's retained-presentation working
+# set without letting cached previews grow with the whole catalog. The key is a
+# filesystem witness, not writer notifications: the TUI, desktop and mobile can
+# all write a journal owned by this process's cache.
+_PREVIEW_CACHE_ENTRIES = 8
+_PREVIEW_CACHE: OrderedDict[tuple[object, ...], SavedPreview] = OrderedDict()
+_PREVIEW_CACHE_LOCK = threading.Lock()
+
 
 @dataclass(frozen=True)
 class SavedPreview:
@@ -124,6 +135,64 @@ class SavedPreview:
 
 
 def read_saved_preview(directory: Path) -> SavedPreview:
+    """Read a preview, reusing it only while the journal identity is unchanged.
+
+    ``ctime_ns`` is deliberate alongside size and mtime: rewind/import can rewrite
+    bytes in place and restore mtime, while compaction replaces the inode. The
+    witness is captured before the read and checked again before publication, so
+    a write racing the replay cannot become a cached answer for the new file.
+    Returned messages are deep-copied because history consumers annotate their
+    Pydantic models; a cache hit must not share that mutable state.
+    """
+    from local_operator.session import compression
+
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
+    key = _preview_cache_key(directory, path)
+    with _PREVIEW_CACHE_LOCK:
+        cached = _PREVIEW_CACHE.get(key)
+        if cached is not None:
+            _PREVIEW_CACHE.move_to_end(key)
+    if cached is not None:
+        return _copy_preview(cached)
+
+    preview = _read_saved_preview(directory, path)
+    try:
+        # Do not publish a read that overlapped a writer. The next caller must
+        # replay from the new journal rather than receiving this mixed witness.
+        if _preview_cache_key(directory, path) != key:
+            return preview
+    except OSError:
+        return preview
+    with _PREVIEW_CACHE_LOCK:
+        # One live identity per session: an append or rewind retires its old key
+        # immediately instead of leaving stale generations resident in the LRU.
+        for old_key in [item for item in _PREVIEW_CACHE if item[0] == str(directory)]:
+            _PREVIEW_CACHE.pop(old_key, None)
+        _PREVIEW_CACHE[key] = _copy_preview(preview)
+        while len(_PREVIEW_CACHE) > _PREVIEW_CACHE_ENTRIES:
+            _PREVIEW_CACHE.popitem(last=False)
+    return preview
+
+
+def _preview_cache_key(directory: Path, path: Path) -> tuple[object, ...]:
+    stat = path.stat()
+    return (
+        str(directory),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+def _copy_preview(preview: SavedPreview) -> SavedPreview:
+    return SavedPreview(copy.deepcopy(preview.messages), preview.partial, preview.cwd)
+
+
+def _read_saved_preview(directory: Path, path: Path) -> SavedPreview:
     # ``transcript_for_read``: a compressed session's preview must come from the
     # archive, not from the absent plain name. ``None`` is raised as the same
     # ``FileNotFoundError`` this reader has always raised for a session with no
