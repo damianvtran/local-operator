@@ -390,10 +390,15 @@ _ROSTER_REFRESH_COALESCE_S = 0.05
 #: switch is the one request the user is actively waiting on, so its reads get a
 #: pool nothing else queues on.
 #:
-#: TWO workers: one build and one read per switch at most, and switches on one
-#: connection are serialised by the server's switch lane, so a deeper pool would
-#: only hold idle threads. Process-wide and lazy because most runtimes never
-#: switch, and the test suite builds hundreds of handles that never do.
+#: TWO workers, sized for the process, not one connection. The pool is shared
+#: process-wide, so two connections (desktop and phone) can switch at the same
+#: time, and a superseded credential read is not awaited by its reply, so it
+#: holds a worker until it finishes even though its result is discarded. Two is
+#: still enough: a switch needs at most one build and one read, the read takes
+#: ~15 ms, so a transient queue behind a superseded read or a second
+#: connection's switch costs milliseconds, and a deeper pool would mostly hold
+#: idle threads. Lazy because most runtimes never switch, and the test suite
+#: builds hundreds of handles that never do.
 _SWITCH_EXECUTOR_WORKERS = 2
 _switch_executor_pool: concurrent.futures.ThreadPoolExecutor | None = None
 _switch_executor_lock = threading.Lock()
@@ -5523,10 +5528,15 @@ class ServingSessionHandle(SessionHandle):
         # build can reach discovery's synchronous HTTP legs, and that one goes
         # to the switch's own pool rather than the default executor the lanes
         # saturate (see :data:`_SWITCH_EXECUTOR_WORKERS` for the measurement).
-        from local_operator.model.configure import model_spec_is_warm
+        # The memo's row is HANDED to the build so the inline path performs no
+        # lookup of its own: a warm check against one cache followed by a build
+        # that resolves through another is how a "warm" switch used to run the
+        # cold body on the loop anyway (review round 2, R2-1).
+        from local_operator.model.configure import warm_model_info
 
-        if model_spec_is_warm(provider, model_id):
-            spec = build_model_spec(provider, model_id)
+        warm_info = warm_model_info(provider, model_id)
+        if warm_info is not None:
+            spec = build_model_spec(provider, model_id, info=warm_info)
         else:
             spec = await self._loop.run_in_executor(
                 _switch_executor(), build_model_spec, provider, model_id

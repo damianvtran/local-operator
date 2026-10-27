@@ -201,7 +201,10 @@ async def test_a_warm_spec_builds_inline_and_a_cold_one_leaves_the_default_execu
         monkeypatch.setattr(configure, "build_model_spec", build)
         warm = {"switch-b"}
         monkeypatch.setattr(
-            configure, "model_spec_is_warm", lambda _provider, model_id: model_id in warm
+            configure,
+            "warm_model_info",
+            # Any non-None row means warm; the stubbed build ignores it.
+            lambda _provider, model_id: object() if model_id in warm else None,
         )
 
         await handle.set_model_effort("test", "switch-b", None)
@@ -215,19 +218,72 @@ async def test_a_warm_spec_builds_inline_and_a_cold_one_leaves_the_default_execu
         await session.dispose()
 
 
-def test_model_spec_is_warm_only_after_a_full_resolve_in_this_bucket() -> None:
-    """The warm predicate answers from the full resolver's own memo, and refuses
+def test_warm_model_info_only_after_a_full_resolve_in_this_bucket() -> None:
+    """The warm row comes from the full resolver's own memo, and is refused for
     every provider whose resolution reads a credential store (``openai``)."""
     from local_operator.model import configure
 
     configure.invalidate_model_info_cache()
     try:
-        assert not configure.model_spec_is_warm("anthropic", "claude-opus-5")
-        configure.resolve_model_info("anthropic", "claude-opus-5")
-        assert configure.model_spec_is_warm("anthropic", "claude-opus-5")
+        assert configure.warm_model_info("anthropic", "claude-opus-5") is None
+        resolved = configure.resolve_model_info("anthropic", "claude-opus-5")
+        warm = configure.warm_model_info("anthropic", "claude-opus-5")
+        assert warm == resolved
+        # A copy: the memo row is shared with the paint path.
+        assert warm is not configure.warm_model_info("anthropic", "claude-opus-5")
         # Canonicalised like the build: the hosting-qualified spelling is the
         # same key.
-        assert configure.model_spec_is_warm("anthropic", "anthropic/claude-opus-5")
-        assert not configure.model_spec_is_warm("openai", "gpt-5")
+        assert configure.warm_model_info("anthropic", "anthropic/claude-opus-5") == resolved
+        assert configure.warm_model_info("openai", "gpt-5") is None
     finally:
         configure.invalidate_model_info_cache()
+
+
+@pytest.mark.asyncio
+async def test_a_warm_switch_never_runs_the_resolver_inline(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A switch judged warm builds from the memo's row, with NO lookup (R2-1).
+
+    The warm check reads ``_paint_memo``; the build used to resolve again
+    through the ``lru_cache``, a different cache that can have dropped the key
+    (it holds 64 entries; the paint memo evicts only prior-bucket keys). Here
+    the LRU is cleared after a full resolve, which is that eviction, and the
+    resolver body is stubbed slow. Fails on the old code: the "warm" build ran
+    the slow body on the loop thread.
+    """
+    import threading
+    import time
+
+    from local_operator.model import configure
+
+    configure.invalidate_model_info_cache()
+    session = _session(tmp_path)
+    loop = asyncio.get_running_loop()
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path), config_dir=tmp_path)
+    try:
+        configure.resolve_model_info("test", "switch-b")
+        assert configure.warm_model_info("test", "switch-b") is not None
+        configure._resolve_model_info_cached.cache_clear()
+
+        body_threads: list[str] = []
+        real_body = configure._resolve_model_info_body
+
+        def slow_body(*args: Any, **kwargs: Any) -> Any:
+            body_threads.append(threading.current_thread().name)
+            time.sleep(0.3)
+            return real_body(*args, **kwargs)
+
+        monkeypatch.setattr(configure, "_resolve_model_info_body", slow_body)
+
+        await handle.set_model_effort("test", "switch-b", None)
+
+        assert session.model.model_id == "switch-b"
+        loop_thread = threading.current_thread().name
+        assert (
+            loop_thread not in body_threads
+        ), f"a warm switch ran the resolver on the loop: {body_threads}"
+    finally:
+        configure.invalidate_model_info_cache()
+        await handle.dispose()
+        await session.dispose()

@@ -1546,7 +1546,7 @@ class FakeSessionShell(Session):
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
-    def refresh_tools(self, tools) -> bool:
+    def refresh_tools(self, tools, *, republish: bool = True) -> bool:
         """Swap the inventory and report it as reaching the next model call.
 
         The real ``Session`` publishes its tools array once per turn, so its

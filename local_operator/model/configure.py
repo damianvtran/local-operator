@@ -2825,8 +2825,8 @@ _paint_refreshing: set[tuple[str, str]] = set()
 _paint_memo: dict[tuple[str, str, int], ModelInfo] = {}
 
 
-def model_spec_is_warm(provider: str, model_id: str) -> bool:
-    """Whether :func:`build_model_spec` would answer from memory, with no IO.
+def warm_model_info(provider: str, model_id: str) -> ModelInfo | None:
+    """The memoised metadata row a live switch may build from inline, or None.
 
     WHY. A live ``/model`` builds its spec on the session loop's critical path,
     and the serving handle used to send EVERY build to the default executor
@@ -2835,23 +2835,36 @@ def model_spec_is_warm(provider: str, model_id: str) -> bool:
     blocking work, and the switch queued behind it: measured with
     ``scripts/bench_model_switch.py --condition busy`` (12 lanes, a 1,000-child
     roster), the build STARTED up to 750 ms after the handler asked for it, for
-    a body that takes well under 1 ms once the memo holds the model. A caller
-    that gets ``True`` here may run the build inline.
+    a body that takes well under 1 ms once the memo holds the model.
 
-    CONSERVATIVE by construction: ``False`` whenever the answer could involve IO.
+    WHY A ROW AND NOT A BOOLEAN (review round 2, R2-1). This used to be a
+    ``model_spec_is_warm`` predicate, and the caller then ran
+    ``build_model_spec(provider, model_id)``, which resolves AGAIN through the
+    ``lru_cache`` — a different cache keyed differently (by ``base``, capped at
+    64 entries) from the ``_paint_memo`` the predicate read. The two disagreed
+    in reproducible ways (a base-scoped ``configure_model`` resolve; LRU
+    eviction past 64 keys), and each disagreement ran the cold body INLINE on
+    the loop. Returning the row and passing it as ``build_model_spec(...,
+    info=row)`` means the inline build performs no lookup at all, so "warm" and
+    "IO-free" are the same fact by construction rather than by two caches
+    happening to agree.
+
+    ``None`` (build off-loop, which resolves normally) whenever the answer could
+    involve IO or the row could be stale:
 
     * ``openai``/``meta-muse`` resolve through ``_catalogue_credential`` on
-      every call (a credential-store read that keys the memo), so they are
-      never warm here;
+      every call (a credential-store read that keys the memo), so they never
+      have a warm row here;
     * local runtimes resolve through their own endpoint-scoped path;
     * a key that DEGRADED is re-resolved once its short TTL expires
       (``_memo_attempt``), so a degraded key is never warm;
-    * otherwise warm means the full resolver answered this exact key in the
-      CURRENT TTL bucket, which is what ``_paint_memo`` records (it is written
-      only by :func:`resolve_model_info`, after the cached body ran).
+    * otherwise the row is what the full resolver answered for this exact key
+      in the CURRENT TTL bucket — ``_paint_memo`` is written only by
+      :func:`resolve_model_info`, after the cached body ran.
 
     Canonicalised exactly as :func:`build_model_spec` does before it resolves,
-    so the key checked is the key the build would read.
+    so the row is the one the build would have resolved. A deep copy, the same
+    contract :func:`resolve_model_info` keeps: the memo row is shared.
     """
     from local_operator.providers.local import LOCAL_PROVIDER_IDS
 
@@ -2860,13 +2873,14 @@ def model_spec_is_warm(provider: str, model_id: str) -> bool:
         name = bare if bare is not None else model_id
         canonical = "test" if provider.strip().lower() == "noop" else provider.strip().lower()
         if canonical in ("openai", "meta-muse") or canonical in LOCAL_PROVIDER_IDS:
-            return False
+            return None
         bucket = int(time.time() // DEFAULT_TTL_S)
         if (canonical, name, bucket, "", None) in _degraded_until:
-            return False
-        return (canonical, name, bucket) in _paint_memo
+            return None
+        info = _paint_memo.get((canonical, name, bucket))
+        return None if info is None else info.model_copy(deep=True)
     except Exception:  # noqa: BLE001 — "not warm" is always a safe answer
-        return False
+        return None
 
 
 def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, bool]:

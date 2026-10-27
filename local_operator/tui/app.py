@@ -45444,8 +45444,15 @@ class OperatorApp(App[None]):
             # move with it: a typed `/model provider/id` is exactly the route
             # that can land on a provider this host has no credential for.
             # OFF the Textual thread: the claim's credential read is a SQLite
-            # scan, and this is the keystroke the user is waiting on (PR #3053,
-            # the same move the serving host makes for its own switch).
+            # scan on the keystroke the user is waiting on (PR #3053, the same
+            # move the serving host makes for its own switch). This removes ONE
+            # of the two store reads on this keystroke, not both: the access
+            # note just below (``_model_access_note`` -> ``view_rows``) still
+            # scans on the UI thread, deliberately. Its answer is INLINE in the
+            # receipt line (`` · <provider> <state>``) printed in this same
+            # call, so taking it off-thread would split the receipt into a
+            # later second notice -- a user-visible receipt change this PR does
+            # not make (review round 2, R2-2).
             self._publish_model_access_off_thread(session)
         suffix, warning = ("", None) if write_only else self._model_access_note(provider)
         if _rehome:
