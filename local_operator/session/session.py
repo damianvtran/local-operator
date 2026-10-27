@@ -8387,9 +8387,14 @@ class Session:
             # and a root-less session's declaration stops naming one it cannot
             # have. AFTER the rebuild, whose failure clears the root. Only names:
             # ``bash`` is admitted from the inventory the session already holds,
-            # never fabricated, like the child floor's ``available``.
+            # never fabricated, like the child floor's ``available`` -- so the
+            # root is offered only when that inventory HAS a ``bash`` (a host or
+            # config that disabled it would otherwise declare a tool resolving
+            # to nothing, and the run would end reporting it unresolved).
+            holds_bash = any(tool.name == "bash" for tool in tools)
             names = readonly_shell_floor_names(
-                self._attached_profile_tools, shell_root=self._shell_write_root
+                self._attached_profile_tools,
+                shell_root=self._shell_write_root if holds_bash else None,
             )
             # Parity with the child prune: a shell that can background keeps
             # the tools that observe and await its jobs, or its own

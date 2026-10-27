@@ -3295,11 +3295,19 @@ def test_the_shell_floor_itself_adds_or_strips_bash() -> None:
 _PRE_SHELL_SCOUT_TOOLS = "read,glob,grep,list_variables,read_variable,web_search,web_fetch"
 
 
-def _session_with_bash(tmp_path, monkeypatch, *, available: bool, pre_shell_row: bool = False):
+def _session_with_bash(
+    tmp_path,
+    monkeypatch,
+    *,
+    available: bool,
+    pre_shell_row: bool = False,
+    holds_bash: bool = True,
+):
     """A real Session over a real session-store directory, holding the
     ordinary ``exec``-tier ``bash`` -- the shape ``lop exec`` builds before
     the profile is attached. ``pre_shell_row`` rewrites the installed scout
-    row's tool tag to :data:`_PRE_SHELL_SCOUT_TOOLS`."""
+    row's tool tag to :data:`_PRE_SHELL_SCOUT_TOOLS`; ``holds_bash=False``
+    builds the session without ``bash`` (a host or config that disabled it)."""
     from local_operator.agent_profiles import install_seed
     from local_operator.agents import AgentEditFields, AgentRegistry
     from local_operator.tools import builtin
@@ -3328,7 +3336,7 @@ def _session_with_bash(tmp_path, monkeypatch, *, available: bool, pre_shell_row:
     session = Session(
         model=MODEL,
         stream_fn=OneShotStream(),
-        tools=[ordinary, builtin.build_read_tool()],
+        tools=[ordinary, builtin.build_read_tool()] if holds_bash else [builtin.build_read_tool()],
         transcript=Transcript(config / "sessions" / "scout-top-level"),
         system_blocks_provider=lambda: [],
         agent_registry=agents,
@@ -3522,6 +3530,23 @@ async def test_a_top_level_scout_without_a_sandbox_declares_no_shell(
         declared_tool_inventory(session, Namespace(tools=None)), unattended=True
     )
     assert _bash_of(session) is None
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_top_level_scout_whose_session_holds_no_bash_declares_none(tmp_path, monkeypatch):
+    """A root but no ``bash`` in the inventory (a host or config disabled
+    it): the floor admits the shell, never fabricates it, like the child
+    floor's ``available`` -- so the declaration names no ``bash`` (which
+    would resolve to nothing and be reported unresolved at run end) and no
+    ``jobs``/``wait`` to observe it."""
+    session = _session_with_bash(
+        tmp_path, monkeypatch, available=True, pre_shell_row=True, holds_bash=False
+    )
+    assert session.attach_agent_profile("scout")
+    assert session._shell_write_root is not None
+    names = session.attached_profile_tools
+    assert "bash" not in names and not {"jobs", "wait"} & set(names)
     await session.dispose()
 
 

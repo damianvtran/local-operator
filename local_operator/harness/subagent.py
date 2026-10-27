@@ -1101,7 +1101,7 @@ def readonly_shell_floor_names(
     they cannot drift: the delegated child's allowlist (:func:`run_subagent`
     builds and pins from it), the child's built inventory
     (:func:`_with_readonly_shell_floor`), and a profile ATTACHED top-level
-    (``Session._floored_profile_tools``), whose names become the unattended
+    (``Session._apply_readonly_shell_role``), whose names become the unattended
     ``lop exec --profile`` declaration. That last one is why this is a
     name-level function: before it existed the top-level declaration was the
     raw stored row, so a scout installed before the shell got no ``bash`` at
