@@ -2805,7 +2805,16 @@ def hold_paint(config_dir: str | Path, session_id: str) -> Callable[[], None]:
 # free) -> legacy 29-32 ms; a busy loop (GIL held) -> 707-739 ms. The executor
 # is not the contended resource, and no lock is: the GIL is. Python's 5 ms
 # switch interval hands the loop thread only a share of the interpreter, so
-# every millisecond of the open stretched by the scan's share.
+# every millisecond of the open stretched by the scan's share. With this rule:
+# legacy-after-real 76-122 ms (median 103) against base 308-417 (median 347),
+# 6/6 interleaved reps at load ~38; the real open and the frames unchanged, and
+# the real index reaches ``ready`` ~50 ms later (median 402 vs 350 ms after its
+# snapshot) because it gave way. The open's own ``a.acquire`` fell from 143-182
+# to 16-22 ms. The residual above the 28-40 ms floor lies BEFORE the route takes
+# its hold: previous snapshot to this route's entry is 51-86 ms (base 117-144),
+# which includes the client's new request and the server's parse of it, both
+# still sharing the GIL with the scan -- nothing marks an open as in flight
+# earlier than ``hold_paint``.
 #
 # THE RULE. A background refresh pauses at row boundaries (and before each
 # whole-document JSON step) while ANY paint hold is live for a session OTHER
