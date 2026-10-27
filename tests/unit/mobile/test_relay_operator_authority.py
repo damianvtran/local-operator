@@ -696,9 +696,7 @@ def test_a_new_anchor_lifts_a_revocation_recorded_on_this_machine(
 # ---------------------------------------------------------------------------
 
 
-def _paired_certificate(
-    config_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[str, str, Any]:
+def _paired_certificate(config_root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str, Any]:
     """A REAL operator-signed device certificate, the device id it names, and the anchor.
 
     Real rather than synthetic because the guard parses it with the same reader
@@ -855,15 +853,17 @@ def test_pair_status_carries_the_operator_public_key_the_certificate_verifies_ag
 
     body = client.get(f"/api/pair/{device_id}").json()
     assert body["operator_spki"] == devices.encode_spki(anchor.spki)
-    point = base64.urlsafe_b64decode(body["operator_spki"] + "=" * (-len(body["operator_spki"]) % 4))
-    assert verify_device_cert(certificate, operator_spki=point, now=parsed.issued_at) is not None, (
-        "the returned key does not verify the returned certificate"
+    point = base64.urlsafe_b64decode(
+        body["operator_spki"] + "=" * (-len(body["operator_spki"]) % 4)
     )
+    assert (
+        verify_device_cert(certificate, operator_spki=point, now=parsed.issued_at) is not None
+    ), "the returned key does not verify the returned certificate"
 
     fresh = anchor_for_handle(
         create_key(config_root=tmp_path / "fresh", preference=FILE_ONLY), label="second"
     )
     monkeypatch.setattr(trust, "load_anchor", installed(fresh))
-    assert client.get(f"/api/pair/{device_id}").json()["operator_spki"] == "", (
-        "a superseded anchor's key was offered for a certificate it did not sign"
-    )
+    assert (
+        client.get(f"/api/pair/{device_id}").json()["operator_spki"] == ""
+    ), "a superseded anchor's key was offered for a certificate it did not sign"
