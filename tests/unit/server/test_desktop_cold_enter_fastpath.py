@@ -183,6 +183,10 @@ async def _journal(directory: Path, *, checkpoint_cwd: str | None = None) -> Non
         await transcript.append_custom(
             FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": {"cwd": checkpoint_cwd}}
         )
+    # Release the writer lock now rather than at finalisation: a test that then
+    # compresses this journal would otherwise be refused as "session in use"
+    # whenever the GC has not yet run ``__del__``.
+    transcript.close()
 
 
 def _without_the_scan(monkeypatch: pytest.MonkeyPatch) -> None:
