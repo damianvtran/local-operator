@@ -386,6 +386,9 @@ async def test_allocation_installs_once_before_task_setup(
         monkeypatch.setattr(provider, "_wait_ready", lambda *args: "127.0.0.1")
         monkeypatch.setattr(provider, "_prepare_guest_disk", lambda *args: order.append("disk"))
         monkeypatch.setattr(provider, "_start_desktop_env", lambda *args: order.append("task"))
+        # The X-display leak fix runs between disk preparation and the
+        # supervisor install (``guest_xcursor``); it is pinned in that slot here.
+        monkeypatch.setattr(provider, "_patch_guest_xcursor", lambda: order.append("xcursor"))
 
         def install(*args: Any, **kwargs: Any) -> guest_disk.CommandResult:
             order.append("supervisor")
@@ -396,7 +399,7 @@ async def test_allocation_installs_once_before_task_setup(
         monkeypatch.setattr(provider, "_run_guest_command", install)
         await provider.allocate(_plan(), _task(), cache_root=provider._cache_root)
         provider._install_guest_supervisor(_plan())
-        assert order == ["disk", "supervisor", "task"]
+        assert order == ["disk", "xcursor", "supervisor", "task"]
         report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
         assert report["installed"] is True
         assert report["status"] == "supervised"

@@ -1036,6 +1036,8 @@ export type MessageParams = {
   "wire.settings.providers.title": undefined;
   "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help": undefined;
   "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label": undefined;
+  "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": undefined;
+  "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label": undefined;
   "wire.settings.providers_openai_api.choice.chat_completions.description": undefined;
   "wire.settings.providers_openai_api.choice.chat_completions.label": undefined;
   "wire.settings.providers_openai_api.choice.responses.description": undefined;

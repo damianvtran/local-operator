@@ -716,6 +716,16 @@ _CLONE_GUARD_FIELDS = frozenset(
         "context_tokens_hint_measured",
         "context_binding",
         "native_context_tokens",
+        # Cache-diagnostics opt-in stamped by ``SessionStreamFn``: it names a
+        # previous provider response for a server-side prefix comparison and
+        # never changes the prompt bytes the model reads.
+        "cache_diagnostics",
+        "cache_diagnostics_previous_id",
+        # Request role for the Anthropic cache-TTL policy, stamped by
+        # ``SessionStreamFn`` on every request (``anthropic_cache_ttl``). It
+        # selects a marker TTL, never message bytes, so an armed one-turn secret
+        # stays in the one body it was approved for.
+        "cache_role",
     }
 )
 #: Model fields that same decoration may set: the per-turn effort fit.
@@ -2033,6 +2043,15 @@ class ToolContext(BaseModel):
     #: may reach, and what the boundary explicitly does not cover, is stated in
     #: ``local_operator.tools.confinement``.
     confinement_root: str | None = None
+    #: The ONLY directory this session's SHELL may write to, or ``None`` for an
+    #: ordinary shell. Unlike ``confinement_root`` it confines nothing else:
+    #: reads stay open and ``read``/``glob``/``web_fetch`` are untouched. Set
+    #: for ``scout`` children (``harness.subagent._with_readonly_shell_floor``)
+    #: so a read-only role can run ``strings`` or unpack an archive into its
+    #: scratchpad and still change nothing; enforced by the kernel sandbox in
+    #: ``local_operator.tools.confinement.ShellWriteConfinement``, and a host
+    #: that cannot enforce it refuses the command rather than run it.
+    shell_write_root: str | None = None
     #: This session's own DIRECTORY on disk (``.../sessions/<id>``), absolute,
     #: or ``None`` wherever ``scratchpad_dir`` is ``None`` (agent directories
     #: are exported wholesale and stay free of runtime files). Its one consumer
@@ -4351,9 +4370,32 @@ class ChatRequest(BaseModel):
     # Local, request-owned binding of the counted boundary to the native
     # protocol and credential selected by the wire client. Never serialized.
     context_binding: Any = Field(default=None, exclude=True, repr=False)
+    #: Opt this request into Anthropic's cache diagnostics, comparing it with
+    #: ``cache_diagnostics_previous_id`` (``None`` = the conversation's first
+    #: diagnosed request, sent as an explicit JSON ``null``, which is still an
+    #: opt-in: the API fingerprints only requests that carry the object).
+    #:
+    #: Stamped ONLY by ``SessionStreamFn`` for its own conversation turns, from
+    #: that stream's last Anthropic response id. That is what makes the chain
+    #: per-conversation: a forked subagent owns a separate ``SessionStreamFn``
+    #: and asides/naming/compaction are never stamped, so no request can be
+    #: compared against another conversation's response. Metadata, not
+    #: content: only ``AnthropicClient._build_body`` reads it, and only for the
+    #: first-party API (Bedrock/Vertex/proxies do not offer the feature).
+    #: Excluded from dumps and ``repr`` like the neighbouring transport
+    #: metadata: it is request policy for one wire, not conversation state.
+    cache_diagnostics: bool = Field(default=False, exclude=True, repr=False)
+    cache_diagnostics_previous_id: str | None = Field(default=None, exclude=True, repr=False)
     # Native reasoning is opaque: use provider-reported token counts rather
     # than treating encrypted bytes as text. Populated only after replay checks.
     native_context_tokens: int = Field(default=0, exclude=True, repr=False)
+    #: Who is asking, for the Anthropic prompt-cache TTL policy
+    #: (``providers/anthropic_cache_ttl.py``): ``"main"``, ``"subagent"`` or
+    #: ``"auxiliary"``. Stamped by ``SessionStreamFn``, the one place that knows
+    #: whether the conversation is a delegated child; ``None`` (a request built
+    #: outside a session stream) derives the role from ``purpose`` alone, as a
+    #: top-level conversation. Transport policy, never wire content.
+    cache_role: str | None = Field(default=None, exclude=True, repr=False)
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:
@@ -4726,6 +4768,18 @@ class StreamStartEvent(BaseModel):
 
     type: Literal["start"] = "start"
     response_id: str | None = None
+    #: Anthropic cache diagnostics for THIS request, when it was opted in (see
+    #: ``ChatRequest.cache_diagnostics``). ``None`` = not diagnosed (another
+    #: provider, the conversation's first request, or the feature latched off).
+    #: Otherwise ``"unchanged"`` (compared, no divergence: a cache miss on such
+    #: a call is TTL expiry, not a prefix break), ``"pending"`` (the comparison
+    #: had not finished when the response started), or the API's own
+    #: ``cache_miss_reason.type`` (``system_changed``, ``tools_changed``,
+    #: ``messages_changed``, ``model_changed``, ``previous_message_not_found``,
+    #: ``unavailable``). ``cache_missed_tokens`` is that reason's
+    #: ``cache_missed_input_tokens`` estimate, 0 when it gives none.
+    cache_miss_type: str | None = None
+    cache_missed_tokens: int = 0
 
 
 class StreamTextDelta(BaseModel):

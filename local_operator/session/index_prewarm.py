@@ -64,8 +64,10 @@ import logging
 import os
 import shutil
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.replay_cache import (
@@ -155,6 +157,8 @@ _ANCHOR_LOCK = threading.Lock()
 #: ``asyncio.create_task`` holds only a weak referent and can be collected
 #: mid-flight.
 _TASKS: set[asyncio.Task[Any]] = set()
+
+_T = TypeVar("_T")
 
 
 def free_bytes(root: str | Path | None = None) -> int | None:
@@ -688,6 +692,245 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
             _ANCHOR_IN_FLIGHT.discard(key)
 
 
+#: How many user conversations the model-metadata warm resolves. The replay
+#: pass's bound, because it targets the same "opened first after a restart" set;
+#: in practice the answer is the same handful of models, so every journal after the
+#: first few costs only its (memoised) selection read.
+PREWARM_MODELS = PREWARM_REPLAYS
+
+#: Wall-clock budget for the WHOLE model warm, in seconds (review MINOR-1). One
+#: resolution is already bounded by discovery's own ceilings (10 s for the
+#: provider listing, 2-3 s for the keyless legs, one shared deadline), but eight
+#: of them in sequence on a blackholed link would be minutes of background
+#: requests after boot. Checked between journals; the one in flight finishes
+#: under its own ceiling.
+PREWARM_MODELS_BUDGET_S = 20.0
+
+
+def _service_session_ids(root: Path) -> set[str]:
+    """The sessions the daemon creates for itself at boot: Aida and the Librarian.
+
+    Their identity is the session id each one's own ``state.json`` names — the
+    same check ``aida.state.is_aida_session`` and
+    ``librarian.state.is_librarian_session`` make. Neither carries an
+    ``origin.json`` (the Librarian deliberately does not, so she stays visible on
+    every surface), so the origin rule below cannot see them, and their
+    transcripts are written at boot, so by mtime they are always the newest.
+    """
+    from local_operator.aida import state as aida_state
+    from local_operator.librarian import state as librarian_state
+
+    ids: set[str] = set()
+    for reader in (aida_state.session_id_of, librarian_state.session_id_of):
+        try:
+            session_id = reader(root)
+        except Exception:  # noqa: BLE001 — an unreadable state file is "no such session"
+            logger.debug("model prewarm: service session state unreadable", exc_info=True)
+            continue
+        if session_id:
+            ids.add(session_id)
+    return ids
+
+
+def _newest_journals(root: str | Path, *, limit: int) -> list[str]:
+    """The ``limit`` most recently modified USER conversations, newest first.
+
+    WHY THE FILTER (QA round 1, Q-1). On a booted store the two newest journals
+    are the daemon's own service sessions, and the load guard then cut the pass
+    to one journal — so the one warmed journal was never one the user opens.
+    Excluded: archived journals; any session whose ``origin.json`` is not a
+    user origin (``resume.is_user_session_origin``, THE visibility rule the
+    pickers use — subagents, agent shells, configuration runs); and the
+    service sessions named by their own state files.
+    """
+    from local_operator.resume import is_user_session_origin, session_origin
+    from local_operator.session import compression
+
+    root = Path(root)
+    sessions_dir = root / "sessions"
+    try:
+        entries = list(sessions_dir.iterdir())
+    except OSError:
+        return []
+    service = _service_session_ids(root)
+    journals: list[tuple[float, str]] = []
+    for entry in entries:
+        if entry.name in service:
+            continue
+        # THE ARCHIVE-AWARE RESOLVER, not a plain-name stat (the
+        # ``test_transcript_reads_are_archive_aware`` guard): it names whatever is
+        # physically on disk, and a codec means an archive — skipped, because the
+        # warm must not decompress the store (see ``_is_archived``). A missing
+        # journal resolves to the plain path and fails the stat below.
+        journal, codec = compression.transcript_source(entry)
+        if codec is not None:
+            continue
+        try:
+            mtime = journal.stat().st_mtime
+        except OSError:
+            continue
+        if not is_user_session_origin(session_origin(entry)):
+            continue
+        journals.append((mtime, entry.name))
+    journals.sort(reverse=True)
+    return [session_id for _mtime, session_id in journals[:limit]]
+
+
+def _resolve_model(root: str | Path, session_id: str) -> bool:
+    """Run the cold open's model resolution once; ``False`` when a leg could not answer.
+
+    The SAME call ``cold_model.synthesise_cold_state`` makes, so whatever it
+    caches is exactly what the open will look up — the import graph, the
+    metadata memo, the listing document, and the selection memo. Imported here
+    rather than at module scope: ``cold_model`` pulls the model-config stack, and
+    this module is imported on daemon startup.
+
+    The return value is the listing legs' own report
+    (``catalogue.collect_unavailable``): a failed fetch, a backed-off one with no
+    document, or a leg that raised. The pass stops on it, because a network that
+    failed one listing will fail the next seven the same way.
+    """
+    from local_operator.model.catalogue import collect_unavailable
+    from local_operator.session.cold_model import resolve_conversation_model
+
+    with collect_unavailable() as unavailable:
+        resolve_conversation_model(Path(root), Path(root) / "sessions" / session_id)
+    return not unavailable
+
+
+async def _in_daemon_thread(fn: Callable[[], _T]) -> _T:
+    """``await fn()`` on a DAEMON thread, so an in-flight request cannot hold exit.
+
+    ``asyncio.to_thread`` uses the default executor, whose workers are joined at
+    interpreter shutdown — a resolution parked in a provider read would then hold
+    the daemon's exit for up to that request's timeout (review MINOR-1). Cancelling
+    the awaiting task stops the pass; this is what stops the worker from mattering.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[_T] = loop.create_future()
+
+    def deliver(outcome: Callable[[], None]) -> None:
+        if not future.done():
+            outcome()
+
+    def run() -> None:
+        try:
+            result = fn()
+        except BaseException as exc:  # noqa: BLE001 — relayed to the awaiting task
+            error = exc
+            loop.call_soon_threadsafe(deliver, lambda: future.set_exception(error))
+        else:
+            loop.call_soon_threadsafe(deliver, lambda: future.set_result(result))
+
+    threading.Thread(target=run, name="lop-model-prewarm", daemon=True).start()
+    return await future
+
+
+async def warm_model_metadata(
+    root: str | Path,
+    *,
+    limit: int = PREWARM_MODELS,
+    budget_s: float = PREWARM_MODELS_BUDGET_S,
+) -> int:
+    """Resolve recently active conversations' models at boot; returns how many resolved.
+
+    WHAT IT DOES ON THE WIRE (review MINOR-2). At daemon boot, with no user
+    action, it resolves the saved models of the ``limit`` most recently active
+    user conversations — including ones nobody opens in this process. That
+    reaches exactly the endpoints, credentials and headers an open of those
+    conversations would (the provider's ``/models`` listing with the stored
+    credential, then the keyless price catalogues), because it IS the open's
+    resolution; nothing new is sent, only sooner.
+
+    WHY (l9-first-open-warm). The first cold open in a fresh daemon spent
+    188-363 ms in ``synthesise_cold_state`` against 1-30 ms on every later open.
+    The cost was not the journal: it was process warmup inside the model
+    resolution. Measured on the 51.7 MB fixture (cProfile, fresh process):
+    a SYNCHRONOUS ``GET /v1/models`` for the saved provider (~130-220 ms, from
+    ``spec_for_target`` -> ``resolve_model_info`` -> discovery, run when no
+    current listing document exists) plus ~25-40 ms of lazy imports
+    (``providers.failover``, ``model.prices``, ``httpcore``, ``h11``). A HEALTHY
+    answer is memoised for the day (``configure._resolve_model_info_cached``)
+    and written as a listing document, so the daemon can pay it at boot rather
+    than on the user's first click. A FAILED one is memoised only for
+    ``configure.DEGRADED_MEMO_TTL_S``, so a boot that ran before the network was
+    up cannot pin a degraded answer onto a later open.
+
+    WHY NOT A NARROWER WARM. Importing the modules alone left the fetch on the
+    open (measured 62-200 ms), and the fetch's target depends on the journal's
+    SAVED selection, so the honest warm is the open's own resolution over the
+    journals most likely to be opened. Any answer it caches is the one the open
+    would have computed itself a moment later, so the first frame is unchanged.
+
+    BOUNDS: sequential, one daemon thread at a time, the loop given a turn
+    between journals; the disk guard refuses it outright; the load guard and
+    ``budget_s`` stop it between journals; the first resolution that reports an
+    unavailable leg stops it (offline, there is no point asking seven more times);
+    and lifespan teardown cancels it (:func:`cancel_prewarm`).
+    """
+    reason = skip_reason(root)
+    if reason is not None:
+        logger.debug("model prewarm skipped (%s)", reason)
+        return 0
+    started = time.monotonic()
+    candidates = await asyncio.to_thread(_newest_journals, root, limit=limit)
+    resolved = 0
+    for position, session_id in enumerate(candidates):
+        stop = pace_reason() if position else None
+        if stop is None and position and time.monotonic() - started >= budget_s:
+            stop = f"budget: {budget_s:.0f}s spent"
+        if stop is not None:
+            logger.debug(
+                "model prewarm stopped after %d of %d user journals (%s)",
+                resolved,
+                len(candidates),
+                stop,
+            )
+            return resolved
+        try:
+            answered = await _in_daemon_thread(
+                lambda session_id=session_id: _resolve_model(root, session_id)
+            )
+        except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+            logger.debug("model prewarm failed for %s", session_id, exc_info=True)
+            await asyncio.sleep(0)
+            continue
+        resolved += 1
+        if not answered:
+            logger.debug(
+                "model prewarm stopped after %d of %d user journals (a listing was unavailable)",
+                resolved,
+                len(candidates),
+            )
+            return resolved
+        await asyncio.sleep(0)
+    logger.debug("model prewarm resolved %d of %d user journals", resolved, len(candidates))
+    return resolved
+
+
+async def cancel_prewarm() -> None:
+    """Cancel every warm this module started and wait for them to unwind.
+
+    For the daemon's lifespan TEARDOWN (review MINOR-1): the warms are optional
+    work nobody is waiting on, and a pass still queued at shutdown would
+    otherwise keep issuing requests while the server drains. Never raises.
+    """
+    tasks = list(_TASKS)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    # A cancelled warm's worker thread may still hold a listing fetch lease; left
+    # standing, the NEXT process's first cold read waits it out (QA round 2,
+    # Q-2: 2209.5 ms). Only an unlink of our own lease files.
+    try:
+        from local_operator.model.catalogue import release_held_leases
+
+        release_held_leases()
+    except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
+        logger.debug("listing lease release failed at shutdown", exc_info=True)
+
+
 def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:
     """Spawn :func:`warm_index_cache` off the hot path; ``None`` when skipped.
 
@@ -703,10 +946,17 @@ def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:
         if reason is not None:
             logger.debug("index prewarm not started (%s)", reason)
             return None
-        task = asyncio.get_running_loop().create_task(warm_index_cache(root))
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(warm_index_cache(root))
+        # ITS OWN TASK, not a step of the index queue: the index and replay passes
+        # take seconds on a real store, and the model warm is mostly a network
+        # wait that overlaps them for free. Queued behind them, a first click a
+        # few seconds after boot would still pay the fetch.
+        model_task = loop.create_task(warm_model_metadata(root))
     except Exception:  # noqa: BLE001 — a warm-up must never be the failure
         logger.debug("index prewarm unavailable at startup", exc_info=True)
         return None
-    _TASKS.add(task)
-    task.add_done_callback(_TASKS.discard)
+    for held in (task, model_task):
+        _TASKS.add(held)
+        held.add_done_callback(_TASKS.discard)
     return task

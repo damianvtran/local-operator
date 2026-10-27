@@ -117,6 +117,12 @@ _DIAGNOSTIC_FAILURE_CODES = frozenset(
         "messaging_unavailable",
         "recipient_unavailable",
         "consent_version_unknown",
+        # Deterministic LOCAL identity refusals (no hub round trip): without
+        # these in the closed set the 2026-10-26 outage logged as
+        # ``unexpected_failure``, indistinguishable from a bug.
+        "bridge_owner_mismatch",
+        "bridge_sign_in_required",
+        "bridge_owner_moved",
     }
 )
 
@@ -130,6 +136,25 @@ def _log_delivery_failure(stage: str, failure: Exception) -> None:
         else "unexpected_failure"
     )
     logger.warning("bridge connector failure: stage=%s code=%s", stage, safe_code)
+
+
+def _iteration_failure_code(failure: BaseException) -> str:
+    """The closed code, or the exception CLASS name, for a whole-iteration failure.
+
+    The class name (never ``str(failure)``, never ``repr``) is what separates a
+    local ``OperationalError`` (e.g. descriptors exhausted) from a hub refusal
+    when nothing else about the failure may be written down: messages and
+    tracebacks can carry bodies, names or bearer material.
+    """
+    code = getattr(failure, "code", None)
+    if isinstance(code, str) and code in _DIAGNOSTIC_FAILURE_CODES:
+        return code
+    from local_operator.team_bridge.client import BridgeSignInRequired
+
+    # The sign-in refusal is a ValueError subclass with no ``code`` attribute.
+    if isinstance(failure, BridgeSignInRequired):
+        return "bridge_sign_in_required"
+    return type(failure).__name__
 
 
 async def resync_walk(owner: Any, *, config_dir: Path, access: Any) -> dict[str, Any]:
@@ -552,6 +577,13 @@ async def run_forever(
         except Exception as failure:
             # No content in the backoff path (privacy): the failure is
             # operational, and the next iteration re-tries the ordinary way.
+            # It used to be swallowed with no record at all, which is how a
+            # connector that could no longer open a file looped silently for
+            # hours. One structural line per failed iteration: stage + code.
+            logger.warning(
+                "bridge connector failure: stage=iteration code=%s",
+                _iteration_failure_code(failure),
+            )
             await _pause(stop, _failure_delay(failure, backoff))
             backoff = min(backoff * 2.0, BACKOFF_MAX_S)
 

@@ -5837,21 +5837,21 @@
     {
       "locale": "zh-CN",
       "namespace": "wire.settings",
-      "source_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
       "translator": {
-        "agent": null,
-        "model": null,
-        "date": null
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
       },
       "auditor": {
-        "agent": "translation-auditor (lopdev team)",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-24",
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.settings/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 0 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried. Replaces zh24r2 row (84-row pin)."
     },
     {
       "locale": "zh-CN",
@@ -6626,6 +6626,120 @@
         "relay.transcript.turn.took"
       ],
       "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
+      "translator": {
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 1 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
+      "translator": {
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 1 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
+      "translator": {
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 3 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
+      "translator": {
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 2 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
+      "translator": {
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 3 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
+      "translator": {
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 3 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried."
     },
     {
       "locale": "es",

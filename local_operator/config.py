@@ -809,7 +809,22 @@ DEFAULT_CONFIG = Config(
             # rewrites of >150k contexts cost 89.5M write tokens (~112M
             # base-equivalent), while the incremental writes on those contexts
             # were only 14.7M (~11M base-equivalent extra at 2×). 150k is the
-            # size above which the rewrite dominates; 0 disables the feature.
+            # size above which the rewrite dominates.
+            # Since the subscription-aware policy (`providers/anthropic_cache_ttl.py`)
+            # this threshold governs the API-key main thread, and a Claude
+            # subscription's main thread once it draws on overage credits. A
+            # subscription within plan limits sends its main thread at 1h at
+            # ANY size, as Claude Code does: over 7 days (2026-10-26, 59k calls)
+            # that was ~75M base-equivalent cheaper than 5m above 150k and still
+            # ~0.8M cheaper below it. 0 disables every main-thread 1h TTL,
+            # the subscription one included; subagents follow their own key.
+            #
+            # `providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`:
+            # the same size gate for DELEGATED turns (subagents), on any
+            # credential. 0 = never: on the same ledger a subagent's 1h writes
+            # cost more than the expiries they avoid at every size (~15M worse
+            # above 150k, ~57M worse below). Compaction, naming and other
+            # one-shots are always 5m.
             # `providers.openrouter.*`: the chat-completions `provider` routing
             # object (see `settings_io.py` for the per-key semantics). Every
             # default below is "no opinion" — the resolver emits NO `provider`
@@ -820,7 +835,10 @@ DEFAULT_CONFIG = Config(
             # an always-on sort is an always-on cold cache.
             "providers": {
                 "openai": {"api": "responses", "use_max_context_window": True},
-                "anthropic": {"cache_ttl_1h_min_context_tokens": 150_000},
+                "anthropic": {
+                    "cache_ttl_1h_min_context_tokens": 150_000,
+                    "subagent_cache_ttl_1h_min_context_tokens": 0,
+                },
                 "openrouter": {
                     # The one HARNESS-side key in this block: read by
                     # `SessionStreamFn._affinity_enabled`, never by

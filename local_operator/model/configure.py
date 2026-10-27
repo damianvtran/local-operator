@@ -41,10 +41,16 @@ from local_operator.harness.types import (
     ChatRequest,
     ModelSpec,
     StreamEvent,
+    StreamStartEvent,
     Usage,
 )
 from local_operator.model import tariff
-from local_operator.model.catalogue import DEFAULT_TTL_S
+from local_operator.model.catalogue import (
+    DEFAULT_TTL_S,
+    LISTING_FAILURE_BACKOFF_S,
+    collect_unavailable,
+    note_unavailable,
+)
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
 from local_operator.model.effort import (
     default_effort,
@@ -2091,6 +2097,7 @@ def _info_from_discovery(
         )
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
+        note_unavailable(f"{provider} discovery")
         return fallback
 
     if provider == "openai" and is_oauth and status == "static":
@@ -2355,6 +2362,7 @@ def _from_price_catalogue(
         row = price_catalogue_row(provider, model_id, timeout=budget)
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("price catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        note_unavailable("price catalogue")
         return info
     if row is None:
         logger.debug("price catalogue has no entry for %s/%s", provider, model_id)
@@ -2410,6 +2418,7 @@ def _from_aggregator_catalogue(
         rows, _status = available_models(provider, api_key=None, timeout=budget, want_id=model_id)
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("aggregator catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        note_unavailable(f"{provider} aggregator catalogue")
         return info
 
     # Priced rows only. An unpriced aggregator row is a routing stub that can
@@ -2483,9 +2492,55 @@ _listing_credential: ContextVar[tuple[str, bool, str | None] | None] = ContextVa
 )
 
 
+#: How long a resolution built from a FAILED leg may be reused, in seconds.
+#:
+#: WHY (PR #2992, review MAJOR-1). The memo below is keyed on a day bucket, and
+#: every leg degrades to its fallback instead of raising, so a 401/DNS/5xx/timeout
+#: on the first resolution used to be stored as an ordinary answer and served for
+#: up to 24 h after the network recovered — a default 128k window and zero prices
+#: in place of the listing's real numbers. A degraded answer now lives only this
+#: long. It is the listing's own sync failure backoff
+#: (``catalogue.LISTING_FAILURE_BACKOFF_S``), so the retry that follows expiry is
+#: one the listing will actually attempt rather than answer from its backoff.
+DEGRADED_MEMO_TTL_S: float = LISTING_FAILURE_BACKOFF_S
+
+#: ``{memo key: wall-clock expiry}`` for memo entries a failed leg produced. The
+#: key is the cached body's own arguments; read and written under the GIL by
+#: plain dict operations, the same discipline as ``_paint_memo``.
+_degraded_until: dict[tuple[Any, ...], float] = {}
+
+#: ``{memo key: retry generation}``. An expired degraded entry cannot be evicted
+#: from ``lru_cache`` on its own, so the next call passes a NEW generation, which
+#: is a different cache key and therefore a fresh resolution; the stale entry
+#: ages out of the 64-entry bound like any other. Absent (generation 0) for every
+#: key that never degraded, which is why the argument is only passed when set.
+_degraded_generation: dict[tuple[Any, ...], int] = {}
+
+
+def _memo_attempt(key: tuple[Any, ...]) -> dict[str, int]:
+    """The extra memo-key argument for ``key``: none, or the retry generation."""
+    expiry = _degraded_until.get(key)
+    if expiry is not None and time.time() >= expiry:
+        _degraded_until.pop(key, None)
+        _degraded_generation[key] = _degraded_generation.get(key, 0) + 1
+    elif expiry is not None:
+        # Served from a still-degraded entry: the caller is getting the failed
+        # answer again, and a collector around it must hear that just as it would
+        # have heard the failure itself.
+        note_unavailable("degraded metadata memo")
+    generation = _degraded_generation.get(key, 0)
+    return {"_attempt": generation} if generation else {}
+
+
 @functools.lru_cache(maxsize=64)
 def _resolve_model_info_cached(
-    provider: str, model_id: str, _bucket: int, _scope: str = "", _base: Path | None = None
+    provider: str,
+    model_id: str,
+    _bucket: int,
+    _scope: str = "",
+    _base: Path | None = None,
+    *,
+    _attempt: int = 0,
 ) -> ModelInfo:
     """Memoized body of :func:`resolve_model_info`.
 
@@ -2496,7 +2551,30 @@ def _resolve_model_info_cached(
     long-lived process (the HTTP server, a scheduler worker) would pin whatever
     metadata it saw at boot for as long as it ran — the disk cache would refresh
     underneath it and nothing would ever read the new numbers.
+
+    ``_attempt`` is likewise key-only: see :data:`_degraded_generation`. A body
+    during which any leg reported that it could not answer
+    (:func:`catalogue.collect_unavailable`) marks its entry DEGRADED, and
+    :func:`resolve_model_info` stops serving it after :data:`DEGRADED_MEMO_TTL_S`.
     """
+    with collect_unavailable() as unavailable:
+        info = _resolve_model_info_body(provider, model_id, _base)
+    if unavailable:
+        logger.debug(
+            "%s/%s metadata degraded (%s); memoised for %.0fs only",
+            provider,
+            model_id,
+            ", ".join(sorted(set(unavailable))),
+            DEGRADED_MEMO_TTL_S,
+        )
+        _degraded_until[(provider, model_id, _bucket, _scope, _base)] = (
+            time.time() + DEGRADED_MEMO_TTL_S
+        )
+    return info
+
+
+def _resolve_model_info_body(provider: str, model_id: str, _base: Path | None) -> ModelInfo:
+    """The resolution itself, uncached: registry first, then the listing legs."""
     canonical = "test" if provider == "noop" else provider
     started = time.monotonic()
     info = _registry_fallback(canonical, model_id)
@@ -2604,6 +2682,8 @@ def invalidate_model_info_cache() -> None:
     numbers, so the fix path gets a way to say so.
     """
     _resolve_model_info_cached.cache_clear()
+    _degraded_until.clear()
+    _degraded_generation.clear()
     _paint_refreshing.clear()
     _paint_memo.clear()
     # The ladder memo is fed by the same resolution, so it degrades for the same
@@ -2692,11 +2772,25 @@ def resolve_model_info(
             scope = "openai-oauth-unscoped"
         token = _listing_credential.set(credential)
         try:
-            info = _resolve_model_info_cached(provider, model_id, bucket, scope, base)
+            info = _resolve_model_info_cached(
+                provider,
+                model_id,
+                bucket,
+                scope,
+                base,
+                **_memo_attempt((provider, model_id, bucket, scope, base)),
+            )
         finally:
             _listing_credential.reset(token)
     else:
-        info = _resolve_model_info_cached(provider, model_id, bucket, "", base)
+        info = _resolve_model_info_cached(
+            provider,
+            model_id,
+            bucket,
+            "",
+            base,
+            **_memo_attempt((provider, model_id, bucket, "", base)),
+        )
     # Feed the paint memo from the authoritative answer, so a renderer that
     # resolves AFTER the session does (the common order) paints the real row,
     # and so the background refresh is the only writer on a cold process.
@@ -3304,6 +3398,37 @@ def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | Non
     return ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
 
 
+#: Default for ``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens``:
+#: ``0``, never 1h for a delegated child. Measured over this harness's own 7-day
+#: ledger (2026-10-26), a subagent's 1h writes cost more than the expiries they
+#: avoid at EVERY size: about 15M base-equivalent tokens worse than 5m above
+#: 150k (345 expiries avoided vs 113M of extra 2x write cost) and about 57M
+#: worse below it. Kept configurable because the trade depends on how a
+#: workload's children idle; see ``providers/anthropic_cache_ttl.py``.
+ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS = 0
+
+
+def _anthropic_subagent_cache_ttl_1h_min_context_tokens(
+    settings: Mapping[str, Any] | None,
+) -> int:
+    """Resolve the context size above which a SUBAGENT turn uses the 1h TTL.
+
+    Same resolution rule as ``_anthropic_cache_ttl_1h_min_context_tokens``:
+    only an explicit non-negative integer is honoured, anything else falls back
+    to the default (here ``0``, never).
+    """
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    anthropic = providers.get("anthropic") if isinstance(providers, Mapping) else None
+    configured = (
+        anthropic.get("subagent_cache_ttl_1h_min_context_tokens")
+        if isinstance(anthropic, Mapping)
+        else None
+    )
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured >= 0:
+        return configured
+    return ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+
+
 #: Decode rate (output tokens per second of streaming) below which a host that
 #: keeps serving this conversation is retired from its affinity pin; ``0`` turns
 #: the speed check off. Next to the code that reads the key, as the registry
@@ -3682,6 +3807,20 @@ class SessionStreamFn:
         self._settings = settings
         self._session_id = session_id
         self._parent_session_id: str | None = None
+        # The Anthropic response id of this conversation's last DIAGNOSED turn,
+        # i.e. the ``previous_message_id`` the next turn's cache diagnostics
+        # compare against (``ChatRequest.cache_diagnostics``). Instance state,
+        # never shared: ``fork`` builds a fresh stream, so a subagent starts its
+        # own chain at ``None`` and can never be diffed against its parent's
+        # prompt (a guaranteed, meaningless ``system_changed``).
+        #
+        # KNOWN GAP: not persisted, so a RESUMED session (a new process) starts
+        # again at ``None`` and its first turn records ``baseline``, even when
+        # an edited instruction file just rewrote the whole prefix. Seeding it
+        # from the transcript would recover those attributions (a stale id is
+        # harmless: the API answers ``previous_message_not_found``); deferred
+        # on PR #2984 (QA Q1).
+        self._cache_diagnostics_previous_id: str | None = None
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
         # ``_observation_root`` is a reference to the ROOT stream of this fork
@@ -3907,6 +4046,9 @@ class SessionStreamFn:
             openai_api=_openai_api_mode(self._settings),
             anthropic_cache_ttl_1h_min_context_tokens=_anthropic_cache_ttl_1h_min_context_tokens(
                 self._settings
+            ),
+            anthropic_subagent_cache_ttl_1h_min_context_tokens=(
+                _anthropic_subagent_cache_ttl_1h_min_context_tokens(self._settings)
             ),
             # Resolved here, not inside the client: `client_for_spec` stays
             # settings-free, and `self._settings` is rebound by
@@ -6586,6 +6728,7 @@ class SessionStreamFn:
         # the shared event loop; the estimator memoizes settled old messages.
         import asyncio
 
+        from local_operator.providers.anthropic_cache_ttl import cache_role
         from local_operator.providers.clients import _estimate_slope
         from local_operator.providers.context import (
             ContextBinding,
@@ -6626,6 +6769,13 @@ class SessionStreamFn:
                 "context_tokens_hint_model": model_key(request) if hint is not None else None,
                 "context_tokens_hint_measured": reconciled[1] if reconciled is not None else None,
                 "context_binding": binding,
+                # Who is asking, for the Anthropic cache-TTL policy: only this
+                # stream knows it is a delegated child (``fork`` sets the
+                # parent link, the same edge analytics records).
+                "cache_role": cache_role(
+                    request.purpose if not request.isolated else "isolated",
+                    delegated=bool(getattr(self, "_parent_session_id", None)),
+                ),
                 "preparation_ms": request.preparation_ms
                 + (time.perf_counter() - preparation_started) * 1000,
             }
@@ -6773,6 +6923,17 @@ class SessionStreamFn:
         # no rotation, no chain), and an exhausted or disabled pinned route
         # therefore stops the recovery with that failure as its reason
         # instead of re-pointing the call at another credential or model.
+        if request.purpose == "turn":
+            # Conversation turns only: an aside, a compaction summary or a
+            # helper carries a different prompt, so comparing it with the
+            # turn chain would report a break that is by design. Isolated
+            # decoration returned above and never reaches here.
+            request = request.model_copy(
+                update={
+                    "cache_diagnostics": True,
+                    "cache_diagnostics_previous_id": self._cache_diagnostics_previous_id,
+                }
+            )
         if request.purpose == "turn" and not request.same_route_retry:
             await self.preflight_usage(request.model)
         # The binding boundary (``_note_serving_binding``): after the preflight
@@ -6796,6 +6957,23 @@ class SessionStreamFn:
             usage = getattr(event, "usage", None)
             if tracks_context and usage is not None:
                 self._context_tracker.record(binding.measured if binding else measured, usage)
+            if (
+                request.cache_diagnostics
+                and isinstance(event, StreamStartEvent)
+                and event.cache_miss_type is not None
+                and event.response_id
+            ):
+                # Only a DIAGNOSED response advances the chain: the API stores
+                # a fingerprint only for requests that opted in, so a fallback
+                # turn served elsewhere (or with the latch off) would name an id
+                # the comparison cannot find. The latest attempt supersedes,
+                # exactly as ``StreamStartEvent`` documents for retries.
+                # Advanced on ``message_start`` rather than at stream end on
+                # purpose: the API fingerprints the REQUEST when it accepts
+                # it, so even a stream that dies afterwards left a comparable
+                # entry, and the worst case is a benign
+                # ``previous_message_not_found`` on the next turn.
+                self._cache_diagnostics_previous_id = event.response_id
             yield event
 
     @property
@@ -6866,6 +7044,10 @@ class SessionStreamFn:
         first_output_at: float | None = None
         last_output_at: float | None = None
         outcome = "incomplete"
+        # Anthropic cache diagnostics from the LATEST ``StreamStartEvent``
+        # (a retried attempt supersedes an abandoned one); ``""`` = undiagnosed.
+        cache_miss_type = ""
+        cache_missed_tokens = 0
         # Snapshot char lengths BEFORE streaming: cheap (string length reads,
         # sub-millisecond even on a very large context) and safe to hand a
         # background thread, unlike the live message objects.
@@ -6975,6 +7157,9 @@ class SessionStreamFn:
                         last_output_at=last_output_at,
                         output_deltas=output_deltas,
                     )
+                if event_type == "start":
+                    cache_miss_type = getattr(event, "cache_miss_type", None) or ""
+                    cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
                 stop_reason = getattr(event, "stop_reason", None)
                 if stop_reason is not None:
                     outcome = str(stop_reason)
@@ -7124,6 +7309,8 @@ class SessionStreamFn:
                 # not a zero-length one.
                 decode_us=ledger_window_us,
                 output_deltas=output_deltas,
+                cache_miss_type=cache_miss_type,
+                cache_missed_tokens=cache_missed_tokens,
             )
             # The observation rides AFTER the analytics ledger, alongside it in
             # the same ``finally``: same facts, ONE clock read (``duration_ms``
@@ -7156,8 +7343,11 @@ class SessionStreamFn:
         usage_reported: bool = True,
         decode_us: int = 0,
         output_deltas: int = 0,
+        cache_miss_type: str = "",
+        cache_missed_tokens: int = 0,
     ) -> None:
         """Enqueue one call sample. Off the hot path; never raises."""
+        self._log_cache_break(usage, cache_miss_type, cache_missed_tokens)
         try:
             import time as _time
 
@@ -7293,10 +7483,51 @@ class SessionStreamFn:
                     decode_us=measured_us,
                     decode_tokens=measured_tokens,
                     decode_calls=measured_calls,
+                    cache_miss_type=cache_miss_type,
+                    cache_missed_tokens=int(cache_missed_tokens),
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
+
+    def _log_cache_break(self, usage: Usage, miss_type: str, missed_tokens: int) -> None:
+        """One ``[prompt cache break]`` INFO line for a costly diagnosed break.
+
+        Called once per call from ``_record_usage``, so the line is emitted at
+        most once per call. It fires only when the API NAMED a divergence
+        (``*_changed``, not the baseline/unchanged/pending states and not
+        "no comparison") AND the call actually rewrote a large share of its
+        context: a small late-prompt change behind a still-hitting breakpoint
+        is the API's documented "rare, low impact" case and would be noise.
+        The thresholds mirror the benchmark's break classifier (>= 20k written
+        and >= half the context), so log counts and ledger analysis agree.
+        """
+        try:
+            from local_operator.providers.clients import (
+                ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK,
+            )
+
+            if (
+                not miss_type
+                or miss_type in ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK
+                or miss_type in ("previous_message_not_found", "unavailable")
+            ):
+                return
+            written = int(usage.cache_write_tokens)
+            context = int(usage.input_tokens) + int(usage.cache_read_tokens) + written
+            if written < 20_000 or written * 2 < context:
+                return
+            logger.info(
+                "[prompt cache break] session=%s type=%s missed_tokens=%d "
+                "cache_write=%d context=%d",
+                self._session_id or "-",
+                miss_type,
+                int(missed_tokens),
+                written,
+                context,
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break a turn
+            logger.debug("cache-break log failed", exc_info=True)
 
     async def close(self) -> None:
         if self._closed:

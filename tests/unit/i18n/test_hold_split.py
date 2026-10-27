@@ -111,9 +111,11 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # Hindi bytes were translated and independently audited on 2026-10-25 at
     # these source bytes) makes it THIRTY-EIGHT. The condensed relay
     # transcript's independently audited 19-key `hi/relay.transcript` row makes
-    # it THIRTY-NINE. The session status dot's independently audited 2-key
-    # `hi/relay.health` row makes it FORTY.
-    assert len(hindi) == 40
+    # it THIRTY-NINE. PR #2985's independently audited `wire.settings` delta
+    # (Anthropic cache-TTL help + subagent row) appends a fresh Hindi row at the
+    # new English bytes: FORTY. The session status dot's independently audited
+    # `hi/relay.health` row makes it FORTY-ONE.
+    assert len(hindi) == 41
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

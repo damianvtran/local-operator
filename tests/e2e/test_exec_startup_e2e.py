@@ -97,6 +97,17 @@ def exec_server(tmp_path, monkeypatch):
                     "wait",
                     {"i": "Awaiting fixture child", "job_id": "fixture-child", "wait_ms": 10000},
                 )
+            elif "SCOUT_FIXTURE" in wire and "bash" not in called:
+                # The round-1 R1 repro on PR #2987: a top-level scout's shell
+                # tries to write OUTSIDE its scratchpad. Only offered tools
+                # can be called, so a run without ``bash`` never gets here.
+                tool = (
+                    "bash",
+                    {
+                        "i": "Writing outside the scratchpad",
+                        "command": f"echo PWNED > {tmp_path / 'outside-pwned.txt'}",
+                    },
+                )
             elif "WRITE_FIXTURE" in wire and "write" not in called:
                 tool = (
                     "write",
@@ -562,6 +573,46 @@ def test_exec_delegates_actual_team_child(exec_server):
     assert "COLLABORATION_SENTINEL" in child_wire
     assert "PROJECT_SENTINEL" in child_wire
     assert "coder" in child_wire
+
+
+def test_exec_profile_scout_shell_is_sandboxed_or_absent(exec_server, tmp_path):
+    """``lop exec --profile scout`` non-tty: the shell cannot write outside.
+
+    Agent review round 1 R1 on PR #2987 reproduced this exact run writing
+    ``PWNED`` outside the scratchpad: the profile's ``bash`` was attached
+    unwrapped and the unattended declaration auto-approved it. Fixed at
+    ``Session.attach_agent_profile``; this pins it through the real CLI, real
+    session construction and the real ``execute_bash``. On a host with the
+    sandbox the shell is offered and its write is refused by the kernel;
+    without one the shell is not offered at all. The file must be absent
+    either way, and that is the assertion that matters.
+    """
+    from local_operator.tools.confinement import shell_sandbox_unavailable_reason
+
+    run, requests, _ = exec_server
+    result = run("exec", "SCOUT_FIXTURE", "--profile", "scout", "--name", "Scout fixture", stdin="")
+    assert result.returncode == 0
+    assert not (tmp_path / "outside-pwned.txt").exists()
+    scout_requests = [r for r in requests if "SCOUT_FIXTURE" in json.dumps(r)]
+    assert scout_requests
+    offered = {tool["function"]["name"] for tool in scout_requests[0].get("tools", [])}
+    assert "write" not in offered and "edit" not in offered
+    if shell_sandbox_unavailable_reason() is not None:
+        assert "bash" not in offered
+        return
+    bash = next(t for t in scout_requests[0]["tools"] if t["function"]["name"] == "bash")
+    assert "SANDBOXED" in bash["function"]["description"]
+    tool_results = [
+        message
+        for request in scout_requests
+        for message in request.get("messages", [])
+        if message.get("role") == "tool"
+    ]
+    assert tool_results, "the scripted bash call must have reached the executor"
+    assert "Operation not permitted" in json.dumps(tool_results)
+    print("SCOUT_OFFERED", sorted(offered))
+    print("SCOUT_BASH_TIER_NOTE", "SANDBOXED" in bash["function"]["description"])
+    print("SCOUT_BASH_RESULT", json.dumps(tool_results[0].get("content"))[:400])
 
 
 def test_exec_default_non_tty_denies_and_explicit_yolo_writes(exec_server, tmp_path):

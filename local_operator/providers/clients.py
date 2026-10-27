@@ -19,6 +19,7 @@ retryable/auth flags for the failover layer.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import email.utils
 import functools
@@ -4192,6 +4193,94 @@ def _anthropic_stream_error(error: Mapping[str, Any]) -> ProviderError:
     )
 
 
+#: Process-wide latch: the API refused the ``diagnostics`` body field once, so
+#: no later request sends it. Cache diagnostics are GA and need no beta header
+#: (https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics),
+#: but they are pure telemetry: a workspace, region or future API version that
+#: rejects the key must cost one retried request, never a turn, and never one
+#: wasted round trip per call for the rest of the process. A list so the latch
+#: is a mutation rather than a ``global`` rebinding; tests reset it.
+#:
+#: PROCESS-wide rather than keyed by credential/workspace/model, deliberately.
+#: The cost is that one refusing org or model (e.g. a ZDR "covered model" that
+#: answers 400 rather than ``unavailable``) blinds diagnostics for every other
+#: account in the same process until it restarts. That costs telemetry only,
+#: never a turn, and no refusal has ever been observed, while a keyed latch adds
+#: state whose key (org id is not known for API keys) would itself be a guess.
+#: Revisit with a ``(credential, model)`` key if a real refusal shows up.
+_ANTHROPIC_DIAGNOSTICS_REFUSED: list[bool] = [False]
+
+#: ``StreamStartEvent.cache_miss_type`` values that are NOT a prefix break:
+#: the conversation's first diagnosed request, a compared request whose prefix
+#: matched (a miss there is TTL expiry), and a comparison still running.
+ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK = frozenset({"baseline", "unchanged", "pending"})
+
+
+def _anthropic_cache_diagnosis(
+    message: Mapping[str, Any], *, previous_id: str | None
+) -> tuple[str, int]:
+    """``(cache_miss_type, cache_missed_tokens)`` from a diagnosed ``message_start``.
+
+    Only called when the request carried ``diagnostics``. The API's three
+    shapes: ``diagnostics: null`` (no divergence, or the first turn — told
+    apart by whether we named a previous id), ``{"cache_miss_reason": null}``
+    (comparison still running) and ``{"cache_miss_reason": {"type": ...,
+    "cache_missed_input_tokens": n}}``. Anything unrecognised reads as
+    ``unavailable`` — the API's own word for "no comparison produced" — so a
+    shape change degrades the telemetry instead of raising into the stream.
+    """
+    diagnostics = message.get("diagnostics")
+    if diagnostics is None:
+        return ("unchanged" if previous_id else "baseline"), 0
+    if not isinstance(diagnostics, Mapping):
+        return "unavailable", 0
+    reason = diagnostics.get("cache_miss_reason")
+    if reason is None:
+        return "pending", 0
+    if not isinstance(reason, Mapping):
+        return "unavailable", 0
+    kind = _first_text(reason.get("type")) or "unavailable"
+    try:
+        missed = max(0, int(reason.get("cache_missed_input_tokens") or 0))
+    except (TypeError, ValueError):
+        missed = 0
+    return kind, missed
+
+
+async def _refuses_diagnostics(response: httpx.Response) -> bool:
+    """Whether an error response is the API rejecting the ``diagnostics`` key.
+
+    Matched on status 400 plus the field NAME in the refusal's own shape — the
+    message starts with ``diagnostics`` or names it as a path (``diagnostics:``
+    / ``diagnostics.``, e.g. ``diagnostics: Extra inputs are not permitted``) —
+    never on status alone: an ordinary 400 is a defect in the request and must
+    surface unchanged. Never on a bare substring either: a 400 about a tool or
+    schema path that merely CONTAINS the word (``tools.0.name: run_diagnostics
+    ...``) would otherwise switch the feature off for the whole process.
+    """
+    if response.status_code != 400:
+        return False
+    await response.aread()
+    message = _extract_error_message(response, _error_payload(response)).strip().lower()
+    # ``^diagnostics\b`` (not a bare ``startswith``) so ``diagnostics_level: ...``
+    # opening a message about some OTHER field cannot latch either.
+    return bool(re.search(r"^diagnostics\b|(?<![\w.])diagnostics[:.]", message))
+
+
+def _overage_account(oauth_access: "OAuthAccess | None") -> str:
+    """The key overage state is recorded under for one subscription credential.
+
+    Overage is a property of the billed account, so the account id is the
+    natural key; the credential row id stands in when the record carries no
+    account (an older stored token), which is still one subscription.
+    """
+    if oauth_access is None:
+        return ""
+    if oauth_access.account_id:
+        return f"account:{oauth_access.account_id}"
+    return f"credential:{oauth_access.credential_id}"
+
+
 def _anthropic_cache_marker_ttl_ms(body: dict[str, Any]) -> int:
     """Read legal cache marker positions, never nested user/tool JSON fields.
 
@@ -4231,8 +4320,8 @@ class AnthropicClient:
     ``content_block_start/delta/stop`` events for ``text`` and ``tool_use``
     blocks; tool arguments stream via ``input_json_delta``.
 
-    Large contexts switch every marker to the 1-hour cache TTL; see
-    ``_cache_ttl_for`` for the economics and the wire constraint.
+    Some requests switch every marker to the 1-hour cache TTL; see
+    ``_cache_ttl_for`` for the policy and the wire constraint.
     """
 
     def __init__(
@@ -4242,6 +4331,7 @@ class AnthropicClient:
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 600.0,
         cache_ttl_1h_min_context_tokens: int = 0,
+        subagent_cache_ttl_1h_min_context_tokens: int = 0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owns_client = http_client is None
@@ -4251,6 +4341,12 @@ class AnthropicClient:
         # bare ``AnthropicClient()`` (tests, scripts) sends the exact body it
         # always did; ``client_for_spec`` passes the configured threshold.
         self._cache_ttl_1h_min_context_tokens = max(0, int(cache_ttl_1h_min_context_tokens))
+        # Delegated-child size gate; 0 (never 1h) everywhere by default because
+        # the measured subagent trade is negative at every size — see
+        # ``providers/anthropic_cache_ttl.py``.
+        self._subagent_cache_ttl_1h_min_context_tokens = max(
+            0, int(subagent_cache_ttl_1h_min_context_tokens)
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -4394,10 +4490,31 @@ class AnthropicClient:
             marker["ttl"] = ttl
         return marker
 
-    def _cache_ttl_for(self, request: ChatRequest, body: dict[str, Any]) -> str | None:
+    def _cache_ttl_for(
+        self,
+        request: ChatRequest,
+        body: dict[str, Any],
+        *,
+        oauth: bool = False,
+        account: str = "",
+    ) -> str | None:
         """Pick the prompt-cache TTL for this request: ``"1h"`` or None (5m).
 
-        WHY: a 5m entry expires while a large session waits on a subagent, a
+        The policy lives in ``providers/anthropic_cache_ttl.py`` (measured
+        numbers, Claude Code parity, overage); this method feeds
+        it the facts only the wire client has — whether the credential is a
+        subscription (``oauth``), whose overage state applies (``account``),
+        and the body to size when no hint exists:
+
+        * subscription main thread, not in overage -> 1h at any size;
+        * subagent turns -> 5m unless
+          ``subagent_cache_ttl_1h_min_context_tokens`` opts them in by size;
+        * auxiliary one-shots (compaction, naming, asides...) -> 5m;
+        * API key, or a subscription drawing on overage -> the size threshold
+          below for the main thread.
+
+        The threshold rationale, kept for the API-key main thread it still
+        governs. WHY: a 5m entry expires while a large session waits on a subagent, a
         scheduled wake, or the user, and its next call then rewrites the whole
         prefix at 1.25× base. Measured over 24h of this harness's own traffic:
         276 such rewrites of >150k contexts cost 89.5M write tokens (~112M
@@ -4414,12 +4531,11 @@ class AnthropicClient:
         request — system blocks and message breakpoints alike — never to a
         subset.
 
-        The decision is one-directional in practice and needs no hysteresis:
-        context only grows within a turn, and once it crosses the threshold
-        the 1h markers stay until compaction shrinks it. Dropping back to 5m
-        markers after compaction is fine — the compacted prefix is new
-        content that has to be written either way, and a smaller context is
-        exactly the case where the cheaper write rate wins again.
+        No hysteresis is needed: a request whose TTL differs from the one
+        that wrote the prefix still reads that prefix in full (measured live,
+        PR #2985 review round 1), so crossing the threshold in either
+        direction changes only the rate of NEW writes, never re-writes the
+        cached prefix.
 
         Two size sources, in preference order:
 
@@ -4436,13 +4552,21 @@ class AnthropicClient:
            the second call on. Without the fallback a resumed 400k session
            would send its first (and most expensive) request at 5m.
         """
-        threshold = self._cache_ttl_1h_min_context_tokens
-        if threshold <= 0:
-            return None
-        size = request.context_tokens_hint
-        if size is None:
-            size = self._estimate_context_tokens(body)
-        return "1h" if size >= threshold else None
+        from local_operator.providers import anthropic_cache_ttl as policy
+
+        def size() -> int:
+            hint = request.context_tokens_hint
+            return hint if hint is not None else self._estimate_context_tokens(body)
+
+        role = request.cache_role or policy.cache_role(request.purpose, delegated=False)
+        return policy.decide_cache_ttl(
+            role=role,  # type: ignore[arg-type]  # validated by the producer
+            subscription=oauth,
+            overage=oauth and policy.overage_active(account),
+            main_min_context_tokens=self._cache_ttl_1h_min_context_tokens,
+            subagent_min_context_tokens=self._subagent_cache_ttl_1h_min_context_tokens,
+            context_size=size,
+        )
 
     @classmethod
     def _system_blocks(
@@ -4620,7 +4744,9 @@ class AnthropicClient:
     ) -> str | None:
         return "anthropic:messages" if self._base_url == ANTHROPIC_API_URL else None
 
-    def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
+    def _build_body(
+        self, request: ChatRequest, *, oauth: bool = False, account: str = ""
+    ) -> dict[str, Any]:
         # Request-time document policy for THIS wire (contract amendment 6).
         # The row is the Anthropic document-input form; a model reached through
         # this client on another provider id gets no row and therefore the
@@ -4720,7 +4846,7 @@ class AnthropicClient:
                 }
                 for tool in request.tools
             ]
-        ttl = self._cache_ttl_for(request, body)
+        ttl = self._cache_ttl_for(request, body, oauth=oauth, account=account)
         if blocks:
             body["system"] = self._system_blocks(blocks, ttl=ttl)
         # System-only breakpoints stop the cached prefix before the first
@@ -4825,6 +4951,19 @@ class AnthropicClient:
             body["speed"] = fast.value
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
+        if (
+            request.cache_diagnostics
+            and self._base_url == ANTHROPIC_API_URL
+            and not _ANTHROPIC_DIAGNOSTICS_REFUSED[0]
+        ):
+            # First-party API only: Bedrock, Vertex and relays do not offer
+            # the feature, and an unknown key there is a guaranteed 400. Sent
+            # on EVERY turn of the conversation, including the first with an
+            # explicit null, because the object is the opt-in — the API
+            # fingerprints a response only when its request carried it, so a
+            # skipped turn would leave the next one nothing to compare with.
+            # Outside the cached prefix: the comparison is server-side.
+            body["diagnostics"] = {"previous_message_id": request.cache_diagnostics_previous_id}
         if self._base_url == ANTHROPIC_API_URL:
             lifetime = _anthropic_cache_marker_ttl_ms(body)
             if lifetime:
@@ -4832,6 +4971,32 @@ class AnthropicClient:
                 # context-size approximation or arbitrary nested tool input.
                 set_wire_hint(request, "anthropic:messages", lifetime, "explicit-wire")
         return body
+
+    @contextlib.asynccontextmanager
+    async def _open_messages_stream(
+        self, url: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> AsyncIterator[httpx.Response]:
+        """Open the Messages stream, shedding a refused ``diagnostics`` key once.
+
+        The fail-closed half of cache diagnostics: if the API answers 400
+        naming the field, the latch flips for the whole process, the key is
+        removed from ``body`` IN PLACE (the caller reads ``"diagnostics" in
+        body`` to know whether ``message_start`` carries a diagnosis) and the
+        identical request is sent again. Nothing has been streamed yet, so the
+        retry is invisible to the turn; every other status passes through.
+        """
+        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+            if not ("diagnostics" in body and await _refuses_diagnostics(response)):
+                yield response
+                return
+        _ANTHROPIC_DIAGNOSTICS_REFUSED[0] = True
+        body.pop("diagnostics", None)
+        logger.info(
+            "anthropic: cache diagnostics refused by the API (HTTP 400); "
+            "disabled for this process"
+        )
+        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+            yield response
 
     async def stream(
         self,
@@ -4848,12 +5013,14 @@ class AnthropicClient:
         usage = Usage(at_ms=tariff.now_ms())
         streamed_text = False
         block_index_to_call: dict[int, tuple[str, str]] = {}
+        oauth = self._is_oauth(oauth_access)
+        overage_account = _overage_account(oauth_access) if oauth else ""
+        body = self._build_body(request, oauth=oauth, account=overage_account)
 
-        async with self._http.stream(
-            "POST",
+        async with self._open_messages_stream(
             url,
-            json=self._build_body(request, oauth=self._is_oauth(oauth_access)),
-            headers=self._headers(
+            body,
+            self._headers(
                 api_key,
                 oauth_access,
                 effort=request.model.reasoning_effort,
@@ -4869,6 +5036,15 @@ class AnthropicClient:
                 ),
             ),
         ) as response:
+            if overage_account:
+                # Before the status check: a 429 carries the same headers, and
+                # "plan limits spent, overage allowed" is exactly what the NEXT
+                # request's TTL must know. See ``anthropic_cache_ttl``.
+                from local_operator.providers.anthropic_cache_ttl import (
+                    observe_unified_headers,
+                )
+
+                observe_unified_headers(overage_account, response.headers)
             if response.status_code >= 400:
                 await response.aread()
                 raise_for_status(response)
@@ -4885,8 +5061,23 @@ class AnthropicClient:
                     # an Anthropic-pinned run with NO native turn identity on
                     # any event — and therefore no way for an external runtime
                     # to commit no-replay proof.
+                    # ``diagnostics`` rides the same frame (streaming puts it
+                    # on ``message_start``, nowhere else). Read only when THIS
+                    # request opted in — the retry below may have dropped the
+                    # key — so an undiagnosed call reports ``None``, never a
+                    # fabricated "baseline".
+                    miss_type, missed_tokens = (
+                        _anthropic_cache_diagnosis(
+                            event.get("message") or {},
+                            previous_id=request.cache_diagnostics_previous_id,
+                        )
+                        if "diagnostics" in body
+                        else (None, 0)
+                    )
                     yield StreamStartEvent(
-                        response_id=_stream_id((event.get("message") or {}).get("id"))
+                        response_id=_stream_id((event.get("message") or {}).get("id")),
+                        cache_miss_type=miss_type,
+                        cache_missed_tokens=missed_tokens,
                     )
                     raw_usage = (event.get("message") or {}).get("usage") or {}
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
@@ -5501,6 +5692,7 @@ def client_for_spec(
     http_client: httpx.AsyncClient | None = None,
     openai_api: str = "responses",
     anthropic_cache_ttl_1h_min_context_tokens: int = 0,
+    anthropic_subagent_cache_ttl_1h_min_context_tokens: int = 0,
     openrouter_provider_preferences: Mapping[str, Any] | None = None,
 ) -> WireClient:
     """Build the wire client for a ``ModelSpec`` via the provider registry.
@@ -5510,7 +5702,9 @@ def client_for_spec(
 
     ``anthropic_cache_ttl_1h_min_context_tokens`` is the configured
     ``providers.anthropic.cache_ttl_1h_min_context_tokens`` (see
-    ``AnthropicClient._cache_ttl_for``); it only reaches the Anthropic wire.
+    ``AnthropicClient._cache_ttl_for``); it only reaches the Anthropic wire,
+    as does ``anthropic_subagent_cache_ttl_1h_min_context_tokens``
+    (``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens``).
     ``openrouter_provider_preferences`` is the resolved ``providers.openrouter``
     routing block (see ``model.configure._openrouter_provider_preferences``);
     it only reaches clients serving an OpenRouter-routed spec. Like
@@ -5553,6 +5747,9 @@ def client_for_spec(
             base_url=base,
             http_client=http_client,
             cache_ttl_1h_min_context_tokens=anthropic_cache_ttl_1h_min_context_tokens,
+            subagent_cache_ttl_1h_min_context_tokens=(
+                anthropic_subagent_cache_ttl_1h_min_context_tokens
+            ),
         )
     if wire == "google":
         base = spec.base_url or GOOGLE_API_URL

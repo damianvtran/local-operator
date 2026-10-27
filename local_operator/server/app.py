@@ -182,6 +182,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # daemon STARTUP (the thing an attach waits on), and a raise inside a FastAPI
     # ``lifespan`` fails startup. The warm skips itself on a full disk or a busy
     # host, and drops the rest of its queue when the host gets busy mid-warm.
+    # It also starts the cold open's MODEL warm (``warm_model_metadata``): the
+    # first open in a fresh daemon otherwise paid a provider listing fetch plus
+    # the model-config imports inside its first frame.
     try:
         from local_operator.session.index_prewarm import start_index_prewarm
 
@@ -542,6 +545,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
     try:
+        # The boot warms are optional work nobody waits on: stop them first, so a
+        # model warm parked in a provider read cannot keep issuing requests while
+        # the server drains (PR #2992 review MINOR-1). Never raises.
+        try:
+            from local_operator.session.index_prewarm import cancel_prewarm
+
+            await cancel_prewarm()
+        except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
+            logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
         if hub_sync_task is not None:
             if app.state.hub_sync is not None:
                 app.state.hub_sync.stop()

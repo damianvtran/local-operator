@@ -24,7 +24,9 @@ agent member whose endpoint consent allows it. That row carries refs only:
 The card renders the shipped ``BRIDGE_UNTRUSTED_CLAUSE`` verbatim and names the
 served guidance version (``bridge-guidance-v2``); the triage rules themselves
 (inform / course-correct / ask, never new work) live in that served text and are
-deliberately not duplicated in the card.
+deliberately not duplicated in the card. The card does name reply ROUTES (the
+thread line, or for a root message ``channel_post`` with the conversation id),
+because the legacy ``bridge send`` path never reaches a conversation.
 """
 
 from __future__ import annotations
@@ -132,6 +134,24 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
             "reply in thread: bridge channel_post with this thread_root_id; "
             "read the thread with channel_thread",
         ]
+    else:
+        # Root message (DM, group or channel): name the route that keeps the
+        # answer IN this conversation. Without it an agent reached for the
+        # legacy `bridge send`/`reply`, which writes the pair inbox
+        # (POST /messaging/messages) and never appends conversation history,
+        # so a human's DM showed no answer in the desktop DM view. Phrased as a
+        # condition on purpose: whether to answer at all stays the served
+        # guidance's call, so the card names a route, never an obligation.
+        # The legacy-send warning lives HERE rather than in the bridge tool's
+        # description on purpose: that description is billed on every turn of
+        # every session and the subagent context budget
+        # (scripts/bench_context_budget.py --kind child) had ~2 tokens of
+        # headroom, while this card costs only when a conversation message
+        # arrives — exactly when the choice between the two routes is made.
+        lines.append(
+            "if you reply: bridge channel_post with channel_id = this conversation_id; "
+            "legacy send/reply never appears in a conversation"
+        )
     lines.append(f"guidance: {GUIDANCE_VERSION}")
     return "\n".join(lines)
 

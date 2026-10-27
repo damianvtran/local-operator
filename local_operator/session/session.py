@@ -3223,6 +3223,15 @@ class Session:
         #: construction (``harness.subagent``): a setter-only value installed
         #: on a parent after construction would otherwise never reach a child.
         confinement_root: str | None = None,
+        #: The only directory this session's SHELL may write to, or ``None``.
+        #: Set by ``harness.subagent`` for a ``scout`` child (its own
+        #: scratchpad) and never by a host: reads stay open, writes and the
+        #: network are refused by the kernel sandbox in
+        #: ``local_operator.tools.confinement.ShellWriteConfinement``.
+        #: There is no way to LIFT it: the only other writer is
+        #: :meth:`_apply_readonly_shell_role` (a scout profile attached to an
+        #: existing session), which only ever sets it.
+        shell_write_root: str | None = None,
         #: The short name this session was DELEGATED under, set only on a
         #: subagent (``zoom-scroll-fix``, ``bridge-qa``). A child never
         #: generates a conversation title — naming runs in the TUI host and the
@@ -3663,6 +3672,29 @@ class Session:
         #: read by ``_build_tool_context`` on every turn, which is what makes
         #: it reach both the createIf checks and the executors.
         self._confinement_root = confinement_root
+        #: The write-confined shell root (see the ``shell_write_root``
+        #: parameter). Stored as given, like ``confinement_root``:
+        #: ``ShellWriteConfinement.at`` resolves it at the enforcement point, so
+        #: the sandbox profile always names the real path. Read by
+        #: ``_build_tool_context`` and by ``harness.subagent`` to keep the
+        #: confinement sticky downward.
+        self._shell_write_root = shell_write_root or None
+        #: Whether this session is a READ-ONLY shell role (``scout``): set by a
+        #: delegating parent (``shell_write_root`` given) or by attaching the
+        #: role's profile (:meth:`_apply_readonly_shell_role`). Held for the
+        #: life of this PROCESS, like a declared inventory: a later ``/agent``
+        #: switch or detach in the same process does not give the shell its host
+        #: reach back, because a model that ran as a scout may have been steered
+        #: by what it read. It is deliberately NOT persisted: a reopened session
+        #: takes the confinement of the profile attached at restore. Switching a
+        #: scout to ``coder`` is the operator choosing a coder's shell, so a
+        #: restore that finds ``coder`` attached gives exactly that, while a
+        #: scout restored as scout is confined again by the same
+        #: :meth:`attach_agent_profile` path
+        #: (``test_a_resumed_scout_attachment_is_confined_again``).
+        #: When set with no root (no scratchpad, or no sandbox on this host),
+        #: ``bash`` is withheld at :meth:`_filter_declared`.
+        self._readonly_shell = self._shell_write_root is not None
         #: Settled model-owned jobs whose results are durably journaled but have
         #: not yet committed into this turn's model context, in settle order.
         #: Safe aside boundaries offer the SAME canonical rows to the running
@@ -7621,6 +7653,9 @@ class Session:
         # The team takes the agent slot (issue #2014), AFTER the brief so the
         # claim can only ever describe a team that is fully attached.
         self._claim_agent_slot_for_team()
+        # A team whose MANAGER is a read-only shell role makes this session
+        # that role: the same confinement ``attach_agent_profile`` applies.
+        self._apply_readonly_shell_role(self._team_manager_name())
         # Journal the NAME so a resume can rebuild this tail. On change only:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
@@ -8217,6 +8252,11 @@ class Session:
             # A role that NAMES a tool keeps its schema published (see
             # ``tools/deferral.py``); the lopdev manager names ``project``.
             self.set_tool_deferral(pins=self._attached_profile_tools)
+            # BEFORE the caller declares the role's inventory (``lop exec
+            # --profile`` declares it right after this returns, and unattended
+            # that declaration IS the approval): the scout's ``bash`` must be
+            # the sandboxed one, or absent, by the time anything can call it.
+            self._apply_readonly_shell_role(profile.name)
             return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
         if kind == "specialist":
             # A specialist carries instructions only — the registry row has no
@@ -8228,6 +8268,70 @@ class Session:
             body = f"[agent: {display_name}]\n{specialist_prompt}" if specialist_prompt else ""
             return self._stamp_agent_brief(body, display_name)
         return None
+
+    def _apply_readonly_shell_role(self, role: str) -> None:
+        """Confine this session's shell when ``role`` is a read-only shell role.
+
+        WHY HERE. ``harness.subagent`` confines a DELEGATED scout, but a scout
+        profile can also be attached to a session that already exists, and
+        every such path ends in :meth:`attach_agent_profile`: ``lop exec
+        --profile`` (and through it the ``sessions`` tool's spawn and mesh
+        ``--profile``), the SDK's profile, ``/agent`` in the TUI and the routed
+        runtime, and a resume restoring the attachment. Round 1 of PR #2987
+        measured the gap: ``lop exec --profile scout`` offered the seed's
+        ``bash`` unwrapped, auto-approved by the unattended declaration, and
+        ``echo PWNED > <outside path>`` wrote the file. The role test is the
+        same predicate the subagent path reads
+        (``harness.subagent.is_readonly_shell_role``), keyed by ROLE, not by
+        ``bash`` being in the allow-list.
+
+        The shell root is this session's own scratchpad when the host can
+        enforce the sandbox. The synchronous check reads only what is known
+        without a spawn (this runs on the event loop); if the probe has not
+        run yet the root is set optimistically, which is safe because
+        ``execute_bash`` awaits the full answer before every spawn and refuses
+        rather than run unwrapped. With no root, ``bash`` is withheld at
+        :meth:`_filter_declared`, the point every inventory writer passes.
+        """
+        from local_operator.harness.subagent import (
+            is_readonly_shell_role,
+            readonly_shell_write_root,
+        )
+
+        if not is_readonly_shell_role(role):
+            return
+        self._readonly_shell = True
+        if self._shell_write_root is None:
+            from local_operator.tools.confinement import (
+                shell_sandbox_known_unavailable_reason,
+            )
+
+            self._shell_write_root = readonly_shell_write_root(
+                self._scratchpad_dir(), unavailable=shell_sandbox_known_unavailable_reason()
+            )
+        # Re-run the inventory through the filter (which strips a root-less
+        # shell) and rebuild a present ``bash`` against the new context, so the
+        # schema says SANDBOXED and carries the ``read`` tier the executor's
+        # wrap makes honest. The executor reads the per-turn context, so even an
+        # old ``bash`` object would wrap; the rebuild keeps the schema truthful.
+        tools = list(self._tools)
+        if self._shell_write_root is not None and any(tool.name == "bash" for tool in tools):
+            try:
+                from local_operator.tools.registry import create_tools
+
+                # A MINIMAL context, not ``_build_tool_context()``: this also
+                # runs from ``__init__`` (a resume restoring the attachment),
+                # before the session's full context can be built, and the
+                # ``bash`` builder reads only ``shell_write_root``
+                # (``build_bash_tool``). The executor reads the full per-turn
+                # context, which carries the same root.
+                context = ToolContext(shell_write_root=self._shell_write_root)
+                rebuilt = {tool.name: tool for tool in create_tools(context, enabled=["bash"])}
+                tools = [rebuilt.get(tool.name, tool) for tool in tools]
+            except Exception:  # noqa: BLE001 — fail closed: drop the shell, never keep it open
+                logger.warning("could not rebuild the scout's sandboxed bash", exc_info=True)
+                self._shell_write_root = None
+        self.refresh_tools(tools)
 
     def clear_agent_profile(self) -> None:
         """Detach any active ``/agent`` profile (the ``/agent clear`` verb).
@@ -13154,6 +13258,12 @@ class Session:
         :meth:`_scope_declared_ops`; this method is where every inventory writer
         passes, so this is where the two cannot be applied apart.
         """
+        if self._readonly_shell and self._shell_write_root is None:
+            # A read-only shell role with no enforceable sandbox gets NO shell
+            # (see :meth:`_apply_readonly_shell_role`). Here, not at the attach,
+            # because every later writer (an MCP refresh, a capability merge)
+            # passes through this method and must not hand ``bash`` back.
+            tools = [tool for tool in tools if getattr(tool, "name", None) != "bash"]
         if self._declared_tools is None:
             return list(tools)
         allowed = self._declared_tools
@@ -19195,6 +19305,11 @@ class Session:
             # tool's enforcement point reads this single answer (see
             # ``local_operator.tools.confinement``).
             confinement_root=self._confinement_root,
+            # The scout's write-confined shell root, when it has one: the bash
+            # executor wraps every command in the write-confining sandbox (or
+            # refuses) whenever this is set. Dropped here, a scout's shell
+            # would run UNWRAPPED -- see ``test_tool_context_parity``.
+            shell_write_root=self._shell_write_root,
             # Derived, never configured: see :meth:`_scratchpad_dir`.
             scratchpad_dir=self._scratchpad_dir(),
             # The session's OWN directory: where the eval tool records its
@@ -25096,9 +25211,12 @@ class Session:
             # ahead of the last request the turn actually sent.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL: the session stamps its
+            # Same prefix as the turn, so the same size: the session stamps its
             # own hint here because the shared stream fn holds none (a child
             # would overwrite it — see ``ChatRequest.context_tokens_hint``).
+            # On Anthropic the hint no longer picks the TTL: an aside is an
+            # auxiliary errand and goes out at 5m, and a 5m-marked request still
+            # reads the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
@@ -25227,8 +25345,10 @@ class Session:
             # would change position 0 and force a full re-process.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL — the session stamps its
-            # own hint because the shared stream fn holds none.
+            # Same prefix as the turn, so the same size — the session stamps its
+            # own hint because the shared stream fn holds none. On Anthropic a
+            # clearance is an auxiliary errand at 5m regardless, and still reads
+            # the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
             # Nothing here reaches a screen until the whole answer is parsed, so
             # a stalled read may be discarded and retried whole (the advisor's

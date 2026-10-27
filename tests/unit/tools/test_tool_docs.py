@@ -402,8 +402,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # 788 -> 812 (review round 1, M1): one sentence names the BYOK voiceover
     # meter (per character; the estimate is per 1,000 characters).
     "generate_voiceover": 812,
-    "glob": 87,
-    "grep": 333,
+    # 87 -> 215 / 333 -> 445 (scout grep/glob fixes, 2026-10-26): the ``glob``
+    # ``path`` parameter and its off-wire note (absolute-pattern split, ``..``
+    # refusal, approval), and ``grep``'s ``max_filesize_mb`` parameter plus the
+    # clipped-line and skipped-file notes. Re-measured through this test's own
+    # printed table; no other entry moved. Round-1 remediation: 215 -> 224 /
+    # 445 -> 472 — the wire descriptions were cut to fit the start-context
+    # ratchet and their detail moved here, to the on-demand doc.
+    "glob": 224,
+    "grep": 472,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
     # actions plus the preview-first/confirm/selection contract. Measured with
     # this test's canonical isolated renderer; no existing entry moved. Round-1

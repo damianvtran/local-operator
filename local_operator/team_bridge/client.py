@@ -949,13 +949,22 @@ class TeamBridgeClient:
         as the OWNER account, which is an enrollment-time decision (H2), not a
         silent fallback. The explicit ``db_path`` spelling is what relocates the
         store with ``config_dir`` — ``config_dir`` alone does not.
+
+        SHARED, NOT PRIVATE. This used to build a fresh ``AuthStore`` per client
+        and never close it. The connector builds two clients per message, and a
+        failure keeps each alive through its traceback's reference cycle, so a
+        refusing connector leaked an ``auth.db`` + ``-wal`` descriptor pair per
+        client until launchd's 256-descriptor limit stopped it silently (live
+        outage, 2026-10-26: 122 pairs held). ``shared_auth_store`` is the same
+        PLAIN store (never mesh-aware), one connection per credential root for
+        the process, and this client must not close what it was handed.
         """
 
         if self._store is None:
-            from local_operator.providers.auth_store import AuthStore
+            from local_operator.providers.auth_store import shared_auth_store
 
             db_path = (self._config_dir / "auth.db") if self._config_dir is not None else None
-            self._store = AuthStore(db_path=db_path)
+            self._store = shared_auth_store(db_path=db_path, config_dir=self._config_dir)
         return self._store
 
     def _pinned_row(self) -> Any:
