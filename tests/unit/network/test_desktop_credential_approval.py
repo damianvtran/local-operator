@@ -1172,6 +1172,24 @@ def test_prose_still_wraps_on_words_on_a_terminal(
             assert len(line) <= 80, line
 
 
+def test_a_device_name_containing_lop_still_wraps_its_prose(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D10 = U13: only a line that STARTS with a command is left unwrapped, not one naming it."""
+    network = store.load(N, rig.root)
+    member = network.member(rig.peer.device_id)
+    assert member is not None
+    member.name = "Studio develop Mac"
+    store.save(network, rig.root)
+    record = _finite(rig, monkeypatch)
+    _, text = _printed(monkeypatch, "approvals", "show", record["approval_id"], cols=80, tty=True)
+    lines = text.splitlines()
+    assert any("Studio develop Mac" in line for line in lines), text
+    for line in lines:
+        if not line.lstrip().startswith(("lop ", "{", "sha256:")):
+            assert len(line) <= 80, line
+
+
 @pytest.mark.asyncio
 async def test_the_detail_read_carries_the_same_outcome_as_the_list_and_show_after_restart(
     rig: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1189,6 +1207,7 @@ async def test_the_detail_read_carries_the_same_outcome_as_the_list_and_show_aft
         assert listed["retryable"] is False and "lop " not in listed["remedy"]
         expected_block = expected_block or listed
         assert listed == expected_block
+    assert expected_block is not None
     capsys.readouterr()
     monkeypatch.setenv("COLUMNS", "1000")
     assert _lop_network("approvals", "show", aid) == 0

@@ -9152,14 +9152,22 @@ def _print_refusal(exc: Any) -> None:
     for line in sentence:
         print(f"\033[1;31m{line}\033[0m" if red else line, file=sys.stderr)
     if isinstance(commands, list) and commands:
-        print(str(getattr(exc, "commands_label", "")), file=sys.stderr)
+        for line in _wrap_lines([str(getattr(exc, "commands_label", ""))], stream=sys.stderr):
+            print(line, file=sys.stderr)
         for command in commands:
             print(command, file=sys.stderr)
 
 
 def _is_command(line: str) -> bool:
-    """Whether a printed line carries a runnable command, which is never wrapped."""
-    return "lop " in line
+    """Whether a printed line IS a runnable command, which is never wrapped.
+
+    The line must START with ``lop `` (after an optional ``Label: `` prefix such as
+    ``Approve: ``), never merely contain it (design #3002 r3, D10; UX U13): a recipient named
+    "Studio develop Mac" put ``lop `` inside a prose line and switched its wrapping off.
+    """
+    import re
+
+    return re.match(r"\s*(?:[A-Z][\w ]{0,40}: )?lop ", line) is not None
 
 
 def _wrap_lines(lines: list[str], width: int | None = None, *, stream: Any = None) -> list[str]:

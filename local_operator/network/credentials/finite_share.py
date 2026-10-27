@@ -283,7 +283,7 @@ def next_lines(record: dict[str, Any]) -> list[str]:
         lines += ["Apply again:", apply_cmd]
     else:
         lines += [
-            "To file the new request from a terminal on this Mac, run these in order:",
+            NEW_REQUEST_LABEL,
             *_new_request_commands(data),
         ]
     return lines
@@ -332,25 +332,18 @@ def _request_command(data: dict[str, Any]) -> str:
     )
 
 
-#: The placeholder a new card's id takes in the printed recipe; it is not a real id, so the
-#: recipe's last two commands are templates the operator completes, never run verbatim.
-NEW_APPROVAL_ID = "<new-approval-id>"
+#: What follows the request command (UX #3002 r3, U12; design N5). The request prints the new
+#: card's own Approve and Apply commands, with its real id, so the recipe never asks the
+#: operator to fill a ``<new-approval-id>`` template by hand.
+NEW_REQUEST_LABEL = (
+    "To file the new request from a terminal on this Mac, run this. It prints the Approve and "
+    "Apply commands for the new card:"
+)
 
 
 def _new_request_commands(data: dict[str, Any]) -> list[str]:
-    """The terminal route after a permanent refusal: request, approve, apply -- one per line.
-
-    Three whole commands rather than one sentence joining them with "then" (UX U8a): each is
-    copied alone. Public context is quoted as command arguments, never concatenated; the
-    placeholder is appended unquoted so it reads as the template it is.
-    """
-    import shlex
-
-    return [
-        _request_command(data),
-        f"lop network approvals approve {NEW_APPROVAL_ID}",
-        shlex.join(_apply_argv(data, "")[:-1]) + f" {NEW_APPROVAL_ID}",
-    ]
+    """The terminal route after a permanent refusal: the request command, whole, alone."""
+    return [_request_command(data)]
 
 
 def _refusal(code: str, expected: dict[str, Any], approval_id: str) -> MeshRefusal:
@@ -373,7 +366,7 @@ def _refusal(code: str, expected: dict[str, Any], approval_id: str) -> MeshRefus
         label = "Apply again:"
         commands = [shlex.join(_apply_argv(expected, approval_id))]
     else:
-        label = "To file the new request from a terminal on this Mac, run these in order:"
+        label = NEW_REQUEST_LABEL
         commands = _new_request_commands(expected)
     refusal.commands_label = label  # type: ignore[attr-defined]
     refusal.commands = commands  # type: ignore[attr-defined]

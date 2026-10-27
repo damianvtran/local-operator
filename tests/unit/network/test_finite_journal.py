@@ -322,10 +322,10 @@ def test_finite_refusal_keeps_codes_and_exact_recovery_not_onboarding(
     payload = json.loads(output.out)
     # The recipe rides as whole commands beside the sentence since #3002 r2 (UX U8a, design
     # D9): the sentence is the plain reason + next step every surface shows, with no syntax.
-    request, approve, apply_ = payload["commands"]
+    # Only the request command: it prints the new card's Approve/Apply with the real id (U12).
+    (request,) = payload["commands"]
     assert request.endswith("--request-approval") and request.startswith("lop network ")
-    assert approve == "lop network approvals approve <new-approval-id>"
-    assert apply_.endswith("--approval <new-approval-id>")
+    assert "<new-approval-id>" not in output.err
     assert "a new request is needed" in payload["message"] and "lop " not in payload["message"]
     assert "new onboarding" not in payload["message"] and "setup" not in payload["message"]
     # stderr prints each command whole on its own line (design D6).
