@@ -268,6 +268,10 @@ def test_local_identity_refusals_are_named_in_the_diagnostic(code, caplog) -> No
 def test_run_forever_logs_a_content_free_iteration_line(
     tmp_path, caplog, failure, expected
 ) -> None:
+    # The owner watch (D2b) never reaches the hub without a committed owner,
+    # so the iteration under test needs the snapshot it is handed to be live.
+    _enroll(tmp_path, _owner(1))
+
     async def scenario() -> None:
         stop = asyncio.Event()
 
