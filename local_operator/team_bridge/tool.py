@@ -95,6 +95,7 @@ from .types import _CONVERSATION_MESSAGE_ID as _CANONICAL_MESSAGE_ID
 from .types import (
     CONVERSATION_ID_PATTERN,
     InvalidSendRecipient,
+    is_conversation_message_id,
     validate_send_recipient,
 )
 
@@ -403,6 +404,16 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     if params.op == "take_up":
         if not params.message_id or not params.body_sha256:
             return _error("take_up needs message_id and body_sha256 (S-20)")
+        if is_conversation_message_id(params.message_id):
+            # A ``bcmsg_`` id lives in the conversation store; the pair
+            # read below would answer "does not exist" and the model would
+            # conclude the message vanished. The conversation lane admits its
+            # body through the connector, and the agent reads it from history.
+            return _error(
+                "conversation messages (bcmsg_ ids) are not taken up here: read them with "
+                "channel_history or channel_thread",
+                code="conversation_message",
+            )
         try:
             result = await runtime.client.message(params.message_id, tenant_id=runtime.tenant_id)
         except Exception as failure:  # BridgeRefusal/BridgeUnreachable -> model-readable

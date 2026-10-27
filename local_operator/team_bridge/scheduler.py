@@ -230,6 +230,7 @@ def default_status_fetcher(
     config_dir: Path,
     owner: Any,
     transport: Any = None,
+    auth_store: Any = None,
 ) -> Callable[[], Awaitable[Any]]:
     """The PRODUCTION SDK-status fetcher (R8/Q3).
 
@@ -237,7 +238,10 @@ def default_status_fetcher(
     access — the ordinary SDK/auth path, no parallel transport and no model-
     key cascade. The RAW nested DTO is returned untouched; the caller
     normalizes it strictly and re-verifies the owner after the await.
-    ``transport`` is injected only by proof rigs.
+    ``transport`` is injected only by proof rigs. ``auth_store`` is the
+    connector's own credential store: handing it through means a fetch never
+    opens a private SQLite connection of its own (a per-message leak that
+    exhausted the connector's file descriptors; see ``TeamBridgeClient._auth_store``).
     """
 
     _require_owner_identity(owner)  # fail closed on a missing canonical hub
@@ -251,6 +255,7 @@ def default_status_fetcher(
             base_url=owner.canonical_base_url,
             credential_id=owner.credential_id,
             transport=transport,
+            store=auth_store,
         )
         # R9/Q3-3: the exact intended AuthStore row and canonical hub are
         # compared to the native initiating owner BEFORE the GET — a bearer
@@ -293,16 +298,46 @@ def _require_owner_identity(owner: Any) -> None:
         raise BridgeRefusal("bridge_owner_mismatch", "the enrolled owner has no canonical hub")
 
 
+def _bound_hub(access: Any) -> str:
+    """The hub a credential row is bound to, normalized for comparison.
+
+    A row authorized before the sign-in began stamping ``api_endpoint`` (commit
+    131fc1afd81, 2026-10-23) carries NO hub, and a refresh never adds one. Such
+    a row is read as the default hub, never as "matches whatever the owner
+    enrolled on".
+
+    WHAT MAKES THAT SAFE (and what does not). It does NOT rest on the refresh
+    issuer check: ``refresh_radient_token`` compares the CURRENT process's token
+    URL, not the issuer that minted the row, and before 131fc1afd81 a login
+    honoured ``RADIENT_OAUTH_TOKEN_URL`` and stamped nothing, so an unstamped row
+    is not proof of the default issuer. It rests on three facts that hold
+    regardless:
+
+    * the comparison is against the hub the ROW is bound to (stamped, else the
+      default), never against the hub the client was told to call, so a client
+      pointed at hub B cannot launder a bearer for hub A;
+    * the owner's hub was proven when the enrollment committed this credential
+      against it, and the same pinned bearer already travels to that hub on
+      every poll, so this check admits no new bearer travel;
+    * an owner enrolled on any NON-default hub is still refused for an
+      unstamped row, so the relaxation can only ever admit a default-hub owner.
+    """
+
+    from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
+
+    stamped = (getattr(access, "api_endpoint", None) or "").rstrip("/")
+    return stamped or DEFAULT_RADIENT_API_BASE_URL.rstrip("/")
+
+
 def _require_access_matches_owner(access: Any, owner: Any) -> None:
     """Credential/account/canonical-hub equality; tokens are never touched."""
 
     from local_operator.team_bridge.client import BridgeRefusal
 
-    endpoint = (getattr(access, "api_endpoint", None) or "").rstrip("/")
     if (
         getattr(access, "credential_id", None) != owner.credential_id
         or getattr(access, "account_id", None) != owner.account_id
-        or endpoint != str(owner.canonical_base_url).rstrip("/")
+        or _bound_hub(access) != str(owner.canonical_base_url).rstrip("/")
     ):
         raise BridgeRefusal(
             "bridge_owner_mismatch", "the signed-in credential is not the enrolled owner"
@@ -344,7 +379,7 @@ async def _verify_live_identity(owner: Any, auth_store: Any, config_dir: Any) ->
     if (
         access.credential_id != owner.credential_id
         or access.account_id != owner.account_id
-        or (access.api_endpoint or "").rstrip("/") != str(owner.canonical_base_url).rstrip("/")
+        or _bound_hub(access) != str(owner.canonical_base_url).rstrip("/")
     ):
         raise StoreRefused("policy_stale", "the signed-in identity is not the enrolled owner")
 
