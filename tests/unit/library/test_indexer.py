@@ -643,3 +643,132 @@ def test_a_sessions_dir_with_only_housekeeping_files_is_ready(tmp_path, monkeypa
     assert state["total"] == 0 and state["state"] == "ready"
     # The idle cadence too: 60 s forever was the visible symptom.
     assert index._idle_timeout() == indexer.RECONCILE_IDLE_S
+
+
+# ---------------------------------------------------------------------------
+# R3: the indexer thread gives way to a desktop first paint
+# ---------------------------------------------------------------------------
+
+
+def _big_session(root: Path, count: int = 400) -> None:
+    rows: list[dict[str, Any]] = []
+    for number in range(count):
+        rows.extend(write_rows(f"w{number}", float(number), written(root, f"f{number}.txt")))
+    session(root, SESSION, rows)
+
+
+def _batch(root: Path) -> int:
+    """One watcher batch as ``_run`` runs it: writer taken, schema ensured."""
+    index = indexer.LibraryIndexer(root)
+    assert indexer._acquire_writer(root)
+    index.store.ensure_schema()
+    try:
+        return index.process_dirty([SESSION])
+    finally:
+        indexer._release_writer(root)
+
+
+def _library(root: Path, home: Path) -> list[str]:
+    """Every listed asset, with the root-dependent parts (its absolute path and
+    the path-derived asset id) normalised so two roots compare."""
+    frame = service.list_assets(root, service.Query(limit=1000))
+    rows = []
+    for row in frame["rows"]:
+        row = {key: value for key, value in row.items() if key != "id"}
+        rows.append(json.dumps(row, sort_keys=True).replace(str(home), "<root>"))
+    return sorted(rows)
+
+
+def _held(fn: Any, *, stale: bool = False) -> tuple[float, Any]:
+    """Run ``fn`` in a worker while a paint hold (another conversation's open)
+    is live on a real event loop; returns (wall seconds, result)."""
+    import asyncio
+
+    from local_operator.session import transcript_index as ti
+
+    async def go() -> tuple[float, Any]:
+        release = ti.hold_paint("/synthetic-root", OTHER)
+        if stale:
+            ti._PAINT_HOLD_SINCE[ti._key("/synthetic-root", OTHER)] -= ti._YIELD_HOLD_STALE_S + 1
+        try:
+            started = time.monotonic()
+            result = await asyncio.to_thread(fn)
+            return time.monotonic() - started, result
+        finally:
+            release()
+
+    try:
+        return asyncio.run(go())
+    finally:
+        ti._reset_for_tests()
+
+
+def test_a_batch_pauses_while_a_paint_hold_is_live_and_indexes_the_same(
+    tmp_path, monkeypatch
+) -> None:
+    """The batch path yields (bounded by the budget) and the index it writes is
+    identical to one built with no hold. Mutant: no yield -> it finishes in
+    well under the 0.4 s budget it should have slept out."""
+    from local_operator.session import transcript_index as ti
+
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 0.4)
+    slept: list[float] = []
+    real_sleep = time.sleep
+
+    def counting_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        real_sleep(seconds)
+
+    # Counted rather than timed: the batch's own wall time on a loaded host can
+    # exceed the budget with no pause at all (it did, which is why).
+    monkeypatch.setattr(time, "sleep", counting_sleep)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    root = config_root(monkeypatch, tmp_path / "a")
+    _big_session(root)
+    wall, scanned = _held(lambda: _batch(root))
+    assert scanned == 1
+    assert wall >= 0.4, f"the batch did not give way to the open ({wall:.3f} s)"
+    assert len(slept) >= 20 and set(slept) == {ti._YIELD_SLICE_S}, slept[:5]
+    held = _library(root, tmp_path / "a")
+    slept.clear()
+
+    # The control: the same journal under a sibling root, indexed with no hold.
+    control_root = config_root(monkeypatch, tmp_path / "b")
+    _big_session(control_root)
+    assert _batch(control_root) == 1
+    control = _library(control_root, tmp_path / "b")
+    assert slept == [], "the unheld control paused"
+    assert len(held) == 400 and held == control, "pausing changed the index"
+
+
+def test_a_leaked_hold_costs_one_batch_at_most_the_budget(tmp_path, monkeypatch) -> None:
+    from local_operator.session import transcript_index as ti
+
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 0.2)
+    root = config_root(monkeypatch, tmp_path)
+    _big_session(root)
+    wall, scanned = _held(lambda: _batch(root))
+    assert scanned == 1 and wall < 2.0
+
+
+def test_a_stale_hold_is_not_yielded_to(tmp_path, monkeypatch) -> None:
+    from local_operator.session import transcript_index as ti
+
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 30.0)
+    root = config_root(monkeypatch, tmp_path)
+    _big_session(root)
+    wall, scanned = _held(lambda: _batch(root), stale=True)
+    assert scanned == 1 and wall < 3.0
+
+
+def test_a_synchronous_rebuild_never_pauses(tmp_path, monkeypatch) -> None:
+    """``rebuild`` (CLI, tests) and the request-path ledger reads run with no
+    yield installed. Mutant: the ledger pauses by default -> 30 s budget."""
+    from local_operator.session import transcript_index as ti
+
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 30.0)
+    root = config_root(monkeypatch, tmp_path)
+    _big_session(root)
+    wall, scanned = _held(lambda: indexer.LibraryIndexer(root).rebuild())
+    assert scanned == 1 and wall < 3.0

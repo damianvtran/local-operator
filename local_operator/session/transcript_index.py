@@ -2897,11 +2897,7 @@ def _yield_to_other_opens(
     unpayable: bool | None = None
 
     def another_open_is_young() -> bool:
-        holds = _PAINT_HOLDS
-        if len(holds) <= (1 if own in holds else 0):
-            return False  # the common case: one len, no copy
-        cutoff = time.monotonic() - _YIELD_HOLD_STALE_S
-        return any(k != own and t > cutoff for k, t in _PAINT_HOLD_SINCE.copy().items())
+        return _young_hold_besides(own)
 
     def may_yield() -> bool:
         nonlocal unpayable
@@ -2918,6 +2914,50 @@ def _yield_to_other_opens(
         while spent < _YIELD_BUDGET_S and another_open_is_young() and may_yield():
             # Measured, not counted: on a loaded host a 2 ms sleep can overrun
             # several-fold, and the budget is a wall-clock promise.
+            started = time.monotonic()
+            time.sleep(_YIELD_SLICE_S)
+            spent += time.monotonic() - started
+
+    return pause
+
+
+def _young_hold_besides(own: tuple[str, str] | None) -> bool:
+    """Whether a paint hold younger than the staleness cap is live for any key but ``own``."""
+    holds = _PAINT_HOLDS
+    if len(holds) <= (1 if own is not None and own in holds else 0):
+        return False  # the common case: one len, no copy
+    cutoff = time.monotonic() - _YIELD_HOLD_STALE_S
+    return any(k != own and t > cutoff for k, t in _PAINT_HOLD_SINCE.copy().items())
+
+
+def yield_to_any_open() -> Callable[[], None]:
+    """A pause for work that NO first frame waits on: the library indexer (R3).
+
+    WHY (conversation-first-paint, residual tail R3, 2026-10-27). The library
+    indexer's thread reacts to a journal's FSEvents by scanning it at once --
+    which is precisely when the user is opening it (a conversation that just
+    synced, was copied in, or finished a turn). It is not a ``start_refresh``
+    task, so the per-refresh rule above never applied: on a real ``lop serve``
+    at load 30-80 it spent a median 264 ms of GIL-holding CPU inside the open
+    of the 51.7 MB journal it was scanning (miss shape, 301 ms median; with this
+    pause, spike ``libyield``, 166 ms).
+
+    THE SAME RULE, MINUS TWO EXEMPTIONS. Same slice, same cumulative
+    :data:`_YIELD_BUDGET_S` per returned pause (one indexer batch), same
+    :data:`_YIELD_HOLD_STALE_S` cap on a leaked hold. The two exemptions of the
+    refresh rule do not apply, deliberately: "own conversation" -- nothing on
+    the paint path awaits the library scan, so the open of the very journal
+    being scanned must win too (that is the measured case); "payable" -- no
+    caller holds a budget on this thread's progress (the request-path ledger
+    reads never install a pause, and a lock they lose to a paused batch answers
+    from the last published scan, its documented non-blocking behaviour).
+    Content is unaffected: lines are consumed in the same order, only later.
+    """
+    spent = 0.0
+
+    def pause() -> None:
+        nonlocal spent
+        while spent < _YIELD_BUDGET_S and _young_hold_besides(None):
             started = time.monotonic()
             time.sleep(_YIELD_SLICE_S)
             spent += time.monotonic() - started
