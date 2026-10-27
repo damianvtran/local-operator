@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
+from local_operator.harness.types import Message, TextContent
 from local_operator.server.models.desktop_sessions import HistoryPage
 from local_operator.server.routes import desktop_sessions
 from local_operator.server.utils.desktop_sessions import (
@@ -29,7 +30,11 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
 )
 from local_operator.session import transcript_index as ti
-from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
+from local_operator.session.transcript import (
+    TRANSCRIPT_FILENAME,
+    Transcript,
+    TranscriptEntry,
+)
 
 TOKEN = "synthetic-desktop-token"
 
@@ -801,3 +806,46 @@ def test_wire_rows_never_alias_the_cached_page() -> None:
     row["payload"]["content"][0]["text"] = "edited"
     row["payload"]["role"] = "edited"
     assert entry.payload == {"role": "user", "content": [{"text": "a"}]}
+
+
+@pytest.mark.asyncio
+async def test_an_incrementally_refreshed_index_serves_the_full_rebuilds_frame(
+    tmp_path: Path,
+) -> None:
+    """O1 (#3034 QA): the open frame may not depend on HOW the index was refreshed.
+
+    ``tail_head_reachable`` subtracts the tail run's ``first_seq`` from
+    ``scan.rows``. An incremental refresh used to record only the rows its suffix
+    re-read there, so the subtraction went to zero and the shortcut kept hunting
+    for a head the full scan's count correctly called out of reach. The tail run
+    below is that shape: its head is more raw rows above the end than the hunt
+    may cover, but few enough PAINTABLE rows that a hunt left running reaches it.
+    """
+    async with _Harness(tmp_path) as harness:
+        rows: list[Any] = []
+        for turn in range(1, 41):
+            rows.extend(_long_turn(turn, 3))
+        rows.extend(_long_turn(99, 100))
+        rows.pop()  # the tail run is still LIVE: no closing answer yet
+        directory = harness.root / "sessions" / harness.session_id
+        _write(directory, rows)
+        await harness.warm()
+        # One more tool row through the real writer: the next refresh is incremental.
+        await Transcript(directory).append_message(
+            Message(role="tool", content=[TextContent(text="output")], tool_call_id="c-extra")
+        )
+        await harness.warm()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 50, "open_frame": 1}
+        incremental = (await harness.client.get(url, params=params)).json()["result"]
+        ti._reset_for_tests()
+        ti.index_path(harness.root, harness.session_id).unlink()
+        await harness.warm()
+        full = (await harness.client.get(url, params=params)).json()["result"]
+
+        def canonical(page: dict[str, Any]) -> dict[str, Any]:
+            return {k: v for k, v in page.items() if k not in {"epoch", "journal_generation"}}
+
+        assert full["head_cut"] is True  # the shape under test: the head is out of reach
+        assert canonical(incremental) == canonical(full)

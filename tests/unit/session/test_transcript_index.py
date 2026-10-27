@@ -2704,3 +2704,44 @@ def test_incremental_append_equals_a_full_scan_for_every_run_field(
     assert [r.outcome for r in incremental.runs][:3] == ["error", "error", "complete"]
     assert incremental.checkpoints == full.checkpoints
     assert incremental.messages == full.messages
+
+
+def test_incremental_scan_records_the_journals_total_row_count(tmp_path: Path, tmp_path_factory):
+    """``scan.rows`` is the JOURNAL's row count on both scan paths (O1, #3034 QA).
+
+    The incremental path used to record only the rows its suffix re-read, so a
+    one-row append to a 10,377-row journal answered 6,973; the open frame's
+    reachability check reads this field as the total.
+    """
+    write_rows(
+        tmp_path,
+        [user("t-u1", 1.0), assistant("t-a1", 1.1), user("t-u2", 2.0), assistant("t-a2", 2.1)],
+    )
+    before = refreshed(tmp_path)
+    assert before.scan.window_rows > 0  # the append below re-reads a SUFFIX only
+    write_rows(tmp_path, [assistant("t-a3", 2.2)])
+    grown = refreshed(tmp_path)
+    other = tmp_path_factory.mktemp("reference")
+    write_rows(
+        other, [json.loads(line) for line in journal_path(tmp_path).read_text().splitlines()]
+    )
+    reference = refreshed(other)
+    assert grown.scan.rows == reference.scan.rows == 5
+    assert grown.scan.rows == len(grown.source_projection_facts)
+    # And the persisted document reloads with the same total.
+    cached = ti.read_index(tmp_path, SID)
+    assert cached is not None and cached.scan.rows == 5
+
+
+def test_a_cached_suffix_only_row_count_reads_back_as_the_total(tmp_path: Path):
+    """Caches written before the fix carry a suffix-only ``scan.rows``; reading
+    one restates the journal's total instead of serving the understated count."""
+    write_rows(tmp_path, [user("c-u1", 1.0), assistant("c-a1", 1.1), user("c-u2", 2.0)])
+    refreshed(tmp_path)
+    path = ti.index_path(tmp_path, SID)
+    raw = json.loads(path.read_text())
+    raw["scan"]["rows"] = 1  # the shape an incremental refresh used to write
+    path.write_text(json.dumps(raw))
+    cached = ti.read_index(tmp_path, SID)
+    assert cached is not None
+    assert cached.scan.rows == 3
