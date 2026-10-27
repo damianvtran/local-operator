@@ -9,10 +9,16 @@ START-UP ORDER (each step exists because getting it wrong is a real failure):
 3. Resolve the committed owner (full namespace) and take the machine-wide
    connector lock BEFORE any network call. Two connectors on one account is
    the defect the lock exists to refuse; the loser exits quietly with its
-   own message.
+   own message. With NO owner yet the process WAITS in-process (the loop's
+   owner watch: a ``stat`` per poll, an owner read per bounded interval)
+   instead of exiting: an exit 0 under ``KeepAlive: true`` was a whole
+   interpreter relaunch about every 10 s (D2b).
 4. Run the loop. The access provider is the H1 client's own ``current_access``
    (the owner-pinned OAuth row — the ordinary sign-in path; never a
-   model-key cascade).
+   model-key cascade). When the loop hands back a DIFFERENT committed owner
+   (a re-enrolment while running), re-arm on it in-process under the same
+   lock with a client pinned to the new credential: no restart needed, and
+   none of the refusal codes ever end the process (review R4).
 5. Hand the loop the config-rooted credential store. Screening runs a model,
    and the model runner resolves its provider key from this store (rows,
    then process env). Starting with none held every message as
@@ -30,6 +36,8 @@ import copy
 import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("local_operator.team_bridge.connector")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -123,18 +131,30 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     store = Store(config_dir)
     if args.credential_id and args.account_id and args.tenant_id and args.endpoint_id:
-        owner = store.resolve_owner(
-            credential_id=args.credential_id,
-            account_id=args.account_id,
-            tenant_id=args.tenant_id,
-            endpoint_id=args.endpoint_id,
-            canonical_base_url=base_url,
-        )
+        # A pinned namespace stays pinned across re-arms: only that exact
+        # owner's generation can move under it (a credential or endpoint
+        # change is a different namespace this invocation was not given).
+        def owner_source() -> Any:
+            return store.resolve_owner(
+                credential_id=args.credential_id,
+                account_id=args.account_id,
+                tenant_id=args.tenant_id,
+                endpoint_id=args.endpoint_id,
+                canonical_base_url=base_url,
+            )
+
     else:
-        owner = store.active_owner()
+        owner_source = store.active_owner
+    owner = owner_source()
     if owner is None:
-        print("no committed bridge enrollment for this config dir; nothing to poll")
-        return 0
+        # Content-free and once: the state persists until an enrolment
+        # commits, and the watch below re-checks it without logging per tick.
+        logger.info("bridge connector idle: stage=idle code=no_owner")
+    while owner is None:
+        await _loop.idle_until_owner_changes(
+            None, config_dir=config_dir, owner_source=owner_source, stop=None
+        )
+        owner = owner_source()
 
     lock = ConnectorLock(config_dir)
     try:
@@ -153,24 +173,29 @@ async def _main_async(args: argparse.Namespace) -> int:
     # ``TeamBridgeClient._auth_store``). Values are never read or logged here.
     auth_store = AuthStore(db_path=config_dir / "auth.db", config_dir=config_dir)
     try:
-        client = TeamBridgeClient(
-            config_dir,
-            base_url=base_url,
-            credential_id=owner.credential_id,
-            # The connector's own store: a private one per client leaked an
-            # auth.db connection per message (see TeamBridgeClient._auth_store).
-            store=auth_store,
-        )
+        while owner is not None:
+            # A fresh client per owner: it pins ``credential_id``, so a
+            # re-enrolment onto a new credential row must not keep serving
+            # the old row's bearer.
+            client = TeamBridgeClient(
+                config_dir,
+                base_url=base_url,
+                credential_id=owner.credential_id,
+                # The connector's own store: a private one per client leaked an
+                # auth.db connection per message (see TeamBridgeClient._auth_store).
+                store=auth_store,
+            )
 
-        async def access_provider():
-            return await client.current_access()
+            async def access_provider(client: TeamBridgeClient = client) -> Any:
+                return await client.current_access()
 
-        await _loop.run_forever(
-            owner,
-            config_dir=config_dir,
-            auth_store=auth_store,
-            access_provider=access_provider,
-        )
+            owner = await _loop.run_forever(
+                owner,
+                config_dir=config_dir,
+                auth_store=auth_store,
+                access_provider=access_provider,
+                owner_source=owner_source,
+            )
     finally:
         auth_store.close()
         lock.release()
