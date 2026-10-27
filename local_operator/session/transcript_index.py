@@ -127,7 +127,7 @@ import os
 import time
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 from uuid import uuid4
@@ -740,9 +740,11 @@ def source_projection_fact(entry: Any, seq: int) -> dict[str, Any]:
 
 def valid_source_projection_facts(facts: Any, scan: ScanState, rows: dict[str, Any]) -> bool:
     """Cache structure/origins are validated, not silently repaired/truncated."""
-    # ScanState.rows counts the most recent reader's segment, NOT total rows
-    # after suffix re-derivation. Contiguous fact ordinals plus last-ID origins
-    # validate the complete table without mistaking a valid append for corruption.
+    # ``ScanState.rows`` is NOT cross-checked against ``len(facts)``: documents
+    # written before the total was recorded on the incremental path hold a
+    # suffix-only count, and rejecting them would force a rescan of every such
+    # cache. Contiguous fact ordinals plus last-ID origins validate the complete
+    # table without mistaking a valid append for corruption.
     if not isinstance(facts, list) or not 0 <= scan.window_rows <= len(facts):
         return False
     allowed = {
@@ -943,6 +945,13 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     facts = raw.get("source_projection_facts")
     if not isinstance(facts, list) or not valid_source_projection_facts(facts, scan, raw_rows):
         return None
+    # A document an incremental refresh wrote before ``scan.rows`` recorded the
+    # journal's total holds a suffix-only count (O1, #3034 QA). The validated
+    # facts table has exactly one entry per scanned row on both scan paths, so
+    # its length IS the total: restating it here heals those caches on read,
+    # with no version bump and no forced rescan of every session's index.
+    if scan.rows != len(facts):
+        scan = replace(scan, rows=len(facts))
     size = sig.get("size")
     if type(size) is not int or any(
         not isinstance(id_, str)
@@ -2644,7 +2653,14 @@ def _scan_incremental(
         naming=naming,
         runs=runs,
         scan=ScanState(
-            rows=reader.rows,
+            # THE JOURNAL'S TOTAL, NOT THIS READ'S: the reader re-read only the
+            # suffix starting at ordinal ``window_rows``, so the rows before it
+            # (kept, not re-read) are added back. ``open_frame.tail_head_reachable``
+            # subtracts a run's ``first_seq`` from this count, and the
+            # suffix-only count (6,973 against 10,377 on the 51.7 MB fixture)
+            # made the head hunt run on, so the frame depended on how the
+            # index was refreshed (O1, #3034 QA). Same total ``_scan_full`` records.
+            rows=window_rows + reader.rows,
             offset=reader.last_end,
             window_offset=new_window_offset,
             window_rows=new_window_rows,
