@@ -742,3 +742,26 @@ async def test_the_first_request_after_a_between_renames_crash_succeeds(env) -> 
         },
     )
     assert response.status_code == 200, response.text
+
+
+def test_skill_write_is_advertised_only_while_every_promised_route_exists() -> None:
+    """The key promises all three writes; removing one must fail HERE, not in a renderer.
+
+    Same shape as the ``hub_skills`` pin: a capability is a reviewed act, so the
+    routes it names are read from the mounted router, not from a literal.
+    """
+    from local_operator.server import features as svc_features
+
+    flags = svc_features.feature_flags()
+    assert flags.get("skill_write") == 1
+    # The read key is separate and unchanged: a renderer needs both.
+    assert flags.get("skill_library") == 1
+
+    routes = {
+        (getattr(route, "path", ""), method)
+        for route in desktop_catalogues.router.routes
+        for method in getattr(route, "methods", set())
+    }
+    assert ("/v1/desktop/skills", "POST") in routes
+    assert ("/v1/desktop/skills/{name}", "PUT") in routes
+    assert ("/v1/desktop/skills/{name}", "DELETE") in routes

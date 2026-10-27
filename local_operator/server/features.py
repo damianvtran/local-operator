@@ -146,11 +146,22 @@ def static_feature_flags() -> dict[str, Any]:
         # `name` arm adds `skill_detail` (body, files, fingerprint, publish budget).
         # Its OWN key rather than a bump of `hub_skills` or `skill_catalogue`: a
         # renderer gated on those keeps the plain name/description list and never
-        # draws a card from a field this backend does not send. The same key also
-        # covers the write routes (`POST /v1/desktop/skills`, `PUT|DELETE
-        # /v1/desktop/skills/{name}`): one capability, so a renderer that draws the
-        # cards can also offer create/edit/remove without a second negotiation.
+        # draws a card from a field this backend does not send. Read-only: the
+        # write routes advertise their own key, `skill_write`, below.
         "skill_library": 1,
+        # THE SKILL LIBRARY WRITES: `POST /v1/desktop/skills` (create, or a copy
+        # of a read-only skill via `copy_from`), `PUT /v1/desktop/skills/{name}`
+        # (replace the whole file set, guarded by `expected_fingerprint`) and
+        # `DELETE /v1/desktop/skills/{name}` (backup-move of a local skill, unpull
+        # of a hub-linked one, with `discard_local_changes`). Every write carries
+        # a `request_id` and is receipted. Its OWN key rather than a bump of
+        # `skill_library`: v0.90.17 already shipped `skill_library: 1` as the READ
+        # side, and those cores answer these routes with 405/404, so a renderer
+        # that offered create/edit/remove on `skill_library >= 1` would draw
+        # controls that fail on every released core. It implies nothing about
+        # `skill_library`: a renderer that draws the editor needs BOTH (the rows
+        # and fingerprints it edits come from the read side).
+        "skill_write": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #
