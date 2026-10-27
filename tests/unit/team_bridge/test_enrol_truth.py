@@ -510,3 +510,116 @@ async def test_guard_default_on_is_never_widened_into_state_c(tmp_path: Path):
     await _discipline(hub, tmp_path).check(Boundary.APP_START)
     assert Store(tmp_path).committed_owner_count() == 0
     assert hub.writes == []
+
+
+# -- round 1 remediation ---------------------------------------------------------
+
+
+async def test_c_resume_turns_the_local_switch_on_and_a_message_is_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """R1-1 / QA Q1: every receive fence reads ``team_bridge.enabled`` from DISK
+    and an absent key reads OFF. A path-(c) resume on a reinstalled machine (key
+    absent) committed the owner but left the switch unset, so the next message
+    was held ``bridge_off`` while status said the device receives."""
+
+    from local_operator.config import read_config_values
+    from local_operator.team_bridge.connector import wake as wake_mod
+    from tests.unit.team_bridge import test_connector as connector_tests
+    from tests.unit.team_bridge.test_discipline import _set_local
+
+    _set_local(tmp_path, session="sess_cos")  # a designation, switch still absent
+    requests: list[httpx.Request] = []
+    client = _client(_hub(_answer(CONSENT_ON_RECORD), requests, head=412), tmp_path)
+    result = await client.put_settings(
+        state="active", tenant_id="tnt_1", endpoint={"state": "paused"}, expected_account_id="acc_1"
+    )
+    assert result["local_enrollment"] == {"committed": True, "code": "committed"}
+
+    # The real wake spine (heavy seams faked, the switch NOT pre-written) admits
+    # the next message; before the fix it answered hold/bridge_off.
+    owner = Store(tmp_path).active_owner()
+    assert owner is not None
+    monkeypatch.setattr(connector_tests, "_enable_bridge", lambda path: None)
+    record, _ = connector_tests._wire_spine(monkeypatch, tmp_path)
+    out = await wake_mod.handle_message_available(
+        owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=connector_tests._access(owner)
+    )
+    assert out["action"] == "delivered", out
+    assert record["screened"] == 1
+    values = read_config_values(tmp_path) or {}
+    assert values["team_bridge"]["enabled"] is True
+
+
+async def test_c_resume_never_overrides_an_explicit_local_off(tmp_path: Path):
+    from local_operator.config import read_config_values
+    from tests.unit.team_bridge.test_discipline import _set_local
+
+    _set_local(tmp_path, enabled=False)
+    requests: list[httpx.Request] = []
+    client = _client(_hub(_answer(CONSENT_ON_RECORD), requests), tmp_path)
+    await client.put_settings(
+        state="active", tenant_id="tnt_1", endpoint={"state": "paused"}, expected_account_id="acc_1"
+    )
+    values = read_config_values(tmp_path) or {}
+    assert values["team_bridge"]["enabled"] is False
+
+
+async def test_default_on_retry_requires_the_record_to_say_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """R1-3: an ABSENT ``current`` is not "still binds"; fail closed like path (c)."""
+
+    from local_operator.team_bridge.client import Boundary
+    from tests.unit.team_bridge.test_default_on import _discipline
+
+    _flaky_commit(monkeypatch)
+    hub = _head_advancing_hub()
+    discipline = _discipline(hub, tmp_path)
+    await discipline.check(Boundary.APP_START)
+    assert hub.endpoint is not None
+    consent = {k: v for k, v in hub.endpoint["consent"].items() if k != "current"}
+    hub.endpoint = {**hub.endpoint, "consent": consent}
+    discipline.invalidate()
+    await discipline.check(Boundary.SURFACE_OPEN)
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+async def test_default_on_retry_runs_on_the_next_cached_check_and_is_paced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """QA Q2: the retry ran on FRESH reads only, so inside one process a failed
+    commit waited out the 300 s status cache. It now runs on the next check even
+    when that check is served from cache, paced to one settings GET per window."""
+
+    from local_operator.team_bridge.client import Boundary
+    from tests.unit.team_bridge.test_default_on import _discipline, _enrolment_writes
+
+    _flaky_commit(monkeypatch, failures=2)
+    hub = _head_advancing_hub()
+    discipline = _discipline(hub, tmp_path)
+    await discipline.check(Boundary.APP_START)  # POST; commit #1 fails
+
+    def settings_gets() -> int:
+        return sum(
+            1
+            for r in hub.requests
+            if r.method == "GET" and r.url.path.endswith("/messaging/settings")
+        )
+
+    statuses = sum(1 for r in hub.requests if r.url.path.endswith("/messaging/status"))
+    check = await discipline.check(Boundary.WINDOW_FOCUS)  # cached; retry #1 fails
+    assert check.from_cache is True
+    assert settings_gets() == 1
+    await discipline.check(Boundary.WINDOW_FOCUS)  # cached, inside the pacing window
+    assert settings_gets() == 1, "a cached check must not GET at click rate"
+    assert Store(tmp_path).committed_owner_count() == 0
+
+    monkeypatch.setitem(discipline._pending_retry_at, "acc_1", 0.0)  # window elapsed
+    check = await discipline.check(Boundary.WINDOW_FOCUS)  # cached; retry #2 commits
+    assert check.from_cache is True
+    owner = Store(tmp_path).active_owner()
+    assert owner is not None, "a pending commit waited out the status cache"
+    assert int(Store(tmp_path).sync_state(owner)["feed_seq"]) == 0
+    assert len(_enrolment_writes(hub)) == 1
+    assert sum(1 for r in hub.requests if r.url.path.endswith("/messaging/status")) == statuses

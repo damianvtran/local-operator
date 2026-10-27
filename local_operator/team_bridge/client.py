@@ -1893,7 +1893,9 @@ class TeamBridgeClient:
             and isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
             and consent.get("version") == CONSENT_VERSION_V2
-            and consent.get("current") is not False
+            # Fail closed like ``_consent_on_record`` (review R1-3): a recovery
+            # that commits consent needs the hub to SAY the record still binds.
+            and consent.get("current") is True
         ):
             return _local_enrollment("no_consent_echo")
         if not may_commit_local():
@@ -1972,6 +1974,15 @@ class TeamBridgeClient:
         be true and the version one this client knows. Anything less is reported
         as ``no_consent_echo`` — never a silent 200.
 
+        THIS IS A CONSENT-MODEL CHANGE (review R1-2), stated so nobody reads
+        it as an accident: before D1 "a bare resume is not an opt-in" held
+        unconditionally. It now holds only when the hub holds no binding record.
+        Why that is sound: ``current`` is the hub's ``ConsentBindsTo`` over the
+        caller's OWN membership row, read from the answer to this very guarded
+        PUT (so neither a stale echo nor another member's consent), the version
+        is the one the member agreed to, and the write itself is the user's
+        explicit action — never a status read (the consent hold, #2712, stands).
+
         Returns ``None`` for a non-active write (nothing to claim) and otherwise
         the ``local_enrollment`` outcome: whether THIS machine now holds the
         owner for this endpoint, and a closed-set code. Every non-committed code
@@ -1989,6 +2000,19 @@ class TeamBridgeClient:
         )
         if not outcome["committed"]:
             logger.warning("team_bridge: local enrolment not committed (%s)", outcome["code"])
+        elif outcome["code"] == "committed" and self._config_dir is not None:
+            # The owner exists now, but every receive/wake/authority fence reads
+            # ``team_bridge.enabled`` from DISK, and an absent key reads OFF
+            # (review R1-1 / QA Q1). A resume on a reinstalled or wiped machine
+            # (path c) had no other writer — the desktop resume button only
+            # sends the PUT — so the device committed an owner and still held
+            # every message ``bridge_off`` while status said it receives. Same
+            # rule as default-on: "if unset" only, so an explicit local OFF
+            # always wins. Best-effort: the commit already stands.
+            try:
+                record_local_enabled_if_unset(self._config_dir)
+            except Exception:  # noqa: BLE001 - the fences then still read OFF, loudly
+                logger.warning("team_bridge: could not persist the local switch")
         return outcome
 
     def _local_commit_outcome(
@@ -3606,6 +3630,12 @@ class StatusDiscipline:
         #: which is safe because the hub's route is a no-op once any endpoint
         #: exists. Memory only: it is never authority for a write.
         self._default_enroll_attempted: set[tuple[str, str]] = set()
+        #: account id -> monotonic time of the last commit-only retry attempt
+        #: (:meth:`_retry_pending_commit`). The retry runs on CACHED answers too
+        #: (QA Q2: waiting for the next fresh read left a device deaf for up to
+        #: :data:`STATUS_CACHE_TTL_S`), so it needs its own pacing: one settings
+        #: GET per :data:`STATUS_ERROR_TTL_S`, never one per click. Memory only.
+        self._pending_retry_at: dict[str, float] = {}
 
     @property
     def base_url(self) -> str:
@@ -3716,7 +3746,12 @@ class StatusDiscipline:
             and state.identity_revision >= identity_revision
             and now - state.last_attempt < self._ttl(state)
         ):
-            return self._cached(state, boundary)
+            cached = self._cached(state, boundary)
+            # A pending local commit must not wait out the status cache (QA Q2):
+            # the cached answer already proves state C for the marker's endpoint,
+            # and the retry paces itself. Local gates only, unless one is pending.
+            await self._retry_pending_commit(cached, access=access)
+            return cached
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             # Re-check under the lock: a sibling that arrived first already read.
@@ -4017,6 +4052,10 @@ class StatusDiscipline:
         Silent towards the status answer, like default-on itself; the outcome
         is logged by code. ``done`` is written once committed, or once the hub
         proves the record is no longer this default-on consent (no endless GET).
+
+        WHEN (QA Q2). On every status check, cached or fresh, paced to one
+        attempt per :data:`STATUS_ERROR_TTL_S` per account, so a failed commit
+        is retried at the next check rather than after the 5-minute cache.
         """
 
         config_dir = self._config_dir
@@ -4047,6 +4086,12 @@ class StatusDiscipline:
             return
         account_id = access.account_id
         marker = local.default_enrollment.get(account_id)
+        last = self._pending_retry_at.get(account_id)
+        if last is not None and time.monotonic() - last < STATUS_ERROR_TTL_S:
+            return
+        # Set BEFORE the await: concurrent checks on the cached path must not
+        # each issue the settings GET.
+        self._pending_retry_at[account_id] = time.monotonic()
 
         def _still_pending() -> bool:
             # Re-read right before the commit: a Turn off (``done``) or an
