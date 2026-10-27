@@ -2395,6 +2395,22 @@ _WIRE_BUDGET_RATCHET = 0.75
 _WIRE_BUDGET_FLOOR = 4_000_000
 
 
+def _newest_usage_at_ms(transcript: Transcript) -> int:
+    """Epoch ms of the newest provider usage the transcript recorded, else 0.
+
+    Every wire usage carries ``at_ms`` (the call's completion stamp), so the
+    newest one is the last time this conversation's prefix was sent. Uncut
+    rows on purpose: a compaction invalidates context-SIZE readings, not the
+    fact that a request reached the provider at that moment.
+    """
+    newest = 0
+    for row in transcript.all_usage_rows():
+        stamp = row.get("at_ms")
+        if isinstance(stamp, int) and stamp > newest:
+            newest = stamp
+    return newest
+
+
 def _history_captured_browser_views(messages: Sequence[Message]) -> bool:
     """Whether this rendered history shows the session capturing browser views.
 
@@ -3970,7 +3986,9 @@ class Session:
         #: exactly like ``_wire_budget_override`` beside it. Kept as a separate
         #: bit rather than a tri-state so every existing read of
         #: ``_images_rejected`` keeps its meaning unchanged (agent review
-        #: round 2, R8).
+        #: round 2, R8). An image-COUNT refusal ("too much media") is the
+        #: same kind of evidence (THIS provider's per-request limit) and sets
+        #: it too (PR #3004 review round 2, R2-m2).
         self._images_rejected_for_size = False
         #: Latch for the text-only-model omission announcement (see
         #: :meth:`_render_history`). The omission itself is not sticky — it
@@ -4545,7 +4563,16 @@ class Session:
         # _last_activity_ms: the idle-flush pruning must measure provider-cache
         # age, and stamping turn bookkeeping right before the check made the
         # 90-minute flush dead code.
-        self._last_provider_request_ms = 0
+        #
+        # SEEDED from the transcript, not 0: the newest recorded usage's
+        # ``at_ms`` is when this conversation last reached the provider, which
+        # is exactly what the cache's age depends on, whichever process sent
+        # it. With 0, ``_sweep_before_run`` had nothing to judge on a resume
+        # and every later sweep read the fresh per-call stamp as warm, so a
+        # session reopened hours later never shed its stale outputs (agent
+        # review round 2, R2-M1: 0 prune rows where base wrote 5). A transcript
+        # without stamped usage (legacy, or never answered) keeps 0.
+        self._last_provider_request_ms = _newest_usage_at_ms(transcript)
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
@@ -5908,10 +5935,19 @@ class Session:
         # composition root and docs/REWRITE.md forbids module-level provider
         # imports, because they are what makes importing a session expensive
         # (and, done at the top of this file, cyclic).
-        from local_operator.providers.failover import is_image_rejection
+        from local_operator.providers.failover import (
+            is_image_count_rejection,
+            is_image_rejection,
+        )
 
         if not is_image_rejection(error):
             return
+        # A COUNT refusal ("Too much media: ... 101 images > 100") poisons no
+        # block: the request crossed this provider's per-request limit. The
+        # strip is still what lets the next turn succeed, but it is
+        # provider-scoped like the size strip, so ``set_model`` to a provider
+        # with a higher limit lifts it (agent review round 2, R2-m2).
+        count_only = is_image_count_rejection(error)
         if self._images_rejected:
             # Already stripping, so there is nothing more to do to the render —
             # but a GENUINE refusal permanently downgrades the strip's scope.
@@ -5919,9 +5955,11 @@ class Session:
             # stays marked provider-scoped, and the next `/model` switch lifts
             # it and re-admits a block the provider actually refused (QA round
             # 3, Q6). Idempotent: clearing a flag that is already clear is free.
-            self._images_rejected_for_size = False
+            if not count_only:
+                self._images_rejected_for_size = False
             return
         self._images_rejected = True
+        self._images_rejected_for_size = count_only
         logger.warning(
             "provider rejected an image; dropping images from this session's context (%s)",
             self._image_drop_diagnostic(),
@@ -16829,6 +16867,22 @@ class Session:
         # runs (idempotent: it re-adopts the newest usage it scans).
         if isinstance(event, MessageEndEvent):
             self._note_usage([event.message])
+            # The provider-cache clock the prune sweeps read
+            # (``_plan_compaction``) advances on EVERY completed provider
+            # call, not only when a run ends. A subagent usually lives inside
+            # one long run, so with the run-end stamp alone this read 0 for its
+            # whole life. Every boundary sweep then saw a 90-minute "idle" gap
+            # and blanked already-cached frames and reads mid-run, which is the
+            # prefix-break mechanism described in ``compaction/pruning.py``.
+            #
+            # Read against this stamp, a sweep measures the gap BEFORE the
+            # request it precedes: the mid-turn sweep runs after the tool batch
+            # and before the next call, so a 90-minute tool still flushes. The
+            # one gap no post-call sweep can see is the user's wait between
+            # runs; ``_sweep_before_run`` covers that, before the first request
+            # (agent review round 1, M2).
+            if isinstance(event.message, Message) and event.message.usage is not None:
+                self._last_provider_request_ms = int(time.time() * 1000)
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
         #
@@ -17964,6 +18018,9 @@ class Session:
             signal.abort("interrupted")
         try:
             await self._ensure_selected_model()
+            # Before anything is sent: the one point that can see the user's
+            # wait since the last call (see the method).
+            await self._sweep_before_run()
             # Imported HERE, once per real turn, rather than at module scope:
             # `harness.rows` gathers the chrome prompts from
             # `session.goal_loop`/`session.session` behind a function precisely
@@ -22617,6 +22674,15 @@ class Session:
             # token side depends on is untouched; a figure that over-states
             # this render can at worst fall through to a plan gate that
             # re-derives its own and returns ``below_threshold``.
+            #
+            # The batch-flush ceiling is judged at EVERY tool boundary, before
+            # the pre-gate below can return. Asked only inside
+            # ``_plan_compaction``, it was reached only once a compaction might
+            # be due, which on a 200k window means ~133 images or 16 MB, past
+            # the 100-image limit it exists to stay under: QA round 2 (Q5)
+            # measured 2 sweeps in 142 boundaries and requests of 112 images.
+            # Before the render below, so the bound reads the flushed history.
+            await self._flush_stale_if_due(compaction_api, settings)
             rendered = self._render_history(messages)
             current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
@@ -23139,6 +23205,135 @@ class Session:
         rest = args[1:]
         return await asyncio.to_thread(lambda: func(snapshot, *rest))
 
+    async def _sweep_stale_outputs(
+        self,
+        compaction_api: Any,
+        settings: Any,
+        llm_history: list[Message],
+        *,
+        only_if_due: bool = False,
+    ) -> bool:
+        """Run the in-place prune sweeps over ``llm_history`` and journal them.
+
+        (a) Superseded/useless tool outputs, then (b) stale frames, behind a
+        session gate: only a session that has CAPTURED browser views can own
+        frames a newer view of a surface supersedes, so every other session
+        type is left byte-identical (the gate's own comment draws the line).
+        Both take the sent-prefix and idle-flush guards: a blank of anything
+        already sent rewrites the prompt cache from that point on.
+
+        The idle flush compares against the last completed PROVIDER call
+        (``_last_provider_request_ms``), which every post-call sweep reads as
+        "the gap before the NEXT request": a 90-minute tool flushes. It is
+        deliberately not the stamp from before the call that just completed: if
+        that gap was idle, that call already rewrote the cache, and blanking now
+        would buy a SECOND rewrite on the next one (QA round 1, C4, where main
+        did exactly that). The user's wait between runs is judged once, before
+        the run's first request, by :meth:`_sweep_before_run`.
+
+        When the retained stale set (stale frames AND superseded reads, so a
+        text-only session is bounded too) crosses a batch-flush ceiling
+        (``stale_flush_due``) both sweeps run with ``flush=True``: everything
+        stale leaves in ONE batch, one prefix break instead of one per item.
+        The stale set is computed ONCE and handed to both the ceiling and the
+        frame sweep (agent review round 2, R2-m3).
+
+        ``only_if_due`` is the mid-turn ceiling check (:meth:`_flush_stale_if_due`):
+        sweep only when a flush is due, and otherwise leave the history alone.
+        Returns whether a batch flush was due.
+        """
+        now_ms = int(time.time() * 1000)
+        last_ms = self._last_provider_request_ms
+        frames = _history_captured_browser_views(llm_history)
+        flush = False
+        stale: Any = None
+        compute: Any = getattr(compaction_api, "stale_set", None)
+        due: Any = getattr(compaction_api, "stale_flush_due", None)
+        if callable(compute) and callable(due):
+            stale = compute(llm_history, frames=frames)
+            flush = bool(
+                due(
+                    llm_history,
+                    context_window=self.effective_model.context_window,
+                    wire_bytes_trigger=self._wire_trigger_bytes(compaction_api, settings) or 0,
+                    stale=stale,
+                )
+            )
+        if only_if_due and not flush:
+            return False
+        pruned_before = _pruned_ids(llm_history)
+        # ``flush`` and ``victims`` are passed only when set, so a duck-typed
+        # hook that predates the parameters (the suite has several) keeps its
+        # old signature.
+        extra: dict[str, Any] = {"flush": True} if flush else {}
+        try:
+            compaction_api.prune_tool_outputs(llm_history, now_ms, last_ms, **extra)
+        except (ImportError, AttributeError):
+            pass  # optional pruning hook absent; degrade to no pruning
+        if frames:
+            frame_extra = dict(extra)
+            if stale is not None:
+                frame_extra["victims"] = stale.frames
+            try:
+                compaction_api.prune_stale_frames_in_place(
+                    llm_history, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
+                )
+            except (ImportError, AttributeError):
+                pass  # optional frame sweep absent; degrade to no sweep
+        await self._journal_prunes(llm_history, pruned_before)
+        return flush
+
+    async def _flush_stale_if_due(self, compaction_api: Any, settings: Any) -> None:
+        """Batch-flush stale outputs at a tool boundary when a ceiling is crossed.
+
+        The mid-turn half of the batch flush: the boundary sweep inside
+        ``_plan_compaction`` sits behind the compaction pre-gate, so a long
+        run under every compaction trigger never reached the ceiling (QA
+        round 2, Q5). This judges the ceiling on the persisted render the
+        sweep uses, and sweeps (journalled, like every other sweep) only
+        when a flush is due: below the ceiling the history stays
+        byte-identical and the cached prefix intact. Best-effort: an
+        optimisation must never fail the run.
+        """
+        try:
+            llm_history = self._render_for_compaction()
+            await self._sweep_stale_outputs(compaction_api, settings, llm_history, only_if_due=True)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("mid-turn stale flush failed", exc_info=True)
+
+    async def _sweep_before_run(self) -> None:
+        """Flush stale outputs before a run's first request, when the cache is cold.
+
+        Every other sweep runs right after a provider call, so none of them can
+        see the gap a user leaves between runs. Without this, the per-call
+        clock made the cross-run idle flush unreachable (agent review round 1,
+        M2; QA Q2): stale frames and superseded reads then left only by
+        compaction, and a resumed session carried every copy (QA Q1).
+
+        Here, before anything is sent, a gap of ``idle_flush_ms`` or more since
+        the last provider call proves the cache cold, so blanking costs nothing
+        the first request would not pay anyway. Best-effort: a sweep that fails
+        must never stop the run.
+        """
+        last_ms = self._last_provider_request_ms
+        if last_ms <= 0:
+            return  # nothing sent yet in this process: nothing to judge
+        try:
+            from local_operator.compaction import api as compaction_api
+        except ImportError:
+            return
+        settings = self._compaction_settings or compaction_api.CompactionSettings()
+        if not getattr(settings, "enabled", True):
+            return
+        idle_flush_ms = int(getattr(compaction_api, "IDLE_FLUSH_MS", 5_400_000))
+        if int(time.time() * 1000) - last_ms < idle_flush_ms:
+            return
+        try:
+            llm_history = self._render_for_compaction()
+            await self._sweep_stale_outputs(compaction_api, settings, llm_history)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("pre-run idle sweep failed", exc_info=True)
+
     async def _plan_compaction(
         self, *, respect_threshold: bool
     ) -> _CompactionPlan | CompactionOutcome:
@@ -23191,30 +23386,7 @@ class Session:
 
         # (1) Prune before deciding: blanked outputs shrink the estimate and
         # may avoid a compaction pass entirely. Mutates messages in place.
-        # The idle flush compares against the last PROVIDER request, not turn
-        # bookkeeping, so a genuinely idle session reclaims the warm region.
-        now_ms = int(time.time() * 1000)
-        pruned_before = _pruned_ids(llm_history)
-        try:
-            compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_provider_request_ms)
-        except (ImportError, AttributeError):
-            pass  # optional pruning hook absent; degrade to no pruning
-        # (1b) Stale frames ride the same boundary, behind a session gate:
-        # only a session that has CAPTURED browser views can own frames a
-        # newer view of a surface supersedes, so every other session type is
-        # left byte-identical (the gate's own comment draws the line). The
-        # frame blank writes bytes the prompt cache may still hold, so the
-        # sweep takes the same warm-suffix/idle-flush guards (1) takes.
-        if _history_captured_browser_views(llm_history):
-            try:
-                compaction_api.prune_stale_frames_in_place(
-                    llm_history,
-                    now_ms=now_ms,
-                    last_activity_ms=self._last_provider_request_ms,
-                )
-            except (ImportError, AttributeError):
-                pass  # optional frame sweep absent; degrade to no sweep
-        await self._journal_prunes(llm_history, pruned_before)
+        await self._sweep_stale_outputs(compaction_api, settings, llm_history)
 
         # (2) Trigger math: prefer the provider's ground-truth context size.
         provider_reported = (
@@ -25211,9 +25383,12 @@ class Session:
             # ahead of the last request the turn actually sent.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL: the session stamps its
+            # Same prefix as the turn, so the same size: the session stamps its
             # own hint here because the shared stream fn holds none (a child
             # would overwrite it — see ``ChatRequest.context_tokens_hint``).
+            # On Anthropic the hint no longer picks the TTL: an aside is an
+            # auxiliary errand and goes out at 5m, and a 5m-marked request still
+            # reads the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
@@ -25342,8 +25517,10 @@ class Session:
             # would change position 0 and force a full re-process.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL — the session stamps its
-            # own hint because the shared stream fn holds none.
+            # Same prefix as the turn, so the same size — the session stamps its
+            # own hint because the shared stream fn holds none. On Anthropic a
+            # clearance is an auxiliary errand at 5m regardless, and still reads
+            # the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
             # Nothing here reaches a screen until the whole answer is parsed, so
             # a stalled read may be discarded and retried whole (the advisor's

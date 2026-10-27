@@ -1314,7 +1314,7 @@ def test_screen_item_hands_screening_the_production_status_source(tmp_path, monk
     captured: dict[str, Any] = {}
     sentinel = object()
 
-    def fake_default_status_fetcher(*, config_dir, owner, transport=None):
+    def fake_default_status_fetcher(*, config_dir, owner, transport=None, auth_store=None):
         captured["factory"] = (config_dir, owner)
         return sentinel
 

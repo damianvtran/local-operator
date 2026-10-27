@@ -185,6 +185,18 @@ async def _journal(directory: Path, *, checkpoint_cwd: str | None = None) -> Non
         )
 
 
+def _without_the_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin ``_locate`` to the SIDECAR arm alone.
+
+    Since L10 a checkpointless journal with no valid sidecar is proven absent on
+    the spot by ``custom_type_proven_absent``, so a "no proof yet → walk" control
+    would never reach the walk. The sidecar tests below are about the record's own
+    validation (append, rewrite, tick ordering); declining the scan keeps their
+    walk counts measuring that, while the scan arm has its own tests further down.
+    """
+    monkeypatch.setattr(desktop_sessions, "custom_type_proven_absent", lambda *_a, **_k: False)
+
+
 def _count_walks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
     real = transcript_module.read_latest_custom_entry
@@ -207,6 +219,7 @@ async def _bridge_cwd(root: Path) -> str:
 async def test_a_proven_absent_checkpoint_skips_the_whole_journal_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _without_the_scan(monkeypatch)
     root = tmp_path / "store"
     directory = root / "sessions" / SESSION_ID
     directory.mkdir(parents=True)
@@ -351,6 +364,7 @@ async def test_a_metadata_only_change_is_rebuilt_once_by_prewarm(
     the desktop guard refuses the record. Prewarm must then call the record stale
     and republish it ONCE, after which the cold open skips the walk again and the
     selector stops re-queueing the journal."""
+    _without_the_scan(monkeypatch)
     root = tmp_path / "store"
     directory = root / "sessions" / SESSION_ID
     directory.mkdir(parents=True)
@@ -412,6 +426,7 @@ async def test_an_equal_tick_record_refuses_and_a_later_one_hits(
     nanosecond later (what a fine-grained filesystem gives naturally) restores the
     fast path, which proves the refusal is about ordering and not a lost record.
     """
+    _without_the_scan(monkeypatch)
     root = tmp_path / "store"
     directory = root / "sessions" / SESSION_ID
     directory.mkdir(parents=True)
@@ -502,3 +517,166 @@ def test_recognising_harness_chrome_imports_no_session_or_tool_stack(tmp_path: P
     assert offenders == [], (
         "recognising harness chrome imported the live session/tool stack: " f"{offenders[:5]}"
     )
+
+
+# --- L10: absence proven by scan when no sidecar exists ----------------------
+
+
+def _checkpoint_row(cwd: str, *, separators: tuple[str, str] = (",", ":")) -> bytes:
+    """A checkpoint row as a writer with ``separators`` would persist it."""
+    row = {
+        "id": "row-checkpoint",
+        "ts": 1,
+        "type": "custom",
+        "payload": {
+            "custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            "details": {"state": {"cwd": cwd}},
+        },
+    }
+    return json.dumps(row, separators=separators).encode("utf-8") + b"\n"
+
+
+def _tree_bytes(directory: Path) -> dict[str, bytes]:
+    """Every file under ``directory``, recursively, by relative path."""
+    return {
+        str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob("*") if p.is_file()
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_checkpointless_journal_without_a_sidecar_skips_the_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The L10 path: no sidecar, no checkpoint row → the scan answers, not the walk.
+
+    The control is the same open with the scan declined: the walk runs and the
+    answer is identical. Nothing is written beside the journal — the sidecar
+    stays prewarm's to publish.
+    """
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    await _journal(directory)
+    assert not desktop_sessions._checkpoint_proven_absent(directory)
+    before = _tree_bytes(directory)
+    calls = _count_walks(monkeypatch)
+    answer = await _bridge_cwd(root)
+    assert calls == []
+    assert answer == str(root.parent)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(desktop_sessions, "custom_type_proven_absent", lambda *_a, **_k: False)
+        assert await _bridge_cwd(root) == answer
+    assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
+    assert _tree_bytes(directory) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("separators", [(",", ":"), (", ", ": ")], ids=["compact", "spaced"])
+async def test_a_checkpoint_row_under_either_separator_is_still_walked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, separators: tuple[str, str]
+) -> None:
+    """A real checkpoint row near BOF, compact or ``json.dumps``-default spaced:
+    the scan must see the spelling and leave the walk to answer the row's cwd."""
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    launched = str(tmp_path / "launched-here")
+    journal = directory / "transcript.jsonl"
+    journal.write_bytes(_checkpoint_row(launched, separators=separators))
+    await _journal(directory)
+    assert not transcript_module.custom_type_proven_absent(
+        directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    )
+    calls = _count_walks(monkeypatch)
+    assert await _bridge_cwd(root) == launched
+    assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
+
+
+@pytest.mark.asyncio
+async def test_a_spelling_only_inside_message_text_still_walks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan proves absence, never presence: a user message QUOTING the
+    spelling is not a checkpoint row, so the walk runs and answers the fallback."""
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    await _journal(directory)
+    quoted = '{"custom_type":"%s"}' % FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    await Transcript(directory, defer_materialise=False).append_message(Message.user(quoted))
+    # The row text is JSON-escaped inside the message, so plant the raw spelling
+    # the way a tool result carrying unescaped bytes would land it in a string.
+    with (directory / "transcript.jsonl").open("ab") as handle:
+        handle.write(
+            json.dumps(
+                {"id": "text", "ts": 2, "type": "note", "payload": {"text": "x"}},
+                separators=(",", ":"),
+            ).encode()[:-1]
+            + b',"raw":{"custom_type":"'
+            + FRONTEND_CHECKPOINT_CUSTOM_TYPE.encode()
+            + b'"}}\n'
+        )
+    assert not transcript_module.custom_type_proven_absent(
+        directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    )
+    calls = _count_walks(monkeypatch)
+    assert await _bridge_cwd(root) == str(root.parent)
+    assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
+
+
+@pytest.mark.asyncio
+async def test_an_archived_journal_declines_the_scan_and_walks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An archive has no plain bytes to scan: decline, and the walk (which
+    materialises the archive) answers exactly as before."""
+    from local_operator.session import compression
+
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    launched = str(tmp_path / "launched-here")
+    await _journal(directory, checkpoint_cwd=launched)
+    outcome = compression.compress_session(directory)
+    assert outcome.status == "compressed", outcome
+    assert not transcript_module.custom_type_proven_absent(
+        directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    )
+    calls = _count_walks(monkeypatch)
+    assert await _bridge_cwd(root) == launched
+    assert calls == [FRONTEND_CHECKPOINT_CUSTOM_TYPE]
+
+
+def test_the_scan_declines_past_its_cap_and_on_a_missing_journal(tmp_path: Path) -> None:
+    directory = tmp_path / "session"
+    directory.mkdir()
+    assert not transcript_module.custom_type_proven_absent(
+        directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    )
+    (directory / "transcript.jsonl").write_bytes(b'{"id":"a","ts":1,"type":"note"}\n' * 4)
+    assert transcript_module.custom_type_proven_absent(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    assert not transcript_module.custom_type_proven_absent(
+        directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE, max_scan_bytes=16
+    )
+    # A type with no fixed byte spelling cannot be proven absent by bytes.
+    assert not transcript_module.custom_type_proven_absent(directory, 'quote"type')
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_marker_never_reaches_the_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "store"
+    directory = root / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    await _journal(directory)
+    marked = str(tmp_path / "marked")
+    (directory / "desktop.json").write_text(json.dumps({"version": 1, "cwd": marked}))
+    scans: list[object] = []
+    monkeypatch.setattr(
+        desktop_sessions, "custom_type_proven_absent", lambda *a, **_k: scans.append(a) or False
+    )
+    calls = _count_walks(monkeypatch)
+    assert await _bridge_cwd(root) == marked
+    assert scans == [] and calls == []

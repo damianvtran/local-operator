@@ -1077,7 +1077,40 @@ _IMAGE_REJECTION_MARKERS = (
     # ceiling are covered by one marker, since the number is the part that
     # moves.
     "image dimensions exceed max allowed size",
+    # The per-request image COUNT refusal: "Too much media: 0 document pages +
+    # 101 images > 100" (measured live on claude-haiku-4-5, PR #3004 QA round
+    # 1). Like the many-image dimension refusal it is reached by the
+    # conversation growing, not by a bad block, and without a marker it
+    # repeated on every prompt. The stale-frame batch flush
+    # (``compaction.pruning.stale_flush_due``) keeps requests under the limit;
+    # this is the backstop for images it cannot reach (user pastes, recent
+    # frames). Unlike every other entry it is a property of the PROVIDER's
+    # limit, not of a block, so the session scopes the resulting strip to
+    # the provider (see :func:`is_image_count_rejection`).
+    "too much media",
 )
+
+#: The subset of :data:`_IMAGE_REJECTION_MARKERS` that names a per-request
+#: image COUNT limit rather than a bad block (see :func:`is_image_count_rejection`).
+_IMAGE_COUNT_REJECTION_MARKERS = ("too much media",)
+
+
+def is_image_count_rejection(error: BaseException | str) -> bool:
+    """Did the provider refuse the request for carrying too MANY images?
+
+    A subset of :func:`is_image_rejection` (same kind gate), split out because
+    the remedy differs: no block is poisoned, the request crossed THIS
+    provider's per-request limit (100 images on 200k-window Anthropic models,
+    600 on 1M ones). The session still strips images so the next turn
+    succeeds, but marks the strip provider-scoped, so a switch to a provider
+    with a higher limit lifts it, exactly like the size strip (agent review
+    round 2, R2-m2).
+    """
+    if not is_image_rejection(error):
+        return False
+    text = error.message if isinstance(error, ProviderError) else str(error)
+    haystack = text.lower()
+    return any(marker in haystack for marker in _IMAGE_COUNT_REJECTION_MARKERS)
 
 
 def is_image_rejection(error: BaseException | str) -> bool:

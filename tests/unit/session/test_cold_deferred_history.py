@@ -1436,9 +1436,17 @@ async def test_first_miss_hydration_is_exact_and_idempotent(isolated_config: Pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing", ["checkpoint", "spend", "usage"])
-async def test_missing_tail_facts_keep_exact_eager_fallback(
+async def test_facts_absent_from_the_whole_journal_defer_with_eager_facts(
     isolated_config: Path, missing: str
 ) -> None:
+    """A fact that exists NOWHERE in the journal is proven absent, not refused.
+
+    Before L7 R1 this pinned an eager fallback, because the tail could not tell
+    "absent" from "beyond the bound". The absence scan now proves it, and the
+    deferred first frame must be the eager one byte for byte. A fact that exists
+    only BELOW the tail still declines:
+    ``test_cold_tail_absence.py::test_a_fact_buried_below_the_tail_declines``.
+    """
     directory = await seed_journal(
         isolated_config, checkpoint=missing != "checkpoint", spend=missing != "spend"
     )
@@ -1451,8 +1459,9 @@ async def test_missing_tail_facts_keep_exact_eager_fallback(
     expected_payload, expected_rows = await _eager_reference(isolated_config)
     tail = await cold_open(isolated_config, deferred=True)
     try:
-        assert tail._deferred_history is None
+        assert tail._deferred_history is not None, "absence is proven, so the open defers"
         assert frontend_payload(tail) == expected_payload
+        await tail.hydrate_deferred_history()
         assert [message.id for message in tail.history()] == expected_rows
     finally:
         await tail.dispose()

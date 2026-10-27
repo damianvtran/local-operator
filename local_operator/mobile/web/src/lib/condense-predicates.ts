@@ -2,7 +2,7 @@
  * THE DESKTOP PREDICATES THE CONDENSATION MODEL READS, lifted verbatim.
  *
  * SOURCES, at the desktop sourceHash `parity-sources.json` pins
- * (`f9f4611dd3dbcc06…`), line ranges of THAT source (measured, round 2 - the round-1
+ * (`929b6a1bbb151b60…`), line ranges of THAT source (measured, round 2 - the round-1
  * ranges ended at the next function's start, not at its own end):
  * - `components/trace/tool-row-model.ts` — `isPartialDelivery` 553-573,
  *   `isFailedResult` 618-741, `displayName` 803-833.

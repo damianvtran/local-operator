@@ -15,6 +15,7 @@ full walk returned, and every way the record could go stale is refused.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 
@@ -312,7 +313,7 @@ async def test_a_pre_remediation_record_is_ignored_rather_than_reinterpreted(tmp
         )
     )
 
-    assert ANCHOR_VERSION == 3, "the version moved; a v1 record must not be reinterpreted"
+    assert ANCHOR_VERSION == 4, "the version moved; a v1 record must not be reinterpreted"
     assert read_anchor(tmp_path) is None
     assert proves_absent(tmp_path) is False
 
@@ -348,3 +349,74 @@ async def test_a_boundary_that_moved_under_the_record_is_refused(tmp_path):
         validate_anchor(tmp_path, read_anchor(tmp_path)) is None
     ), "a record whose boundary moved under it was still treated as proof"
     assert proves_absent(tmp_path) is False
+
+
+# --- #3001 QA Q1: the absence proof must see the spaced spelling too -----------
+
+
+def _spaced_checkpoint_row(cwd: str) -> str:
+    """A checkpoint row as ``json.dumps``' default (``": "``) writer spells it."""
+    return json.dumps(
+        {
+            "id": "spaced-checkpoint",
+            "ts": 1,
+            "type": "custom",
+            "payload": {
+                "custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                "details": {"state": {"cwd": cwd}},
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_spaced_checkpoint_row_is_never_recorded_as_absent(tmp_path):
+    """Q1's root: a compact-only scan published ``checkpoint_absent`` for this
+    journal, and an unchanged-size record is trusted with no scan at all."""
+    (tmp_path / "transcript.jsonl").write_text(_spaced_checkpoint_row("/cwd-START") + "\n")
+    await journal_without_a_checkpoint(tmp_path, messages=4)
+    assert build_anchor(tmp_path) is None
+    assert proves_absent(tmp_path) is False
+
+
+@pytest.mark.asyncio
+async def test_a_spaced_checkpoint_appended_after_the_record_invalidates_it(tmp_path):
+    """The suffix check uses the same spelling set as the whole-file proof."""
+    await journal_without_a_checkpoint(tmp_path, messages=4)
+    anchor = build_anchor(tmp_path)
+    assert anchor is not None and write_anchor(tmp_path, anchor)
+    assert proves_absent(tmp_path)
+    with (tmp_path / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(_spaced_checkpoint_row("/cwd-LATER") + "\n")
+    assert proves_absent(tmp_path) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [2, 3])
+async def test_an_absence_record_from_a_compact_only_version_proves_nothing(tmp_path, version):
+    """A v2/v3 record on disk after the upgrade may describe a spaced-checkpoint
+    journal as absent, and it would still validate (same inode, size, digest). Its
+    absence claim is therefore never trusted; the record itself stays readable so
+    the selection evidence it carries is not discarded with it."""
+    (tmp_path / "transcript.jsonl").write_text(_spaced_checkpoint_row("/cwd-START") + "\n")
+    await journal_without_a_checkpoint(tmp_path, messages=4)
+    path = tmp_path / "transcript.jsonl"
+    complete = path.stat().st_size
+    forged = TailAnchor(
+        inode=path.stat().st_ino,
+        size=complete,
+        tail_digest=hashlib.sha256(path.read_bytes().splitlines(keepends=True)[-1]).hexdigest()[
+            :16
+        ],
+    )
+    record = forged.as_dict()
+    record["version"] = version
+    (tmp_path / ANCHOR_FILENAME).write_text(json.dumps(record))
+    # Control: the same record at the current version WOULD be trusted — the
+    # refusal below is about the version, not a broken fixture.
+    record["version"] = ANCHOR_VERSION
+    loaded = read_anchor(tmp_path)
+    assert loaded is not None and loaded.checkpoint_absent is False
+    assert proves_absent(tmp_path) is False
+    (tmp_path / ANCHOR_FILENAME).write_text(json.dumps(record))
+    assert proves_absent(tmp_path) is True

@@ -1858,6 +1858,137 @@ class ReplaySuffix:
     reached_bof: bool = False
     #: Parsed rows actually visited by a bounded metadata scan.
     rows_read: int = 0
+    #: :func:`read_cold_tail` only: the journal holds NO usage receipt at all —
+    #: none in the tail and the spelling absent from every byte below it. This
+    #: is what lets a caller tell "no seed is eager's own answer" apart from
+    #: "the tail met receipts but none parsed", which must still decline
+    #: because eager would keep looking further back for a parseable one.
+    usage_proven_absent: bool = False
+    #: :func:`read_cold_tail` only: bytes the absence proof scanned below the
+    #: tail, for the caller's evidence; not a contract.
+    absence_scan_bytes: int = 0
+
+
+#: Ceiling on the bytes BELOW the bounded tail that :func:`read_cold_tail` will
+#: scan to prove a type absent. Above it the tail declines to eager, which is no
+#: faster on such a journal but is the established answer. Measured warm:
+#: 2.9 ms for 8 MB and 15.5 ms for 51.7 MB, so 128 MiB is about 40 ms warm; a
+#: cold page cache pays a sequential read up to this cap (L7 design, risk 1).
+ABSENCE_SCAN_MAX_BYTES = 128 << 20
+
+#: Read granularity of :func:`_spellings_absent`. Matches the eager reader's
+#: chunk so the scan costs the same per byte as the walk it replaces.
+_ABSENCE_SCAN_WINDOW_BYTES = 1 << 20
+
+#: The ``key: value`` separators a JSON row can carry around a needle. The
+#: repo's one writer is compact; ``json.dumps``' default is ``": "``. Both are
+#: searched for, so absence does not rest on which writer produced the row
+#: (review round 1, MAJOR-1). A JSONL row cannot hold a raw newline, so an
+#: indented writer cannot produce a third spelling inside one row.
+_KEY_SEPARATORS = (b":", b": ")
+
+#: The byte spellings every persisted usage receipt carries: the message payload
+#: key ``usage`` holding an object (see :func:`read_cold_tail`).
+_USAGE_SPELLINGS = tuple(b'"usage"' + sep + b"{" for sep in _KEY_SEPARATORS)
+
+
+def _spellings_absent(
+    handle: BinaryIO,
+    start: int,
+    end: int,
+    needles: tuple[bytes, ...],
+    *,
+    window_bytes: int = _ABSENCE_SCAN_WINDOW_BYTES,
+) -> bool:
+    """Whether none of ``needles`` occurs in the byte range ``[start, end)``.
+
+    Streams fixed windows forward and never holds more than one window plus
+    the overlap, so the cost in memory does not grow with the journal. Each
+    window reads ``len(longest needle) - 1`` bytes past its end: a needle
+    written across a window boundary has its first byte in one window and
+    its last in the next, and only that overlap lets one of them see it whole.
+    The overlap never reads past ``end``. A match that only overlaps ``end``
+    is outside the range and must not count.
+
+    Raises ``OSError`` from the handle. A caller proving absence must treat an
+    unreadable byte as "not proven", never as "absent".
+    """
+    if not needles or start >= end:
+        return True
+    overlap = max(len(needle) for needle in needles) - 1
+    position = start
+    while position < end:
+        stop = min(end, position + window_bytes)
+        handle.seek(position)
+        window = handle.read(min(end, stop + overlap) - position)
+        if any(needle in window for needle in needles):
+            return False
+        position = stop
+    return True
+
+
+def _custom_type_spellings(custom_type: str) -> tuple[bytes, ...] | None:
+    """``"custom_type":"<type>"`` under every separator in ``_KEY_SEPARATORS``.
+
+    ``None`` when the type's JSON-escaped spelling differs from its literal
+    one, because then no fixed byte string is safe to search for. Same rule
+    as :func:`find_row_for_custom_type`.
+    """
+    encoded = json.dumps(custom_type)
+    if encoded != f'"{custom_type}"':
+        return None
+    return tuple(b'"custom_type"' + sep + encoded.encode("utf-8") for sep in _KEY_SEPARATORS)
+
+
+def custom_type_proven_absent(
+    directory: str | Path,
+    custom_type: str,
+    *,
+    max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
+) -> bool:
+    """Whether NO byte of the plain journal spells a ``custom_type`` row, proven by scan.
+
+    ``True`` is a proof that :func:`read_latest_custom_entry` would answer ``None``;
+    ``False`` means only "not proven" and the caller walks as before.
+
+    WHY (L10): ``DesktopSessions._locate`` asks for the frontend checkpoint of a
+    session with no ``desktop.json`` marker, and a legacy journal has none, so the
+    backward walk JSON-decodes the whole file to find nothing — 81-90 ms of a
+    117-191 ms open on the 8 MB legacy fixture. The tail-anchor sidecar answers the
+    same question only after core-start prewarm has written it. This is the same
+    proof made on the spot with :func:`read_cold_tail`'s scanner: a row the walk
+    could match must carry ``"custom_type"`` and the type's spelling under one of
+    ``_KEY_SEPARATORS`` (the walk's ``str(payload["custom_type"]) == custom_type``
+    has no other byte form this format writes), so if neither spelling occurs the
+    walk's answer is ``None``. A spelling found anywhere — including inside message
+    text — proves nothing, and the walk decides.
+
+    DECLINES (``False``) rather than guesses: an archive (the walk materialises it,
+    and this scan reads plain bytes only), a type with no fixed spelling, a journal
+    larger than ``max_scan_bytes``, and any read error. The scan covers the file's
+    size at its ``fstat``, torn final row included. A row appended after that
+    instant is one this proof did not cover — the walk, starting LATER, could have
+    seen it — so the fallback cwd answered is the one the walk would have given had
+    it started at that same instant (#3001 review NIT-1).
+
+    PURE READ: nothing is written. The tail-anchor sidecar stays prewarm's to
+    publish (its module contract), and at ~3 ms warm per 8 MB this scan is cheaper
+    than the sidecar write's fsync it would otherwise motivate on the open path.
+    """
+    spellings = _custom_type_spellings(custom_type)
+    if spellings is None:
+        return False
+    path, codec = compression.transcript_source(Path(directory))
+    if codec is not None:
+        return False
+    try:
+        with path.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size > max_scan_bytes:
+                return False
+            return _spellings_absent(handle, 0, size, spellings)
+    except OSError:
+        return False
 
 
 def read_cold_tail(
@@ -1866,15 +1997,86 @@ def read_cold_tail(
     checkpoint_types: tuple[str, ...],
     max_bytes: int = 4 * 1024 * 1024,
     max_rows: int = 256,
+    max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
 ) -> ReplaySuffix | None:
     """Prove first-frame facts from a bounded plain-journal suffix, or decline.
 
     This is NOT replay: entries are only the evidence for the newest usage
-    receipt, never a message-list substitute. Checkpoint, spend, their order
-    and the usage seed must all be found within 4 MiB / 256 rows. Earlier bytes
-    cannot change those latest facts. Bound exhaustion, damaged or incomplete
-    lines, archives and ANY shrink row met by the walk keep the exact eager
-    path; no absence is inferred from a bound.
+    receipt, never a message-list substitute. Each fact (every checkpoint
+    type, plus the usage seed) is either MET in the newest 4 MiB / 256 rows,
+    or PROVEN ABSENT from every byte below them. Damaged or incomplete lines,
+    archives and a shrink row met before a usage receipt keep the exact eager
+    path. A bound alone is never taken as proof of absence.
+
+    WHY the absence proof (L7 design R1): legacy journals carry no checkpoint
+    and no spend row at all. Requiring the tail to *meet* them sent every such
+    journal to the eager reader, which read to BOF because nothing stopped it:
+    about 1 s for an 8 MB journal. Scanning the bytes below the tail for each
+    missing type's spelling costs milliseconds at memchr speed. It needs no
+    prefix witness or stored offsets, because it reads the very bytes it
+    reasons about.
+
+    WHY the facts equal eager's under ANY eager window. A type met in the tail
+    is its newest row: no compaction separates it from EOF, so eager's buffer,
+    which always reaches back to the newest compaction, holds it as well.
+    That is the #2974 argument. A type whose spelling is absent from
+    ``[0, tail)`` and that was not met in the tail exists nowhere in the file,
+    so eager finds none however far it reads, with or without a sidecar or
+    chunk alignment. A parseable usage receipt met before any shrink row is
+    newer than every shrink, so it survives
+    :func:`usages_since_newest_shrink` in eager's suffix and is the newest
+    parseable reading there too.
+
+    THE SPELLINGS, and why a false absence is impossible for this repo's
+    writers:
+
+    * A checkpoint type is ``"custom_type":"<type>"``, a custom row's payload
+      key followed by the type literal in quotes. The ``"type":"custom"``
+      envelope is deliberately not matched. The type string is the one piece
+      no format change can move. A usage receipt is ``"usage":{``. Each is
+      ALSO searched with ``json.dumps``' default ``": "`` separator, so a row
+      written by a writer that forgot ``separators=`` is still seen (review
+      round 1, MAJOR-1). That costs only false presences, which decline.
+    * Every journal row is written by :meth:`TranscriptEntry.to_json`, whose
+      ``json.dumps(..., separators=(",", ":"))`` with the default
+      ``ensure_ascii`` has been unchanged since the format was introduced
+      (381377fe82d). Checked: ``git log -S'separators='`` and ``-S'json.dumps('``
+      on ``transcript.py``, and ``-S`` on the two type constants in
+      ``frontend_state.py`` / ``spend.py``. Each constant was introduced once,
+      with the same literal: ``"frontend_state_checkpoint_v1"`` (b0bde07e4a6)
+      and ``"session_spend.v1"`` (f31d50929e5). Rewriters (``compact_file``
+      folds, the import service's ``append_imported``) and the mobile
+      projection also serialise through ``to_json``. Neither type literal
+      contains a character JSON escapes, so ``ensure_ascii`` cannot change its
+      bytes. A type whose escaped spelling does differ is never scanned for:
+      the tail declines, as :func:`find_row_for_custom_type` does.
+    * A FALSE PRESENCE is always safe. When the spelling appears without being
+      a real row (a nested object in another row, for instance), the scan says
+      "present" and the tail declines to eager. A conversation that merely
+      quotes the type inside message TEXT does not even match, because the
+      quotes in a JSON string are escaped as ``\\"``.
+    * The assumption that remains: a row's key/value separator is ``:`` or
+      ``": "``, the only two ``json.dumps`` produces on one line (a JSONL row
+      holds no raw newline, so ``indent=`` cannot appear). A writer emitting
+      other whitespace (``" : "``, tabs) would defeat it; none exists, and
+      ``to_json`` is still the repo's only row writer.
+    * The spend type does not need special handling: it reaches this function
+      as one of ``checkpoint_types`` (``build_cold_tail_metadata`` passes the
+      required AND opportunistic types), so a spend row below the tail is
+      scanned for like the checkpoint and declines when present.
+
+    Bounds: the scan covers ``[0, low + longest - 1)``, where ``low`` is the
+    start of the oldest row the tail consumed. The overlap is redundant,
+    since the byte before ``low`` is a newline that no spelling contains, but
+    it keeps the bound conservative. Above ``max_scan_bytes``
+    (:data:`ABSENCE_SCAN_MAX_BYTES`) the tail declines.
+
+    When the walk stops: once every fact is met (as before), at the
+    4 MiB / 256-row bound, or at a shrink row met AFTER a parseable usage
+    receipt. That shrink is older than the seed, so the seed stays exact, and
+    walking on would only refuse. The shrink row itself is not consumed, so
+    it lies in the scanned range, and any unmet type below it is still
+    looked for. A shrink met BEFORE a parseable receipt still declines.
 
     What each guard protects, because two of them look alike:
 
@@ -1891,18 +2093,30 @@ def read_cold_tail(
     """
     from local_operator.session.compression import transcript_source
 
+    # Lazy: usage_seed -> model_selection -> this module.
+    from local_operator.session.usage_seed import parse_usage
+
     path, codec = transcript_source(Path(directory))
     if codec is not None:
         return None
+    spellings = {name: _custom_type_spellings(name) for name in checkpoint_types}
     checkpoints: dict[str, dict[str, Any]] = {}
     order: dict[str, int] = {}
     parsed: list[TranscriptEntry] = []
     have_usage = False
+    # A receipt that VALIDATES. Only that one may stop the walk at a shrink,
+    # because only a parseable reading is guaranteed to be eager's seed.
+    have_seed = False
     try:
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             end = handle.tell()
+            # Start of the oldest row consumed. The walker yields chunk
+            # starts rather than row starts, so this is priced per row: each
+            # consumed line is its bytes plus the newline that ends it.
+            low = end
             first = True
+            stopped = False
             for start, lines in _iter_complete_lines_backward(
                 handle, end, chunk_bytes=64 * 1024, max_bytes=max_bytes
             ):
@@ -1910,16 +2124,19 @@ def read_cold_tail(
                 # still be an interrupted append. Let eager replay decide it.
                 if first and (not lines or lines[0] != b""):
                     return None
-                first = False
-                for raw in lines:
+                for index, raw in enumerate(lines):
+                    # The first chunk's leading b"" is the zero bytes after
+                    # the final newline, not a row.
+                    width = 0 if first and index == 0 else len(raw) + 1
                     if not raw.strip():
+                        low -= width
                         continue
                     if len(parsed) >= max_rows:
-                        return None
+                        stopped = True
+                        break
                     entry = TranscriptEntry.from_json(raw.decode("utf-8"))
                     if entry is None:
                         return None
-                    parsed.append(entry)
                     provider = entry.payload.get("provider_payload") or {}
                     if not isinstance(provider, dict):
                         return None
@@ -1930,7 +2147,12 @@ def read_cold_tail(
                         or provider.get(SHRUNK_KEY)
                         or (entry.type == ENTRY_MESSAGE and provider.get("pruned"))
                     ):
-                        return None
+                        if not have_seed:
+                            return None
+                        stopped = True
+                        break
+                    parsed.append(entry)
+                    low -= width
                     if entry.type == ENTRY_CUSTOM:
                         name = entry.payload.get("custom_type")
                         if name in checkpoint_types and name not in checkpoints:
@@ -1938,7 +2160,12 @@ def read_cold_tail(
                             order[name] = len(parsed)
                     if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict):
                         have_usage = True
-                    if have_usage and all(name in checkpoints for name in checkpoint_types):
+                        if not have_seed and parse_usage(entry.payload["usage"]) is not None:
+                            have_seed = True
+                    # Stop on a PARSEABLE receipt, not merely a usage dict: an
+                    # unparseable newest one is skipped by the seed, and the
+                    # older parseable one eager would seed from must be in hand.
+                    if have_seed and all(name in checkpoints for name in checkpoint_types):
                         # A SYNTHETIC suffix: ``through_present=True`` is not a
                         # cursor search (this reader takes no cursor), only the
                         # field's required value. Nothing consumes it from a
@@ -1955,9 +2182,46 @@ def read_cold_tail(
                             bytes_read=end - start,
                             rows_read=len(parsed),
                         )
+                first = False
+                if stopped:
+                    break
+            # Here the walk stopped (row bound, or a shrink below a seed) or
+            # the walker ran out (byte bound, or BOF with ``low == 0``).
+            bytes_read = end - low
+            if low >= end:
+                return None
+            # What is still unproven. A usage receipt that the tail met but
+            # could not parse is not proven absent: eager would look further
+            # back for a parseable one. So this declines (design row 15).
+            if have_usage and not have_seed:
+                return None
+            missing = [name for name in checkpoint_types if name not in checkpoints]
+            needles: list[bytes] = []
+            for name in missing:
+                spelling = spellings[name]
+                if spelling is None:
+                    return None
+                needles.extend(spelling)
+            if not have_usage:
+                needles.extend(_USAGE_SPELLINGS)
+            scan_end = min(end, low + max(len(n) for n in needles) - 1)
+            if scan_end > max_scan_bytes:
+                return None
+            if not _spellings_absent(handle, 0, scan_end, tuple(needles)):
+                return None
+            return ReplaySuffix(
+                entries=tuple(reversed(parsed)),
+                through_present=True,
+                checkpoint=checkpoints.get(checkpoint_types[0]),
+                checkpoints=checkpoints,
+                checkpoint_order=order,
+                bytes_read=bytes_read,
+                rows_read=len(parsed),
+                usage_proven_absent=not have_usage,
+                absence_scan_bytes=scan_end,
+            )
     except (OSError, UnicodeError, TypeError, ValueError):
         return None
-    return None
 
 
 def read_replay_suffix(

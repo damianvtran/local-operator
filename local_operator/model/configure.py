@@ -3398,6 +3398,37 @@ def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | Non
     return ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
 
 
+#: Default for ``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens``:
+#: ``0``, never 1h for a delegated child. Measured over this harness's own 7-day
+#: ledger (2026-10-26), a subagent's 1h writes cost more than the expiries they
+#: avoid at EVERY size: about 15M base-equivalent tokens worse than 5m above
+#: 150k (345 expiries avoided vs 113M of extra 2x write cost) and about 57M
+#: worse below it. Kept configurable because the trade depends on how a
+#: workload's children idle; see ``providers/anthropic_cache_ttl.py``.
+ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS = 0
+
+
+def _anthropic_subagent_cache_ttl_1h_min_context_tokens(
+    settings: Mapping[str, Any] | None,
+) -> int:
+    """Resolve the context size above which a SUBAGENT turn uses the 1h TTL.
+
+    Same resolution rule as ``_anthropic_cache_ttl_1h_min_context_tokens``:
+    only an explicit non-negative integer is honoured, anything else falls back
+    to the default (here ``0``, never).
+    """
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    anthropic = providers.get("anthropic") if isinstance(providers, Mapping) else None
+    configured = (
+        anthropic.get("subagent_cache_ttl_1h_min_context_tokens")
+        if isinstance(anthropic, Mapping)
+        else None
+    )
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured >= 0:
+        return configured
+    return ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+
+
 #: Decode rate (output tokens per second of streaming) below which a host that
 #: keeps serving this conversation is retired from its affinity pin; ``0`` turns
 #: the speed check off. Next to the code that reads the key, as the registry
@@ -4015,6 +4046,9 @@ class SessionStreamFn:
             openai_api=_openai_api_mode(self._settings),
             anthropic_cache_ttl_1h_min_context_tokens=_anthropic_cache_ttl_1h_min_context_tokens(
                 self._settings
+            ),
+            anthropic_subagent_cache_ttl_1h_min_context_tokens=(
+                _anthropic_subagent_cache_ttl_1h_min_context_tokens(self._settings)
             ),
             # Resolved here, not inside the client: `client_for_spec` stays
             # settings-free, and `self._settings` is rebound by
@@ -6694,6 +6728,7 @@ class SessionStreamFn:
         # the shared event loop; the estimator memoizes settled old messages.
         import asyncio
 
+        from local_operator.providers.anthropic_cache_ttl import cache_role
         from local_operator.providers.clients import _estimate_slope
         from local_operator.providers.context import (
             ContextBinding,
@@ -6734,6 +6769,13 @@ class SessionStreamFn:
                 "context_tokens_hint_model": model_key(request) if hint is not None else None,
                 "context_tokens_hint_measured": reconciled[1] if reconciled is not None else None,
                 "context_binding": binding,
+                # Who is asking, for the Anthropic cache-TTL policy: only this
+                # stream knows it is a delegated child (``fork`` sets the
+                # parent link, the same edge analytics records).
+                "cache_role": cache_role(
+                    request.purpose if not request.isolated else "isolated",
+                    delegated=bool(getattr(self, "_parent_session_id", None)),
+                ),
                 "preparation_ms": request.preparation_ms
                 + (time.perf_counter() - preparation_started) * 1000,
             }
