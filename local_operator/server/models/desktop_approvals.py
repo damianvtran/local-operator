@@ -154,3 +154,19 @@ class NetworkEnrollmentAcknowledgment(BaseModel):
         if DIGEST.fullmatch(value) is None:
             raise ValueError("Use the exact displayed enrollment request commitment")
         return value
+
+
+class CredentialApprovalAcknowledgment(BaseModel):
+    """What the desktop REVIEWED: the operation and the two digests it was shown.
+
+    Strict and closed (``extra: forbid``) like the enrollment acknowledgment: the server
+    recomputes both digests from the record on disk and refuses any mismatch BEFORE the
+    signer runs, so a renderer showing a stale or different disclosure cannot obtain a
+    signature for the card on disk. An old renderer has no such body and keeps getting the
+    generic route's refusal.
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    operation: Literal["credential_finite_share", "credential_inheritance"]
+    request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    disclosure_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")

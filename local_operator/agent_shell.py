@@ -151,6 +151,35 @@ ALLOW_NESTED_SESSION_ENV = "LOCAL_OPERATOR_ALLOW_NESTED_SESSION"
 #: why a session that never had the allowance is not told how it is spelled.
 MAY_DELEGATE_ENV = "LOCAL_OPERATOR_AGENT_MAY_DELEGATE"
 
+#: The DESKTOP BEARER(S) a daemon may hold: the capability the desktop app injects into a
+#: backend it spawned (``server.desktop.TOKEN_ENV``; spelled here, not imported, because this
+#: module is on every runtime's import path and ``server.desktop`` pulls in FastAPI).
+#:
+#: WHY THEY NEVER LEAVE THE DAEMON (operator ask a-772b, "Yes, fix it before this ships").
+#: QA on #3002 (cell 14) showed a real ``bash`` tool child, under ``tool_approval_mode:
+#: auto``, inheriting the daemon's bearer and POSTing ``approve-credential`` -- a finite
+#: share signed on a file-only key and applied with no person involved. The session
+#: runtime never needs the bearer: its ONE reader is ``server.desktop.desktop_posture``,
+#: which runs in the daemon. So the runtime is spawned without it, and every child
+#: environment an agent's tool builds drops it last, whatever the shell policy grants.
+#:
+#: THE LIMIT, STATED: this removes the inherited-environment path. It is not a same-uid
+#: boundary -- a process running as the operator can still read a claimed daemon's 0600
+#: run record or the 0600 file key itself. Only a presence-gated key proves a person.
+DAEMON_BEARER_ENVS: tuple[str, ...] = ("LOCAL_OPERATOR_DESKTOP_TOKEN",)
+
+
+def without_daemon_bearer(env: MutableMapping[str, str]) -> MutableMapping[str, str]:
+    """Drop every daemon bearer from a CHILD environment (in place) and return it.
+
+    Call it on a copy that is about to become a child's environment -- never on
+    ``os.environ`` itself: the daemon still needs its own bearer to gate its routes.
+    """
+    for name in DAEMON_BEARER_ENVS:
+        env.pop(name, None)
+    return env
+
+
 #: Values that read as "on". Matches the convention the rest of the package
 #: uses for boolean-ish environment flags (``agent_profiles`` reads ``delegate``
 #: the same way), so ``=true`` from a shell script behaves as written rather

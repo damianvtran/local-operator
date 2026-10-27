@@ -811,6 +811,13 @@ def static_feature_flags() -> dict[str, Any]:
         "approvals": 1,
         # Existing signed SSH onboarding, surfaced without a new trust engine.
         "mesh_onboard": 1,
+        # TYPED CREDENTIAL APPROVAL: `POST /v1/desktop/approvals/{id}/approve-credential`
+        # (review -> sign -> apply in one call, phase-by-phase answer) and
+        # `.../apply-credential` (the retry of a signed card), plus the `typed_approval`
+        # block on a credential row. ITS OWN KEY, not a bump of `approvals`: a renderer
+        # without it keeps the CLI-remedy card (`can_approve_here: False`) and never
+        # POSTs a body this backend would not understand.
+        "credential_approvals": 1,
         # THE ONE DIAL on the projects surface: `POST
         # /v1/desktop/projects/{key}/request-update`, which asks the linked
         # sessions for a progress update through the same peer-send core the
