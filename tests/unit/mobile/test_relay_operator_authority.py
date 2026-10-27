@@ -686,3 +686,129 @@ def test_a_new_anchor_lifts_a_revocation_recorded_on_this_machine(
     assert fresh.key_id != anchor.key_id
     monkeypatch.setattr(trust, "load_anchor", load(fresh))
     assert claim().status_code == 200, "a superseded anchor's record still bricked the phone"
+
+
+# ---------------------------------------------------------------------------
+# The command path refuses a revoked device's certificate (C1)
+# ---------------------------------------------------------------------------
+
+
+def _paired_certificate(config_root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """A REAL operator-signed device certificate and the device id it names.
+
+    Real rather than synthetic because the guard parses it with the same reader
+    the runtime uses; a hand-rolled string would test a parser nobody ships.
+    """
+    from local_operator.operator.sign import issue_device_cert, load_signer
+
+    _install_operator_key(config_root, monkeypatch)
+    point = _point()
+    device_id = devices.new_device_id(point)
+    signer = load_signer(config_root=config_root, backend_name="file-only")
+    assert signer is not None, "the fixture's operator key did not load"
+    try:
+        certificate = issue_device_cert(
+            device_spki=point, device_id=device_id, label="my phone", signer=signer
+        )
+    finally:
+        signer.close()
+    return certificate, device_id
+
+
+class _RecordingWriter:
+    """The session socket: records every frame the relay really writes, and acks it."""
+
+    def __init__(self, daemon: MobileDaemon, pid: int) -> None:
+        self.written: list[dict[str, Any]] = []
+        self._daemon = daemon
+        self._pid = pid
+
+    def write(self, payload: bytes) -> None:
+        frame = json.loads(payload.decode())
+        self.written.append(frame)
+        self._daemon._pending_reqs[(self._pid, frame["req"])].set_result(
+            {"op": "ack", "req": frame["req"], "detail": "ok"}
+        )
+
+    async def drain(self) -> None:
+        return None
+
+
+def _command_rig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[MobileDaemon, _RecordingWriter, TestClient]:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = _record(session_id="revoked-cert-session")
+    entry = SessionEntry(record)
+    writer = _RecordingWriter(daemon, record.pid)
+    entry.writer = writer  # type: ignore[assignment]
+    daemon.table.entries[record.pid] = entry
+    return daemon, writer, _logged_in(daemon)
+
+
+def _signed_command(certificate: str) -> dict[str, Any]:
+    return {
+        "op": "slash_result",
+        "command": "approvals",
+        "args": "auto",
+        "images": [],
+        "operator_sig": "bb" * 8,
+        "operator_key_id": "cc" * 16,
+        "operator_cert": certificate,
+    }
+
+
+@pytest.mark.parametrize("where", ["local-record", "anchor"])
+def test_the_command_route_refuses_a_revoked_devices_certificate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """C1: the phone kept approval authority after a LOCAL revocation.
+
+    `lop operator devices --revoke` records the device in the relay's own
+    ``revoked.json`` and deletes the stored certificate — but the phone keeps its
+    copy, and the runtime re-checks only the root-owned anchor. Measured on
+    origin/main: with the revocation in the local record only (``--print-only``, or
+    before the privileged anchor write), the relay FORWARDED the certificate. Both
+    lists must refuse it, before any frame is written or future parked.
+    """
+    daemon, writer, client = _command_rig(tmp_path, monkeypatch)
+    certificate, device_id = _paired_certificate(tmp_path, monkeypatch)
+    if where == "local-record":
+        devices.record_revocation(tmp_path, device_id)
+    else:
+        _anchor_with_revocation(monkeypatch, device_id)
+        assert devices.is_revoked_here(tmp_path, device_id) is False
+    assert devices.is_revoked(tmp_path, device_id) is True
+
+    reply = client.post(
+        "/api/sessions/revoked-cert-session/command", json=_signed_command(certificate)
+    )
+    assert reply.status_code == 403, reply.text
+    assert reply.json() == {
+        "error": (
+            "This phone's approval access was removed on the computer. "
+            "Pair it again to approve from here."
+        ),
+        "code": "operator_device_revoked",
+    }
+    assert writer.written == [], "a revoked device's signature reached the session"
+    assert daemon._pending_reqs == {}, "a refusal left a future parked"
+
+
+def test_the_command_route_still_forwards_a_live_devices_certificate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: a paired, un-revoked device's certificate is carried as before,
+    and so is one the relay cannot parse — the runtime, not the courier, refuses that."""
+    _daemon, writer, client = _command_rig(tmp_path, monkeypatch)
+    certificate, device_id = _paired_certificate(tmp_path, monkeypatch)
+    assert devices.is_revoked(tmp_path, device_id) is False
+
+    for presented in (certificate, "operator-signed-statement"):
+        reply = client.post(
+            "/api/sessions/revoked-cert-session/command", json=_signed_command(presented)
+        )
+        assert reply.status_code == 200, (presented, reply.text)
+        assert writer.written[-1]["operator_cert"] == presented
+    assert len(writer.written) == 2

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, P
 
 if TYPE_CHECKING:
     from starlette.requests import Request
+    from starlette.responses import JSONResponse
 
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.mobile.push_worker import PushWorker
@@ -2813,6 +2814,67 @@ def _ask_gone_copy(op: str) -> str:
     if op in ("ask_decline", "ask_revise"):
         return _ASK_GONE_HANDOFF
     return _ASK_GONE_RESPONSE
+
+
+#: The typed category of :func:`_revoked_device_refusal`, so the phone can key on
+#: WHICH refusal this is rather than pattern-match the sentence (the rule the
+#: command route's ``ValueError`` arm already follows for authority refusals).
+OPERATOR_DEVICE_REVOKED_CODE = "operator_device_revoked"
+
+#: Worded for the phone holding the revoked certificate: what happened, and the
+#: one move that still works. Plain English beside a typed code, like the sibling
+#: ``/api/pair`` revoked refusal in this module.
+_OPERATOR_DEVICE_REVOKED = (
+    "This phone's approval access was removed on the computer. "
+    "Pair it again to approve from here."
+)
+
+
+def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
+    """A 403 for a command presenting a REVOKED device's certificate, else ``None``.
+
+    THE TWO-LIST GAP. ``lop operator devices --revoke`` writes the relay's own
+    ``revoked.json`` and deletes the stored certificate, but the phone keeps its
+    copy and can keep presenting it. The runtime re-checks only the root-owned
+    ANCHOR, so a revocation recorded locally but not (yet) in the anchor —
+    ``--revoke --print-only``, or the window before the privileged anchor write —
+    left the phone with approval authority through this relay. ``/api/pair``
+    already refuses such a device with ``devices.is_revoked`` (both lists); this
+    is the same question asked on the command path, before any frame is written
+    or future registered, so a refusal leaves nothing parked.
+
+    THE RELAY STAYS A COURIER. The check reads only public data — the device id
+    in an operator-signed public statement, and two revocation lists — and mints
+    nothing. It can only WITHHOLD a signature, never produce one. The certificate
+    is parsed, not verified: an unparsable one keeps today's behaviour (it is
+    forwarded and the runtime refuses it), and a forged certificate naming a
+    revoked id gains nothing by being refused here.
+    """
+    if not isinstance(certificate, str) or not certificate:
+        return None
+    # Function-local, as in ``build_app``: ``lop`` without the server extra never
+    # pays for starlette at import.
+    from starlette.responses import JSONResponse
+
+    from local_operator.operator import devices
+    from local_operator.operator.verify import read_device_cert
+    from local_operator.paths import config_dir
+
+    parsed = read_device_cert(certificate)
+    if parsed is None:
+        return None
+    try:
+        revoked = devices.is_revoked(config_dir(), parsed.device_id)
+    except (OSError, ValueError):  # pragma: no cover — an unreadable store
+        # Fail toward today's behaviour, not toward a refusal: the runtime's own
+        # anchor check still stands behind this belt.
+        return None
+    if not revoked:
+        return None
+    return JSONResponse(
+        {"error": _OPERATOR_DEVICE_REVOKED, "code": OPERATOR_DEVICE_REVOKED_CODE},
+        status_code=403,
+    )
 
 
 def _session_is_live(daemon: "MobileDaemon", session_id: str) -> bool:
@@ -7350,6 +7412,9 @@ def build_app(daemon: MobileDaemon):
         op = body.pop("op", None)
         if not isinstance(op, str) or not op:
             return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)
+        revoked = _revoked_device_refusal(body.get("operator_cert"))
+        if revoked is not None:
+            return revoked
         try:
             from local_operator.mobile.types import (
                 ContinuationCommand,
