@@ -69,6 +69,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from local_operator.session.cold_metadata import safe_metadata_path
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.replay_cache import (
     REPLAY_CACHE_ENTRIES,
@@ -300,15 +301,20 @@ def sessions_needing_replay(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         entries = list(sessions_dir.iterdir())
     except OSError:
         return []
+    # THE SAME POPULATION AS THE MODEL WARM (PR #3009 review MAJOR-1), through
+    # the ONE predicate both selectors share. Without it the newest journal on a
+    # booted store is the daemon's own (Aida, the Librarian, written at boot), and
+    # a loaded host cuts this pass to one journal — so the one replay, and the cold
+    # record it files, went to a session nobody opens. Applied BEFORE the limit,
+    # and the RAM-cache skip below stays per entry: ``_newest_journals`` cuts to
+    # ``limit`` first, so reusing it would let journals this process already holds
+    # spend the budget.
+    service = _service_session_ids(Path(root))
     journals: list[tuple[float, str]] = []
     for entry in entries:
-        if _is_archived(entry):
-            continue
-        try:
-            stat = (entry / TRANSCRIPT_FILENAME).stat()
-        except OSError:
-            continue
-        journals.append((stat.st_mtime, entry.name))
+        mtime = _user_journal_mtime(entry, service)
+        if mtime is not None:
+            journals.append((mtime, entry.name))
     journals.sort(reverse=True)
     candidates: list[str] = []
     for _mtime, session_id in journals:
@@ -610,6 +616,7 @@ async def warm_replay_cache(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         key = await asyncio.to_thread(_cold_replay_key, directory)
         if key is None:
             continue
+        record_path = await asyncio.to_thread(_record_path_to_file, root, session_id, key)
         # ``load_cold_replay`` IS the reader's own single-flight: a user who opens
         # this session while its preheat is in flight JOINS this task instead of
         # starting a second parse, and a key already materialized is answered from
@@ -618,13 +625,25 @@ async def warm_replay_cache(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         try:
             replay = await load_cold_replay(
                 key,
-                lambda directory=directory, key=key: asyncio.to_thread(
+                lambda directory=directory, key=key, record_path=record_path: asyncio.to_thread(
                     build_cold_replay,
                     directory,
                     key=key,
                     want_checkpoint=True,
                     through_id=None,
                     strict_cut=False,
+                    # FILE THE COLD RECORD, at the path ``AttachedSession.cold``
+                    # files it (``root`` is the config dir that owns
+                    # ``sessions/``). The RAM entry above dies with this process;
+                    # the record is the only part of this parse the NEXT start's
+                    # first open can use, and without it most first opens missed
+                    # (a real store: 827 of 850 recently touched journals had
+                    # none). Same witness discipline as the open path, because it
+                    # IS the open path's code: ``build_cold_replay`` files only
+                    # after its after-read re-stat equals ``key``, and only for
+                    # the cold-open request shape this call makes. ``None`` when
+                    # a valid record already stands (``_record_path_to_file``).
+                    metadata_path=record_path,
                 ),
             )
         except Exception:  # noqa: BLE001 — one unreadable journal must not end the preheat
@@ -643,6 +662,32 @@ async def warm_replay_cache(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         await asyncio.sleep(0)
     logger.debug("replay prewarm materialized %d replay(s)", started)
     return started
+
+
+def _record_path_to_file(root: str | Path, session_id: str, key: "ReplayKey") -> Path | None:
+    """Where this warm should file ``session_id``'s cold record, or ``None`` to skip.
+
+    ``None`` when the record on disk is ALREADY VALID for ``key`` (PR #3009
+    review MINOR-1): a journal untouched since the last boot would otherwise be
+    re-filed with identical bytes at every start (a temp file plus a rename per
+    journal, per boot). Only the WRITE is skipped. The parse still runs, because
+    the record carries no message list and the RAM entry needs one. The check is
+    the open path's own (``read_cold_metadata`` against ``witness_for(key)``), so
+    a record it calls valid is exactly one the next open would HIT. A record for
+    a moved journal fails it and is replaced. WORKER-THREAD ONLY: it reads and
+    parses the record, which can be ~1 MB.
+    """
+    from local_operator.session.cold_metadata import read_cold_metadata, witness_for
+
+    path = safe_metadata_path(root, session_id)
+    if path is None:
+        return None
+    try:
+        if read_cold_metadata(path, witness_for(key)) is not None:
+            return None
+    except Exception:  # noqa: BLE001 — an unreadable record is one to replace
+        logger.debug("cold record check failed for %s", session_id, exc_info=True)
+    return path
 
 
 def write_tail_anchor(root: str | Path, session_id: str) -> bool:
@@ -732,6 +777,48 @@ def _service_session_ids(root: Path) -> set[str]:
     return ids
 
 
+def _user_journal_mtime(entry: Path, service: set[str]) -> float | None:
+    """``entry``'s plain-journal mtime when it is a USER conversation, else ``None``.
+
+    ONE PREDICATE FOR BOTH BOOT WARMS (the model warm's ``_newest_journals`` and
+    the replay warm's ``sessions_needing_replay``), so the two cannot disagree
+    about which conversations a user opens. They did disagree, and the replay
+    warm's single paced slot went to a boot-created service session (PR #3009
+    review MAJOR-1). Excluded:
+
+    * the service sessions named by their own state files (``service``, from
+      :func:`_service_session_ids`; neither carries an ``origin.json``);
+    * an ARCHIVE, found by the archive-aware resolver rather than a plain-name
+      stat (the ``test_transcript_reads_are_archive_aware`` guard). A codec
+      means only an archive is on disk, and the warms must not decompress the
+      store (see ``_is_archived``). A session holding BOTH a plain journal and an
+      archive resolves to the plain one, as every reader resolves it, so it is
+      kept. A missing journal resolves to the plain path and fails the stat;
+    * any session whose ``origin.json`` is not a user origin
+      (``resume.is_user_session_origin``, THE visibility rule the pickers use).
+      Asked LAST because it reads a file, after the two cheap rejections.
+
+    The runtime STANDBYS a host warms at boot need no rule of their own: a
+    standby has no session directory and no transcript until it is claimed
+    (``session/runtime/standby.py``).
+    """
+    from local_operator.resume import is_user_session_origin, session_origin
+    from local_operator.session import compression
+
+    if entry.name in service:
+        return None
+    journal, codec = compression.transcript_source(entry)
+    if codec is not None:
+        return None
+    try:
+        mtime = journal.stat().st_mtime
+    except OSError:
+        return None
+    if not is_user_session_origin(session_origin(entry)):
+        return None
+    return mtime
+
+
 def _newest_journals(root: str | Path, *, limit: int) -> list[str]:
     """The ``limit`` most recently modified USER conversations, newest first.
 
@@ -741,11 +828,9 @@ def _newest_journals(root: str | Path, *, limit: int) -> list[str]:
     Excluded: archived journals; any session whose ``origin.json`` is not a
     user origin (``resume.is_user_session_origin``, THE visibility rule the
     pickers use — subagents, agent shells, configuration runs); and the
-    service sessions named by their own state files.
+    service sessions named by their own state files — all through
+    :func:`_user_journal_mtime`, the predicate the replay warm shares.
     """
-    from local_operator.resume import is_user_session_origin, session_origin
-    from local_operator.session import compression
-
     root = Path(root)
     sessions_dir = root / "sessions"
     try:
@@ -755,23 +840,9 @@ def _newest_journals(root: str | Path, *, limit: int) -> list[str]:
     service = _service_session_ids(root)
     journals: list[tuple[float, str]] = []
     for entry in entries:
-        if entry.name in service:
-            continue
-        # THE ARCHIVE-AWARE RESOLVER, not a plain-name stat (the
-        # ``test_transcript_reads_are_archive_aware`` guard): it names whatever is
-        # physically on disk, and a codec means an archive — skipped, because the
-        # warm must not decompress the store (see ``_is_archived``). A missing
-        # journal resolves to the plain path and fails the stat below.
-        journal, codec = compression.transcript_source(entry)
-        if codec is not None:
-            continue
-        try:
-            mtime = journal.stat().st_mtime
-        except OSError:
-            continue
-        if not is_user_session_origin(session_origin(entry)):
-            continue
-        journals.append((mtime, entry.name))
+        mtime = _user_journal_mtime(entry, service)
+        if mtime is not None:
+            journals.append((mtime, entry.name))
     journals.sort(reverse=True)
     return [session_id for _mtime, session_id in journals[:limit]]
 

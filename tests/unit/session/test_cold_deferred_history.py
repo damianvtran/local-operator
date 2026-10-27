@@ -1473,3 +1473,121 @@ async def test_facts_absent_from_the_whole_journal_defer_with_eager_facts(
         assert [message.id for message in tail.history()] == expected_rows
     finally:
         await tail.dispose()
+
+
+# --------------------------------------------------------------------------
+# The startup replay prewarm files the record the next cold open HITs
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_startup_replay_prewarm_files_the_record_a_deferred_open_hits(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prewarm's parse must leave the durable record, not only the RAM entry.
+
+    WHY THIS IS PINNED: the replay cache is process-local, so the prewarm's only
+    effect that outlives the process is the cold record. Before this fix the
+    prewarm called ``build_cold_replay`` without ``metadata_path`` and filed
+    nothing (827 of 850 recently touched journals in a real store had no record),
+    so the first open after the NEXT restart missed. Asserted across a simulated
+    restart (cache cleared, tail proof forbidden) so only the record can answer.
+    """
+    from local_operator.session import index_prewarm as prewarm
+
+    monkeypatch.setattr(prewarm, "free_bytes", lambda _root=None: 1 << 40)
+    monkeypatch.setattr(prewarm, "load_per_cpu", lambda: 0.0)
+    await seed_journal(isolated_config)
+    assert not _record_path(isolated_config).exists()
+
+    assert await prewarm.warm_replay_cache(isolated_config) == 1
+    assert _record_path(isolated_config).exists(), "the prewarm filed no cold record"
+    key = prewarm._cold_replay_key(_session_dir(isolated_config))
+    assert key is not None
+    record = cold_metadata.read_cold_metadata(
+        _record_path(isolated_config), cold_metadata.witness_for(key)
+    )
+    assert record is not None, "the filed record does not match the journal's version"
+
+    # The NEXT process: an empty RAM cache, and neither a replay nor a tail proof
+    # allowed — the record is the only thing that can make this open deferred.
+    replay_cache.replay_cache().clear()
+    calls = counting_replay(monkeypatch)
+
+    def no_tail(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the prewarm's record must HIT without a tail read")
+
+    monkeypatch.setattr(replay_cache, "read_cold_tail", no_tail)
+    facade = await cold_open(isolated_config, deferred=True)
+    try:
+        assert facade._deferred_history is not None
+        assert calls == [], "the deferred open replayed the journal"
+    finally:
+        await facade.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_startup_replay_prewarm_files_no_record_for_an_archive_or_a_moved_journal(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prewarm inherits the open path's witness discipline, and never archives.
+
+    An archived session is not selected at all (the warm must not decompress the
+    store), and a journal that moves during the prewarm's parse fails the
+    after-read re-stat in ``build_cold_replay``, so no record names a version the
+    journal no longer is — the same rule ``AttachedSession.cold``'s filing obeys.
+    """
+    import os
+    import time
+
+    from local_operator.session import index_prewarm as prewarm
+
+    monkeypatch.setattr(prewarm, "free_bytes", lambda _root=None: 1 << 40)
+    monkeypatch.setattr(prewarm, "load_per_cpu", lambda: 0.0)
+    monkeypatch.setattr(compression, "_free_bytes", lambda _path: 10**12)
+    archived = await seed_journal(isolated_config, session_id="archived000")
+    old = time.time() - 30 * 86400
+    os.utime(archived / "transcript.jsonl", (old, old))
+    outcome = compression.compress_session(archived)
+    assert outcome.status == "compressed", outcome.reason
+    moving = await seed_journal(isolated_config, session_id="moving00000")
+
+    original = replay_cache.read_replay_suffix
+
+    def append_during_read(directory: Any, *args: Any, **kwargs: Any) -> Any:
+        result = original(directory, *args, **kwargs)
+        with open(Path(directory) / "transcript.jsonl", "a", encoding="utf-8") as handle:
+            handle.write("\n")
+        return result
+
+    monkeypatch.setattr(replay_cache, "read_replay_suffix", append_during_read)
+    await prewarm.warm_replay_cache(isolated_config)
+
+    assert not _record_path(isolated_config, "archived000").exists()
+    assert not _record_path(isolated_config, "moving00000").exists()
+    assert moving.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_second_prewarm_over_an_untouched_journal_leaves_the_record_alone(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3009 review MINOR-1: a valid record is not rewritten by the next boot.
+
+    The parse still runs (the record carries no message list, and the RAM entry
+    needs one), but re-filing an identical record costs a temp file and a rename
+    every boot for nothing. Bytes AND mtime are asserted: equal bytes alone would
+    pass a rewrite that happened to produce the same content.
+    """
+    from local_operator.session import index_prewarm as prewarm
+
+    monkeypatch.setattr(prewarm, "free_bytes", lambda _root=None: 1 << 40)
+    monkeypatch.setattr(prewarm, "load_per_cpu", lambda: 0.0)
+    await seed_journal(isolated_config)
+    assert await prewarm.warm_replay_cache(isolated_config) == 1
+    record = _record_path(isolated_config)
+    before = (record.read_bytes(), record.stat().st_mtime_ns, record.stat().st_ino)
+
+    replay_cache.replay_cache().clear()  # the next boot: an empty RAM cache
+    assert await prewarm.warm_replay_cache(isolated_config) == 1
+    assert (record.read_bytes(), record.stat().st_mtime_ns, record.stat().st_ino) == before
