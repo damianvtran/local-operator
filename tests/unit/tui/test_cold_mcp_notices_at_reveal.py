@@ -29,6 +29,8 @@ knows" would be the wrong conclusion to draw from the first two.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_operator.harness.types import Message, TextContent
@@ -38,6 +40,7 @@ from local_operator.session.frontend_state import (
     FrontendSessionState,
 )
 from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.session.protocol import SessionProtocol
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock
@@ -141,7 +144,7 @@ class _Frames:
     """
 
     def __init__(self, app: OperatorApp, session: object) -> None:
-        self.samples: list[dict[str, object]] = []
+        self.samples: list[dict[str, Any]] = []
         real = app.post_display_hook
         samples = self.samples
 
@@ -191,24 +194,33 @@ class _Frames:
 
         app.post_display_hook = hook  # type: ignore[method-assign]
 
-    def content(self) -> list[dict]:
-        """Frames painted with the session in front of the reader, carrying rows."""
+    def content(self) -> list[dict[str, Any]]:
+        """Frames painted with the session in front of the reader, carrying rows.
+
+        A row with height 0 is mounted-but-not-yet-laid-out, which is a
+        composition step rather than something the reader sees; frames holding one
+        are skipped so "the first contentful frame" means the first one with real
+        geometry.
+        """
         return [
             sample
             for sample in self.samples
-            if sample["target"] and not sample["parked"] and sample["blocks"] > 0
+            if sample["target"]
+            and not sample["parked"]
+            and sample["blocks"] > 0
+            and all(row["h"] > 0 for row in sample["rows"] if row["notice"])
         ]
 
     @staticmethod
-    def texts(frame: dict) -> list[str]:
+    def texts(frame: dict[str, Any]) -> list[str]:
         return [row["text"] for row in frame["rows"]]
 
     @staticmethod
-    def notices(frame: dict) -> list[dict]:
+    def notices(frame: dict[str, Any]) -> list[dict[str, Any]]:
         return [row for row in frame["rows"] if row["notice"]]
 
     @classmethod
-    def geometry(cls, frame: dict) -> dict:
+    def geometry(cls, frame: dict[str, Any]) -> dict[str, Any]:
         """What a painted frame LOOKS like, heights and spacing included.
 
         The claim QA round 1 could not find in the texts: a row that is authored
@@ -234,12 +246,35 @@ async def _settle(pilot, frames: _Frames, *, quiet: int = 6) -> None:
             seen = len(frames.samples)
 
 
-def _mcp_rows(frame: dict, failures: dict[str, str]) -> list[dict]:
+def _mcp_rows(frame: dict[str, Any], failures: dict[str, str]) -> list[dict[str, Any]]:
     return [
         row
         for row in _Frames.notices(frame)
         if any(f"MCP {name} failed" in row["text"] for name in failures)
     ]
+
+
+def _live_round(app: OperatorApp, viewer: AttachedSession, failures: dict[str, str]) -> None:
+    """Install an OWNER's startup round the way the bind does.
+
+    ``_install_frontend(..., publish=True)`` is the real hop
+    (``_apply_frontend_facades`` → ``_fire_mcp_startup_sink`` → this app), and it
+    is deliberately called with ``restored`` at its default: an owner's snapshot
+    is live news, whatever ``is_cold`` currently says.
+    """
+    configured = sorted(set(failures) | set(FAILURES))
+    state = viewer.frontend_state.model_copy(
+        update={
+            "mcp_startup": {
+                "configured": configured,
+                "connected": [name for name in configured if name not in failures],
+                "failures": dict(failures),
+                "tool_count": 300,
+                "settling": False,
+            }
+        }
+    )
+    viewer._install_frontend(state, publish=True)
 
 
 def _healthy_live(app: OperatorApp, viewer: AttachedSession) -> None:
@@ -391,21 +426,23 @@ async def test_a_checkpoint_row_is_history_and_a_healthy_live_round_never_contra
 
 
 @pytest.mark.asyncio
-async def test_a_live_round_that_confirms_a_history_row_restates_it_in_place(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("columns", [62, 90, 110])
+async def test_a_live_round_that_confirms_a_history_row_moves_nothing(
+    tmp_path, monkeypatch, columns: int
 ) -> None:
-    """Q2's other half: a failure that is STILL failing becomes present tense.
+    """Review round 2, MAJOR-1: a confirmation must not relayout the row.
 
-    Restated on the block that is already on screen — one row, one statement,
-    and nothing appended beside it — so the confirmation costs no line and
-    leaves no stale claim above its own correction. The live session is a double
-    because "a runtime is attached and synced" is exactly what a synthetic cold
-    facade is not; the ledger key it shares with the facade is what makes the
-    row findable.
+    Restating "failed last session" into the present tense frees thirteen cells,
+    and at 62, 90 and 110 columns that crosses a fold: the row lost a line and
+    the adaptive gap rule flipped its neighbour's spacing, so the transcript
+    height changed by two rows after the reader had started reading — the Q1
+    defect class moved from the reveal to the confirmation. The row is therefore
+    left exactly as painted, and the live news goes to the toast and the band,
+    neither of which reflows the transcript.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    viewer = await _cold(tmp_path, "confirm", failures=FAILURES)
+    viewer = await _cold(tmp_path, f"confirm-{columns}", failures=FAILURES)
     try:
 
         async def factory():
@@ -413,35 +450,102 @@ async def test_a_live_round_that_confirms_a_history_row_restates_it_in_place(
 
         app = OperatorApp(factory)
         frames = _Frames(app, viewer)
-        async with app.run_test(size=FRAME) as pilot:
+        async with app.run_test(size=(columns, 34)) as pilot:
             await _settle(pilot, frames)
-            first = frames.content()[0]
-            before = _mcp_rows(first, FAILURES)
-            assert before and all("last session" in row["text"] for row in before)
+            before = frames.content()[-1]
+            assert _mcp_rows(before, FAILURES), f"{columns}: no rows painted"
 
-            class _Live:
-                session_id = viewer.session_id
-                is_cold = False
-                mcp_startup = McpStartupOutcome(
-                    configured=tuple(sorted(FAILURES)),
-                    connected=(),
-                    failures=dict(FAILURES),
-                    tool_count=0,
-                )
-
-            app._report_mcp_startup(_Live())
+            _live_round(app, viewer, dict(FAILURES))
             await _settle(pilot, frames)
             after = frames.content()[-1]
+            assert _Frames.geometry(after) == _Frames.geometry(before), (
+                f"{columns} cols: confirming a history row reflowed the transcript: "
+                f"{_Frames.geometry(before)} -> {_Frames.geometry(after)}"
+            )
+            assert [row["text"] for row in _mcp_rows(after, FAILURES)] == [
+                row["text"] for row in _mcp_rows(before, FAILURES)
+            ], f"{columns} cols: the confirmation reworded a painted row"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_live_snapshot_landing_mid_bind_is_news_not_history(tmp_path, monkeypatch) -> None:
+    """Review round 2, MAJOR-2: provenance is the object, not the connection.
+
+    ``is_cold`` stays True for a while after an owner's snapshot is installed
+    (``_finish_sync`` runs after an await), so the bind path's genuinely live
+    round used to be labelled "last session" — including a server that had never
+    failed before — and was never announced. This cell drives that exact window:
+    the facade is still cold when ``_install_frontend(publish=True)`` hands the
+    app the owner's round, which carries the two checkpoint failures plus a NEW
+    ``github`` one.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    viewer = await _cold(tmp_path, "midbind", failures=FAILURES)
+    try:
+
+        async def factory():
+            return viewer
+
+        app = OperatorApp(factory)
+        frames = _Frames(app, viewer)
+        live = dict(FAILURES)
+        live["github"] = "command not found: gh"
+        async with app.run_test(size=(120, 34)) as pilot:
+            await _settle(pilot, frames)
+            assert _mcp_rows(frames.content()[0], FAILURES), "the durable rows are missing"
+            # THE REAL WINDOW, forced deterministically: `is_cold` is
+            # `_client is None or not connected or not _ready_for_events`, and
+            # the bind path installs the owner's snapshot while
+            # `_finish_sync` has not run yet.
+            monkeypatch.setattr(viewer, "_ready_for_events", False, raising=True)
+            assert viewer.is_cold, "this cell is only meaningful mid-bind"
+
+            calls: list[int] = []
+            real_report = OperatorApp._report_mcp_startup
+
+            def spy(self, session):  # noqa: ANN001
+                calls.append(1)
+                return real_report(self, session)
+
+            OperatorApp._report_mcp_startup = spy  # type: ignore[method-assign]
+            try:
+                _live_round(app, viewer, live)
+                await _settle(pilot, frames)
+            finally:
+                OperatorApp._report_mcp_startup = real_report  # type: ignore[method-assign]
+            assert calls, "the owner's snapshot never reached the app's startup report"
+            assert viewer.is_cold, "the facade must still be cold for this to prove anything"
+
+            after = frames.content()[-1]
+            github = [row for row in _Frames.notices(after) if "github" in row["text"]]
+            assert github, f"the new failure was never painted: {frames.texts(after)}"
+            assert not github[0]["history"], (
+                "a server that never failed last session was labelled history: "
+                f"{github[0]['text']}"
+            )
+            assert app._announced_mcp_startup, "the live round announced nothing"
+            assert (
+                len(app._announced_mcp_startup) == 1
+            ), f"the live round announced more than once: {app._announced_mcp_startup}"
             confirmed = _mcp_rows(after, FAILURES)
-            assert len(confirmed) == len(FAILURES), (
-                "the confirmed failure was appended instead of restated: "
-                f"{frames.texts(first)} -> {frames.texts(after)}"
+            assert all(
+                "last session" in row["text"] for row in confirmed
+            ), f"a live confirmation reworded a history row: {[r['text'] for r in confirmed]}"
+
+            # A second identical snapshot is not a second round of news.
+            announced = dict(app._announced_mcp_startup)
+            _live_round(app, viewer, live)
+            await _settle(pilot, frames)
+            assert app._announced_mcp_startup == announced, (
+                "an unchanged snapshot re-announced: "
+                f"{announced} -> {app._announced_mcp_startup}"
             )
-            assert not any("last session" in row["text"] for row in confirmed), (
-                f"a failure the live round still reports stayed in the past tense: "
-                f"{[row['text'] for row in confirmed]}"
-            )
-            assert not any(row["history"] for row in confirmed)
+            assert _Frames.geometry(frames.content()[-1]) == _Frames.geometry(
+                after
+            ), "an unchanged snapshot reflowed the transcript"
     finally:
         await viewer.dispose()
 
@@ -482,7 +586,7 @@ async def test_a_cold_open_without_a_durable_outcome_projects_nothing_and_append
                     tool_count=0,
                 )
 
-            app._report_mcp_startup(_Live())
+            app._report_mcp_startup(cast("SessionProtocol", _Live()))
             await _settle(pilot, frames)
             settled = frames.content()[-1]
             rows = _mcp_rows(settled, FAILURES)
@@ -494,7 +598,7 @@ async def test_a_cold_open_without_a_durable_outcome_projects_nothing_and_append
                 f"{[row['text'] for row in rows]}"
             )
             # And the replay stays quiet, the same as on the durable path.
-            app._report_mcp_startup(_Live())
+            app._report_mcp_startup(cast("SessionProtocol", _Live()))
             await _settle(pilot, frames)
             assert frames.texts(frames.content()[-1]) == frames.texts(settled), (
                 "a second replay of an unchanged outcome appended its rows again: "
@@ -588,7 +692,7 @@ async def test_a_restored_outcome_records_without_interrupting(tmp_path, monkeyp
                     tool_count=0,
                 )
 
-            app._report_mcp_startup(_Live())
+            app._report_mcp_startup(cast("SessionProtocol", _Live()))
             await _settle(pilot, frames)
             assert (
                 app._announced_mcp_startup

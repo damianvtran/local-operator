@@ -1996,6 +1996,13 @@ class AttachedSession:
         # Children can persist a roster before the parent's first transcript
         # row. Absence of that file must not hide independently durable spend.
         state = await self._restore_cold_details(state)
+        # THE ONE INSTALL THAT IS A RESTORE. Everything in ``state`` here was
+        # read out of the durable checkpoint, so the MCP round it carries is
+        # history: the row that renders it says "last session", and a later live
+        # round is worded and announced as news. This is provenance by
+        # construction — ``_install_frontend(restored=True)`` — because the
+        # connection state cannot tell the two apart (the owner's first live
+        # snapshot lands while the facade is still mid-bind).
         self._cold_checkpoint = None
         self._cold_seed_usage = None
         # NOT cleared, unlike its two neighbours: the spend details row is ~200
@@ -2003,7 +2010,7 @@ class AttachedSession:
         # ``restored_spend`` for the exact micro-USD figure long after the cold
         # open. Freeing it would trade nothing for a missing number.
         self._cold_selection = None
-        self._install_frontend(state)
+        self._install_frontend(state, restored=True)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
         # viewer is READY, and it is _ensure_bound that supplies the runtime
@@ -7186,7 +7193,13 @@ class AttachedSession:
         if state.history_generation != self._loaded_history_generation:
             self._invalidate_display_history()
 
-    def _install_frontend(self, state: FrontendSessionState, *, publish: bool = False) -> None:
+    def _install_frontend(
+        self,
+        state: FrontendSessionState,
+        *,
+        publish: bool = False,
+        restored: bool = False,
+    ) -> None:
         if state.session_id != self._session_id:
             raise ConnectionError("frontend state belongs to another session")
         if self._frontend_store is None or self._frontend_store.state.epoch != state.epoch:
@@ -7202,7 +7215,7 @@ class AttachedSession:
             self._frontend_store.replace_and_notify(state)
         else:
             self._frontend_store.replace(state)
-        self._apply_frontend_facades(state)
+        self._apply_frontend_facades(state, restored=restored)
         pending, self._pending_frontend_updates = self._pending_frontend_updates, None
         for update in pending or ():
             # A same-connection refresh can overtake queued deltas already
@@ -7213,7 +7226,11 @@ class AttachedSession:
             self._on_frontend_update(update.model_dump(mode="json"))
 
     def _apply_frontend_facades(
-        self, state: FrontendSessionState, *, changed_fields: set[str] | None = None
+        self,
+        state: FrontendSessionState,
+        *,
+        changed_fields: set[str] | None = None,
+        restored: bool = False,
     ) -> None:
         """Refresh changed facades; a full snapshot replaces every collection.
 
@@ -7284,9 +7301,18 @@ class AttachedSession:
             self.mcp_manager.replace(state.mcp_servers)
         startup = state.mcp_startup
         if isinstance(startup, Mapping):
-            from local_operator.session.mcp_status import McpStartupOutcome
+            from local_operator.session.mcp_status import (
+                McpStartupOutcome,
+                RestoredMcpStartupOutcome,
+            )
 
-            startup = McpStartupOutcome(
+            # ``restored`` says this state came out of the DURABLE checkpoint,
+            # and it is the provenance the TUI words its rows by: the same
+            # numbers from an owner's snapshot are news, from a checkpoint they
+            # are history. Connection state cannot answer this (it is cold for a
+            # while after a live snapshot lands — see the class docstring).
+            outcome_type = RestoredMcpStartupOutcome if restored else McpStartupOutcome
+            startup = outcome_type(
                 configured=tuple(startup.get("configured", ()) or ()),
                 connected=tuple(startup.get("connected", ()) or ()),
                 failures=dict(startup.get("failures", {}) or {}),

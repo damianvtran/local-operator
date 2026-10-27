@@ -173,8 +173,6 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
 from local_operator.session.frontend_state import CostKnowledge
-
-# Shared loop semantics stay import-light for detached owners.
 from local_operator.session.goal_loop import (
     _BOTCHED_COUNT_RE,
     DEFAULT_LOOP_ITERATIONS,
@@ -187,6 +185,9 @@ from local_operator.session.goal_loop import (
     MAX_LOOP_JUDGE_FAILURES,
     _parse_loop_verdict,
 )
+
+# Shared loop semantics stay import-light for detached owners.
+from local_operator.session.mcp_status import RestoredMcpStartupOutcome
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_PROGRESS_S,
@@ -22523,11 +22524,15 @@ class OperatorApp(App[None]):
         outcome = getattr(session, "mcp_startup", None)
         if outcome is None:
             return
-        # WHETHER THIS OUTCOME IS NEWS OR HISTORY, decided once here and reused
-        # by both halves below. ``is_cold`` is the one owner of "no synchronized
-        # runtime is attached" (``SessionProtocol`` states it), so the toast and
-        # the rows can never disagree about the tense.
-        restored = bool(getattr(session, "is_cold", False))
+        # WHETHER THIS OUTCOME IS NEWS OR HISTORY — provenance, not connection
+        # state. `is_cold` answered the wrong question: the owner's first live
+        # snapshot is installed while the facade is still mid-bind
+        # (`_finish_sync` runs after an await), so a genuinely LIVE round read as
+        # cold, was labelled "last session", and its new failures were never
+        # announced (review round 2, MAJOR-2). The durable checkpoint's outcome
+        # arrives as ``RestoredMcpStartupOutcome``; every owner or in-process
+        # round is the base class, so the type IS the provenance.
+        restored = isinstance(outcome, RestoredMcpStartupOutcome)
         toast = self.query_one(Toast)
         payload = format_mcp_startup(outcome, max_cells=toast.content_cells)
         if payload is None:
@@ -22627,31 +22632,22 @@ class OperatorApp(App[None]):
             # composition, the fold hint and the fit record below (see there).
             column = self._mcp_notice_painted_column()
             # THE LEDGER SAYS THIS SESSION ALREADY RECORDED THIS FAILURE, so this
-            # outcome CONFIRMS a row rather than reporting one — and a second row
-            # would spend a line to contradict the first. The only thing left to
-            # say is the tense: a projected "failed last session" that the live
-            # round still reports becomes the present again, IN PLACE, on the
-            # block the reader is already reading (``NoticeBlock.restate``: same
-            # widget, no second row, nothing above it moves). QA round 1 (Q2) is
-            # the failure this removes — a healthy live outcome beside nine
-            # unretracted red rows.
+            # outcome CONFIRMS a row rather than reporting one, and the row is
+            # left EXACTLY AS PAINTED. It is not restated into the present tense:
+            # that edit frees thirteen cells (" last session"), and whenever it
+            # crosses a fold boundary the row changes height and the adaptive
+            # gap rule flips the next row's spacing — measured at 62, 90 and 110
+            # columns, the transcript lost two rows (review round 2, MAJOR-1).
+            # The history label stays true ("failed last session"), and the live
+            # news has its own surfaces: the toast and the status band, neither
+            # of which reflows the transcript.
             #
             # The KEY is consulted before the view, deliberately: a failure
             # another session recorded is this session's to write (two
             # conversations in one process legitimately show the same server),
-            # and the view is then asked only whether the row is still there — a
-            # rebuilt view has none (``deferred`` in round 1's notes).
+            # and a view that was rebuilt holds no rows at all — that gap is
+            # ``deferred`` in round 1's notes.
             if notice_key in self._mcp_failure_notices:
-                painted = self._mcp_failure_row(name, str(error))
-                if painted is not None and painted.mcp_failure_history and not restored:
-                    painted.restate(
-                        self._mcp_notice_line(
-                            name, str(error), budget=NoticeBlock.body_budget(column)
-                        ),
-                        "error",
-                    )
-                    painted.mcp_failure_fit = (name, str(error), column)
-                    painted.mcp_failure_history = False
                 continue
             self._mcp_failure_notices.add(notice_key)
             # The pointer is appended ONLY when the line does not already name
