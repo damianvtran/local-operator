@@ -2537,7 +2537,14 @@ class _FakeCredentialStore:
 def _mcp_login_row(url: str) -> Any:
     from types import SimpleNamespace
 
-    return SimpleNamespace(id=1, identity_key=url, updated_at=0)
+    # A row carrying a token, as a real login does: the ledger counts only a grant
+    # the runtime would use (F-READY-1), so a data-less row reads as no login.
+    return SimpleNamespace(
+        id=1,
+        identity_key=url,
+        updated_at=0,
+        data={"tokens": {"access_token": "synthetic-access"}},
+    )
 
 
 def _radient_login_row(email: str = "owner@example.test") -> Any:

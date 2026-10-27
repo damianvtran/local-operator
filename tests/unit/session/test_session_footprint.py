@@ -259,6 +259,77 @@ async def test_a_session_resumed_after_two_hours_sheds_the_superseded_read(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_a_future_usage_stamp_cannot_hold_off_the_idle_flush(tmp_path, monkeypatch):
+    """A transcript whose ``at_ms`` sits a DAY in the future (clock skew, or a
+    transcript copied from a machine whose clock runs ahead) must not suppress
+    the run-start idle flush for a real gap that follows the resume.
+
+    Unclamped, the seeded clock read ``now - last`` as -22 h, so a real 2 h
+    wait after reopening the session shed nothing until wall time passed the
+    stamp plus the flush window (PR #3004 agent review round 3, R3-m1: 0 prune
+    rows). Clamped to "now" at construction, the 2 h gap is measured from a
+    real time and the superseded read is blanked before the first request.
+    """
+    import local_operator.model.tariff as tariff
+    import local_operator.session.session as session_module
+
+    clock = {"offset": 0.0}
+    real_time = session_module.time.time
+    monkeypatch.setattr(session_module.time, "time", lambda: real_time() + clock["offset"])
+    day_ahead_ms = 24 * 60 * 60 * 1000
+
+    def stamped(turn):
+        # The skewed writer: every completion stamp a day ahead of this clock.
+        *head, end = turn
+        usage = Usage(
+            input_tokens=10,
+            output_tokens=5,
+            at_ms=tariff.now_ms() + int(clock["offset"] * 1000) + day_ahead_ms,
+        )
+        return [*head, StreamEndEvent(stop_reason=end.stop_reason, usage=usage)]
+
+    class StampedStream(ScriptedStream):
+        def __call__(self, request, signal):
+            self.turns[len(self.requests)] = stamped(self.turns[len(self.requests)])
+            return super().__call__(request, signal)
+
+    directory = tmp_path / "sess"
+    first = Session(
+        model=MODEL,
+        stream_fn=StampedStream(
+            [_read_turn("c1"), _final_turn("read once"), _read_turn("c2"), _final_turn("again")]
+        ),
+        tools=[read_tool()],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    await first.prompt("read engine.py")
+    await first.prompt("read engine.py again")
+    await first.dispose()
+    assert not [e for e in Transcript(directory).entries() if e.type == ENTRY_PRUNE]
+
+    resumed_stream = ScriptedStream([_final_turn("still here")])
+    resumed = Session(
+        model=MODEL,
+        stream_fn=resumed_stream,
+        tools=[read_tool()],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    # The seed is the clamp, not the future stamp.
+    assert resumed._last_provider_request_ms <= int(session_module.time.time() * 1000)
+    clock["offset"] += 2 * 60 * 60  # the user's real wait before the next prompt
+    await resumed.prompt("still there?")
+    await resumed.dispose()
+
+    prunes = [e for e in Transcript(directory).entries() if e.type == ENTRY_PRUNE]
+    assert prunes, "a day-ahead stamp held off the flush after a real 2 h gap"
+    sent = [m for m in resumed_stream.requests[0].messages if isinstance(m, Message)]
+    tool_texts = [m.text for m in sent if m.role == "tool"]
+    assert tool_texts[0] == SUPERSEDED_NOTICE, tool_texts[0][:80]
+
+
+@pytest.mark.asyncio
 async def test_resumed_session_continues_the_conversation(tmp_path):
     """Resume off the smaller representation and take another turn: the
     provider must receive the earlier history, not a bare prompt."""

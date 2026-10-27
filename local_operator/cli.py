@@ -12728,50 +12728,13 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
             ),
         )
     if record.outbound is None:
-        # THE MANUAL FIRST PUBLICATION. An unattended push refuses to invent an
-        # ancestor, but an explicit push IS that deliberate act: seed (A, P) from
-        # the KNOWN baseline -- the tree this link last pulled -- and only while
-        # the hub still holds exactly that tree, so the declared ancestor is a
-        # fact rather than a guess.
-        if record.lineage != "clean" or record.recorded_by == prov.UNKNOWN_BASELINE:
-            return _skills_fail(
-                args,
-                LinkError(
-                    "lineage-not-clean",
-                    "this link's lineage is not clean; resolve or pull again first",
-                ),
-            )
+        # THE MANUAL FIRST PUBLICATION: seeded by the one service helper the
+        # desktop push route shares, so the two surfaces cannot disagree about
+        # when an explicit push may invent its ancestor.
         try:
-            # Both sides are already canonical (a baseline's fields verbatim, the
-            # check's adapter projection), so the fingerprint IS the comparison;
-            # the carrier dispatch inside it keeps bundles on tree hashes.
-            agreed = prov.fingerprint_snapshot(
-                "skill", dict(record.fields)
-            ) == prov.fingerprint_snapshot("skill", dict(check.remote or {}))
-        except Exception:  # noqa: BLE001 - an unreadable side proves no agreement
-            agreed = False
-        if not agreed:
-            return _skills_fail(
-                args,
-                LinkError(
-                    "hub-moved",
-                    "the hub moved since this link's baseline; run `lop skills sync` first",
-                ),
-            )
-        from dataclasses import replace as dc_replace
-
-        from local_operator.hub_sync.push import receipt_for
-
-        receipt = receipt_for(
-            "skill",
-            dict(record.fields),
-            dict(record.fields),
-            revision=record.remote_revision,
-            operation_id=None,
-        )
-        prov.write_baseline(ctx.config_dir, dc_replace(record, outbound=receipt))
-        record = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
-        assert record is not None
+            record = svc.seed_manual_outbound_receipt(ctx, record, check)
+        except LinkError as error:
+            return _skills_fail(args, error)
     outbound = record.outbound
     assert outbound is not None
     identity = record.identity

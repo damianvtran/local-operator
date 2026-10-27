@@ -250,6 +250,13 @@ async def test_an_unrelated_400_is_not_retried() -> None:
         "messages.1.content.0.tool_use.input: diagnostics_report too long",
         "diagnostics_level: Extra inputs are not permitted",
         "tools.0.input_schema.properties.diagnostics: invalid type",
+        # PR #2984 review round 2, r2-n1: a 400 QUOTING request text that
+        # contains ``diagnostics:`` after a space latched the old matcher.
+        "system.0.text: run diagnostics: please",
+        # PR #3018 review round 1, m1: prose ending a comma clause with
+        # ``diagnostics.`` latched while the tail accepted any period.
+        "tools.0.description: checks health, runs diagnostics. returns status",
+        "messages.0.content.0.text: hello, please run diagnostics. thanks",
     ],
 )
 async def test_a_400_that_merely_mentions_diagnostics_does_not_latch(message: str) -> None:
@@ -278,6 +285,17 @@ async def test_a_400_that_merely_mentions_diagnostics_does_not_latch(message: st
         "diagnostics: Extra inputs are not permitted",
         "diagnostics.previous_message_id: Input should be a valid string",
         "messages: ok, but diagnostics: Extra inputs are not permitted",
+        # The rest of the round-2 reviewer's latch set, pinned here so the
+        # clause rule that closed r2-n1 is proved not to have narrowed it.
+        "Diagnostics: Extra inputs are not permitted",
+        "   diagnostics: Field required",
+        "diagnostics.previous_message_id: String should match pattern '^msg_'",
+        "messages.0.content: bad ; diagnostics: Extra inputs are not permitted",
+        "diagnostics is not supported for this model",
+        # A real refusal (anthropics/claude-code#68553): the ``\.\w`` tail
+        # must still take a path segment after the period.
+        "diagnostics.previous_message_id: must be the `id` from a prior /v1/messages "
+        "response (starts with `msg_`)",
     ],
 )
 async def test_the_field_refusal_shapes_latch(message: str) -> None:
@@ -413,6 +431,54 @@ async def test_an_undiagnosed_start_does_not_advance_the_chain(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_an_undiagnosed_turn_stamps_the_chain_value_not_its_own_id(
+    tmp_path, monkeypatch
+) -> None:
+    """The usage a turn persists carries the CHAIN value — what the next turn
+    would compare against — never the response's own id. On an undiagnosed
+    turn (here: the latch is on, so the API kept no fingerprint for msg_p_2)
+    the two differ, and persisting msg_p_2 would make a resume name an id the
+    comparison can never find (PR #3018 review round 1, m2)."""
+    from local_operator.harness.types import StreamEndEvent, cache_diagnostics_id_of
+
+    bodies: list[dict[str, Any]] = []
+    stream, store = await _mounted(tmp_path, monkeypatch, bodies)
+    try:
+        first = await _collect(stream(_turn(), None))  # msg_p_1, diagnosed
+        clients._ANTHROPIC_DIAGNOSTICS_REFUSED[0] = True
+        second = await _collect(stream(_turn(), None))  # msg_p_2, NOT diagnosed
+    finally:
+        await stream.close()
+        store.close()
+
+    def stamped(events: list[Any]) -> str | None:
+        end = next(e for e in events if isinstance(e, StreamEndEvent))
+        return cache_diagnostics_id_of(end.usage)
+
+    assert _start(second).response_id == "msg_p_2"
+    assert _start(second).cache_miss_type is None, "the second turn must be undiagnosed"
+    assert stamped(first) == "msg_p_1"
+    assert stamped(second) == "msg_p_1", "stamped its own id instead of the chain value"
+
+
+def test_a_resume_seed_never_overwrites_a_live_chain() -> None:
+    """``seed_cache_diagnostics`` fills an EMPTY chain only: a stream that has
+    already diagnosed a turn in this process holds a fresher id than any
+    transcript row (PR #3018 review round 1, m2)."""
+    from unittest.mock import MagicMock
+
+    from local_operator.model.configure import SessionStreamFn
+
+    stream = SessionStreamFn(MagicMock(), {}, "sess-1")
+    stream.seed_cache_diagnostics("msg_persisted")
+    assert stream._cache_diagnostics_previous_id == "msg_persisted"
+
+    stream._cache_diagnostics_previous_id = "msg_live"
+    stream.seed_cache_diagnostics("msg_persisted")
+    assert stream._cache_diagnostics_previous_id == "msg_live"
+
+
+@pytest.mark.asyncio
 async def test_the_verdict_reaches_the_call_snapshot(tmp_path, monkeypatch) -> None:
     """``StreamStartEvent`` -> ``_record_stream`` -> ``_record_usage`` ->
     ``CallSnapshot``: the ledger columns are the deliverable, so the wiring is
@@ -513,3 +579,126 @@ def test_a_costly_named_break_logs_one_line(caplog, miss_type, write, logged) ->
     if logged:
         assert "session=sess-1" in lines[0] and "type=system_changed" in lines[0]
         assert "missed_tokens=1234" in lines[0]
+
+
+# -- the chain across a resume (PR #2984 QA Q1) --------------------------------
+
+
+async def _session_turn(tmp_path, monkeypatch, directory, stream_id: str, bodies):
+    """One real ``Session`` turn over a real ``create_stream_fn`` on the mock wire.
+
+    A fresh stream per call is the point: each call is a NEW process's view
+    of the conversation, so the only way a chain id can carry over is the
+    transcript.
+    """
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    stream, store = await _mounted_as(tmp_path, monkeypatch, stream_id, bodies)
+    session = Session(
+        model=ModelSpec(provider="anthropic", model_id="claude-haiku-4-5"),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    try:
+        await session.prompt("hi")
+    finally:
+        await session.dispose()
+        await stream.close()
+        store.close()
+
+
+async def _mounted_as(tmp_path, monkeypatch, stream_id, bodies):
+    stream, store, handler = _anthropic_stream_fn(tmp_path, monkeypatch, stream_id, bodies)
+    await stream._http.aclose()
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream._transport.http = stream._http
+    return stream, store
+
+
+@pytest.mark.asyncio
+async def test_a_resume_continues_the_chain_and_a_fork_starts_its_own(
+    tmp_path, monkeypatch
+) -> None:
+    """The diagnosed id is persisted with the turn's usage, so a NEW process
+    resuming the conversation names it as ``previous_message_id`` instead of
+    restarting at null (which recorded an instruction-edit break as
+    ``baseline``). A transcript fork copies those rows, but they name its
+    PARENT's requests, so the fork still opens its own chain at null."""
+    from local_operator.fork import fork_session
+    from local_operator.session.transcript import Transcript
+
+    config_dir = tmp_path / "cfg"
+    directory = config_dir / "sessions" / "parent01"
+    bodies: list[dict[str, Any]] = []
+
+    await _session_turn(tmp_path, monkeypatch, directory, "a", bodies)
+    # The row carries the id; nothing else about the row shape moved.
+    persisted = [
+        e.payload["usage"].get("cache_diagnostics_id")
+        for e in Transcript(directory).entries()
+        if e.type == "message" and isinstance(e.payload.get("usage"), dict)
+    ]
+    assert persisted == ["msg_a_1"]
+
+    await _session_turn(tmp_path, monkeypatch, directory, "b", bodies)  # the resume
+    fork_id = fork_session(config_dir, "parent01")
+    await _session_turn(tmp_path, monkeypatch, config_dir / "sessions" / fork_id, "c", bodies)
+    await _session_turn(tmp_path, monkeypatch, directory, "d", bodies)  # parent again
+
+    assert [body.get("diagnostics", "absent") for body in bodies] == [
+        {"previous_message_id": None},  # first ever turn
+        {"previous_message_id": "msg_a_1"},  # resumed: the previous PROCESS's id
+        {"previous_message_id": None},  # the fork opens its own chain
+        {"previous_message_id": "msg_b_1"},  # the parent is unaffected by the fork
+    ]
+
+
+def test_a_fork_resumes_its_own_chain_once_it_has_one(tmp_path) -> None:
+    """The fork exclusion is by TIME, not "never seed a fork": rows the fork
+    journalled after ``forked_at`` are its own and must seed its next resume."""
+    from local_operator.resume import ORIGIN_FORK, ORIGIN_NAME
+    from local_operator.session.session import _resumed_cache_diagnostics_id
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        newest_cache_diagnostics_id,
+    )
+
+    copied = TranscriptEntry(
+        id="e1",
+        ts=100.0,
+        type=ENTRY_MESSAGE,
+        payload={"role": "assistant", "usage": {"cache_diagnostics_id": "msg_parent"}},
+    )
+    own = TranscriptEntry(
+        id="e2",
+        ts=300.0,
+        type=ENTRY_MESSAGE,
+        payload={"role": "assistant", "usage": {"cache_diagnostics_id": "msg_fork"}},
+    )
+    assert newest_cache_diagnostics_id([copied, own]) == "msg_fork"
+    assert newest_cache_diagnostics_id([copied]) == "msg_parent"
+    assert newest_cache_diagnostics_id([]) is None
+
+    class _Journal:
+        """Just the two members the seed reads: entries and the directory
+        whose origin marker says when the fork was taken."""
+
+        def __init__(self, entries):
+            self._entries = entries
+            self.directory = tmp_path
+
+        def entries(self):
+            return list(self._entries)
+
+    (tmp_path / ORIGIN_NAME).write_text(
+        json.dumps({"origin": ORIGIN_FORK, "parent": "p", "forked_at": 200.0})
+    )
+    assert _resumed_cache_diagnostics_id(_Journal([copied])) is None  # type: ignore[arg-type]
+    assert (
+        _resumed_cache_diagnostics_id(_Journal([copied, own]))  # type: ignore[arg-type]
+        == "msg_fork"
+    )

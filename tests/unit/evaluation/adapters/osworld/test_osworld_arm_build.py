@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -559,6 +560,10 @@ def _stub_preinstall(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[st
     )
     monkeypatch.setattr(arm, "install_arm", lambda **kwargs: calls.append("install"))
     monkeypatch.setattr(arm, "uv_version", lambda: "uv 0.10.8")
+    # The plan guard refuses any interpreter but the arm's 3.12, and CI runs this
+    # file on 3.13 as well: unpinned, the plan test passed or failed by CI leg.
+    # The refusal itself is asserted on its own below, on every leg.
+    monkeypatch.setattr(arm, "running_python_version", lambda: "3.12.13")
     return calls
 
 
@@ -648,6 +653,42 @@ def test_plan_mode_writes_nothing_under_out_and_is_refused_by_it(
 
     assert arm.main(["--source-sha", "a" * 40, "--out", str(out)]) == 2
     assert not out.exists()
+
+
+@pytest.mark.parametrize("running", ["3.13.12", "3.14.0", "3.11.9", "3.1.2"])
+def test_a_plan_on_another_minor_is_refused_before_resolving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    running: str,
+) -> None:
+    """A plan resolves with THIS interpreter, so only the arm's minor may make one.
+
+    The pinned osworld closure is only resolved for 3.12; a plan made on 3.13
+    would carry a digest no 3.12 arm can match. This used to be asserted only by
+    accident -- on whichever CI leg the suite ran -- so it is pinned here, with
+    ``3.1.2`` guarding against a prefix comparison that would read it as 3.12.
+    """
+
+    plan_path = tmp_path / "plan.json"
+    calls = _stub_preinstall(monkeypatch, tmp_path)
+    monkeypatch.setattr(arm, "running_python_version", lambda: running)
+
+    assert arm.main(["--source-sha", "a" * 40, "--plan", str(plan_path)]) == 2
+    assert f"with a 3.12 interpreter (this one is {running})" in capsys.readouterr().err
+    assert "resolve" not in calls, "the refusal must come before the resolution"
+    assert not plan_path.exists()
+
+
+def test_the_interpreter_seam_reports_the_running_process() -> None:
+    """The pinned seam must still read this process when it is not pinned.
+
+    Pinning it in the tests above is only honest if the real function reports
+    the interpreter the plan's resolution actually runs on (``sys.executable``).
+    """
+
+    major, minor, micro = sys.version_info[:3]
+    assert arm.running_python_version().startswith(f"{major}.{minor}.{micro}")
 
 
 def test_execute_binds_to_the_plan_and_is_not_refused_for_existence(
