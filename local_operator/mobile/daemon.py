@@ -7833,13 +7833,27 @@ def build_app(daemon: MobileDaemon):
         # has to say — and it is the same predicate the runtime and the pairing
         # receipt use, so the three surfaces cannot disagree.
         from local_operator.operator import operator_authority_unusable
+        from local_operator.operator.trust import load_anchor
 
+        # THE KEY THE CERTIFICATE IS CHECKED AGAINST (B2), so the phone can verify
+        # its own certificate instead of trusting this answer. Public material: the
+        # installed anchor's point, the same read `_installed_key_id` makes. Sent
+        # only when the installed anchor IS the key that signed this certificate —
+        # a superseded anchor's point would verify nothing and look like a forgery.
+        loaded = load_anchor()
+        anchor = loaded.anchor if loaded.usable else None
+        operator_spki = (
+            devices.encode_spki(anchor.spki)
+            if anchor is not None and anchor.key_id == stored.operator_key_id
+            else ""
+        )
         return JSONResponse(
             {
                 "paired": True,
                 "device_id": stored.device_id,
                 "certificate": stored.certificate,
                 "operator_key_id": stored.operator_key_id,
+                "operator_spki": operator_spki,
                 "scope": list(stored.scope),
                 "exp": stored.not_after,
                 "name": stored.name,
