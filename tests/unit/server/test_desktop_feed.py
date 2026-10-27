@@ -4475,6 +4475,52 @@ def test_an_unreadable_inbox_store_still_opens_the_feed(tmp_path: Path) -> None:
         store.chmod(0o600)
 
 
+def test_a_released_item_is_not_reclaimed_on_every_tick(tmp_path: Path) -> None:
+    """R5-1: the release rolls the cooldown back, so the FEED bounds the retry.
+
+    Without the deadline the 100 ms tick would claim and release the same row
+    forever on a host whose producer reports nothing (the M2 shape, one store
+    generation later).
+    """
+    import sqlite3
+    import time as _time
+
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.server.utils.desktop_feed import ITEM_RETRY_BACKOFF_S
+    from tests.unit.notifications.test_delivery import _advertise
+
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _advertise(feed, subscription)
+    store = NotificationStore(tmp_path)
+    item = store.notify("a1" * 6, title="owed", priority="high")
+    # Past the grace, so the row is genuinely owed rather than held.
+    conn = sqlite3.connect(tmp_path / "notifications.db")
+    with conn:
+        conn.execute("UPDATE items SET updated_at=?", (int(_time.time() * 1000) - 60_000,))
+    conn.close()
+
+    row = store.get(item.item_id)
+    assert row is not None
+    # The release path: what a raise that produced nothing does.
+    asyncio.run(feed._release_item_claims(store, [dict(row)]))
+    assert feed._item_retry_after.get(item.item_id, 0.0) > _time.monotonic()
+    released = store.get(item.item_id)
+    assert (
+        released is not None and released["delivered_at"] is None
+    ), "the cooldown stamp is rolled back"
+
+    # A tick inside the deadline claims nothing, and the pass stays owed so the
+    # retry happens once the deadline lifts rather than at the next doorbell.
+    _tick(feed)
+    unchanged = store.get(item.item_id)
+    assert unchanged is not None and unchanged["delivered_rev"] == 0
+    assert feed._items_owed is True
+    assert feed._item_retry_after[item.item_id] <= _time.monotonic() + ITEM_RETRY_BACKOFF_S
+    asyncio.run(feed.close())
+
+
 def test_the_inbox_tick_reports_unknown_instead_of_ending_the_loop(tmp_path: Path) -> None:
     """A failing inbox read returns, and the OTHER channels keep publishing.
 

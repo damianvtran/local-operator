@@ -562,6 +562,22 @@ that fallback, so one gate does not produce both an Electron and runtime toast.
 sends it once the last live lease has run out (45 s with no beat), never at a
 transient stream end.
 
+`activity` is the terminal's input half of that same question, and it exists
+because `viewer_watch` alone could not answer it (R6-1). `viewer_watch` says
+WHICH conversation a multiplexing terminal is displaying; a conversation can be
+on screen while the operator is away from the keyboard. The item ladder stands
+its rung 4 down only for a conversation that is BOTH displayed and being typed
+in, so an attached TUI sends `{"op": "activity", "input_at_ms": <epoch ms>}` on a
+real `Key`/`MouseDown` edge, throttled by the client to one report per 10 s. The
+payload is one positive integer and nothing else: the age of the newest edge is
+the whole of what routing needs, and keystroke content never leaves the UI. A
+runtime keeps, per attach connection, the newest stamp; the rung-4 check reads
+the newest stamp among connections that have not declared they are away, and
+answers `None` — "cannot tell" — when no such connection ever reported. `None`
+falls through to notifying, so an old client, a silent client and a stale stamp
+all keep today's behaviour. A frame whose `input_at_ms` is not a positive
+integer is refused, and a refused frame is never stored.
+
 A lease is also the one signal that CREATES residency rather than only
 preserving it. While a live lease says `visible`, the HTTP bridge starts the
 session's runtime in the background (`refresh_watch`), because that is term 3 of
@@ -2446,7 +2462,11 @@ on save (an older core refuses it).
 `anchor_id`, `session{id, title, agent_id, live}`, `projects[{key, name,
 status}]`, `ask` (the open ask's question/dismissibility, else `null`) and
 `actions{dismiss, answer, read}`. An open ask always reports `high` and
-`actions.dismiss=false`.
+`actions.dismiss=false`. `live_state` is core's own vocabulary
+(`busy`/`idle`/`attached`/`wedged`, and `""` for a cold row); this path is a
+cold reader, so it reports `idle` when the liveness marker shows a resident
+runtime and `""` otherwise, with `live` as the boolean beside it. The detail
+route's `session` adds `cwd`.
 
 **Writes are token-bound (R10), never sweeps.** A by-id write names the
 `revision` it rendered — a newer revision is `skipped: stale_revision` and stays
@@ -2462,6 +2482,44 @@ item supplies its own `visible_since_ms`, the server checks that stamp against
 THAT row's current `updated_at`, then `visible_since <= input_at <= now` and the
 120 s freshness/dwell rules. The batch field remains the fallback for clients
 that have not added per-item stamps; a mixed batch is judged row by row (D13).
+
+**Banners (`high` only) and the `update` feed branch.** `normal` and `low`
+never raise a native notification; they are the badge and the page. A `high`
+item is claimed at most once per revision by any banner producer
+(`claim_delivery`), and only while the row is still unread AND still
+UNDISMISSED — a dismissed row is never claimed, which is what keeps a keyed
+update to something the operator put away out of view (contract §1.3). The
+claim is released when a delivery attempt produces nothing
+(`release_delivery`), so an owed banner is never lost, and a later content
+change bumps `revision`, which makes the row claimable again.
+
+EVERY RUNG HOLDS A REVISION FOR `delivery.BANNER_GRACE_MS` (2500 ms) from its
+last content change before claiming it. The desktop's in-view receipt needs a
+1 s dwell after a fresh input (`POST .../notifications/seen`), so a raise at the
+write could never be cancelled by the operator already looking at the item;
+the hold is bounded, it only ever suppresses a banner for a revision ALREADY
+READ when it expires, and an unread revision always raises. An unchanged
+or dismissed update (`action` `unchanged`/`absorbed`) never raises and so never
+suppresses its run's completion banner.
+
+The desktop leg raises it on the `notification` frame with `kind: "update"`
+(`notification_contract` stays `1`; a renderer that does not know the kind
+renders it as text):
+`{kind, notification_id, item_revision, priority, title, body, session_id,
+focus_policy, dedupe_key}`. It is published only while a live desktop lease
+advertises `update` in `can_notify_kinds` — and only to the subscriptions of
+THIS feed that advertised it, never to every subscriber on the machine.
+
+The burst ceiling is a WINDOW, not a tick: at most `desktop_feed.BURST_LIMIT`
+(3) individual banners per `ITEM_BURST_WINDOW_S` (10 s), then ONE digest frame
+`{kind, overflow: true, count, notification_ids, priority, dedupe_key}` which
+claims the WHOLE remainder of that window in the same pass. A per-tick ceiling
+re-armed every 100 ms, so ten items became ten banners in a third of a second;
+a window is what makes "one interruption that says ten" true. The same two
+gates the completion leg applies — the `display.notifications` switch and the
+identity guard — refuse before any claim, so a gated revise is neither published
+nor stranded. A runtime run that raised (or handed off) an item banner does not also
+raise its own completion banner; `error` ends always do.
 
 **All means the entire explicitly requested scope, not the first 50 rows.** On
 an explicit mark-all/dismiss-session gesture, clients enumerate every page of

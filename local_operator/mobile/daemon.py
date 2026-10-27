@@ -48,7 +48,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, P
 
 if TYPE_CHECKING:
     from starlette.requests import Request
-    from starlette.responses import JSONResponse
+
+    # Both names serve ANNOTATIONS here and neither is redundant: this block is
+    # `TYPE_CHECKING`-only, so the runtime objects come from the function-local
+    # imports (`JSONResponse` at :2963, `Response` at :5529), while the
+    # annotations spell the wider `Response` for the notification refusal helper
+    # and `JSONResponse` for the rest of the module.
+    from starlette.responses import JSONResponse, Response
 
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.mobile.push_worker import PushWorker
@@ -1879,6 +1885,29 @@ def _session_folder_exists(session_id: str) -> bool:
     return (config_dir() / "sessions" / session_id).is_dir()
 
 
+def _notification_row_session_id(row: Any) -> str:
+    """The conversation a notification row belongs to, or "" when it names none.
+
+    THE ROW CARRIES ITS CONVERSATION AS A NESTED OBJECT — the desktop answer's
+    shape (`{"session": {"id": ..., "title": ...}}`) — so a top-level
+    `session_id` read yields "" and silently marks every item unsendable. That
+    mistake was paid for once on the ASKS wire and again on this route's DETAIL
+    handler (QA Q4 on #2968): the list row said `durable: True` for a session
+    while the same item's detail said `false`, so a client that honours those
+    flags (the phone's "Open conversation") disabled it on every item.
+
+    ONE FUNCTION, BOTH ROUTES: two spellings of this lookup is how the list and
+    the detail came to disagree. The fallback to a top-level `session_id` is for
+    an older writer's row, never the primary read.
+    """
+    if not isinstance(row, dict):
+        return ""
+    facts = row.get("session")
+    if isinstance(facts, dict) and facts.get("id"):
+        return str(facts.get("id") or "")
+    return str(row.get("session_id") or "")
+
+
 def _durable_user_session_dir(session_id: str) -> Path | None:
     """Return a strictly addressed durable user conversation, if it exists.
 
@@ -2352,6 +2381,52 @@ def _optional_capabilities() -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - an absent module is "no capability"
         pass
     return flags
+
+
+def _lapsed_window(config_dir: Path) -> int:
+    """``asks.lapsed_visible_for``, polled once per request (the desktop route's rule).
+
+    Reading it here, on the event loop, is the same choice the runtime-facing
+    desktop route documents: the window is a config read plus an expiry, and the
+    request that follows is the only consumer.
+    """
+    from local_operator.asks.visibility import lapsed_visible_ms
+
+    return lapsed_visible_ms(config_dir, poll_now=True)
+
+
+def _notifications_block() -> dict[str, Any] | None:
+    """The list payload's ``notifications`` block: the inbox badge, one read.
+
+    A SIBLING of ``unread`` on the list payload, for that block's own reason: a
+    missing key must read as "this relay has no inbox", never as a zero the
+    phone could paint over a perfectly real badge. So a store that cannot be
+    read answers ``None`` -- and the caller OMITS the key entirely (Q4-2).
+
+    ``{}`` was the old answer and it was the wrong shape twice over: the frame
+    says absent-means-unknown, and an empty object is a PRESENT block whose
+    numbers happen to be missing -- a renderer walking the documented keys reads
+    zero. Omitting the key leaves exactly one spelling of "cannot tell".
+
+    The numbers are the desktop's own (``notifications.items.counts``), never
+    recomputed here: ``waiting_unread_count`` is the ask half of the badge and
+    ``waiting_count`` is every pending ask, and a second implementation of that
+    split is a second thing that can disagree with the reel.
+    """
+    from local_operator.notifications.items import counts as inbox_counts
+    from local_operator.paths import config_dir
+
+    try:
+        return dict(inbox_counts(config_dir()))
+    except Exception:  # noqa: BLE001 -- absent means unknown, never zero
+        logger.debug("relay: notifications block unavailable", exc_info=True)
+        return None
+
+
+def _notifications_frame() -> dict[str, dict[str, Any]]:
+    """The frame's inbox key, present only when the store could be read."""
+    block = _notifications_block()
+    return {} if block is None else {"notifications": block}
 
 
 def _feature_flags() -> dict[str, Any]:
@@ -4167,6 +4242,7 @@ class MobileDaemon:
         from local_operator.session.attention import AttentionStore
 
         await self._refresh_pins_if_changed()
+        await self._refresh_notifications_if_changed()
         await self.refresh_tags_if_changed()
         revision = await asyncio.to_thread(AttentionStore().revision)
         if revision != getattr(self, "_attention_revision", None):
@@ -4368,6 +4444,41 @@ class MobileDaemon:
                 )
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push worker tick failed", exc_info=True)
+
+    async def _refresh_notifications_if_changed(self) -> None:
+        """Wake the list stream when the INBOX store moved.
+
+        The badge travels on the list payload (``_notifications_block``), and the
+        store is written by every runtime and by the desktop routes -- processes
+        this daemon never hears from. Without this pass the phone's badge only
+        moved when an unrelated session event happened to repaint the list, which
+        is the same defect ``_refresh_pins_if_changed`` was added for.
+
+        ONE fingerprint per scan tick over ``notifications.db`` and its ``-wal``,
+        not a watcher and not a poll of the inbox: the store is SQLite in WAL
+        mode, so an in-flight writer moves the sidecar before the database does
+        and a single-file stat would miss the tick that matters.
+        """
+        from local_operator.notifications.store import store_path
+        from local_operator.paths import config_dir
+
+        def fingerprint() -> tuple[Any, ...]:
+            database = store_path(config_dir())
+            out: list[Any] = []
+            for path in (database, database.with_name(database.name + "-wal")):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    out.append(None)
+                    continue
+                out.append((stat.st_ino, stat.st_size, stat.st_mtime_ns))
+            return tuple(out)
+
+        current = await asyncio.to_thread(fingerprint)
+        if current == getattr(self, "_notifications_fingerprint", None):
+            return
+        self._notifications_fingerprint = current
+        self.table.notify_list_changed()
 
     async def _refresh_pins_if_changed(self) -> None:
         """Wake the list stream when ANOTHER surface changed the shared pins.
@@ -5394,6 +5505,56 @@ _SUPPLEMENT_POLICY: dict[str, str] = {
 }
 
 
+def _notification_models() -> Any:
+    """The desktop route module, imported lazily for its shared models.
+
+    ONE VALIDATION, TWO TRANSPORTS (round-1 R7/Q5). The relay used to
+    hand-roll these checks, and the two drifted exactly where a phone
+    client would notice: five PATCH bodies and four list queries answered
+    422 on the desktop and 200 here. The models, the item-id check, the
+    transcript-anchor reader and the store-failure sentence now come from
+    ``server/routes/desktop_notifications`` — server-tier, so imported at
+    call time, the same rule the other relay adapters follow.
+    """
+    from local_operator.server.routes import desktop_notifications
+
+    return desktop_notifications
+
+
+def _notification_refusal(error: BaseException) -> Response | None:
+    """This relay's answer for a classified store failure, or None (Q5).
+
+    The same ``store_unavailable`` code and sentence the desktop route sends,
+    so the phone can word it instead of painting a bare "Internal Server
+    Error". ``None`` means "not a store failure": the caller re-raises rather
+    than inventing a disposition.
+    """
+    from starlette.responses import JSONResponse
+
+    from local_operator.paths import config_dir
+    from local_operator.server.routes.desktop_notifications import notifications_refusal
+    from local_operator.session.store_failures import store_failure
+
+    # A cursor sqlite cannot bind is the WIRE's refusal, not a store failure:
+    # the shared `NotificationsQuery` validator answers 422 for it, and this is
+    # the backstop for any path that reaches the store first (QA round 2).
+    if isinstance(error, OverflowError):
+        return JSONResponse(
+            {"error": "cursor is out of range", "code": "invalid_cursor"},
+            status_code=422,
+        )
+    failure = store_failure(error, config_dir())
+    if failure is None:
+        return None
+    return JSONResponse(
+        {
+            "error": notifications_refusal(failure, config_dir()),
+            "code": failure.code,
+        },
+        status_code=failure.status,
+    )
+
+
 def build_app(daemon: MobileDaemon):
     """The Starlette app. Imported inside the function so ``lop`` without the
     server extra never pays for starlette at startup."""
@@ -5646,7 +5807,18 @@ def build_app(daemon: MobileDaemon):
             # computed (see ``unread_snapshot``), so the block cannot be served
             # from a later rebuild than the rows it sits beside.
             "unread": daemon.table.unread_block(),
+            # The inbox badge (docs/design/notifications-inbox.md §5.4), read
+            # per frame like ``unread``: a stale badge is the one thing a phone
+            # must not show, and this answer is cheap beside it. AN UNREADABLE
+            # STORE OMITS THE KEY (Q4-2): the wire's contract is that a missing
+            # block reads as "this relay has no inbox", and a present ``{}``
+            # would let a renderer paint a zero over a real badge.
+            **_notifications_frame(),
             "capabilities": {
+                # D11: the relay's own inbox receipt door, advertised so native
+                # can turn its receipt feed on instead of probing a refusal.
+                # Sourced from core's feature registry (`notifications_seen`), so
+                # the phone keys on ONE fact rather than a relay-side literal.
                 "features": _feature_flags(),
                 "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
@@ -8031,6 +8203,234 @@ def build_app(daemon: MobileDaemon):
             row["durable"] = _durable_user_session_dir(session_id) is not None
         return JSONResponse({"asks": rows})
 
+    async def api_notifications(request: Request) -> Response:
+        """``GET /api/notifications``: the inbox reel, the desktop route's answer.
+
+        A THIN ADAPTER over ``notifications.items.list_page`` -- the same call the
+        desktop route makes -- so the phone and the app cannot describe one store
+        two ways: the paging cursor, the conservative ``through_seq`` boundary,
+        the ``observed`` id/revision tokens a bulk write must echo, and the
+        ``waiting_count``/``waiting_unread_count`` split all come from there.
+
+        The QUERY is validated by the desktop route's own model (round-1 R7), so
+        a bound the app refuses is refused here with the same status.
+
+        PER-ROW LIVENESS, like ``/api/asks``: the index knows an item is durable,
+        not whether the conversation behind it can answer now, so each row carries
+        ``runtime_live`` (this process's dial table) and ``durable`` (a session
+        directory that survives a restart). A row with neither is a receipt the
+        reader can see and cannot open, which is what the two fields are for.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from pydantic import ValidationError
+
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        try:
+            query = models.NotificationsQuery.model_validate(dict(request.query_params))
+        except ValidationError as error:
+            return JSONResponse(
+                {"error": error.errors()[0].get("msg", "invalid query")}, status_code=422
+            )
+        try:
+            window = _lapsed_window(config_dir())
+            page = await asyncio.to_thread(
+                inbox.list_page,
+                config_dir(),
+                state=query.state,
+                source=query.source,
+                priority=query.priority,
+                session_id=query.session_id,
+                cursor=query.cursor,
+                limit=query.limit,
+                lapsed_visible_ms=window,
+                through_seq=query.through_seq,
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid cursor"}, status_code=422)
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        for row in list(page.get("items") or []) + list(page.get("waiting") or []):
+            # One reader for the row's conversation (`_notification_row_session_id`),
+            # so this answer and the DETAIL route cannot disagree again.
+            session_key = _notification_row_session_id(row)
+            row["runtime_live"] = _session_is_live(daemon, session_key)
+            row["durable"] = _durable_user_session_dir(session_key) is not None
+        return JSONResponse(page)
+
+    async def api_notification_detail(request: Request) -> Response:
+        """``GET /api/notifications/{id}``: one item, its context and the calls."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        item_id = str(request.path_params["item_id"])
+        if not models.valid_item_id(item_id):
+            return JSONResponse({"error": "invalid item id"}, status_code=422)
+        try:
+            answer = await asyncio.to_thread(
+                inbox.detail,
+                config_dir(),
+                item_id,
+                lapsed_visible_ms=_lapsed_window(config_dir()),
+                # Round-1 R7: the transcript anchor the desktop detail carries.
+                # Without it the phone's detail always showed ``anchor: null``.
+                anchor_excerpt=models.anchor_excerpt,
+            )
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        if answer is None:
+            return JSONResponse({"error": "unknown notification"}, status_code=404)
+        # QA Q4: this read `item["session_id"]`, a key the item does not have —
+        # it carries a nested `session` block — so the detail answered
+        # false/false for EVERY item while the list row said `durable: True`.
+        # Same reader, same rules as the list row.
+        session_key = _notification_row_session_id(answer.get("item"))
+        (answer.get("item") or {})["runtime_live"] = _session_is_live(daemon, session_key)
+        (answer.get("item") or {})["durable"] = _durable_user_session_dir(session_key) is not None
+        return JSONResponse(answer)
+
+    async def api_notifications_patch(request: Request) -> Response:
+        """``PATCH /api/notifications``: the desktop write, byte for byte.
+
+        The BODY is ``NotificationsPatch`` itself (round-1 R7): one validator,
+        so the phone and the app refuse the same bodies for the same reasons.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from pydantic import ValidationError
+
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": "a JSON body is required"}, status_code=422)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "a JSON object is required"}, status_code=422)
+        try:
+            patch = models.NotificationsPatch.model_validate(body)
+        except ValidationError as error:
+            return JSONResponse(
+                {"error": error.errors()[0].get("msg", "invalid body")}, status_code=422
+            )
+        try:
+            answer = await asyncio.to_thread(
+                inbox.apply_patch,
+                config_dir(),
+                patch.op,
+                ids=[entry.model_dump() for entry in patch.ids] if patch.ids is not None else None,
+                session_id=patch.session_id,
+                through_seq=patch.through_seq,
+                all_items=patch.all,
+                observed=(
+                    [entry.model_dump() for entry in patch.observed]
+                    if patch.observed is not None
+                    else None
+                ),
+            )
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=422)
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        return JSONResponse(answer)
+
+    async def api_notifications_seen(request: Request) -> Response:
+        """``POST /api/notifications/seen`` — the PHONE's own in-view receipt (D11).
+
+        WHAT CHANGED, AND WHY. Round 1 refused every receipt here (R6), on
+        contract §6.4's "explicit read only" for the relay. The manager replaced
+        that rule (D11) after native #117 shipped its receipt feed as the inbox's
+        only auto-read path: the refusal left a phone that had plainly viewed an
+        item with no way to say so, retrying the refused write every 500 ms and
+        painting an error where the list should be.
+
+        The gate is the SAME ONE THE DESKTOP USES, not a second opinion. The
+        evidence is validated by ``NativeSeenEvidence`` (surface pinned to
+        ``native``; ``touch``/``press``/``scroll`` only), and
+        ``notifications.items.apply_seen`` re-checks every item against the store
+        exactly as the desktop route does: the row belongs to
+        ``evidence.session_id``, names its current revision and anchor,
+        ``visible_since`` sits between that row's own ``updated_at`` and the input
+        edge, the edge is fresh (≤120 s) and old enough for the dwell. Anything
+        else is ``skipped`` with its reason. A receipt is a claim about what the
+        operator saw, so nothing here trusts the client: it only refuses fewer
+        claims than round 1, each on the same evidence.
+
+        A phone that labels itself ``desktop`` is still refused, with its own
+        code (``relay_surface_mismatch``) so native can tell "wrong door" from
+        "bad evidence" — the R6 negative, kept.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from pydantic import ValidationError
+
+        from local_operator.notifications import items as inbox
+        from local_operator.paths import config_dir
+
+        models = _notification_models()
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 - a body that is not JSON is a refusal
+            return JSONResponse({"error": "a JSON body is required"}, status_code=422)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "a JSON object body is required"}, status_code=422)
+        evidence = payload.get("evidence")
+        surface = str((evidence or {}).get("surface") or "") if isinstance(evidence, dict) else ""
+        if surface != "native":
+            # ANY other surface, including the desktop's own: this route serves
+            # the phone, and an unlabelled or mislabelled claim has no evidence
+            # story this transport can honour.
+            return JSONResponse(
+                {
+                    "error": "read receipts on the relay are for the native surface, "
+                    "which reports touch, press or scroll edges",
+                    "code": "relay_surface_mismatch",
+                },
+                status_code=422,
+            )
+        try:
+            body = models.NativeNotificationsSeen.model_validate(payload)
+        except ValidationError as error:
+            return JSONResponse(
+                {"error": error.errors()[0].get("msg", "invalid receipt")}, status_code=422
+            )
+        try:
+            answer = await asyncio.to_thread(
+                inbox.apply_seen,
+                config_dir(),
+                [entry.model_dump(exclude_none=True) for entry in body.items],
+                body.evidence.model_dump(),
+            )
+        except Exception as error:  # noqa: BLE001 - classified, never echoed raw
+            refusal = _notification_refusal(error)
+            if refusal is not None:
+                return refusal
+            raise
+        # The receipt's own answer carries the badge too, so the client need not
+        # poll for it after a read.
+        return JSONResponse(answer)
+
     async def api_schedules(request: Request) -> Response:
         """What is ARMED on this machine: the machine-wide wake and monitor
         indexes, in one answer (the phone's Schedules surface reads both).
@@ -9490,6 +9890,13 @@ def build_app(daemon: MobileDaemon):
         Route("/api/pair", api_pair, methods=["POST"]),
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/asks", api_asks),
+        # The inbox (docs/design/notifications-inbox.md §5.4): the reel, one
+        # item, the token-bound write and the in-view receipt. The SAME module
+        # functions the desktop routes call, so the two surfaces cannot drift.
+        Route("/api/notifications", api_notifications),
+        Route("/api/notifications/{item_id:str}", api_notification_detail),
+        Route("/api/notifications", api_notifications_patch, methods=["PATCH"]),
+        Route("/api/notifications/seen", api_notifications_seen, methods=["POST"]),
         # The armed index (mobile parity, read half): one fetch feeds the
         # phone's Schedules surface — the machine-wide wakes and monitors
         # listings, straight off the derived indexes. Read-only by design:

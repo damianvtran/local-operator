@@ -290,6 +290,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # neither path is derived from a session id or can name anything under ``sessions/``.
     # It runs only after sqlite has refused the file as a database, and the alternative to
     # moving it is leaving a file every later open fails on.
+    # moving it is leaving a file every later open fails on (R5-1).
     (
         "local_operator/notifications/store.py::NotificationStore._quarantine",
         "os.replace",

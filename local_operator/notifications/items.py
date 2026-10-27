@@ -97,6 +97,16 @@ class SessionFacts:
     should show) and fall back to the snapshot the item recorded. ``live`` is
     the liveness marker probe the cold ask door uses (``resume.live_runtime_pid``),
     which reads one small file and never dials a runtime.
+
+    ``live_state`` is contract §5's name for that fact, in core's own vocabulary
+    (``session/catalog.py::live_state_from_flags``: ``busy``, ``idle``,
+    ``attached``, ``wedged``, or ``""`` for a cold row). A COLD READER CAN HONESTLY
+    SAY ONLY ONE OF THEM: the marker proves a runtime is resident, which is
+    ``idle``; ``busy``/``attached``/``wedged`` need the registry record this path
+    deliberately does not walk (it runs on a list request). So a live session
+    reports ``idle`` and a cold one ``""``, and no value here over-claims. ``live``
+    stays beside it because a renderer branching on a boolean should not parse a
+    token to get one.
     """
 
     def __init__(self, config_dir: Path | str) -> None:
@@ -110,22 +120,37 @@ class SessionFacts:
         if cached is None:
             title = ""
             live = False
+            cwd = ""
             try:
                 from local_operator.resume import live_runtime_pid, stored_session_title
 
                 directory = self.config_dir / "sessions" / session_id
                 if directory.is_dir():
                     title = stored_session_title(directory)
+                    # THE WORKSPACE DIRECTORY BELONGS ON THE SESSION BLOCK (R3-1).
+                    # Every surface already receives this block, and a row with no
+                    # stored title has nothing else to name it but the bare session
+                    # id — the TUI fell back to `row["cwd"]`, which a notify row
+                    # never carried, so the fallback could not fire on a real row.
+                    # Resolved HERE, where the directory is already in hand.
+                    from local_operator.session_files.service import session_cwd
+
+                    cwd = session_cwd(self.config_dir, session_id, directory)
                 live = live_runtime_pid(self.config_dir, session_id) is not None
             except Exception:  # noqa: BLE001 — chrome; the snapshot title stands in
                 logger.debug("notifications: session facts unavailable", exc_info=True)
-            cached = {"title": title, "live": live}
+            cached = {"title": title, "live": live, "cwd": cwd}
             self._cache[session_id] = cached
         return {
             "id": session_id,
             "title": cached["title"] or fallback_title,
             "agent_id": agent_id,
             "live": bool(cached["live"]),
+            "live_state": "idle" if cached["live"] else "",
+            # ADDED KEY, never a default: a session with no recorded directory
+            # omits it, so a reader's own fallback (the id) still applies and no
+            # consumer has to disbelieve an empty string.
+            **({"cwd": cached["cwd"]} if cached.get("cwd") else {}),
         }
 
 
@@ -184,6 +209,10 @@ def notify_item(
         "revision": int(row.get("revision") or 1),
         "read": read,
         "read_via": row.get("read_via") if read else None,
+        # WHICH surface produced an ``in_view`` read (D11). The desktop, the TUI
+        # and the phone all record ``in_view``; this is the provenance that says
+        # which of them the evidence came from.
+        "read_surface": row.get("read_surface") if read else None,
         "dismissed": dismissed,
         "repeat_count": int(row.get("repeat_count") or 1),
         "key": str(row.get("key") or ""),
@@ -225,9 +254,16 @@ def ask_item(
         "revision": 1,
         "read": read,
         "read_via": "explicit" if read else None,
+        "read_surface": None,
         "dismissed": False,
         "repeat_count": 1,
         "session": sessions.get(session_id),
+        # THE ASK ROW'S OWN WORKSPACE DIRECTORY, carried through the shape
+        # (R3-2). ``asks/store.py`` sets ``row["cwd"]``, and the normalizer used
+        # to drop it — so a rendered row with no stored title fell back to the
+        # bare session id and the TUI's directory-name fallback could never fire
+        # on a real row. The detail route reads the same value from this key.
+        "cwd": str(row.get("cwd") or ""),
         "projects": projects.get(session_id),
         "ask": {
             "ask_id": ask_id,
@@ -284,6 +320,29 @@ def counts(config_dir: Path | str, store: NotificationStore | None = None) -> di
         "waiting_unread_count": waiting_unread,
         "high_water": high_water,
     }
+
+
+def cursor_in_range(value: str | None) -> str | None:
+    """Refuse a cursor whose stamp cannot be an epoch stamp (QA round 2).
+
+    Length was bounded and magnitude was not, so ``9`` x 79 digits passed the
+    wire and died in sqlite. The rule is the store's own: a stamp is a
+    non-negative integer inside int64 (``store.CURSOR_STAMP_MAX``). A
+    NON-NUMERIC cursor is the documented "from the top" case and stays
+    accepted; only a well-formed stamp that cannot exist is refused.
+    """
+    from local_operator.notifications.store import CURSOR_STAMP_MAX
+
+    if not value:
+        return value
+    stamp, _, _ = str(value).partition(".")
+    try:
+        magnitude = int(stamp)
+    except ValueError:
+        return value
+    if not 0 <= magnitude <= CURSOR_STAMP_MAX:
+        raise ValueError("cursor stamp is out of range")
+    return value
 
 
 def list_page(

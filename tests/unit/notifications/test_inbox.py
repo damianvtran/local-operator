@@ -17,7 +17,15 @@ from typing import Any, Awaitable, TypeVar
 import pytest
 
 from local_operator.harness.types import TextContent, ToolContext
-from local_operator.notifications.items import apply_patch, counts, detail, list_page
+from local_operator.notifications.items import (
+    ProjectFacts,
+    SessionFacts,
+    apply_patch,
+    counts,
+    detail,
+    list_page,
+    notify_item,
+)
 from local_operator.notifications.store import (
     INPUT_EVIDENCE_MS,
     NEW_ITEMS_PER_HOUR,
@@ -266,6 +274,43 @@ def test_detail_carries_session_history_and_the_conversations_asks(tmp_path: Pat
     assert answer["session"]["id"] == SID and answer["session"]["cwd"] == "/tmp/work"
     assert [row["ask_id"] for row in answer["asks"]] == ["ask_1"]
     assert detail(tmp_path, "n_aaaaaaaaaaaaaaaa") is None
+
+
+# ---------------------------------------------------------------------------
+# Lease fixtures: a live desktop lease for the BANNER tests (L1b)
+# ---------------------------------------------------------------------------
+
+
+def _lease(root: Path, *, session_id: str, **extra: Any) -> None:
+    """A live desktop lease, written through the real publisher, plus raw extras.
+
+    Used by the banner/delivery tests, which need a REAL lease (rung 4's own
+    reader) rather than a stand-in. It is not the deleted rung-0 evaluator: no
+    test here marks an item read from a lease, and ``READ_VIA`` has no
+    ``watching`` value any more.
+    """
+    import json
+
+    from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
+    from local_operator.session.runtime.presence import (
+        delivery_record_path,
+        reset_cache,
+    )
+
+    publisher = DesktopDeliveryPublisher(root)
+    publisher.update(
+        "sub-1",
+        can_notify=True,
+        can_notify_kinds=["complete"],
+        session_id=session_id,
+        window={"exists": True, "focused": True, "visible": True, "minimized": False},
+    )
+    if extra:
+        path = delivery_record_path(publisher.instance_id, root)
+        record = json.loads(path.read_text())
+        record.update(extra)
+        path.write_text(json.dumps(record))
+    reset_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +655,169 @@ def test_detail_ids_use_the_patch_regex(client) -> None:
     ):
         answer = client.get(f"/v1/desktop/notifications/{bad}", headers=AUTH)
         assert answer.status_code == 422, (bad, answer.status_code)
+
+
+def test_an_open_ask_row_carries_its_workspace_directory(tmp_path: Path) -> None:
+    """R3-2: the ask's ``cwd`` survives normalization.
+
+    ``asks/store.py`` puts the workspace directory on the row; the inbox shape
+    used to drop it, so a rendered row with no stored title fell back to the bare
+    session id and the TUI's directory fallback could never fire on a real row.
+    """
+    from local_operator.asks import store as ask_store
+
+    # The index sweep keeps an entry only while its conversation directory
+    # exists (`entry_is_stale`), which is the real shape: an ask outlives a
+    # stopped conversation, not a deleted one.
+    (tmp_path / "sessions" / SID).mkdir(parents=True, exist_ok=True)
+    ask_store.write_entry(
+        tmp_path,
+        SID,
+        cwd="/Users/damian/workspace/repos/lo-notifications-l1",
+        asks=[
+            {
+                "ask_id": "ask_cwd",
+                "session_id": SID,
+                "status": "open",
+                "created_at": int(time.time() * 1000),
+                "questions": [{"question": "Ship it?", "header": "Ship"}],
+            }
+        ],
+    )
+    page = list_page(tmp_path, state="all")
+    asks = [row for row in (page.get("waiting") or []) if row.get("source") == "ask"]
+    assert asks, "the open ask must be listed"
+    assert asks[0]["cwd"] == "/Users/damian/workspace/repos/lo-notifications-l1"
+    # And the detail route agrees with the list row.
+    answered = detail(tmp_path, asks[0]["id"])
+    assert answered is not None
+    assert answered["item"]["cwd"] == asks[0]["cwd"]
+
+
+def test_a_store_written_by_the_previous_head_opens_and_serves(tmp_path: Path) -> None:
+    """R5-1 MAJOR: `CREATE TABLE IF NOT EXISTS` never adds a column.
+
+    A `notifications.db` written by the previous head carries neither
+    `read_surface` nor `delivered_at`, and every read answered `no such column`
+    — a 500 on list, detail, PATCH and the banner claim with no recovery for
+    the operator. The store now adds what it is missing when it opens, so the
+    file is upgraded in place.
+    """
+    import sqlite3
+
+    from local_operator.notifications.store import _SCHEMA
+
+    old_path = tmp_path / "notifications.db"
+    conn = sqlite3.connect(old_path)
+    with conn:
+        # A REALISTIC previous-head store: every table and index it shipped,
+        # with the two columns this round added dropped back off. `DROP COLUMN`
+        # (SQLite 3.35+) is what makes this the same file the old build wrote,
+        # rather than a hand-written subset that would fail for unrelated
+        # reasons.
+        for statement in _SCHEMA:
+            conn.execute(statement)
+        conn.execute("ALTER TABLE items DROP COLUMN read_surface")
+        conn.execute("ALTER TABLE items DROP COLUMN delivered_at")
+        conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES ('next_seq', '2')")
+        conn.execute(
+            "INSERT INTO items (id, seq, session_id, priority, title, content_hash, "
+            "created_at, updated_at) VALUES (?, 1, ?, 'high', 'old row', 'h', ?, ?)",
+            ("n_aaaaaaaaaaaaaaaa", "a1b2c3d4e5f6", 1_700_000_000_000, 1_700_000_000_000),
+        )
+        conn.execute("PRAGMA user_version=1")
+    conn.close()
+
+    store = NotificationStore(tmp_path)
+    # The row the OLD build wrote is readable, and the new columns exist.
+    rows, _ = store.list_items(state="all")
+    assert [row["id"] for row in rows] == ["n_aaaaaaaaaaaaaaaa"]
+    assert rows[0]["read_surface"] is None
+    assert store.counts()[0] == 1
+    # The claim path needs delivered_at, and must not raise.
+    assert store.claim_delivery("n_aaaaaaaaaaaaaaaa", "desktop") is True
+    assert store.release_delivery("n_aaaaaaaaaaaaaaaa", 1, "desktop") is True
+    # Writes still work and carry the new column.
+    item = store.notify("a1b2c3d4e5f6", title="new row", anchor_id="call_m")
+    assert store.get(item.item_id) is not None
+    columns = {
+        str(row[1])
+        for row in sqlite3.connect(tmp_path / "notifications.db")
+        .execute("PRAGMA table_info(items)")
+        .fetchall()
+    }
+    assert {"read_surface", "delivered_at"} <= columns
+
+    # IDEMPOTENT: opening it again is a no-op, not a duplicate-column error.
+    NotificationStore(tmp_path).counts()
+    # And a store too old to have the TABLE at all still gets created whole.
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    assert NotificationStore(fresh).counts()[0] == 0
+
+
+def test_the_item_session_block_carries_live_state(tmp_path: Path) -> None:
+    """Contract §5 names ``live_state``; the shape sent ``live`` alone.
+
+    A cold reader can honestly say only "a runtime is resident" — core's
+    ``idle`` — so that is what a live session reports, and ``""`` is the cold-row
+    value the vocabulary already defines. ``live`` stays as the boolean beside it.
+    """
+    store = _store(tmp_path)
+    item = store.notify(SID, title="shape")
+    row, _ = store.list_items(state="all")
+    session = notify_item(row[0], SessionFacts(tmp_path), ProjectFacts(tmp_path))["session"]
+    assert session["live"] is False and session["live_state"] == ""
+    assert set(session) == {"id", "title", "agent_id", "live", "live_state"}
+    answered = detail(tmp_path, item.item_id)
+    assert answered is not None
+    assert answered["session"]["live_state"] == ""
+    assert {"id", "title", "agent_id", "live", "live_state", "cwd"} == set(answered["session"])
+
+
+def test_a_banner_claim_never_moves_the_list_watermark(tmp_path: Path) -> None:
+    """D14/CD4: claiming delivery must not make an unchanged row "stale"."""
+    store = _store(tmp_path)
+    item = store.notify(SID, title="high thing", priority="high")
+    _, high_water = store.counts()
+    page = list_page(tmp_path, state="unread")
+    observed = page["observed"]
+    assert store.claim_delivery(item.item_id, "desktop")
+    # The SAME tokens the surface rendered still apply: the claim changed no
+    # content, no revision and no read state.
+    result = apply_patch(
+        tmp_path, "read", all_items=True, through_seq=high_water, observed=observed
+    )
+    assert result["changed"] == [item.item_id], result
+    assert store.counts()[0] == 0
+
+
+def test_one_banner_per_item_per_cooldown_window(tmp_path: Path) -> None:
+    """D15/CD2: a keyed watcher inside the window bumps the row, not the banner."""
+    from local_operator.notifications.store import BANNER_COOLDOWN_MS
+
+    store = _store(tmp_path)
+    now = int(time.time() * 1000)
+    first = store.notify(SID, title="campaign", body_md="10", priority="high", key="c", now=now)
+    assert store.claim_delivery(first.item_id, "desktop", now=now)
+    # Five keyed updates five minutes apart — the fraud/campaign wake case. The
+    # sixth tick lands exactly ON the window's edge and is asserted below.
+    for step in range(1, 6):
+        stamp = now + step * 5 * 60 * 1000
+        updated = store.notify(
+            SID, title="campaign", body_md=str(10 + step), priority="high", key="c", now=stamp
+        )
+        assert updated.item_id == first.item_id
+        row = store.get(first.item_id)
+        assert row is not None
+        assert int(row["revision"]) == step + 1, "the row still updates"
+        assert store.counts()[0] == 1, "and the badge still counts it"
+        assert not store.claim_delivery(
+            first.item_id, "desktop", now=stamp
+        ), "inside the cooldown a revision raises no banner"
+    # Past the window the newest revision is claimable again.
+    later = now + BANNER_COOLDOWN_MS + 1
+    assert store.claim_delivery(first.item_id, "desktop", now=later)
 
 
 def test_a_corrupt_store_is_quarantined_by_the_next_write(tmp_path: Path) -> None:

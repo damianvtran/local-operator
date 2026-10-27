@@ -82,6 +82,19 @@ _WAL_BUSY_TIMEOUT_MS = 250
 PRIORITIES = ("low", "normal", "high")
 _PRIORITY_RANK = {name: rank for rank, name in enumerate(PRIORITIES)}
 
+#: The surfaces whose ``seen`` receipts are accepted. ``native`` is the phone's
+#: own door (D11): its edges are touch/press/scroll and its evidence is
+#: re-checked here exactly like the desktop's, so a receipt cannot be minted
+#: from an assertion the server cannot examine.
+SEEN_SURFACES = ("desktop", "tui", "native")
+
+#: How long after the input edge a surface's receipt is admissible. The desktop
+#: waits a second so a wheel tick that merely lands on the pane cannot read; the
+#: TUI has already required a Key/MouseDown on a rendered card, so its own
+#: positive-elapsed check is enough; the phone gets the desktop's second, because
+#: a touch that scrolls a list is the same class of accidental edge.
+_DWELL_MS = {"desktop": 1000, "tui": 1, "native": 1000}
+
 #: Read provenance. There is no ``watching`` value: a new item is ALWAYS unread.
 #: ``in_view`` requires a per-item anchor/revision receipt with a real input
 #: edge; ``explicit`` is the operator's own gesture. The old presence evaluator
@@ -108,6 +121,13 @@ HISTORY_CAP = 20
 
 #: Retention (contract §1.4). Unread rows are never age-pruned: an unread item
 #: is exactly the thing the operator has not seen yet.
+#: Banner cooldown per item (contract §1.3, D15). A watcher that ticks every few
+#: minutes must not raise a banner per tick: inside this window a keyed update
+#: still bumps the row, its revision and the badge, and raises nothing. EVERY
+#: banner rung honours it through ``claim_delivery``, so the desktop feed, the
+#: runtime ladder and the TUI cannot disagree about what already spoke.
+BANNER_COOLDOWN_MS = 30 * 60 * 1000
+
 DISMISSED_TTL_MS = 14 * 24 * _HOUR_MS
 READ_TTL_MS = 30 * 24 * _HOUR_MS
 ROW_CAP = 10_000
@@ -292,6 +312,18 @@ class ApplyResult:
     skipped: list[dict[str, str]] = field(default_factory=list)
 
 
+#: Columns added to ``items`` AFTER the table shipped. `CREATE TABLE IF NOT
+#: EXISTS` does nothing to an existing file, so a store written by an earlier
+#: build would answer every read with "no such column: <name>" — a 500 on list,
+#: detail, PATCH and the banner claim, with no recovery path for the operator
+#: (round-4 R5-1 review, MAJOR). Each entry is applied add-if-missing under the
+#: same write transaction that creates the table, so opening an old store
+#: upgrades it exactly once, and a NEW store is already complete.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("read_surface", "ALTER TABLE items ADD COLUMN read_surface TEXT"),
+    ("delivered_at", "ALTER TABLE items ADD COLUMN delivered_at INTEGER"),
+)
+
 _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS items (
@@ -315,10 +347,12 @@ _SCHEMA = (
       read_rev      INTEGER NOT NULL DEFAULT 0,
       read_at       INTEGER,
       read_via      TEXT,
+      read_surface  TEXT,
       dismissed_at  INTEGER,
       dismissed_via TEXT,
       delivered_rev INTEGER NOT NULL DEFAULT 0,
-      delivered_by  TEXT
+      delivered_by  TEXT,
+      delivered_at  INTEGER
     )
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS items_key ON items(session_id, key) WHERE key <> ''",
@@ -351,8 +385,8 @@ _SCHEMA = (
 _ITEM_COLUMNS = (
     "id, seq, session_id, session_title, agent_id, team_id, priority, title, body_md, "
     "links_json, key, content_hash, revision, repeat_count, anchor_id, created_at, "
-    "updated_at, read_rev, read_at, read_via, dismissed_at, dismissed_via, "
-    "delivered_rev, delivered_by"
+    "updated_at, read_rev, read_at, read_via, read_surface, dismissed_at, dismissed_via, "
+    "delivered_rev, delivered_by, delivered_at"
 )
 
 
@@ -372,15 +406,31 @@ def _encode_cursor(updated_at: int, item_id: str) -> str:
     return f"{int(updated_at)}.{item_id}"
 
 
+#: The largest integer SQLite can bind (it stores integers as int64). A cursor
+#: stamp above this can only come from a corrupted or hostile client, and
+#: handing it to sqlite raises ``OverflowError`` from deep inside a query.
+CURSOR_STAMP_MAX = 2**63 - 1
+
+
 def _decode_cursor(cursor: str | None) -> tuple[int, str] | None:
-    """The opaque list cursor. Malformed is "from the top", never an error."""
+    """The opaque list cursor. Malformed is "from the top", never an error.
+
+    OUT OF RANGE IS MALFORMED (QA round 2): the wire refuses such a stamp with
+    a 422 (``items.cursor_in_range``), and this is the second line of defence
+    for every other caller — a value sqlite cannot bind must never reach the
+    query, because ``OverflowError`` there is not a store failure and would
+    surface as an unclassified 500.
+    """
     if not cursor:
         return None
     stamp, _, item_id = str(cursor).partition(".")
     try:
-        return int(stamp), item_id
+        value = int(stamp)
     except ValueError:
         return None
+    if not 0 <= value <= CURSOR_STAMP_MAX:
+        return None
+    return value, item_id
 
 
 class NotificationStore:
@@ -463,11 +513,47 @@ class NotificationStore:
                             conn.execute(statement)
                         conn.execute("INSERT OR IGNORE INTO meta(k, v) VALUES ('next_seq', '1')")
                         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            # ADD-IF-MISSING, and OUTSIDE the version gate on purpose. `CREATE
+            # TABLE IF NOT EXISTS` is a no-op on an existing file, and a store
+            # written by any build that already declared this SCHEMA_VERSION
+            # never re-enters the block above — so gating the ALTERs on the
+            # version is exactly the hole that made an older store answer
+            # "no such column" on every route (round-4 R5-1 review, MAJOR).
+            # The column LIST is the contract; the version is not.
+            self._ensure_columns(conn)
             self._adopt_wal(conn)
             return conn
         except BaseException:
             conn.close()
             raise
+
+    @staticmethod
+    def _ensure_columns(conn: sqlite3.Connection) -> None:
+        """Add any `_ADDED_COLUMNS` an existing store predates, then stop.
+
+        A READ of ``table_info`` first, so the common case costs one metadata
+        query and takes no write lock; only a store that genuinely predates a
+        column enters a transaction. Read from the table rather than from
+        ``user_version`` because a half-upgraded or hand-repaired file must
+        converge instead of failing on a duplicate column.
+        """
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'"
+        ).fetchone():
+            return
+        present = {str(row[1]) for row in conn.execute("PRAGMA table_info(items)").fetchall()}
+        missing = [(column, alter) for column, alter in _ADDED_COLUMNS if column not in present]
+        if not missing:
+            return
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Re-read under the lock: two processes racing an old store must not
+            # both ALTER (the loser would die on "duplicate column name").
+            present = {str(row[1]) for row in conn.execute("PRAGMA table_info(items)").fetchall()}
+            for column, alter in missing:
+                if column not in present:
+                    conn.execute(alter)
+                    logger.info("notifications: store upgraded with column %s", column)
 
     @staticmethod
     def _adopt_wal(conn: sqlite3.Connection) -> None:
@@ -499,6 +585,17 @@ class NotificationStore:
                 # A placeholder a first writer has not populated yet.
                 conn.close()
                 return None
+            # AN OLD STORE IS NOT A READ ERROR (R5-1 review, MAJOR). A reader
+            # opens `mode=ro`, which cannot ALTER, so a file written before a
+            # column existed would fail every read with "no such column" and the
+            # route would answer 500 with no recovery. Upgrading is a WRITE, so
+            # hand this open to the migrating path once and read the result;
+            # the common case (columns already present) stays read-only and
+            # takes no write lock.
+            present = {str(row[1]) for row in conn.execute("PRAGMA table_info(items)").fetchall()}
+            if any(column not in present for column, _ in _ADDED_COLUMNS):
+                conn.close()
+                return self._connect_once()
         except BaseException:
             conn.close()
             raise
@@ -894,7 +991,8 @@ class NotificationStore:
                 )
             elif op == "unread":
                 conn.execute(
-                    "UPDATE items SET seq=?, read_rev=0, read_at=NULL, read_via=NULL WHERE id=?",
+                    "UPDATE items SET seq=?, read_rev=0, read_at=NULL, read_via=NULL, "
+                    "read_surface=NULL WHERE id=?",
                     (seq, row["id"]),
                 )
             elif op == "dismiss":
@@ -990,9 +1088,10 @@ class NotificationStore:
         # THE EDGE is batch-level: a trusted input kind on a known surface, an
         # input time in the past but fresh, and the dwell the surface needs
         # (the desktop waits one second while the anchor stays visible).
-        dwell_ms = 1000 if surface == "desktop" else 1
+        dwell_ms = _DWELL_MS.get(surface, 0)
         edge_fresh = (
-            surface in ("desktop", "tui")
+            surface in SEEN_SURFACES
+            and dwell_ms
             and 0 < input_at_ms <= stamp
             and dwell_ms <= stamp - input_at_ms <= INPUT_EVIDENCE_MS
         )
@@ -1023,39 +1122,126 @@ class NotificationStore:
                 else:
                     seq = self._next_seq(conn)
                     conn.execute(
-                        "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via='in_view' "
+                        "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via='in_view', "
+                        "read_surface=? "
                         "WHERE id=?",
-                        (seq, stamp, item_id),
+                        (seq, stamp, surface, item_id),
                     )
                     result.changed.append(item_id)
             return result
 
         return self._write(body, "seen")
 
-    def claim_delivery(self, item_id: str, by: str) -> bool:
-        """Claim the banner for an item's current revision, machine-wide, once.
+    def undelivered(self, *, priority: str | None = None, limit: int = 4) -> list[dict[str, Any]]:
+        """Items a banner leg may still raise: unread, undismissed, unclaimed.
+
+        THE FILTER IS SQL, not a post-read pass: a caller that fetched N unread
+        rows and filtered `delivered_rev` afterwards could starve the oldest
+        item for ever once the newest N had been claimed, which is the one
+        failure a drain-by-ticks design has to avoid.
+        """
+        clauses = ["dismissed_at IS NULL", "read_rev < revision", "delivered_rev < revision"]
+        params: list[Any] = []
+        if priority is not None:
+            clauses.append("priority = ?")
+            params.append(str(priority))
+        params.append(max(1, int(limit)))
+
+        def body(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [
+                _row_dict(row)
+                for row in conn.execute(
+                    f"SELECT {_ITEM_COLUMNS} FROM items WHERE {' AND '.join(clauses)} "
+                    "ORDER BY created_at, id LIMIT ?",
+                    params,
+                )
+            ]
+
+        return self._read(body, [], "undelivered")
+
+    def claim_delivery(self, item_id: str, by: str, *, now: int | None = None) -> bool:
+        """Claim the banner for an item's current revision, once, machine-wide.
 
         ``delivered_rev`` is the watermark a banner leg (desktop feed, TUI, the
         runtime's own OS banner, and a future phone push) claims before raising,
         so one revision raises at most one banner. Separate from the read mark
         on purpose: notifying is not reading (``attention.py``'s two-watermark
         rule).
+
+        THE READ STATE IS PART OF THE CLAIM. A receipt that lands before the
+        raise (the feed claims on its next tick) means the surface already
+        showed the operator this content, so a banner would be redundant — the
+        one suppression the grace allows. It suppresses nothing permanently: a
+        later content change bumps ``revision``, which makes the row unread and
+        claimable again (``notifications/delivery.py`` states the rule).
         """
+
+        stamp = now if now is not None else now_ms()
 
         def body(conn: sqlite3.Connection) -> bool:
             row = conn.execute(
-                "SELECT revision, delivered_rev FROM items WHERE id=?", (item_id,)
+                "SELECT revision, delivered_rev, read_rev, dismissed_at, delivered_at "
+                "FROM items WHERE id=?",
+                (item_id,),
             ).fetchone()
             if row is None or int(row["delivered_rev"]) >= int(row["revision"]):
                 return False
-            seq = self._next_seq(conn)
+            # THE COOLDOWN (contract §1.3, D15), checked before any other arm so
+            # it covers every rung: a high-priority watcher updating every five
+            # minutes used to banner twelve times an hour for one item. The row
+            # stays unread and badged; the SECOND update inside the window is
+            # simply not news a banner can carry.
+            last = row["delivered_at"]
+            if last is not None and stamp - int(last) < BANNER_COOLDOWN_MS:
+                return False
+            if int(row["read_rev"]) >= int(row["revision"]):
+                return False
+            # DISMISSED IS NOT CLAIMABLE (round-1 R1): a keyed update to a
+            # dismissed row is absorbed "silently … no banner" (contract §1.3);
+            # `undelivered` already filters it, and the claim must agree with
+            # it, or a direct caller re-banners what the operator dismissed.
+            if row["dismissed_at"] is not None:
+                return False
+            # NO ``seq`` ADVANCE (D14). A claim changes nothing a list renders:
+            # it is a delivery watermark. Moving ``seq`` made an UNCHANGED high
+            # item "stale" to an in-flight bulk confirm, so "mark all read"
+            # skipped exactly the item that had just bannered.
             conn.execute(
-                "UPDATE items SET seq=?, delivered_rev=revision, delivered_by=? WHERE id=?",
-                (seq, by, item_id),
+                "UPDATE items SET delivered_rev=revision, delivered_by=?, delivered_at=? "
+                "WHERE id=?",
+                (by, stamp, item_id),
             )
             return True
 
         return self._write(body, "claim")
+
+    def release_delivery(self, item_id: str, revision: int, by: str) -> bool:
+        """Give back a claim whose raise never happened (a spawn that reported nothing).
+
+        Scoped to the exact revision AND claimant: a stale release must not
+        wipe a newer revision's claim, and nothing may undo another surface's
+        banner. True when a claim was actually released.
+        """
+
+        def body(conn: sqlite3.Connection) -> bool:
+            # NO ``seq`` ADVANCE (D14), the claim's own rule.
+            #
+            # ``delivered_at`` IS ROLLED BACK (R5-1). The cooldown is a rule about
+            # what the operator was SHOWN, and a released claim shown nothing must
+            # not silence the item for thirty minutes: a transient spawn failure
+            # (a notifier still starting, a refused spawn under load) would
+            # otherwise cost the banner entirely. What bounds the retry instead is
+            # the CALLER's own backoff — the TUI's doubling interval and the
+            # desktop feed's per-item retry gate — so rolling back cannot become
+            # the per-second claim/release storm T4 measured.
+            released = conn.execute(
+                "UPDATE items SET delivered_rev=0, delivered_by='', delivered_at=NULL "
+                "WHERE id=? AND delivered_rev=? AND delivered_by=?",
+                (item_id, int(revision), by),
+            )
+            return bool(released.rowcount)
+
+        return self._write(body, "release")
 
     # -- retention ------------------------------------------------------------
 

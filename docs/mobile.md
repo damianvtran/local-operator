@@ -611,6 +611,62 @@ unchanged tick. A read that repaints the list does not consume the change for
 other clients: the wake compares against what the daemon last published, not
 the list's own cache token.
 
+## Notifications inbox (`GET/PATCH /api/notifications`)
+
+The relay is a THIN ADAPTER over the same module the desktop routes call
+(`local_operator/notifications/items.py`), never a second description of the
+store: paging (`cursor`, the frozen `through_seq` boundary), the `observed`
+id/revision tokens a bulk write must echo, and the
+`waiting_count`/`waiting_unread_count` split are the desktop's own answers.
+
+- `GET /api/notifications` — the reel. Same query parameters and the same
+  payload as `GET /v1/desktop/notifications`, plus per-row `runtime_live` (this
+  relay can reach the conversation now) and `durable` (its transcript survives a
+  restart) — the two flags `GET /api/asks` established, so a row is never
+  presented as answerable when it is not.
+- `[redacted]/{id}` — one item, its context and its asks, carrying the SAME
+  per-row `runtime_live`/`durable` pair as the reel with the same meaning. The
+  detail answered `false`/`false` for every item until QA Q4, because it read a
+  top-level `session_id` the item does not have — an item holds a nested
+  `session` block — so both routes now share one reader.
+- `PATCH /api/notifications` — `read`/`unread`/`dismiss`/`undismiss` over
+  `ids[{id, revision}]`, or `session_id`+`through_seq`, or `all`+`through_seq`;
+  every bulk target also needs the `observed` tokens, at most 500 per batch. A
+  missing observation is `422`, never a legacy sweep.
+- `POST /api/notifications/seen` — the PHONE's in-view receipt (decision D11,
+  which supersedes round 1's blanket refusal). The body is
+  `{items:[{id, revision, anchor_id, visible_since_ms?}], evidence:{surface,
+  session_id, input_kind, input_at_ms, visible_since_ms}}` with `surface` pinned
+  to `"native"` and `input_kind` one of `touch`, `press` or `scroll`.
+  - The EVIDENCE is re-checked by the same store call the desktop uses: the row
+    belongs to `evidence.session_id`, names its current `revision` and
+    `anchor_id`, its own `visible_since` (or the batch fallback) sits between
+    that row's `updated_at` and the input edge, the edge is fresh (≤120 s) and at
+    least the dwell old, and a row already read answers `already`. Anything else
+    is `skipped` with its reason (`unknown`, `stale_revision`, `anchor_mismatch`,
+    `stale_evidence`, `already`), never a 500 and never a silent sweep.
+  - An accepted row records `read_via: "in_view"` with `read_surface: "native"`,
+    so provenance names the surface that produced it.
+  - ANY other surface — including the desktop's own `"desktop"`, and an absent
+    one — is refused `422 {code: "relay_surface_mismatch"}`. That is round 1's
+    R6 negative, kept: this door serves the phone and nothing else.
+  - Native keys on `capabilities.features.notifications_seen` (core's feature
+    registry) and turns its receipt feed on only when it is present.
+
+Every query the resource takes is validated by the DESKTOP route's own model
+(`NotificationsQuery`) and every PATCH body by `NotificationsPatch`, so a bound
+the app refuses is refused here with the same status. A store that cannot be read
+answers `500 {code: "store_unavailable", error}`, the desktop route's own code
+and sentence, never a bare "Internal Server Error".
+
+Every route carries the cookie gate and answers `401` without it. The badge rides
+the existing list stream: `notifications: {unread_count, waiting_unread_count,
+waiting_count, high_water}` is a SIBLING of `unread` on `/api/sessions` and on
+`/api/sessions/events`, and its key is ABSENT (never zeroed) when this relay has
+no inbox or the store cannot be read. One fingerprint per scan tick over
+`notifications.db` and its `-wal` wakes that stream, so a write from any process
+reaches the phone within one scan interval without a second timer.
+
 ## Failure modes and rules
 
 - **Daemon down, TUI up**: the TUI is unaffected; the record sits unpublished
@@ -695,6 +751,10 @@ never re-derived per surface.
 | Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
 | Conversation tags | — | chat sidebar tag chips + `/v1/desktop/tags` | partial — S2a ships the row labels on both lists and the assignment sheet (checkboxes, primary radio, two-step clear); create/rename remains desktop/agent-only. S2b adds **view-only grouping by primary tag** on the session list: a capability-gated, opt-in local preference (`lo-mobile-group-tags`) that regroups the daemon's own order, with ★ Pinned kept as its own top section and no tag/placement writes |
 | Checkpoint rail (turn ticks) | — | checkpoint rail (`sessions.checkpoints`) | partial — the manifest is served read-only (`GET /api/sessions/{id}/checkpoints`); the phone's rail render is next (phase 4) |
+| Notifications inbox | `/notifications` page (L2) | notifications page | partial — the relay serves the reel read and write wire
+(`GET /api/notifications`, `GET /api/notifications/{id}`, `PATCH /api/notifications`, `POST /api/notifications/seen`), the
+`notifications` badge block on `/api/sessions` and `/api/sessions/events`, and the same token-bound bulk rules as the
+desktop; the phone's screens are next |
 | Wakes / schedules | `wake_panel` | schedules | partial — the armed index is served read-only (`GET /api/schedules`); the phone view and arm/cancel are next (phase 4) |
 | Settings | `settings_view` | settings | missing (phase 5) |
 | Move session | `move_picker` | move session | partial — the relay serves the peers' rows on the session list (`?include_peers`, SSE included) and the transfer verb (`POST /api/sessions/{id}/transfer`); the phone's move picker and remote-row render are next (phase 5) |

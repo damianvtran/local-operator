@@ -34,7 +34,7 @@ import re
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.i18n.keys import wire_errors_notifications as _wn
 from local_operator.i18n.messages import render
@@ -93,6 +93,33 @@ def _lapsed_window(root: pathlib.Path) -> int:
     return lapsed_visible_ms(root, poll_now=True)
 
 
+#: A list cursor: the store's own shape (``<epoch_ms>.<item_id>``) with the two
+#: wire bounds the store depends on — a length and a MAGNITUDE. Both transports
+#: validate with this one annotation, so a value sqlite cannot bind is a 422 on
+#: either surface and never reaches the query (QA round 2).
+CursorQuery = Annotated[str | None, AfterValidator(inbox.cursor_in_range)]
+
+
+class NotificationsQuery(BaseModel):
+    """The list route's query, as ONE model both transports validate with.
+
+    The relay (``mobile/daemon.py``) validates its query string through this
+    same class, so the phone and the app refuse exactly the same requests
+    (round-1 R7: four queries answered 200 on the relay and 422 here). Unknown
+    query keys are ignored, as FastAPI ignores them on this route.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    state: Literal["unread", "all", "dismissed"] = "unread"
+    source: Literal["notify", "ask"] | None = None
+    priority: Literal["high", "normal", "low"] | None = None
+    session_id: Annotated[str | None, Field(pattern=r"^[a-f0-9]{12}$")] = None
+    cursor: Annotated[CursorQuery, Field(max_length=80)] = None
+    through_seq: Annotated[int | None, Field(ge=0)] = None
+    limit: Annotated[int, Field(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT
+
+
 @router.get("/v1/desktop/notifications", response_model=CRUDResponse[dict[str, Any]])
 async def list_notifications(
     request: Request,
@@ -100,7 +127,7 @@ async def list_notifications(
     source: Literal["notify", "ask"] | None = None,
     priority: Literal["high", "normal", "low"] | None = None,
     session_id: Annotated[str | None, Query(pattern=r"^[a-f0-9]{12}$")] = None,
-    cursor: Annotated[str | None, Query(max_length=80)] = None,
+    cursor: Annotated[CursorQuery, Query(max_length=80)] = None,
     through_seq: Annotated[int | None, Query(ge=0)] = None,
     limit: Annotated[int, Query(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT,
 ):
@@ -131,7 +158,7 @@ async def count_notifications(request: Request):
         return reply(await asyncio.to_thread(inbox.counts, root))
 
 
-def _anchor_excerpt(session_dir: pathlib.Path, anchor_id: str) -> str:
+def anchor_excerpt(session_dir: pathlib.Path, anchor_id: str) -> str:
     """The notify call's own transcript row, as the operator would read it.
 
     The anchor is the ``tool_call_id`` of the ``notify`` call. Its result row
@@ -190,7 +217,7 @@ def _row_text(row: Any, anchor_id: str) -> str:
 @router.get("/v1/desktop/notifications/{item_id}", response_model=CRUDResponse[dict[str, Any]])
 async def notification_detail(item_id: str, request: Request):
     """One item with its history, session, anchor, projects and the session's asks."""
-    if not _valid_item_id(item_id):
+    if not valid_item_id(item_id):
         raise HTTPException(422, _wn.unknown_item().envelope())
     async with errors(request, notifications_refusal):
         root = _config_dir(request)
@@ -200,15 +227,21 @@ async def notification_detail(item_id: str, request: Request):
             root,
             item_id,
             lapsed_visible_ms=window,
-            anchor_excerpt=_anchor_excerpt,
+            anchor_excerpt=anchor_excerpt,
         )
     if answer is None:
         raise HTTPException(404, _wn.unknown_item().envelope())
     return reply(answer)
 
 
-def _valid_item_id(value: str) -> bool:
-    """The PATCH models' own shape rule, so both transports refuse the same ids."""
+def valid_item_id(value: str) -> bool:
+    """The PATCH models' own shape rule, shared by BOTH transports (CD8).
+
+    Public because the relay validates detail ids through this module rather
+    than hand-rolling a second predicate (R7); strict because the loose
+    prefix/length check accepted ``n_................`` and ``ask:..:x`` while
+    the write AND seen models refused them.
+    """
     return _ITEM_ID_RE.match(value) is not None
 
 
@@ -294,6 +327,29 @@ class SeenEvidence(Input):
 class NotificationsSeen(Input):
     items: list[SeenItem] = Field(min_length=1, max_length=100)
     evidence: SeenEvidence
+
+
+class NativeSeenEvidence(Input):
+    """The PHONE's evidence (D11): its own edges, the desktop's re-checks.
+
+    ``surface`` is pinned to ``native`` and the input kinds to the gestures a
+    phone actually has. It is a separate model rather than a widened literal on
+    ``SeenEvidence`` so a desktop client cannot label its report "native" and a
+    relay client cannot label its own "desktop": each transport's door accepts
+    exactly the surface it is (the relay answers any other with
+    ``relay_surface_mismatch``).
+    """
+
+    surface: Literal["native"]
+    session_id: SessionID
+    input_kind: Literal["touch", "press", "scroll"]
+    input_at_ms: int = Field(ge=0)
+    visible_since_ms: int = Field(ge=0)
+
+
+class NativeNotificationsSeen(Input):
+    items: list[SeenItem] = Field(min_length=1, max_length=100)
+    evidence: NativeSeenEvidence
 
 
 @router.post("/v1/desktop/notifications/seen", response_model=CRUDResponse[dict[str, Any]])
