@@ -914,6 +914,12 @@ def test_ci_partitions_each_tree_by_measured_duration(job: str) -> None:
 #: against 650 s of tests, and the tui-e2e ubuntu leg was 1164 s against
 #: 1112 s. Observed overhead is therefore 38-52 s; 60 s is that rounded up,
 #: not a guess with room in it.
+#:
+#: The unit job's later `Install ripgrep` step postdates that run and is
+#: overhead too. As an apt install it cost 7-18 s per shard (#2997 round 1,
+#: review R2), enough to push the top of the range past 60 s. It now fetches
+#: one ~2.2 MB pinned release tarball, about 1-2 s, which keeps the measured
+#: range inside 60 s. Re-measure before you add another setup step here.
 SHARD_JOB_OVERHEAD_SECONDS = 60
 
 #: Workers the unit shard job actually gets, and the reason the two trees

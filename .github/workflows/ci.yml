@@ -961,9 +961,27 @@ jobs:
         # SKIP without it, so the engine most users run went untested in CI while
         # the job stayed green (review N1 on #2982). The version print puts proof
         # in the log that the binary those tests find is really there.
+        #
+        # A pinned upstream release tarball, checksum-verified, rather than apt:
+        # `apt-get update` fetched a 3.6 MB index (7-18 s per shard) from a mirror
+        # the PR cannot control, could hang with no bound, and installed whatever
+        # version the runner image's archive carried (review R2 on #2997). The
+        # static musl build has no runtime dependencies. Fail-hard on purpose: a
+        # silently missing rg is what let the rg tests skip green before. Bump by
+        # changing RG_VERSION and RG_SHA256 together (the `.sha256` asset beside
+        # the tarball on the GitHub release).
+        timeout-minutes: 2
+        env:
+          RG_VERSION: "15.1.0"
+          RG_SHA256: "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599"
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q ripgrep
+          set -euo pipefail
+          name="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 --max-time 60 -o "$RUNNER_TEMP/rg.tgz" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${name}.tar.gz"
+          echo "${RG_SHA256}  $RUNNER_TEMP/rg.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/rg.tgz" -C "$RUNNER_TEMP" "${name}/rg"
+          sudo install -m 0755 "$RUNNER_TEMP/${name}/rg" /usr/local/bin/rg
           rg --version
 
       - name: Partition test suite

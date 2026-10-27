@@ -753,6 +753,17 @@ def truncate_output(text: str, limit: int = TOOL_OUTPUT_LIMIT_CHARS) -> str:
 ElisionSpan = tuple[str, int, int]
 
 
+class _SpillPlace(NamedTuple):
+    """Where a body span's content lives in a spill that is NOT line-for-line
+    with the body (grep: the body has ``--``/context rows, the spill one match
+    per line). ``hidden`` is False when the span held no match, so
+    ``first``/``last`` name the nearest match rather than a hidden one."""
+
+    first: int
+    last: int
+    hidden: bool
+
+
 def _elision_span(text: str, head: str, tail: str) -> tuple[int, int, int] | None:
     """``(total_lines, first_elided_line, last_elided_line)``, all 1-based.
 
@@ -1150,7 +1161,7 @@ def _elide_inline(
     text: str,
     limit: int,
     offset: int = 0,
-    remap: Callable[[int, int], tuple[int, int]] | None = None,
+    remap: Callable[[int, int], _SpillPlace | None] | None = None,
 ) -> tuple[str, ElisionSpan | None]:
     """``(body, elided_span)``: the budget-fitting body and where the gap is.
 
@@ -1171,18 +1182,37 @@ def _elide_inline(
     ``--`` separators and context rows but spills one line per match, so a span
     counted on the body points at the wrong matches (QA Q7 on #2982). It takes
     the elided body span ``(first, last)`` and returns the spill span holding
-    those rows' matches; the marker is reworded to say so. It replaces
-    ``offset``, which is a uniform shift and cannot express that mapping.
+    those rows' matches; the marker is reworded to say so, and counts "body
+    lines" so its N-of-M does not read as the spill's numbering (review N1 on
+    #2997). It replaces ``offset``, which is a uniform shift and cannot express
+    that mapping.
 
     Returns a ``None`` span when nothing was elided.
     """
     if len(text) <= limit:
         return text, None
 
-    def _place(first: int, last: int) -> tuple[int, int]:
-        return remap(first, last) if remap else (first + offset, last + offset)
+    def _place(first: int, last: int) -> tuple[int, int, str | None]:
+        """Spill span of a body span, and the marker's wording for it."""
+        place = remap(first, last) if remap else None
+        if place is None:
+            # No remap, or (unreachable for grep: a body over budget holds a
+            # match row) no match row to map onto — keep the uniform shift.
+            return first + offset, last + offset, None
+        if place.hidden:
+            where = f"their matches are lines {place.first}-{place.last} of the saved output"
+        else:
+            # Only `--`/context rows fell in the gap: the spill holds no context,
+            # so the pointer is the nearest match — one the body may well show.
+            # Saying "their matches are" here claimed a hidden match that does
+            # not exist (review R3 on #2997).
+            where = (
+                f"context rows only, no match hidden; the nearest match is line "
+                f"{place.first} of the saved output"
+            )
+        return place.first, place.last, where
 
-    held = "their matches are" if remap else "they are"
+    counted = "body lines" if remap else "lines"
     structured = _elide_json(text, limit)
     if structured is not None:
         # Still valid JSON, so the footer has to say "the whole payload" rather
@@ -1202,19 +1232,31 @@ def _elide_inline(
         # exist.
         return head + BASH_TRUNCATION_MARKER + tail, ("chars", len(head) + len(tail), len(text))
     total, first, last = span
-    marker = _elision_marker(last - first + 1, total, *_place(first, last), held=held)
+    spill_first, spill_last, where = _place(first, last)
+    marker = _elision_marker(
+        last - first + 1, total, spill_first, spill_last, counted=counted, where=where
+    )
     head, tail = _clip_head_tail(text, limit - len(marker))
     span = _elision_span(text, head, tail)
     if span is None:
         return head + BASH_TRUNCATION_MARKER + tail, ("chars", len(head) + len(tail), len(text))
     total, first, last = span
-    line_span: ElisionSpan = ("lines", *_place(first, last))
-    marker = _elision_marker(last - first + 1, total, line_span[1], line_span[2], held=held)
+    spill_first, spill_last, where = _place(first, last)
+    line_span: ElisionSpan = ("lines", spill_first, spill_last)
+    marker = _elision_marker(
+        last - first + 1, total, spill_first, spill_last, counted=counted, where=where
+    )
     return head + marker + tail, line_span
 
 
 def _elision_marker(
-    elided: int, total: int, first: int, last: int, *, held: str = "they are"
+    elided: int,
+    total: int,
+    first: int,
+    last: int,
+    *,
+    counted: str = "lines",
+    where: str | None = None,
 ) -> str:
     """The in-band gap marker.
 
@@ -1225,8 +1267,8 @@ def _elision_marker(
     """
     return (
         f"{BASH_TRUNCATION_MARKER.rstrip()}\n"
-        f"[{elided} of {total} lines elided — {held} lines {first}-{last} "
-        f"of the saved output]\n\n"
+        f"[{elided} of {total} {counted} elided — "
+        f"{where or f'they are lines {first}-{last} of the saved output'}]\n\n"
     )
 
 
@@ -6081,7 +6123,7 @@ def _spilled_list_body(
     shown_text: str,
     tool_name: str,
     context: ToolContext | None,
-    remap: Callable[[int, int], tuple[int, int]] | None = None,
+    remap: Callable[[int, int], _SpillPlace | None] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Join a spill's full line set while preserving an authored shown body.
 
@@ -6098,7 +6140,7 @@ def _capped_list_body(
     shown: str,
     tool_name: str,
     context: ToolContext | None,
-    remap: Callable[[int, int], tuple[int, int]] | None = None,
+    remap: Callable[[int, int], _SpillPlace | None] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Body + spill details for a list result that has TWO caps on it.
 
@@ -6123,10 +6165,21 @@ def _capped_list_body(
         # Fits the prompt, but the count cap still hid entries. Point at the
         # rest explicitly rather than leaving "(capped at N)" as a dead end.
         shown_lines = len(shown.splitlines())
-        hidden_from = (remap(1, shown_lines)[1] if remap else shown_lines) + 1
-        return shown + _spill_footer(meta, ("lines", hidden_from, meta.lines)), {
-            "spill": _spill_detail(meta)
-        }
+        page = remap(1, shown_lines) if remap else _SpillPlace(1, shown_lines, True)
+        if page is None:
+            # An empty page (grep ``skip`` at or past the match count): every
+            # stored entry is one this page did not show.
+            hidden: ElisionSpan | None = ("lines", 1, meta.lines)
+        elif page.last < meta.lines:
+            hidden = ("lines", page.last + 1, meta.lines)
+        elif page.first > 1:
+            # The LAST page: nothing follows it, so ``page.last + 1`` printed
+            # ``range="452-451"``, which ``read`` rejects (QA Q2 on #2997). What
+            # this page hides is everything before it — the skipped entries.
+            hidden = ("lines", 1, page.first - 1)
+        else:
+            hidden = None  # the page shows every entry; the footer names the whole copy
+        return shown + _spill_footer(meta, hidden), {"spill": _spill_detail(meta)}
     body, span = _elide_inline(shown, TOOL_OUTPUT_LIMIT_CHARS, remap=remap)
     return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
 
@@ -12931,11 +12984,42 @@ class _RgLineReader:
                 self._eof = True
 
 
+#: The line boundaries ``str.splitlines`` honours besides ``\n``, each mapped to a
+#: visible stand-in of the same length (its Unicode control picture where one
+#: exists, else U+2424 SYMBOL FOR NEWLINE). rg splits lines only on ``\n``, so its
+#: text can hold these, while the spill store and the elision span count lines
+#: with ``splitlines``: one rg record became 2+ spill lines and every pointer
+#: after it drifted (review R1 on #2997). The Python engine never sees them —
+#: it splits the file with ``splitlines`` itself. One-for-one so the match
+#: offset ``_clip_grep_line`` centres on is unchanged.
+_RG_LINE_BREAK_GLYPHS = str.maketrans(
+    {
+        "\r": "\u240d",
+        "\x0b": "\u240b",
+        "\x0c": "\u240c",
+        "\x1c": "\u241c",
+        "\x1d": "\u241d",
+        "\x1e": "\u241e",
+        "\x85": "\u2424",
+        "\u2028": "\u2424",
+        "\u2029": "\u2424",
+    }
+)
+
+
+def _rg_line_text(text: str) -> str:
+    """One rg output line as ONE display/spill line (see ``_RG_LINE_BREAK_GLYPHS``).
+
+    A trailing ``\r`` is a CRLF line ending, not content: it is dropped, as the
+    Python engine's ``splitlines`` drops it, rather than shown as a glyph."""
+    return text.removesuffix("\r").translate(_RG_LINE_BREAK_GLYPHS)
+
+
 def _rg_match_text(raw_text: bytes, col: int, dropped: int, cap: int) -> str:
     """The display text of one rg MATCH line: clipped around the match, with the
     character offset taken from the raw byte prefix (see ``_RG_LINE_RE``), and an
     explicit note when the line outran the reader's cap (see ``_RgLineReader``)."""
-    text = raw_text.decode("utf-8", errors="replace")
+    text = _rg_line_text(raw_text.decode("utf-8", errors="replace"))
     lead = col - 1  # rg's column is 1-based, in bytes
     note = ""
     if dropped:
@@ -13079,7 +13163,7 @@ async def _ripgrep_scan(
                     _match_record(
                         path,
                         int(context.group("line")),
-                        _clip_grep_line(context.group("text"), None),
+                        _clip_grep_line(_rg_line_text(context.group("text")), None),
                         "c",
                     )
                 )
@@ -13175,22 +13259,32 @@ def _render_grep_body(
     return "\n".join(out), len(kept), total, spill_rows
 
 
-def _grep_spill_remap(spill_rows: list[int | None]) -> Callable[[int, int], tuple[int, int]]:
-    """Map an elided BODY span to the spill span holding its matches.
+def _grep_spill_remap(
+    spill_rows: list[int | None],
+) -> Callable[[int, int], _SpillPlace | None]:
+    """Map a BODY span to the spill span holding its matches.
 
-    When the gap hides only ``--``/context rows there is no match to point at, so
-    the span collapses onto the nearest match line instead — still a range the
-    store serves, around the rows that were hidden.
+    When the span holds only ``--``/context rows there is no match to point at,
+    so it collapses onto the nearest match line instead (``hidden=False``) —
+    still a range the store serves, around the rows that were hidden, and the
+    marker says no match was hidden there.
+
+    ``None`` means the body has no match row at all: a page with ``skip`` at or
+    past the match count. Indexing an empty neighbour list there raised
+    IndexError and turned a past-the-end page into a tool crash (QA Q1 on #2997).
     """
 
-    def remap(first: int, last: int) -> tuple[int, int]:
+    def remap(first: int, last: int) -> _SpillPlace | None:
         inside = [row for row in spill_rows[first - 1 : last] if row is not None]
         if inside:
-            return min(inside), max(inside)
+            return _SpillPlace(min(inside), max(inside), True)
         after = [row for row in spill_rows[last:] if row is not None]
         before = [row for row in spill_rows[: first - 1] if row is not None]
-        nearest = after[0] if after else before[-1]
-        return nearest, nearest
+        if after:
+            return _SpillPlace(after[0], after[0], False)
+        if before:
+            return _SpillPlace(before[-1], before[-1], False)
+        return None
 
     return remap
 
