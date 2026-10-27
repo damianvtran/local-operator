@@ -44,16 +44,53 @@ def test_locator_grammar_is_pinned_to_memory_capture():
 
 def test_mine_attributes_asks_and_decisions_by_role_header():
     block = (
-        "[User]\nplease keep the manager posting updates in thread 7\n"
+        "[User]\nplease keep the manager posting updates in the thread in thread 7\n"
         "[Assistant]\ndecided to keep the existing helper; do not add a new one\n"
         "[Tool result: bash]\n/Users/damian/local-operator/x.py and #1234\n"
     )
     carry = mine_carry(block)
-    assert carry.asks == ["please keep the manager posting updates in thread 7"]
+    assert carry.asks == ["please keep the manager posting updates in the thread in thread 7"]
     assert carry.decisions == ["decided to keep the existing helper; do not add a new one"]
     # Identifiers are mined everywhere, not only from the speaker's own lines.
     assert "/Users/damian/local-operator/x.py" in carry.identifiers
     assert "#1234" in carry.identifiers
+
+
+def test_same_line_tool_call_header_switches_role_away_from_user():
+    """Both serializers emit ``[Assistant tool calls] bash(...)`` on ONE line.
+
+    The old whole-line anchor never matched it, so every tool call after an
+    operator turn was mined as an operator ask (the design spike's exact repro).
+    The call's identifiers are still mined: the remainder is scanned as tool text.
+    """
+    carry = mine_carry(
+        '[User]\nplease fix the build\n[Assistant tool calls] bash(command="make check")'
+    )
+    assert carry.asks == ["please fix the build"]
+    assert carry.decisions == []
+    pathy = mine_carry(
+        '[User]\nfix it\n[Assistant tool calls] read(path="src/foo/bar.py")\n'
+        "continued argument line we will not keep\n[User]\nthanks, now ship"
+    )
+    assert pathy.asks == ["fix it", "thanks, now ship"]
+    assert "src/foo/bar.py" in pathy.identifiers
+
+
+def test_custom_message_header_mines_no_asks_or_decisions():
+    """``[peer_message]``/``[job_result]`` bodies are injected text, not the operator."""
+    carry = mine_carry(
+        "[User]\nplease fix the build\n[peer_message]\nwe will deploy now, run it\n"
+        "[job_result]\ndecided: build green at #4242\n"
+    )
+    assert carry.asks == ["please fix the build"]
+    assert carry.decisions == []
+    assert "#4242" in carry.identifiers
+
+
+def test_prose_starting_with_a_bracket_word_is_not_a_header():
+    """``[User]x`` glued to prose is text, not a role switch."""
+    carry = mine_carry("[User]\nplease check\n[Assistant]already done we will ship\n")
+    assert carry.asks == ["please check", "[Assistant]already done we will ship"]
 
 
 def test_mine_finds_no_ask_in_an_assistant_line():
@@ -257,12 +294,12 @@ def test_carry_rows_skips_refused_but_keeps_the_rest():
         "- Identifiers: docs/.env\n"
         "- Identifiers: ~/.aws/credentials\n"
         "- Identifiers: /Users/damian/local-operator/ok.py\n"
-        "- Asks: keep the manager posting updates\n"
+        "- Asks: keep the manager posting updates in the thread\n"
     )
     rows = carry_rows(carry, locators=True)
     bodies = [row["body"] for row in rows]
     assert any("ok.py" in body for body in bodies)
-    assert any("keep the manager posting updates" in body for body in bodies)
+    assert any("keep the manager posting updates in the thread" in body for body in bodies)
     assert not any(".env" in body for body in bodies)
     assert all(body.strip() for body in bodies)
 

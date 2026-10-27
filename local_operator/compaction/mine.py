@@ -69,6 +69,7 @@ __all__ = [
     "Carry",
     "carry_digest_lines",
     "carry_is_empty",
+    "is_role_header",
     "merge_carry",
     "mine_carry",
     "parse_carry",
@@ -154,10 +155,41 @@ _DECISION_CUE = re.compile(
     re.IGNORECASE,
 )
 
-#: Serialized role headers written by ``snapcompact.serialize_for_snapcompact``.
+#: Serialized role headers written by ``snapcompact.serialize_for_snapcompact``
+#: and ``api.serialize_conversation``. Matched as a line PREFIX, not a whole
+#: line: both serializers emit ``[Assistant tool calls] bash(...)`` with the
+#: rendered calls on the SAME line. The earlier ``...\]$`` anchor never matched
+#: that form, so the role stayed ``user`` after an operator turn and every tool
+#: call (with its multi-line arguments) was mined as an operator ask — measured
+#: on the live store, only 22% of captured ``ask`` rows matched operator text.
+#: ``(?![^\s])`` (header ends at whitespace or end of line) keeps a prose line
+#: that merely begins ``[User]x`` from switching role.
 _ROLE_HEADER = re.compile(
-    r"^\[(User|Assistant|Assistant tool calls|Tool result:.*|Tool ERROR:.*)\]$"
+    r"^\[(User|Assistant|Assistant tool calls|Tool result:[^\]]*|Tool ERROR:[^\]]*)\](?!\S)"
 )
+
+#: Any OTHER bracketed lowercase header: ``api.serialize_conversation`` renders a
+#: ``CustomMessage`` as ``[{custom_type}]`` (``peer_message``, ``job_result``,
+#: ``system_prefix`` ...). Those bodies are injected text, not the operator's
+#: words, yet with no header match they inherited the previous role and 65% of
+#: sampled captured asks were exactly such injected messages. They become role
+#: ``other``, which mines identifiers but never asks or decisions. Hyphens too:
+#: the harness's own ``[session-state]`` notice is minted that way. Two or more
+#: characters, so a ``[x] done`` checklist line typed by the operator stays prose.
+_CUSTOM_HEADER = re.compile(r"^\[[a-z][a-z_-]+\](?!\S)")
+
+
+def is_role_header(line: str) -> bool:
+    """True when ``line`` opens with a serializer role or custom-message header.
+
+    Shared with ``memory_capture``'s debris filter so a memory candidate that IS
+    a serialized transcript line (``[Assistant tool calls] bash(...)``, a
+    ``[peer_message]`` echo) is refused by the same grammar that attributes
+    roles here; two copies would drift exactly the way the anchor did.
+    """
+    stripped = line.strip()
+    return bool(_ROLE_HEADER.match(stripped) or _CUSTOM_HEADER.match(stripped))
+
 
 #: Longest prefix of any single line the locator scan examines. A tool result
 #: is already truncated to 2,000 chars by the serializer and a user paste can be
@@ -241,11 +273,25 @@ def mine_carry(text: str) -> Carry:
             # Tool blocks are their own role: a tool ERROR line reading "do not
             # delete …" is an error message, not an assistant decision, and
             # mining it as one wrote a commitment the assistant never made
-            # (review round 1, NIT 9).
-            role = (
-                "user" if title == "User" else ("tool" if title.startswith("Tool") else "assistant")
-            )
+            # (review round 1, NIT 9). ``Assistant tool calls`` is the tool role
+            # too: its same-line remainder is a rendered call, never a decision.
+            if title == "User":
+                role = "user"
+            elif title.startswith("Tool") or title == "Assistant tool calls":
+                role = "tool"
+            else:
+                role = "assistant"
             in_carry = False  # a role header always ends a carried section
+            remainder = raw.strip()[header.end() :].strip()
+            if not remainder:
+                continue
+            # The same-line remainder (the rendered tool calls) still carries
+            # identifiers — a path in ``read(path=...)`` is a real anchor — so it
+            # falls through to the scan under the role just set.
+            raw = remainder
+        elif _CUSTOM_HEADER.match(raw.strip()):
+            role = "other"
+            in_carry = False
             continue
         line = raw.strip()
         if not line:

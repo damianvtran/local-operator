@@ -157,6 +157,9 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     if scope:
         store.identity.owner(scope)
     if name == "read":
+        # B5: reads inside one attention turn count once per fact; the host mints a
+        # fresh ``send_turn_id`` per turn, which is exactly that window.
+        store.begin_recall_turn(getattr(context, "send_turn_id", None) or "")
         if entity:
             if not scope or set(query) - {"related", "version", "tokens"}:
                 raise MemoryError(
