@@ -161,7 +161,12 @@ def test_an_mcp_login_now_defaults_to_share(root: Path) -> None:
     _seed(
         root,
         "mcp-oauth",
-        {"project_id": "https://mcp.example/sse", "refresh": "r3", "access": "a3"},
+        # The row shape McpTokenStorage writes: an offer counts only a grant the
+        # runtime would use (F-READY-1), and top-level access/refresh keys are not one.
+        {
+            "project_id": "https://mcp.example/sse",
+            "tokens": {"access_token": "a3", "refresh_token": "r3"},
+        },
     )
     _seed_mcp_json(root, {"tools": {"type": "sse", "url": "https://mcp.example/sse"}})
     row = _row(offers_mod.build_items(root), "mcp:https://mcp.example/sse")
