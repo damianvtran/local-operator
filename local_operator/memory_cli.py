@@ -305,6 +305,8 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
     # A receipt stores the stable device id; the name is resolved here, at the one
     # place both the human renderer and `--json` read, so a failing peer is a
     # machine an operator can recognise rather than an opaque 32-hex token.
+    from local_operator.memory_maintenance import last_auto_pass
+
     peers = peer_status(root)
     for peer in peers:
         peer["name"] = _device_name(str(peer.get("device") or ""), root)
@@ -331,6 +333,9 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
         # automatic forget, so they must be visible) and B5's recall telemetry.
         "capture": capture_status(store),
         "recall": store.recall_summary(),
+        # JSON-only for now: the newest UNATTENDED compaction, so an operator
+        # can confirm the automatic pass is running (`lop memory status --json`).
+        "maintenance": {"last_auto_pass": last_auto_pass(root)},
         "limits": (
             "Shape guards are heuristic: they catch recognized sensitive patterns, not every "
             "secret. Unrecognized secrets can still be stored and journaled — keep values in "
@@ -713,6 +718,13 @@ def execute(
         # Checked BEFORE the status early return, which used to swallow --to.
         raise MemoryError("--to applies to `move` only.")
     if args.operation == "status":
+        # Status is one of the opportunistic doors for the unattended memory
+        # maintenance pass (the wake supervisor is the primary seat and retires
+        # when nothing is fireable). Offered on a daemon thread so the status
+        # read never waits for it; the pass gates itself (6 h, lock, 60 s).
+        from local_operator.memory_maintenance import start_background
+
+        start_background(root)
         return _status(root, store)
     if args.limit is not None and args.operation not in ("inspect", "consolidate"):
         # A silently ignored flag reads as a filter that was applied.
@@ -960,6 +972,11 @@ def execute(
         # A human correction is a deliberate statement: it stops being an unreviewed capture
         # (and capture refreshes, which only touch candidates, can no longer overwrite it).
         replacement["status"] = "active"
+        # The capture's 14-day deadline belonged to its being UNREVIEWED (decision
+        # D2: deliberate facts never auto-expire). Carried over, read paths would
+        # hide the promoted fact on the capture's schedule. An expiry the operator
+        # wants on a reviewed fact is a second, explicit edit.
+        replacement["expires_at"] = None
     done = store.put(
         scope,
         replacement,
@@ -1806,6 +1823,13 @@ def main(args: argparse.Namespace) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print(render_human(json.dumps(result), prefix="lop memory"))
+        # The output is already on screen; a maintenance pass `status` offered
+        # finishes before this short-lived process exits instead of being cut
+        # off mid-transaction (bounded by the pass's own 60 s timeout; a pass
+        # that was not due returned in milliseconds).
+        from local_operator.memory_maintenance import join_background
+
+        join_background()
         return 0
     except (MemoryError, ValueError, TypeError, OSError, sqlite3.Error) as exc:
         print(

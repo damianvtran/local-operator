@@ -160,6 +160,17 @@ RECALL_HARD_TOKENS = 2000
 #: removing this raise is a deliberate follow-up change, not an automatic
 #: behaviour. Treat any further raise the same way.
 #:
+#: STILL 128 MiB AFTER AUTOMATIC COMPACTION LANDED (2026-10-27, operator
+#: decision D7), deliberately. The automatic pass
+#: (:mod:`local_operator.memory_maintenance`) plus the peer-echo filter drain a
+#: measured clone of this host's store from 75.2 MB to 44.6 MB, which meets the
+#: drain condition on THIS host — but the fleet is mixed-version: a peer that
+#: has not updated has neither the echo filter nor the auto pass, so its store
+#: keeps the old growth curve, and a lower cap shipped now re-creates the
+#: original outage there. The cap also has no growth data behind a new number
+#: yet. Revisit after about two weeks of post-fix ``journal_prune`` /
+#: ``storage_bytes`` history across the fleet.
+#:
 #: Accepted side effect: :meth:`MemoryStore._page_cap_refusal` keeps the generic
 #: refusal when the host filesystem reports no more free space than this cap
 #: (``disk_free <= cap_bytes``). Raising the cap to 128 MiB means a host with
@@ -2330,8 +2341,20 @@ class MemoryStore:
             plan, _victims, _owners, _newest = self._journal_plan(db)
         return {**plan, "read_only": True}
 
-    def compact(self, *, expect: str) -> dict[str, Any]:
+    def compact(
+        self, *, expect: str, reason: str = "operator", vacuum: bool = True
+    ) -> dict[str, Any]:
         """Apply the previewed journal compaction in one pass.
+
+        ``reason`` is what ``journal_prune`` records: ``operator`` for the
+        confirmed CLI pass, ``auto`` for the maintenance pass in
+        :mod:`local_operator.memory_maintenance`, so the cadence gate and a
+        human reading the table can tell an unattended pass from a requested
+        one. ``vacuum=False`` is that pass's low-disk mode: VACUUM rewrites the
+        whole file and needs about its size again in free space, while the
+        DELETE alone already returns pages to the freelist, which every table
+        reuses — so writes recover without the rewrite and only the file size
+        waits for a pass with room.
 
         ``expect`` is the ``fingerprint`` of the preview the operator read; the
         plan is recomputed inside the write transaction and a mismatch refuses
@@ -2373,6 +2396,8 @@ class MemoryStore:
                 "Compaction needs the fingerprint from its preview. Nothing was deleted. "
                 "Run the preview first."
             )
+        if reason not in ("operator", "auto"):
+            raise MemoryError("Unknown compaction reason; use operator or auto.")
         with self.connection() as db:
             try:
                 db.execute("BEGIN IMMEDIATE")
@@ -2406,7 +2431,7 @@ class MemoryStore:
                             self._origin(db),
                             len(victims),
                             plan["dropped"]["payload_bytes"],
-                            "operator",
+                            reason,
                         ),
                     )
                 db.commit()
@@ -2430,7 +2455,7 @@ class MemoryStore:
                 raise
             free_before = plan["storage"]["freelist_pages"]
         vacuumed = False
-        if plan["ops"]["dropped"] or free_before:
+        if vacuum and (plan["ops"]["dropped"] or free_before):
             try:
                 with self.connection() as db:
                     db.execute("VACUUM")

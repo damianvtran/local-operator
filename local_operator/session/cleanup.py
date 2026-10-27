@@ -2043,6 +2043,7 @@ def delete_session(
         # reason.
         _forget_wake_entry(config_dir, session_id)
         _forget_monitor_entry(config_dir, session_id)
+        _forget_session_captures(config_dir, session_id)
     return DeleteOutcome(
         session_id=session_id,
         found=True,
@@ -2051,6 +2052,34 @@ def delete_session(
         children=children,
         label=session_label(directory),
     )
+
+
+def _forget_session_captures(config_dir: Path, session_id: str) -> None:
+    """Forget an explicitly deleted conversation's CAPTURED memory (decision D2).
+
+    WHY: session memory used to outlive its session forever — 1,911 facts /
+    334k tokens belonged to 65 deleted sessions on the operator's store, all of
+    them unreviewed captures nobody could reach any more. Only captures go:
+    deliberate facts (stated by an agent or the operator, or a promoted
+    candidate) are KEPT, listable with ``lop memory list --session ID`` and
+    movable, because someone chose to write them.
+
+    Only the EXPLICIT delete calls this. The automatic retention sweep does not:
+    its contract is reclaiming disk, and captured rows there expire on their own
+    14-day deadline anyway. Best-effort like the wake/monitor pruning beside it —
+    the directory is already gone, so a store error must not turn a completed
+    delete into a reported failure; the captures then expire on schedule.
+    """
+    try:
+        from local_operator.memory_maintenance import forget_session_captures
+
+        forgotten = forget_session_captures(config_dir, session_id)
+        if forgotten:
+            logger.info("forgot %d captured memories of deleted session %s", forgotten, session_id)
+    except Exception:  # noqa: BLE001 — the delete already happened; see docstring
+        logger.warning(
+            "could not forget deleted session %s's captured memory", session_id, exc_info=True
+        )
 
 
 def _append_cleanup_log(sessions_dir: Path, record: dict[str, Any]) -> bool:

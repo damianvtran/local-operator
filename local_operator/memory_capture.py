@@ -1457,6 +1457,15 @@ def persist(
     if not isinstance(skipped, int) or skipped < 0:
         raise MemoryError("Invalid capture skip count.")
     timestamp = time.time() if committed_at is None else committed_at
+    # Unreviewed captures expire CAPTURE_TTL_S after their LAST revision (operator
+    # decision D2): each refresh below writes a new revision with a new deadline,
+    # so a fact the session keeps re-capturing lives while the session works. An
+    # integer deadline, not the float timestamp: the stamp is charged to the item's
+    # wire-token cap, and a 17-digit float costs more of it than seconds precision
+    # is worth. Deliberate facts never pass through here, so they never get one.
+    from local_operator.memory_maintenance import CAPTURE_TTL_S
+
+    expires_at = int(timestamp) + CAPTURE_TTL_S
     facts: dict[str, dict[str, Any]] = {}
     state: dict[str, dict[str, Any]] = {}
     # The tag of the previous admitted row: a state tag's bullets fold only while
@@ -1471,6 +1480,7 @@ def persist(
                     status="candidate",
                     created_at=timestamp,
                     source_time=timestamp,
+                    expires_at=expires_at,
                     source={
                         "session": store.identity.session_id,
                         "entry": marker_id,
