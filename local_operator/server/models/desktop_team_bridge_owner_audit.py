@@ -154,9 +154,10 @@ class OwnerAuditAttachment(_HubShape):
 class OwnerAuditMessage(_HubShape):
     """One audited message (the hub's ``BridgeConversationMessageView``).
 
-    ``body`` is the FULL text whatever the agent's verdict was; render held and
-    rejected bodies as plaintext, collapsed by default, with no link previews or
-    remote images (contract v2 m4). ``agent_delivery_status`` is ``admitted`` |
+    ``body`` is the FULL text whatever the agent's verdict was; render rejected
+    and unscreened (``not_screened``) bodies as plaintext, collapsed by default,
+    with no link previews or remote images (contract v2 m4; v2 M3 removed
+    ``held``). ``agent_delivery_status`` is ``admitted`` |
     ``rejected`` | ``not_screened`` and is ABSENT on messages the audited agent
     itself sent (v3 N4); ``agent_verdict_at`` accompanies admitted/rejected.
     """
@@ -195,7 +196,8 @@ class OwnerAuditThread(_HubShape):
 
     root: OwnerAuditMessage
     replies: list[OwnerAuditMessage]
-    #: Pass back as ``after_seq`` for the next page.
+    #: Pass back as ``after_seq`` for the next page. ``after_seq`` is INCLUSIVE
+    #: (the hub's member history behaves the same).
     next_after_seq: int | None = None
     has_more: bool = False
 

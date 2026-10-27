@@ -1087,7 +1087,14 @@ def _spawn_standby(
 
     console_end, child_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     child_fd = child_end.fileno()
-    env = dict(os.environ)
+    # A standby BECOMES a session runtime, and adoption cannot repair the
+    # `ps -E` view of its launch environment (``_apply_environment``), so the
+    # desktop plane's bearer is withheld at the spawn, as in ``launch``.
+    # Lazy: ``shell_env`` pulls the config stack, which these spawn modules keep
+    # off their import path (the standby warmer imports them before any config).
+    from local_operator.tools.shell_env import withhold_harness_plane
+
+    env = withhold_harness_plane(dict(os.environ))
     for key in CONTRACT_KEYS + ("LOP_RUNTIME_ADOPT_SESSION",):
         env.pop(key, None)
     # Pinned, because the child resolves its root from the environment and a

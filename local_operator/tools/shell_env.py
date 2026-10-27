@@ -228,6 +228,42 @@ CREDENTIAL_NAME_MARKERS: tuple[str, ...] = (
 )
 
 
+#: The harness's OWN control-plane credentials, withheld from every model-run
+#: child in BOTH modes. ``inherit`` keeps the operator's tools working by
+#: passing the parent environment through, and that is right for ``gh``'s token
+#: or an AWS profile; it is wrong for these, which are not the operator's tool
+#: credentials but the desktop plane's bearer. A model command holding it can
+#: call any ``/v1/desktop/...`` route as the app, including the human-only
+#: Team Bridge owner audit that serves bodies the agent's screening REJECTED
+#: (PR #3022 QA round 1, Q1). No model command legitimately needs it: nothing
+#: in this repo reads it outside the daemon (``server/desktop.py``), and a
+#: ``lop`` a model runs talks to sessions through the session socket, never the
+#: desktop plane. Spelled here rather than imported from ``server.desktop``
+#: (which pulls FastAPI onto every spawn); ``tests/unit/tools/test_shell_env.py``
+#: pins the two equal.
+#:
+#: This removes the key from the child's OWN environment. The parent halves are
+#: closed where those environments are made: the session runtime's launch
+#: environment (:func:`withhold_harness_plane`) and the daemon's own launch
+#: environment (``server.desktop.capture_launch_token``).
+HARNESS_PLANE_CREDENTIALS: tuple[str, ...] = ("LOCAL_OPERATOR_DESKTOP_TOKEN",)
+
+
+def withhold_harness_plane(env: dict[str, str]) -> dict[str, str]:
+    """``env`` without the harness's control-plane credentials, in place.
+
+    For every environment a process the MODEL can reach is launched with: the
+    model's own children (via :func:`child_environment`) and the session runtime
+    that is their parent, whose launch environment a same-uid child reads with
+    ``ps eww $PPID`` (Darwin) or ``/proc/$PPID/environ`` (Linux) whatever the
+    child's own environment says.
+    """
+
+    for name in HARNESS_PLANE_CREDENTIALS:
+        env.pop(name, None)
+    return env
+
+
 @dataclass(frozen=True)
 class ShellEnvironmentPolicy:
     """The three stored keys, resolved and validated.
@@ -615,4 +651,6 @@ def child_environment(
         )
     for name in policy.exclude:
         env.pop(name, None)
-    return env
+    # LAST, after the injections and ``exclude``, and in BOTH modes: no policy
+    # and no injection may hand a model child the harness's own plane bearer.
+    return withhold_harness_plane(env)

@@ -4867,7 +4867,12 @@ class MobileDaemon:
                 self.release_phone_view(session_id)
                 raise
 
-        env = dict(os.environ)
+        # The runtime hosts the model's tools; withhold the desktop plane's
+        # bearer from its launch environment as ``session.runtime.launch`` does
+        # (PR #3022 QA round 1, Q1). Lazy for the same import-path reason.
+        from local_operator.tools.shell_env import withhold_harness_plane
+
+        env = withhold_harness_plane(dict(os.environ))
         env["LOP_MOBILE_CHILD_CWD"] = cwd
         if provider:
             env["LOP_MOBILE_CHILD_PROVIDER"] = provider

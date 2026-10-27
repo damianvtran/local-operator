@@ -7,7 +7,9 @@ or never screened. The hub side is agent-server #221
 (`docs/TEAM-BRIDGE-CONVERSATIONS.md` §16); this is the runtime's proxy over it.
 
 Capability: `features.team_bridge_owner_audit >= 1`. A renderer that does not
-see it hides the section.
+see it hides the section. The renderer keys availability on this capability,
+never on a 404 from one conversation: `conversation_not_found` is also the
+answer for a non-owner or an out-of-window conversation.
 
 ## Routes
 
@@ -23,6 +25,10 @@ unknown or repeated query name is a `422 invalid_request` before any I/O.
 | `/v1/desktop/team-bridge/owner-audit/conversations` | `limit`, `cursor` | `OwnerAuditConversationPage` |
 | `.../owner-audit/conversations/{conversation_id}/messages` | `limit`, `before_seq` \| `after_seq` | `OwnerAuditMessagePage` (newest-first) |
 | `.../owner-audit/conversations/{conversation_id}/messages/{message_id}/replies` | `limit`, `after_seq` | `OwnerAuditThread` (oldest-first) |
+
+`before_seq` is exclusive. `after_seq` is **inclusive** on both routes, the same
+as the hub's member history (`after_seq=9` returns seq 9 and later), so a "load
+newer" page must drop the boundary row it already shows.
 | `.../owner-audit/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}` | none | bytes |
 
 JSON results ride the usual `CRUDResponse` envelope (`result`). The contract
@@ -53,16 +59,50 @@ a member, outside the audit window, or unknown are all the same `404
 conversation_not_found` (bytes: `attachment_not_found`), so the routes are no
 existence oracle. A shape this build cannot read is `502 malformed_page`.
 
-## Human-only
+## Human-only, and what that does and does not mean
 
 These bodies have **not** passed the agent's screening. They are served to the
-human owner and never to a model: the `team_bridge` tool, `read_context`,
-`model_boundary`, the connector and every other agent-context path cannot reach
-the `TeamBridgeClient.owner_audit_*` methods.
-`tests/unit/team_bridge/test_owner_audit_isolation.py` enforces this statically
-(only the client, these routes and the contract module may name the surface)
-and behaviourally (every tool op runs without a single audit request). The
-agent's own admitted-only read is unchanged.
+human owner and never to a model.
+
+**No agent tool path.** The `team_bridge` tool, `read_context`,
+`model_boundary` and the connector cannot reach the `TeamBridgeClient.owner_audit_*`
+methods. `tests/unit/team_bridge/test_owner_audit_isolation.py` enforces this
+in three ways:
+- statically: only the client, these routes and the contract module may name the
+  surface, including the hyphenated route path;
+- at the client: every hub request on `/agents/owned` outside the four methods is
+  refused before dispatch, whatever spelling built the path;
+- behaviourally: every tool op runs without one audit request.
+
+The agent's own admitted-only read is unchanged.
+
+**No desktop bearer for model-run code.** The routes are gated by the desktop
+plane's bearer (`LOCAL_OPERATOR_DESKTOP_TOKEN`), so model-run code must not be
+able to obtain it. Measured reaches, and what closes each one:
+
+| Reach | Closed by |
+| --- | --- |
+| `bash`, `eval` (Python kernel) and their descendants inherit it from the session runtime's environment | withheld by name from every model child in BOTH `shell_environment` modes (`tools/shell_env.HARNESS_PLANE_CREDENTIALS`) |
+| `ps eww $PPID` (Darwin) or `/proc/$PPID/environ` (Linux) on the session runtime | the runtime is launched without it (`session/runtime/launch.py`, `standby.py`, `mobile/daemon.py`) |
+| `ps eww <daemon pid>` on the `lop serve` daemon | the daemon takes it out of its environment at boot and overwrites the original bytes (`server/desktop.capture_launch_token`); the plane is governed from the captured value |
+| a `--reload` successor | re-supplied only to that exec, then captured again |
+| the serve record (`run/serve/<pid>.json`) | an app-spawned daemon publishes `claim_key: ""`; a claimed daemon's key is spent by the claim |
+| argv / inherited fds | never carried there |
+
+**What this does NOT protect against.** Model-run code runs as the operator's
+uid. This is not a boundary against same-uid code that goes looking:
+- **Darwin:** the desktop app persists the bearer in a `0600` `desktop-token`
+  file in its Application Support directory, so a same-uid process can read it.
+- **Both platforms:** a same-uid process can read the Radient OAuth row in
+  `auth.db` and call the hub's owner-audit routes directly, with no desktop
+  bearer at all. It can also read process memory or the keychain.
+- **Window:** the launch-environment window before the daemon's capture runs
+  (milliseconds at boot) is the same one the app's own spawn opens.
+
+Closing those needs a different uid or a sandbox for model commands; the
+confined (benchmark) mode's seatbelt profile is that sandbox. The guarantee
+here is that no harness path HANDS the bearer to the model, and that no
+ambient read of the model's own or its parents' environment yields it.
 
 Nothing is persisted: no bridge-store write, no body cache, no read marker.
 The renderer's in-memory query cache is the only copy, and it is cleared on an

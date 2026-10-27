@@ -61,6 +61,8 @@ shared settings writer, watcher or timer. See docs/design/team-bridge-identity-m
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import enum
 import hashlib
 import json
@@ -633,10 +635,54 @@ ATTACHMENT_MIME_TYPES = ("image/png", "image/jpeg")
 #: predicate (contract v2 m2); the agent's own fetch stays images-only.
 OWNER_AUDIT_FILE_MIME = "application/octet-stream"
 OWNER_AUDIT_ATTACHMENT_MIME_TYPES = (*ATTACHMENT_MIME_TYPES, OWNER_AUDIT_FILE_MIME)
+#: The hub's owner-audit route family (agent-server #221). ONE spelling, used
+#: by the four ``owner_audit_*`` methods and by the gate below and nowhere else.
+_OWNER_AUDIT_HUB_PATH = "/messaging/agents/owned/conversations"
+OWNER_AUDIT_SCOPE_SENTENCE = (  # i18n: ignore local guard; a code path, never shown to a person
+    "The owner audit is readable only through the desktop owner-audit routes."
+)
+#: Set ONLY while an ``owner_audit_*`` method is dispatching (see
+#: :func:`_owner_audit_scope`). The audit serves bodies the agent's screening
+#: rejected, so a request on that path from ANY other caller — a new method on
+#: this class, ``_send`` with a hand-built or concatenated path, a ``getattr``
+#: with a computed name reaching something else — is refused before a byte
+#: moves (#3022 R1-1). A static scan cannot see a built string; this can.
+_OWNER_AUDIT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "team_bridge_owner_audit_scope", default=False
+)
+
+
+@contextlib.contextmanager
+def _owner_audit_scope() -> Any:
+    token = _OWNER_AUDIT_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _OWNER_AUDIT_SCOPE.reset(token)
+
+
+def _refuse_unscoped_owner_audit(path: str) -> None:
+    """Refuse a hub request on the owner-audit family outside its four methods.
+
+    Matched after collapsing slashes and case, so ``//messaging/Agents/owned``
+    is the same path to this check as it is to a lenient router.
+    """
+
+    normalized = re.sub(r"/+", "/", path).lower()
+    if "/agents/owned" in normalized and not _OWNER_AUDIT_SCOPE.get():
+        raise BridgeRefusal(
+            "owner_audit_not_in_scope",
+            OWNER_AUDIT_SCOPE_SENTENCE,
+            http_status=403,
+        )
+
+
 #: The hub's largest generic-file class cap (agent-server
 #: ``BridgeFileContainerMaxBytes``/``BridgeFileOtherMaxBytes``, 25 MiB). The
-#: audit read is bounded at the largest thing the hub can legitimately hold,
-#: so an oversized answer is cut off mid-stream rather than buffered.
+#: audit read is STREAMED with this bound, so an oversized answer is refused
+#: once it passes the cap rather than read to the end; a legitimate file is
+#: then held in daemon memory (up to this size, never on disk) and handed to the
+#: route as one body (#3022 R1-3).
 OWNER_AUDIT_FILE_MAX_BYTES = 25 * 1024 * 1024
 #: The two attachment fetch purposes (manager decision D1). ``screen`` is the
 #: pre-admission classification read whose bytes go ONLY to the isolated
@@ -1126,7 +1172,12 @@ class TeamBridgeClient:
         identity_response_only: bool = False,
         if_none_match: str | None = None,
         timeout: float = REQUEST_TIMEOUT_S,
+        accept: str | None = None,
     ) -> httpx.Response:
+        # Every hub request in this class ends here, so the owner-audit path
+        # gate lives here: no caller can reach `/agents/owned` by spelling the
+        # path itself (#3022 R1-1).
+        _refuse_unscoped_owner_audit(path)
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
         # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
@@ -1146,7 +1197,10 @@ class TeamBridgeClient:
                 # ``max_response_bytes + chunk`` bytes instead of being
                 # buffered whole. The capped body is rebuilt into an ordinary
                 # Response so refusal mapping stays the one shared path.
-                headers["Accept"] = "image/png, image/jpeg, application/json"
+                # ``accept`` names the bounded read's own success types: the
+                # owner-audit byte read also accepts the hub's generic-file type,
+                # which a negotiating hop would otherwise answer 406 (#3022 R1-2).
+                headers["Accept"] = accept or "image/png, image/jpeg, application/json"
                 # identity (review R1-03): ``aiter_bytes`` yields DECODED bytes,
                 # and the rebuilt Response below would decode a gzip
                 # Content-Encoding a second time (a DecodingError surfacing as
@@ -1264,6 +1318,7 @@ class TeamBridgeClient:
         content: bytes | None = None,
         max_response_bytes: int | None = None,
         expected_account_id: str | None = None,
+        accept: str | None = None,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -1289,6 +1344,7 @@ class TeamBridgeClient:
                 body=body,
                 content=content,
                 max_response_bytes=max_response_bytes,
+                accept=accept,
             )
         except httpx.HTTPError as failure:
             raise BridgeUnreachable() from failure
@@ -1303,6 +1359,7 @@ class TeamBridgeClient:
                     body=body,
                     content=content,
                     max_response_bytes=max_response_bytes,
+                    accept=accept,
                 )
             except httpx.HTTPError as failure:
                 raise BridgeUnreachable() from failure
@@ -2574,12 +2631,13 @@ class TeamBridgeClient:
             params["limit"] = int(limit)
         if cursor:
             params["cursor"] = cursor
-        return await self._send(
-            "GET",
-            "/messaging/agents/owned/conversations",
-            params=params or None,
-            expected_account_id=expected_account_id,
-        )
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                _OWNER_AUDIT_HUB_PATH,
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
 
     async def owner_audit_messages(
         self,
@@ -2608,12 +2666,13 @@ class TeamBridgeClient:
             params["before_seq"] = int(before_seq)
         if after_seq is not None:
             params["after_seq"] = int(after_seq)
-        return await self._send(
-            "GET",
-            f"/messaging/agents/owned/conversations/{conversation_id}/messages",
-            params=params or None,
-            expected_account_id=expected_account_id,
-        )
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages",
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
 
     async def owner_audit_replies(
         self,
@@ -2637,13 +2696,13 @@ class TeamBridgeClient:
             params["limit"] = int(limit)
         if after_seq is not None:
             params["after_seq"] = int(after_seq)
-        return await self._send(
-            "GET",
-            f"/messaging/agents/owned/conversations/{conversation_id}/messages/{message_id}"
-            "/replies",
-            params=params or None,
-            expected_account_id=expected_account_id,
-        )
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages/{message_id}/replies",
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
 
     async def owner_audit_attachment(
         self,
@@ -2667,14 +2726,16 @@ class TeamBridgeClient:
 
         _require_attachment_id(attachment_id)
         params = {"tenant_id": tenant_id} if tenant_id else None
-        response = await self._authorized(
-            "GET",
-            f"/messaging/agents/owned/conversations/{conversation_id}/messages/{message_id}"
-            f"/attachments/{attachment_id}",
-            params=params,
-            max_response_bytes=OWNER_AUDIT_FILE_MAX_BYTES,
-            expected_account_id=expected_account_id,
-        )
+        with _owner_audit_scope():
+            response = await self._authorized(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages/{message_id}"
+                f"/attachments/{attachment_id}",
+                params=params,
+                max_response_bytes=OWNER_AUDIT_FILE_MAX_BYTES,
+                expected_account_id=expected_account_id,
+                accept=f"image/png, image/jpeg, {OWNER_AUDIT_FILE_MIME}, application/json",
+            )
         if response.status_code >= 400:
             raise _refusal(response)
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()

@@ -192,6 +192,7 @@ def proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
             calls.append((self.command, self.path))
+            state.setdefault("accept", []).append(self.headers.get("accept"))
             if state["error"]:
                 code, error = state["error"]
                 out = json.dumps({"code": error, "error": "Conversation not found"}).encode()
@@ -307,6 +308,17 @@ def test_a_generic_file_is_served_as_a_download_never_inline(proxy):
     assert response.headers["content-security-policy"] == "default-src 'none'; sandbox"
     assert response.headers["cache-control"] == "private, no-store"
     assert calls == [("GET", f"{HUB}/{CID}/messages/{MID}/attachments/{AID}?tenant_id=org-a")]
+
+
+def test_the_attachment_read_accepts_the_generic_file_type(proxy):
+    """#3022 R1-2: the byte read must ACCEPT what it expects, or a negotiating
+    hop 406s every file. The member image read keeps its image-only Accept."""
+
+    client, _calls, state, _ = proxy
+    assert client.get(f"{BASE}/{CID}/messages/{MID}/attachments/{AID}" + _q()).status_code == 200
+    accept = state["accept"][-1]
+    assert "application/octet-stream" in accept and "image/png" in accept
+    assert "image/jpeg" in accept
 
 
 def test_an_image_is_served_inline_with_its_type(proxy):

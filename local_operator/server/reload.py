@@ -697,7 +697,17 @@ def _exec(plan: ReloadPlan) -> None:
         str(fd),
     ]
     try:
-        os.execve(str(plan.interpreter), argv, dict(os.environ))
+        # The desktop capability was captured OUT of ``os.environ`` at boot
+        # (``server.desktop.capture_launch_token``) so no child inherits it; the
+        # successor must keep governing the plane with the SAME bearer the app
+        # holds (the UI's re-anchor relies on it), so it is re-supplied here and
+        # the successor captures it again on its own boot.
+        successor_env = dict(os.environ)
+        from local_operator.server.desktop import TOKEN_ENV, launch_token_for_successor
+
+        if launch_token_for_successor():
+            successor_env[TOKEN_ENV] = launch_token_for_successor()
+        os.execve(str(plan.interpreter), argv, successor_env)
     finally:
         # Reached only when the exec FAILED — a successful one never returns.
         # Both restorations run even if the first raises (serve-reload review round 2, R2-7):

@@ -442,7 +442,15 @@ def _spawn_runtime(
     the next caller, and a window bought by a deferral nobody engaged for is
     exactly the leak the scrub below exists to prevent (review round 1, M4).
     """
-    env = dict(os.environ)
+    # The runtime hosts the model's tools, and its children read THIS launch
+    # environment with `ps eww $PPID` whatever their own says, so the desktop
+    # plane's bearer must never be in it (PR #3022 QA round 1, Q1). The runtime
+    # does not need it: it talks to the daemon over the session socket.
+    # Lazy: ``shell_env`` pulls the config stack, which these spawn modules keep
+    # off their import path (the standby warmer imports them before any config).
+    from local_operator.tools.shell_env import withhold_harness_plane
+
+    env = withhold_harness_plane(dict(os.environ))
     env["LOP_MOBILE_CHILD_CWD"] = cwd
     env["LOP_MOBILE_CHILD_RESUME"] = session_id
     # A viewer's birth sample seeds only a new conversation. It is NOT a

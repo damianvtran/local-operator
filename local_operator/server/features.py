@@ -404,9 +404,12 @@ def static_feature_flags() -> dict[str, Any]:
         # `agent_delivery_status`. Its own key by the `radient_org` rule: a
         # renderer that does not see it hides the section rather than mounting
         # one whose every call 404s. 1 is the shape version
-        # (`server/models/desktop_team_bridge_owner_audit.py`). A hub without
-        # #221 answers 404 through these routes, which the renderer treats as
-        # "not available here".
+        # (`server/models/desktop_team_bridge_owner_audit.py`). The renderer
+        # keys the section's AVAILABILITY on this capability, never on a 404:
+        # `conversation_not_found` is also what a non-owner or an out-of-window
+        # conversation answers, so treating a 404 as "no audit here" would hide
+        # the section over one conversation (#3022 R1-N2). A hub that predates
+        # #221 is detected on the LIST route only (its 404 there).
         "team_bridge_owner_audit": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a

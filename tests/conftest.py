@@ -1141,6 +1141,24 @@ def reset_store_maintenance() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def reset_desktop_launch_capture() -> Iterator[None]:
+    """Give every test a process whose desktop bearer has not been captured.
+
+    ``lop serve`` takes ``LOCAL_OPERATOR_DESKTOP_TOKEN`` out of the environment
+    once per process (``server.desktop.capture_launch_token``) and latches the
+    value; ``tests/unit/test_cli_serve.py`` runs ``serve_command`` in-process,
+    so without this a later test's ``monkeypatch.setenv`` of the token would be
+    ignored in favour of an earlier test's latched value (or its absence).
+    """
+
+    from local_operator.server import desktop
+
+    desktop._LAUNCH_TOKEN = None
+    yield
+    desktop._LAUNCH_TOKEN = None
+
+
+@pytest.fixture(autouse=True)
 def reset_page_cache_between_tests() -> Iterator[None]:
     """Give every test a worker that has served no transcript page yet.
 

@@ -66,7 +66,17 @@ AUDIT_METHODS = (
 #: helpers' prefix; the bare capability key ``team_bridge_owner_audit`` in
 #: ``server/features.py`` is metadata the renderer reads, not a reach, and does
 #: not match it.
-AUDIT_MARKERS = ("owner_audit_", "agents/owned", "desktop_team_bridge_owner_audit")
+#: ``owner-audit`` / ``owner_audit/`` catch the DESKTOP route path spelled in
+#: code (an agent calling its own daemon's route), and ``owned/conversations``
+#: a hub path concatenated from halves (#3022 R1-1). A path built from smaller
+#: pieces still is what the client-side gate below exists for.
+AUDIT_MARKERS = (
+    "owner_audit_",
+    "owner-audit",
+    "agents/owned",
+    "owned/conversations",
+    "desktop_team_bridge_owner_audit",
+)
 
 
 def _references(tree: ast.AST) -> list[str]:
@@ -277,3 +287,63 @@ def test_the_tripwire_fires_on_an_audit_method(tmp_path: Path) -> None:
     client = TrippedClient(tmp_path, base_url="https://hub.example/v1", store=FakeStore())
     getattr(client, "owner_audit_messages")
     assert client.tripped == ["owner_audit_messages"]
+
+
+# -- runtime gate (#3022 R1-1) ------------------------------------------------
+#
+# The static scan sees names and literals; it cannot see
+# ``getattr(client, "owner" + "_audit_messages")`` or
+# ``_send("GET", "/messaging/agents/" + "owned/conversations")``. The client
+# therefore refuses ANY hub request on the owner-audit family that is not made
+# from inside one of its four methods, at the one dispatch every request uses.
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/messaging/agents/" + "owned/conversations",
+        "/messaging/agents/owned/conversations/bcv_abcd1234/messages",
+        "//messaging//Agents/Owned/conversations",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_built_audit_path_is_refused_before_any_request(tmp_path: Path, path: str) -> None:
+    requests: list[httpx.Request] = []
+    client = TeamBridgeClient(
+        tmp_path,
+        base_url="https://hub.example/v1",
+        store=FakeStore(),
+        transport=httpx.MockTransport(lambda r: (requests.append(r), _hub_answer(r))[1]),
+    )
+    with pytest.raises(tb_client.BridgeRefusal) as refused:
+        await client._send("GET", path)
+    assert refused.value.code == "owner_audit_not_in_scope"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_the_audit_methods_themselves_still_dispatch(tmp_path: Path) -> None:
+    """Positive control: the gate admits the four methods (and only by scope)."""
+
+    requests: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200, json={"msg": "ok", "result": {"messages": [], "has_more": False}}
+        )
+
+    client = TeamBridgeClient(
+        tmp_path,
+        base_url="https://hub.example/v1",
+        store=FakeStore(),
+        transport=httpx.MockTransport(answer),
+    )
+    dynamic = getattr(client, "owner" + "_audit" + "_messages")
+    await dynamic(CID, expected_account_id="acc_1")
+    assert [r.url.path for r in requests] == [
+        f"/v1/messaging/agents/owned/conversations/{CID}/messages"
+    ]
+    # The scope does not leak past the call: the same client, a raw path, refused.
+    with pytest.raises(tb_client.BridgeRefusal):
+        await client._send("GET", f"/messaging/agents/owned/conversations/{CID}/messages")

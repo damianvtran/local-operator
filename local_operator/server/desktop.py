@@ -149,6 +149,83 @@ def _parse_origins(raw: str) -> frozenset[str]:
     )
 
 
+#: The env capability as this process LAUNCHED with it, once
+#: :func:`capture_launch_token` has taken it out of the environment. ``None``
+#: means "not captured" (tests, in-process hosts), and the environment is read
+#: as before.
+_LAUNCH_TOKEN: str | None = None
+
+
+def _overwrite_environ_bytes(name: str) -> None:
+    """Overwrite ``name``'s VALUE bytes in the C ``environ`` block, best effort.
+
+    Why the bytes and not just ``os.environ``: ``ps eww <pid>`` (Darwin's
+    ``KERN_PROCARGS2``) and ``/proc/<pid>/environ`` (Linux) report the
+    environment a process was STARTED with, read from its memory, so unsetting
+    the name leaves the value readable by any same-uid process — measured on
+    Darwin for a non-platform binary (PR #3022 QA round 1, Q1), which is what
+    the daemon is. Overwriting the original string in place is what those
+    readers then see (measured: the value reads back as ``x``s). Must run BEFORE
+    ``unsetenv``, which drops the pointer this walks. Any failure is swallowed:
+    the in-process capture still holds, and this is defence for the ambient
+    read, not the authorization.
+    """
+
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        environ = ctypes.POINTER(ctypes.c_char_p).in_dll(libc, "environ")
+        addresses = ctypes.cast(environ, ctypes.POINTER(ctypes.c_void_p))
+        prefix = f"{name}=".encode()
+        index = 0
+        while environ[index]:
+            entry = environ[index]
+            if entry.startswith(prefix) and len(entry) > len(prefix):
+                address = addresses[index]
+                if address:
+                    ctypes.memset(address + len(prefix), ord("x"), len(entry) - len(prefix))
+            index += 1
+    except Exception:  # noqa: BLE001 - best effort; never fail the daemon's boot
+        return
+
+
+def capture_launch_token() -> None:
+    """Take the desktop capability out of this daemon's environment, keep it here.
+
+    Called once at ``lop serve`` start, before any child exists. Afterwards:
+
+    * :func:`desktop_posture` answers from the captured value, so the plane is
+      governed exactly as before;
+    * every child the daemon spawns (``dict(os.environ)`` is the norm here)
+      starts without it, so a model's tools never inherit it — the runtime and
+      tool spawn sites also withhold it by name
+      (``tools.shell_env.HARNESS_PLANE_CREDENTIALS``) as the second layer;
+    * ``ps eww``/``/proc/<pid>/environ`` on the daemon show the overwritten
+      bytes, not the bearer.
+
+    A ``--reload`` successor needs the same bearer (the desktop app keeps using
+    it, see ``server/reload.py``), so the reload exec re-supplies it from
+    :func:`launch_token_for_successor` and the successor captures it again on
+    boot. The window between an exec and that capture is the same one the
+    app's own spawn opens; it is stated in ``docs/team-bridge-owner-audit.md``.
+    """
+
+    global _LAUNCH_TOKEN
+    if _LAUNCH_TOKEN is not None:
+        return
+    _LAUNCH_TOKEN = os.environ.get(TOKEN_ENV, "")
+    if _LAUNCH_TOKEN:
+        _overwrite_environ_bytes(TOKEN_ENV)
+    os.environ.pop(TOKEN_ENV, None)
+
+
+def launch_token_for_successor() -> str:
+    """The captured capability for a reload exec's environment ("" when none)."""
+
+    return _LAUNCH_TOKEN or ""
+
+
 def desktop_posture() -> DesktopPosture:
     """The bearer and Origin allowlist governing the desktop plane RIGHT NOW.
 
@@ -165,7 +242,7 @@ def desktop_posture() -> DesktopPosture:
     silently installed beside it. Otherwise an accepted claim governs, and the
     env origins (if any) stay in force alongside the claimed origin.
     """
-    env_token = os.environ.get(TOKEN_ENV, "")
+    env_token = _LAUNCH_TOKEN if _LAUNCH_TOKEN is not None else os.environ.get(TOKEN_ENV, "")
     env_origins = _parse_origins(os.environ.get(ORIGINS_ENV, ""))
     if env_token:
         return DesktopPosture(token=env_token, origins=env_origins)

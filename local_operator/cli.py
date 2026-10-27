@@ -11367,6 +11367,17 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
     if not _serve_bind_is_loopback_only(host):
         return _refuse_non_loopback_bind(host, port)
 
+    # THE DESKTOP BEARER LEAVES THE ENVIRONMENT before anything is spawned, so
+    # no session runtime and no model command can inherit it or read it back
+    # out of this process with `ps eww` (PR #3022 QA round 1, Q1; see
+    # ``server.desktop.capture_launch_token``). NOT under ``--reload``: uvicorn's
+    # reloader re-imports the app in a CHILD that reads the plane from its own
+    # environment, and that development mode is not a desktop-spawned daemon.
+    if not reload:
+        from local_operator.server.desktop import capture_launch_token
+
+        capture_launch_token()
+
     # A DAEMON IS A HOSTING PLANE, NOT A CHAT AN AGENT OPENED. This process is
     # about to become the ``lop serve`` daemon the operator's front ends (the
     # desktop app's backend, the phone relay's child, the TUI server) talk to,
