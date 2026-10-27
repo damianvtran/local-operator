@@ -646,6 +646,38 @@ def _mcp_row_exists(store: Any | None, url: str) -> bool | None:
         return None
 
 
+def mcp_server_login_here(server: Mapping[str, Any]) -> bool | None:
+    """Whether a peer's MCP fact row holds a login its runtime would USE.
+
+    ``has_row`` is any credential row, and the MCP SDK writes one (``client_info``
+    only) the moment it DISCOVERS a server — long before anyone signs in. The
+    runtime does not count that row, or a tombstoned one, as a local grant
+    (``mcp.auth.server_has_stored_grant``): a session there borrows the share.
+    Readiness, the shareability ledger and the offer builder must answer the SAME
+    question, or a non-technical operator is told to "sign in again on <node>" — a
+    headless node — for a server that already works there (F-READY-1).
+
+    Three-valued like ``has_row``: ``None`` = the store could not be read. A node
+    new enough to export ``usable_grant`` is taken at its word. An older node
+    (``v0.90.14`` already exports both fields read here) never sent it, so a row
+    with NEITHER an access token NOR a refresh token is read as no login: that is
+    exactly the registration-only shape, and every real login carries one of them.
+    """
+    has_row = server.get("has_row")
+    if has_row is not True:
+        return has_row if has_row in (False, None) else None
+    diagnostics = server.get("auth_diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        return True
+    usable = diagnostics.get("usable_grant")
+    if isinstance(usable, bool):
+        return usable
+    return not (
+        diagnostics.get("access_state") == "absent"
+        and diagnostics.get("refresh_presence") == "absent"
+    )
+
+
 def mcp_login_remedy(url: str) -> str:
     """The ONE spelling of the "sign in here first" clause for an MCP server URL.
 
@@ -2425,8 +2457,16 @@ def mcp_credential_rows(
         # existing login keeps the login copy: literal handling must not hide a
         # separate OAuth failure.
         literal_only = bool(literals) and not server.get("refs")
+        # A HEADER-REFERENCE SERVER IS NOT A LOGIN CASE EITHER. Slack's shape is an
+        # http server whose Authorization header names ``${SLACK_TOKEN}``, with no
+        # auth block and no login row; its readiness question is "does the peer
+        # resolve that name", which the ref row answers from the peer's own facts.
+        # Through the login path it read the viewer's (often WAL-locked, read-only)
+        # auth.db and reported "unknown" for a credential no login could supply.
         if transport not in ("http", "sse") or (
-            literal_only and server.get("has_row") is not True and not server.get("auth_declared")
+            (literal_only or server.get("refs"))
+            and mcp_server_login_here(server) is not True
+            and not server.get("auth_declared")
         ):
             row = _mcp_ref_row(
                 member,
@@ -2580,7 +2620,10 @@ def _mcp_credential_row(
     viewer: Viewer,
     peer_label: str,
 ) -> dict[str, Any]:
-    has_row = server.get("has_row")
+    # A row without a grant the runtime would use is NO row: the runtime goes
+    # straight to the borrow, so the verdict must reach the holder/borrow branch
+    # below instead of telling the operator to sign in on this peer.
+    has_row = mcp_server_login_here(server)
     diagnostics = server.get("auth_diagnostics")
     local_unavailable = (
         isinstance(diagnostics, Mapping)

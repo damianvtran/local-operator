@@ -1918,7 +1918,10 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
             # No URL, no login to hold and nothing to share: a row here would render
             # a remedy naming an empty command.
             continue
-        login_here = server.get("has_row")  # True | False | None (store unreadable)
+        # True | False | None (store unreadable). A registration-only or tombstoned
+        # row is NOT a login here: the runtime would borrow, so offering
+        # "login held — share" would promise a share this device cannot serve.
+        login_here = readiness_mod.mcp_server_login_here(server)
         shared_with: list[dict[str, str]] = []
         found = placement_mod.placement_entries_for(mcp_url=url, root=_config_dir())
         if found is not None:

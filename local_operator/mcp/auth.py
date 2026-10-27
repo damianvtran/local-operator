@@ -1995,6 +1995,24 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
     except Exception:  # noqa: BLE001 — the store is best-effort here
         logger.debug("stored-grant lookup failed for %s", server_url, exc_info=True)
         return False
+    return payload_has_usable_grant(payload if isinstance(payload, dict) else None)
+
+
+def payload_has_usable_grant(payload: dict[str, Any] | None) -> bool:
+    """Whether a row payload holds a grant the runtime would USE before borrowing.
+
+    THE ONE RULE behind :func:`server_has_stored_grant` and the value-free
+    ``usable_grant`` boolean :func:`mcp_grant_diagnostics` exports to readiness.
+    Readiness must answer the same question the runtime does: when it counted any
+    row as a login, a registration-only row (the ``client_info`` the SDK writes on
+    first discovery) told a non-technical operator to "sign in again on <node>"
+    while that node's sessions were quietly borrowing a working share (F-READY-1).
+    Two copies of this test are how the two answers drift apart again.
+
+    Deliberately NOT the diagnostics' wider ``fenced`` test: a live
+    unconfirmed-send marker does not stop the runtime choosing the local grant,
+    so it must not stop readiness from calling the row local either.
+    """
     if not isinstance(payload, dict) or not payload_carries_grant(payload):
         return False
     # A ROW IS NOT A USABLE CREDENTIAL (real-node QA). A registration-only row,
@@ -2056,6 +2074,10 @@ def mcp_grant_diagnostics(
     """
     unknown: dict[str, Any] = {
         "has_row": None,
+        # ``has_row`` is ANY row (registration included); ``usable_grant`` is the
+        # runtime's own answer (:func:`payload_has_usable_grant`). Readiness reads
+        # the latter so it never sends an operator to repair a login nobody holds.
+        "usable_grant": None,
         "provenance": "unknown",
         "identity_verified": False,
         "identity_state": "scope_unknown",
@@ -2134,6 +2156,7 @@ def mcp_grant_diagnostics(
     return {
         **unknown,
         "has_row": row is not None,
+        "usable_grant": row is not None and payload_has_usable_grant(data),
         "provenance": provenance,
         "sharing_mode": (
             "finite_only"

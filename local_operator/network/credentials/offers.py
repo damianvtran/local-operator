@@ -494,10 +494,12 @@ def enumerate_candidates(config: Path, *, network_id: str = "") -> list[dict[str
         if server.get("transport") not in ("http", "sse"):
             continue
         url = str(server.get("url") or "")
-        if not url or server.get("has_row") is not True:
+        if not url or readiness_mod.mcp_server_login_here(server) is not True:
             # No URL, no login to hold and nothing to serve — and a read that
             # cannot open the store reports ``has_row: None``, which must NOT
-            # read as "serve it anyway".
+            # read as "serve it anyway". A registration-only or tombstoned row is
+            # no login either: the runtime here would itself borrow, so offering
+            # an mcp-rotating item would advertise a grant this device cannot mint.
             continue
         rows.append(
             {
