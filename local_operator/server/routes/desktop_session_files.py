@@ -29,6 +29,11 @@ for pull requests - and this module copies that route's stance:
   absolute paths from its transcript; a mesh or phone surface must NOT reuse this route's
   projection - it calls the service with ``display=True``.
 
+A third, independent route lives here because it shares this module's stance (journal on
+disk, no bridge, same admission): ``GET /v1/desktop/sessions/{session_id}/user-attachments``,
+the files and pictures the PERSON attached (``session/user_attachments.py``), gated by its own
+key ``features.session_attachments``.
+
 Capability: ``features.session_files == 1`` (``server/features.py``). Absent means the surface
 does not exist; the renderer keeps its own scan and must not call the route.
 """
@@ -50,10 +55,12 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_session_files import (
     FilesListing,
     MaterialiseReceipt,
+    UserAttachmentsListing,
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import errors, host, reply
 from local_operator.server.utils.desktop_sessions import contained_descendants
+from local_operator.session import compression, user_attachments
 from local_operator.session_files import ledger, service
 
 logger = logging.getLogger(__name__)
@@ -291,3 +298,36 @@ _MATERIALISE_REFUSALS = {
     "artifact_missing": (410, _wd.session_files_artifact_missing()),
     "unsafe_destination": (409, _wd.session_files_materialise_failed(reason="unsafe destination")),
 }
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/user-attachments",
+    response_model=CRUDResponse[UserAttachmentsListing],
+)
+async def list_user_attachments(session_id: SessionID, request: Request):
+    """Every document and picture the user attached to this conversation, oldest first.
+
+    WHY A ROUTE: the renderer pages history lazily from the newest row, so an attachment from
+    the first turn of a long conversation is not in memory when the canvas opens; only the
+    journal has the complete list. Metadata only - bytes stay on ``…/attachments/{digest}``.
+
+    Same admission as the file index (``files_target``): unknown id 404, silent peer 409; a
+    DRAFT has no journal and answers an empty ``ready`` list; a PEER's conversation answers
+    ``state: "unsupported"``. An archive this host cannot decode answers
+    ``state: "unavailable"`` (never an empty ``ready``, which would read as "nothing
+    attached"). No ``scope``: a subagent's inputs were written by its parent, not the person.
+
+    Capability: ``features.session_attachments == 1``.
+    """
+    async with errors(request):
+        kind_of_target, directory = await host(request).files_target(session_id)
+    if kind_of_target == "peer":
+        return reply(UserAttachmentsListing(state="unsupported"))
+    if directory is None:
+        return reply(UserAttachmentsListing())
+    try:
+        listing = await asyncio.to_thread(user_attachments.list_user_attachments, directory)
+    except compression.ArchiveError:
+        logger.info("user-attachments: undecodable archive for %s", session_id, exc_info=True)
+        return reply(UserAttachmentsListing(state="unavailable"))
+    return reply(UserAttachmentsListing(state="ready", **listing))

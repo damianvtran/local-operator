@@ -765,6 +765,7 @@ readings.
 | GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1`, `open_frame=1` | snapshot frame below (**read envelope**); both flags also apply to the page embedded in `payload.history` (`open_frame=1` = §"The open frame") |
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1`, `open_frame=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
 | GET `.../{id}/files` | optional `scope=family\|self`, `kind`, `origin`, `highlighted=0\|1`, `q`, `sort=recent\|name\|kind\|modified\|created\|size`, `order=asc\|desc`, `limit` 1..200 (default 100), `cursor` | `{state,revision,scope,sort,order,total,counts,rows,next_cursor,cursor_reset,stat_complete,scan}` — the per-session file index (`session_files`); see §"The per-session file index" |
+| GET `.../{id}/user-attachments` | — | `{state:ready\|unsupported\|unavailable,items,truncated}` — every document and picture the USER attached, oldest first, metadata only (`session_attachments`); see §"The user-attachment inventory" |
 | POST `.../{id}/files/{file_id}/materialise` | — | `{path,name,size_bytes,created}`; copies a digest-only artifact to `<session scratchpad>/generated/` (`session_files`) |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
@@ -2398,6 +2399,27 @@ already holds them. The service takes `display=True` for any surface that leaves
 that blanks `content`. Older sessions backfill from the `AttachmentContent` blocks in
 `content` while those are unpruned; an old row that was already pruned is the one thing the
 index cannot recover.
+
+### The user-attachment inventory (`session_attachments: 1`)
+
+`GET /v1/desktop/sessions/{id}/user-attachments` answers *which files and pictures did the
+person attach to this conversation?* A renderer cannot answer that from loaded history: pages
+arrive newest-first on demand, so a PDF from the first turn of a long conversation is not in
+memory when the canvas opens, and listing only the loaded rows would claim "nothing attached".
+The route scans the whole journal (`local_operator/session/user_attachments.py`).
+
+Each item: `{message_id, ts, index, kind: document|image, attachment, filename, mime_type,
+bytes, path, stored_path, stored, injection}`. `index` is the block's position in its
+message's `content`; `attachment` is the store digest (`null` when the row's inline bytes are
+not in the store); `path` is the ORIGIN path (may be gone), `stored_path`/`stored` the retained
+store copy and whether it is on disk now. **Metadata only:** bytes stay on
+`…/attachments/{digest}`; there is no second transport. User rows only, and never a
+harness-injected row (`provider_payload.harness_injected`).
+
+States: `ready` (complete), `unsupported` (a peer's conversation), `unavailable` (an archive
+this host cannot decode). `truncated: true` past 2000 items. Admission is the file index's
+(404 unknown id, 409 silent peer, empty `ready` for a draft). Absent key: the renderer
+aggregates loaded rows and must not call the route.
 
 ### Verification
 

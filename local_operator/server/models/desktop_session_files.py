@@ -151,3 +151,47 @@ __all__ = [
     "FilesScan",
     "MaterialiseReceipt",
 ]
+
+
+class UserAttachment(BaseModel):
+    """One file or picture the USER attached to the conversation (``…/attachments`` list route).
+
+    Metadata only: the bytes are served by the existing digest route
+    (``…/attachments/{attachment}``), never inlined here. ``attachment`` is ``None`` when the row
+    carried inline bytes the store does not hold. ``path`` is the ORIGIN path the client had (a
+    Finder drag, a picked file) and may no longer exist; ``stored_path`` is the retained store
+    copy and ``stored`` whether that copy is on disk right now, so a surface can say "moved, but
+    still retained" versus "both gone" without fetching anything.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    message_id: str
+    ts: float = 0.0
+    #: Position of the block in its message's ``content`` (stable across reloads).
+    index: int = 0
+    kind: Literal["document", "image"]
+    attachment: str | None = None
+    filename: str | None = None
+    mime_type: str = "application/octet-stream"
+    bytes: int | None = None
+    path: str | None = None
+    stored_path: str | None = None
+    stored: bool = False
+    injection: Literal["native", "extracted", "reference"] | None = None
+
+
+class UserAttachmentsListing(BaseModel):
+    """``data`` of ``GET /v1/desktop/sessions/{id}/user-attachments``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    #: ``ready`` (the whole journal was read); ``unsupported`` (a peer's conversation: the
+    #: journal is not on this disk); ``unavailable`` (a compressed journal this host cannot
+    #: decode right now). On either non-ready state the client keeps its loaded-row aggregation
+    #: and must not present it as the complete list.
+    state: Literal["ready", "unsupported", "unavailable"] = "ready"
+    #: Oldest first (send order).
+    items: list[UserAttachment] = Field(default_factory=list)
+    #: ``True`` when the list stopped at the service cap; never present a truncated list as all.
+    truncated: bool = False
