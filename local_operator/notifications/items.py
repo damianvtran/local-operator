@@ -81,7 +81,12 @@ def _ask_dismissible(row: Mapping[str, Any]) -> bool:
         return False
 
 
-def _first_question(row: Mapping[str, Any]) -> str:
+def first_question(row: Mapping[str, Any]) -> str:
+    """An ask record's first question text — the ONE reader every surface uses.
+
+    Public because the TUI detail reads the same raw ask records the reel row
+    is built from, and a second reader would be a second guess at the shape.
+    """
     for question in row.get("questions") or ():
         if isinstance(question, Mapping):
             text = str(question.get("question") or question.get("header") or "").strip()
@@ -246,8 +251,8 @@ def ask_item(
         "id": ref,
         "source": "ask",
         "priority": ASK_PRIORITY,
-        "title": excerpt(_first_question(row), 120),
-        "excerpt": excerpt(_first_question(row)),
+        "title": excerpt(first_question(row), 120),
+        "excerpt": excerpt(first_question(row)),
         "created_at": created,
         "updated_at": created,
         "seq": int(mark.get("seq") or 0),

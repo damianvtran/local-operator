@@ -1,0 +1,187 @@
+active locale: hi (SHIPPED gate shimmed for this pass)
+PASS the pinned renderer resolves the audited hi title ('सूचनाएँ')
+
+-- row_line: exact width and the right-hand columns --
+width 40
+  PASS cells  40 | '▸ • ▁▃▅ Nightly…  उच्च                 6m'
+       time cell '6m' padded '   6m' -> 5 cells (budget 5)
+  PASS cells  40 | '    ▁▃  Deploy finis…                 3h'
+       time cell '3h' padded '   3h' -> 5 cells (budget 5)
+  PASS cells  40 | '    ▁▃  Plan updated                 अभी '
+       time cell 'अभी' padded '  अभी' -> 4 cells (budget 5)
+  PASS cells  40 | '  • ?   Which branch…                 2m'
+       time cell '2m' padded '   2m' -> 5 cells (budget 5)
+width 60
+  PASS cells  60 | '▸ • ▁▃▅ Nightly build is green again  उच्च                 6m'
+       time cell '6m' padded '   6m' -> 5 cells (budget 5)
+  PASS cells  60 | '    ▁▃  Deploy finished      ×2 लाइव देखा गया                 3h'
+       time cell '3h' padded '   3h' -> 5 cells (budget 5)
+  PASS cells  60 | '    ▁▃  Plan updated           चैट में देखा गया                अभी '
+       time cell 'अभी' padded '  अभी' -> 4 cells (budget 5)
+  PASS cells  60 | '  • ?   Which branch should I deploy?                     2m'
+       time cell '2m' padded '   2m' -> 5 cells (budget 5)
+width 76
+  PASS cells  76 | '▸ • ▁▃▅ Nightly build is green again                  उच्च                 6m'
+       time cell '6m' padded '   6m' -> 5 cells (budget 5)
+  PASS cells  76 | '    ▁▃  Deploy finished                      ×2 लाइव देखा गया                 3h'
+       time cell '3h' padded '   3h' -> 5 cells (budget 5)
+  PASS cells  76 | '    ▁▃  Plan updated                           चैट में देखा गया                अभी '
+       time cell 'अभी' padded '  अभी' -> 4 cells (budget 5)
+  PASS cells  76 | '  • ?   Which branch should I deploy?                                     2m'
+       time cell '2m' padded '   2m' -> 5 cells (budget 5)
+width 100
+  PASS cells 100 | '▸ • ▁▃▅ Nightly build is green again                                          उच्च                 6m'
+       time cell '6m' padded '   6m' -> 5 cells (budget 5)
+  PASS cells 100 | '    ▁▃  Deploy finished                                              ×2 लाइव देखा गया                 3h'
+       time cell '3h' padded '   3h' -> 5 cells (budget 5)
+  PASS cells 100 | '    ▁▃  Plan updated                                                   चैट में देखा गया                अभी '
+       time cell 'अभी' padded '  अभी' -> 4 cells (budget 5)
+  PASS cells 100 | '  • ?   Which branch should I deploy?                                                             2m'
+       time cell '2m' padded '   2m' -> 5 cells (budget 5)
+width 120
+  PASS cells 120 | '▸ • ▁▃▅ Nightly build is green again                                                              उच्च                 6m'
+       time cell '6m' padded '   6m' -> 5 cells (budget 5)
+  PASS cells 120 | '    ▁▃  Deploy finished                                                                  ×2 लाइव देखा गया                 3h'
+       time cell '3h' padded '   3h' -> 5 cells (budget 5)
+  PASS cells 120 | '    ▁▃  Plan updated                                                                       चैट में देखा गया                अभी '
+       time cell 'अभी' padded '  अभी' -> 4 cells (budget 5)
+  PASS cells 120 | '  • ?   Which branch should I deploy?                                                                                 2m'
+       time cell '2m' padded '   2m' -> 5 cells (budget 5)
+
+-- header_line: title, counts and the filter edge at real widths --
+width 40: cells  38 | ' सूचनाएँ · 4 अपठित · 2 आपके इंतज़ार में · शुरुआती 4'
+PASS header_line fits 40
+width 60: cells  60 | ' सूचनाएँ · 4 अपठित · 2 आपके इंतज़ार में · शुरुआती 4    अपठित │ अपडेट │ समय '
+PASS header_line fits 60
+width 76: cells  76 | ' सूचनाएँ · 4 अपठित · 2 आपके इंतज़ार में · शुरुआती 4            अपठित │ अपडेट │ सामान्य+ │ समय '
+PASS header_line fits 76
+width 100: cells 100 | ' सूचनाएँ · 4 अपठित · 2 आपके इंतज़ार में · शुरुआती 4                                    अपठित │ अपडेट │ सामान्य+ │ समय '
+PASS header_line fits 100
+width 120: cells 120 | ' सूचनाएँ · 4 अपठित · 2 आपके इंतज़ार में · शुरुआती 4                                                        अपठित │ अपडेट │ सामान्य+ │ समय '
+PASS header_line fits 120
+
+-- detail_text: header line, meta and sections --
+width 40:
+  1:  40 cells | ' ← सूचनाएँ         ▁▃ normal · अपडेट · 1/42 '
+  2:  16 cells | ' Deploy finished'
+  3:  45 cells | '  · 3h पहले · 18:46 से अब तक 2 अपडेट · लाइव देखा गया'
+  4:  39 cells | ' ──────────────────────────────────────'
+  5:  48 cells | ' The deploy finished and the smoke tests passed.'
+  6:   0 cells | ''
+  7:  40 cells | ' ── इस बातचीत में आपके जवाब का इंतज़ार · 1 ───────'
+  8:  24 cells | '  ?   38m में समाप्त होगा  a ↵'
+  9:   0 cells | ''
+  10:  40 cells | ' ── संबंधित प्रोजेक्ट · 1 ─────────────────────'
+  11:  13 cells | '  release-2.1'
+FAIL detail_text has no line over 40 cells (over: ['  · 3h पहले · 18:46 से अब तक 2', ' The deploy finished and the s'])
+PASS detail at 40 renders section_history ('अपडेट')
+FAIL detail at 40 renders section_links ('लिंक')
+PASS detail at 40 renders section_projects ('प्रोजेक्ट')
+PASS detail at 40 renders section_waiting_here ('इंतज़ार')
+PASS detail at 40 renders updates_since ('से अब तक')
+PASS detail at 40 renders ask_expires ('समाप्त होगा')
+width 76:
+  1:  76 cells | ' ← सूचनाएँ                                             ▁▃ normal · अपडेट · 1/42 '
+  2:  16 cells | ' Deploy finished'
+  3:  45 cells | '  · 3h पहले · 18:46 से अब तक 2 अपडेट · लाइव देखा गया'
+  4:  75 cells | ' ──────────────────────────────────────────────────────────────────────────'
+  5:  48 cells | ' The deploy finished and the smoke tests passed.'
+  6:   0 cells | ''
+  7:  76 cells | ' ── इस बातचीत में आपके जवाब का इंतज़ार · 1 ───────────────────────────────────────────'
+  8:  24 cells | '  ?   38m में समाप्त होगा  a ↵'
+  9:   0 cells | ''
+  10:  76 cells | ' ── संबंधित प्रोजेक्ट · 1 ─────────────────────────────────────────────────────────'
+  11:  13 cells | '  release-2.1'
+PASS detail_text has no line over 76 cells (over: [])
+PASS detail at 76 renders section_history ('अपडेट')
+FAIL detail at 76 renders section_links ('लिंक')
+PASS detail at 76 renders section_projects ('प्रोजेक्ट')
+PASS detail at 76 renders section_waiting_here ('इंतज़ार')
+PASS detail at 76 renders updates_since ('से अब तक')
+PASS detail at 76 renders ask_expires ('समाप्त होगा')
+width 120:
+  1: 120 cells | ' ← सूचनाएँ                                                                                         ▁▃ normal · अपडेट · 1/42 '
+  2:  16 cells | ' Deploy finished'
+  3:  45 cells | '  · 3h पहले · 18:46 से अब तक 2 अपडेट · लाइव देखा गया'
+  4: 119 cells | ' ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────'
+  5:  48 cells | ' The deploy finished and the smoke tests passed.'
+  6:   0 cells | ''
+  7: 120 cells | ' ── इस बातचीत में आपके जवाब का इंतज़ार · 1 ───────────────────────────────────────────────────────────────────────────────────────'
+  8:  24 cells | '  ?   38m में समाप्त होगा  a ↵'
+  9:   0 cells | ''
+  10: 120 cells | ' ── संबंधित प्रोजेक्ट · 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────'
+  11:  13 cells | '  release-2.1'
+PASS detail_text has no line over 120 cells (over: [])
+PASS detail at 120 renders section_history ('अपडेट')
+FAIL detail at 120 renders section_links ('लिंक')
+PASS detail at 120 renders section_projects ('प्रोजेक्ट')
+PASS detail at 120 renders section_waiting_here ('इंतज़ार')
+PASS detail at 120 renders updates_since ('से अब तक')
+PASS detail at 120 renders ask_expires ('समाप्त होगा')
+
+-- empty states at 40 and 76 (bodies WRAP: Text(no_wrap=False)) --
+width 40 kind=all priority=any: worst line 68 | ' अभी तक कोई सूचना नहीं'
+    over-width line absent or wrapping body: over=True, text.no_wrap=None
+PASS empty_text at 40: over-width line only where the Text wraps
+width 40 kind=all priority=high: worst line 24 | ' इन फ़िल्टर से कुछ भी मेल नहीं खाता'
+    over-width line absent or wrapping body: over=False, text.no_wrap=None
+PASS empty_text at 40: over-width line only where the Text wraps
+width 76 kind=all priority=any: worst line 68 | ' अभी तक कोई सूचना नहीं'
+    over-width line absent or wrapping body: over=False, text.no_wrap=None
+PASS empty_text at 76: over-width line only where the Text wraps
+width 76 kind=all priority=high: worst line 24 | ' इन फ़िल्टर से कुछ भी मेल नहीं खाता'
+    over-width line absent or wrapping body: over=False, text.no_wrap=None
+PASS empty_text at 76: over-width line only where the Text wraps
+
+-- footer hints with the view's own label order (hi vs en) --
+list @40: hi  37/39 keeps ['↵', 'e', 'o', 'f', 'esc'] 
+     @40: en  35/39 keeps ['↵', 'u', 'f', 'esc']
+list @60: hi  59/59 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+     @60: en  46/59 keeps ['↵', 'e', 'u', 'f', 'esc']
+list @76: hi  59/75 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+     @76: en  60/75 keeps ['↵', 'e', 'u', 'space', 'f', 'esc']
+list @100: hi  59/99 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+     @100: en  76/99 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+list @120: hi  59/119 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+     @120: en  76/119 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+list @160: hi  59/159 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+     @160: en  76/159 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+detail+narrow @40: hi  37/39 keeps ['↵', 'e', 'o', 'f', 'esc'] 
+              @40: en  35/39 keeps ['↵', 'u', 'f', 'esc']
+detail+narrow @60: hi  59/59 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+              @60: en  46/59 keeps ['↵', 'e', 'u', 'f', 'esc']
+detail+narrow @76: hi  59/75 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+              @76: en  60/75 keeps ['↵', 'e', 'u', 'space', 'f', 'esc']
+detail+narrow @100: hi  59/99 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+              @100: en  76/99 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+detail+narrow @120: hi  59/119 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+              @120: en  76/119 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+detail+narrow @160: hi  59/159 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] 
+              @160: en  76/159 keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+detail narrow @40: hi  32/39 keeps ['o', 'a', 'e', 'esc'] 
+              @40: en  29/39 keeps ['a', 'u', 'esc']
+detail narrow @60: hi  53/59 keeps ['o', 'a', 'e', 'E', 'u', 'esc'] 
+              @60: en  55/59 keeps ['a', 'e', 'E', 'u', 'esc']
+detail narrow @76: hi  53/75 keeps ['o', 'a', 'e', 'E', 'u', 'esc'] 
+              @76: en  71/75 keeps ['o', 'a', 'e', 'E', 'u', 'esc']
+detail narrow @100: hi  53/99 keeps ['o', 'a', 'e', 'E', 'u', 'esc'] 
+              @100: en  71/99 keeps ['o', 'a', 'e', 'E', 'u', 'esc']
+detail narrow @120: hi  53/119 keeps ['o', 'a', 'e', 'E', 'u', 'esc'] 
+              @120: en  71/119 keeps ['o', 'a', 'e', 'E', 'u', 'esc']
+detail narrow @160: hi  53/159 keeps ['o', 'a', 'e', 'E', 'u', 'esc'] 
+              @160: en  71/159 keeps ['o', 'a', 'e', 'E', 'u', 'esc']
+undo row @40: hi  11/39 keeps ['z'] 
+         @40: en   7/39 keeps ['z']
+undo row @60: hi  11/59 keeps ['z'] 
+         @60: en   7/59 keeps ['z']
+undo row @76: hi  11/75 keeps ['z'] 
+         @76: en   7/75 keeps ['z']
+undo row @100: hi  11/99 keeps ['z'] 
+         @100: en   7/99 keeps ['z']
+undo row @120: hi  11/119 keeps ['z'] 
+         @120: en   7/119 keeps ['z']
+undo row @160: hi  11/159 keeps ['z'] 
+         @160: en   7/159 keeps ['z']
+
+FAILURES=["detail_text has no line over 40 cells (over: ['  · 3h पहले · 18:46 से अब तक 2', ' The deploy finished and the s'])", "detail at 40 renders section_links ('लिंक')", "detail at 76 renders section_links ('लिंक')", "detail at 120 renders section_links ('लिंक')"]
+RENDER MECHANICS: FAIL

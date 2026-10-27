@@ -1,0 +1,287 @@
+{
+  "schema": 1,
+  "audit_id": "ntt2",
+  "audit_id_assigned_by": "translation-auditor; round 2 assigned by the manager in the tui-audit-zh-CN round-2 delegation on 2026-10-25",
+  "audit_kind": "independent_remediation_round_2_remeasurement",
+  "round": 2,
+  "previous_audit": {
+    "audit_id": "ntt1",
+    "verdict": "not_passed",
+    "open_major": "N1 (row_line padded by characters, not cells)",
+    "path": "tui-audit/zh-CN/tui.notifications/ntt1/"
+  },
+  "locale": "zh-CN",
+  "namespace": "tui.notifications",
+  "audit_date": "2026-10-25",
+  "audited_revision": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+  "audited_revision_note": "Audited code: 8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a, exported with git archive into this session's scratchpad. The before arm re-ran the module at d25392f3553 from the same scratchpad. The zh-CN catalogue is an UNTRACKED worktree file and the commit contains no catalogue file at all.",
+  "attestation_revision": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+  "key_count": {
+    "en": 72,
+    "context": 72,
+    "target": 72
+  },
+  "verdict": "passed",
+  "result": "clean_after_remediation",
+  "verdict_reason": "Round 1's single major (N1: row_line right-aligned TIME_CELLS and SOURCE_CELLS with str.rjust, which counts characters) is fixed in 8976104b83b and re-measured by execution, not by code reading: every row, including the two zh just-now cases and the English arm with a Chinese conversation title, now paints exactly the budgeted width (78 of 78), where round 1 measured 80/84/82. A structural verifier that asserts column invariants without naming the fix fails 4 of 7 cases on the pre-fix tree and passes 7 of 7 on the fix. The target bytes are unchanged from round 1 (cd60e55f...), so every copy-level result carries forward on identical bytes. No blocker, no open major; N2 (minor) and N3 (nit) are unchanged and explicitly non-gating.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, tui-audit-zh-CN, round 2)",
+    "instance": "0603506819c6",
+    "session": "0603506819c6",
+    "model": "radient/auto",
+    "actual_model_source": "Same session as ntt1. Three provider-quota model-switch notices landed during round 1 (anthropic/claude-opus-5-5 -> anthropic/claude-sonnet-5-5 -> openai/gpt-6.1-sol -> radient/auto); no further switch notice appeared during round 2, so the model that performed round 2 is radient/auto. No role pin, default or tool setting was changed by this auditor.",
+    "date": "2026-10-25",
+    "independence": "Independent agent and context, and independent of the fixer: this auditor authored none of the zh-CN catalogue, none of the renderer/view code, and did not write, stage, stash, move or delete anything in the shared worktree. The measurement scripts were authored here, and the same script was run against both the pre-fix and post-fix trees."
+  },
+  "translator": {
+    "agent": "not identified in the delegation; the target is an untracked worktree file",
+    "model": "unknown — not claimed",
+    "date": "unknown",
+    "source": "No provenance claim is made; authorship is not inferred from git."
+  },
+  "fixer": {
+    "agent": "L1 core-notify coder (per the delegation)",
+    "commit": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+    "model": "not claimed by this auditor"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.json",
+      "sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+      "matches_supplied_frozen_source_sha256": true,
+      "identical_to_round_1": true
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+      "sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+      "identical_to_round_1": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.notifications.json",
+      "sha256": "cd60e55f3d532f44848fe44a88ee87b879192f1b5149545526b7ded829768156",
+      "matches_supplied_target_sha256": true,
+      "identical_to_round_1": true,
+      "rechecked_against_worktree_after_the_run": true
+    },
+    "renderer_after": {
+      "path": "local_operator/tui/notifications_render.py",
+      "sha256": "64ca3084716c99b33823a1123efe0879764af1573a464b3b8a092057b98cad72"
+    },
+    "renderer_before": {
+      "path": "local_operator/tui/notifications_render.py at d25392f3553",
+      "note": "the pre-fix module, kept in this session's scratchpad and re-run as the before arm"
+    }
+  },
+  "commit_scope": {
+    "files": [
+      "local_operator/tui/local_operator.tcss",
+      "local_operator/tui/notifications_model.py",
+      "local_operator/tui/notifications_render.py",
+      "local_operator/tui/widgets/notifications_view.py",
+      "local_operator/tui/widgets/session_sidebar.py",
+      "tests/unit/tui/test_notifications_page.py"
+    ],
+    "catalogue_files_touched": 0,
+    "copy_untouched_verified_by": "diff inspection (no i18n/catalogue path in the commit) plus the identical target sha256"
+  },
+  "remeasurement": {
+    "width": 78,
+    "width_note": "the cell count the view hands row_line for an 80-column window (list_width = size - 2)",
+    "cases": [
+      {
+        "id": "a",
+        "locale": "zh-CN",
+        "case": "just-now row, ASCII conversation title",
+        "before_cells": 80,
+        "after_cells": 78,
+        "width": 78,
+        "exact_after": true
+      },
+      {
+        "id": "b",
+        "locale": "zh-CN",
+        "case": "just-now row, Chinese conversation title",
+        "before_cells": 84,
+        "after_cells": 78,
+        "width": 78,
+        "exact_after": true
+      },
+      {
+        "id": "c",
+        "locale": "zh-CN",
+        "case": "2h-old row, ASCII title",
+        "before_cells": 78,
+        "after_cells": 78,
+        "width": 78,
+        "exact_after": true
+      },
+      {
+        "id": "d",
+        "locale": "en",
+        "case": "just-now row, Chinese conversation title (English arm)",
+        "before_cells": 82,
+        "after_cells": 78,
+        "width": 78,
+        "exact_after": true
+      },
+      {
+        "id": "e",
+        "locale": "en",
+        "case": "control: normal en row, long ASCII title",
+        "before_cells": 78,
+        "after_cells": 78,
+        "width": 78,
+        "exact_after": true
+      },
+      {
+        "id": "f",
+        "locale": "en",
+        "case": "control: 30-char ASCII conversation title",
+        "before_cells": 78,
+        "after_cells": 78,
+        "width": 78,
+        "exact_after": true
+      },
+      {
+        "id": "g",
+        "locale": "zh-CN",
+        "case": "just-now, CJK title, high + repeat chips",
+        "before_cells": 84,
+        "after_cells": 78,
+        "width": 78,
+        "exact_after": true
+      }
+    ],
+    "structural_verifier": {
+      "assertions": [
+        "total painted cells == width",
+        "last 5 cells == right-aligned render.row_time value",
+        "the 12 cells before the 1-cell separator == right-aligned truncate_cells(source_name, 12)",
+        "a source longer than 12 cells is truncated, never overrun"
+      ],
+      "pre_fix": {
+        "cases_passed": 3,
+        "cases_failed": 4,
+        "all_pass": false
+      },
+      "post_fix": {
+        "cases_passed": 7,
+        "cases_failed": 0,
+        "all_pass": true
+      },
+      "note": "The verifier names no fix detail, and fails on the pre-fix tree — so its pass on the fix is evidence, not a tautology."
+    },
+    "catalogue_use_sentinel": {
+      "control": "chip_high patched to CHIPMARK (en) / 标记X (zh-CN) in an isolated catalogue copy",
+      "result": "the detail header painted the patched catalogue value in both locales, proving it reads the catalogue and not the raw priority token",
+      "note": "An earlier naive 'contains high/normal' detector flagged English high as a leak; discarded as a false positive because the English catalogue value IS the word 'high'."
+    }
+  },
+  "checks": {
+    "mechanical_harness": {
+      "command": "audit.py",
+      "pass": 51,
+      "fail": 0,
+      "negative_controls_caught": 10
+    },
+    "composite_render": {
+      "command": "render_check.py",
+      "pass": 89,
+      "zh_list_lines_all_widths_fit": true,
+      "remaining_failures": [
+        "en@40 header (54 cells) and en@40 detail top (44 cells): pre-existing English clipping at 40 columns, unchanged from round 1; zh-CN passes both",
+        "hint tie-breaks at 40 and 80 columns: N2, unchanged"
+      ]
+    },
+    "copy_level_results_carried_forward": "unchanged, because the target bytes are identical to round 1"
+  },
+  "findings": [
+    {
+      "id": "N1",
+      "severity": "major",
+      "status": "resolved",
+      "kind": "fit/renderer",
+      "keys": [
+        "tui.notifications.row_now"
+      ],
+      "current_text": "刚刚",
+      "proposed_text": "no copy change — the renderer was fixed instead, confirming the round-1 attribution",
+      "before": "80 cells (ASCII source) / 84 (Chinese source) / 82 English arm, against a 78-cell budget",
+      "after": "78 / 78 / 78 — exact",
+      "reason": "8976104b83b replaces str.rjust with a cell-aware pad in row_line; measured on both trees.",
+      "translation_defect": false,
+      "blocks_ship": false,
+      "resolved_by": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a"
+    },
+    {
+      "id": "N2",
+      "severity": "minor",
+      "status": "carried_forward_unchanged",
+      "kind": "overflow",
+      "keys": [
+        "tui.notifications.hint_read",
+        "tui.notifications.hint_unread"
+      ],
+      "current_text": "标为已读 / 标为未读",
+      "proposed_text": "no change (已读/未读 would collide with the read-state labels)",
+      "reason": "8 cells each, exactly the maxCells 8 budget; at <=80 columns the whole-hint fitter drops one more hint in zh than in en. Hints are dropped whole, never clipped.",
+      "translation_defect": false,
+      "blocks_ship": false
+    },
+    {
+      "id": "N3",
+      "severity": "nit",
+      "status": "carried_forward_unchanged",
+      "kind": "idiom/consistency",
+      "keys": [
+        "tui.notifications.group_time",
+        "tui.notifications.group_conversation"
+      ],
+      "current_text": "按时间 / 按对话",
+      "proposed_text": "keep; recorded for the programme",
+      "reason": "desktop paints 时间/对话 under a Group chip label; the TUI paints them bare on the header edge, where 按 aids legibility. Glossary term intact.",
+      "translation_defect": false,
+      "blocks_ship": false
+    }
+  ],
+  "noted_outside_scope": [
+    "_pad_cells never truncates by design, so the time column is exact only while the localised `now` label is <= TIME_CELLS (5). zh 刚刚 is 4, so zh is safe; a longer 'now' in another locale would reintroduce the overrun. Cheap guard for the six-locale wave: assert cell_len(row_now()) <= TIME_CELLS per locale.",
+    "Same commit, code-side and zh-visible: the detail header no longer paints a raw English priority token (before: ' ▁▃ normal · 更新 · 1/3 ' in zh; after: bars only for normal, '高' for high). Verified by a catalogue sentinel.",
+    "At 40 columns the ENGLISH header and detail top still exceed their width; zh-CN passes both. Pre-existing source-locale behaviour.",
+    "The coder's regressions in tests/unit/tui/test_notifications_page.py were read, not run: this auditor's evidence is the measurement above. CI/QA own the suite.",
+    "No claim is made about the programme-level zh-CN slash namespace security HOLD; this audit covers tui.notifications only."
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major_open": 0,
+    "major_resolved": 1,
+    "minor": 1,
+    "nit": 1,
+    "rejected": 0,
+    "findings_total": 3,
+    "major_are_translation_defects": 0,
+    "ledger_row_may_ship": true,
+    "ledger_pairing": {
+      "catalogue_sha256": "cd60e55f3d532f44848fe44a88ee87b879192f1b5149545526b7ded829768156",
+      "code_commit": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a"
+    }
+  },
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Renderer-level cell audit and real render/list_text composites; no Textual frame capture, no release-eligibility claim, no CI claim.",
+    "The audit ran on a scratchpad copy of the target; a later edit of the untracked file would need a new audit bound to its new sha256."
+  ],
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "run_by": "0603506819c6",
+    "note": "Concatenated actual stdout of this auditor's runs (mechanical harness, before/after measurement, structural verifier on both trees, extra effects, composite render, helper and sentinel probes), not reconstructed notes."
+  }
+}

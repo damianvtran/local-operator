@@ -1,0 +1,227 @@
+Local Operator i18n audit - actual command output (concatenated, unedited)
+audit_id: ntt1   locale: vi   namespace: tui.notifications   date: 2026-10-25
+agent: translation-auditor (lopdev team, audit-vi)   session: 8408dcd6e3c9
+model actually serving this audit: radient/auto - the latest of three provider-quota
+  fallback notices in this session (anthropic/claude-opus-5-5 -> anthropic/claude-sonnet-5-5
+  -> openai/gpt-6.1-sol -> radient/auto). The declared primary and the intermediates are
+  NOT claimed as the audit model.
+pinned commit: d25392f3553c38ce1740c98e53c9c66a700e9e64
+
+PINS, recomputed from the bytes on disk for this log:
+  source  b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68  MATCHES PIN
+  context 0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907  MATCHES PIN
+  target  98cc6e1b7229a8bc21a9549dcb4252e0fd162c4570f3f5c072e10dbc1910d341  MATCHES PIN
+
+WORKTREE SAFETY: the target bytes were copied out of ~/workspace/repos/lo-notifications-l1
+before the coder switched that worktree (its HEAD later read b33846f2). All checks ran on that
+copy inside this scratchpad, from a `git archive` snapshot of d25392f3553 plus a
+`git clone --shared` checkout of d25392f3553 for the rendered pass. Nothing was written,
+staged, stashed, moved or deleted in the worktree; no generator ran; nothing was committed.
+
+===============================================================================
+BLOCK 1 - mechanical pass: pins, check_catalogues(), ICU parity, plural renders at 0/1/2/5/21/1000, maxCells, NFC, bidi, literals
+===============================================================================
+--- work/run_log.txt ---
+[target] en_sha256=b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+[target] context_sha256=0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+[target] target_sha256=98cc6e1b7229a8bc21a9549dcb4252e0fd162c4570f3f5c072e10dbc1910d341
+[target] keys en=72 vi=72 context=72
+[target] check_catalogues(): 0 problem(s) total, 0 for vi/tui.notifications or en/tui.notifications
+[target] PLURAL asks_stay: 0->0 câu hỏi được giữ lại đến khi có câu trả lời. | 1->1 câu hỏi được giữ lại đến khi có câu trả lời. | 2->2 câu hỏi được giữ lại đến khi có câu trả lời. | 5->5 câu hỏi được giữ lại đến khi có câu trả lời. | 21->21 câu hỏi được giữ lại đến khi có câu trả lời. | 1000->1.000 câu hỏi được giữ lại đến khi có câu trả lời.
+[target] PLURAL banner_digest_title: 0->Thêm 0 thông báo ưu tiên cao | 1->Thêm 1 thông báo ưu tiên cao | 2->Thêm 2 thông báo ưu tiên cao | 5->Thêm 5 thông báo ưu tiên cao | 21->Thêm 21 thông báo ưu tiên cao | 1000->Thêm 1.000 thông báo ưu tiên cao
+[target] PLURAL confirm_dismiss_session: 0->Ẩn 0 cập nhật từ Untitled conversation? y/n | 1->Ẩn 1 cập nhật từ Untitled conversation? y/n | 2->Ẩn 2 cập nhật từ Untitled conversation? y/n | 5->Ẩn 5 cập nhật từ Untitled conversation? y/n | 21->Ẩn 21 cập nhật từ Untitled conversation? y/n | 1000->Ẩn 1.000 cập nhật từ Untitled conversation? y/n
+[target] PLURAL dismissed: 0->Đã ẩn 0 cập nhật. | 1->Đã ẩn 1 cập nhật. | 2->Đã ẩn 2 cập nhật. | 5->Đã ẩn 5 cập nhật. | 21->Đã ẩn 21 cập nhật. | 1000->Đã ẩn 1.000 cập nhật.
+[target] PLURAL header_counts: 0->0 chưa đọc · 0 đang chờ bạn | 1->1 chưa đọc · 1 đang chờ bạn | 2->2 chưa đọc · 2 đang chờ bạn | 5->5 chưa đọc · 5 đang chờ bạn | 21->21 chưa đọc · 21 đang chờ bạn | 1000->1.000 chưa đọc · 1.000 đang chờ bạn
+[target] PLURAL stale_skipped: 0->0 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên. | 1->1 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên. | 2->2 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên. | 5->5 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên. | 21->21 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên. | 1000->1.000 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên.
+[target] PLURAL updates_since: 0->0 cập nhật kể từ 59m | 1->1 cập nhật kể từ 59m | 2->2 cập nhật kể từ 59m | 5->5 cập nhật kể từ 59m | 21->21 cập nhật kể từ 59m | 1000->1.000 cập nhật kể từ 59m
+[target] maxCells: 53 budgeted keys checked, 0 over budget
+[target]   AT-BUDGET arg_read: 44/44 (en 35) 'Đánh dấu tất cả thông báo chưa đọc là đã đọc'
+[target]   AT-BUDGET ask_kind: 7/8 (en 3) 'câu hỏi'
+[target]   AT-BUDGET filter_unread: 8/8 (en 6) 'chưa đọc'
+[target]   AT-BUDGET header_partial: 12/12 (en 10) '1000 mục đầu'
+[target]   AT-BUDGET hint_answer: 7/8 (en 6) 'trả lời'
+[target]   AT-BUDGET hint_back: 8/8 (en 4) 'quay lại'
+[target]   AT-BUDGET hint_clear: 7/8 (en 5) 'bỏ chọn'
+[target]   AT-BUDGET hint_undo: 8/8 (en 4) 'hoàn tác'
+[target]   AT-BUDGET hint_unread: 8/8 (en 6) 'chưa đọc'
+[target]   AT-BUDGET kind_asks: 7/8 (en 4) 'câu hỏi'
+[target]   AT-BUDGET kind_updates: 8/8 (en 7) 'cập nhật'
+[target]   AT-BUDGET priority_normal_up: 7/8 (en 7) 'thường+'
+[target]   AT-BUDGET seen_in_chat: 12/12 (en 12) 'xem khi hiện'
+[target]   AT-BUDGET seen_live: 12/12 (en 9) 'xem khi nhận'
+[target]   AT-BUDGET update_kind: 8/8 (en 6) 'cập nhật'
+[target] file NFC=True bidi_controls=False
+[target] identical-to-en values: []
+[target] FAILURES=0
+
+===============================================================================
+BLOCK 2 - negative controls: six mutants, each must fail closed (exit 1, named defect)
+===============================================================================
+--- work/negctl.log ---
+# Negative controls: six mutants of the audited vi bytes, each run through the SAME
+# audit_vi.py against the pinned snapshot. Expected outcome: exit 1 with the named defect.
+# Mutants were written only inside this scratchpad; the snapshot's vi file was restored
+# to the audited bytes afterwards (sha256 re-verified below).
+
+=== nc1_renamed_arg (mutant sha256: 113475ef6f7d39dc158e7c80eef5e0116ab7982844da96913a17d2ae9a40da91) ===
+[nc1_renamed_arg] target_sha256=113475ef6f7d39dc158e7c80eef5e0116ab7982844da96913a17d2ae9a40da91
+[nc1_renamed_arg]   CHECK vi/tui.notifications: tui.notifications.confirm_dismiss_session: arguments (('count', 'plural'), ('src', 'simple')) != en's (('count', 'plural'), ('source', 'simple')): argument 2 is 'src', en's is 'source' (renamed or reordered)
+[nc1_renamed_arg] FAILURES=8
+[nc1_renamed_arg]   FAIL vi/tui.notifications: tui.notifications.confirm_dismiss_session: arguments (('count', 'plural'), ('src', 'simple')) != en's (('count', 'plural'), ('source', 'simple')): argument 2 is 'src', en's is 'source' (renamed or reordered)
+[nc1_renamed_arg]   FAIL tui.notifications.confirm_dismiss_session: arguments (('count', 'plural'), ('src', 'simple')) != (('count', 'plural'), ('source', 'simple')): argument 2 is 'src', en's is 'source' (renamed or reordered)
+[nc1_renamed_arg]   FAIL tui.notifications.confirm_dismiss_session: render n=0: message argument 'src' was not supplied (have: count, source)
+[nc1_renamed_arg]   FAIL tui.notifications.confirm_dismiss_session: render n=1: message argument 'src' was not supplied (have: count, source)
+[nc1_renamed_arg]   FAIL tui.notifications.confirm_dismiss_session: render n=2: message argument 'src' was not supplied (have: count, source)
+
+=== nc2_wrong_plural_category (mutant sha256: 2acb29597cce1d010d6dc558f61f985f91bf01b53b3b52fac101fe952e5f7ea2) ===
+[nc2_wrong_plural_category] target_sha256=2acb29597cce1d010d6dc558f61f985f91bf01b53b3b52fac101fe952e5f7ea2
+[nc2_wrong_plural_category]   CHECK vi/tui.notifications: tui.notifications.dismissed: plural category 'one' not in ['other']
+[nc2_wrong_plural_category] FAILURES=2
+[nc2_wrong_plural_category]   FAIL vi/tui.notifications: tui.notifications.dismissed: plural category 'one' not in ['other']
+[nc2_wrong_plural_category]   FAIL vi/tui.notifications: tui.notifications.dismissed: plural category 'one' not in ['other']
+
+=== nc3_row_now_over_budget (mutant sha256: 02e4b524dd01b563e79a6e3b24768879ead92ccf84c11d57cfbc7936cfd20f70) ===
+[nc3_row_now_over_budget] target_sha256=02e4b524dd01b563e79a6e3b24768879ead92ccf84c11d57cfbc7936cfd20f70
+[nc3_row_now_over_budget] FAILURES=1
+[nc3_row_now_over_budget]   FAIL tui.notifications.row_now: 8 cells > maxCells 5: 'vừa xong'
+
+=== nc4_literal_lost (mutant sha256: 717c3d5f1f9a702e3f3ab04906862e41521abeb25deef953e7bbf82d20e22f11) ===
+[nc4_literal_lost] target_sha256=717c3d5f1f9a702e3f3ab04906862e41521abeb25deef953e7bbf82d20e22f11
+[nc4_literal_lost] FAILURES=1
+[nc4_literal_lost]   FAIL tui.notifications.unread_mark_all: literal '/unread read' lost
+
+=== nc5_nfd (mutant sha256: ddf7c03e033eb14efccf9abd852d129471f86769e0ce0d0e54841792b4c68929) ===
+[nc5_nfd] target_sha256=ddf7c03e033eb14efccf9abd852d129471f86769e0ce0d0e54841792b4c68929
+[nc5_nfd] FAILURES=1
+[nc5_nfd]   FAIL tui.notifications.hint_dismiss: not NFC
+
+=== nc6_branch_drops_count (mutant sha256: b22249445b58e1f4e8a8cef0ad9876273c2ea7fc4eb3bc310de12fcbabac76a9) ===
+[nc6_branch_drops_count] target_sha256=b22249445b58e1f4e8a8cef0ad9876273c2ea7fc4eb3bc310de12fcbabac76a9
+[nc6_branch_drops_count] FAILURES=6
+[nc6_branch_drops_count]   FAIL tui.notifications.asks_stay: n=0 renders without the count: 'câu hỏi được giữ lại đến khi có câu trả lời.'
+[nc6_branch_drops_count]   FAIL tui.notifications.asks_stay: n=1 renders without the count: 'câu hỏi được giữ lại đến khi có câu trả lời.'
+[nc6_branch_drops_count]   FAIL tui.notifications.asks_stay: n=2 renders without the count: 'câu hỏi được giữ lại đến khi có câu trả lời.'
+[nc6_branch_drops_count]   FAIL tui.notifications.asks_stay: n=5 renders without the count: 'câu hỏi được giữ lại đến khi có câu trả lời.'
+[nc6_branch_drops_count]   FAIL tui.notifications.asks_stay: n=21 renders without the count: 'câu hỏi được giữ lại đến khi có câu trả lời.'
+[nc6_branch_drops_count]   FAIL tui.notifications.asks_stay: n=1000 renders without the count: 'câu hỏi được giữ lại đến khi có câu trả lời.'
+
+post-run target sha256: 98cc6e1b7229a8bc21a9549dcb4252e0fd162c4570f3f5c072e10dbc1910d341
+
+===============================================================================
+BLOCK 3 - rendered pass: real OperatorApp at 80x24 in an isolated clone of d25392f3553, locale vi
+===============================================================================
+--- frames/shot_vi.log ---
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+ACTIVE LOCALE vi | title = Thông báo
+GEO {'view': [76, 15], 'list': [76, 11], 'notice': [76, 1], 'hints': [76, 1], 'title': [76, 1]}
+HEADER Content(' Thông báo · 4 chưa đọc · 1 đang chờ bạn               chưa đọc │ thời gian ', spans=[Span(1, 10, style=Style(foreground=Color(233, 229, 219), bold=True)), Span(10, 40, style=Style(foreground=Color(181, 175, 162), bold=False)), Span(55, 76, style=Style(foreground=Color(181, 175, 162), bold=False))])
+RECEIPT dismissed: cells=17 width=76 folds_to=1 widget_height=1 clipped=no | Đã ẩn 3 cập nhật.
+RECEIPT marked_read: cells=30 width=76 folds_to=1 widget_height=1 clipped=no | Đã đánh dấu 100 mục là đã đọc.
+RECEIPT restored: cells=21 width=76 folds_to=1 widget_height=1 clipped=no | Đã khôi phục 100 mục.
+RECEIPT dismiss+asks_stay: cells=64 width=76 folds_to=1 widget_height=1 clipped=no | Đã ẩn 3 cập nhật. 1 câu hỏi được giữ lại đến khi có câu trả lời.
+RECEIPT dismiss+asks+stale: cells=121 width=76 folds_to=2 widget_height=1 clipped=YES | Đã ẩn 3 cập nhật. 1 câu hỏi được giữ lại đến khi có câu trả lời. 2 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên.
+DETAIL view_mode list wide False
+DETAIL texts ["('↵', 'trả lời')", "('u', 'đã đọc')", "('space', 'chọn')", "('o', 'trò chuyện')", "('f', 'lọc')", "('esc', 'quay lại')"]
+
+--- frames/shot_vi2.log ---
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+EDITORS 1
+PICKERS 1
+PICKER size Size(width=76, height=1) region Region(x=2, y=18, width=76, height=1)
+PICKER primary_column 12
+    ROW cells=76 '❯  read        Đánh dấu tất cả thông báo chưa đọc là đã đọc                 '
+PICKER has_ellipsis False
+CURSOR row source notify
+DETAIL mode detail wide False
+    DETAIL cells=75 ' ← Thông báo                                    ▁▃ normal · cập nhật · 1/1 '
+    DETAIL cells=21 ' Đã cập nhật tài liệu'
+    DETAIL cells=24 ' 0000000000b1 · vừa xong'
+    DETAIL cells=74 ' ─────────────────────────────────────────────────────────────────────────'
+    DETAIL cells=28 ' Không có chi tiết đính kèm.'
+DETAIL hints [('o', 'trò chuyện'), ('a', 'trả lời'), ('e', 'ẩn'), ('E', 'ẩn tất cả'), ('u', 'chưa đọc'), ('esc', 'quay lại')]
+CONTROL receipt[vi] cells=121 width=76 folds_to=2 height=1 clipped=YES | Đã ẩn 3 cập nhật. 1 câu hỏi được giữ lại đến khi có câu trả lời. 2 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên.
+CONTROL receipt[en] cells=95 width=76 folds_to=2 height=1 clipped=YES | Dismissed 3 updates. 1 ask stays until it's answered. 2 changed since you looked and were left.
+EMPTY locale vi
+    EMPTY cells=22 ' Chưa có thông báo nào'
+    EMPTY cells=0 ''
+    EMPTY cells=88 ' Khi tác nhân hỏi bạn điều gì đó hoặc gửi cập nhật để bạn lưu ý, nội dung sẽ hiện ở đây.'
+
+===============================================================================
+BLOCK 4 - frame files (sha256)
+===============================================================================
+  8a02e181815c05776c576c2bcdc92d2c373e073334a9042a6a8b2c56413999fe  01-list-vi-80x24.svg
+  0d0c7bbe72d731d5d3e4b17dd3401437d87357f2e14cb2935789c494634fc08d  02-receipt-dismiss+asks+stale-vi-80x24.svg
+  a1dd75235cd22b8074951f733140e29fce883f4ed4e0e7e3d6f72b4c456fce69  02-receipt-dismiss+asks_stay-vi-80x24.svg
+  6a7b930297df8eee60c7012d108cc3b59f578f014cba37f1324a0fefce721e36  03-detail-vi-80x24.svg
+  8668652813e272b7c1f009deab6d8ff5e273cd4d6068618ac0e39c48e9ee82c8  04-back-to-list-vi-80x24.svg
+  e91fcefc5e5db9bad1addd0cdb1ef93358937b3199dc60ec2a3a29fada6a0094  06-picker-vi-80x24.svg
+  9e324bc980e0bfa4a376b4094cdc52f9d413323e7bcc6c80d5bdbf526c815cd5  07-detail-vi-80x24.svg
+  09ef72f9d81bb00301c2454e941537457057a075db8349a99da97ff71340c693  08-receipt-control-en-vi-80x24.svg
+  3ffe5caa3caa59c0da0c35283d2e08a424c4212ea4a222ac4e899927feb44efa  08-receipt-control-vi-vi-80x24.svg
+  18a30581076cf16796a159c084c05ef5044496b257a1e4970e99ea9001fe049b  09-empty-vi-80x24.svg
+
+===============================================================================
+BLOCK 5 - pre-render arithmetic: the alternatives the translator rejected are over budget
+===============================================================================
+--- work/fit.log ---
+== alternatives the translator says were rejected (budget forcing)
+  row_now: 'vừa xong' = 8 cells (maxCells 5)
+  group_conversation: 'cuộc trò chuyện' = 15 cells (maxCells 12)
+  hint_conversation: 'cuộc trò chuyện' = 15 cells (maxCells 14)
+  seen_live: 'xem trực tiếp' = 13 cells (maxCells 12)
+  seen_live: 'Đã xem trực tiếp' = 16 cells (maxCells 12)
+  seen_in_chat: 'Đã xem trong cuộc trò chuyện' = 28 cells (maxCells 12)
+  priority_normal_up: 'bình thường+' = 12 cells (maxCells 8)
+  priority_normal_up: 'bình thường trở lên' = 19 cells (maxCells 8)
+  hint_dismiss: 'bỏ qua' = 6 cells (maxCells 10)
+  hint_dismiss: 'ẩn' = 2 cells (maxCells 10)
+== at-budget strings, exact
+  arg_read: 44/44 'Đánh dấu tất cả thông báo chưa đọc là đã đọc'
+  ask_expires: 18/18 'hết hạn sau {time}'
+  filter_unread: 8/8 'chưa đọc'
+  hint_back: 8/8 'quay lại'
+  hint_undo: 8/8 'hoàn tác'
+  hint_unread: 8/8 'chưa đọc'
+  kind_updates: 8/8 'cập nhật'
+  seen_in_chat: 12/12 'xem khi hiện'
+  seen_live: 12/12 'xem khi nhận'
+  update_kind: 8/8 'cập nhật'
+== footer receipts at 80 columns (notice row = 78 cells, height 1)
+  dismissed(1): 17   en: 19
+  dismissed(100): 19
+  marked_read(100): 30 en: 16
+  restored(100): 21 en: 13
+  nothing_unread: 26 en: 15
+  stale_skipped(100): 58 en: 43
+  asks_stay(1): 46
+  ask_answer_hint: 64 en: 53 maxCells None
+  COMBINED receipt: vi 121 en 95 -> over 78 by 43 / 17
+  write_failed err='database is locked': 78 en: 72
+  confirm_mark_all(100): 31 en: 18
+  confirm_dismiss_session(100,title 40ch): 64
+  nothing_to_dismiss(title 40ch): 62
+  error_load err='database is locked': 44 en: 47
+== unbudgeted empty bodies (wrap in a 1fr body, so growth costs rows not cells)
+  empty_none_body: 87 en: 70
+  empty_caught_up_body: 74 en: 80
+== /unread NoticeBlock lines (wrap, hanging indent; budget at 80 cols)
+  transcript 80 -> body_budget 73
+  transcript 78 -> body_budget 71
+  transcript 76 -> body_budget 69
+  unread_mark_all(100): 46 en: 31
+  unread_mark_these: 43 en: 29
+  refused+pointer: 96
+== detail header tail at 80 (width 78, no_wrap+crop)
+  back(11)+1 + tail '▁▃ thường · cập nhật · 100/100' = 43 of 78
+  back(11)+1 + tail '▁▃▅ cao · cập nhật · 100/100' = 41 of 78
+  back(11)+1 + tail '?  câu hỏi · 100/100' = 33 of 78
+== list row at 76 (narrow) worst chips
+  high+seen_in_chat: chips 19 -> title_cells 30
+  high+repeat+seen: chips 25 -> title_cells 24
+  none: chips 0 -> title_cells 49
+== picker argument row at 80 (label budget 44)
+  span 75, column 12, remaining 63 vs vi 44 / en 35
+  min width where vi label fits whole: 61
+== sidebar footer
+  sidebar_note(100): 13 maxCells 18
+

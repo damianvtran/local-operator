@@ -1,0 +1,679 @@
+COMMAND: PYTHONDONTWRITEBYTECODE=1 <repo>/.venv/bin/python ntt1/audit_hi.py
+PIN d25392f3553c38ce1740c98e53c9c66a700e9e64   namespace tui.notifications   locale hi
+PASS en source sha256 b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68 == pin b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+PASS en context sha256 0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907 == pin 0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+PASS audited copy sha256 8d503495a5aed2562306b7c06ed15eac6bbb5486c2717bb10bbda65e3303fc1e == delegation 8d503495a5aed2562306b7c06ed15eac6bbb5486c2717bb10bbda65e3303fc1e
+INFO live worktree file still present; its sha256 8d503495a5aed2562306b7c06ed15eac6bbb5486c2717bb10bbda65e3303fc1e (still matches the audited copy)
+keys en=72 hi=72 context=72
+PASS key sets identical
+PASS context sidecar covers exactly the en keys
+PASS scratch catalogue root carries the audited bytes
+PASS catalogues.load_catalogue(hi, tui.notifications) == audited copy
+check_catalogues(): 0 problem line(s) across the pinned tree
+PASS check_catalogues() reports nothing for hi / tui.notifications
+hi CLDR categories: ['one', 'other']
+
+-- ICU per key --
+PASS tui.notifications.ago: arguments (('age', 'simple'),) == en (('age', 'simple'),)
+PASS tui.notifications.arg_read: arguments () == en ()
+PASS tui.notifications.ask_answer_hint: arguments () == en ()
+PASS tui.notifications.ask_expires: arguments (('time', 'simple'),) == en (('time', 'simple'),)
+PASS tui.notifications.ask_kind: arguments () == en ()
+PASS tui.notifications.asks_stay: arguments (('count', 'plural'),) == en (('count', 'plural'),)
+PASS tui.notifications.asks_stay: plural selectors ['one', 'other'] cover hi categories (missing [])
+     plural over ['count'], src selectors ['one', 'other']
+PASS tui.notifications.back: arguments () == en ()
+PASS tui.notifications.banner_digest_body: arguments () == en ()
+PASS tui.notifications.banner_digest_title: arguments (('count', 'plural'),) == en (('count', 'plural'),)
+PASS tui.notifications.banner_digest_title: plural selectors ['one', 'other'] cover hi categories (missing [])
+     plural over ['count'], src selectors ['one', 'other']
+PASS tui.notifications.chip_high: arguments () == en ()
+PASS tui.notifications.confirm_dismiss_session: arguments (('count', 'plural'), ('source', 'simple')) == en (('count', 'plural'), ('source', 'simple'))
+PASS tui.notifications.confirm_dismiss_session: plural selectors ['one', 'other'] cover hi categories (missing [])
+     plural over ['count'], src selectors ['one', 'other']
+PASS tui.notifications.confirm_mark_all: arguments (('count', 'simple'),) == en (('count', 'simple'),)
+PASS tui.notifications.dismissed: arguments (('count', 'plural'),) == en (('count', 'plural'),)
+PASS tui.notifications.dismissed: plural selectors ['one', 'other'] cover hi categories (missing [])
+     plural over ['count'], src selectors ['one', 'other']
+PASS tui.notifications.empty_caught_up_body: arguments () == en ()
+PASS tui.notifications.empty_caught_up_title: arguments () == en ()
+PASS tui.notifications.empty_filtered_title: arguments () == en ()
+PASS tui.notifications.empty_none_body: arguments () == en ()
+PASS tui.notifications.empty_none_title: arguments () == en ()
+PASS tui.notifications.error_load: arguments (('error', 'simple'),) == en (('error', 'simple'),)
+PASS tui.notifications.filter_all: arguments () == en ()
+PASS tui.notifications.filter_unread: arguments () == en ()
+PASS tui.notifications.group_conversation: arguments () == en ()
+PASS tui.notifications.group_older: arguments () == en ()
+PASS tui.notifications.group_time: arguments () == en ()
+PASS tui.notifications.group_today: arguments () == en ()
+PASS tui.notifications.group_waiting: arguments () == en ()
+PASS tui.notifications.group_week: arguments () == en ()
+PASS tui.notifications.group_yesterday: arguments () == en ()
+PASS tui.notifications.header_counts: arguments (('unread', 'plural'), ('waiting', 'plural')) == en (('unread', 'plural'), ('waiting', 'plural'))
+PASS tui.notifications.header_counts: plural selectors ['one', 'other'] cover hi categories (missing [])
+     plural over ['unread', 'waiting'], src selectors ['one', 'other']
+PASS tui.notifications.header_partial: arguments (('count', 'simple'),) == en (('count', 'simple'),)
+PASS tui.notifications.hint_answer: arguments () == en ()
+PASS tui.notifications.hint_back: arguments () == en ()
+PASS tui.notifications.hint_clear: arguments () == en ()
+PASS tui.notifications.hint_conversation: arguments () == en ()
+PASS tui.notifications.hint_dismiss: arguments () == en ()
+PASS tui.notifications.hint_dismiss_all: arguments () == en ()
+PASS tui.notifications.hint_filter: arguments () == en ()
+PASS tui.notifications.hint_open: arguments () == en ()
+PASS tui.notifications.hint_read: arguments () == en ()
+PASS tui.notifications.hint_select: arguments () == en ()
+PASS tui.notifications.hint_undo: arguments () == en ()
+PASS tui.notifications.hint_unread: arguments () == en ()
+PASS tui.notifications.just_now: arguments () == en ()
+PASS tui.notifications.kind_asks: arguments () == en ()
+PASS tui.notifications.kind_updates: arguments () == en ()
+PASS tui.notifications.marked_read: arguments (('count', 'simple'),) == en (('count', 'simple'),)
+PASS tui.notifications.marked_unread: arguments (('count', 'simple'),) == en (('count', 'simple'),)
+PASS tui.notifications.no_body: arguments () == en ()
+PASS tui.notifications.nothing_to_dismiss: arguments (('source', 'simple'),) == en (('source', 'simple'),)
+PASS tui.notifications.nothing_unread: arguments () == en ()
+PASS tui.notifications.pointer_unread: arguments () == en ()
+PASS tui.notifications.position: arguments (('index', 'simple'), ('total', 'simple')) == en (('index', 'simple'), ('total', 'simple'))
+PASS tui.notifications.priority_high: arguments () == en ()
+PASS tui.notifications.priority_normal_up: arguments () == en ()
+PASS tui.notifications.refused_argument: arguments () == en ()
+PASS tui.notifications.restored: arguments (('count', 'simple'),) == en (('count', 'simple'),)
+PASS tui.notifications.row_now: arguments () == en ()
+PASS tui.notifications.section_history: arguments () == en ()
+PASS tui.notifications.section_links: arguments () == en ()
+PASS tui.notifications.section_projects: arguments () == en ()
+PASS tui.notifications.section_waiting_here: arguments () == en ()
+PASS tui.notifications.seen_in_chat: arguments () == en ()
+PASS tui.notifications.seen_live: arguments () == en ()
+PASS tui.notifications.selected: arguments (('count', 'simple'),) == en (('count', 'simple'),)
+PASS tui.notifications.sidebar_note: arguments (('count', 'simple'),) == en (('count', 'simple'),)
+PASS tui.notifications.stale_skipped: arguments (('count', 'plural'),) == en (('count', 'plural'),)
+PASS tui.notifications.stale_skipped: plural selectors ['one', 'other'] cover hi categories (missing [])
+     plural over ['count'], src selectors ['one', 'other']
+PASS tui.notifications.title: arguments () == en ()
+PASS tui.notifications.unread_mark_all: arguments (('count', 'simple'),) == en (('count', 'simple'),)
+PASS tui.notifications.unread_mark_these: arguments () == en ()
+PASS tui.notifications.update_kind: arguments () == en ()
+PASS tui.notifications.updates_since: arguments (('count', 'plural'), ('time', 'simple')) == en (('count', 'plural'), ('time', 'simple'))
+PASS tui.notifications.updates_since: plural selectors ['one', 'other'] cover hi categories (missing [])
+     plural over ['count'], src selectors ['one', 'other']
+PASS tui.notifications.write_failed: arguments (('error', 'simple'),) == en (('error', 'simple'),)
+plural-bearing keys: 7 -> ['tui.notifications.asks_stay', 'tui.notifications.banner_digest_title', 'tui.notifications.confirm_dismiss_session', 'tui.notifications.dismissed', 'tui.notifications.header_counts', 'tui.notifications.stale_skipped', 'tui.notifications.updates_since']
+
+-- ICU render at 0/1/2/5/21/1000 and realistic strings --
+tui.notifications.ago @-: 6m पहले
+PASS tui.notifications.ago: every rendered branch is non-empty
+tui.notifications.arg_read @-: सभी अपठित सूचनाओं को पढ़ा हुआ मानें
+PASS tui.notifications.arg_read: every rendered branch is non-empty
+tui.notifications.ask_answer_hint @-: सवाल जवाब मिलने तक बने रहते हैं — जवाब देने के लिए a दबाएँ।
+PASS tui.notifications.ask_answer_hint: every rendered branch is non-empty
+tui.notifications.ask_expires @-: 38m में समाप्त होगा
+PASS tui.notifications.ask_expires: every rendered branch is non-empty
+tui.notifications.ask_kind @-: सवाल
+PASS tui.notifications.ask_kind: every rendered branch is non-empty
+tui.notifications.asks_stay @0: 0 सवाल जवाब मिलने तक बना रहेगा।
+tui.notifications.asks_stay @1: 1 सवाल जवाब मिलने तक बना रहेगा।
+tui.notifications.asks_stay @2: 2 सवाल जवाब मिलने तक बने रहेंगे।
+tui.notifications.asks_stay @5: 5 सवाल जवाब मिलने तक बने रहेंगे।
+tui.notifications.asks_stay @21: 21 सवाल जवाब मिलने तक बने रहेंगे।
+tui.notifications.asks_stay @1000: 1,000 सवाल जवाब मिलने तक बने रहेंगे।
+PASS tui.notifications.asks_stay: every rendered branch is non-empty
+tui.notifications.back @-: ← सूचनाएँ
+PASS tui.notifications.back: every rendered branch is non-empty
+tui.notifications.banner_digest_body @-: इन्हें देखने के लिए /notifications टाइप करें।
+PASS tui.notifications.banner_digest_body: every rendered branch is non-empty
+tui.notifications.banner_digest_title @0: 0 और उच्च प्राथमिकता वाली सूचना
+tui.notifications.banner_digest_title @1: 1 और उच्च प्राथमिकता वाली सूचना
+tui.notifications.banner_digest_title @2: 2 और उच्च प्राथमिकता वाली सूचनाएँ
+tui.notifications.banner_digest_title @5: 5 और उच्च प्राथमिकता वाली सूचनाएँ
+tui.notifications.banner_digest_title @21: 21 और उच्च प्राथमिकता वाली सूचनाएँ
+tui.notifications.banner_digest_title @1000: 1,000 और उच्च प्राथमिकता वाली सूचनाएँ
+PASS tui.notifications.banner_digest_title: every rendered branch is non-empty
+tui.notifications.chip_high @-: उच्च
+PASS tui.notifications.chip_high: every rendered branch is non-empty
+tui.notifications.confirm_dismiss_session @0: Fix the flaky login test का 0 अपडेट हटाएँ? y/n
+tui.notifications.confirm_dismiss_session @1: Fix the flaky login test का 1 अपडेट हटाएँ? y/n
+tui.notifications.confirm_dismiss_session @2: Fix the flaky login test के 2 अपडेट हटाएँ? y/n
+tui.notifications.confirm_dismiss_session @5: Fix the flaky login test के 5 अपडेट हटाएँ? y/n
+tui.notifications.confirm_dismiss_session @21: Fix the flaky login test के 21 अपडेट हटाएँ? y/n
+tui.notifications.confirm_dismiss_session @1000: Fix the flaky login test के 1,000 अपडेट हटाएँ? y/n
+PASS tui.notifications.confirm_dismiss_session: every rendered branch is non-empty
+tui.notifications.confirm_mark_all @-: 1 को पढ़ा हुआ मानें? y/n
+PASS tui.notifications.confirm_mark_all: every rendered branch is non-empty
+tui.notifications.dismissed @0: 0 अपडेट हटाया गया।
+tui.notifications.dismissed @1: 1 अपडेट हटाया गया।
+tui.notifications.dismissed @2: 2 अपडेट हटाए गए।
+tui.notifications.dismissed @5: 5 अपडेट हटाए गए।
+tui.notifications.dismissed @21: 21 अपडेट हटाए गए।
+tui.notifications.dismissed @1000: 1,000 अपडेट हटाए गए।
+PASS tui.notifications.dismissed: every rendered branch is non-empty
+tui.notifications.empty_caught_up_body @-: आपकी किसी भी बातचीत में कुछ भी आपके इंतज़ार में नहीं है। सब कुछ दिखाने के लिए f दबाएँ।
+PASS tui.notifications.empty_caught_up_body: every rendered branch is non-empty
+tui.notifications.empty_caught_up_title @-: आप अप-टू-डेट हैं
+PASS tui.notifications.empty_caught_up_title: every rendered branch is non-empty
+tui.notifications.empty_filtered_title @-: इन फ़िल्टर से कुछ भी मेल नहीं खाता
+PASS tui.notifications.empty_filtered_title: every rendered branch is non-empty
+tui.notifications.empty_none_body @-: जब कोई एजेंट आपसे कुछ पूछता है या किसी अपडेट की ओर आपका ध्यान दिलाता है, तो वह यहाँ दिखता है।
+PASS tui.notifications.empty_none_body: every rendered branch is non-empty
+tui.notifications.empty_none_title @-: अभी तक कोई सूचना नहीं
+PASS tui.notifications.empty_none_title: every rendered branch is non-empty
+tui.notifications.error_load @-: सूचनाएँ लोड नहीं हो सकीं: disk full (ENOSPC)
+PASS tui.notifications.error_load: every rendered branch is non-empty
+tui.notifications.filter_all @-: सभी
+PASS tui.notifications.filter_all: every rendered branch is non-empty
+tui.notifications.filter_unread @-: अपठित
+PASS tui.notifications.filter_unread: every rendered branch is non-empty
+tui.notifications.group_conversation @-: बातचीत
+PASS tui.notifications.group_conversation: every rendered branch is non-empty
+tui.notifications.group_older @-: पुराने
+PASS tui.notifications.group_older: every rendered branch is non-empty
+tui.notifications.group_time @-: समय
+PASS tui.notifications.group_time: every rendered branch is non-empty
+tui.notifications.group_today @-: आज
+PASS tui.notifications.group_today: every rendered branch is non-empty
+tui.notifications.group_waiting @-: आपके जवाब का इंतज़ार
+PASS tui.notifications.group_waiting: every rendered branch is non-empty
+tui.notifications.group_week @-: इस हफ़्ते पहले
+PASS tui.notifications.group_week: every rendered branch is non-empty
+tui.notifications.group_yesterday @-: कल
+PASS tui.notifications.group_yesterday: every rendered branch is non-empty
+tui.notifications.header_counts @0: 0 अपठित · 0 आपके इंतज़ार में
+tui.notifications.header_counts @1: 1 अपठित · 1 आपके इंतज़ार में
+tui.notifications.header_counts @2: 2 अपठित · 2 आपके इंतज़ार में
+tui.notifications.header_counts @5: 5 अपठित · 5 आपके इंतज़ार में
+tui.notifications.header_counts @21: 21 अपठित · 21 आपके इंतज़ार में
+tui.notifications.header_counts @1000: 1,000 अपठित · 1,000 आपके इंतज़ार में
+PASS tui.notifications.header_counts: every rendered branch is non-empty
+tui.notifications.header_partial @-: शुरुआती 1
+PASS tui.notifications.header_partial: every rendered branch is non-empty
+tui.notifications.hint_answer @-: जवाब दें
+PASS tui.notifications.hint_answer: every rendered branch is non-empty
+tui.notifications.hint_back @-: वापस
+PASS tui.notifications.hint_back: every rendered branch is non-empty
+tui.notifications.hint_clear @-: चयन हटाएँ
+PASS tui.notifications.hint_clear: every rendered branch is non-empty
+tui.notifications.hint_conversation @-: बातचीत
+PASS tui.notifications.hint_conversation: every rendered branch is non-empty
+tui.notifications.hint_dismiss @-: हटाएँ
+PASS tui.notifications.hint_dismiss: every rendered branch is non-empty
+tui.notifications.hint_dismiss_all @-: सभी हटाएँ
+PASS tui.notifications.hint_dismiss_all: every rendered branch is non-empty
+tui.notifications.hint_filter @-: फ़िल्टर
+PASS tui.notifications.hint_filter: every rendered branch is non-empty
+tui.notifications.hint_open @-: खोलें
+PASS tui.notifications.hint_open: every rendered branch is non-empty
+tui.notifications.hint_read @-: पढ़ा हुआ मानें
+PASS tui.notifications.hint_read: every rendered branch is non-empty
+tui.notifications.hint_select @-: चुनें
+PASS tui.notifications.hint_select: every rendered branch is non-empty
+tui.notifications.hint_undo @-: पूर्ववत करें
+PASS tui.notifications.hint_undo: every rendered branch is non-empty
+tui.notifications.hint_unread @-: अपठित मानें
+PASS tui.notifications.hint_unread: every rendered branch is non-empty
+tui.notifications.just_now @-: अभी-अभी
+PASS tui.notifications.just_now: every rendered branch is non-empty
+tui.notifications.kind_asks @-: सवाल
+PASS tui.notifications.kind_asks: every rendered branch is non-empty
+tui.notifications.kind_updates @-: अपडेट
+PASS tui.notifications.kind_updates: every rendered branch is non-empty
+tui.notifications.marked_read @-: 1 को पढ़ा हुआ माना गया।
+PASS tui.notifications.marked_read: every rendered branch is non-empty
+tui.notifications.marked_unread @-: 1 को अपठित माना गया।
+PASS tui.notifications.marked_unread: every rendered branch is non-empty
+tui.notifications.no_body @-: कोई विवरण नहीं जोड़ा गया।
+PASS tui.notifications.no_body: every rendered branch is non-empty
+tui.notifications.nothing_to_dismiss @-: Fix the flaky login test में हटाने के लिए कुछ नहीं है।
+PASS tui.notifications.nothing_to_dismiss: every rendered branch is non-empty
+tui.notifications.nothing_unread @-: कुछ भी अपठित नहीं है।
+PASS tui.notifications.nothing_unread: every rendered branch is non-empty
+tui.notifications.pointer_unread @-: पूर्णता की रसीदें अब /unread में हैं।
+PASS tui.notifications.pointer_unread: every rendered branch is non-empty
+tui.notifications.position @-: 3/42
+PASS tui.notifications.position: every rendered branch is non-empty
+tui.notifications.priority_high @-: उच्च
+PASS tui.notifications.priority_high: every rendered branch is non-empty
+tui.notifications.priority_normal_up @-: सामान्य+
+PASS tui.notifications.priority_normal_up: every rendered branch is non-empty
+tui.notifications.refused_argument @-: /notifications सिर्फ़ read आर्ग्युमेंट लेता है।
+PASS tui.notifications.refused_argument: every rendered branch is non-empty
+tui.notifications.restored @-: 1 को बहाल किया गया।
+PASS tui.notifications.restored: every rendered branch is non-empty
+tui.notifications.row_now @-: अभी
+PASS tui.notifications.row_now: every rendered branch is non-empty
+tui.notifications.section_history @-: पिछले अपडेट
+PASS tui.notifications.section_history: every rendered branch is non-empty
+tui.notifications.section_links @-: लिंक
+PASS tui.notifications.section_links: every rendered branch is non-empty
+tui.notifications.section_projects @-: संबंधित प्रोजेक्ट
+PASS tui.notifications.section_projects: every rendered branch is non-empty
+tui.notifications.section_waiting_here @-: इस बातचीत में आपके जवाब का इंतज़ार
+PASS tui.notifications.section_waiting_here: every rendered branch is non-empty
+tui.notifications.seen_in_chat @-: चैट में देखा गया
+PASS tui.notifications.seen_in_chat: every rendered branch is non-empty
+tui.notifications.seen_live @-: लाइव देखा गया
+PASS tui.notifications.seen_live: every rendered branch is non-empty
+tui.notifications.selected @-: 1 चयनित
+PASS tui.notifications.selected: every rendered branch is non-empty
+tui.notifications.sidebar_note @-: सूचनाएँ 1
+PASS tui.notifications.sidebar_note: every rendered branch is non-empty
+tui.notifications.stale_skipped @0: 0 सूचना आपके देखने के बाद बदल गई, इसलिए छोड़ दी गई।
+tui.notifications.stale_skipped @1: 1 सूचना आपके देखने के बाद बदल गई, इसलिए छोड़ दी गई।
+tui.notifications.stale_skipped @2: 2 सूचनाएँ आपके देखने के बाद बदल गईं, इसलिए छोड़ दी गईं।
+tui.notifications.stale_skipped @5: 5 सूचनाएँ आपके देखने के बाद बदल गईं, इसलिए छोड़ दी गईं।
+tui.notifications.stale_skipped @21: 21 सूचनाएँ आपके देखने के बाद बदल गईं, इसलिए छोड़ दी गईं।
+tui.notifications.stale_skipped @1000: 1,000 सूचनाएँ आपके देखने के बाद बदल गईं, इसलिए छोड़ दी गईं।
+PASS tui.notifications.stale_skipped: every rendered branch is non-empty
+tui.notifications.title @-: सूचनाएँ
+PASS tui.notifications.title: every rendered branch is non-empty
+tui.notifications.unread_mark_all @-: /unread read से सभी 1 को पढ़ा हुआ मानें
+PASS tui.notifications.unread_mark_all: every rendered branch is non-empty
+tui.notifications.unread_mark_these @-: /unread read से इन्हें पढ़ा हुआ मानें
+PASS tui.notifications.unread_mark_these: every rendered branch is non-empty
+tui.notifications.update_kind @-: अपडेट
+PASS tui.notifications.update_kind: every rendered branch is non-empty
+tui.notifications.updates_since @0: 38m से अब तक 0 अपडेट
+tui.notifications.updates_since @1: 38m से अब तक 1 अपडेट
+tui.notifications.updates_since @2: 38m से अब तक 2 अपडेट
+tui.notifications.updates_since @5: 38m से अब तक 5 अपडेट
+tui.notifications.updates_since @21: 38m से अब तक 21 अपडेट
+tui.notifications.updates_since @1000: 38m से अब तक 1,000 अपडेट
+PASS tui.notifications.updates_since: every rendered branch is non-empty
+tui.notifications.write_failed @-: सूचनाएँ अपडेट नहीं हो सकीं — और कुछ नहीं बदला: disk full (ENOSPC)
+PASS tui.notifications.write_failed: every rendered branch is non-empty
+
+-- fit: cell_len of each rendered variant vs maxCells --
+tui.notifications.ago: cap 12, worst 6  ('6m पहले')
+tui.notifications.arg_read: cap 44, worst 23  ('सभी अपठित सूचनाओं को पढ़ा हुआ मानें')
+tui.notifications.ask_expires: cap 18, worst 15  ('14:05 में समाप्त होगा')
+tui.notifications.ask_kind: cap 8, worst 3  ('सवाल')
+tui.notifications.back: cap 24, worst 6  ('← सूचनाएँ')
+tui.notifications.banner_digest_body: cap 60, worst 35  ('इन्हें देखने के लिए /notifications टाइप करें।')
+tui.notifications.banner_digest_title: cap 60, worst 27  ('1,000 और उच्च प्राथमिकता वाली सूचनाएँ')
+tui.notifications.chip_high: cap 6, worst 3  ('उच्च')
+tui.notifications.empty_caught_up_title: cap 30, worst 12  ('आप अप-टू-डेट हैं')
+tui.notifications.empty_filtered_title: cap 40, worst 23  ('इन फ़िल्टर से कुछ भी मेल नहीं खाता')
+tui.notifications.empty_none_title: cap 30, worst 15  ('अभी तक कोई सूचना नहीं')
+tui.notifications.filter_all: cap 8, worst 2  ('सभी')
+tui.notifications.filter_unread: cap 8, worst 4  ('अपठित')
+tui.notifications.group_conversation: cap 12, worst 4  ('बातचीत')
+tui.notifications.group_older: cap 30, worst 3  ('पुराने')
+tui.notifications.group_time: cap 12, worst 3  ('समय')
+tui.notifications.group_today: cap 30, worst 2  ('आज')
+tui.notifications.group_waiting: cap 30, worst 14  ('आपके जवाब का इंतज़ार')
+tui.notifications.group_week: cap 30, worst 10  ('इस हफ़्ते पहले')
+tui.notifications.group_yesterday: cap 30, worst 2  ('कल')
+tui.notifications.header_counts: cap 40, worst 29  ('1,000 अपठित · 1,000 आपके इंतज़ार में')
+tui.notifications.header_partial: cap 12, worst 10  ('शुरुआती 1,000')
+tui.notifications.hint_answer: cap 8, worst 5  ('जवाब दें')
+tui.notifications.hint_back: cap 8, worst 3  ('वापस')
+tui.notifications.hint_clear: cap 8, worst 7  ('चयन हटाएँ')
+tui.notifications.hint_conversation: cap 14, worst 4  ('बातचीत')
+tui.notifications.hint_dismiss: cap 10, worst 3  ('हटाएँ')
+tui.notifications.hint_dismiss_all: cap 12, worst 6  ('सभी हटाएँ')
+tui.notifications.hint_filter: cap 8, worst 4  ('फ़िल्टर')
+tui.notifications.hint_open: cap 10, worst 2  ('खोलें')
+tui.notifications.hint_read: cap 8, worst 8  ('पढ़ा हुआ मानें')
+tui.notifications.hint_select: cap 8, worst 2  ('चुनें')
+tui.notifications.hint_undo: cap 8, worst 8  ('पूर्ववत करें')
+tui.notifications.hint_unread: cap 8, worst 7  ('अपठित मानें')
+tui.notifications.just_now: cap 12, worst 5  ('अभी-अभी')
+tui.notifications.kind_asks: cap 8, worst 3  ('सवाल')
+tui.notifications.kind_updates: cap 8, worst 4  ('अपडेट')
+tui.notifications.no_body: cap 40, worst 17  ('कोई विवरण नहीं जोड़ा गया।')
+tui.notifications.position: cap 12, worst 4  ('3/42')
+tui.notifications.priority_high: cap 8, worst 3  ('उच्च')
+tui.notifications.priority_normal_up: cap 8, worst 5  ('सामान्य+')
+tui.notifications.row_now: cap 5, worst 2  ('अभी')
+tui.notifications.section_history: cap 30, worst 8  ('पिछले अपडेट')
+tui.notifications.section_links: cap 20, worst 2  ('लिंक')
+tui.notifications.section_projects: cap 30, worst 10  ('संबंधित प्रोजेक्ट')
+tui.notifications.section_waiting_here: cap 40, worst 24  ('इस बातचीत में आपके जवाब का इंतज़ार')
+tui.notifications.seen_in_chat: cap 12, worst 10  ('चैट में देखा गया')
+tui.notifications.seen_live: cap 12, worst 9  ('लाइव देखा गया')
+tui.notifications.selected: cap 16, worst 10  ('1,000 चयनित')
+tui.notifications.sidebar_note: cap 18, worst 10  ('सूचनाएँ 1,000')
+tui.notifications.title: cap 20, worst 4  ('सूचनाएँ')
+tui.notifications.update_kind: cap 8, worst 4  ('अपडेट')
+tui.notifications.updates_since: cap 30, worst 24  ('14:05 से अब तक 1,000 अपडेट')
+PASS every rendered variant within maxCells (over: [])
+
+-- Devanagari measurement: code points vs cell_len for tight strings --
+tui.notifications.hint_read: 'पढ़ा हुआ मानें' codepoints 14 cells 8 cap 8
+tui.notifications.hint_undo: 'पूर्ववत करें' codepoints 12 cells 8 cap 8
+tui.notifications.seen_in_chat: 'चैट में देखा गया' codepoints 16 cells 10 cap 12
+tui.notifications.row_now: 'अभी' codepoints 3 cells 2 cap 5
+tui.notifications.chip_high: 'उच्च' codepoints 4 cells 3 cap 6
+tui.notifications.hint_unread: 'अपठित मानें' codepoints 11 cells 7 cap 8
+tui.notifications.filter_unread: 'अपठित' codepoints 5 cells 4 cap 8
+tui.notifications.priority_normal_up: 'सामान्य+' codepoints 8 cells 5 cap 8
+tui.notifications.hint_conversation: 'बातचीत' codepoints 6 cells 4 cap 14
+tui.notifications.group_conversation: 'बातचीत' codepoints 6 cells 4 cap 12
+
+-- footer fit (hint_update width = terminal width - 1) --
+width 40: hi keeps ['↵', 'e', 'o', 'f', 'esc'] cost 37/39  | en keeps ['↵', 'u', 'f', 'esc'] cost 35/39
+width 60: hi keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 59/59  | en keeps ['↵', 'e', 'u', 'f', 'esc'] cost 46/59
+width 80: hi keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 59/79  | en keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 76/79
+width 100: hi keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 59/99  | en keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 76/99
+width 120: hi keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 59/119  | en keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 76/119
+width 160: hi keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 59/159  | en keeps ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'] cost 76/159
+
+-- literal tokens, NFC, bidi --
+PASS tui.notifications.banner_digest_body: literal '/notifications' present byte-exact
+PASS tui.notifications.confirm_dismiss_session: literal 'y/n' present byte-exact
+PASS tui.notifications.confirm_mark_all: literal 'y/n' present byte-exact
+PASS tui.notifications.empty_caught_up_body: literal 'f' present byte-exact
+PASS tui.notifications.refused_argument: literal '/notifications' present byte-exact
+PASS tui.notifications.refused_argument: literal 'read' present byte-exact
+PASS tui.notifications.pointer_unread: literal '/unread' present byte-exact
+PASS tui.notifications.unread_mark_all: literal '/unread read' present byte-exact
+PASS tui.notifications.unread_mark_these: literal '/unread read' present byte-exact
+PASS tui.notifications.ask_answer_hint: literal 'a' present byte-exact
+PASS unread_mark_all: `/unread read` at the start, not reflowed inside a phrase
+PASS unread_mark_these: `/unread read` at the start
+PASS tui.notifications.ago: no stray /unread reference
+PASS tui.notifications.arg_read: no stray /unread reference
+PASS tui.notifications.ask_answer_hint: no stray /unread reference
+PASS tui.notifications.ask_expires: no stray /unread reference
+PASS tui.notifications.ask_kind: no stray /unread reference
+PASS tui.notifications.asks_stay: no stray /unread reference
+PASS tui.notifications.back: no stray /unread reference
+PASS tui.notifications.banner_digest_body: no stray /unread reference
+PASS tui.notifications.banner_digest_title: no stray /unread reference
+PASS tui.notifications.chip_high: no stray /unread reference
+PASS tui.notifications.confirm_dismiss_session: no stray /unread reference
+PASS tui.notifications.confirm_mark_all: no stray /unread reference
+PASS tui.notifications.dismissed: no stray /unread reference
+PASS tui.notifications.empty_caught_up_body: no stray /unread reference
+PASS tui.notifications.empty_caught_up_title: no stray /unread reference
+PASS tui.notifications.empty_filtered_title: no stray /unread reference
+PASS tui.notifications.empty_none_body: no stray /unread reference
+PASS tui.notifications.empty_none_title: no stray /unread reference
+PASS tui.notifications.error_load: no stray /unread reference
+PASS tui.notifications.filter_all: no stray /unread reference
+PASS tui.notifications.filter_unread: no stray /unread reference
+PASS tui.notifications.group_conversation: no stray /unread reference
+PASS tui.notifications.group_older: no stray /unread reference
+PASS tui.notifications.group_time: no stray /unread reference
+PASS tui.notifications.group_today: no stray /unread reference
+PASS tui.notifications.group_waiting: no stray /unread reference
+PASS tui.notifications.group_week: no stray /unread reference
+PASS tui.notifications.group_yesterday: no stray /unread reference
+PASS tui.notifications.header_counts: no stray /unread reference
+PASS tui.notifications.header_partial: no stray /unread reference
+PASS tui.notifications.hint_answer: no stray /unread reference
+PASS tui.notifications.hint_back: no stray /unread reference
+PASS tui.notifications.hint_clear: no stray /unread reference
+PASS tui.notifications.hint_conversation: no stray /unread reference
+PASS tui.notifications.hint_dismiss: no stray /unread reference
+PASS tui.notifications.hint_dismiss_all: no stray /unread reference
+PASS tui.notifications.hint_filter: no stray /unread reference
+PASS tui.notifications.hint_open: no stray /unread reference
+PASS tui.notifications.hint_read: no stray /unread reference
+PASS tui.notifications.hint_select: no stray /unread reference
+PASS tui.notifications.hint_undo: no stray /unread reference
+PASS tui.notifications.hint_unread: no stray /unread reference
+PASS tui.notifications.just_now: no stray /unread reference
+PASS tui.notifications.kind_asks: no stray /unread reference
+PASS tui.notifications.kind_updates: no stray /unread reference
+PASS tui.notifications.marked_read: no stray /unread reference
+PASS tui.notifications.marked_unread: no stray /unread reference
+PASS tui.notifications.no_body: no stray /unread reference
+PASS tui.notifications.nothing_to_dismiss: no stray /unread reference
+PASS tui.notifications.nothing_unread: no stray /unread reference
+PASS tui.notifications.pointer_unread: no stray /unread reference
+PASS tui.notifications.position: no stray /unread reference
+PASS tui.notifications.priority_high: no stray /unread reference
+PASS tui.notifications.priority_normal_up: no stray /unread reference
+PASS tui.notifications.refused_argument: no stray /unread reference
+PASS tui.notifications.restored: no stray /unread reference
+PASS tui.notifications.row_now: no stray /unread reference
+PASS tui.notifications.section_history: no stray /unread reference
+PASS tui.notifications.section_links: no stray /unread reference
+PASS tui.notifications.section_projects: no stray /unread reference
+PASS tui.notifications.section_waiting_here: no stray /unread reference
+PASS tui.notifications.seen_in_chat: no stray /unread reference
+PASS tui.notifications.seen_live: no stray /unread reference
+PASS tui.notifications.selected: no stray /unread reference
+PASS tui.notifications.sidebar_note: no stray /unread reference
+PASS tui.notifications.stale_skipped: no stray /unread reference
+PASS tui.notifications.title: no stray /unread reference
+PASS tui.notifications.update_kind: no stray /unread reference
+PASS tui.notifications.updates_since: no stray /unread reference
+PASS tui.notifications.write_failed: no stray /unread reference
+PASS tui.notifications.ago: NFC
+PASS tui.notifications.ago: no bidi/zero-width controls ([])
+PASS tui.notifications.ago: no doubled space
+PASS tui.notifications.arg_read: NFC
+PASS tui.notifications.arg_read: no bidi/zero-width controls ([])
+PASS tui.notifications.arg_read: no doubled space
+PASS tui.notifications.ask_answer_hint: NFC
+PASS tui.notifications.ask_answer_hint: no bidi/zero-width controls ([])
+PASS tui.notifications.ask_answer_hint: no doubled space
+PASS tui.notifications.ask_expires: NFC
+PASS tui.notifications.ask_expires: no bidi/zero-width controls ([])
+PASS tui.notifications.ask_expires: no doubled space
+PASS tui.notifications.ask_kind: NFC
+PASS tui.notifications.ask_kind: no bidi/zero-width controls ([])
+PASS tui.notifications.ask_kind: no doubled space
+PASS tui.notifications.asks_stay: NFC
+PASS tui.notifications.asks_stay: no bidi/zero-width controls ([])
+PASS tui.notifications.asks_stay: no doubled space
+PASS tui.notifications.back: NFC
+PASS tui.notifications.back: no bidi/zero-width controls ([])
+PASS tui.notifications.back: no doubled space
+PASS tui.notifications.banner_digest_body: NFC
+PASS tui.notifications.banner_digest_body: no bidi/zero-width controls ([])
+PASS tui.notifications.banner_digest_body: no doubled space
+PASS tui.notifications.banner_digest_title: NFC
+PASS tui.notifications.banner_digest_title: no bidi/zero-width controls ([])
+PASS tui.notifications.banner_digest_title: no doubled space
+PASS tui.notifications.chip_high: NFC
+PASS tui.notifications.chip_high: no bidi/zero-width controls ([])
+PASS tui.notifications.chip_high: no doubled space
+PASS tui.notifications.confirm_dismiss_session: NFC
+PASS tui.notifications.confirm_dismiss_session: no bidi/zero-width controls ([])
+PASS tui.notifications.confirm_dismiss_session: no doubled space
+PASS tui.notifications.confirm_mark_all: NFC
+PASS tui.notifications.confirm_mark_all: no bidi/zero-width controls ([])
+PASS tui.notifications.confirm_mark_all: no doubled space
+PASS tui.notifications.dismissed: NFC
+PASS tui.notifications.dismissed: no bidi/zero-width controls ([])
+PASS tui.notifications.dismissed: no doubled space
+PASS tui.notifications.empty_caught_up_body: NFC
+PASS tui.notifications.empty_caught_up_body: no bidi/zero-width controls ([])
+PASS tui.notifications.empty_caught_up_body: no doubled space
+PASS tui.notifications.empty_caught_up_title: NFC
+PASS tui.notifications.empty_caught_up_title: no bidi/zero-width controls ([])
+PASS tui.notifications.empty_caught_up_title: no doubled space
+PASS tui.notifications.empty_filtered_title: NFC
+PASS tui.notifications.empty_filtered_title: no bidi/zero-width controls ([])
+PASS tui.notifications.empty_filtered_title: no doubled space
+PASS tui.notifications.empty_none_body: NFC
+PASS tui.notifications.empty_none_body: no bidi/zero-width controls ([])
+PASS tui.notifications.empty_none_body: no doubled space
+PASS tui.notifications.empty_none_title: NFC
+PASS tui.notifications.empty_none_title: no bidi/zero-width controls ([])
+PASS tui.notifications.empty_none_title: no doubled space
+PASS tui.notifications.error_load: NFC
+PASS tui.notifications.error_load: no bidi/zero-width controls ([])
+PASS tui.notifications.error_load: no doubled space
+PASS tui.notifications.filter_all: NFC
+PASS tui.notifications.filter_all: no bidi/zero-width controls ([])
+PASS tui.notifications.filter_all: no doubled space
+PASS tui.notifications.filter_unread: NFC
+PASS tui.notifications.filter_unread: no bidi/zero-width controls ([])
+PASS tui.notifications.filter_unread: no doubled space
+PASS tui.notifications.group_conversation: NFC
+PASS tui.notifications.group_conversation: no bidi/zero-width controls ([])
+PASS tui.notifications.group_conversation: no doubled space
+PASS tui.notifications.group_older: NFC
+PASS tui.notifications.group_older: no bidi/zero-width controls ([])
+PASS tui.notifications.group_older: no doubled space
+PASS tui.notifications.group_time: NFC
+PASS tui.notifications.group_time: no bidi/zero-width controls ([])
+PASS tui.notifications.group_time: no doubled space
+PASS tui.notifications.group_today: NFC
+PASS tui.notifications.group_today: no bidi/zero-width controls ([])
+PASS tui.notifications.group_today: no doubled space
+PASS tui.notifications.group_waiting: NFC
+PASS tui.notifications.group_waiting: no bidi/zero-width controls ([])
+PASS tui.notifications.group_waiting: no doubled space
+PASS tui.notifications.group_week: NFC
+PASS tui.notifications.group_week: no bidi/zero-width controls ([])
+PASS tui.notifications.group_week: no doubled space
+PASS tui.notifications.group_yesterday: NFC
+PASS tui.notifications.group_yesterday: no bidi/zero-width controls ([])
+PASS tui.notifications.group_yesterday: no doubled space
+PASS tui.notifications.header_counts: NFC
+PASS tui.notifications.header_counts: no bidi/zero-width controls ([])
+PASS tui.notifications.header_counts: no doubled space
+PASS tui.notifications.header_partial: NFC
+PASS tui.notifications.header_partial: no bidi/zero-width controls ([])
+PASS tui.notifications.header_partial: no doubled space
+PASS tui.notifications.hint_answer: NFC
+PASS tui.notifications.hint_answer: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_answer: no doubled space
+PASS tui.notifications.hint_back: NFC
+PASS tui.notifications.hint_back: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_back: no doubled space
+PASS tui.notifications.hint_clear: NFC
+PASS tui.notifications.hint_clear: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_clear: no doubled space
+PASS tui.notifications.hint_conversation: NFC
+PASS tui.notifications.hint_conversation: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_conversation: no doubled space
+PASS tui.notifications.hint_dismiss: NFC
+PASS tui.notifications.hint_dismiss: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_dismiss: no doubled space
+PASS tui.notifications.hint_dismiss_all: NFC
+PASS tui.notifications.hint_dismiss_all: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_dismiss_all: no doubled space
+PASS tui.notifications.hint_filter: NFC
+PASS tui.notifications.hint_filter: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_filter: no doubled space
+PASS tui.notifications.hint_open: NFC
+PASS tui.notifications.hint_open: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_open: no doubled space
+PASS tui.notifications.hint_read: NFC
+PASS tui.notifications.hint_read: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_read: no doubled space
+PASS tui.notifications.hint_select: NFC
+PASS tui.notifications.hint_select: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_select: no doubled space
+PASS tui.notifications.hint_undo: NFC
+PASS tui.notifications.hint_undo: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_undo: no doubled space
+PASS tui.notifications.hint_unread: NFC
+PASS tui.notifications.hint_unread: no bidi/zero-width controls ([])
+PASS tui.notifications.hint_unread: no doubled space
+PASS tui.notifications.just_now: NFC
+PASS tui.notifications.just_now: no bidi/zero-width controls ([])
+PASS tui.notifications.just_now: no doubled space
+PASS tui.notifications.kind_asks: NFC
+PASS tui.notifications.kind_asks: no bidi/zero-width controls ([])
+PASS tui.notifications.kind_asks: no doubled space
+PASS tui.notifications.kind_updates: NFC
+PASS tui.notifications.kind_updates: no bidi/zero-width controls ([])
+PASS tui.notifications.kind_updates: no doubled space
+PASS tui.notifications.marked_read: NFC
+PASS tui.notifications.marked_read: no bidi/zero-width controls ([])
+PASS tui.notifications.marked_read: no doubled space
+PASS tui.notifications.marked_unread: NFC
+PASS tui.notifications.marked_unread: no bidi/zero-width controls ([])
+PASS tui.notifications.marked_unread: no doubled space
+PASS tui.notifications.no_body: NFC
+PASS tui.notifications.no_body: no bidi/zero-width controls ([])
+PASS tui.notifications.no_body: no doubled space
+PASS tui.notifications.nothing_to_dismiss: NFC
+PASS tui.notifications.nothing_to_dismiss: no bidi/zero-width controls ([])
+PASS tui.notifications.nothing_to_dismiss: no doubled space
+PASS tui.notifications.nothing_unread: NFC
+PASS tui.notifications.nothing_unread: no bidi/zero-width controls ([])
+PASS tui.notifications.nothing_unread: no doubled space
+PASS tui.notifications.pointer_unread: NFC
+PASS tui.notifications.pointer_unread: no bidi/zero-width controls ([])
+PASS tui.notifications.pointer_unread: no doubled space
+PASS tui.notifications.position: NFC
+PASS tui.notifications.position: no bidi/zero-width controls ([])
+PASS tui.notifications.position: no doubled space
+PASS tui.notifications.priority_high: NFC
+PASS tui.notifications.priority_high: no bidi/zero-width controls ([])
+PASS tui.notifications.priority_high: no doubled space
+PASS tui.notifications.priority_normal_up: NFC
+PASS tui.notifications.priority_normal_up: no bidi/zero-width controls ([])
+PASS tui.notifications.priority_normal_up: no doubled space
+PASS tui.notifications.refused_argument: NFC
+PASS tui.notifications.refused_argument: no bidi/zero-width controls ([])
+PASS tui.notifications.refused_argument: no doubled space
+PASS tui.notifications.restored: NFC
+PASS tui.notifications.restored: no bidi/zero-width controls ([])
+PASS tui.notifications.restored: no doubled space
+PASS tui.notifications.row_now: NFC
+PASS tui.notifications.row_now: no bidi/zero-width controls ([])
+PASS tui.notifications.row_now: no doubled space
+PASS tui.notifications.section_history: NFC
+PASS tui.notifications.section_history: no bidi/zero-width controls ([])
+PASS tui.notifications.section_history: no doubled space
+PASS tui.notifications.section_links: NFC
+PASS tui.notifications.section_links: no bidi/zero-width controls ([])
+PASS tui.notifications.section_links: no doubled space
+PASS tui.notifications.section_projects: NFC
+PASS tui.notifications.section_projects: no bidi/zero-width controls ([])
+PASS tui.notifications.section_projects: no doubled space
+PASS tui.notifications.section_waiting_here: NFC
+PASS tui.notifications.section_waiting_here: no bidi/zero-width controls ([])
+PASS tui.notifications.section_waiting_here: no doubled space
+PASS tui.notifications.seen_in_chat: NFC
+PASS tui.notifications.seen_in_chat: no bidi/zero-width controls ([])
+PASS tui.notifications.seen_in_chat: no doubled space
+PASS tui.notifications.seen_live: NFC
+PASS tui.notifications.seen_live: no bidi/zero-width controls ([])
+PASS tui.notifications.seen_live: no doubled space
+PASS tui.notifications.selected: NFC
+PASS tui.notifications.selected: no bidi/zero-width controls ([])
+PASS tui.notifications.selected: no doubled space
+PASS tui.notifications.sidebar_note: NFC
+PASS tui.notifications.sidebar_note: no bidi/zero-width controls ([])
+PASS tui.notifications.sidebar_note: no doubled space
+PASS tui.notifications.stale_skipped: NFC
+PASS tui.notifications.stale_skipped: no bidi/zero-width controls ([])
+PASS tui.notifications.stale_skipped: no doubled space
+PASS tui.notifications.title: NFC
+PASS tui.notifications.title: no bidi/zero-width controls ([])
+PASS tui.notifications.title: no doubled space
+PASS tui.notifications.unread_mark_all: NFC
+PASS tui.notifications.unread_mark_all: no bidi/zero-width controls ([])
+PASS tui.notifications.unread_mark_all: no doubled space
+PASS tui.notifications.unread_mark_these: NFC
+PASS tui.notifications.unread_mark_these: no bidi/zero-width controls ([])
+PASS tui.notifications.unread_mark_these: no doubled space
+PASS tui.notifications.update_kind: NFC
+PASS tui.notifications.update_kind: no bidi/zero-width controls ([])
+PASS tui.notifications.update_kind: no doubled space
+PASS tui.notifications.updates_since: NFC
+PASS tui.notifications.updates_since: no bidi/zero-width controls ([])
+PASS tui.notifications.updates_since: no doubled space
+PASS tui.notifications.write_failed: NFC
+PASS tui.notifications.write_failed: no bidi/zero-width controls ([])
+PASS tui.notifications.write_failed: no doubled space
+PASS no exclamation mark added where the en has none
+
+-- negative controls --
+PASS control root (unmodified copy) passes
+NEG-1 dropped {source}: ["hi/tui.notifications: tui.notifications.nothing_to_dismiss: arguments () != en's (('source', 'simple'),): en has 1 argument(s), translation has 0"]
+PASS NEG-1 renamed/dropped {source} is detected
+NEG-2 renamed {error} -> {err}: ["hi/tui.notifications: tui.notifications.error_load: arguments (('err', 'simple'),) != en's (('error', 'simple'),): argument 1 is 'err', en's is 'error' (renamed or reordered)"]
+PASS NEG-2 renamed argument is detected
+NEG-3 plural category 'few' for hi: ["hi/tui.notifications: tui.notifications.dismissed: plural category 'few' not in ['one', 'other']"]
+PASS NEG-3 a plural category hi does not have is detected
+NEG-4 plural without `other`: ['hi/tui.notifications: tui.notifications.asks_stay: plural has no `other` branch']
+PASS NEG-4 a plural with no `other` branch is detected
+NEG-5 marked_read keeps a single {count} (legal form): NOT DETECTED
+PASS NEG-5 control stays green where the string is genuinely legal
+NEG-6 fit measurer on 66-codepoint text: 47 cells vs ago cap 12 -> DETECTED
+PASS NEG-6 the fit measurer flags an over-budget string
+
+FAILURES=[]
+AUDIT MECHANICS: PASS

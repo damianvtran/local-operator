@@ -1,0 +1,107 @@
+COMMAND: python delta.py.txt [ntt2 remediation delta] tree=/Users/damian/.local-operator/sessions/ca5d33d6f6aa/scratchpad/tui-audit/tree-77b3c2cf
+pin PASS en       b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+pin PASS context  9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6
+pin PASS target   eee1186170a1856f4e59528b4769b8b834c0c928ce7cad325ceedccc789058fc
+keys en=72 ru=72 round1=72 ctx=72
+round1 target=03cdb4d6fc69764229a5dd15611a0d64e1856dca54107904bfdca223f8b947c1 context=0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+
+== delta vs round-1 audited bytes
+changed keys (3): ['chip_high', 'pointer_unread', 'stale_skipped']
+order==en: True sorted: True
++/- lines: 6
+  | --- round1
+  | +++ target
+  | @@ -11 +11 @@
+  | -  "tui.notifications.chip_high": "важно",
+  | +  "tui.notifications.chip_high": "выс.",
+  | @@ -52 +52 @@
+  | -  "tui.notifications.pointer_unread": "Отчёты о завершении сессий перенесены в /unread.",
+  | +  "tui.notifications.pointer_unread": "Завершённые сессии перенесены в /unread.",
+  | @@ -67 +67 @@
+  | -  "tui.notifications.stale_skipped": "{count, plural, one {# уведомление изменилось с момента просмотра — оставлено как есть.} few {# уведомления изменились с момента просмотра — оставлены как есть.} many {# уведомлений изменились с момента просмотра — оставлены как есть.} other {# уведомления изменились с момента просмотра — оставлены как есть.}}",
+  | +  "tui.notifications.stale_skipped": "{count, plural, one {# уведомление изменилось после просмотра — не тронуто.} few {# уведомления изменились после просмотра — не тронуты.} many {# уведомлений изменилось после просмотра — не тронуто.} other {# уведомления изменилось после просмотра — не тронуто.}}",
+bytes=7031 ends=b'\n}\n' cr=False tabs=False nfc=True
+
+== the three changed values
+-- chip_high
+   old: 'важно'
+   new: 'выс.'
+   args en=() ru=() same=True problem=None
+   NFC=True bidi=[] dblspace=False
+-- pointer_unread
+   old: 'Отчёты о завершении сессий перенесены в /unread.'
+   new: 'Завершённые сессии перенесены в /unread.'
+   args en=() ru=() same=True problem=None
+   NFC=True bidi=[] dblspace=False
+-- stale_skipped
+   old: '{count, plural, one {# уведомление изменилось с момента просмотра — оставлено как есть.} few {# уведомления изменились с момента просмотра — оставлены как есть.} many {# уведомлений изменились с момента просмотра — оставлены как есть.} other {# уведомления изменились с момента просмотра — оставлены как есть.}}'
+   new: '{count, plural, one {# уведомление изменилось после просмотра — не тронуто.} few {# уведомления изменились после просмотра — не тронуты.} many {# уведомлений изменилось после просмотра — не тронуто.} other {# уведомления изменилось после просмотра — не тронуто.}}'
+   args en=(('count', 'plural'),) ru=(('count', 'plural'),) same=True problem=None
+   plural completeness: None
+   NFC=True bidi=[] dblspace=False
+
+== agreed text, exactly
+chip_high == 'выс.' PASS
+pointer_unread == agreed sentence PASS (40 cells)
+stale arms found: ['one', 'few', 'many', 'other']
+   one   PASS '# уведомление изменилось после просмотра — не тронуто.'
+   few   PASS '# уведомления изменились после просмотра — не тронуты.'
+   many  PASS '# уведомлений изменилось после просмотра — не тронуто.'
+   other PASS '# уведомления изменилось после просмотра — не тронуто.'
+   wrapper prefix=True suffix+branches=True
+
+== stale_skipped CLDR renders (ru) and en at the same counts
+  n=0     ru=54 en=41  grammar-OK '0 уведомлений изменилось после просмотра — не тронуто.'
+  n=1     ru=54 en=40  grammar-OK '1 уведомление изменилось после просмотра — не тронуто.'
+  n=2     ru=54 en=41  grammar-OK '2 уведомления изменились после просмотра — не тронуты.'
+  n=3     ru=54 en=41  grammar-OK '3 уведомления изменились после просмотра — не тронуты.'
+  n=5     ru=54 en=41  grammar-OK '5 уведомлений изменилось после просмотра — не тронуто.'
+  n=11    ru=55 en=42  grammar-OK '11 уведомлений изменилось после просмотра — не тронуто.'
+  n=21    ru=55 en=42  grammar-OK '21 уведомление изменилось после просмотра — не тронуто.'
+  n=22    ru=55 en=42  grammar-OK '22 уведомления изменились после просмотра — не тронуты.'
+  n=25    ru=55 en=42  grammar-OK '25 уведомлений изменилось после просмотра — не тронуто.'
+  n=101   ru=56 en=43  grammar-OK '101 уведомление изменилось после просмотра — не тронуто.'
+  n=1234  ru=58 en=45  grammar-OK '1\xa0234 уведомления изменились после просмотра — не тронуты.'
+  chip_high      cells=4
+  pointer_unread cells=40
+
+== widths, worst realistic count
+  n=3     new=54  round1=66  en=41  (saved 12)
+  n=5     new=54  round1=66  en=41  (saved 12)
+  n=11    new=55  round1=67  en=42  (saved 12)
+  n=1234  new=58  round1=70  en=45  (saved 12)
+  budgets: {'chip_high': 6, 'pointer_unread': None, 'stale_skipped': None}
+  chip_high      cells=4   budget=6 ok
+  pointer_unread cells=40  budget=None no budget
+  stale_skipped  cells=54  budget=None no budget
+
+== pointer_unread: the /unread literal
+  index=32 segment='/unread' codepoints=['0x2f', '0x75', '0x6e', '0x72', '0x65', '0x61', '0x64']
+  byte-exact /unread PASS; sentence ends ' /unread.'
+
+== context budgets: branch vs round 1
+  moved budgets: 2
+    hint_answer                            8 -> 9
+    hint_dismiss_all                       12 -> 14
+  moved among the three audited keys: none
+  audited budget chip_high      = 6 (round1 6)
+  audited budget pointer_unread = None (round1 None)
+  audited budget stale_skipped  = None (round1 None)
+  ru hint_answer        cells=8   old_budget=8   new_budget=9   fits_both=True
+  ru hint_dismiss_all   cells=10  old_budget=12  new_budget=14  fits_both=True
+
+== row chips: first width at which the chip survives (real row_line)
+  active locale='ru'
+  chip 'выс.'         dropped through width 36, shown from 37
+  chip 'было в чате'  dropped through width 48, shown from 49
+  chip 'видели сразу' dropped through width 49, shown from 50
+
+== negative controls
+  NC1a few arm drops the # placeholder -> completeness="plural 'count' branch 'few' does not render the value (`#` or `{count, number}`)"
+  NC1b few arm wrong case -> probe would accept=False ('3 уведомлений изменились после просмотра — не тронуты.')
+  NC2 few arm removed -> completeness="plural 'count' is missing locale categories ['few'] (has ['many', 'one', 'other'])"
+  NC3 argument renamed -> problem="argument 1 is 'total', en's is 'count' (renamed or reordered)"
+  NC4 drifted command literal detected=True
+
+FAILURES=[]
+RESULT: PASS (0 failure(s))

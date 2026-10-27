@@ -204,7 +204,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # slice adds `relay.approvals` (17 keys, the approval-scope copy main added
     # as literals) on the same terms: carried only now that its independent
     # audit row exists against the current en bytes. It sorts before
-    # `relay.ask`.
+    # `relay.ask`. The notifications-inbox wave adds `tui.notifications` (the
+    # inbox page's 72 keys) on exactly the same terms: six locales carry it
+    # only because their independent audit bundles and fresh ledger rows landed
+    # with the files in the same commit, and the seventh (ru) is still absent
+    # for want of its round-2 delta audit. Mechanical parity is asserted below
+    # for every namespace in this tuple, so the new one is checked too.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
@@ -225,6 +230,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "tui.asks",
         "tui.authoring",
         "tui.notices",
+        "tui.notifications",
         "tui.palette",
         "tui.projects_edit",
         "tui.review",

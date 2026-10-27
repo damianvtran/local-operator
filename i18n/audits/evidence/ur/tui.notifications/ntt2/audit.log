@@ -1,0 +1,378 @@
+# Translation audit log — ntt2 (round 2, delta re-audit) / locale ur / namespace tui.notifications
+# Auditor: independent translation-auditor (lopdev), session 6cd869512279.
+# Actual serving model: radient/auto (session started on anthropic/claude-opus-5-5; provider-quota
+# [model switch] notices moved it through anthropic/claude-sonnet-5-5 and openai/gpt-6.1-sol in the
+# previous round of this same session).
+#
+# audited target : /Users/damian/workspace/repos/lo-notifications-l1/local_operator/i18n/catalogues/ur/tui.notifications.json (UNTRACKED, `??` in git status)
+# target sha256  = 07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a
+# round-1 target = a0cd78685b89231a7c282cf7f7b68020cbd4a8e29593e84c68e63105a9a96ea0
+# en sha256      = b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+# ctx sha256     = 0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+# code under test= 8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a (feat/notifications-tui), extracted with `git archive` to /Users/damian/workspace/lo-ntt2/code
+# round-1 code   = d25392f3553c38ce1740c98e53c9c66a700e9e64, extracted to /Users/damian/workspace/lo-ntt2/code_old for the before/after control
+#
+# DISCLOSURE: the two code extractions live OUTSIDE the session scratchpad (~/workspace/lo-ntt2/). Two
+# `git archive` extractions inside the session scratchpad hit its 256 MiB cap mid-round; they were removed
+# and re-extracted outside. The audited copy, probes and all captured logs remain in this bundle's work/.
+
+==============================================================================
+## 1. Pin the bytes, then diff them against the round-1 target
+COMMAND: cp -p <worktree>/ur/tui.notifications.json <scratch>/ntt2/work/target.ur.json ; shasum -a 256 target.ur.json ntt1/work/target.ur.json ; python3 json + difflib diff
+NOTE: the worktree file and my scratch copy hash identically; the delta is exactly the four keys the delegation named, with every other value byte-identical and no formatting/ordering change.
+  sha256(ntt2 target)   07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a
+  round-1 target       a0cd78685b89231a7c282cf7f7b68020cbd4a8e29593e84c68e63105a9a96ea0
+  worktree target now   07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a
+
+keys old=72 new=72 added=[] removed=[]
+changed keys (4):
+  tui.notifications.back
+    old: '← اطلاعات'
+    new: '→ اطلاعات'
+  tui.notifications.hint_undo
+    old: 'کالعدم'
+    new: 'بحال'
+  tui.notifications.unread_mark_all
+    old: '/unread read سے تمام {count} کو پڑھا ہوا نشان زد کریں'
+    new: '/unread read سے تمام {count} کو پڑھا ہوا نشان زد کریں۔'
+  tui.notifications.unread_mark_these
+    old: '/unread read سے انہیں پڑھا ہوا نشان زد کریں'
+    new: '/unread read سے انہیں پڑھا ہوا نشان زد کریں۔'
+all other values byte-identical: True
+raw unified diff of the whole file:
+--- ntt1
++++ ntt2
+@@ -8 +8 @@
+-  "tui.notifications.back": "← اطلاعات",
++  "tui.notifications.back": "→ اطلاعات",
+@@ -42 +42 @@
+-  "tui.notifications.hint_undo": "کالعدم",
++  "tui.notifications.hint_undo": "بحال",
+@@ -69,2 +69,2 @@
+-  "tui.notifications.unread_mark_all": "/unread read سے تمام {count} کو پڑھا ہوا نشان زد کریں",
+-  "tui.notifications.unread_mark_these": "/unread read سے انہیں پڑھا ہوا نشان زد کریں",
++  "tui.notifications.unread_mark_all": "/unread read سے تمام {count} کو پڑھا ہوا نشان زد کریں۔",
++  "tui.notifications.unread_mark_these": "/unread read سے انہیں پڑھا ہوا نشان زد کریں۔",
+
+==============================================================================
+## 2. Repository state and the two renderer generations
+COMMAND: git -C <repo> rev-parse HEAD ; git branch --show-current ; git log -1 ; git status --porcelain=v1 <target> ; git show <rev>:local_operator/tui/notifications_render.py | grep -n '_t = |display_tr' ; git show <rev>:local_operator/tui/notifications_model.py | grep -n SHELL_COMMAND ; git show <rev>:local_operator/tui/notifications_render.py | grep -n '_pad_cells|rjust'
+HEAD=8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a
+branch=
+commit 8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a
+fix(notifications): isolate in-sentence commands and reserve the TUI's columns by cells
+?? local_operator/i18n/catalogues/ur/tui.notifications.json
+
+[round-1 renderer route, d25392f3553]
+_t = tr("tui.notifications")
+
+[round-2 renderer route, 8976104b83]
+from local_operator.tui.i18n_status import display_tr
+from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = display_tr(
+    "tui.notifications",
+    # The literal /commands ride as islands (see model.SHELL_COMMANDS):
+    # per-string isolation alone reorders them in Urdu.
+    technical_literals=model.SHELL_COMMANDS,
+    technical_commands=model.SHELL_COMMAND_TEMPLATES,
+)
+_k = i18n_keys.tui_notifications
+
+[token islands declared by the model]
+SHELL_COMMANDS: tuple[str, ...] = ("/notifications", "/unread")
+SHELL_COMMAND_TEMPLATES: tuple[str, ...] = ("/unread read",)
+
+[cell-aware padding]
+def _pad_cells(text: str, cells: int) -> str:
+    # fields are sized in terminal cells, so `str.rjust` — which counts
+    stamp = _pad_cells(row_time(int(row.get("updated_at") or 0), now_ms), TIME_CELLS)
+        _pad_cells(source, SOURCE_CELLS), style=ink("fg" if cursor else "muted", ground=ground)
+
+[code catalogue bytes at the commit under test]
+en catalogue   b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68  (commit tree) == pinned en: True
+context        0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907  (commit tree) == pinned ctx: True
+
+==============================================================================
+## 3. THE ARROW THROUGH THE REAL PAINT PATH (round-2 renderer, active locale ur)
+COMMAND: captured stdout of the probe named above
+NOTE: the module's own `_t` is display_tr(technical_literals=/notifications,/unread; technical_commands=/unread read). 'painted' shows the control characters literally. 'VISUAL real' is what a UAX#9 resolver (GNU FriBidi 1.0.16) places where for the painted string; 'VISUAL ctrl' is the same copy with per-string RLI only and NO token islands, i.e. the pre-fix paint.
+active_locale='ur'   code root=/Users/damian/workspace/lo-ntt2/code
+render._t literals: True
+view module exported _t exists: True
+
+## back
+  catalogue   : '→ اطلاعات'
+  painted(esc): '\u2067→ اطلاعات\u2069'
+  painted     : <RLI>→ اطلاعات<PDI>
+  cells       : 9 (controls cost 0)
+  VISUAL real : <RLI>ﺕﺎﻋﻼﻃﺍ →<PDI>
+  VISUAL ctrl : <RLI>ﺕﺎﻋﻼﻃﺍ →<PDI>   <- per-string RLI only, no token island
+
+## pointer_unread
+  catalogue   : 'تکمیل کی رسیدیں اب /unread میں ہیں۔'
+  painted(esc): '\u2067تکمیل کی رسیدیں اب \u2066/unread\u2069 میں ہیں۔\u2069'
+  painted     : <RLI>تکمیل کی رسیدیں اب <LRI>/unread<PDI> میں ہیں۔<PDI>
+  cells       : 35 (controls cost 0)
+  VISUAL real : <RLI>۔ﮟﯿﮨ ﮟﯿﻣ <PDI>/unread<LRI> ﺏﺍ ﮟﯾﺪﯿﺳﺭ ﯽﮐ ﻞﯿﻤﮑﺗ<PDI>
+  VISUAL ctrl : <RLI>۔ﮟﯿﮨ ﮟﯿﻣ unread/ ﺏﺍ ﮟﯾﺪﯿﺳﺭ ﯽﮐ ﻞﯿﻤﮑﺗ<PDI>   <- per-string RLI only, no token island
+
+## refused_argument
+  catalogue   : '/notifications کے ساتھ صرف read دیا جا سکتا ہے۔'
+  painted(esc): '\u2067\u2066/notifications\u2069 کے ساتھ صرف read دیا جا سکتا ہے۔\u2069'
+  painted     : <RLI><LRI>/notifications<PDI> کے ساتھ صرف read دیا جا سکتا ہے۔<PDI>
+  cells       : 47 (controls cost 0)
+  VISUAL real : <RLI>۔ﮯﮨ ﺎﺘﮑﺳ ﺎﺟ ﺎﯾﺩ read ﻑﺮﺻ ﮫﺗﺎﺳ ﮯﮐ <PDI>/notifications<LRI><PDI>
+  VISUAL ctrl : <RLI>۔ﮯﮨ ﺎﺘﮑﺳ ﺎﺟ ﺎﯾﺩ read ﻑﺮﺻ ﮫﺗﺎﺳ ﮯﮐ notifications/<PDI>   <- per-string RLI only, no token island
+
+## banner_digest_body
+  catalogue   : 'انہیں دیکھنے کے لیے /notifications لکھیں۔'
+  painted(esc): '\u2067انہیں دیکھنے کے لیے \u2066/notifications\u2069 لکھیں۔\u2069'
+  painted     : <RLI>انہیں دیکھنے کے لیے <LRI>/notifications<PDI> لکھیں۔<PDI>
+  cells       : 41 (controls cost 0)
+  VISUAL real : <RLI>۔ﮟﯿﮭﮑﻟ <PDI>/notifications<LRI> ﮯﯿﻟ ﮯﮐ ﮯﻨﮭﮑﯾﺩ ﮟﯿﮩﻧﺍ<PDI>
+  VISUAL ctrl : <RLI>۔ﮟﯿﮭﮑﻟ notifications/ ﮯﯿﻟ ﮯﮐ ﮯﻨﮭﮑﯾﺩ ﮟﯿﮩﻧﺍ<PDI>   <- per-string RLI only, no token island
+
+## unread_mark_all
+  catalogue   : '/unread read سے تمام {count} کو پڑھا ہوا نشان زد کریں۔'
+  painted(esc): '\u2067\u2066/unread read\u2069 سے تمام 5 کو پڑھا ہوا نشان زد کریں۔\u2069'
+  painted     : <RLI><LRI>/unread read<PDI> سے تمام 5 کو پڑھا ہوا نشان زد کریں۔<PDI>
+  cells       : 48 (controls cost 0)
+  VISUAL real : <RLI>۔ﮟﯾﺮﮐ ﺩﺯ ﻥﺎﺸﻧ ﺍﻮﮨ ﺎﮬﮍﭘ ﻮﮐ 5 ﻡﺎﻤﺗ ﮯﺳ <PDI>/unread read<LRI><PDI>
+  VISUAL ctrl : <RLI>۔ﮟﯾﺮﮐ ﺩﺯ ﻥﺎﺸﻧ ﺍﻮﮨ ﺎﮬﮍﭘ ﻮﮐ 5 ﻡﺎﻤﺗ ﮯﺳ unread read/<PDI>   <- per-string RLI only, no token island
+
+## unread_mark_these
+  catalogue   : '/unread read سے انہیں پڑھا ہوا نشان زد کریں۔'
+  painted(esc): '\u2067\u2066/unread read\u2069 سے انہیں پڑھا ہوا نشان زد کریں۔\u2069'
+  painted     : <RLI><LRI>/unread read<PDI> سے انہیں پڑھا ہوا نشان زد کریں۔<PDI>
+  cells       : 44 (controls cost 0)
+  VISUAL real : <RLI>۔ﮟﯾﺮﮐ ﺩﺯ ﻥﺎﺸﻧ ﺍﻮﮨ ﺎﮬﮍﭘ ﮟﯿﮩﻧﺍ ﮯﺳ <PDI>/unread read<LRI><PDI>
+  VISUAL ctrl : <RLI>۔ﮟﯾﺮﮐ ﺩﺯ ﻥﺎﺸﻧ ﺍﻮﮨ ﺎﮬﮍﭘ ﮟﯿﮩﻧﺍ ﮯﺳ unread read/<PDI>   <- per-string RLI only, no token island
+
+## hint_undo
+  catalogue   : 'بحال'
+  painted(esc): '\u2067بحال\u2069'
+  painted     : <RLI>بحال<PDI>
+  cells       : 4 (controls cost 0)
+  VISUAL real : <RLI>ﻝﺎﺤﺑ<PDI>
+  VISUAL ctrl : <RLI>ﻝﺎﺤﺑ<PDI>   <- per-string RLI only, no token island
+
+## detail_text() composed header (width 80, position 3 of 41)
+  plain(esc)  : ' \u2067→ اطلاعات\u2069                                                 ▁▃ · \u2067اپ ڈیٹ\u2069 · \u20673 / 41\u2069 \n Hello\n  · \u206720752d پہلے\u2069\n ──────────────────────────────────────────────────────────────────────────────\n \u2067کوئی تفصیل منسلک نہیں کی گئی۔\u2069\n'
+  painted     :  <RLI>→ اطلاعات<PDI>                                                 ▁▃ · <RLI>اپ ڈیٹ<PDI> · <RLI>3 / 41<PDI> 
+ Hello
+  · <RLI>20752d پہلے<PDI>
+ ──────────────────────────────────────────────────────────────────────────────
+ <RLI>کوئی تفصیل منسلک نہیں کی گئی۔<PDI>
+
+  cells       : 210
+  VISUAL      :  <RLI>ﺕﺎﻋﻼﻃﺍ →<PDI>                                                 ▁▃ · <RLI>ﭧﯾﮈ ﭖﺍ<PDI> · <RLI>41 / 3<PDI> 
+ Hello
+  · <RLI>20752d ﮯﻠﮩﭘ<PDI>
+────────────────────────────────────────────────────────────────────────────── 
+۔ﯽﺌﮔ ﯽﮐ ﮟﯿﮩﻧ ﮏﻠﺴﻨﻣ ﻞﯿﺼﻔﺗ ﯽﺋﻮﮐ<RLI> <PDI>
+
+
+## island accounting on the painted forms
+  back: RLI=1 PDI=1 LRI=0
+  pointer_unread: RLI=1 PDI=2 LRI=1
+  refused_argument: RLI=1 PDI=2 LRI=1
+  banner_digest_body: RLI=1 PDI=2 LRI=1
+  unread_mark_all: RLI=1 PDI=2 LRI=1
+  unread_mark_these: RLI=1 PDI=2 LRI=1
+  hint_undo: RLI=1 PDI=1 LRI=0
+
+## English is untouched by the projection (same call, locale en)
+  back: painted='← Notifications' no_controls=True equals_en_catalogue=True
+  pointer_unread: painted='Completion receipts moved to /unread.' no_controls=True equals_en_catalogue=True
+  unread_mark_all: painted='/unread read marks all 5 read' no_controls=True equals_en_catalogue=True
+  hint_undo: painted='undo' no_controls=True equals_en_catalogue=True
+
+==============================================================================
+## 4. BEFORE/AFTER — the same ur bytes through the round-1 renderer (plain tr)
+COMMAND: captured stdout of the probe named above
+NOTE: same audited bytes, round-1 renderer: proves which part of the old behaviour was the renderer, not the copy.
+active_locale='ur'  code root=/Users/damian/workspace/lo-ntt2/code_old
+module file: /Users/damian/workspace/lo-ntt2/code_old/local_operator/tui/notifications_render.py
+renderer route: plain tr
+
+back:
+  painted(esc): '→ اطلاعات'
+  painted     : → اطلاعات
+  cells       : 9
+  VISUAL      : ﺕﺎﻋﻼﻃﺍ →
+
+pointer_unread:
+  painted(esc): 'تکمیل کی رسیدیں اب /unread میں ہیں۔'
+  painted     : تکمیل کی رسیدیں اب /unread میں ہیں۔
+  cells       : 35
+  VISUAL      : ۔ﮟﯿﮨ ﮟﯿﻣ unread/ ﺏﺍ ﮟﯾﺪﯿﺳﺭ ﯽﮐ ﻞﯿﻤﮑﺗ
+
+unread_mark_all:
+  painted(esc): '/unread read سے تمام 3 کو پڑھا ہوا نشان زد کریں۔'
+  painted     : /unread read سے تمام 3 کو پڑھا ہوا نشان زد کریں۔
+  cells       : 48
+  VISUAL      : /unread read ۔ﮟﯾﺮﮐ ﺩﺯ ﻥﺎﺸﻧ ﺍﻮﮨ ﺎﮬﮍﭘ ﻮﮐ 3 ﻡﺎﻤﺗ ﮯﺳ
+
+==============================================================================
+## 5. THE COMPOSED DETAIL HEADER — three states (width 80, position 3 of 41)
+COMMAND: captured stdout of the probe named above
+NOTE: round-1 renderer + round-1 bytes: the true pre-fix page. Note the raw Latin 'normal' token and the left-pointing arrow at the right end of the auto-detected RTL line.
+header plain(esc): ' ← اطلاعات                                          ▁▃ normal · اپ ڈیٹ · 3 / 41 '
+header marked    :  ← اطلاعات                                          ▁▃ normal · اپ ڈیٹ · 3 / 41 
+header VISUAL    :  41 / 3 · ﭧﯾﮈ ﭖﺍ · normal ▃▁                                          ﺕﺎﻋﻼﻃﺍ ← 
+
+row_line width=78 source='Release notes': cells=78 (want 78)
+row_line width=78 source='测试对话名称很长': cells=83 (want 78)
+row_line width=78 source='مکالمہ': cells=78 (want 78)
+
+==============================================================================
+## 5b. round-1 renderer + round-2 bytes
+COMMAND: captured stdout of the probe named above
+NOTE: isolates the copy change alone.
+header plain(esc): ' → اطلاعات                                          ▁▃ normal · اپ ڈیٹ · 3 / 41 '
+header marked    :  → اطلاعات                                          ▁▃ normal · اپ ڈیٹ · 3 / 41 
+header VISUAL    :  41 / 3 · ﭧﯾﮈ ﭖﺍ · normal ▃▁                                          ﺕﺎﻋﻼﻃﺍ → 
+
+row_line width=78 source='Release notes': cells=78 (want 78)
+row_line width=78 source='测试对话名称很长': cells=83 (want 78)
+row_line width=78 source='مکالمہ': cells=78 (want 78)
+
+==============================================================================
+## 5c. round-2 renderer + round-2 bytes (the audited state)
+COMMAND: captured stdout of the probe named above
+NOTE: the shipped state: per-string isolates, no raw Latin priority token, arrow rightwards inside its isolate.
+header plain(esc): ' \u2067→ اطلاعات\u2069                                                 ▁▃ · \u2067اپ ڈیٹ\u2069 · \u20673 / 41\u2069 '
+header marked    :  <RLI>→ اطلاعات<PDI>                                                 ▁▃ · <RLI>اپ ڈیٹ<PDI> · <RLI>3 / 41<PDI> 
+header VISUAL    :  <RLI>ﺕﺎﻋﻼﻃﺍ →<PDI>                                                 ▁▃ · <RLI>ﭧﯾﮈ ﭖﺍ<PDI> · <RLI>41 / 3<PDI> 
+
+row_line width=78 source='Release notes': cells=78 (want 78)
+row_line width=78 source='测试对话名称很长': cells=78 (want 78)
+row_line width=78 source='مکالمہ': cells=78 (want 78)
+
+==============================================================================
+## 6. NEIGHBOUR LOCALES — the ur-only projection must not touch LTR locales
+COMMAND: captured stdout of the probe named above
+NOTE: seven keys per locale painted through the same display_tr route; every locale byte-equal to its own catalogue with no control characters.
+en    : clean (7 keys, no controls, byte-equal to catalogue)
+es    : clean (7 keys, no controls, byte-equal to catalogue)
+fr    : clean (7 keys, no controls, byte-equal to catalogue)
+hi    : clean (7 keys, no controls, byte-equal to catalogue)
+ru    : clean (7 keys, no controls, byte-equal to catalogue)
+vi    : clean (7 keys, no controls, byte-equal to catalogue)
+zh-CN : clean (7 keys, no controls, byte-equal to catalogue)
+
+==============================================================================
+## 7. DELTA MECHANICS — args, plurals, hygiene, widths, plural arms
+COMMAND: captured stdout of the probe named above
+NOTE: the repo's own check_catalogues() runs against the extracted commit tree with the audited ur bytes overlaid; the target and the code under audit are the same generation.
+=== 1. inputs
+  target: 07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a
+  en: b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+  ctx: 0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+  code root: /Users/damian/.local-operator/sessions/6cd869512279/scratchpad/tui-audit/ur/tui.notifications/ntt2/work/code  (commit 8976104b83 extraction)
+  code en catalogue   : b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+  code en context     : 0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+  code ur (overlaid)  : 07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a
+  en at commit == pinned en: True
+
+=== 2. the four changed keys
+  tui.notifications.back
+    en      : '← Notifications'
+    ur      : '→ اطلاعات'
+    args en : ()
+    args ur : ()
+    argument problem: None
+    plurals : none
+    NFC     : True
+    manual bidi controls: none
+  tui.notifications.hint_undo
+    en      : 'undo'
+    ur      : 'بحال'
+    args en : ()
+    args ur : ()
+    argument problem: None
+    plurals : none
+    NFC     : True
+    manual bidi controls: none
+  tui.notifications.unread_mark_all
+    en      : '/unread read marks all {count} read'
+    ur      : '/unread read سے تمام {count} کو پڑھا ہوا نشان زد کریں۔'
+    args en : (('count', 'simple'),)
+    args ur : (('count', 'simple'),)
+    argument problem: None
+    plurals : none
+    NFC     : True
+    manual bidi controls: none
+  tui.notifications.unread_mark_these
+    en      : '/unread read marks these read'
+    ur      : '/unread read سے انہیں پڑھا ہوا نشان زد کریں۔'
+    args en : ()
+    args ur : ()
+    argument problem: None
+    plurals : none
+    NFC     : True
+    manual bidi controls: none
+
+=== 3. whole-file parity / arguments / plural categories (repo checker, scratch tree)
+  check_catalogues() problems mentioning tui.notifications: none
+  check_catalogues() problems overall (all locales/namespaces in this tree): 0
+  per-key argument parity over all 72 keys: all PASS
+
+=== 4. file-level text hygiene
+  NFC file: True
+  bidi controls in file: none
+  ZWNJ/ZWJ/NBSP: none
+  non-ASCII digits: none
+  keys with '??' or doubled danda: none
+  keys ending '۔' : 15 of 72
+
+=== 5. width of the changed keys (worst realistic params)
+  tui.notifications.back: maxCells=24 ur_worst=9 en_worst=15
+  tui.notifications.hint_undo: maxCells=8 ur_worst=4 en_worst=4
+  tui.notifications.unread_mark_all: maxCells=None ur_worst=52 en_worst=33
+  tui.notifications.unread_mark_these: maxCells=None ur_worst=44 en_worst=29
+
+=== 6. plural arms still render their count (all plural keys)
+  tui.notifications.asks_stay: PASS
+  tui.notifications.banner_digest_title: PASS
+  tui.notifications.confirm_dismiss_session: PASS
+  tui.notifications.dismissed: PASS
+  tui.notifications.header_counts: PASS
+  tui.notifications.stale_skipped: PASS
+  tui.notifications.updates_since: PASS
+
+=== 7. the changed strings in context, rendered
+  tui.notifications.back: '→ اطلاعات'  (9 cells)
+  tui.notifications.hint_undo: 'بحال'  (4 cells)
+  tui.notifications.unread_mark_all: '/unread read سے تمام 5 کو پڑھا ہوا نشان زد کریں۔'  (48 cells)
+  tui.notifications.unread_mark_these: '/unread read سے انہیں پڑھا ہوا نشان زد کریں۔'  (44 cells)
+
+=== 8. negative control: the round-1 bytes must fail the new arrow rule
+  ntt1 back = '← اطلاعات' ; ntt2 back = '→ اطلاعات'
+  arrow changed: True
+  danda added to unread_mark_all: True
+  hint_undo changed: 'کالعدم' -> 'بحال'
+
+==============================================================================
+## 8. Cell-aware padding — the commit's second claim, measured (English paint, 78-cell row)
+COMMAND: row_line(row, 78) with a real session.title, round-2 code vs round-1 code
+NOTE: the round-1 overrun appears in ENGLISH with a CJK conversation title (83 cells for a 78-cell row), which is what the commit message claimed; the round-2 code paints exactly 78 for ASCII, CJK and Arabic titles. Probe correction disclosed: the first version of this check set `source` instead of `session.title`, so source_name() read nothing and both generations measured 78 — meaningless. The fix reads session.title; the numbers above are the corrected run.
+[round-2 code 8976104b83]
+row_line width=78 source='Release notes': cells=78 (want 78)
+row_line width=78 source='测试对话名称很长': cells=78 (want 78)
+row_line width=78 source='مکالمہ': cells=78 (want 78)
+
+[round-1 code d25392f3553, same rows]
+row_line width=78 source='Release notes': cells=78 (want 78)
+row_line width=78 source='测试对话名称很长': cells=83 (want 78)
+row_line width=78 source='مکالمہ': cells=78 (want 78)
+
+==============================================================================
+## 9. Round-1 findings, current disposition
+COMMAND: json read of the audited bytes
+NT-UR-1 back      : '← اطلاعات' -> '→ اطلاعات'  (arrow U+2192)
+NT-UR-2 hint_undo : 'کالعدم' -> 'بحال'
+NT-UR-5 terminal ۔: unread_mark_these endswith ۔ = True (was False)
+NT-UR-3 hint_clear: 'صاف' (unchanged — nit, no change requested)
+NT-UR-4 unread forms: header '{unread, plural, one {# نہ پڑھی گئی} other {# نہ پڑھی گئی}}' / filter 'نہ پڑھی' / hint 'نہ پڑھا' (unchanged — nit, convention note)

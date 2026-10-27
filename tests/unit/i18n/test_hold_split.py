@@ -87,7 +87,16 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # The condensed relay transcript's `relay.transcript` row (19 keys, its
     # zh-CN bytes independently audited at the current English source) is the
     # eighty-fifth: likewise CARRIED, so set equality requires it too.
-    assert len(chinese) == 89
+    # The session status dot's own nine-key `relay.health` namespace (minted
+    # so relay.chrome's frozen English bytes stay untouched; two keys audited
+    # on 2026-10-26, the round-2 seven added and the whole namespace's zh-CN
+    # bytes doubly audited at the current English source on 2026-10-27) is
+    # the eighty-sixth, CARRIED on the same terms.
+    # The skill-write error keys (PR #3013) re-audited `wire.errors.desktop`, a
+    # namespace the locale already carried, and the append-only ledger gained a
+    # second zh-CN row for it (the earlier row is retained at its superseded
+    # source hash): the eighty-seventh.
+    assert len(chinese) == 90
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -136,7 +145,11 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # transcript's independently audited 19-key `hi/relay.transcript` row makes
     # it THIRTY-NINE. PR #2985's independently audited `wire.settings` delta
     # (Anthropic cache-TTL help + subagent row) appends a fresh Hindi row at the
-    assert len(hindi) == 44
+    # new English bytes: FORTY. The session status dot's independently audited
+    # `hi/relay.health` row makes it FORTY-ONE.
+    # The skill-write error re-audit (PR #3013) appends a second hi row for the
+    # already-carried `wire.errors.desktop`: FORTY-TWO.
+    assert len(hindi) == 45
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 

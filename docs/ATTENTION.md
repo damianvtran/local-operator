@@ -371,6 +371,21 @@ update still bumps the row, its revision and the badge, and raises no banner. A
 claim or release moves no list watermark (D14), so a bulk confirm that was armed
 before a claim still applies to the same rows afterwards.
 
+**The TUI's evidence** (`tui/notifications_attention.py`, on the 1 s attention
+poll) is the completion anchor's own rule applied per `notify` card: one
+screen (no modal), a focused app, no session transition, the transcript
+displayed (no full-page mode over it), the card's last row inside the viewport
+and the screen's hit test at that row landing on the card. A card's first
+visible tick stamps `visible_since_ms`; scrolling it off drops the stamp. A
+REAL focus report is required (Textual's startup focus value is not evidence),
+and the input edge is the last real Key/MouseDown the app saw, which must be
+no earlier than the card's visibility. It submits through the same
+`notifications.items.apply_seen` the route calls, `surface="tui"`, so the store
+re-checks it exactly as it re-checks a desktop receipt. Measured negatives that
+stay unread: no focus report yet, a key before the card rendered, a full page
+covering the transcript, a newer revision of a keyed item, another session's
+item with the same anchor, and a card scrolled off.
+
 **No automatic path may acknowledge in bulk** (R10). Mark-all-read and dismiss-
 by-session are explicit gestures, token-bound: they carry the `through_seq` the
 surface first observed (the answer's `high_water`) PLUS exact `observed`
