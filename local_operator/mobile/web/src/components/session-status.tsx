@@ -171,6 +171,18 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 		   shrinks: the model label beside it is the elastic element, because a
 		   truncated NAME stays truthful while a truncated AMOUNT does not. */
 		const label = [context.spelling?.split("/")[0], spend.text].filter(Boolean).join(" · ");
+		/* ONE FIGURE WHERE TWO CANNOT FIT (QA round 3, O1). Below 359 px wide
+		   with the keyboard open the composer's footer is a single line (see
+		   `COMPOSER_CHIP_ROW`), and attach + cwd + a 44 px model floor + the
+		   stop/send pair leave the reading about 56 px, short of the 96 px the
+		   two facts need. Clipping the amount is the false reading D1 forbids,
+		   and wrapping the footer costs the decision above it 44 px, so the
+		   reading shows ONE whole figure there: the context percentage (the
+		   fact a long session watches), else the spend. The full pair stays in
+		   the accessible name and in the sheet one tap away. Switched by CSS,
+		   not state, so the first frame and a stop button appearing cannot
+		   reflow the row. */
+		const short = context.spelling?.split("/")[0] || spend.text;
 		return <>
 			<button type="button" onClick={() => setExpanded(true)}
 				aria-label={messageRuntime.t("relay.chrome.composer.spend_label", { label })}
@@ -180,7 +192,15 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 				   `pe-[7px]` moves the TEXT 7 px in from the composer's 8 px padding, so
 				   the reading's right edge lands at 15 px like the field's left inset.
 				   The slot's own outer edge still lines up with the stop/send discs. */
-				className="flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap pe-[7px] text-meta tabular-nums text-ink-dim active:text-ink">{label}</button>
+				className={cn(
+					"flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap pe-[7px] text-meta tabular-nums text-ink-dim active:text-ink",
+					"min-w-11 max-[359px]:[@media(max-height:480px)]:w-auto",
+				)}>
+				{/* Literal class strings: Tailwind only emits the utilities it finds
+				    spelled out in source. */}
+				<span className="max-[359px]:[@media(max-height:480px)]:hidden">{label}</span>
+				<span aria-hidden className="hidden max-[359px]:[@media(max-height:480px)]:inline">{short}</span>
+			</button>
 			<Sheet open={expanded} onClose={() => setExpanded(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
 				<SessionStatus projection={projection} detail />
 			</Sheet>

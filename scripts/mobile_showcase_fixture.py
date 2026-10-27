@@ -418,6 +418,17 @@ def _approval_projection() -> SessionProjection:
         "production bucket and invalidates the CDN cache.",
     )
     projection.pending_count = 1
+    # THE USAGE METER A REAL RUNTIME PUBLISHES (QA round 3, O1). Without it the
+    # composer's footer kept two rows and the above-composer slot looked roomier
+    # at 320x440 than it is on a live session: QA measured a 20.6 px slot with
+    # usage (s4, s6) against 65 px without (s2). Same fields as the glance row.
+    projection.cumulative_parent_cost = 2.47
+    projection.child_costs = {}
+    projection.cost_knowledge = "exact"
+    projection.context_tokens = 61_800
+    projection.context_window = 200_000
+    projection.context_is_estimate = False
+    projection.usage = {"input_tokens": 61_800, "output_tokens": 4_120}
     return projection
 
 

@@ -61,7 +61,7 @@ vi.mock("./store", async (importOriginal) => {
 });
 
 /** A cut-off screen: the danger notice #970 paints, and a resumable turn. */
-function projection(opts: { cut_off: boolean | undefined; ended?: boolean }): SessionProjection {
+function projection(opts: { cut_off: boolean | undefined; ended?: boolean; pid?: number }): SessionProjection {
 	const p = {
 		session_id: "s1",
 		pid: 1,
@@ -96,6 +96,7 @@ function projection(opts: { cut_off: boolean | undefined; ended?: boolean }): Se
 	} as SessionProjection;
 	if (opts.cut_off !== undefined) p.cut_off = opts.cut_off;
 	if (opts.ended) p.ended = true;
+	if (opts.pid !== undefined) p.pid = opts.pid;
 	return p;
 }
 
@@ -134,6 +135,21 @@ describe("the phone's resume button", () => {
 		expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
 		fireEvent.click(document.querySelector<HTMLElement>("button[data-health]")!);
 		expect(screen.getAllByRole("button", { name: "Resume" })).toHaveLength(1);
+	});
+
+	it("yields on the DOT's verdict too: a history rebuild (pid 0) offers no second resume (R3-2)", () => {
+		/* Review round 3, R3-2. The pill reads the screen's ONE `ended` (the
+		   header dot's `sessionHealth(...) === "ended"`), not `projection.ended`:
+		   a conversation opened from history is a disk rebuild with no running
+		   owner (`pid: 0`, `ended: false`), the dot calls it Ended and offers
+		   Resume, so a pill sending `continue` to no runtime would be the
+		   second, wrong resume path U15 removed. */
+		const { rerender } = render(<SessionScreen sessionId="s1" />);
+		slot = { projection: projection({ cut_off: true, pid: 0 }), connected: true };
+		rerender(<SessionScreen sessionId="s1" />);
+
+		expect(document.querySelector<HTMLElement>("button[data-health]")?.dataset.health).toBe("ended");
+		expect(screen.queryByRole("button", { name: /tap to resume/ })).toBeNull();
 	});
 
 	it("an ended session's failed send names the resume path, not 'Try again' (U20)", async () => {

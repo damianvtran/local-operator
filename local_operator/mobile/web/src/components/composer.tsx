@@ -464,8 +464,18 @@ const COMPOSER_LEADING = "-ms-1.5";
    structure is FIXED (not a width- or content-dependent wrap), so the
    first-paint frame reserves exactly these lines and a stop button appearing
    cannot reflow the composer. */
+/* SHORT VIEWPORTS (keyboard open, max-height 480) put the meta facts INLINE,
+   between attach and the stop/send pair, so the footer is one 44 px line
+   instead of two. `basis-0`, not `basis-auto` (QA round 3, O1): an auto basis
+   is the facts' max-content width (cwd 44 + model label + the 96 px reading =
+   248 px at 320), so the line breaker sent the 90 px action pair to a SECOND
+   line, and that third composer row took 44 px from the above-composer slot
+   (20.6 px left at 320x440, Approve/Deny 20.5 px visible). A zero basis lets
+   the facts take only the leftover width; the model label is the elastic
+   element and truncates, and the reading compacts itself below 359 px wide
+   (`SessionStatus` compact), so nothing on the line needs to wrap. */
 const COMPOSER_CHIP_ROW =
-	"order-last flex min-w-0 basis-full items-center gap-1 [@media(max-height:480px)]:order-none [@media(max-height:480px)]:basis-auto [@media(max-height:480px)]:flex-1";
+	"order-last flex min-w-0 basis-full items-center gap-1 [@media(max-height:480px)]:order-none [@media(max-height:480px)]:basis-0 [@media(max-height:480px)]:flex-1";
 const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
 
 /** The composer's box, empty, for the frames before a session's projection.

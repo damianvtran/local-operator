@@ -60,4 +60,23 @@ describe("the composer's spacing constants", () => {
 		expect(meta?.className).toContain("basis-full");
 		expect(meta?.className).toContain("min-w-0");
 	});
+
+	it("lets the meta facts take only the LEFTOVER width in a short viewport (QA round 3, O1)", () => {
+		/* O1: with the keyboard open (max-height 480) the meta facts move inline
+		   beside attach and the stop/send pair. As `basis-auto` their flex basis
+		   was their max-content (cwd 44 + the model label + the 96 px reading,
+		   248 px [redacted] at 320), so the line breaker pushed the 90 px action
+		   pair onto a SECOND footer line: composer 331.4 px against 287.4, and the
+		   above-composer slot shrank to 20.6 px. `basis-0` gives the meta facts
+		   only what is left, and the model label, the elastic element, truncates
+		   instead of the controls wrapping. */
+		const { container } = render(<ComposerFrame />);
+		const row = container.querySelector(".lo-composer > div");
+		const meta = [...(row?.children ?? [])].find((child) => child.className.includes("order-last"));
+		const cls = meta?.className.split(/\s+/) ?? [];
+		expect(cls).toContain("[@media(max-height:480px)]:basis-0");
+		expect(cls).not.toContain("[@media(max-height:480px)]:basis-auto");
+		// It never wraps on its own minimum either: the minimum is made to fit.
+		expect(cls).toContain("min-w-0");
+	});
 });

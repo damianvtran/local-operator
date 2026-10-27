@@ -308,3 +308,143 @@ describe("an overflowing slot rests on the card's decision (design D6 = review R
 		expect(stack().scrollTop).toBe(0);
 	});
 });
+
+describe("an ask that offers options rests on them too (review R3-1)", () => {
+	/* R3-1: `data-slot-rest` sat only on the approval row and the free-text
+	   row, so an ask that offers OPTIONS had no rest target and an overflowing
+	   slot stayed at its top, the question's head, with every option below the
+	   fold. The first option is the target: resting its bottom on the slot's
+	   bottom edge puts the start of the decision in view with the question
+	   just above it, and the rest of the list is one scroll away. */
+	const ASK_WITH_OPTIONS: PendingRequest = {
+		request_id: "req-ask",
+		kind: "ask",
+		title: "Which region?",
+		detail: "",
+		options: [
+			{ label: "eu-west", description: "" },
+			{ label: "us-east", description: "" },
+			{ label: "ap-south", description: "" },
+		],
+		secret: false,
+		question_index: 0,
+		question_total: 1,
+	};
+	afterEach(() => vi.restoreAllMocks());
+
+	it("marks the FIRST option as the rest target, and rests on it", () => {
+		const isSlot = (el: Element) => el instanceof HTMLElement && el.hasAttribute("data-above-composer");
+		const sh = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight")!;
+		const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight")!;
+		const rect = Element.prototype.getBoundingClientRect;
+		vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(function (this: Element) {
+			return isSlot(this) ? 316 : (sh.get!.call(this) as number);
+		});
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+			return isSlot(this) ? 65 : (ch.get!.call(this) as number);
+		});
+		vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+			if (isSlot(this)) return new DOMRect(0, 72, 320, 64.6);
+			if (this instanceof HTMLElement && this.hasAttribute("data-slot-rest")) return new DOMRect(8, 200, 304, 44);
+			return rect.call(this);
+		});
+		/* No `asks` field: an owner that publishes `asks` routes a pending ask
+		   to the asks dock, not this card (`lib/asks.ts` `blockingPending`). */
+		slot = { projection: projection({ pending: ASK_WITH_OPTIONS }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		const rests = document.querySelectorAll<HTMLElement>("[data-slot-rest]");
+		expect(rests).toHaveLength(1);
+		expect(rests[0]!.textContent).toContain("eu-west");
+		expect(screen.getByTestId("pending-card").contains(rests[0]!)).toBe(true);
+		// 244 - 136.6: the first option's bottom lands on the slot's bottom edge.
+		expect(stack().scrollTop).toBeCloseTo(107.4, 1);
+	});
+});
+
+describe("the rest re-runs when the slot's own box resizes, and lets go (review R3-3)", () => {
+	/* R3-3: happy-dom's ResizeObserver never calls back, so the observer half
+	   of the rest was untested — yet the keyboard opening (a resize of the
+	   slot's box) is what makes the slot overflow in the first place. This
+	   stub records every observer and lets the test fire its callback. */
+	type Observed = { callback: ResizeObserverCallback; targets: Element[]; disconnected: boolean };
+	let observers: Observed[] = [];
+	function stubObserver() {
+		observers = [];
+		vi.stubGlobal(
+			"ResizeObserver",
+			class {
+				private readonly record: Observed;
+				constructor(callback: ResizeObserverCallback) {
+					this.record = { callback, targets: [], disconnected: false };
+					observers.push(this.record);
+				}
+				observe(target: Element) { this.record.targets.push(target); }
+				unobserve() {}
+				disconnect() { this.record.disconnected = true; }
+			},
+		);
+	}
+	/** The slot's box, switchable between "fits" and "overflows" mid-test. */
+	let overflow = false;
+	function stubSlot() {
+		const isSlot = (el: Element) => el instanceof HTMLElement && el.hasAttribute("data-above-composer");
+		const sh = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight")!;
+		const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight")!;
+		const rect = Element.prototype.getBoundingClientRect;
+		vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(function (this: Element) {
+			return isSlot(this) ? 316 : (sh.get!.call(this) as number);
+		});
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+			return isSlot(this) ? (overflow ? 65 : 316) : (ch.get!.call(this) as number);
+		});
+		vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+			if (isSlot(this)) return new DOMRect(0, 72, 320, overflow ? 64.6 : 316);
+			if (this instanceof HTMLElement && this.hasAttribute("data-slot-rest")) return new DOMRect(8, 252, 304, 44);
+			return rect.call(this);
+		});
+	}
+	const slotObserver = () => observers.filter((o) => o.targets.some((t) => t.hasAttribute("data-above-composer")));
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+		overflow = false;
+	});
+
+	it("re-rests when the keyboard opening shrinks the slot after the card mounted", () => {
+		stubObserver();
+		stubSlot();
+		slot = { projection: projection(), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		// Mounted while it fit: nothing to do.
+		expect(stack().scrollTop).toBe(0);
+		expect(slotObserver()).toHaveLength(1);
+		// The keyboard opens: the slot's box shrinks and the observer fires.
+		overflow = true;
+		const watcher = slotObserver()[0]!;
+		watcher.callback([], {} as ResizeObserver);
+		// 296 - 136.6: the decision row's bottom on the slot's bottom edge.
+		expect(stack().scrollTop).toBeCloseTo(159.4, 1);
+	});
+
+	it("disconnects its observer when the card changes and when the screen unmounts", () => {
+		stubObserver();
+		stubSlot();
+		slot = { projection: projection(), connected: true };
+		const view = render(<SessionScreen sessionId="s1" />);
+		const first = slotObserver()[0]!;
+		expect(first.disconnected).toBe(false);
+		// A NEW decision (another request) re-keys the rest: the old observer
+		// lets go and a fresh one watches the slot.
+		slot = {
+			projection: projection({ pending: { ...APPROVAL, request_id: "req-2" } }),
+			connected: true,
+		};
+		view.rerender(<SessionScreen sessionId="s1" />);
+		expect(first.disconnected).toBe(true);
+		const second = slotObserver().at(-1)!;
+		expect(second).not.toBe(first);
+		expect(second.disconnected).toBe(false);
+		view.unmount();
+		expect(second.disconnected).toBe(true);
+	});
+});

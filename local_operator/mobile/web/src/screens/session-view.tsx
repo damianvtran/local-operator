@@ -111,12 +111,17 @@ function Header({
 	projection,
 	sessionId,
 	connected,
+	ended,
 	gateOpen,
 	setGateOpen,
 }: {
 	projection: SessionProjection;
 	sessionId: string;
 	connected: boolean;
+	/** The screen's one `sessionHealth(...) === "ended"` (review R3-5): the
+	    composer reads the same value, so the dot and the message box can never
+	    disagree about whether a send reopens the session. */
+	ended: boolean;
 	gateOpen: boolean;
 	setGateOpen: (open: boolean) => void;
 }) {
@@ -126,7 +131,6 @@ function Header({
 	   of `useResume`: the menu runs it, then opens the health sheet, which is
 	   where its acceptance line or refusal is painted. */
 	const [healthOpen, setHealthOpen] = useState(false);
-	const ended = sessionHealth(projection, connected) === "ended";
 	const resume = useResume(sessionId, ended);
 	/* The opener the menu's sheet returns focus to. Held here because the ⋮
 	   button lives here and the sheet is the only consumer that needs it. */
@@ -667,6 +671,11 @@ export function SessionScreen({
 	   prompt this device just sent makes the column non-empty the instant it
 	   leaves the composer, and hiding its row behind "no messages yet" would put
 	   the placeholder in front of the very message that proves the send worked. */
+	/* THE SCREEN'S ONE "ENDED" (review round 3, R3-5): the header dot's
+	   verdict, derived once here and handed to the header and the composer, so
+	   the dot, its ⋮ Resume, the message box's placeholder and its failure copy
+	   cannot drift apart. Pinned in source by `session-view.one-ended.test.ts`. */
+	const ended = sessionHealth(projection, connected) === "ended";
 	const needsApproval = blocking?.kind === "approval";
 	/* The pending card's identity: its React key (one remount per question of
 	   a multi-part ask) and the slot's `restOn`, so a new decision is
@@ -741,7 +750,7 @@ export function SessionScreen({
 					connected={connected}
 				/>
 			) : <>
-			<Header projection={projection} sessionId={sessionId} connected={connected} gateOpen={gateOpen} setGateOpen={setGateOpen} />
+			<Header projection={projection} sessionId={sessionId} connected={connected} ended={ended} gateOpen={gateOpen} setGateOpen={setGateOpen} />
 			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll
 				   area reads as "did it break?"; this placeholder says the
@@ -872,7 +881,7 @@ export function SessionScreen({
 				onCloseEffort={() => setEffortOpen(false)}
 				autoFocus={autoFocusComposer}
 				/* ONE "ended", the header dot's (review round 2, R2-2 = U7). */
-				ended={sessionHealth(projection, connected) === "ended"}
+				ended={ended}
 			/>
 
 			<ModelSheet

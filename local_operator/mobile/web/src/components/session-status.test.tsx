@@ -602,3 +602,36 @@ describe("SessionStatus — the spend drill-down (state, not telemetry)", () => 
 		).toBe("tts $—");
 	});
 });
+
+describe("SessionStatus — the composer's compact reading on a short, narrow screen (QA round 3, O1)", () => {
+	/* At 320 with the keyboard open the composer row holds attach, the cwd
+	   glyph, the model button (44 px floor), the reading and the stop/send pair
+	   on ONE line: 156 px for cwd + model + reading. The full two-fact reading
+	   needs its fixed 96 px slot (D1), which only fits from 360 up. Below that
+	   it shows ONE figure (context, else spend), never a clipped one: the full
+	   reading stays in the accessible name and one tap away in the sheet. */
+	it("renders the full reading and a one-figure compact form, switched by CSS only", () => {
+		const { container } = render(<SessionStatus projection={projection({ context_tokens: 61_800 })} compact />);
+		const button = container.querySelector("button")!;
+		const [full, short] = [...button.querySelectorAll("span")];
+		expect(full!.textContent).toBe("30.9% · $1.25");
+		expect(short!.textContent).toBe("30.9%");
+		// Which one paints is decided by the viewport, not by JS state, so the
+		// first frame and a stop button appearing cannot reflow the row.
+		expect(full!.className).toContain("max-[359px]:[@media(max-height:480px)]:hidden");
+		expect(short!.className.split(/\s+/)).toEqual(expect.arrayContaining(["hidden", "max-[359px]:[@media(max-height:480px)]:inline"]));
+		// The slot gives up its fixed 96 px only in that mode, and keeps a 44 px target.
+		expect(button.className).toContain("w-24");
+		expect(button.className).toContain("max-[359px]:[@media(max-height:480px)]:w-auto");
+		expect(button.className).toContain("min-w-11");
+		// Nothing is lost to assistive tech: the name still carries both facts.
+		expect(button.getAttribute("aria-label")).toContain("30.9% · $1.25");
+	});
+
+	it("falls back to the spend figure when there is no context reading", () => {
+		const { container } = render(<SessionStatus projection={projection({ context_tokens: null })} compact />);
+		const [, short] = [...container.querySelector("button")!.querySelectorAll("span")];
+		expect(short!.textContent).toBe("$1.25");
+	});
+});
+
