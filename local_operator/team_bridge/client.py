@@ -1673,7 +1673,9 @@ class TeamBridgeClient:
             # disable boots it out even though the committed owner is retained
             # for a later explicit re-enable. Best-effort, never changes the
             # already-accepted server write's result.
-            from local_operator.team_bridge.connector.install import sync_connector_service
+            from local_operator.team_bridge.connector.install import (
+                sync_connector_service,
+            )
 
             sync_connector_service(self._config_dir)
         return result

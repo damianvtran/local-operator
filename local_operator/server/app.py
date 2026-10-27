@@ -308,7 +308,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # caller/test can settle it without inspecting this closure.
     async def _bridge_connector_boot_sync() -> None:
         try:
-            from local_operator.team_bridge.connector.install import sync_connector_service
+            from local_operator.team_bridge.connector.install import (
+                sync_connector_service,
+            )
 
             await asyncio.to_thread(sync_connector_service, config_dir)
         except Exception:  # noqa: BLE001 — service catch-up must never fail boot

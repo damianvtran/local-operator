@@ -233,7 +233,9 @@ async def test_status_distinguishes_missing_installed_and_loaded(service) -> Non
 
 
 async def test_the_consent_surface_commit_also_installs(service) -> None:
-    from local_operator.team_bridge.connector.enrollment import commit_consent_and_designation
+    from local_operator.team_bridge.connector.enrollment import (
+        commit_consent_and_designation,
+    )
 
     fake, home, root = service
     commit_consent_and_designation(
