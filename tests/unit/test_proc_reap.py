@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import Any
 
 import pytest
 
@@ -27,13 +28,13 @@ from local_operator import proc
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX zombies only")
 
 
-def _spawn_exit0(monkeypatch: pytest.MonkeyPatch) -> "subprocess.Popen[bytes]":
+def _spawn_exit0(monkeypatch: pytest.MonkeyPatch) -> "subprocess.Popen[Any]":
     """Spawn ``sh -c 'exit 0'`` through the real helper; return its Popen."""
-    seen: list[subprocess.Popen[bytes]] = []
+    seen: list[subprocess.Popen[Any]] = []
     real = subprocess.Popen
 
-    def _recording(*args: object, **kwargs: object) -> "subprocess.Popen[bytes]":
-        child = real(*args, **kwargs)  # type: ignore[call-overload]
+    def _recording(*args: Any, **kwargs: Any) -> "subprocess.Popen[Any]":
+        child: subprocess.Popen[Any] = real(*args, **kwargs)
         seen.append(child)
         return child
 

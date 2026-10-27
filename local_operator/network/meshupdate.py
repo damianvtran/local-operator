@@ -1095,7 +1095,7 @@ def _execute_validated(
     with update_lock(root, target):
         if shape == METHOD_GENERATION:
             left_behind = busy_records(root)
-            count = 0
+            count, detail = 0, ""
         else:
             count, detail = busy_sessions(root)
         if count != 0:
