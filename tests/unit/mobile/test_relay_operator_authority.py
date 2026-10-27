@@ -918,3 +918,47 @@ def test_pair_status_carries_the_operator_public_key_the_certificate_verifies_ag
     assert (
         client.get(f"/api/pair/{device_id}").json()["operator_spki"] == ""
     ), "a superseded anchor's key was offered for a certificate it did not sign"
+
+
+def test_an_unreadable_anchor_forwards_the_command_rather_than_failing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1: a root-owned DIRECTORY at the anchor path must not 500 the command route.
+
+    ``load_anchor`` opens a directory, its owner and mode checks pass, and the read
+    raises ``IsADirectoryError`` — which ``is_revoked`` does not catch. Measured on
+    c661224c0f1 (the arm removed): the route raised. The revocation belt fails OPEN
+    here, as round 1 did, because the runtime's own anchor check still stands
+    behind it and cannot load that anchor either.
+
+    Only root ownership is faked — creating a root-owned directory needs root — and
+    only for the anchor path; the directory and the real ``load_anchor`` are real.
+    """
+    import os
+
+    from local_operator.operator import trust
+
+    _daemon, writer, client = _command_rig(tmp_path, monkeypatch)
+    certificate, _device_id, _anchor = _paired_certificate(tmp_path, monkeypatch)
+    anchor = trust.anchor_path()
+    anchor.mkdir()
+    real_open = trust._open_no_follow
+
+    def as_root(path: Path) -> Any:
+        opened = real_open(path)
+        if opened is None or path != anchor:
+            return opened
+        descriptor, info = opened
+        fields = list(info)
+        fields[0], fields[4] = 0o040755, 0  # st_mode, st_uid
+        return descriptor, os.stat_result(fields)
+
+    monkeypatch.setattr(trust, "_open_no_follow", as_root)
+    with pytest.raises(IsADirectoryError):
+        trust.load_anchor()  # the premise: the anchor read really raises
+
+    reply = client.post(
+        "/api/sessions/revoked-cert-session/command", json=_signed_command(certificate)
+    )
+    assert reply.status_code == 200, reply.text
+    assert writer.written[-1]["operator_cert"] == certificate

@@ -2868,11 +2868,20 @@ def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
     parsed = read_device_cert(certificate)
     if parsed is None:
         return None
-    # No try/except: ``is_revoked`` already treats an unreadable store or anchor
-    # as "not revoked" (``_read_json`` swallows ``OSError``; ``load_anchor`` never
-    # raises), which is the fail-open direction this belt wants — the runtime's
-    # own anchor check still stands behind it.
-    if not devices.is_revoked(config_dir(), parsed.device_id):
+    try:
+        revoked = devices.is_revoked(config_dir(), parsed.device_id)
+    except OSError:
+        # ``load_anchor`` is NOT total: a root-owned DIRECTORY at the anchor path
+        # passes its owner and mode checks and then raises ``IsADirectoryError``
+        # on the read (agent review round 2, R2-1 — reproduced). Swallowing it
+        # forwards the command, as round 1 did, rather than failing it with a 500.
+        # That opens nothing: this is a belt, and the runtime's own anchor check
+        # still stands behind it — it cannot load this anchor either, so it
+        # honours no certificate. ``/api/pair`` meets the same state through the
+        # same ``is_revoked``, so refusing here would protect nothing the anchor
+        # does not. Only ``OSError``: anything else is a bug and should surface.
+        return None
+    if not revoked:
         return None
     return JSONResponse(
         {"error": _OPERATOR_DEVICE_REVOKED, "code": OPERATOR_DEVICE_REVOKED_CODE},
