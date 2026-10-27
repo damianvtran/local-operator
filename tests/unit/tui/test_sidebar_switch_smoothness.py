@@ -77,7 +77,7 @@ from textual.widget import Widget
 from local_operator.tui.app import OperatorApp, _suppress_intermediate_paint
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.transcript import TranscriptView
-from tests.unit.tui.test_app_pilot import _factory
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote, _message, _switch
 
 
@@ -1026,3 +1026,49 @@ async def test_a_revealed_transcript_is_never_left_dimmed() -> None:
         "un-parking did not run the disabled watcher, so a view dimmed by a "
         "cascade while parked would stay dimmed after it is revealed"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_host_less_source_resolves_its_roster_from_the_snapshot() -> None:
+    """A cold saved view owns no ledger, but the dock's rows are already known.
+
+    The panel is part of the frame that reveals the transcript only if the
+    roster resolves before the first poll. Left to the ledger path it resolved
+    to `[]` on a facade with no runtime, so the subagent panel mounted one frame
+    after the reveal and took three rows off the transcript.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        JobState,
+    )
+
+    session = SimpleNamespace(
+        jobs=None,
+        _subagent_comms=None,
+        _frontend_state_store=FrontendStateStore(
+            FrontendSessionState(
+                session_id="cold-view",
+                epoch="cold",
+                jobs=[
+                    JobState(id="child", type="task", status="cut_off", label="Review"),
+                    JobState(id="shell", type="bash", status="running"),
+                ],
+            )
+        ),
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(20):
+            await pilot.pause()
+        original = app._session
+        app._session = session  # type: ignore[assignment]
+        try:
+            jobs, selected = app._subagent_roster()
+        finally:
+            app._session = original
+
+    assert [job.id for job in jobs] == ["child"], "a task row was lost or a bash row leaked in"
+    assert selected is None
