@@ -626,6 +626,18 @@ ATTACHMENT_MAX_COUNT = 4
 #: Content-Type outside it is refused here — the bytes are never trusted to
 #: name their own type downstream.
 ATTACHMENT_MIME_TYPES = ("image/png", "image/jpeg")
+#: The owner-audit byte route's served types: the two images plus the ONE type
+#: the hub serves every generic (non-image) file as (agent-server
+#: ``models.BridgeFileServedMime``, with the fixed name ``attachment.bin``). The
+#: audit serves files because the auditor is a human reading under the human
+#: predicate (contract v2 m2); the agent's own fetch stays images-only.
+OWNER_AUDIT_FILE_MIME = "application/octet-stream"
+OWNER_AUDIT_ATTACHMENT_MIME_TYPES = (*ATTACHMENT_MIME_TYPES, OWNER_AUDIT_FILE_MIME)
+#: The hub's largest generic-file class cap (agent-server
+#: ``BridgeFileContainerMaxBytes``/``BridgeFileOtherMaxBytes``, 25 MiB). The
+#: audit read is bounded at the largest thing the hub can legitimately hold,
+#: so an oversized answer is cut off mid-stream rather than buffered.
+OWNER_AUDIT_FILE_MAX_BYTES = 25 * 1024 * 1024
 #: The two attachment fetch purposes (manager decision D1). ``screen`` is the
 #: pre-admission classification read whose bytes go ONLY to the isolated
 #: screening call; ``context`` is the post-``allow`` read whose bytes may enter
@@ -2509,6 +2521,175 @@ class TeamBridgeClient:
             params=params or None,
             access=access,
         )
+
+    # -- owner audit (HUMAN-ONLY) --------------------------------------------
+    #
+    # The agent OWNER's read-only audit of every conversation its own agent is
+    # or was in (agent-server #221, docs/TEAM-BRIDGE-CONVERSATIONS.md §16). These
+    # four reads return FULL bodies, including messages the agent REJECTED or
+    # never screened: screening protects the agent's context from injection, it
+    # is not a confidentiality boundary against the agent's owner.
+    #
+    # THAT IS WHY THEY ARE HUMAN-ONLY. A body served here has NOT passed the
+    # agent's screening, so it must never reach a model: the `team_bridge` tool,
+    # read_context, model_boundary, the connector and every other agent-context
+    # path must not call these methods. The only caller is the desktop route
+    # family `/v1/desktop/team-bridge/owner-audit/...`, which hands the bytes to
+    # the renderer and keeps nothing. `tests/unit/team_bridge/
+    # test_owner_audit_isolation.py` pins that statically (no module but this one
+    # and the desktop route names `owner_audit_`) and behaviourally (every tool
+    # op runs without one audit request leaving the process). A new caller must
+    # come through that test, not around it.
+    #
+    # NO ENDPOINT PARAMETER, by contract (v2 M1): the server derives the audited
+    # agent rows from the caller + tenant, so a non-owner cannot even express the
+    # request, and the hub refuses `endpoint_id`/`purpose`/`scope` here. Nothing
+    # is persisted: no store write, no body cache (store.py's no-body-cache rule),
+    # and the hub answers `Cache-Control: private, no-store`.
+    #
+    # Every read REQUIRES the captured-owner receipt (`expected_account_id`):
+    # an audit page fetched for account A must never be served while the machine
+    # is signed in as B, and an optional guard regresses the first time a caller
+    # forgets it (the attachment routes' #2772 B1 rule).
+
+    async def owner_audit_conversations(
+        self,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of the conversations the caller's OWN agent is or was in.
+
+        ``{conversations: [...], next_cursor?, has_more}``, activity-descending,
+        each row carrying ``agent`` (the audited member and its window bounds)
+        and no read state. HUMAN-ONLY: see the section comment above.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if cursor:
+            params["cursor"] = cursor
+        return await self._send(
+            "GET",
+            "/messaging/agents/owned/conversations",
+            params=params or None,
+            expected_account_id=expected_account_id,
+        )
+
+    async def owner_audit_messages(
+        self,
+        conversation_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        before_seq: int | None = None,
+        after_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """One audited timeline page, newest-first, with FULL bodies.
+
+        Each message may carry ``agent_delivery_status`` (``admitted`` |
+        ``rejected`` | ``not_screened``; omitted on the agent's own messages)
+        and ``agent_verdict_at``. Only the audit window is served; a
+        conversation without one is the hub's uniform 404. HUMAN-ONLY.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if before_seq is not None:
+            params["before_seq"] = int(before_seq)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        return await self._send(
+            "GET",
+            f"/messaging/agents/owned/conversations/{conversation_id}/messages",
+            params=params or None,
+            expected_account_id=expected_account_id,
+        )
+
+    async def owner_audit_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        after_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """One audited thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+
+        Same window as the timeline (the root must be inside it). HUMAN-ONLY.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        return await self._send(
+            "GET",
+            f"/messaging/agents/owned/conversations/{conversation_id}/messages/{message_id}"
+            "/replies",
+            params=params or None,
+            expected_account_id=expected_account_id,
+        )
+
+    async def owner_audit_attachment(
+        self,
+        conversation_id: str,
+        message_id: str,
+        attachment_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+    ) -> tuple[bytes, str]:
+        """One audited attachment's bytes and served type: ``(data, mime)``.
+
+        Unlike :meth:`fetch_attachment` the audit branch serves GENERIC files as
+        well as images (the auditor is a human, and the human predicate serves
+        them), so the accepted types are :data:`OWNER_AUDIT_ATTACHMENT_MIME_TYPES`
+        and the bounded read uses the hub's largest file class cap. An image is
+        still held to :data:`ATTACHMENT_MAX_BYTES`. Anything else — another
+        type, an empty body, a missing header — is refused rather than handed
+        downstream under a type nobody can name. HUMAN-ONLY.
+        """
+
+        _require_attachment_id(attachment_id)
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        response = await self._authorized(
+            "GET",
+            f"/messaging/agents/owned/conversations/{conversation_id}/messages/{message_id}"
+            f"/attachments/{attachment_id}",
+            params=params,
+            max_response_bytes=OWNER_AUDIT_FILE_MAX_BYTES,
+            expected_account_id=expected_account_id,
+        )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if (
+            response.status_code != 200
+            or mime not in OWNER_AUDIT_ATTACHMENT_MIME_TYPES
+            or not response.content
+            or (mime in ATTACHMENT_MIME_TYPES and len(response.content) > ATTACHMENT_MAX_BYTES)
+        ):
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                "Radient returned an invalid response.",  # i18n: ignore, no code
+                http_status=502,
+            )
+        return response.content, mime
 
     async def conversation_body(
         self,

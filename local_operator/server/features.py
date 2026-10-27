@@ -397,6 +397,17 @@ def static_feature_flags() -> dict[str, Any]:
         # in this runtime: feature branches must adopt the same guard before
         # advertising their mutations alongside this capability.
         "team_bridge_conversation_owner_guard": 1,
+        # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
+        # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
+        # #221, where the signed-in owner reads every conversation their own
+        # agent is or was in, with full bodies and per-message
+        # `agent_delivery_status`. Its own key by the `radient_org` rule: a
+        # renderer that does not see it hides the section rather than mounting
+        # one whose every call 404s. 1 is the shape version
+        # (`server/models/desktop_team_bridge_owner_audit.py`). A hub without
+        # #221 answers 404 through these routes, which the renderer treats as
+        # "not available here".
+        "team_bridge_owner_audit": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
