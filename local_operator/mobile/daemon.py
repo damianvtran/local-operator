@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, P
 
 if TYPE_CHECKING:
     from starlette.requests import Request
+    from starlette.responses import JSONResponse
 
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.mobile.push_worker import PushWorker
@@ -2842,6 +2843,93 @@ def _ask_gone_copy(op: str) -> str:
     if op in ("ask_decline", "ask_revise"):
         return _ASK_GONE_HANDOFF
     return _ASK_GONE_RESPONSE
+
+
+#: The typed category of :func:`_revoked_device_refusal`, so the phone can key on
+#: WHICH refusal this is rather than pattern-match the sentence (the rule the
+#: command route's ``ValueError`` arm already follows for authority refusals).
+OPERATOR_DEVICE_REVOKED_CODE = "operator_device_revoked"
+
+#: Worded for the phone holding the revoked certificate: what happened, and the
+#: way back IN ORDER. Re-pairing alone is refused while the revocation stands
+#: (``/api/pair`` asks ``devices.is_revoked`` too, and the phone reuses its stored
+#: key, so its device id is unchanged), so the machine-side lift comes first —
+#: the same route and tone as the phone's pair screen (``screens/pair.tsx``, the
+#: ``revoked`` state), which the phone shows verbatim as a fallback. Plain English
+#: beside a typed code, like the sibling ``/api/pair`` revoked refusal here.
+_OPERATOR_DEVICE_REVOKED = (
+    "This phone's approval access was removed on the computer, and only that "
+    "machine can restore it — pairing again will be refused until then. Ask Local "
+    "Operator on that machine to allow this phone again, then pair this phone again."
+)
+
+
+def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
+    """A 403 for a command presenting a REVOKED device's certificate, else ``None``.
+
+    THE TWO-LIST GAP. ``lop operator devices --revoke`` writes the relay's own
+    ``revoked.json`` and deletes the stored certificate, but the phone keeps its
+    copy and can keep presenting it. The runtime re-checks only the root-owned
+    ANCHOR, so a revocation recorded locally but not (yet) in the anchor —
+    ``--revoke --print-only``, or the window before the privileged anchor write —
+    left the phone with approval authority through this relay. ``/api/pair``
+    already refuses such a device with ``devices.is_revoked`` (both lists); this
+    is the same question asked on the command path, before any frame is written
+    or future registered, so a refusal leaves nothing parked.
+
+    THE RELAY STAYS A COURIER. The check reads only public data — the device id
+    in an operator-signed public statement, and two revocation lists — and mints
+    nothing. It can only WITHHOLD a signature, never produce one. The certificate
+    is parsed, not verified: an unparsable one keeps today's behaviour (it is
+    forwarded and the runtime refuses it), and a forged certificate naming a
+    revoked id gains nothing by being refused here.
+    """
+    if not isinstance(certificate, str) or not certificate:
+        return None
+    # Function-local, as in ``build_app``: ``lop`` without the server extra never
+    # pays for starlette at import.
+    from starlette.responses import JSONResponse
+
+    from local_operator.operator import devices
+    from local_operator.operator.verify import read_device_cert
+    from local_operator.paths import config_dir
+
+    parsed = read_device_cert(certificate)
+    if parsed is None:
+        return None
+    try:
+        revoked = devices.is_revoked(config_dir(), parsed.device_id)
+    except OSError:
+        # ``load_anchor`` is NOT total: a root-owned DIRECTORY at the anchor path
+        # passes its owner and mode checks and then raises ``IsADirectoryError``
+        # on the read (agent review round 2, R2-1 — reproduced). Swallowing it
+        # forwards the command, as round 1 did, rather than failing it with a 500.
+        # Failing OPEN is deliberate (agent review round 3, R3-1), for three
+        # reasons. (1) Only root can create this state — the anchor directory is
+        # root-owned and an entry must be uid 0 to pass ``load_anchor`` — and root
+        # can already rewrite the anchor's revocation list, delete it, or install
+        # another key, so a refusal here protects nothing from the one actor who
+        # can trigger it. (2) It keeps the three "anchor unusable" states
+        # consistent: a DELETED anchor and a mode-0666 one already lose a stamped
+        # local revocation and forward the command (R9-2: a stamp counts only
+        # while its key is the installed anchor), and failing closed on this one
+        # alone would not change that. (3) The ``operator_device_revoked`` refusal
+        # would be false for a phone that is not revoked and would send it to a
+        # re-pair, and ``/api/pair`` itself 500s in this state; an honest refusal
+        # needs its own typed code and phone copy.
+        # RESIDUAL: the runtime serves its pinned pre-failure anchor for up to
+        # ``ANCHOR_REFRESH_S`` (~30 s), so in that window it can admit a
+        # certificate revoked only in the stamped local record. The fix at the
+        # source is ``load_anchor`` rejecting a non-regular file (a follow-up),
+        # which makes this arm dead code. Only ``OSError``: anything else is a bug
+        # and should surface.
+        return None
+    if not revoked:
+        return None
+    return JSONResponse(
+        {"error": _OPERATOR_DEVICE_REVOKED, "code": OPERATOR_DEVICE_REVOKED_CODE},
+        status_code=403,
+    )
 
 
 def _session_is_live(daemon: "MobileDaemon", session_id: str) -> bool:
@@ -7454,6 +7542,9 @@ def build_app(daemon: MobileDaemon):
         op = body.pop("op", None)
         if not isinstance(op, str) or not op:
             return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)
+        revoked = _revoked_device_refusal(body.get("operator_cert"))
+        if revoked is not None:
+            return revoked
         try:
             from local_operator.mobile.types import (
                 ContinuationCommand,
@@ -7872,13 +7963,27 @@ def build_app(daemon: MobileDaemon):
         # has to say — and it is the same predicate the runtime and the pairing
         # receipt use, so the three surfaces cannot disagree.
         from local_operator.operator import operator_authority_unusable
+        from local_operator.operator.trust import load_anchor
 
+        # THE KEY THE CERTIFICATE IS CHECKED AGAINST (B2), so the phone can verify
+        # its own certificate instead of trusting this answer. Public material: the
+        # installed anchor's point, the same read `_installed_key_id` makes. Sent
+        # only when the installed anchor IS the key that signed this certificate —
+        # a superseded anchor's point would verify nothing and look like a forgery.
+        loaded = load_anchor()
+        anchor = loaded.anchor if loaded.usable else None
+        operator_spki = (
+            devices.encode_spki(anchor.spki)
+            if anchor is not None and anchor.key_id == stored.operator_key_id
+            else ""
+        )
         return JSONResponse(
             {
                 "paired": True,
                 "device_id": stored.device_id,
                 "certificate": stored.certificate,
                 "operator_key_id": stored.operator_key_id,
+                "operator_spki": operator_spki,
                 "scope": list(stored.scope),
                 "exp": stored.not_after,
                 "name": stored.name,

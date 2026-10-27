@@ -553,6 +553,11 @@ export function pairingStatus(deviceId: string): Promise<{
 	    `GateSheet`/`PairScreen`: false between `lop operator init` and
 	    `lop operator install`, which is the state the old success box lied about. */
 	authority_ready?: boolean;
+	/** The installed operator key's public point (base64url SPKI) that signed
+	    `certificate`, so the phone could verify its own certificate rather than
+	    trust this answer. Empty when the installed anchor is not the signer (a
+	    superseded or missing anchor). Not read by the phone yet. */
+	operator_spki?: string;
 }> {
 	return request(`/api/pair/${encodeURIComponent(deviceId)}`);
 }
