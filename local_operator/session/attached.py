@@ -1836,11 +1836,15 @@ class AttachedSession:
         config/auth resolution off this path too: even metadata can block on an
         external provider. The authenticated snapshot supplies it on binding.
         """
-        from local_operator.session.frontend_state import FrontendModelSpec
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            FrontendModelSpec,
+        )
         from local_operator.session.saved_preview import (
             SavedPreview,
             read_saved_preview,
         )
+        from local_operator.session.transcript import read_latest_custom
 
         try:
             preview = await asyncio.to_thread(
@@ -1856,15 +1860,29 @@ class AttachedSession:
             if record is None or owner is None:
                 raise FileNotFoundError("This conversation is no longer available") from None
             preview = SavedPreview([], False, record.cwd or cwd)
+        # The preview's tail read establishes the conversation; the durable
+        # checkpoint is read separately and off the loop so the roster and todo
+        # panels it carries are already in the FIRST installed frontend state.
+        # Restoring them here is what stops the post-paint bind from taking the
+        # dock's rows out of the transcript and re-scrolling (QA: viewport
+        # 41 -> 26 rows, scroll 90 -> 105, ~39 visible lines moved). The pure
+        # preview reader is deliberately left untouched: this is the reveal's
+        # frontend concern, not a second history projection.
         self = cls(config_dir=config_dir, session_id=session_id, takeover_factory=takeover_factory)
+        self._cold_checkpoint = await asyncio.to_thread(
+            read_latest_custom,
+            config_dir / "sessions" / session_id,
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        )
         self._cwd = preview.cwd or cwd
         self.saved_preview_partial = preview.partial
         self._can_go_cold = True
         self._display_window_requested = True
+        # Reveal the saved tail from the preview, not a second full replay.
         self._bind_history(preview.messages, None, drop_history_duplicates=True)
         self._cold_painted_ids = set(self._history_ids)
         model = FrontendModelSpec(provider="", model_id="")
-        self._install_frontend(
+        state = await self._restore_cold_details(
             FrontendSessionState(
                 session_id=session_id,
                 epoch=f"cold-{session_id}",
@@ -1873,12 +1891,13 @@ class AttachedSession:
                 effective_model=model,
                 # Issue #2014: an explicit EMPTY STATEMENT, not the ``{}`` sentinel
                 # that means "a host older than this field". Nothing is attached
-                # at this point in the cold open (there is no checkpoint read
-                # yet), so the honest answer is "nobody" — a client can render
-                # that — while ``{}`` would tell it to guess.
+                # until binding, so the honest initial answer is "nobody". The
+                # preview's durable checkpoint can supply the dock before reveal.
                 effective_identity=effective_identity_for(active_agent="", team=""),
             )
         )
+        self._cold_checkpoint = None
+        self._install_frontend(state)
         self._finish_sync()
         self._runtime_ready.set()
         return self

@@ -53,6 +53,127 @@ def test_existing_empty_journal_is_a_valid_empty_preview(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_saved_preview_restores_its_dock_before_the_first_frontend_state(
+    tmp_path, monkeypatch
+):
+    """A cold reveal must already have the roster and todos its bind will paint."""
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+        JobState,
+        TodoItemState,
+        TodoPhaseState,
+    )
+
+    async def no_takeover():
+        raise AssertionError("a preview must not become an execution owner")
+
+    directory = tmp_path / "sessions" / "with-dock"
+    directory.mkdir(parents=True)
+    journal(directory, [message("tail", "Useful tail")])
+    state = FrontendSessionState(
+        session_id="with-dock",
+        epoch="saved",
+        jobs=[JobState(id="child", type="task", status="cut_off", label="Review")],
+        todos=[
+            TodoPhaseState(
+                name="Verify", items=[TodoItemState(text="Check the frame", status="pending")]
+            )
+        ],
+    )
+    with (directory / "transcript.jsonl").open("a") as handle:
+        handle.write(
+            TranscriptEntry(
+                "checkpoint",
+                0,
+                "custom",
+                {
+                    "custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                    "details": {"state": state.model_dump(mode="json")},
+                },
+            ).to_json()
+            + "\n"
+        )
+    # The production restore has not supplied a synthesized state yet; the
+    # preview calls the same cold-detail seam with its empty initial state.
+    remote = await AttachedSession.saved_preview(
+        "with-dock", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=no_takeover
+    )
+    try:
+        assert [job.id for job in remote.frontend_state.jobs] == ["child"]
+        assert remote.frontend_state.todos[0].items[0].text == "Check the frame"
+        assert not remote.frontend_state.streaming
+    finally:
+        await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_saved_preview_does_not_pay_a_second_full_history_read(tmp_path, monkeypatch):
+    """The reveal's dock restore must not become a second transcript hydration."""
+    from local_operator.session.attached import AttachedSession
+
+    async def no_takeover():
+        raise AssertionError("a preview must not become an execution owner")
+
+    directory = tmp_path / "sessions" / "without-dock"
+    directory.mkdir(parents=True)
+    journal(directory, [message("tail", "Useful tail")])
+
+    async def refuse(_through_id=None, **_kwargs):
+        raise AssertionError("the preview already read its window; no journal hydration")
+
+    monkeypatch.setattr(AttachedSession, "_read_transcript", refuse)
+    monkeypatch.setattr(AttachedSession, "_load_history", refuse)
+    remote = await AttachedSession.saved_preview(
+        "without-dock", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=no_takeover
+    )
+    try:
+        assert [row.text for row in remote.display_history_window()] == ["Useful tail"]
+    finally:
+        await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_preview_with_an_unreadable_checkpoint_keeps_its_transcript(tmp_path, monkeypatch):
+    """Malformed chrome is degraded, never a blank conversation or a failed open."""
+    from local_operator.session.attached import AttachedSession
+
+    async def no_takeover():
+        raise AssertionError("a preview must not become an execution owner")
+
+    directory = tmp_path / "sessions" / "bad-dock"
+    directory.mkdir(parents=True)
+    journal(directory, [message("tail", "Useful tail")])
+    with (directory / "transcript.jsonl").open("a") as handle:
+        handle.write(
+            TranscriptEntry(
+                "checkpoint",
+                0,
+                "custom",
+                {
+                    "custom_type": "frontend_state_checkpoint_v1",
+                    "details": {"state": "bad"},
+                },
+            ).to_json()
+            + "\n"
+        )
+
+    async def refuse(_through_id=None):
+        raise AssertionError("checkpoint failure must not force a whole-history read")
+
+    monkeypatch.setattr(AttachedSession, "_read_transcript", refuse)
+    remote = await AttachedSession.saved_preview(
+        "bad-dock", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=no_takeover
+    )
+    try:
+        assert [row.text for row in remote.display_history_window()] == ["Useful tail"]
+        assert remote.degraded_reason
+    finally:
+        await remote.dispose()
+
+
+@pytest.mark.asyncio
 async def test_unmaterialized_empty_view_requires_a_discoverable_owner(tmp_path, monkeypatch):
     from local_operator.session.attached import AttachedSession
 

@@ -10302,6 +10302,13 @@ class OperatorApp(App[None]):
             # covers the response. Pinned wide sidebars stay open.
             self._set_sidebar_open(False)
         self._prefill_resume_before_reveal()
+        # The dock belongs to the INCOMING session, not to the next 1 Hz poll.
+        # Adoption already installed its canonical frontend state above; sync
+        # its panel visibility before the reveal's layout so the transcript
+        # never gives those rows back and re-scrolls one frame later. The
+        # ordinary refresh is idempotent and retains all existing density and
+        # subagent/todo state (including the legacy empty-state fallbacks).
+        self._refresh_band()
         self._show_sidebar_connection(source)
         if not source.draft.following_tail and source.draft.scroll_anchor_id:
             scroll_revision = source.scroll_revision

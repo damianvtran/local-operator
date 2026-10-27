@@ -323,23 +323,17 @@ async def test_the_composer_never_paints_a_height_neither_session_asked_for() ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 30), (200, 50)])
-async def test_no_history_rows_mount_into_the_visible_view(size: tuple[int, int]) -> None:
+@pytest.mark.parametrize("display_only", [False, True])
+async def test_no_history_rows_mount_into_the_visible_view(
+    size: tuple[int, int], display_only: bool
+) -> None:
     """RC4: the resume fill runs before reveal, so nothing arrives afterwards.
 
-    The prepared window under-fills the viewport by construction, so the fill
-    fired on essentially every switch and mounted 24 further rows into a view
-    the user was already looking at — 53% of the conversation appearing after
-    the fact, which is the "traces shuffle upward" report.
-
-    Counted on the VISIBLE view only: rows appended to a parked offscreen replay
-    are the preparation doing its job.
-
-    TWO TERMINAL HEIGHTS, because the pre-reveal pass mounts exactly ONE page
-    and "one page is enough" is a claim about geometry, not a law (agent review
-    round 1, R3). A taller terminal needs more rows to fill the same viewport,
-    so 200x50 is where the bound would break first if `RESUME_PAGE_MESSAGES`
-    ever stopped covering it; the 30-row case is the one the audit measured
-    (21 blocks against a 27-row viewport).
+    The cold saved-view arm is part of this contract too. Its deliberately
+    smaller initial window must not become a visible second page while the
+    runtime binds: project that bounded local window in one pass instead.
+    This test uses a 60-row local history; the real cold fixtures add the
+    bind/panel geometry coverage this lightweight facade does not carry.
     """
     home = SidebarRemote("home-session")
     target = _conversation("deep-session", 60)
@@ -375,6 +369,10 @@ async def test_no_history_rows_mount_into_the_visible_view(size: tuple[int, int]
                 return out
 
             app._commit_sidebar_session = commit  # type: ignore[method-assign]
+            if display_only:
+                source = SessionInteraction(target)
+                source.display_only = True
+                app._sidebar_sources[target.session_id] = source
             await _switch(app, pilot, target)
             for _ in range(60):
                 await pilot.pause()
@@ -383,6 +381,68 @@ async def test_no_history_rows_mount_into_the_visible_view(size: tuple[int, int]
                 f"{sum(mounted_after_reveal)} history rows mounted into the visible view "
                 "after it was revealed; the pre-reveal fill is not reaching its goal"
             )
+
+
+@pytest.mark.asyncio
+async def test_a_switch_reserves_the_incoming_dock_before_its_first_paint() -> None:
+    """The incoming subagent/todo panels own their rows in the reveal frame.
+
+    Adoption supplies the new frontend snapshot before any paint. Leaving the
+    band to its next poll makes the transcript shrink and scroll after reveal.
+    """
+    from local_operator.session.frontend_state import (
+        JobState,
+        TodoItemState,
+        TodoPhaseState,
+    )
+
+    home = SidebarRemote("home-session")
+    target = _conversation("panel-session", 60)
+    target.running_children = 1
+    target._store.replace(
+        target._store.state.model_copy(
+            update={
+                "jobs": [JobState(id="child", type="task", label="review")],
+                "todos": [
+                    TodoPhaseState(
+                        name="Verify",
+                        items=[TodoItemState(text="Inspect the reveal", status="pending")],
+                    )
+                ],
+            }
+        )
+    )
+
+    app = OperatorApp(lambda: _factory(home))
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+            original_refresh = app._refresh_band
+            syncs = 0
+
+            def refresh() -> None:
+                nonlocal syncs
+                original_refresh()
+                syncs += 1
+
+            app._refresh_band = refresh  # type: ignore[method-assign]
+            original_lease = app._lease_sidebar_source
+
+            async def lease(session_id, *, speculative=False):  # type: ignore[no-untyped-def]
+                # `_switch` replaces this lease; let its fake surface arrive,
+                # then simulate adoption's newly installed frontend state. This
+                # is the real production commit boundary, not a later poll.
+                source = await original_lease(session_id, speculative=speculative)
+                app._refresh_band()
+                return source
+
+            app._lease_sidebar_source = lease  # type: ignore[method-assign]
+            await _switch(app, pilot, target)
+
+            assert syncs, "no reveal-time band reconciliation reached the test"
+            assert app._subagent_panel is not None and app._subagent_panel.display
+            assert app._todo_panel is not None and app._todo_panel.display
 
 
 @pytest.mark.asyncio
