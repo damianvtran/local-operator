@@ -192,6 +192,8 @@ ECHO_POLICY = {
     # word above them would only restate the row underneath it — and the word
     # `read` is an ACTION, not something the model is ever told.
     "notifications": False,
+    # The receipt listing's new name (decision D2): the same handler and receipt.
+    "unread": False,
     # The same rule as `/team` and `/usage`: the listing or the receipt IS the
     # answer, and nothing here is words the model is told — the project TOOL is
     # how the model writes project rows, while `/project` is the operator's own
@@ -319,6 +321,7 @@ PROMPT_POLICY = {
     # like `/usage` rather than reassembling to the front and handing the model
     # the rest of the draft.
     "notifications": False,
+    "unread": False,
     # FALSE, all three, for `/notifications`' reason and one more of their own:
     # the trailing text these own is a WORD the handler reads (`yes`), never free
     # text a model is given. `/delete yes` is a confirmation, and a confirmation

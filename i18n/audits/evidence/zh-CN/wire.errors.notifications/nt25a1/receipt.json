@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.notifications",
+  "record": "i18n/audits/evidence/zh-CN/wire.errors.notifications/nt25a1/record.json",
+  "provenance": "Written by independent audit-zh-cn-6a81bd6cab5c, session 6a81bd6cab5c, actual model openai/gpt-6.1-sol, 2026-10-25; companion logs are its actual execution output.",
+  "hashes": {
+    "record.json": "2e2e950d23d2413f3b3b09003f7aac9f2af2423726a5c3e2017973b1d21bbbce",
+    "audit.log": "d6f5e0ae0065af0a6dfd4410a64a52400c75b9aff035a3d16a0b3e39b87aa887",
+    "report.md": "85bed54413957d05f5de4d13464804d4d85175f2723bb8f78b5407be19338b9b"
+  }
+}

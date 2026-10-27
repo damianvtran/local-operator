@@ -1,0 +1,6 @@
+{
+  "wire.errors.notifications.store_busy": "通知存储目前正忙，未做任何更改。请稍后重试。",
+  "wire.errors.notifications.store_full": "这台电脑的磁盘空间已满，未做任何更改。请在存放{where}的卷上释放空间，然后重试。",
+  "wire.errors.notifications.store_unavailable": "无法读取或写入通知存储。重试无济于事；请检查{where}及其所在的磁盘。",
+  "wire.errors.notifications.unknown_item": "该通知已不在“通知”中。"
+}

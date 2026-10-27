@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "audit_id": "ntt1",
+  "locale": "fr",
+  "namespace": "tui.notifications",
+  "record": "scratchpad:tui-audit/fr/tui.notifications/ntt1/record.json",
+  "record_repo_path_when_shipped": "i18n/audits/evidence/fr/tui.notifications/ntt1/record.json",
+  "provenance": "Written by the independent auditor translation-auditor/429b867caa2e, ACTUAL model radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5 through anthropic/claude-sonnet-5-5 and openai/gpt-6.1-sol), on 2026-10-25. audit.log contains this audit's real stdout including an earlier failing run (a rig KeyError and one negative control that did not fail closed), both repaired and re-run rather than rewritten.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, tui-audit-fr)",
+    "instance": "429b867caa2e",
+    "session": "429b867caa2e",
+    "model": "radient/auto",
+    "actual_model_source": "Session model-switch notices during this task: anthropic/claude-opus-5-5 -> anthropic/claude-sonnet-5-5 (provider failure: quota) -> openai/gpt-6.1-sol (quota) -> radient/auto (quota). The audit was performed by the last of these, radient/auto; neither the requested primary nor the intermediates served it. Not a role/default pin and no tool set was changed.",
+    "fallback_used": true,
+    "date": "2026-10-25",
+    "independence": "Separate agent/context from the translator (coder / Opus5.5, per delegation provenance). This auditor drafted, polished and modified none of the English, French, desktop or wire values audited here, and edited no catalogue, code, generated asset, git object or ledger row; the worktree was read only. Parser, plural, width and negative-control results were derived here."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.json",
+      "sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+      "matches_supplied_frozen_source_sha256": true
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+      "sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+      "matches_supplied_frozen_context_sha256": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/tui.notifications.json",
+      "sha256": "87866da0d850589f04c12d28599bfc9235c0facf9aa5cc37b39ac20cbea29905",
+      "matches_supplied_target_sha256": true,
+      "tracked": false
+    }
+  },
+  "guidance": {
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "b916f3d1c30b0a2e18fc94ca51d130f60e86b3b17b1918aa51f5c5da6d52ec39"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 3,
+    "rejected": 0,
+    "findings_total": 6
+  },
+  "fit_decision": {
+    "key": "tui.notifications.updates_since",
+    "question": "Is 31 cells at 4-digit counts a realistic fit failure (major) or acceptable (minor)?",
+    "decision": "minor",
+    "measurements": "fr first exceeds maxCells 30 at count 1000 (31 cells) and stays 31 through 9999; 29 cells at 999; 33 at 100000; 38 at 1000000. English never exceeds 30 up to 1500000 (29 at 10^6). header_counts breaches its 40-cell budget at 10^6 in BOTH locales (fr 44, en 43).",
+    "reasoning": "No 1-3 digit count overflows and the overshoot is one cell; the affected segment is appended to a Text(no_wrap=False) meta line in the pinned notifications_render.py, so the consequence is a wrap inside a wrapping pane, not a cropped column or a lost label; and repeat_count reaching 1000 requires 1000 keyed updates to one item (HISTORY_CAP=20 caps history rows only; NEW_ITEMS_PER_HOUR=30 caps new items only). The fr value is byte-identical to the already-audited desktop string ui.notifications.detail.meta.updates_since.",
+    "would_change_if": "a breach at 3-digit counts, a non-wrapping or cropped container for the meta line, or evidence that repeat_count reaches 1000 in operator use."
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "audit.py.txt",
+    "budget_rows.json",
+    "receipt.json"
+  ],
+  "hashes": {
+    "record.json": "d0cf892cdc52c5c8cc3ffe867e9ea4446d764135d6cfbae0983a21b29007def3",
+    "report.md": "f79ee75e0c73627f2caf0c73996927bab59ccfa108dcb61d129735b1cb163f4b",
+    "audit.log": "602549df6e16c62694c7ffa419c2c0001c874274f7e40f470d9d114ddaabfa14"
+  },
+  "independence": "Separate agent/context from the translator (coder / Opus5.5, per delegation provenance). This auditor drafted, polished and modified none of the English, French, desktop or wire values audited here, and edited no catalogue, code, generated asset, git object or ledger row; the worktree was read only. Parser, plural, width and negative-control results were derived here.",
+  "note": "Bundle written entirely inside the auditor scratchpad. No catalogue, code, generated asset, git object or ledger row was created or modified; the worktree was read only."
+}

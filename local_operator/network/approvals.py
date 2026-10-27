@@ -872,7 +872,13 @@ NO_SIGNING_SURFACE_SENTENCE = (
 
 
 def sign_decision(
-    *, kind: str, request_id: str, request_digest: str, decided_at: float, decision: str = "approve"
+    *,
+    kind: str,
+    request_id: str,
+    request_digest: str,
+    decided_at: float,
+    decision: str = "approve",
+    config_root: Path | None = None,
 ) -> str:
     """Sign one approval decision with the LOCAL operator key. This call PROMPTS.
 
@@ -903,23 +909,43 @@ def sign_decision(
     )
     from local_operator.paths import config_dir
 
-    root = config_dir()
+    # ``config_root`` lets a typed desktop route sign with the key of the profile it SERVES
+    # rather than the process default; those routes also refuse a backend whose root is not
+    # the ambient one (``enrollment.bound_profile``), so the two cannot name different keys.
+    root = config_root if config_root is not None else config_dir()
     signer = None
     try:
         signer = load_signer(config_root=root, backend_name=resolve_backend_name(root))
     except KeyBackendError:
         signer = None
+    from local_operator.network.credentials.approval_copy import KEY_DID_NOT_SIGN
+
     if signer is None:
-        raise MeshRefusal("approval_signing_unavailable", NO_SIGNING_SURFACE_SENTENCE)
+        # "Not set up" only when it is TRUE (UX U4): with an operator anchor installed,
+        # authority IS set up and the key simply could not be loaded (an unreadable or moved
+        # key file), so the setup advice would send the operator into setup again.
+        raise MeshRefusal(
+            "approval_signing_unavailable",
+            KEY_DID_NOT_SIGN if _anchor_installed() else NO_SIGNING_SURFACE_SENTENCE,
+        )
     try:
         return sign_message(signer, message, timeout=None).sig
     except KeyBackendError as exc:
-        raise MeshRefusal(
-            "approval_signing_unavailable",
-            f"the operator key did not sign, so nothing was approved: {exc}",
-        ) from exc
+        # The key exists and did not sign (a dismissed prompt). No exception text in the
+        # sentence: it can carry paths and OS jargon (UX U4).
+        raise MeshRefusal("approval_signing_unavailable", KEY_DID_NOT_SIGN) from exc
     finally:
         signer.close()
+
+
+def _anchor_installed() -> bool:
+    """Whether this machine has an operator anchor installed (pinned or merely present)."""
+    try:
+        from local_operator.operator.trust import load_anchor
+
+        return bool(load_anchor().exists)
+    except Exception:  # noqa: BLE001 - unreadable reads as "not set up", today's sentence
+        return False
 
 
 def local_anchor_trio(root: Path | None = None) -> dict[str, Any] | None:
@@ -1038,12 +1064,24 @@ def _record_decision(
     signature_hex: str | None,
     root: Path | None,
     expected_digest: str | None = None,
+    changed: MeshRefusal | None = None,
 ) -> dict[str, Any]:
-    """The shared spine of approve/deny: guards, signature, write-once, audit."""
+    """The shared spine of approve/deny: guards, signature, write-once, audit.
+
+    ``expected_digest`` re-checks, under the record lock, the digest a typed surface
+    displayed and validated BEFORE its prompt (no lock spans the OS prompt). ``changed``
+    is that surface's own refusal for a mismatch; the enrollment card's is the default.
+    """
     with _record_lock(approval_id, root):
         record = _load_raw(approval_id, root)
-        if expected_digest is not None and record.get("request_digest") != expected_digest:
-            raise MeshRefusal("network_enrollment_snapshot_changed", enrollment.REMEDY)
+        # RECOMPUTED, not only the stored field (agent review #3002 round 1, R1): an edit to
+        # ``what`` inside the prompt window that leaves the ``request_digest`` field alone
+        # matched the field and had a decision written onto a record nobody reviewed.
+        if expected_digest is not None and (
+            record.get("request_digest") != expected_digest
+            or request_digest(record) != expected_digest
+        ):
+            raise changed or MeshRefusal("network_enrollment_snapshot_changed", enrollment.REMEDY)
         moment = time.time()
         if _materialize_expiry(record, moment, root):
             raise MeshRefusal(

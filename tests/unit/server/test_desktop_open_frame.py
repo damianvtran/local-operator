@@ -24,7 +24,10 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.config import ConfigManager
 from local_operator.server.models.desktop_sessions import HistoryPage
 from local_operator.server.routes import desktop_sessions
-from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.server.utils.desktop_sessions import (
+    DesktopSessionBridge,
+    DesktopSessions,
+)
 from local_operator.session import transcript_index as ti
 from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
 
@@ -738,3 +741,63 @@ async def test_a_small_limit_still_reaches_the_openings_user_row(tmp_path: Path)
         # could match by answers ``ready`` with an empty list (see ``publish_runs``
         # and the note in ``build_frame``), which is legitimate — this test is
         # about the read's bound, not about the facts.
+
+
+# ---------------------------------------------------------------------------
+# conversation-first-paint R5(ii): the wire rows are built directly, not via a
+# dumps+loads round trip, and nothing about them changes.
+# ---------------------------------------------------------------------------
+
+
+def _reference_wire_rows(entries: Any) -> list[dict[str, Any]]:
+    """The pre-R5 spelling, verbatim: the oracle for byte identity."""
+    import json
+
+    from local_operator.harness.rows import visible_transcript_rows
+
+    return visible_transcript_rows(
+        [{**json.loads(entry.to_json()), "ts_source": "entry"} for entry in entries]
+    )
+
+
+def test_wire_rows_are_byte_identical_to_the_round_trip() -> None:
+    """Every JSON shape a journal row can hold, plus the two a round trip
+    NORMALISES (a tuple, a non-string key) should a page ever carry one: the
+    serialized wire must match the old round trip to the byte, key order and
+    float spelling included."""
+    import json
+
+    entries = [
+        _entry("u1", 1.0, "message", {"role": "user", "content": [{"text": "héllo ✓"}]}),
+        _entry(
+            "a1",
+            1.1,
+            "message",
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "x"}],
+                "usage": {"prompt_tokens": 10, "cost": 0.1 + 0.2, "big": 10**20},
+                "flags": [True, False, None, -0.0, 1e-300],
+            },
+        ),
+        _entry("c1", 1.2, "custom", {"custom_type": "x", "details": {"nested": [[{}], []]}}),
+        # Separate rows: a non-str key round-trips its WHOLE dict, which would
+        # also normalise a tuple beside it and hide that branch.
+        _entry("t1", 1.3, "message", {"role": "tool", "content": ("tuple", 1)}),
+        _entry("t2", 1.4, "message", {"role": "tool", "meta": {7: "int-key"}}),
+    ]
+    served = DesktopSessionBridge._wire_rows(entries)
+    expected = _reference_wire_rows(entries)
+    assert json.dumps(served) == json.dumps(expected)
+    assert served == expected
+
+
+def test_wire_rows_never_alias_the_cached_page() -> None:
+    """The page cache SHARES pages between requests, so a wire row a later step
+    edits must not reach back into the cached entry (the round trip guaranteed
+    that by construction; the direct build must too)."""
+    entry = _entry("u1", 1.0, "message", {"role": "user", "content": [{"text": "a"}]})
+    row = DesktopSessionBridge._wire_rows([entry])[0]
+    row["payload"]["content"][0]["text"] = "edited"
+    row["payload"]["role"] = "edited"
+    assert entry.payload == {"role": "user", "content": [{"text": "a"}]}

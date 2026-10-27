@@ -62,6 +62,7 @@ import pytest
 
 import local_operator.session.catalog as session_catalog
 import local_operator.session.retention as retention
+from local_operator.asks.visibility import lapsed_visible_ms
 from local_operator.resume import _recent_sessions_with_origin
 from local_operator.session.catalog import CatalogueScope, catalogue_page, load_catalog
 from local_operator.session.creation import ensure_session_created_at
@@ -375,7 +376,19 @@ class TestAScopedPageIsTheSameScan:
         # The hidden population still costs nothing: the skip is armed by the
         # inode the scandir batch already carried, and 200 hidden directories add
         # no per-directory stat to any shape.
-        assert scoped["lstat"] == small["lstat"] == large["lstat"]
+        #
+        # THE MESSAGE CARRIES THE WHOLE PICTURE BECAUSE THIS CELL WENT RED IN CI
+        # AND NOWHERE ELSE: `scoped` counted 18 lstats against `small`'s 6 on a
+        # Linux shard while the same bytes passed here, in the shard's own replay
+        # order, and on a neighbouring head. A bare `18 == 6` cannot say whether
+        # the WALK moved, the CENSUS moved, or the store's lapsed window did, so
+        # on failure the three profiles, the configured window and the wall clock
+        # the visibility rule read all travel with the assertion.
+        lapsed_ms = lapsed_visible_ms()
+        assert scoped["lstat"] == small["lstat"] == large["lstat"], (
+            f"walk moved: small={small} large={large} scoped={scoped} "
+            f"lapsed_ms={lapsed_ms} now={time.time():.3f} root={tmp_path}"
+        )
 
     def test_a_scoped_page_adds_exactly_one_stat_per_visible_session(self, tmp_path: Path) -> None:
         """The census is bounded by the STORE, not by the page.

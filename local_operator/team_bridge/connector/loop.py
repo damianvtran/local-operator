@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,43 @@ RETRY_MAX_ATTEMPTS = 11
 RETRY_BATCH_LIMIT = 8
 _RETRY_ATTEMPTS: dict[str, int] = {}
 
+#: OWNER WATCH (D2b, Team Bridge post-0.90.17). The connector used to resolve
+#: its owner ONCE: after a re-enrolment (generation bump, new endpoint,
+#: credential rebind) every iteration refused ``owner_mismatch`` and backed off
+#: for ever, and an owner-less start exited 0 into launchd's KeepAlive, a whole
+#: interpreter relaunch about every 10 s. Exiting on a refusal is NOT the fix
+#: (review R4): the same codes answer an account switch against an UNCHANGED
+#: owner, so a restart re-reads the same owner and refuses again, a respawn
+#: storm. Instead the process stays resident and watches the store.
+#:
+#: ``OWNER_SIGNAL_POLL_S`` is how often an IDLE connector stats the bridge
+#: database (``stat`` only, no SQLite open): a re-enrolment is picked up within
+#: one poll. ``OWNER_RECHECK_S`` bounds everything else: an idle connector
+#: re-reads the owner (and an identity-refused one retries the hub) at most
+#: once per interval, so a missed signal costs latency, never correctness, and
+#: an account that is never fixed costs one local read plus one hub attempt a
+#: minute rather than a ramp of attempts or a relaunch loop.
+OWNER_SIGNAL_POLL_S = 5.0
+OWNER_RECHECK_S = BACKOFF_MAX_S
+
+#: Refusals that say "this process's IDENTITY is wrong", not "the hub is
+#: flaky". Retrying them on the 1-2-4-8 s ramp only repeats the refusal; what
+#: fixes them is a store change (a re-enrolment, picked up by the owner watch)
+#: or the operator signing back in (picked up at the bounded re-check). So they
+#: idle the full ``OWNER_RECHECK_S`` at once and log on a state change only.
+_IDENTITY_REFUSAL_CODES = frozenset(
+    {
+        "owner_mismatch",
+        "not_enrolled",
+        "owner_changed",
+        "credential_changed",
+        "stale_generation",
+        "bridge_owner_mismatch",
+        "bridge_owner_moved",
+        "bridge_sign_in_required",
+    }
+)
+
 logger = logging.getLogger(__name__)
 
 # Operational codes only: exception messages, arbitrary .code values, feed
@@ -123,6 +161,10 @@ _DIAGNOSTIC_FAILURE_CODES = frozenset(
         "bridge_owner_mismatch",
         "bridge_sign_in_required",
         "bridge_owner_moved",
+        # ``pull._guard_owner``'s refusal when the pinned credential row no
+        # longer names a committed owner: an identity state the owner watch
+        # idles on, so it must log as itself, not as ``PullRefused``.
+        "not_enrolled",
     }
 )
 
@@ -536,19 +578,51 @@ async def run_forever(
     access_provider: Any,
     settings: Any = None,
     stop: asyncio.Event | None = None,
-) -> None:
+    owner_source: Callable[[], Any] | None = None,
+) -> Any:
     """The connector's steady state: poll, handle, back off, repeat.
 
     ``access_provider`` is an async callable returning the pinned OAuth
     access for this owner (the H1 client's own ``current_access`` — the
     ordinary sign-in path, never a key cascade). A refused iteration backs
     off (`BACKOFF_BASE_S` doubling to `BACKOFF_MAX_S`); a 204 resets it.
+
+    RE-ARM CONTRACT. Every iteration first re-reads the committed owner from
+    ``owner_source`` (default: this config dir's ``Store.active_owner``, one
+    local SQLite read, no network). A committed owner that DIFFERS from
+    ``owner`` (endpoint, credential, tenant or generation) is RETURNED, and the
+    caller re-arms on it in-process; ``None`` is returned only when ``stop`` is
+    set. No owner at all, or an identity refusal against the unchanged owner,
+    keeps the loop resident and idling (see ``OWNER_RECHECK_S``): it never
+    returns for those, because the caller exiting is the respawn storm R4
+    rejected.
     """
 
     import time as _time
 
+    if owner_source is None:
+        from local_operator.team_bridge.store import Store
+
+        owner_source = Store(config_dir).active_owner
     backoff = BACKOFF_BASE_S
+    # The idle state last LOGGED (``no_owner`` or a refusal code), so a state
+    # that persists for hours writes one line, not one per re-check.
+    idle_code: str | None = None
     while stop is None or not stop.is_set():
+        current = owner_source()
+        if current is not None and current != owner:
+            logger.info("bridge connector rearm: stage=rearm code=owner_changed")
+            return current
+        if current is None:
+            # Unenrolled under us (or the store is unreadable, which
+            # ``active_owner`` reads as no authority): never touch the hub.
+            if idle_code != "no_owner":
+                logger.info("bridge connector idle: stage=idle code=no_owner")
+                idle_code = "no_owner"
+            await idle_until_owner_changes(
+                None, config_dir=config_dir, owner_source=owner_source, stop=stop
+            )
+            continue
         started = _time.monotonic()
         try:
             access = await access_provider()
@@ -560,6 +634,7 @@ async def run_forever(
                 settings=settings,
             )
             backoff = BACKOFF_BASE_S
+            idle_code = None
             # F1 (live E2E): an answer used to re-poll IMMEDIATELY. Against a
             # real hub that answered at once (resync arms, a caught-up cursor
             # without ``wait``) it never yielded — 124 reads in under 2 s, then
@@ -580,12 +655,89 @@ async def run_forever(
             # It used to be swallowed with no record at all, which is how a
             # connector that could no longer open a file looped silently for
             # hours. One structural line per failed iteration: stage + code.
-            logger.warning(
-                "bridge connector failure: stage=iteration code=%s",
-                _iteration_failure_code(failure),
-            )
+            code = _iteration_failure_code(failure)
+            # Every identity code is in the closed diagnostic set, so the
+            # logged code is the classification: one source of truth.
+            if code in _IDENTITY_REFUSAL_CODES:
+                # Identity refusal: same line format, but once per state
+                # change, then a watched idle instead of the ramp.
+                if idle_code != code:
+                    logger.warning("bridge connector failure: stage=iteration code=%s", code)
+                    idle_code = code
+                await idle_until_owner_changes(
+                    owner,
+                    config_dir=config_dir,
+                    owner_source=owner_source,
+                    stop=stop,
+                    budget=_failure_delay(failure, OWNER_RECHECK_S),
+                )
+                continue
+            logger.warning("bridge connector failure: stage=iteration code=%s", code)
             await _pause(stop, _failure_delay(failure, backoff))
             backoff = min(backoff * 2.0, BACKOFF_MAX_S)
+    return None
+
+
+def _owner_signal(config_dir: Path) -> tuple[Any, ...]:
+    """A cheap change signal for the bridge store: ``stat`` of the database
+    and its WAL, never an open.
+
+    WHY a stat and not a read: an idle connector may sit for days, and a
+    SQLite open per poll (``Store._connect`` also runs the layout check) is the
+    tight polling the re-arm must avoid. Every enrolment write reaches the
+    WAL (or, once checkpointed, the main file), so a commit, an invalidate or
+    a first-ever store moves this tuple; plain reads do not (measured: three
+    ``active_owner`` reads leave it identical). Other writers to the same
+    store can move it too, which only costs one extra local owner read. Carries
+    no names or content: inode, size and mtime only.
+    """
+
+    from local_operator.team_bridge.store import state_db_path
+
+    database = state_db_path(config_dir)
+    parts: list[Any] = []
+    for path in (database, database.with_name(database.name + "-wal")):
+        try:
+            stat = path.stat()
+        except OSError:
+            parts.append(None)
+            continue
+        parts.append((stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return tuple(parts)
+
+
+async def idle_until_owner_changes(
+    baseline: Any,
+    *,
+    config_dir: Path,
+    owner_source: Callable[[], Any],
+    stop: asyncio.Event | None,
+    budget: float = OWNER_RECHECK_S,
+) -> None:
+    """Idle up to ``budget`` seconds, returning EARLY when the store's committed
+    owner stops being ``baseline`` (or ``stop`` is set).
+
+    The one owner-watch helper behind both idle states: the loop's (no owner,
+    or an identity refusal) and ``__main__``'s owner-less start. Between polls
+    it costs one ``stat`` per ``OWNER_SIGNAL_POLL_S``; the owner is READ only
+    when that signal moves. The caller re-reads the owner after this returns,
+    which is the bounded re-check that covers a change the signal missed.
+    Takes the baseline signal BEFORE the first wait, so a commit landing at any
+    point inside the window is seen.
+    """
+
+    signal = _owner_signal(config_dir)
+    waited = 0.0
+    while (stop is None or not stop.is_set()) and waited < budget:
+        step = min(OWNER_SIGNAL_POLL_S, budget - waited)
+        await _pause(stop, step)
+        waited += step
+        moved = _owner_signal(config_dir)
+        if moved == signal:
+            continue
+        signal = moved
+        if owner_source() != baseline:
+            return
 
 
 def _failure_delay(failure: BaseException, backoff: float) -> float:

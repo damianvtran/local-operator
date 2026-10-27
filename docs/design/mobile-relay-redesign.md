@@ -221,8 +221,8 @@ a starred row marks a feature that stays one tap away.
 | 25 | send / steer / stop / retry | Composer action row, end (morphing, unchanged semantics) | 1 ★ |
 | 26 | slash sheet (type `/`) | unchanged trigger; restyled sheet | 1 ★ |
 | 27 | `/usage` → usage sheet | unchanged, **plus** Drawer → Usage | 1 → 1 ★ |
-| 28 | ended strip + `resume` | **Bottom banner above the composer** (not an overlay over the transcript): "Session ended · history kept" + filled `Resume` button | 1 ★ |
-| 29 | degraded strip ("not answering") | Same banner slot, warning tone, no action | — |
+| 28 | ended state + `resume` | **Header status dot** (grey) beside the subtitle's `Ended`; tapping the title block opens a sheet that explains it and carries a filled `Resume` button; also `Resume` in the ⋮ menu while ended. **No banner above the composer** (#3008, superseding the banner) | 1 → 1 ★ |
+| 29 | degraded / not answering | Same header status dot (yellow) beside `Not answering`; its sheet says what a send does now. No action, no band (#3008) | 1 |
 | 30 | agent view `Agents` (open agent navigation) | unchanged (header action) | 1 ★ |
 | 31 | asks sheet "dismiss…", "decline", answer | unchanged (sheet internals restyle only) | ★ |
 | 32 | projects sheet / tags sheet / metadata sheet internals | restyle only (§7) | — |
@@ -527,21 +527,35 @@ Keep the position (above the tray), the remount key, the budget rule and
   render above the composer.
 - 96 px total (+ safe area) against 158 px today. **3 → 2 rows.**
 
-### 6.7 Status strips (ended / degraded / offline)
+### 6.7 Session health: the header status dot (ended / not answering / offline)
 
-Today these overlay the transcript top as full-width coloured strips. They
-become one **banner slot above the composer**, inside the column, which takes
-layout space only while shown. The current overlay exists to avoid jumps
-(design D4/D9), and the banner avoids the jump the same way, because it
-replaces the tray row (44 px) rather than stacking. Priority stays: ended >
-degraded > link down.
+**Superseded (#3008).** These were once full-width strips over the transcript,
+then a banner slot above the composer. Both spent the thumb zone on a fact
+that rarely changes and needs no action until the reader wants one, and the
+ended banner sat flush on the composer card. Session health now lives in the
+app bar (§6.2): one 8 px dot beside the subtitle word that already names the
+state, and the title block is a 44 px control that opens the shared Sheet
+with one explanation sentence. Nothing is stacked above the composer for
+health. Priority stays: ended > not answering > link down.
 
-- **Ended**: `bg-surface`, `ink-muted` text "Session ended · history kept",
-  and a filled accent `Resume` button (44 px) at the end. The composer stays
-  (a send also resumes; that is the existing behaviour).
-- **Degraded**: `bg-warning-wash`, a `warning` dot, and "Not answering —
-  sends will wait". No action.
-- **Link down**: §8. This one does **not** use the banner.
+- **Live** (green, `success`): "Running on your computer — messages reach it
+  right away". A streaming turn is live: busy is not a health state.
+- **Not answering** (yellow, `warning`): the relay's dial is down (`degraded`:
+  a send is refused at once and the text stays in the box), or the owner's
+  heartbeat and frames have both been quiet past `SESSION_HEALTH_WINDOW_S`
+  (`heartbeat_stale`: a send can time out yet still arrive). No queueing is
+  promised. No action.
+- **Reconnecting** (yellow): the PHONE's own link is down (§8); the session
+  may still be running.
+- **Ended** (grey, `ink-dim`): history kept, and a send or `Resume` reopens it
+  in the home folder. The sheet's filled accent `Resume` (44 px) is the one
+  action, also offered in the ⋮ menu while ended. The composer stays enabled (a
+  send also resumes) and its placeholder says so before the tap.
+
+The rule, the server fields and the window constant are in
+`local_operator/mobile/web/src/lib/session-health.ts`; the copy is the
+`relay.health` namespace. A transition into any non-live state is announced
+through one polite live region.
 
 ### 6.8 States
 

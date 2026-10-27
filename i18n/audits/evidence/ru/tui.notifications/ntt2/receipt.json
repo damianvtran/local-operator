@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "audit_id": "ntt2",
+  "locale": "ru",
+  "namespace": "tui.notifications",
+  "round": 2,
+  "record": "i18n/audits/evidence/ru/tui.notifications/ntt2/record.json",
+  "provenance": "Original evidence written by independent translation-auditor session ca5d33d6f6aa, actual model radient/auto (provider-quota fallback chain disclosed in record.json), on 2026-10-25; command output captured in-session, not reconstructed.",
+  "hashes": {
+    "record.json": "dc3f2e0c2046ef2d27c0a1161b90311a9f33e535f20eb0a048407ea54f0b1bb8",
+    "report.md": "6cec9694431219c748eb9aff623dd34816e39000a94771cbbfbd2780b00cb37d",
+    "audit.log": "1bc36ccf0e0f9c02d79a15720408d9057badae7f3538fe953762b099b69d2135"
+  },
+  "attestation": {
+    "target_sha256": "eee1186170a1856f4e59528b4769b8b834c0c928ce7cad325ceedccc789058fc",
+    "round1_target_sha256": "03cdb4d6fc69764229a5dd15611a0d64e1856dca54107904bfdca223f8b947c1",
+    "en_sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+    "en_context_sha256": "9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6",
+    "audited_revision": "77b3c2cf45ea5a21e316c11e1fd7a56c9a135aa6",
+    "target_tracked": false
+  },
+  "delta": {
+    "changed_keys": [
+      "chip_high",
+      "pointer_unread",
+      "stale_skipped"
+    ],
+    "byte_diff": "3 replaced lines",
+    "unexpected_changes": []
+  },
+  "verdict": {
+    "status": "passed",
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "keys_read": {
+    "en": 72,
+    "target": 72,
+    "context": 72,
+    "semantically_reaudited": 3
+  }
+}

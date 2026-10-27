@@ -3722,6 +3722,11 @@ def _make_system_blocks_provider(
 
     async def provider(model_label: str = "") -> list[str]:
         nonlocal cached_key, cached_blocks
+        # notify is wired only after Session construction. The factory's warm
+        # roster lacks its door; inventory reconciliation cannot repair block
+        # zero. Ask the owning Session, never infer from host type or a stub.
+        notify_probe = getattr(provider, "notify_available", None)
+        has_notify = bool(notify_probe()) if callable(notify_probe) else None
         # ``model_label`` is passed live by the Session on each provider step, so
         # a deliberate ``set_model`` or a failover fallback is reflected in the
         # env block at the next safe call boundary without rebuilding this
@@ -3813,6 +3818,7 @@ def _make_system_blocks_provider(
             channel,
             open_asks or "",
             tuple((tool.name, tool.description) for tool in tools),
+            has_notify,
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
         # ``key``: this render is the CACHED head only, and the session
@@ -3843,6 +3849,7 @@ def _make_system_blocks_provider(
             interactive=interactive,
             channel=channel,
             open_asks=open_asks or "",
+            has_notify=has_notify,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )
@@ -3853,6 +3860,7 @@ def _make_system_blocks_provider(
     # semantics. Production providers opt into Session's persisted-prefix
     # protocol explicitly; benchmarks can still call this builder read-only.
     setattr(provider, "append_only_state", True)
+    setattr(provider, "session_notify_membership", True)
     setattr(provider, "repo_guidance", repo_guidance)
     setattr(provider, "knowledge_hooks", hooks)
     # The frozen host answer, for the session's own re-render of block 1. Two

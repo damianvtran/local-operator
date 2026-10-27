@@ -1,0 +1,38 @@
+COMMAND: env -i HOME=<scratch>/nt25a2-home LOCAL_OPERATOR_CONFIG_DIR=<scratch>/nt25a2-home/config PATH=<inherited path> PYTHONPATH=<core-worktree> .venv/bin/python <scratch>/audit-core-ur-nt25a2.py
+AUDIT: nt25a2; locale ur; one-key remediation only
+AUDITOR: translation-auditor; session 89dbc1a173e9; instance 89dbc1a173e9-nt25a2; model openai/gpt-6-astra
+MODEL SOURCE: resumed session-state Environment Model; prior nt25a1 provenance unchanged
+CORE HEAD: 329b5c581784df1082dbd0630c0f814c7a3c0c8f
+PARSER: /Users/damian/workspace/repos/lo-notifications-l1/local_operator/i18n/runtime.py
+PRIOR COMPANION PASS record.json 37aaeb2723fec43814d46cf2f11eecaa2d8c06b2c09b0046543e6d4a76e09e18
+PRIOR COMPANION PASS report.md 6b9a0b230acb4b829c189d81cfb8e7917a700a55b608a32aab4b459609868512
+PRIOR COMPANION PASS audit.log bb8b07f1c850566805488292624ef8b3adf0942d06a6b99129655f316467de46
+PRIOR COMPANION PASS recheck.py.txt ee49ef033762174c555937b739db6e8519d03f359000a1e2001e109531a8a06f
+INPUT SHA256 en local_operator/i18n/catalogues/en/wire.slash.notifications_page.json 9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594
+SOURCE COMPATIBILITY PASS en
+INPUT SHA256 en_context_sidecar local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json 2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0
+SOURCE COMPATIBILITY PASS en_context_sidecar
+INPUT SHA256 target local_operator/i18n/catalogues/ur/wire.slash.notifications_page.json 88c087d1e231da9b916472cb38b733b1fba07fa010ec3e9c8943a22fe7d1d378
+KEY PARITY PASS: 1 English / 1 Urdu
+EN: Asks and agent updates; read marks all read
+UR: سوالات و ایجنٹ اپ ڈیٹس؛ read سب کو پڑھا قرار دے
+EXACT PRIOR PROPOSED REPAIR PASS: T-UR-CORE-1
+PARSE PASS en arguments= () plurals= ()
+PARSE PASS ur arguments= () plurals= ()
+RENDER PASS: 'سوالات و ایجنٹ اپ ڈیٹس؛ read سب کو پڑھا قرار دے'
+LITERAL read PASS
+WIDTH PASS: rich.cells.cell_len= 47 / maxCells= 50
+MANUAL BIDI CONTROLS PASS: []
+NEGATIVE malformed ICU PASS: MessageSyntaxError expected ',' or '}' after argument name 'audit_negative' (at offset 63 of 'سوالات و ایجنٹ اپ ڈیٹس؛ read سب کو پڑھا قرار دے {audit_negative')
+NEGATIVE missing argument PASS: MessageFormatError message argument 'audit_required' was not supplied (have: none)
+NEGATIVE translated command token PASS: missing literal read detected
+NEGATIVE overflow PASS: 53 > maxCells 50
+RETAIN CORE ERRORS PASS en f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c
+RETAIN CORE ERRORS PASS en_context_sidecar 07ad1e5da403a5fccde5648f04cd10bf1263cabc50f5e1804644630c7ce13106
+RETAIN CORE ERRORS PASS target ed6f12c19808f626546e3650dd57c0561aee232062203f42fe7944f2fc2dade9
+RETAIN UI PASS en ce0c8d6d9af80980667741dd6d289ab7312d04aaea0e717e5cef4cf55c2b37ae
+RETAIN UI PASS target d5c4a7e21e450d9a21a06b85198bd8a2ed78cd2d5c007e0ab10c930d60fdae4d
+RETAIN UI PASS context 3804068c75073ce9663f73539b508cbb46e495488dc47e5dd97aa80fd1a6918e
+SCOPE: 1 key re-audited; previous 134 keys retained by source/context/target byte compatibility only
+RESULT: all mechanical checks and 4 in-memory negative controls PASS
+LIMIT: no rendered RTL/Nastaliq/native-speaker or release eligibility claim

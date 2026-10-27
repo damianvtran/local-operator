@@ -38,6 +38,10 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalUnavailableError, ask_approval
+from local_operator.harness.degeneration import (
+    DegenerationTrip,
+    StreamDegenerationGuard,
+)
 from local_operator.harness.guard_area import (
     READING_TOOLS,
     exempt_from_escalation,
@@ -73,6 +77,7 @@ from local_operator.harness.types import (
     Aside,
     AudioContent,
     ChatRequest,
+    ConsumerCut,
     Content,
     CustomMessage,
     DocumentContent,
@@ -574,6 +579,7 @@ MAX_NAMELESS_CALL_RECOVERIES = 2
 NAMELESS_CALL_RECOVERY_PROMPT = _chrome_prompts.NAMELESS_CALL_RECOVERY_PROMPT
 WORDLESS_STOP_RECOVERY_PROMPT = _chrome_prompts.WORDLESS_STOP_RECOVERY_PROMPT
 NO_PROGRESS_RECOVERY_PROMPT = _chrome_prompts.NO_PROGRESS_RECOVERY_PROMPT
+DEGENERATE_STREAM_RECOVERY_PROMPT = _chrome_prompts.DEGENERATE_STREAM_RECOVERY_PROMPT
 LENGTH_STOP_RECOVERY_PROMPT = _chrome_prompts.LENGTH_STOP_RECOVERY_PROMPT
 CONTINUE_TRUNCATED_ANSWER_PROMPT = _chrome_prompts.CONTINUE_TRUNCATED_ANSWER_PROMPT
 CONNECTIVITY_CONTINUATION_PROMPT = _chrome_prompts.CONNECTIVITY_CONTINUATION_PROMPT
@@ -634,6 +640,23 @@ MAX_WORDLESS_STOP_RECOVERIES = 1
 #: connectivity and nameless budgets): a fresh allowance per turn would re-buy
 #: the same diagnosis.
 MAX_LENGTH_SILENT_RECOVERIES = 1
+
+#: How many times ONE run re-asks after the in-stream degeneration guard
+#: (``harness.degeneration``) cut a response that had become one passage
+#: repeated verbatim. DISTINCT from the two budgets above, and deliberately not
+#: drawn from them: those buy a cheaper effort rung or a plain re-ask, and the
+#: measured loop (2026-10-26, three consecutive 131,072-token turns, see the
+#: guard's module docstring) recurred identically on BOTH lower-effort retries,
+#: so neither move addresses it. This re-ask keeps the effort and changes the
+#: request instead: the looping turn is dropped and
+#: ``DEGENERATE_STREAM_RECOVERY_PROMPT`` is appended.
+#:
+#: TWO: one loop can be bad luck in sampling, and the steer is cheap -- the guard
+#: stops each loop after ~10 KB rather than the full budget. A THIRD loop in the
+#: same run is the model's steady state on this context, and the run ends NAMED
+#: with an error that says so rather than paying for more. Run-scoped like every
+#: sibling recovery: a fresh allowance per turn would re-buy the same diagnosis.
+MAX_DEGENERATE_STREAM_RECOVERIES = 2
 
 #: How many times ONE run continues an answer that the output limit cut off
 #: mid-prose. A prose truncation is the one length end the loop deliberately did
@@ -1327,7 +1350,9 @@ class _NoProgressGuard:
 
 
 async def _abortable_stream(
-    stream: AsyncIterator[StreamEvent], signal: AbortSignal | None
+    stream: AsyncIterator[StreamEvent],
+    signal: AbortSignal | None,
+    cut: AbortSignal | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Yield from ``stream`` but stop as soon as ``signal`` aborts.
 
@@ -1361,8 +1386,20 @@ async def _abortable_stream(
     ``text_parts``, so a transient second reference to data the loop is holding
     anyway cannot change the memory profile. In practice the queue stays near
     empty - the producer is network-bound and the consumer is not.
+
+    ``cut`` is a second, CONSUMER-OWNED stop for this one stream: the loop's
+    in-stream degeneration guard (``harness.degeneration``) fires it when the
+    response has collapsed into a verbatim loop. It ends the stream exactly the
+    way an abort does -- same pump cancellation inside the socket read, same
+    quiet end -- but it is deliberately NOT merged into ``signal``: the
+    caller's signal means "the user stopped the run", the loop reads it after
+    the stream to label the turn ``aborted``, and the provider holds its own
+    reference to it. A guard stop is not a user stop and must reach neither. A
+    watcher per signal rather than ``AbortSignal.any_of``: these watchers die
+    in the ``finally`` below on every exit, so nothing outlives the stream.
     """
-    if signal is None:
+    signals = [s for s in (signal, cut) if s is not None]
+    if not signals:
         async for event in stream:
             yield event
         return
@@ -1385,11 +1422,11 @@ async def _abortable_stream(
     # before it starts, which is the whole difference. (Same hazard the batch
     # drain documents and defends against; this is the second instance of it.)
     task.add_done_callback(lambda _task: finished.set())
-    watcher = asyncio.ensure_future(_cancel_when_aborted(signal, task))
+    watchers = [asyncio.ensure_future(_cancel_when_aborted(s, task)) for s in signals]
     # An abort that has ALREADY fired must not be missed: the watcher only gets
     # to run on the next loop pass, by which time the pump could have consumed
     # the whole stream and spent a request the user had stopped.
-    if signal.aborted:
+    if any(s.aborted for s in signals):
         task.cancel()
 
     try:
@@ -1418,7 +1455,8 @@ async def _abortable_stream(
             if getter in done:
                 yield getter.result()
     finally:
-        watcher.cancel()
+        for watcher in watchers:
+            watcher.cancel()
         if not task.done():
             task.cancel()
         with contextlib.suppress(BaseException):
@@ -2228,6 +2266,9 @@ class AgentLoop:
         # Re-asks this run has spent on turns whose tool calls arrived with no
         # name; see ``MAX_NAMELESS_CALL_RECOVERIES``.
         nameless_call_recoveries = 0
+        # Re-asks this run has spent on streams the degeneration guard cut; see
+        # ``MAX_DEGENERATE_STREAM_RECOVERIES``.
+        degenerate_stream_recoveries = 0
 
         yield AgentStartEvent(generation=generation)
 
@@ -2290,6 +2331,7 @@ class AgentLoop:
                     turn_retryable_interruption = False
                     turn_attempted_selector: "ModelSpec | None" = None
                     nameless_call_drops = 0
+                    turn_degenerate: DegenerationTrip | None = None
                     # Attribution of THIS call's failure: reset per call for the
                     # same reason as every other turn-local above. A stale pair
                     # from a previous iteration would name a model that did not
@@ -2339,6 +2381,7 @@ class AgentLoop:
                             turn_retryable_interruption = event.retryable_interruption
                             turn_attempted_selector = event.attempted_selector
                             nameless_call_drops = event.nameless_call_drops
+                            turn_degenerate = event.degenerate
                             # WHICH model failed, carried to the end event so the
                             # session's incident and the transcript name it —
                             # never the model the user selected. Empty on a
@@ -3006,6 +3049,109 @@ class AgentLoop:
                         )
                         self._discard_pending_custom(pending)
                         return
+
+                    if turn_degenerate is not None:
+                        # THE DEGENERATION ARM (``harness.degeneration``). The
+                        # guard cut this stream because it had become one short
+                        # passage repeated verbatim, so the turn ends as a
+                        # ``length`` stop -- and this arm claims it BEFORE the
+                        # ordinary length arm below, for two reasons. That
+                        # arm's copy ("spent its whole output budget") is false
+                        # here: the stream was stopped after ~10 KB precisely so
+                        # the budget was NOT spent. And its remedy is the wrong
+                        # one: it retreats an effort rung and replays the same
+                        # request, which in the measured trace looped again,
+                        # identically, on both retreats. So the recovery keeps
+                        # the established re-ask SHAPE (drop the turn, append a
+                        # chrome prompt, go round) with its own budget and its
+                        # own words, and an abort still outranks it: an aborted
+                        # stream never reaches here (``stop_reason`` is
+                        # ``aborted``, handled by the branch above).
+                        #
+                        # The looping message leaves the wire history for the
+                        # empty-truncation retry's reason and one of its own:
+                        # replaying ten kilobytes of the loop anchors the retry
+                        # on exactly what it must not continue. Any tool call
+                        # in it never ran and is dropped with it, which is what
+                        # the steer tells the model. Identity is ``stored``, the
+                        # object actually appended above.
+                        if context.messages and context.messages[-1] is stored:
+                            context.messages.pop()
+                        if new_messages and new_messages[-1] is stored:
+                            new_messages.pop()
+                        if _graceful_cancel_requested(config):
+                            # A requested stop outranks the re-ask, as on every
+                            # recovery arm: end the run the way the boundary
+                            # below ends a stopped one.
+                            yield AgentEndEvent(
+                                messages=new_messages, aborted=True, generation=generation
+                            )
+                            self._discard_pending_custom(pending)
+                            return
+                        if degenerate_stream_recoveries >= MAX_DEGENERATE_STREAM_RECOVERIES:
+                            # NAMED, and named for what happened. Not
+                            # ``OUTPUT_LIMIT_CAUSE``: its sentence ("hit the
+                            # model's output limit") is the false claim this arm
+                            # exists to avoid. The error is the record a parent,
+                            # an exec caller and the session's incident read.
+                            yield AgentEndEvent(
+                                messages=new_messages,
+                                error=(
+                                    "Degenerate output: the model's "
+                                    f"{turn_degenerate.channel} fell into a verbatim loop "
+                                    f"(a {turn_degenerate.period}-character passage repeated "
+                                    f"{turn_degenerate.repeats}+ times) on "
+                                    f"{degenerate_stream_recoveries + 1} attempts in this run. "
+                                    "The harness stopped each attempt as soon as the loop was "
+                                    "detected; rephrase the request or switch models."
+                                ),
+                                generation=generation,
+                            )
+                            self._discard_pending_custom(pending)
+                            return
+                        degenerate_stream_recoveries += 1
+                        # ONE steer in the transcript, never a run of them. A
+                        # consecutive trip finds the previous steer as the last
+                        # row (the looping turn it followed was just dropped),
+                        # so it is retired before the fresh one goes in; at the
+                        # cap (above) the existing one stays as the record.
+                        # Without this the next user turn read "your last
+                        # message was stopped…" twice in a row with nothing
+                        # between (review n2). Matched on the text: the steer is
+                        # a fresh ``Message.user`` per trip.
+                        # Only a steer THIS run minted (the tail of both lists):
+                        # a row an earlier run persisted is durable history and
+                        # is never rewritten from here.
+                        last = context.messages[-1] if context.messages else None
+                        if (
+                            isinstance(last, Message)
+                            and last.role == "user"
+                            and last.text == DEGENERATE_STREAM_RECOVERY_PROMPT
+                            and new_messages
+                            and new_messages[-1] is last
+                        ):
+                            context.messages.pop()
+                            new_messages.pop()
+                        # Persisted for the reason every recovery prompt is: a
+                        # resumed session must be able to see why it was
+                        # re-asked. Harness chrome -- see
+                        # ``harness.rows.harness_chrome_prompts``.
+                        recovery = Message.user(DEGENERATE_STREAM_RECOVERY_PROMPT)
+                        context.messages.append(recovery)
+                        new_messages.append(recovery)
+                        # No TurnEndEvent: the turn is not in the transcript, so
+                        # there is no live row to settle (the nameless and
+                        # wordless re-asks' reason). And, unlike those siblings,
+                        # NO NOTICE -- deliberately, and only for now: each of
+                        # them yields catalogue copy, and a new message here
+                        # needs a translated ``tui.notices`` key in every
+                        # carried locale (review m1, deferred to a follow-up
+                        # PR). The record is the ``degenerate_stream`` payload
+                        # on the ``message_end`` already emitted, which every
+                        # surface reads to label the cut row honestly
+                        # (``rows.assistant_stop_notice``), plus the log line.
+                        has_more_tool_calls = True
+                        continue
 
                     if nameless_call_drops:
                         # A tool call with no name cannot execute and cannot be
@@ -4108,6 +4254,10 @@ class AgentLoop:
         # Set only by the except arm below, from the exception's own flag: the
         # harness cannot import ``providers`` to classify this itself.
         connectivity_loss = False
+        # The first trip of the degeneration guard on this call, if any; see
+        # where the stream is opened below.
+        degenerate: DegenerationTrip | None = None
+        cut_receipt: ConsumerCut | None = None
         # The spec the request below is BUILT with, captured before the stream
         # starts. Declared here rather than read after the ``try`` for two
         # reasons: the resolved ``model`` is assigned inside it, so a reader
@@ -4266,7 +4416,25 @@ class AgentLoop:
             )
             request = self._arm_one_turn_secrets(context, request)
             secret_active = request.has_one_turn_secrets
-            stream = _abortable_stream(config.stream_fn(request, signal), signal)
+            # THE DEGENERATION GUARD (``harness.degeneration``): one detector on
+            # the REASONING channel, and a cut signal of this call's own. It
+            # stops a stream whose reasoning has become one short passage
+            # repeated verbatim BEFORE the provider bills the rest of the output
+            # budget, which is the only point at which stopping it saves
+            # anything. Visible text is deliberately NOT watched: legitimate
+            # answers (identical-row tables, zero-byte base64, repeated log
+            # lines) are exactly periodic too, and cutting one throws away an
+            # answer the user asked for -- see the module docstring. The cut
+            # ends the stream through the same pump cancellation an abort uses,
+            # but never touches ``signal`` -- see ``_abortable_stream``.
+            degeneration_cut = AbortSignal()
+            reasoning_guard = StreamDegenerationGuard("reasoning")
+            # Armed BEFORE dispatch so the stream fn's decorated copy of this
+            # request shares it: the usage recorder reads it to book the cut
+            # call's spend as an ESTIMATE rather than as unknown (review m3; see
+            # ``ChatRequest._consumer_cut``).
+            cut_receipt = request.arm_consumer_cut()
+            stream = _abortable_stream(config.stream_fn(request, signal), signal, degeneration_cut)
             from local_operator.providers.failover import _one_turn_scrub_stream_event
 
             async for event in stream:
@@ -4325,6 +4493,15 @@ class AgentLoop:
                     # ``providers/failover._RETRY_SAFE_STREAM_EVENTS``).
                     if not secret_active:
                         yield ReasoningDeltaEvent(message_id=assistant.id, delta=event.delta)
+                    if degenerate is None and (trip := reasoning_guard.feed(event.delta)):
+                        degenerate = trip
+                        # Everything streamed so far is output the provider
+                        # billed: the reasoning up to the trip plus any text
+                        # (none, in the measured shape, but a turn can speak
+                        # first and loop after).
+                        if cut_receipt is not None:
+                            cut_receipt.mark(trip.chars + sum(map(len, text_parts)))
+                        degeneration_cut.abort("degenerate stream")
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
                         event.index,
@@ -4700,6 +4877,52 @@ class AgentLoop:
                 getattr(exc, "connectivity_loss", False)
             )
 
+        if degenerate is not None:
+            # The guard cut this stream, so no ``StreamEndEvent`` set a reason
+            # (or one that raced the cut did). ``length`` because that is what
+            # happened -- the response was ended at a bound before it finished
+            # -- and it is the reason every live surface already renders as
+            # "cut off" rather than as a complete answer. The run loop's
+            # degeneration arm claims this turn BEFORE its ordinary length
+            # arm, so none of that arm's "spent its whole output budget" copy
+            # is ever said about a stream that was stopped early. An abort
+            # that landed meanwhile still wins: the check below runs after.
+            #
+            # Whatever the cancelled socket raised on its way out is the cut's
+            # consequence, not a provider failure, so it must not divert the
+            # turn to the connectivity or error arms (which would resend it).
+            stop_reason = "length"
+            error = None
+            connectivity_loss = False
+            retryable_interruption = False
+            # The diagnosable record, on the message's own payload (wire
+            # clients never replay harness keys) and therefore on the
+            # ``message_end`` event every recorder already captures.
+            provider_payload = {
+                **(provider_payload or {}),
+                "degenerate_stream": degenerate.payload(),
+            }
+            # The cut call's SPEND (review m3). No provider usage frame arrives
+            # on a cancelled stream, so the recorder below the loop books an
+            # estimate (``model.configure._estimate_consumer_cut_usage``, basis
+            # ``estimated``) and hands it back on the shared receipt; the same
+            # figure goes on the message so the session's spend band, the turn
+            # aggregate and a parent's child ledger all see the call instead of
+            # a free one. The recorder's ``finally`` has already run: the pump
+            # task it lives in was awaited by ``_abortable_stream`` before the
+            # stream ended. A provider frame that DID arrive before the cut wins.
+            if usage is None and cut_receipt is not None and cut_receipt.estimated_usage:
+                usage = cut_receipt.estimated_usage
+            logger.warning(
+                "degenerate %s stream stopped: a %d-character passage repeated %d+ times "
+                "verbatim after %d characters (unit starts %r)",
+                degenerate.channel,
+                degenerate.period,
+                degenerate.repeats,
+                degenerate.chars,
+                "<withheld>" if secret_active else degenerate.sample,
+            )
+
         if signal is not None and signal.aborted:
             # A stream CUT by the abort ends without its ``StreamEndEvent``, so
             # the local default ("stop") would otherwise stand and the turn
@@ -4840,6 +5063,7 @@ class AgentLoop:
             nameless_call_drops=nameless_call_drops,
             failure_selector=failure_selector,
             failure_failover_from=failure_failover_from,
+            degenerate=degenerate if stop_reason == "length" else None,
         )
 
     @staticmethod
@@ -7395,6 +7619,10 @@ class _ModelTurnResult:
     #: row to replay for such a call, so only the run loop can tell the model;
     #: carried out for the recovery in ``run``.
     nameless_call_drops: int = 0
+    #: Set when the in-stream degeneration guard cut this call's stream (see
+    #: ``harness.degeneration``); carried out so the run loop's degeneration
+    #: arm, not its ordinary length arm, decides what happens next.
+    degenerate: "DegenerationTrip | None" = None
     #: ``provider/model`` of the target that produced ``error``, and the
     #: selector the walk started from when that target was not the selection.
     #: Empty when unknown (a synthesised error, or nothing raised). See

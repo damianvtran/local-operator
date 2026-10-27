@@ -60,6 +60,26 @@ NO_PROGRESS_RECOVERY_PROMPT = (
 )
 
 
+#: What the loop tells the model after the in-stream degeneration guard
+#: (``harness.degeneration``) cut its response off because the stream had become
+#: one short passage repeated verbatim. The cut message is REMOVED from the wire
+#: history -- replaying ten kilobytes of the loop would anchor the retry on the
+#: very thing it must not continue -- so this prompt is the only record, for the
+#: model and for a reader of a resumed session, of why the conversation goes on.
+#: It is what makes the re-ask not a pure replay: the measured loops (see the
+#: guard's module docstring) recurred identically on two lower-effort retries
+#: that changed nothing but the effort. Harness chrome -- see
+#: ``harness.rows.harness_chrome_prompts``.
+DEGENERATE_STREAM_RECOVERY_PROMPT = (
+    "Harness recovery notice: your last message was stopped before it finished "
+    "because it had fallen into a loop — the same passage was repeating word for "
+    "word — so none of it was kept or acted on. Do not continue or repeat it. "
+    "Work from the current state already in this conversation and produce your "
+    "next tool call, or your final answer if the work is done, without "
+    "re-deliberating what you have already established."
+)
+
+
 #: What the loop tells the model after a turn arrived with no text and no tool
 #: calls on a clean stop. Like the nameless-call notice above it is the only
 #: record of why the conversation continues: the empty message itself is

@@ -4811,7 +4811,24 @@ class ServingSessionHandle(SessionHandle):
             unsubscribe_outcome = self._session.subscribe(observe_end)
             try:
                 if command.wait_for_turn:
-                    await self._await_turn_lock_free()
+                    # A person's prompt is visible to the Team Bridge body path
+                    # while it waits out a foreign turn, so a body follow-up
+                    # does not start one more body turn ahead of it. Harness
+                    # rows (goal continuations) are not a person and do not
+                    # hold it; a session without the seam keeps the plain wait.
+                    # Annotated because ``getattr`` on the probe yields ``Any |
+                    # None`` and ``callable()`` narrows that to a callable
+                    # returning ``object``, which a ``with`` cannot enter. The
+                    # seam is ``Session.person_prompt_waiting``, a
+                    # ``contextlib.contextmanager``.
+                    waiting: Callable[[], contextlib.AbstractContextManager[object]] | None = (
+                        getattr(self._session, "person_prompt_waiting", None)
+                    )
+                    if callable(waiting) and not command.harness_injected:
+                        with waiting():
+                            await self._await_turn_lock_free()
+                    else:
+                        await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
@@ -6436,6 +6453,17 @@ class ServingSessionHandle(SessionHandle):
             self._session._aida_attended_probe = lambda: bool(self._attended_surfaces())
         except Exception:  # noqa: BLE001 — a session without the slot keeps its default
             logger.debug("could not install the attended probe", exc_info=True)
+        # R2-2: the item ladder's rung-4 stand-down reads the same surface table,
+        # through the session's own `_notify_tui_evidence` seam. A TUI ATTACHED to
+        # this session is a TUI RENDERING it (an attach names the one conversation
+        # the front end shows), which is the watched half of the predicate; the
+        # ACTIVE half needs the TUI's input evidence, and with none reported the
+        # probe answers None — unknown, which notifies rather than suppresses
+        # (contract §6.3). Installed here so the answer is live, not captured.
+        try:
+            self._session._notify_tui_probe = self._tui_viewer_active
+        except Exception:  # noqa: BLE001 — an unsettable slot keeps its default
+            logger.debug("could not install the inbox TUI probe", exc_info=True)
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
@@ -6443,6 +6471,41 @@ class ServingSessionHandle(SessionHandle):
             holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
+
+    def _tui_viewer_active(self) -> bool | None:
+        """Is a TUI showing THIS conversation with the operator active in it?
+
+        ``None`` when the answer cannot be established — no TUI attached, or a
+        TUI that reports no input evidence — and the caller treats that as "raise
+        the banner" (contract §6.3: every unknown fails toward notifying).
+
+        THE TWO HALVES ARE DELIBERATELY SEPARATE. An attach proves a terminal is
+        RENDERING this session; it says nothing about whether anyone is at the
+        keyboard. The activity half is the TUI's own ``activity`` report (its
+        Key/MouseDown edges, throttled, contract §6.1); a runtime that predates
+        it, or a TUI that has sent none, leaves the answer unknown — which
+        suppresses nothing.
+        """
+        reader = getattr(self._registrant, "tui_input_age_s", None)
+        if not callable(reader):
+            return None
+        watching = "attach" in self._attached_surfaces() or "tui" in self._watching_surfaces()
+        if not watching:
+            return None
+        try:
+            age = reader()
+        except Exception:  # noqa: BLE001 — an unreadable probe is unknown
+            return None
+        if not isinstance(age, (int, float)) or isinstance(age, bool):
+            # A registrant whose probe answers something other than a number is
+            # "cannot tell", not "active": the fail-open direction is to notify.
+            return None
+        # Imported here, not at module scope: `tui.attention` is a UI-tier
+        # module and this file must stay importable without it (same rule as
+        # every other server→tui read).
+        from local_operator.tui.attention import ATTENTION_INPUT_EVIDENCE_S
+
+        return float(age) <= float(ATTENTION_INPUT_EVIDENCE_S)
 
     def _attended_surfaces(self) -> frozenset[str]:
         """Local human front ends on this runtime (``RuntimeServer.attended_surfaces``).

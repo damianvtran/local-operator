@@ -55,6 +55,23 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # A failed credential card's "Why it stopped" line (UX review #3002 r1, U1). The value
+    # is ``approval_copy.reason_for(code)`` -- this project's own sentence for a refusal code,
+    # never a peer's raw token; ``approval_copy.last_failure`` maps the stored code first.
+    ("local_operator/network/credentials/finite_share.py", "next_lines", "reason"): (
+        1,
+        "approval_copy's own sentence for the stored refusal code, not a raw token",
+    ),
+    ("local_operator/network/credentials/finite_share.py", "list_lines", "reason"): (
+        1,
+        "approval_copy's own sentence for the stored refusal code, not a raw token",
+    ),
+    # Reads the stored refusal CODE off a failed receipt to look up this project's sentence
+    # (``outcome(code)``); the raw value is never rendered.
+    ("local_operator/network/credentials/approval_copy.py", "last_failure", "detail"): (
+        1,
+        "the stored refusal code, mapped to approval_copy's sentence before any surface",
+    ),
     # Exact executed-step discriminator for retaining signed intent; compared
     # internally, never rendered as a reason or substituted for signature proof.
     ("local_operator/network/approvals.py", "_sweep_namespace", "detail"): (
