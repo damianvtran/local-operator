@@ -965,19 +965,32 @@ def read_listing(
                 # Same ceiling as the peer poll, but it returns the instant the
                 # sibling's attempt ends — success or failure (see the helper).
                 sibling._released.wait(timeout=_LISTING_LEASE_WAIT_S)
-            else:
+            elif not _failure_backoff_active(path):
+                # No sibling found AND no failure on record: a foreign holder.
+                # The backoff check covers a sibling that failed and released
+                # between our lost ``acquire`` and the lookup (review M1, forced:
+                # 2193-2230 ms) — its attempt is already over, so polling 2 s for
+                # the document it never wrote would be the stall this fixes.
                 lease.await_peer_briefly()
         payload, age = _read_cache(path)
-        if payload is not None:
-            return Listing(payload=payload, age_s=age)
         # The attempt we waited on FAILED moments ago in this process (it recorded
         # the failure before releasing): answer as the backoff branch above does
         # rather than re-issuing the request it just made. Only an in-process
         # failure can be on record here — ``_last_failure`` is per process — so a
         # foreign holder's outcome still falls through to our own fetch.
+        #
+        # Checked BEFORE serving a document (review M3): a STALE document beside
+        # a just-failed attempt is the holder's own ``failed=True`` answer, and
+        # ``configure``'s degraded memo (#2992) keys its 60 s-vs-day choice on
+        # that flag — reported as clean, a week-old payload would be day-pinned.
+        # A holder that SUCCEEDED replaced the document, whose new stamp no
+        # longer matches the recorded failure, so this stays False for it.
         if _failure_backoff_active(path):
-            note_unavailable(key)
-            return Listing(payload=None, age_s=float("inf"), failed=True)
+            if payload is None:
+                note_unavailable(key)
+            return Listing(payload=payload, age_s=age, failed=True)
+        if payload is not None:
+            return Listing(payload=payload, age_s=age)
         # No document even after the peer's window: fall through and fetch.
         # The lease is lost or stale; a cold machine must still start.
 
@@ -987,8 +1000,10 @@ def read_listing(
         # Recorded BEFORE the release: a sibling thread waiting on this lease
         # wakes on the release and reads the failure memory to decide whether to
         # re-ask, so the other order would let it repeat the request just failed.
-        _record_failure(path)
-        lease.release()
+        try:
+            _record_failure(path)
+        finally:
+            lease.release()
         if payload is not None:
             # Stale beats absent: the numbers are days old at worst, whereas
             # the static fallback is wrong by nearly a factor of six.
