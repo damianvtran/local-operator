@@ -33,3 +33,38 @@ def real_response() -> Callable[[int, bytes], requests.Response]:
         return response
 
     return _build
+
+
+@pytest.fixture(autouse=True)
+def _connector_never_reaches_launchd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No unit test may reach the real launchd through the connector (D2a).
+
+    D2a makes the connector's service lifecycle run on ordinary events — an
+    enrolment commit, a ``team_bridge.enabled`` write, an app-start boundary —
+    and those events are reachable from ``tests/unit/server`` (the serve
+    lifespan, the status route, settings edits) and from anything that reads a
+    status boundary, not just from ``tests/unit/team_bridge``. So the seam is
+    guarded HERE, at the package-wide root, and the guard is a hard failure
+    rather than a no-op: ``launchctl`` has no sandbox and always addresses the
+    calling user's live ``gui/<uid>`` domain, whatever ``HOME`` says.
+
+    This is the SECOND layer. The first is the real product guard
+    (``launchd.shared_label_refusal``), which refuses every store the suite can
+    construct; its own behaviour is pinned in ``test_launchd.py`` and the wakes
+    installer tests. A test that deliberately opens that guard (as the D2a
+    lifecycle tests do) still cannot reach launchd through this.
+
+    ``raising=False`` and the function-local import keep the fixture from being
+    itself the failure on a tree that predates the seam, and from paying the
+    import on every test that never touches the bridge.
+    """
+
+    from local_operator.team_bridge.connector import install
+
+    def forbidden(*args: str):
+        raise AssertionError(
+            "a unit test reached the connector's launchctl seam; inject "
+            "install._launchctl or leave the shared-label guard closed"
+        )
+
+    monkeypatch.setattr(install, "_launchctl", forbidden, raising=False)

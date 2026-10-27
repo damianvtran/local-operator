@@ -50,6 +50,9 @@ import logging
 import plistlib
 import subprocess
 import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -199,6 +202,10 @@ def write_plist(config_dir: Path, target_dir: Path) -> Path:
 CODE_INSTALLED = "installed"
 #: Already in place and loaded: the idempotent no-op every repeat call takes.
 CODE_CURRENT = "current"
+#: The plist was already correct and launchd had forgotten the label, so this
+#: call only re-registered it. Distinct from ``installed`` because NOTHING was
+#: written — the log line must not claim an install that did not happen.
+CODE_REGISTERED = "registered"
 #: Bootout + unlink after the wanted state turned off.
 CODE_REMOVED = "removed"
 #: Not wanted and nothing installed: the cheap answer on a machine never enrolled.
@@ -316,18 +323,83 @@ def _registered(path: Path) -> bool | None:
     return result.returncode == 0
 
 
+#: One sync at a time, per process. Two triggers can reach this at the same
+#: moment — the serve lifespan's catch-up and an APP_START status boundary, or
+#: a commit hook and a settings edit — and both would otherwise see "no plist"
+#: and each run a full bootout+bootstrap. QA measured four concurrent first
+#: installs producing 19-34 launchctl calls and FOUR reload cycles, and a
+#: bootout that lands after another thread's bootstrap leaves the label
+#: UNLOADED while both callers report success: a silent outage, not a wasted
+#: round trip. Serialising makes the losers observe the winner's result
+#: (``current``) instead of repeating it.
+_SYNC_LOCK = threading.Lock()
+
+#: How long a second caller waits for the one in flight before giving up. Sized
+#: above the whole launchctl budget (a reload's release + bootstrap deadlines),
+#: because waiting is exactly what a caller wants here: the answer it needs is
+#: the one being computed.
+_SYNC_LOCK_TIMEOUT_S = 30.0
+
+
+@contextmanager
+def _sync_exclusive(config_dir: Path) -> Iterator[None]:
+    """Hold the process lock AND, where the platform has it, a file lock.
+
+    TWO LOCKS, because the process lock cannot cover the server + a TUI session
+    syncing their own app starts at the same moment. The file lock is a
+    best-effort flock beside the store (``<config>/team_bridge``): POSIX only,
+    and ``fcntl`` is imported here rather than at module scope so importing this
+    module stays portable. A failure to take it is never fatal — losing the
+    cross-process half degrades to the pre-existing in-process guarantee.
+    """
+
+    acquired = _SYNC_LOCK.acquire(timeout=_SYNC_LOCK_TIMEOUT_S)
+    handle = None
+    try:
+        if not acquired:
+            logger.debug("bridge connector: another sync holds the lock; proceeding serially")
+        try:
+            import fcntl
+
+            lock_path = Path(config_dir) / "team_bridge" / "connector-service.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(lock_path, "a+")  # noqa: SIM115 — closed in the finally
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except Exception:  # noqa: BLE001 — the file half is best-effort
+            logger.debug("bridge connector: no file lock available", exc_info=True)
+            if handle is not None:
+                handle.close()
+                handle = None
+        yield
+    finally:
+        if handle is not None:
+            try:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except Exception:  # noqa: BLE001
+                pass
+            handle.close()
+        if acquired:
+            _SYNC_LOCK.release()
+
+
 def _install(config_dir: Path) -> ServiceOutcome:
     path = plist_path()
     wanted = render_plist(config_dir)
     current = launchd.load(path)
     addressable = launchd.is_own_plist(path, LABEL)
+    _register_only = False
     if current == wanted:
         if not addressable:
             return ServiceOutcome(CODE_NOT_ADDRESSABLE, "plist current; launchd not addressed")
         if _registered(path):
             return ServiceOutcome(CODE_CURRENT)
         # A current plist launchd has forgotten (a reboot before the agent was
-        # ever loaded, a hand bootout): fall through to the bootstrap.
+        # ever loaded, a hand bootout): fall through to the bootstrap, which
+        # re-registers the SAME bytes — so the answer is ``registered``, not
+        # ``installed`` (QA Q-6: the log claimed an install nothing wrote).
+        _register_only = True
     else:
         refusal = _source_checkout_refusal()
         if refusal is not None:
@@ -346,7 +418,7 @@ def _install(config_dir: Path) -> ServiceOutcome:
         return ServiceOutcome(
             CODE_FAILED, f"launchctl could not load the connector: {reloaded.detail}"
         )
-    return ServiceOutcome(CODE_INSTALLED)
+    return ServiceOutcome(CODE_REGISTERED if _register_only else CODE_INSTALLED)
 
 
 def _remove() -> ServiceOutcome:
@@ -391,11 +463,18 @@ def sync_connector_service(config_dir: Path) -> ServiceOutcome:
         wanted = _wanted(Path(config_dir))
         if wanted is None:
             return ServiceOutcome(CODE_UNKNOWN, "enrolment or settings unreadable; left as is")
-        outcome = _install(Path(config_dir)) if wanted else _remove()
+        with _sync_exclusive(Path(config_dir)):
+            outcome = _install(Path(config_dir)) if wanted else _remove()
     except Exception as exc:  # noqa: BLE001 — NEVER raises: the caller already won
         logger.debug("bridge connector service sync failed", exc_info=True)
         return ServiceOutcome(CODE_FAILED, str(exc))
-    if outcome.code in (CODE_INSTALLED, CODE_REMOVED, CODE_FAILED, CODE_SOURCE_CHECKOUT):
+    if outcome.code in (
+        CODE_INSTALLED,
+        CODE_REGISTERED,
+        CODE_REMOVED,
+        CODE_FAILED,
+        CODE_SOURCE_CHECKOUT,
+    ):
         logger.info("bridge connector service: %s %s", outcome.code, outcome.detail)
     return outcome
 

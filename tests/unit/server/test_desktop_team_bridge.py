@@ -861,6 +861,34 @@ async def test_status_never_claims_a_receiver_that_is_not_installed(api):
     assert result["connector"] in {"isolated", "unsupported"}, result["connector"]
 
 
+async def test_status_asks_launchd_off_the_event_loop(api, monkeypatch):
+    """R1-3: the status route's launchctl probe must not run on the loop.
+
+    ``connector_state`` runs ``launchctl print`` (15 s timeout), so the route
+    hands it to a worker thread. Asserted on the THREAD the probe observes,
+    which is the mechanism itself rather than a timing.
+    """
+
+    import threading
+
+    from local_operator.team_bridge.connector import install
+
+    client, root, _discipline = api
+    seen: list[threading.Thread] = []
+
+    def spy(config_dir):
+        seen.append(threading.current_thread())
+        return install.STATE_MISSING
+
+    monkeypatch.setattr(install, "connector_state", spy)
+    response = await client.get("/v1/desktop/team-bridge/status")
+    assert response.status_code == 200
+    assert response.json()["result"]["connector"] == install.STATE_MISSING
+    assert (
+        seen and seen[0] is not threading.main_thread()
+    ), "the launchctl probe ran on the event loop"
+
+
 async def test_status_reports_signed_out_as_a_state_not_an_error(api, monkeypatch):
     client, _root, discipline = api
     discipline.check_result = _status_check(

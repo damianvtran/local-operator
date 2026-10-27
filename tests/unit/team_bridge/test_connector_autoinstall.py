@@ -9,8 +9,10 @@ No test starts a connector or addresses the operator's real launchd domain.
 
 from __future__ import annotations
 
+import asyncio
 import plistlib
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -246,3 +248,93 @@ async def test_the_consent_surface_commit_also_installs(service) -> None:
     )
     assert fake.loaded
     assert install.plist_path().exists()
+
+
+async def test_a_slow_launchctl_never_blocks_the_event_loop(service, monkeypatch) -> None:
+    """R1-1: the OFF write must not freeze the server while launchctl works.
+
+    The fake sleeps for real, so the proof is a timer on the SAME loop: if the
+    lifecycle ran inline no tick would land while the request was in flight.
+    Inline was the defect — QA measured 0.97 s of a blocked loop on one disable,
+    against every route and the SSE fan-out waiting behind it.
+    """
+
+    fake, home, root = service
+    _commit(root)
+    install.sync_connector_service(root)
+    immediate = install._launchctl
+
+    def sleepy(*args: str):
+        time.sleep(0.8)
+        return immediate(*args)
+
+    monkeypatch.setattr(install, "_launchctl", sleepy)
+    ticks: list[float] = []
+
+    async def ticker() -> None:
+        for _ in range(12):
+            await asyncio.sleep(0.05)
+            ticks.append(time.monotonic())
+
+    write = asyncio.create_task(
+        _client(_active, root).put_settings(state="disabled", expected_account_id="acc_1")
+    )
+    ticking = asyncio.create_task(ticker())
+    await asyncio.sleep(0.3)
+    in_flight = not write.done()
+    landed = len(ticks)
+    await asyncio.gather(write, ticking)
+
+    # 0.3 s at a 0.05 s interval is ~6 ticks; a blocked loop yields none — and
+    # on the inline code the whole write finished first, so ``in_flight`` was
+    # already false by the time this line ran. Ordered so the message names the
+    # defect rather than the setup.
+    assert landed >= 3, (
+        f"the event loop was blocked by launchctl: only {landed} ticks landed in "
+        "0.3 s while the write was in flight"
+    )
+    assert in_flight, "the write finished inside the window; the fake was not slow enough"
+    assert not install.plist_path().exists()
+
+
+async def test_concurrent_syncs_install_once(service) -> None:
+    """Q-3: two triggers at one app start must not each reload the label.
+
+    Four threads through the shipped entry point, as the serve lifespan, a
+    status boundary and a settings edit can do at the same moment. Before the
+    lock this produced four reload cycles, and a bootout landing after another
+    thread's bootstrap could leave the label UNLOADED while both reported
+    success — an outage, not a wasted call.
+    """
+
+    import concurrent.futures
+
+    fake, home, root = service
+    _commit(root)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        codes = list(pool.map(lambda _: install.sync_connector_service(root).code, range(4)))
+
+    assert codes.count(install.CODE_INSTALLED) == 1, codes
+    assert set(codes) <= {install.CODE_INSTALLED, install.CODE_CURRENT}, codes
+    assert fake.loaded, "a concurrent sync left the label unloaded"
+    bootstraps = [c for c in fake.calls if c[0] == "bootstrap"]
+    assert len(bootstraps) == 1, fake.calls
+
+
+async def test_a_forgotten_label_is_reported_as_registered_not_installed(service) -> None:
+    """Q-6: nothing is written when the plist is already correct.
+
+    The plist is current but launchd has forgotten the job (a reboot before the
+    agent loaded, a hand bootout), so the same bytes are bootstrapped again. The
+    log line must say ``registered``; ``installed`` claimed a write that never
+    happened.
+    """
+
+    fake, home, root = service
+    _commit(root)
+    install.sync_connector_service(root)
+    fake.loaded = False  # launchd forgot the job; the file is untouched
+    before = install.plist_path().stat().st_mtime_ns
+    assert install.sync_connector_service(root).code == install.CODE_REGISTERED
+    assert install.plist_path().stat().st_mtime_ns == before, "the plist was rewritten"
+    assert fake.loaded

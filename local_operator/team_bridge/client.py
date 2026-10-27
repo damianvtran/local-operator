@@ -1665,19 +1665,27 @@ class TeamBridgeClient:
             # sticky on this machine too (see _apply_local_opt_out).
             opted_account = getattr(access, "account_id", None) or expected_account_id
             self._apply_local_opt_out(opted_account)
-        if state in ("active", "disabled") and self._config_dir is not None:
-            # The connector's wanted state is committed enrolment × local OFF.
-            # Reconcile on both writes: an active write covers the resume of an
-            # existing endpoint (no NEW commit) and an isolated/unreadable commit
-            # leaves the service in the wanted state the commit would have; a
-            # disable boots it out even though the committed owner is retained
-            # for a later explicit re-enable. Best-effort, never changes the
-            # already-accepted server write's result.
+        if state == "disabled" and self._config_dir is not None:
+            # THE OFF EVENT, and the only reconcile this method owns. An
+            # ENABLE is covered by the commit hook (``_commit_explicit_enable``
+            # -> ``commit_settings_enrollment`` -> the connector sync), so
+            # reconciling again here was a second launchctl round trip for one
+            # click (code review R1-1 / QA Q-1 measured 5 subprocesses across
+            # the two). A resume of an EXISTING endpoint commits nothing, and
+            # needs nothing: this machine installed the unit at its original
+            # commit, and the app-start catch-up re-checks every enrolled
+            # machine on the next boot.
+            #
+            # OFF THE EVENT LOOP: this runs launchctl, whose budget is a 15 s
+            # subprocess timeout plus the shared reload's release and bootstrap
+            # deadlines. Inline it stalled every route, the SSE fan-out and
+            # agent turns — measured at 0.97 s on one disable — at the moment
+            # this surface was waiting for its 200.
             from local_operator.team_bridge.connector.install import (
                 sync_connector_service,
             )
 
-            sync_connector_service(self._config_dir)
+            await asyncio.to_thread(sync_connector_service, self._config_dir)
         return result
 
     async def enroll_default_on(
@@ -1835,7 +1843,12 @@ class TeamBridgeClient:
                 commit_settings_enrollment,
             )
 
-            committed = commit_settings_enrollment(
+            # IN A THREAD (review R1-1): the commit itself is a fast SQLite
+            # transaction, but it fires the D2a connector hook, which runs
+            # launchctl. Off the loop a first install costs one worker thread;
+            # on it, it would freeze every route for the length of a bootstrap.
+            committed = await asyncio.to_thread(
+                commit_settings_enrollment,
                 config_dir=self._config_dir,
                 credential_id=credential_id,
                 account_id=account_id,

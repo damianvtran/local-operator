@@ -79,6 +79,7 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import unicodedata
@@ -744,17 +745,22 @@ async def status(
         # The receiver's SERVICE state, distinct from enrolment: installed is
         # a plist launchd does not hold; missing is no receiver at all. Off
         # macOS this says ``unsupported``; for an isolated store, ``isolated``.
-        "connector": _connector_state(config_manager.config_dir),
+        # Awaited IN A THREAD (review R1-3): the reading runs ``launchctl
+        # print``, so on the loop one wedged launchd would stall every status
+        # poll rather than only this field.
+        "connector": await asyncio.to_thread(_connector_state, config_manager.config_dir),
     }
     return reply(result)
 
 
 def _connector_state(config_dir: Path) -> str:
-    """Report the connector service without putting launchctl on the event loop.
+    """The connector's service state, as ``install.connector_state`` reports it.
 
-    The status read is cached/coalesced and this is a cheap local answer: one
-    plist existence check plus at most one ``launchctl print``. It never raises
-    and never installs; installation belongs to the commit/off/app-start events.
+    SYNCHRONOUS on purpose: the caller owns the thread (``asyncio.to_thread``),
+    because the reading runs ``launchctl print`` and must not sit on the event
+    loop. It is otherwise cheap — one plist existence check plus at most that
+    one probe — never raises, and never installs; installation belongs to the
+    commit, opt-out and app-start events.
     """
 
     from local_operator.team_bridge.connector.install import connector_state
