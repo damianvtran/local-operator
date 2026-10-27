@@ -29,6 +29,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -44,6 +45,17 @@ REPO = Path(__file__).resolve().parents[3]
 #:
 #: Costs are the module's own execution time inside an instrumented open with the
 #: shipped warm set applied (loader hook, one fresh process per reading).
+
+
+class _ProbeResult(TypedDict):
+    """What the probe prints: module NAMES, split so a third-party import can be
+    asserted on without walking the whole list."""
+
+    first_party: list[str]
+    third_party_roots: list[str]
+    identity: str
+
+
 _LEFT_COLD: dict[str, str] = {
     "local_operator.secrets": "the encrypted store's package root; crypto chain (see below)",
     "local_operator.secrets.access": "55.3 ms cold; pulls the cryptography bindings",
@@ -158,7 +170,7 @@ def _plant(tmp_path: Path) -> tuple[Path, str]:
     return tmp_path / "config", session_id
 
 
-def _cold_open_imports(tmp_path: Path, *, warm: bool) -> dict[str, object]:
+def _cold_open_imports(tmp_path: Path, *, warm: bool) -> _ProbeResult:
     config_dir, session_id = _plant(tmp_path)
     env = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
     env.update(
@@ -213,6 +225,42 @@ def test_warming_covers_every_first_party_module_the_cold_open_imports(
         f"{uncovered}. Add each to `_WARM_IMPORTS` (if it has no module-scope side "
         "effect and no heavy dependency chain) or to `_LEFT_COLD` with the reason."
     )
+
+
+def test_the_warm_set_names_the_open_path_modules() -> None:
+    """The sweep's findings, pinned BY NAME, because the identity guard above
+    cannot see all of them.
+
+    The guard opens a two-row synthetic conversation: enough to drive the team
+    registry, the tail anchor and the monitors store, but NOT the paths that
+    price a model or render a peer row, which only a real transcript reaches.
+    Those were found by sweeping one (10,376 rows, an active team in the
+    checkpoint) and they are pinned here so a rewrite of the list cannot drop
+    them silently: every one is a first-party module whose first import landed
+    inside the open at 5-10 ms.
+
+    Membership alone would pass for a name that no longer resolves, so the warm
+    is RUN over the shipped list — a rename leaves an entry that the per-name
+    ``except`` swallows, and the only symptom would be the stall coming back.
+    """
+    import sys
+
+    from local_operator.session_factory import _WARM_IMPORTS, warm_session_imports
+
+    expected = (
+        "local_operator.model.prices",
+        "local_operator.monitors.store",
+        "local_operator.network.credentials.placement",
+        "local_operator.network.identity",
+        "local_operator.session.tail_anchor",
+        "local_operator.teams",
+    )
+    missing = [name for name in expected if name not in _WARM_IMPORTS]
+    assert not missing, f"these are imported cold inside the open: {missing}"
+
+    warm_session_imports()
+    absent = [name for name in expected if name not in sys.modules]
+    assert not absent, f"warmed but absent from sys.modules: {absent}"
 
 
 def test_the_cold_open_does_not_reach_the_tunnel_gateway(tmp_path: Path) -> None:
