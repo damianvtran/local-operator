@@ -9,5 +9,42 @@
     "role": "status sheet explanation",
     "tone": "Plain, reassuring statement; sentence case; no trailing period (matches relay.chrome.session.ended_hint).",
     "note": "Body of the sheet that opens when the reader taps the green status dot. 'Your computer' is the machine running the agent session (not the phone). 'Right away' means a message is delivered to the running session now, not queued for a restart; it may still wait for the agent's current step to finish, so do not promise an instant reply."
+  },
+  "relay.health.reconnecting": {
+    "role": "session status label (app bar status dot)",
+    "tone": "One short state word, sentence case, no trailing period, no ellipsis.",
+    "maxCells": 16,
+    "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Title of the sheet and tooltip of the YELLOW status dot when the PHONE's own connection is down (the computer may be fine). Same register as relay.health.live and relay.chrome.session.subtitle.not_answering / .ended, which name the other states."
+  },
+  "relay.health.reconnecting_detail": {
+    "role": "status sheet explanation",
+    "tone": "Plain, calm statement of fact; sentence case.",
+    "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Body of the sheet for the reconnecting state. 'This phone' is the device showing the screen; 'your computer' is the machine running the agent session. The point to keep: it is the phone's connection that is down, the session itself may still be running, and the phone keeps trying to reconnect on its own. 'A send may fail' is deliberate — do not promise that messages wait or are queued."
+  },
+  "relay.health.dropped_detail": {
+    "role": "status sheet explanation",
+    "tone": "Plain statement of fact; sentence case; no blame.",
+    "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Body of the sheet for the YELLOW 'Not answering' state when the computer's connection to the session has dropped (the phone itself is online). True behaviour to keep: a message sent now is refused immediately (it does NOT wait or queue), the typed text is put back in the message box, and the connection retries by itself. 'Your computer' is the machine running the session; the phone itself is online. 'The message box' is the message field at the bottom of the screen."
+  },
+  "relay.health.quiet_detail": {
+    "role": "status sheet explanation",
+    "tone": "Plain statement of fact; sentence case; honest about uncertainty.",
+    "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Body of the sheet for the YELLOW 'Not answering' state when the connection is up but the session has gone quiet (no heartbeat and no updates for a while). True behaviour to keep: a send can wait and then report a failure, yet the message may still be delivered later once the session catches up — so the reader should look at the conversation before sending again. Do not promise queueing or delivery."
+  },
+  "relay.health.ended_detail": {
+    "role": "status sheet explanation",
+    "tone": "Plain, reassuring; sentence case.",
+    "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Body of the sheet for the GREY 'Ended' state, shown under the title 'Ended' and above the Resume button — so it must add information, not repeat 'ended'. 'Resume' names that button: use the same word as relay.chrome.session.resume. 'Home folder' is the user's home directory on the computer: the session comes back there, not in its original project folder. 'A send' means typing a message and sending it."
+  },
+  "relay.health.ended_send_failed": {
+    "role": "composer error message",
+    "tone": "Plain, actionable; no blame; sentence case.",
+    "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Shown in the message box's error area when sending to an ENDED session failed to wake it. 'Retry' refers to the retry button directly below this message (currently labelled 'Retry earlier instruction'). \"Ended\" (keep the quotation marks, or the locale's own quotation marks) is the status word shown under the conversation title at the top of the screen; tapping it opens the sheet with Resume — use the same word as relay.chrome.session.subtitle.ended."
+  },
+  "relay.health.ended_placeholder": {
+    "role": "message field placeholder",
+    "tone": "Short hint; sentence case; ends with an ellipsis (…).",
+    "maxCells": 36,
+    "note": "Owned relay SPA chrome for the session header's status dot and the sheet it opens (docs/design/mobile-relay-guidelines.md, Composer and startup). Placeholder text inside the empty message field of an ENDED conversation (it replaces the usual 'Message…'). It tells the reader, before they send, that sending reopens the session in their home folder on the computer. Must fit one line in a 276 px field at 16 px on a 320 px phone; keep the trailing ellipsis character (…)."
   }
 }

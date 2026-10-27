@@ -10,9 +10,37 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def dropped_detail() -> Msg:
+    return Msg("relay.health.dropped_detail", {})
+
+
+def ended_detail() -> Msg:
+    return Msg("relay.health.ended_detail", {})
+
+
+def ended_placeholder() -> Msg:
+    return Msg("relay.health.ended_placeholder", {})
+
+
+def ended_send_failed() -> Msg:
+    return Msg("relay.health.ended_send_failed", {})
+
+
 def live() -> Msg:
     return Msg("relay.health.live", {})
 
 
 def live_detail() -> Msg:
     return Msg("relay.health.live_detail", {})
+
+
+def quiet_detail() -> Msg:
+    return Msg("relay.health.quiet_detail", {})
+
+
+def reconnecting() -> Msg:
+    return Msg("relay.health.reconnecting", {})
+
+
+def reconnecting_detail() -> Msg:
+    return Msg("relay.health.reconnecting_detail", {})
