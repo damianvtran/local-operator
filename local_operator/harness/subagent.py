@@ -127,7 +127,7 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Mapping
 
 from local_operator.agent_profiles import (
     READ_ONLY_NETWORK_TOOLS,
@@ -1088,6 +1088,31 @@ async def _readonly_shell_root(
     return True, root
 
 
+def readonly_shell_floor_names(
+    names: "Iterable[str]", *, shell_root: str | None
+) -> tuple[str, ...]:
+    """``names`` with the write-confined shell floor applied: THE one rule.
+
+    With a ``shell_root`` (the host can enforce the sandbox) ``bash`` is
+    ensured; without one it is removed, even when ``names`` lists it. Order is
+    kept and ``bash`` is appended last when added.
+
+    One rule for every place a confined session's tool NAMES are decided, so
+    they cannot drift: the delegated child's allowlist (:func:`run_subagent`
+    builds and pins from it), the child's built inventory
+    (:func:`_with_readonly_shell_floor`), and a profile ATTACHED top-level
+    (``Session._floored_profile_tools``), whose names become the unattended
+    ``lop exec --profile`` declaration. That last one is why this is a
+    name-level function: before it existed the top-level declaration was the
+    raw stored row, so a scout installed before the shell got no ``bash`` at
+    top level while the same row delegated got one.
+    """
+    floored = tuple(name for name in names if name != "bash" or shell_root is not None)
+    if shell_root is not None and "bash" not in floored:
+        floored = (*floored, "bash")
+    return floored
+
+
 def _with_readonly_shell_floor(
     allowed: "list[AgentTool]", available: "list[AgentTool]", *, shell_root: str | None
 ) -> "list[AgentTool]":
@@ -1105,14 +1130,26 @@ def _with_readonly_shell_floor(
     REMOVED even when the stored row lists it -- a read-only role's shell can
     run sandboxed or not at all, and ``execute_bash`` would refuse every call
     anyway; withholding the schema saves the model discovering that one
-    refused command at a time.
+    refused command at a time. The decision is
+    :func:`readonly_shell_floor_names`'s; this only maps it onto tool objects.
     """
-    if shell_root is None:
+    if "bash" not in readonly_shell_floor_names(
+        (tool.name for tool in allowed), shell_root=shell_root
+    ):
         return [tool for tool in allowed if tool.name != "bash"]
     if any(tool.name == "bash" for tool in allowed):
         return allowed
     bash = next((tool for tool in available if tool.name == "bash"), None)
     return allowed + [bash] if bash is not None else allowed
+
+
+#: The tools that OBSERVE or await a background job and spawn nothing. Kept for
+#: any session whose ``bash`` can background (:func:`_can_background`): the
+#: ``background=true`` receipt tells the model to follow up with them, so a
+#: shell that can background without them strands its own jobs. Read by both
+#: the delegated child's prune (:func:`run_subagent`) and a top-level scout's
+#: floored declaration (``Session._apply_readonly_shell_role``).
+BACKGROUND_OBSERVER_TOOLS = frozenset({"jobs", "wait"})
 
 
 def _can_background(tools: "list[AgentTool]") -> bool:
@@ -4011,10 +4048,9 @@ async def _construct_child_session(
         if readonly_shell:
             # Build (and pin) ``bash`` only when the floor below will keep it;
             # never build it for a confined child that may not have a shell.
-            if shell_write_root is not None:
-                allowed_names.add("bash")
-            else:
-                allowed_names.discard("bash")
+            allowed_names = set(
+                readonly_shell_floor_names(allowed_names, shell_root=shell_write_root)
+            )
         allowlist_names = frozenset(allowed_names)
         builtin_names = [name for name in DEFAULT_TOOL_NAMES if name in allowed_names]
         for name in DEFAULT_TOOL_NAMES:
@@ -4443,7 +4479,7 @@ async def _construct_child_session(
     # ``wake`` stays pruned: a child's session ends after one prompt, so a wake
     # it armed would be silently lost.
     if _can_background(tools):
-        drop = drop - {"jobs", "wait"}
+        drop = drop - BACKGROUND_OBSERVER_TOOLS
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
     if any(tool.name == "task" for tool in child._tools):
         # A child that KEPT ``task`` (a pod lead) rebuilds ``hub`` now that its

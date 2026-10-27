@@ -575,8 +575,16 @@ def test_exec_delegates_actual_team_child(exec_server):
     assert "coder" in child_wire
 
 
-def test_exec_profile_scout_shell_is_sandboxed_or_absent(exec_server, tmp_path):
+@pytest.mark.parametrize("pre_shell_row", [False, True])
+def test_exec_profile_scout_shell_is_sandboxed_or_absent(exec_server, tmp_path, pre_shell_row):
     """``lop exec --profile scout`` non-tty: the shell cannot write outside.
+
+    ``pre_shell_row`` is the follow-up gap: an installed scout row frozen
+    before the seed had a shell (its tag lists no ``bash``; seed sync holds
+    tool changes back) declared that raw list, so the top-level scout got NO
+    shell while the same row delegated got the sandboxed one. The attached
+    names are now floored like the child's, so both rows must reach the same
+    answer below.
 
     Agent review round 1 R1 on PR #2987 reproduced this exact run writing
     ``PWNED`` outside the scratchpad: the profile's ``bash`` was attached
@@ -589,7 +597,19 @@ def test_exec_profile_scout_shell_is_sandboxed_or_absent(exec_server, tmp_path):
     """
     from local_operator.tools.confinement import shell_sandbox_unavailable_reason
 
-    run, requests, _ = exec_server
+    run, requests, root = exec_server
+    if pre_shell_row:
+        from local_operator.agent_profiles import install_seed
+        from local_operator.agents import AgentEditFields, AgentRegistry
+
+        agents = AgentRegistry(root)
+        assert install_seed("scout", registry=agents, scope="global") is not None
+        row = agents.get_agent_by_name("scout")
+        old = "tools:read,glob,grep,list_variables,read_variable,web_search,web_fetch"
+        agents.update_agent(
+            row.id,
+            AgentEditFields(tags=[old if t.startswith("tools:") else t for t in row.tags]),
+        )
     result = run("exec", "SCOUT_FIXTURE", "--profile", "scout", "--name", "Scout fixture", stdin="")
     assert result.returncode == 0
     assert not (tmp_path / "outside-pwned.txt").exists()
