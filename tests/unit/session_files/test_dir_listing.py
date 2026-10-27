@@ -403,3 +403,32 @@ def test_known_extensions_match_the_renderer_source_when_checked_out() -> None:
         assert block is not None, group
         found.update(regex.findall(r'"([^"]+)"', block.group(1)))
     assert found == set(listing_module.KNOWN_EXTENSIONS)
+
+
+def test_byte_probe_covers_every_whitespace_the_grammar_admits() -> None:
+    """F3, exhaustively: no whitespace placement may make the probe narrower than the grammar.
+
+    The grammar indents with JS ``\\s`` and trims item text with JS ``trim``, while the probe
+    reads the row's JSON bytes, so the two agree only if every spelling ``json.dumps`` writes
+    is in the probe's gap class. Sweeps the whole JS whitespace set around the colon, on blank
+    lines, as item indent and after the marker, and asserts: grammar finds a candidate => the
+    probe fired.
+    """
+    whitespace = [c for c in listing_module._JS_SPACE_CHARS if c != "\n"]
+    shapes: list[str] = []
+    for char in whitespace:
+        shapes += [
+            f"Files in ~/out:{char}\n- a.pdf",
+            f"Files in ~/out:\n{char}- a.pdf",
+            f"Files in ~/out:\n\n{char}- a.pdf",
+            f"Files in ~/out:\n{char}\n- a.pdf",
+            f"Files in ~/out:\n-{char}a.pdf",
+            f"Files in ~/out:\n- a.pdf{char}",
+            f"Files in ~/out/{char}:\n- a.pdf",
+        ]
+        for other in whitespace:
+            shapes.append(f"Files in ~/out:{char}\n{other}- a.pdf")
+            shapes.append(f"Files in ~/out:\n{char}{other}- a.pdf")
+    for text in shapes:
+        if directory_listing(text):
+            assert scan_module._DIR_LISTING_PROBE.search(line(_reply(text))), repr(text)
