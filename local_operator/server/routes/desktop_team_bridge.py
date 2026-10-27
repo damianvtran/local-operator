@@ -83,6 +83,7 @@ import logging
 import re
 import unicodedata
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -740,8 +741,25 @@ async def status(
         #: when nothing waits, so an older renderer that ignores the key loses
         #: nothing.
         "delivery_hold": _delivery_hold(config_manager),
+        # The receiver's SERVICE state, distinct from enrolment: installed is
+        # a plist launchd does not hold; missing is no receiver at all. Off
+        # macOS this says ``unsupported``; for an isolated store, ``isolated``.
+        "connector": _connector_state(config_manager.config_dir),
     }
     return reply(result)
+
+
+def _connector_state(config_dir: Path) -> str:
+    """Report the connector service without putting launchctl on the event loop.
+
+    The status read is cached/coalesced and this is a cheap local answer: one
+    plist existence check plus at most one ``launchctl print``. It never raises
+    and never installs; installation belongs to the commit/off/app-start events.
+    """
+
+    from local_operator.team_bridge.connector.install import connector_state
+
+    return connector_state(config_dir)
 
 
 def _delivery_hold(config_manager: ConfigManager) -> dict[str, Any] | None:

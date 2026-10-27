@@ -60,6 +60,7 @@ def commit_consent_and_designation(
     # An empty designation is a legitimate commit: consent without a session
     # (badge-only arrivals, §5.6) — NOT a missing receipt.
     Store(config_dir).commit_enrollment(owner, receipt, cos_session_id=cos_session_id or None)
+    _connector_after_commit(config_dir)
 
 
 def commit_settings_enrollment(
@@ -118,7 +119,23 @@ def commit_settings_enrollment(
         OwnerReceipt(consent_version=consent_version, consent_ref=endpoint_id),
         cos_session_id=cos_session_id or None,
     )
+    _connector_after_commit(config_dir)
     return True
+
+
+def _connector_after_commit(config_dir: Path) -> None:
+    """Install/start the connector after a successful LOCAL commit (D2a).
+
+    A successful commit is the earliest honest event: before it there is no
+    local authority to receive for. Called AFTER the store transaction, so a
+    service failure can never undo or mask the commit; ``sync_connector_service``
+    itself never raises. Both native entry points share this hook, including
+    the consent-surface commit that bypasses the HTTP client.
+    """
+
+    from local_operator.team_bridge.connector.install import sync_connector_service
+
+    sync_connector_service(config_dir)
 
 
 def designation(owner: Any, *, config_dir: Path) -> str | None:

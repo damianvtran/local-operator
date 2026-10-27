@@ -314,6 +314,8 @@ LABEL_BROWSER = "{brand} [browser bridge] port={port}"
 LABEL_WAKES = "{brand} [wakes]"
 LABEL_TUNNEL = "{brand} [tunnel]"
 LABEL_SERVE = "{brand} [serve] port={port}"
+#: The Team Bridge connector LaunchAgent: one per user, no per-instance field.
+LABEL_BRIDGE_CONNECTOR = "{brand} [bridge connector]"
 #: The secret broker, and the ONE field is a digest rather than the config dir
 #: itself. Which store a broker holds is exactly what an operator reading `ps`
 #: needs in order to tell a test's broker from their live one, but the config

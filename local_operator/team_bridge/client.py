@@ -1665,6 +1665,17 @@ class TeamBridgeClient:
             # sticky on this machine too (see _apply_local_opt_out).
             opted_account = getattr(access, "account_id", None) or expected_account_id
             self._apply_local_opt_out(opted_account)
+        if state in ("active", "disabled") and self._config_dir is not None:
+            # The connector's wanted state is committed enrolment × local OFF.
+            # Reconcile on both writes: an active write covers the resume of an
+            # existing endpoint (no NEW commit) and an isolated/unreadable commit
+            # leaves the service in the wanted state the commit would have; a
+            # disable boots it out even though the committed owner is retained
+            # for a later explicit re-enable. Best-effort, never changes the
+            # already-accepted server write's result.
+            from local_operator.team_bridge.connector.install import sync_connector_service
+
+            sync_connector_service(self._config_dir)
         return result
 
     async def enroll_default_on(
@@ -3443,6 +3454,19 @@ class StatusDiscipline:
         so a timeout must not blank a surface the user can still reach.
         """
 
+        if boundary is Boundary.APP_START:
+            # CATCH-UP for machines enrolled before D2a existed: an app-start
+            # boundary is an existing, event-driven moment with no new poller.
+            # A machine with no committed owner answers absent without creating
+            # the store; a committed owner with no LaunchAgent is installed.
+            # Off the event loop: this may run launchctl, which must never hold
+            # up the status read. ``sync_connector_service`` never raises.
+            if self._config_dir is not None:
+                from local_operator.team_bridge.connector.install import (
+                    sync_connector_service,
+                )
+
+                await asyncio.to_thread(sync_connector_service, self._config_dir)
         return self._observe(await self._check(boundary))
 
     async def reconcile_identity_mutation(self) -> StatusCheck:
