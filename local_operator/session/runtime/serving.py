@@ -1301,10 +1301,14 @@ class ServingSessionHandle(SessionHandle):
             )
             self._notify()
             self._announce_pending("approval", tool_name, description)
+            # Read ONCE, here: `asyncio.wait_for` fixes its deadline when the
+            # wait begins, so this is the wait that applies even if a surface
+            # attaches later and flips the policy (see `_record_gate_timeout`).
+            timeout_s = self._gate_timeout_s()
             try:
-                return await asyncio.wait_for(future, timeout=self._gate_timeout_s())
+                return await asyncio.wait_for(future, timeout=timeout_s)
             except TimeoutError:
-                await self._record_gate_timeout(tool_name, description)
+                await self._record_gate_timeout(tool_name, description, waited_s=timeout_s or 0.0)
                 return False
             finally:
                 self._pending_futures.pop(request_id, None)
@@ -1379,10 +1383,15 @@ class ServingSessionHandle(SessionHandle):
                 # ``BODIES["ask"]`` vocabulary is the right fallback for it.
                 announced = "" if getattr(question, "secret", False) else prose
                 self._announce_pending("ask", prose, announced)
+                # Read once per question, for the same reason as the approval
+                # gate: the deadline `wait_for` enforces is fixed right here.
+                timeout_s = self._gate_timeout_s()
                 try:
-                    answer = await asyncio.wait_for(future, timeout=self._gate_timeout_s())
+                    answer = await asyncio.wait_for(future, timeout=timeout_s)
                 except TimeoutError:
-                    await self._record_gate_timeout("ask", prose, kind="ask")
+                    await self._record_gate_timeout(
+                        "ask", prose, kind="ask", waited_s=timeout_s or 0.0
+                    )
                     # A timed-out question ends the whole ask: report whatever
                     # earlier questions collected (partial, like the terminal's
                     # Escape) rather than blocking forever on the next one.
@@ -6574,7 +6583,7 @@ class ServingSessionHandle(SessionHandle):
             return 0
 
     async def _record_gate_timeout(
-        self, tool: str, description: str, kind: str = "approval"
+        self, tool: str, description: str, kind: str = "approval", *, waited_s: float
     ) -> None:
         """Append the row that says NOBODY WAS THERE.
 
@@ -6582,6 +6591,15 @@ class ServingSessionHandle(SessionHandle):
         are different facts: one is the user's decision, the other is the
         absence of one. Without this row the next turn reads "the user denied
         this" and adjusts its plan around a choice nobody made.
+
+        ``waited_s`` IS THE CALLER'S, never re-derived here. It must be the
+        timeout the gate passed to ``asyncio.wait_for`` when its wait began.
+        This used to call ``_gate_timeout_s()`` again at write time, and that
+        policy is live: a gate that opened with nothing attached waited the
+        short cap, a phone attaching mid-wait flipped the policy to the
+        day-long park, and a 30-second expiry was recorded — and replayed to
+        the model and the phone — as ``waited_s: 86400`` (PR #3030 QA, X1).
+        Keyword-only and required so no caller can fall back to the re-read.
         """
         transcript = getattr(self._session, "transcript", None)
         append = getattr(transcript, "append_message", None)
@@ -6607,7 +6625,7 @@ class ServingSessionHandle(SessionHandle):
                         # and describing it in the approval gate's vocabulary
                         # told the user something that did not happen (D12).
                         "kind": kind,
-                        "waited_s": self._gate_timeout_s() or 0.0,
+                        "waited_s": waited_s,
                     },
                 )
             )
