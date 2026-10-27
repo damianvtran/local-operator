@@ -92,7 +92,7 @@ def retryable(code: str) -> bool:
     return code in RETRYABLE_CODES
 
 
-def reason(code: str) -> str:
+def reason_for(code: str) -> str:
     """The plain-words reason for an apply refusal ``code`` (never empty)."""
     return _REASONS.get(code, _UNKNOWN_REASON)
 
@@ -111,7 +111,7 @@ def outcome(code: str) -> dict[str, Any]:
     return {
         "code": code,
         "retryable": retryable(code),
-        "reason": reason(code),
+        "reason": reason_for(code),
         "remedy": remedy(code),
     }
 

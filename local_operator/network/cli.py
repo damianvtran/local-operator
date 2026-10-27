@@ -1105,8 +1105,7 @@ def _emit(args: argparse.Namespace, payload: dict[str, Any], lines: list[str]) -
     if _json_mode(args):
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
     else:
-        # Word-wrapped to the terminal (design D3), human half only.
-        for line in _wrap_lines(lines):
+        for line in lines:
             print(line)
     return 0 if payload.get("ok", True) else 1
 
@@ -8948,6 +8947,17 @@ def _print_file_only_notice() -> None:
         _print_wrapped(["Note: " + approval_copy.FILE_ONLY_DISCLOSURE], sys.stderr)
 
 
+def _emit_wrapped(args: argparse.Namespace, payload: dict[str, Any], lines: list[str]) -> int:
+    """:func:`_emit` for the credential-approval card verbs, word-wrapped (design D3).
+
+    SCOPED to `approvals show/list/approve`: those are the cards whose long disclosure
+    lines the terminal used to cut mid-word. Every other `lop network` printer keeps its
+    exact bytes (their tests pin single-line receipts, and a wrap there is a separate
+    design decision, not this PR's).
+    """
+    return _emit(args, payload, lines if _json_mode(args) else _wrap_lines(lines))
+
+
 def _wrap_lines(lines: list[str], width: int | None = None) -> list[str]:
     """Wrap logical lines to the terminal on WORDS, with a hanging indent (design D3).
 
@@ -9111,7 +9121,7 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     if disclosed:
         # The disclosure was printed ONCE, above, before signing (UX U5). After it: the state
         # and the next step only -- printing the whole block again doubled the output.
-        return _emit(args, payload, _approved_credential_lines(decided))
+        return _emit_wrapped(args, payload, _approved_credential_lines(decided))
     return _emit(args, payload, _approval_lines(decided))
 
 
@@ -9208,10 +9218,10 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
                 lines.extend(finite_share.list_lines(row))
             else:
                 lines.extend(_approval_lines(row))
-        return _emit(args, payload, lines or ["no approvals on this device"])
+        return _emit_wrapped(args, payload, lines or ["no approvals on this device"])
     if verb == "show":
         record = approval_store.load_record(args.approval)
-        return _emit(args, {"ok": True, "approval": record}, _approval_lines(record))
+        return _emit_wrapped(args, {"ok": True, "approval": record}, _approval_lines(record))
     if verb == "request":
         return _cmd_approvals_request(args)
     if verb == "approve":

@@ -357,7 +357,7 @@ def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) 
             # card applies once the other writer is done, so the "new request" remedy would
             # send the operator to re-request and re-sign for nothing.
             raise MeshRefusal(
-                exc.code, approval_copy.reason(exc.code) + " " + approval_copy.TRY_AGAIN
+                exc.code, approval_copy.reason_for(exc.code) + " " + approval_copy.TRY_AGAIN
             ) from exc
         leading = labels.get(exc.code, "The finite-share operation was refused (" + exc.code + ").")
         raise MeshRefusal(exc.code, leading + " " + _remedy(expected)) from exc
@@ -380,7 +380,7 @@ def _refuse_spent(approval_id: str, root: Path | None) -> None:
         return  # the apply's own load names a missing card
     failure = approval_copy.last_failure(record)
     if failure is not None and not failure["retryable"] and failure["code"]:
-        raise MeshRefusal(failure["code"], approval_copy.reason(failure["code"]))
+        raise MeshRefusal(failure["code"], approval_copy.reason_for(failure["code"]))
 
 
 def _reject_future_overlap(rec: dict[str, Any], key: str) -> None:

@@ -120,6 +120,8 @@ def test_request_approve_apply_status_through_the_real_entrypoints(
     ready: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rig = ready
+    # Logical lines: the approval card verbs word-wrap to the terminal (design #3002 r1, D3).
+    monkeypatch.setenv("COLUMNS", "1000")
     assert status(rig, capsys)["state"] == "no-consent"
     assert "authentication gap" in "\n".join(status(rig, capsys)["lines"])
 
