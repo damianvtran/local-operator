@@ -148,3 +148,27 @@ async def test_an_unresolved_attachment_still_binds_her_duty_session(isolated_ro
         assert "bash" not in names and "send" not in names, names
     finally:
         await session.dispose()
+
+
+def test_the_fail_closed_fallback_matches_the_seed() -> None:
+    """m2 (review round 2): the literal used when the seed is unreadable is the seed's list."""
+    from local_operator.session.session import _LIBRARIAN_FALLBACK_TOOLS
+
+    assert _LIBRARIAN_FALLBACK_TOOLS == SEED_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_seed_still_binds_her_duty_session(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m2 (review round 2): no attachment list AND no readable seed still narrows."""
+    import local_operator.agent_profiles as profiles
+
+    monkeypatch.setattr(profiles, "load_seed", lambda name: None)
+    session = _session(isolated_root, "l1brar1an0a4", duty=True, attach=False)
+    try:
+        names = {t.name for t in session._tools}
+        assert names <= set(SEED_TOOLS), sorted(names - set(SEED_TOOLS))
+        assert "bash" not in names
+    finally:
+        await session.dispose()

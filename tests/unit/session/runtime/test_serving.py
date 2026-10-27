@@ -688,6 +688,28 @@ async def test_a_signal_exit_refuses_parked_and_later_gates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_signal_between_two_questions_does_not_park_the_second() -> None:
+    """m1 (agent review round 2 on #3028): the exit flag is re-read per question.
+
+    q1 is answered in the same tick the exit is committed; the refusal finds
+    nothing parked (q1's future is already settled), so a single entry check
+    let q2 park after the refusal. The loop now stops and returns what it has.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    q1 = SimpleNamespace(id="q1", question="First?", options=[], secret=False)
+    q2 = SimpleNamespace(id="q2", question="Second?", options=[], secret=False)
+    asked = asyncio.ensure_future(handle._ask_gate([q1, q2]))
+    await asyncio.sleep(0)
+    (future,) = list(handle._pending_futures.values())
+    future.set_result({"q1": ["yes"]})
+    assert handle.refuse_gates_for_exit() == 0
+    answer = await asyncio.wait_for(asked, timeout=1)
+    assert answer == {"q1": ["yes"]}, answer
+    assert handle._pending_futures == {}
+    assert handle.is_busy() is False
+
+
+@pytest.mark.asyncio
 async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
     handle, session = make_handle()
     receipts = await asyncio.gather(

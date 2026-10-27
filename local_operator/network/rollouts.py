@@ -560,13 +560,20 @@ def _backoff_s(fails: int) -> float:
     return FAIL_BACKOFF_S[index]
 
 
+#: How many ``left_busy`` ids a member's answer may put into the durable record
+#: and audit row. The list comes from a paired peer, so it is bounded by count
+#: as well as per id (agent review round 2 on #3028, n1) — the same reason
+#: :data:`DETAIL_CAP` bounds the sentence.
+LEFT_BUSY_CAP = 20
+
+
 def _left_busy_ids(answer: Mapping[str, Any]) -> list[str]:
     """The session ids a generation-layout member left on its old build, from its answer."""
     raw = answer.get("left_busy")
     if not isinstance(raw, list):
         return []
-    ids = []
-    for item in raw:
+    ids: list[str] = []
+    for item in raw[:LEFT_BUSY_CAP]:
         ident = item.get("session_id") if isinstance(item, Mapping) else item
         if ident:
             ids.append(str(ident)[:80])

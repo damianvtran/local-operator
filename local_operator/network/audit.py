@@ -593,7 +593,13 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "update_rollout_started": frozenset(
         {"rollout", "authority", "policy", "via", "target", "from", "members"}
     ),
-    "update_member_state": frozenset({"rollout", "state", "code", "reason", "method", "version"}),
+    # ``left_busy`` (#3028, QA round 2 Q8): the ids a generation-layout member
+    # deliberately left on its old build — the receipt's sentence is capped, so
+    # the names it carries can be lost. A list of short ids, bounded by count at
+    # the emitter (``rollouts.LEFT_BUSY_CAP``) and here by ``_clean_value``.
+    "update_member_state": frozenset(
+        {"rollout", "state", "code", "reason", "method", "version", "left_busy"}
+    ),
     "update_rollout_done": frozenset({"rollout", "counts"}),
     # The suppression row (S3b): which front end moved (``via``), what the key
     # said (``policy``) and the per-run override when it was the flag that

@@ -454,6 +454,10 @@ SUBAGENT_ROSTER_CUSTOM_TYPE = _roster_sidecar.SUBAGENT_ROSTER_CUSTOM_TYPE
 SUBAGENT_ROSTER_SIDECAR = _roster_sidecar.SUBAGENT_ROSTER_SIDECAR
 _SUBAGENT_ROSTER_VERSION = _roster_sidecar.SUBAGENT_ROSTER_VERSION
 _SUBAGENT_SUMMARY_CHARS = 500
+#: The Librarian's duty-session tools when her packaged seed cannot be read
+#: (#3028, review round 2 m2): the seed 1.1.0 list, every entry read-tier.
+#: Kept equal to the seed by ``test_librarian_tool_surface``.
+_LIBRARIAN_FALLBACK_TOOLS: tuple[str, ...] = ("library", "read", "glob", "grep", "todo")
 
 #: The build THIS PROCESS loaded, read once and memoised. Compared against the
 #: install on disk by ``update.classify_import_failure``, which is the only way
@@ -26731,10 +26735,18 @@ class Session:
 
                 seed = load_seed("librarian")
                 names = tuple(seed.tools or ()) if seed is not None else ()
-            if names:
-                self.set_tool_inventory(list(names), unattended=False)
+            if not names:
+                # FAIL CLOSED (agent review round 2 on #3028, m2): an unreadable
+                # packaged seed must not leave her unattended pass with every
+                # tool. The literal is the 1.1.0 read-tier list.
+                names = _LIBRARIAN_FALLBACK_TOOLS
+            self.set_tool_inventory(list(names), unattended=False)
         except Exception:  # noqa: BLE001 — never a reason her session fails to open
             logger.debug("librarian: could not declare her tool inventory", exc_info=True)
+            try:
+                self.set_tool_inventory(list(_LIBRARIAN_FALLBACK_TOOLS), unattended=False)
+            except Exception:  # noqa: BLE001 — the same contract, one rung down
+                logger.debug("librarian: fallback inventory failed too", exc_info=True)
 
     def _librarian_is_hers(self) -> bool:
         """Whether THIS session is the one ``librarian/state.json`` names.

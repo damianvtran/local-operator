@@ -85,9 +85,24 @@ def test_no_other_daemons_unit_grows_the_relays_kill_mode(tmp_path: Path) -> Non
     """``kill_mode`` is opt-in: the shared renderer and every sibling unit are
     byte-unchanged, which is the other half of the KillMode pin.
 
-    The relay is deliberately the ONE unit that names a kill mode (see
+    The relay was the first unit to name a kill mode (see
     ``supervisors.render_systemd_unit`` for why); a sibling that grew the line
     would change what its own daemon's stop does, which no one asked for.
+
+    ONE NAMED EXEMPTION, the wakes supervisor (#3028, agent review round 1 M2),
+    because the relay's reason is not relay-specific: it is "this daemon's
+    cgroup holds detached session runtimes", and the wakes supervisor's does
+    too (it engages them through ``procstate.detached_popen_kwargs``). Under
+    the default ``control-group`` a unit stop SIGKILLed every wake-spawned
+    session at 90 s, shorter than the runtime's own signal drain. Review round 2
+    checked the three properties that make ``process`` safe there: (a) a stop
+    signals only the supervisor, and each runtime leaves by its own residency
+    rule; (b) uninstall orphans nothing in the defect sense — survivors are
+    listed, stoppable sessions, the relay's no-ExecStop rule; (c) a restart
+    cannot double-spawn, because engagement keys on the transcript lease
+    (``_has_live_runtime``, then ``launch.py``'s lease arbitration). The
+    exemption is pinned EXACTLY: wakes must carry ``process`` and still no
+    ExecStop reaper, and every other sibling stays bare.
     """
     from local_operator.browser_bridge import install as browser_install
     from local_operator.mobile import install as mobile_install
@@ -104,9 +119,13 @@ def test_no_other_daemons_unit_grows_the_relays_kill_mode(tmp_path: Path) -> Non
         "wakes supervisor": wakes_install.render_systemd(tmp_path / "cfg"),
         "mobile": mobile_install.render_systemd(4098),
     }
+    exempt = {"wakes supervisor": "KillMode=process"}
     for name, text in rendered.items():
-        assert "KillMode" not in text, name
         assert "ExecStop" not in text, name
+        if name in exempt:
+            assert exempt[name] in text.splitlines(), name
+            continue
+        assert "KillMode" not in text, name
 
 
 def test_install_dry_run_names_the_unit_and_touches_nothing(

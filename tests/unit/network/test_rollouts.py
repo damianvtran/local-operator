@@ -1623,6 +1623,44 @@ def test_a_done_member_keeps_the_sessions_it_left_behind_in_record_and_audit(
     assert rows and rows[-1].detail.get("left_busy") == ["p4rk-r-0001"], rows
 
 
+def test_left_busy_survives_the_real_audit_logs_detail_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q8 (QA round 2 on #3028): the REAL ``AuditLog`` keeps only allow-listed keys.
+
+    The fake sink above records whatever it is handed, so it passed while the
+    real log dropped ``left_busy`` (``DETAIL_KEYS["update_member_state"]`` did
+    not list it). This cell writes through a real ``AuditLog`` and reads the
+    row back from disk, with a list longer than the cap.
+    """
+    from local_operator.network.audit import AuditLog
+
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    log = AuditLog(root)
+    server.audit = cast(Any, log)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.0.1 to 0.99.0")
+    done["left_busy"] = [{"session_id": f"p4rk-{i:04d}"} for i in range(rollouts.LEFT_BUSY_CAP + 5)]
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    log.close()
+    rows = [r for r in AuditLog(root).tail(200) if r.get("event") == rollouts.MEMBER_STATE]
+    assert rows, rows
+    kept = rows[-1].get("detail", {}).get("left_busy")
+    assert isinstance(kept, list) and kept[:2] == ["p4rk-0000", "p4rk-0001"], rows[-1]
+    assert len(kept) <= rollouts.LEFT_BUSY_CAP, len(kept)
+
+
+def test_left_busy_is_bounded_by_count() -> None:
+    """n1 (review round 2): a peer's list is capped before it reaches durable storage."""
+    many = [{"session_id": f"s{i:04d}"} for i in range(rollouts.LEFT_BUSY_CAP + 30)]
+    update = rollouts.classify_answer(
+        {"ok": True, "state": "done", "left_busy": many}, fails=0, now=0.0
+    )
+    assert len(update["left_busy"]) == rollouts.LEFT_BUSY_CAP
+
+
 def test_a_target_that_never_appears_stops_at_the_window_and_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

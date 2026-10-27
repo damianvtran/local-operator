@@ -1342,6 +1342,13 @@ class ServingSessionHandle(SessionHandle):
             # ask_answer resolves the FRONT one, and we advance to the next.
             answers: dict[str, list[str]] = {}
             for index, question in enumerate(questions):
+                if self._gates_closed_for_exit:
+                    # RE-CHECKED PER QUESTION (agent review round 2 on #3028, m1):
+                    # a person answering question N in the same tick a signal
+                    # commits the exit would otherwise park question N+1 after
+                    # the refusal, holding the drain open. Same partial answer
+                    # a timeout reports.
+                    return answers or None
                 request_id = secrets.token_hex(8)
                 future: asyncio.Future[dict[str, list[str]] | None] = self._loop.create_future()
                 self._pending_futures[request_id] = future
