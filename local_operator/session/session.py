@@ -4320,6 +4320,9 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        # The body turn whose answer was already seen at a terminal step, so
+        # it is never cut afterwards (``_body_turn_cut_for_person``).
+        self._body_answered_turn: Any | None = None
         # One tracked waiter coalesces admitted arrivals behind the current
         # turn. The reservation, not this task or the card text, owes the work.
         self._pending_body_followup_task: asyncio.Task[Any] | None = None
@@ -15544,8 +15547,28 @@ class Session:
         tails mirror the loop's rule exactly: an assistant message with no
         tool calls, and a batch whose LAST result is the quiet-turn marker
         (``harness.loop._batch_ends_quiet``).
+
+        ONCE ANSWERED, NEVER CUT. A yield-edge re-entry after the terminal
+        step (a hub aside, a job result, a moving todo) puts drained input on
+        the tail and the loop calls again, yet the body was already answered:
+        cutting there re-served it and repeated its earlier tools (PR #2999
+        code review round 3, MINOR-R3-1). So the first terminal reading
+        latches for this turn, keyed by the turn object so the next body turn
+        starts unlatched (``_settle_pending_body`` also clears it). Its later
+        requests still carry no person words: ``_drain_steering`` keeps
+        holding them. The same latch lets a loop recovery after a terminal
+        tail (the wordless-stop re-ask, a truncated-answer continuation) run
+        uncut: the person waits one bounded call longer, held, never folded in.
         """
-        return self._body_turn_yields_to_person() and not self._context_tail_is_terminal()
+        turn = self._pending_body_turn
+        if turn is None or self._body_answered_turn is turn:
+            return False
+        # Latched before the steer check: the answer may land with no person
+        # waiting and the steer only during the re-entered call after it.
+        if self._context_tail_is_terminal():
+            self._body_answered_turn = turn
+            return False
+        return self._person_steer_queued()
 
     def _context_tail_is_terminal(self) -> bool:
         """Whether the live context ends on a step after which the loop stops."""
@@ -15949,8 +15972,19 @@ class Session:
         ``notify=false`` — may end quietly: an incident notice's
         operator-visible row is already published, so silence about it loses
         nothing (pinned by test).
+
+        EXCEPT A BODY TURN'S HELD PERSON. While a Team Bridge body turn runs,
+        a queued person row is held off it (``_drain_steering``) and gets its
+        own turn from the turn-end flush, so this turn is not the one they
+        wait on and its quiet end loses them nothing. Refusing there made the
+        quiet end non-terminal, the body cut fired on a finished turn, and
+        the body was served twice; the refusal sentence also landed in the
+        person's own turn (PR #2999 QA round 3, Q-R3-1). Every other turn
+        folds the queued row into its next request, so it keeps the refusal.
         """
-        if "user" in self._run_triggers or self._has_awaiting_user():
+        if "user" in self._run_triggers or (
+            self._has_awaiting_user() and not self._body_turn_yields_to_person()
+        ):
             return "A person asked this turn; answer them in one line."
         if self._run_notify_requested:
             return "This wake or monitor asked to tell the user; say what they need to know."
@@ -17960,6 +17994,7 @@ class Session:
         finally:
             self._pending_body_turn = None
             self._pending_body_verdict = None
+            self._body_answered_turn = None
 
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""

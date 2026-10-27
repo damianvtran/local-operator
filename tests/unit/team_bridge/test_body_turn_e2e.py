@@ -1322,3 +1322,233 @@ async def test_a_steer_during_the_final_answer_never_repeats_an_earlier_side_eff
     assert _carries_both(stream, "PERSON-C") == [], _layout(stream)
     assert BODY not in "\n".join(stream.texts(2)), "the person's turn carried the body"
     assert "PERSON-C" in "\n".join(stream.texts(2))
+
+
+# -- Q-R3-1 cells (QA round 3 remediation) ------------------------------------
+#
+# The other affirmative way a body turn ends: the model calls ``no_reply``. A
+# person row queued while it does is HELD for its own turn (``_drain_steering``),
+# so it must not make ``no_reply`` refuse: a refused quiet end is not terminal,
+# the cut then fired on a finished turn, and the body was served twice.
+
+REFUSAL = "A person asked this turn"
+
+
+def _no_reply_call(call_id: str) -> list[StreamEvent]:
+    return _tool_call(call_id, "no_reply")
+
+
+def _assert_no_reply_mounted(session: Session) -> None:
+    # The REAL builtin, through the session's own quiet-end door: a spliced
+    # stand-in would prove nothing about the refusal seam under test.
+    assert any(tool.name == "no_reply" for tool in session._tools)
+
+
+def _steer_spooled_c(session: Session) -> None:
+    from local_operator.session.runtime.inbox import SOURCE_USER, InboxLine
+
+    session._run_spooled_owner_prompt(
+        InboxLine(text="PERSON-C", sender={}, source=SOURCE_USER, command_id="cmd-spool-r3"),
+        seen=set(),
+    )
+
+
+@pytest.mark.parametrize(
+    "steer",
+    [lambda session: session.steer("PERSON-C", []), _steer_spooled_c],
+    ids=["R3b_tui_steer", "R3d_spooled"],
+)
+@pytest.mark.asyncio
+async def test_a_body_turn_ending_on_no_reply_is_not_re_served_for_a_queued_person(
+    tmp_path, monkeypatch, steer
+) -> None:
+    """Q-R3-1 (R3b, R3d): ``no_reply`` ends the body turn; the person goes next."""
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    settles = _record_settles(monkeypatch)
+    holder: dict[str, Session] = {}
+    answer: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+    # A re-served body turn (request 2) would call ``no_reply`` again.
+    stream = SteeringStream(
+        [_no_reply_call("q-1"), answer, _no_reply_call("q-2"), answer],
+        at=0,
+        during=lambda: steer(holder["session"]),
+    )
+    session = _session(tmp_path, stream, _runtime(config_dir, client))
+    holder["session"] = session
+    _assert_no_reply_mounted(session)
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+
+    assert client.fetches == [MESSAGE_ID], _layout(stream)
+    verdict, outcome = settles[0]
+    assert verdict["aborted"] is False and outcome == "completed", settles
+    assert _row(config_dir)["state"] == "completed"
+    assert _carrying(stream) == [0], _layout(stream)
+    assert _carries_both(stream, "PERSON-C") == [], _layout(stream)
+    assert "PERSON-C" in "\n".join(stream.texts(1)), "the person's held row opens its own turn"
+    for index in range(len(stream.requests)):
+        assert REFUSAL not in "\n".join(stream.texts(index)), _layout(stream)
+
+
+@pytest.mark.asyncio
+async def test_a_body_turn_ending_on_no_reply_never_repeats_an_earlier_side_effect(
+    tmp_path, monkeypatch
+) -> None:
+    """Q-R3-1 (R3e): a side-effecting tool, then ``no_reply`` with a typed steer queued."""
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    settles = _record_settles(monkeypatch)
+    effects: list[str] = []
+    holder: dict[str, Session] = {}
+    answer: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+    # Scripted so a re-served body turn (request 3) runs the tool again.
+    stream = SteeringStream(
+        [
+            _tool_call("call-1", "hook"),
+            _no_reply_call("q-1"),
+            answer,
+            _tool_call("call-2", "hook"),
+            _no_reply_call("q-2"),
+            answer,
+        ],
+        at=1,
+        during=lambda: holder["session"].steer("PERSON-C", []),
+    )
+    session = _session(
+        tmp_path,
+        stream,
+        _runtime(config_dir, client),
+        tools=[_hook_tool(lambda: effects.append("reply sent"))],
+    )
+    holder["session"] = session
+    _assert_no_reply_mounted(session)
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+
+    assert effects == ["reply sent"], _layout(stream)
+    assert client.fetches == [MESSAGE_ID]
+    assert settles[0][0]["aborted"] is False and settles[0][1] == "completed", settles
+    assert _carrying(stream) == [0, 1], _layout(stream)
+    assert _carries_both(stream, "PERSON-C") == [], _layout(stream)
+    assert "PERSON-C" in "\n".join(stream.texts(2))
+    for index in range(len(stream.requests)):
+        assert REFUSAL not in "\n".join(stream.texts(index)), _layout(stream)
+
+
+@pytest.mark.asyncio
+async def test_a_non_body_turn_still_refuses_no_reply_for_a_queued_person(tmp_path) -> None:
+    """The Q-R3-1 exemption is body-turn-only: elsewhere a queued person still refuses.
+
+    With no body pending nothing holds the person's row off the turn: it is
+    folded into this turn's next request, so this turn IS the one they wait
+    on and the quiet end must stay refused (docs/design/quiet-turns.md §4).
+    """
+
+    from local_operator.harness.types import CustomMessage
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    _store(config_dir)
+    client = FakeBridgeClient()
+    holder: dict[str, Session] = {}
+    stream = SteeringStream(
+        [
+            _no_reply_call("q-1"),
+            [StreamTextDelta(delta="answered"), StreamEndEvent(stop_reason="stop")],
+        ],
+        at=0,
+        during=lambda: holder["session"].steer("PERSON-C", []),
+    )
+    session = _session(tmp_path, stream, _runtime(config_dir, client))
+    holder["session"] = session
+    _assert_no_reply_mounted(session)
+    try:
+        await session._prompt_messages(
+            [
+                CustomMessage(
+                    custom_type="peer_message", attribution="user", details={"text": "ping"}
+                )
+            ],
+            carried_prompt=True,
+        )
+        await _settle(session)
+    finally:
+        await session.dispose()
+
+    assert client.fetches == []
+    assert len(stream.requests) == 2, _layout(stream)
+    second = "\n".join(stream.texts(1))
+    assert REFUSAL in second and "PERSON-C" in second, _layout(stream)
+
+
+@pytest.mark.asyncio
+async def test_an_answered_body_is_not_cut_by_a_later_yield_edge_re_entry(
+    tmp_path, monkeypatch
+) -> None:
+    """MINOR-R3-1: a hub aside re-entering after the answer must not cut the turn.
+
+    The steer and the aside both land while the final answer streams; the
+    yield edge re-enters for the aside, and that later call's boundary saw a
+    non-terminal tail and cut a turn whose body was already answered.
+    """
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    settles = _record_settles(monkeypatch)
+    effects: list[str] = []
+    holder: dict[str, Session] = {}
+
+    def both() -> None:
+        session = holder["session"]
+        session.steer("PERSON-C", [])
+        session.queue_aside(lambda: Message.user("HUB-ASIDE"))
+
+    answer: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+    stream = SteeringStream(
+        [
+            _tool_call("call-1", "hook"),
+            answer,
+            answer,
+            answer,
+            _tool_call("call-2", "hook"),
+            answer,
+        ],
+        at=1,
+        during=both,
+    )
+    session = _session(
+        tmp_path,
+        stream,
+        _runtime(config_dir, client),
+        tools=[_hook_tool(lambda: effects.append("reply sent"))],
+    )
+    holder["session"] = session
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+
+    assert effects == ["reply sent"], _layout(stream)
+    assert client.fetches == [MESSAGE_ID], _layout(stream)
+    assert settles[0][0]["aborted"] is False and settles[0][1] == "completed", settles
+    assert any("HUB-ASIDE" in "\n".join(stream.texts(i)) for i in range(len(stream.requests)))
+    assert _carries_both(stream, "PERSON-C") == [], _layout(stream)
