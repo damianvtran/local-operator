@@ -310,7 +310,10 @@ def shape_for_key(key: str, config: Path) -> tuple[str, str, str]:
             try:
                 from local_operator.mcp.auth import McpTokenStorage
 
-                if McpTokenStorage(url, store=store).has_stored_row():
+                # The same held-grant rule as ``credential_here`` (one rule,
+                # F-READY-1 round 1, M1). Both arms return one shape today, so
+                # this keeps the two reads from drifting rather than changing it.
+                if McpTokenStorage(url, store=store).holds_grant():
                     return "mcp-rotating", "mcp-oauth", ""
             except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
                 pass
@@ -377,7 +380,12 @@ def credential_here(key: str, config: Path) -> bool:
         try:
             from local_operator.mcp.auth import McpTokenStorage
 
-            return bool(McpTokenStorage(url, store=store).has_stored_row())
+            # A ROW IS NOT A HELD LOGIN (F-READY-1 round 1, M1): a registration-
+            # only row was never issued a grant, so the share verb refuses with
+            # "sign in here first" and the join re-check skips it, instead of
+            # placing a share nobody can serve. See ``holds_grant`` for why a
+            # tombstoned grant still counts here.
+            return bool(McpTokenStorage(url, store=store).holds_grant())
         except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
             return False
         finally:

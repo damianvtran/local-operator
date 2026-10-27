@@ -151,9 +151,14 @@ def test_registration_only_row_with_owner_expiry_names_the_owner(
 def test_readiness_local_answer_matches_the_runtime(
     shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One rule: readiness attributes a server to the LOCAL login exactly when the
-    runtime would use the local login instead of borrowing."""
-    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    """One rule: with a share to borrow, readiness attributes the server to the
+    LOCAL login exactly when the runtime would use it instead of borrowing.
+
+    The share is what makes the question meaningful: without one there is no
+    borrow to choose, and a dead unshared row is a local repair by design (m1,
+    pinned by ``test_dead_local_login_without_a_share_says_sign_in_again_on_the_holder``).
+    """
+    root = _holder_root(tmp_path, monkeypatch, placed=True)
     _write_shape(root, shape)
     auth = AuthStore(db_path=root / "auth.db", config_dir=root)
     try:
@@ -161,10 +166,8 @@ def test_readiness_local_answer_matches_the_runtime(
     finally:
         auth.close()
 
-    row = _holder_row(root, viewer=_FakeViewer(holds_mcp=False))
-    readiness_says_local = row.get("code") == "local_grant_unavailable" or (
-        row["ok"] is True and "holds its own login" in row["detail"]
-    )
+    row = _holder_row(root, viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT))
+    readiness_says_local = "borrows" not in row["detail"]
 
     assert readiness_says_local is runtime_uses_local, (shape, row)
     diagnostics = readiness.mcp_servers_fact(root)["servers"][0]["auth_diagnostics"]
@@ -257,3 +260,243 @@ def test_header_reference_server_takes_the_reference_path() -> None:
     )
     assert rows[0]["ok"] is True, rows[0]
     assert rows[0]["detail"] == "holder resolves every referenced credential for slack"
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation: the viewer/owner side and the share seams (M1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("shape", "held"),
+    # A tombstoned grant is still the owner's ISSUED login: sharing it is how the
+    # holder learns "sign in again on <owner>" (McpTokenStorage.holds_grant).
+    [("registration-only", False), ("dead", True), ("valid", True)],
+)
+def test_viewer_holds_mcp_login_counts_only_an_issued_grant(
+    shape: str, held: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    _write_shape(root, shape)
+    viewer = readiness.ViewerFacts(root, device_id=OWNER)
+    try:
+        assert viewer.holds_mcp_login(URL) is held
+    finally:
+        viewer.close()
+
+
+def test_registration_only_viewer_is_not_told_to_share_a_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's repro: same root, ledger said 'sign in here first' while the
+    readiness row said 'this device holds a login … share it'. One answer now."""
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    _write_shape(root, "registration-only")
+    server = {"name": "linear", "url": URL, "transport": "http", "has_row": False}
+    viewer = readiness.ViewerFacts(root, device_id=OWNER)
+    try:
+        rows = readiness.mcp_credential_rows(
+            SimpleNamespace(device_id=SELF, name="peer"),
+            _facts(mcp={"servers": [server]}),
+            viewer=viewer,
+            peer_label="peer",
+        )
+    finally:
+        viewer.close()
+    assert "holds a login" not in rows[0]["detail"], rows[0]
+    assert rows[0]["code"] == readiness.CODE_NO_CREDENTIAL
+
+
+@pytest.mark.parametrize(
+    ("shape", "held"),
+    # A tombstoned grant is still the owner's ISSUED login: sharing it is how the
+    # holder learns "sign in again on <owner>" (McpTokenStorage.holds_grant).
+    [("registration-only", False), ("dead", True), ("valid", True)],
+)
+def test_credential_here_and_shape_count_only_an_issued_grant(
+    shape: str, held: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network.credentials import offers
+
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    _write_shape(root, shape)
+    key = credential_key_for_mcp(URL)
+    assert offers.credential_here(key, root) is held
+    assert offers.shape_for_key(key, root) == ("mcp-rotating", "mcp-oauth", "")
+
+
+def test_share_verb_refuses_a_registration_only_row_with_sign_in_here_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network import cli as net_cli
+    from local_operator.network.types import MeshRefusal
+
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    _write_shape(root, "registration-only")
+    with pytest.raises(MeshRefusal) as refused:
+        net_cli._require_local_credential(  # noqa: SLF001 — the share verb's own guard
+            credential_key_for_mcp(URL), "mcp-oauth"
+        )
+    assert refused.value.code == "no_local_credential"
+    assert readiness.mcp_login_remedy(URL) in refused.value.sentence
+
+
+@pytest.mark.parametrize(("shape", "granted"), [("registration-only", False), ("valid", True)])
+def test_join_admission_recheck_places_only_an_issued_grant(
+    shape: str, granted: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The relay's admission re-check (``_grant_pair_shares``) must not declare a
+    share whose owner cannot mint the grant, even when the decision names it."""
+    from local_operator.network import audit as audit_mod
+    from local_operator.network import relay, types
+    from local_operator.network.credentials import placement as placement_mod
+
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    _write_shape(root, shape)
+    key = credential_key_for_mcp(URL)
+    record = _record()
+    audit = audit_mod.AuditLog(root)
+    try:
+        done, _reduced = relay._grant_pair_shares(  # noqa: SLF001 — the admission helper
+            record,
+            joiner_id=OWNER,
+            decision=types.PairDecision(
+                invite_id="inv_1", decision="admit", matched=True, shares=[key]
+            ),
+            # Offered out of band: the re-check is what must hold the line.
+            offer_items=[{"key": key, "kind": "mcp-rotating", "label": "", "share": True}],
+            owner_name="holder",
+            root=root,
+            audit=audit,
+        )
+    finally:
+        audit.close()
+    document = placement_mod.PlacementDocument.load(NETWORK, root, self_device=SELF)
+    assert done == ([key] if granted else [])
+    assert (document.entry(key) is not None) is granted
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation: the header-ref path is only for an unshared server (M2)
+# ---------------------------------------------------------------------------
+
+REFS = [{"id": "LINEAR_TOKEN", "set": True}]
+
+
+def _ref_server(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "name": "linear",
+        "url": URL,
+        "transport": "http",
+        "has_row": False,
+        "has_placement": False,
+        "refs": REFS,
+    }
+    base.update(over)
+    return base
+
+
+def _row_for(server: dict[str, Any], viewer: _FakeViewer) -> dict[str, Any]:
+    rows = readiness.mcp_credential_rows(
+        HOLDER, _facts(mcp={"servers": [server]}), viewer=viewer, peer_label="holder"
+    )
+    return rows[0]
+
+
+def test_refs_with_a_dead_local_row_and_an_unpulled_share_stay_on_the_login_path() -> None:
+    """Reviewer cell 1: refs + a tombstoned row + a share the holder has not pulled.
+    The ref row hid this as ok; the login path names the repair."""
+    row = _row_for(
+        _ref_server(
+            has_row=True,
+            auth_diagnostics={
+                "has_row": True,
+                "usable_grant": False,
+                "sharing_mode": "unavailable",
+                "access_state": "dead",
+                "refresh_presence": "present",
+            },
+        ),
+        _FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT),
+    )
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_NOT_SHARED, row
+
+
+def test_refs_with_no_row_and_an_unpulled_share_report_the_pull_gap() -> None:
+    row = _row_for(_ref_server(), _FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT))
+    assert row["ok"] is False and row["code"] == readiness.CODE_NOT_SHARED, row
+    assert "has not pulled the placement" in row["detail"]
+
+
+def test_refs_with_a_placed_share_and_owner_expiry_report_the_owner() -> None:
+    evidence = {"state": "expired", "owner_device": OWNER, "owner_name": "macbook", "at": 5.0}
+    row = _row_for(
+        _ref_server(has_placement=True, auth_evidence=evidence),
+        _FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT),
+    )
+    assert row["code"] == readiness.CODE_OBSERVED_FAILURE, row
+    assert row["remedies"] == ["sign in again on macbook"]
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation: a dead login with no share is a definite local repair (m1)
+# ---------------------------------------------------------------------------
+
+
+def test_dead_local_login_without_a_share_says_sign_in_again_on_the_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    _write_shape(root, "dead")
+    row = _holder_row(root, viewer=_FakeViewer(holds_mcp=False))
+    assert row["code"] == "local_grant_unavailable", row
+    assert row["remedies"] == ["sign in again on holder"]
+
+
+def test_dead_local_login_with_a_share_borrows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of m1: with a share the runtime borrows, so readiness does."""
+    root = _holder_root(tmp_path, monkeypatch, placed=True)
+    _write_shape(root, "dead")
+    row = _holder_row(root, viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT))
+    assert row["ok"] is True and "borrows" in row["detail"], row
+
+
+# ---------------------------------------------------------------------------
+# n1 and Q2
+# ---------------------------------------------------------------------------
+
+
+def test_a_non_boolean_has_row_is_unknown_not_false() -> None:
+    assert readiness.mcp_server_login_here({"has_row": 0}) is None
+    assert readiness.mcp_server_login_here({"has_row": False}) is False
+    assert readiness.mcp_server_login_here({"has_row": None}) is None
+
+
+def test_ledger_omits_an_unshared_header_ref_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q2: a ``${REF}`` server is not a login, so the ledger must not say
+    'sign in here first' for it; its credential travels as a secret share."""
+    from local_operator.network import cli as net_cli
+
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "slack": {
+                        "type": "http",
+                        "url": "https://mcp.slack.example.test/mcp",
+                        "headers": {"Authorization": "Bearer ${SLACK_TOKEN}"},
+                    },
+                    "linear": {"type": "http", "url": URL},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = net_cli._shareable_servers(SELF)  # noqa: SLF001
+    assert [row["server"] for row in rows] == ["linear"]

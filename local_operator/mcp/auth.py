@@ -1108,6 +1108,39 @@ class McpTokenStorage:
             return None
         return any(row.identity_key == self.server_url for row in rows)
 
+    def holds_grant(self) -> bool | None:
+        """Whether this device was ever ISSUED a grant for the URL it still holds.
+
+        The three-valued twin of :meth:`has_stored_row` for the OWNER-side
+        questions — the share verb's refusal, the join-time admission re-check
+        and readiness's "this device holds a login" — which asked
+        :meth:`has_stored_row` and so counted a registration-only row (the
+        ``client_info`` the SDK writes on discovery). That let a device share,
+        and readiness tell it to share, a login nobody ever signed into; the
+        peer then borrowed and failed (F-READY-1 round 1, M1).
+
+        :func:`payload_carries_grant`, NOT :func:`payload_has_usable_grant`, on
+        purpose: a tombstoned grant is still the owner's login, and placing it is
+        deliberate — the holder's borrow then answers ``interactive_required`` and
+        says "sign in again on <owner>", the one remedy that works
+        (``test_repair_grants_a_dead_owner_grant_on_purpose``). Whether the
+        RUNTIME would use the row locally is the other question, answered by
+        :func:`server_has_stored_grant`. ``None`` = the store could not be read.
+        """
+        store = self._store
+        if store is None:
+            return False
+        try:
+            rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+        except Exception:
+            logger.debug("MCP grant lookup failed for %s", self.credential_id, exc_info=True)
+            return None
+        for row in rows:
+            if row.identity_key == self.server_url:
+                data = getattr(row, "data", None)
+                return payload_carries_grant(data if isinstance(data, dict) else None)
+        return False
+
     def _read(self) -> dict[str, Any] | None:
         """Row payload for this server URL, or ``None`` (no store/no row)."""
         row = self._read_row()

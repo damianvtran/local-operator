@@ -1796,3 +1796,49 @@ def test_a_handler_refusal_is_recorded_locally_with_its_code(root: Path) -> None
     assert rows[-1]["outcome"] == "refused"
     assert rows[-1]["cause"] == "bad_memory"
     assert "bad_memory" in audit.CAUSES
+
+
+def _network_main(argv: list[str]) -> int:
+    """``lop network <argv>`` through the real parser and dispatcher."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+    return net_cli.main(parser.parse_args(["network", *argv]))
+
+
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_init_out_of_range_port_is_a_refusal_not_a_traceback(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    json_mode: bool,
+) -> None:
+    """Review m3 / QA Q1: through the CLI's own dispatcher, so the rendering is real."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    argv = ["init", "bad-net", "--port", "70000", "--no-start"] + (["--json"] if json_mode else [])
+    rc = _network_main(argv)
+    out, err = capsys.readouterr()
+    assert rc == 1
+    assert "Traceback" not in out + err and "Stack Trace" not in out + err
+    assert "65535" in err
+    if json_mode:
+        body = json.loads(out)
+        assert body["ok"] is False and body["code"] == "bad_request"
+    assert store.list_networks(root) == []
+
+
+def test_init_port_refuses_to_move_the_relay_under_an_existing_network(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review m2: ``network.port`` is device-wide; a second network's --port would
+    strand the first network's peers on a closed port after the next restart."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    assert _network_main(["init", "a-net", "--no-start", "--json"]) == 0
+    capsys.readouterr()
+    rc = _network_main(["init", "b-net", "--port", "47811", "--no-start", "--json"])
+    body = json.loads(capsys.readouterr().out)
+    assert rc == 1 and body["code"] == "bad_request"
+    assert "a-net" in body["message"]
+    assert [record.name for record in store.list_networks(root)] == ["a-net"]
+    assert store.read_config(("network", "port"), None, root=root) is None

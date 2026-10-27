@@ -1357,11 +1357,32 @@ def _cmd_init(args: argparse.Namespace) -> int:
         # the record exists, so a refused value creates no network either.
         from local_operator import settings_io
         from local_operator.config import ConfigManager
+        from local_operator.network.types import MeshRefusal
         from local_operator.paths import config_dir
 
         setting = settings_io.BY_KEY.get("network.port")
         if setting is None:  # pragma: no cover - registry guarantee
             raise RuntimeError("network.port is not registered in settings_io")
+        # A refused value is the CLI's normal refusal (a sentence, and a JSON body
+        # for --json), not a traceback (review round 1, m3; QA round 1, Q1).
+        problem = settings_io.validate(setting, port)
+        if problem is not None:
+            raise MeshRefusal("bad_request", f"--port {port}: {problem}")
+        # ONE RELAY, ONE PORT, PER DEVICE (review round 1, m2). ``network.port`` is
+        # device-wide; every existing network's record and member row still
+        # publish the old port, so moving it here would strand their peers on a
+        # closed port after the next relay restart. Refusing is the safe choice:
+        # nothing changes, and the operator can still move the port deliberately
+        # (`lop config` / settings), which is where a device-wide change belongs.
+        existing = [record.name for record in store.list_networks()]
+        if existing:
+            raise MeshRefusal(
+                "bad_request",
+                f"--port {port} would move this device's relay off port {settings.port}, "
+                f"which network {', '.join(repr(name) for name in existing)} already "
+                "advertises to its members; create the network without --port, or "
+                "change the device's relay port in settings first",
+            )
         settings_io.write_setting(ConfigManager(config_dir=Path(config_dir())), setting, port)
     identity = load_or_mint()
 
@@ -1941,6 +1962,13 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
         login_here = readiness_mod.mcp_server_login_here(server)
         shared_with: list[dict[str, str]] = []
         found = placement_mod.placement_entries_for(mcp_url=url, root=_config_dir())
+        if readiness_mod.mcp_header_ref_server(
+            server, shared=found is not None or bool(server.get("auth_evidence"))
+        ):
+            # Not a login: its credential is a ``${REF}`` secret, shared through
+            # the secret placement, so "sign in here first" was a dead end even
+            # with the secret set (QA round 1, Q2). Same rule readiness uses.
+            continue
         if found is not None:
             network_id, entry = found
             record = _record_for(network_id)

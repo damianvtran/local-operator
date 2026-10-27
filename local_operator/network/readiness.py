@@ -623,7 +623,13 @@ def _transport_of(raw: Mapping[str, Any]) -> str:
 
 
 def _mcp_row_exists(store: Any | None, url: str) -> bool | None:
-    """Whether a credential row exists for ``url``; ``None`` = unreadable store.
+    """Whether this store holds an issued login for ``url``; ``None`` = unreadable.
+
+    A registration-only row is not a login (F-READY-1 round 1, M1): it answers
+    ``False`` here, as in the share verb and the admission re-check, so readiness
+    never tells this device to share a login nobody signed into. The rule is
+    ``McpTokenStorage.holds_grant`` (which says why a tombstoned grant still
+    counts on this owner side). The name is kept: the ledger's guard cites it.
 
     ``store is None`` — this root has no database (``_open_store`` refuses to
     create one) — is answered HERE as a definite ``False``, never handed to
@@ -641,7 +647,7 @@ def _mcp_row_exists(store: Any | None, url: str) -> bool | None:
     try:
         from local_operator.mcp.auth import McpTokenStorage
 
-        return McpTokenStorage(url, store=store).has_stored_row()
+        return McpTokenStorage(url, store=store).holds_grant()
     except Exception:  # noqa: BLE001 — an unreadable store is "not known"
         return None
 
@@ -665,7 +671,9 @@ def mcp_server_login_here(server: Mapping[str, Any]) -> bool | None:
     """
     has_row = server.get("has_row")
     if has_row is not True:
-        return has_row if has_row in (False, None) else None
+        # ``0 in (False, None)`` is True, so a membership test would pass a
+        # non-boolean through; only a definite ``False`` is a definite no.
+        return False if has_row is False else None
     diagnostics = server.get("auth_diagnostics")
     if not isinstance(diagnostics, Mapping):
         return True
@@ -675,6 +683,33 @@ def mcp_server_login_here(server: Mapping[str, Any]) -> bool | None:
     return not (
         diagnostics.get("access_state") == "absent"
         and diagnostics.get("refresh_presence") == "absent"
+    )
+
+
+def mcp_header_ref_server(server: Mapping[str, Any], *, shared: bool) -> bool:
+    """Whether an HTTP/SSE server's credential question is its ``${REF}`` headers.
+
+    Slack's shape: an Authorization header naming ``${SLACK_TOKEN}``, no auth
+    block, no login. Its question is "does the device resolve that name", and
+    the login path answers a different one — on readiness it read the viewer's
+    (often WAL-locked, read-only) auth.db and said "unknown"; on the ledger it
+    said "sign in here first" while the secret was set (QA round 1, Q2).
+
+    NARROW ON PURPOSE (review round 1, M2). A ``${REF}`` header is not proof that
+    a server needs no login: an OAuth server discovered by challenge has no auth
+    block either, and a holder that BORROWS it has no local login by definition.
+    So any evidence of a login share — ``shared``: a placement entry on either
+    side, or recorded owner evidence — keeps the server on the login path, where
+    the pull gap and an observed owner refusal are reported instead of hidden
+    behind a green "resolves every referenced credential" row.
+    """
+    if str(server.get("transport") or "") not in ("http", "sse"):
+        return False
+    return (
+        bool(server.get("refs"))
+        and not server.get("auth_declared")
+        and mcp_server_login_here(server) is not True
+        and not shared
     )
 
 
@@ -2457,16 +2492,21 @@ def mcp_credential_rows(
         # existing login keeps the login copy: literal handling must not hide a
         # separate OAuth failure.
         literal_only = bool(literals) and not server.get("refs")
-        # A HEADER-REFERENCE SERVER IS NOT A LOGIN CASE EITHER. Slack's shape is an
-        # http server whose Authorization header names ``${SLACK_TOKEN}``, with no
-        # auth block and no login row; its readiness question is "does the peer
-        # resolve that name", which the ref row answers from the peer's own facts.
-        # Through the login path it read the viewer's (often WAL-locked, read-only)
-        # auth.db and reported "unknown" for a credential no login could supply.
-        if transport not in ("http", "sse") or (
-            (literal_only or server.get("refs"))
-            and mcp_server_login_here(server) is not True
-            and not server.get("auth_declared")
+        # A header-reference server with no login share anywhere is a ref question
+        # (see ``mcp_header_ref_server`` for why "anywhere" is the boundary).
+        shared = bool(
+            server.get("has_placement")
+            or server.get("auth_evidence")
+            or (url and viewer.placement(mcp_url=url).get("owner_device"))
+        )
+        if (
+            transport not in ("http", "sse")
+            or (
+                literal_only
+                and server.get("has_row") is not True
+                and not server.get("auth_declared")
+            )
+            or mcp_header_ref_server(server, shared=shared)
         ):
             row = _mcp_ref_row(
                 member,
@@ -2625,13 +2665,25 @@ def _mcp_credential_row(
     # below instead of telling the operator to sign in on this peer.
     has_row = mcp_server_login_here(server)
     diagnostics = server.get("auth_diagnostics")
-    local_unavailable = (
-        isinstance(diagnostics, Mapping)
-        and has_row is True
-        and diagnostics.get("sharing_mode") == "unavailable"
-    )
     placement = viewer.placement(mcp_url=url)
     owner = str(placement.get("owner_device") or "")
+    # A TOMBSTONED LOCAL LOGIN WITH NO SHARE IS STILL A LOCAL REPAIR (review round
+    # 1, m1). The runtime will not use a dead row, so with a share it borrows and
+    # the row must reach the borrow branch below. With NO share there is nothing
+    # to borrow, and the device demonstrably had a login: the definite "sign in
+    # again on <peer>" is the truth, not the hedged "if it needs a sign-in" copy.
+    dead_unshared = (
+        isinstance(diagnostics, Mapping)
+        and server.get("has_row") is True
+        and diagnostics.get("access_state") == "dead"
+        and not owner
+        and not server.get("has_placement")
+    )
+    local_unavailable = (
+        isinstance(diagnostics, Mapping)
+        and (has_row is True or dead_unshared)
+        and diagnostics.get("sharing_mode") == "unavailable"
+    )
     peer_is_holder = member.device_id in _holder_names(placement)
     evidence = server.get("auth_evidence")
     evidence = evidence if isinstance(evidence, Mapping) else {}
@@ -2681,9 +2733,12 @@ def _mcp_credential_row(
             observed={"server": name, "url": url, "auth_evidence": dict(evidence)},
         )
     if local_unavailable:
-        # A present but dead/expired-unrefreshable grant cannot satisfy the
-        # existing local-login branch. Without current owner-expiry evidence this
-        # is a LOCAL repair, and both sentences must name the same device.
+        # A usable-but-unavailable grant (expired with no refresh, or a live
+        # unconfirmed send) is still the runtime's local rung, and a tombstoned
+        # one counts here only when nothing is shared (``dead_unshared``). Without
+        # current owner-expiry evidence this is a LOCAL repair, and both
+        # sentences must name the same device. A tombstoned row WITH a share is
+        # not here: the runtime borrows, so the borrow branch answers it.
         assert isinstance(diagnostics, Mapping)  # narrowed by local_unavailable
         return _capability_row(
             device_id=member.device_id,
