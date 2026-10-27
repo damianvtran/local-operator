@@ -401,8 +401,8 @@ dev host). `--run` prints each exclusion
 with its reason, so a local green is not evidence about those seven — the audit in
 particular, since a dependency-touching PR is exactly where a local green and a
 red audit can coexist. Use the four commands above by hand when you want the
-whole-tree form regardless — a release PR, or a diff that touches `.github/**`,
-both of which set every flag true.
+whole-tree form regardless. A diff that touches `.github/**` sets every flag
+true; a release bump (a version-line-only `pyproject.toml` diff) sets none.
 
 Do **not** invoke `.venv/bin/black`, `.venv/bin/flake8`, `.venv/bin/isort`, or
 `.venv/bin/pyright` directly. Those console scripts carry a shebang baked in
@@ -1266,14 +1266,17 @@ the job is the reviewer's missing memory, not a lock.
 that is nothing but the `version =` line as a release bump, and a release
 bump runs six checks, not the matrix: `changes` and `version-bump-guard`
 from `ci.yml`, plus `Release invariants` and `Build and start the release
-artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (which runs
-on pushes to `release-next`/`release-next-*`, the bump PR's head branch).
-Every other `ci.yml` job reports skipping. That is the intended disposition
-(the classifier's `release_bump` rule is asserted in
+artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (among its
+triggers, a push to `release-next`/`release-next-*`, the runbook's bump
+branch). Every other `ci.yml` job reports skipping. The classifier keys on
+the diff but the Release Gate keys on the branch name, so a bump pushed from
+any other branch shows only the two `ci.yml` checks: the artifact gate never
+ran, which is a reason to use the mandated branch, not a green. That is the
+intended disposition (the classifier's `release_bump` rule is asserted in
 `tests/unit/test_ci_hygiene.py`), but it means "CI is green" on a release PR
 is evidence about the version line, the release invariants and the built
-wheel starting — not about the code. The code being released was gated on
-the PR that landed it, not on this one.
+wheel starting at the bump branch's head — not about the code. The code
+being released was gated on the PR that landed it, not on this one.
 
 Note that `gh api repos/<owner>/<repo>/branches/main/protection` answers
 `404 Branch not protected` here. That endpoint reports only **legacy** branch
@@ -1419,14 +1422,24 @@ it landed.
    `changes` and `version-bump-guard` run and every other job reports
    skipping — the whole job set would be gating code this PR does not touch.
    The other four come from `.github/workflows/release-gate.yml`, which fires
-   on the push to `release-next`: `Release invariants` (the pushed commit is
-   the one checked out, the declared version parses as PEP 440, and the i18n
-   `generate.py --check` and `check.py` pass) and `Build and start the release
-   artifact` on Python 3.12, 3.13 and 3.14 (`scripts/smoke_wheel.py` against
-   the built wheel). That split is the point: the gate proves the thing being
-   cut builds, installs and starts on every declared interpreter, which is
-   what a version bump can break, while the suite is skipped because the diff
-   is pyproject-only. Do not read the short check list as a truncated
+   on the push to `release-next` (its triggers also include `release-next-*`,
+   pushes to `main`, and `workflow_dispatch`): `Release invariants` (the
+   pushed commit is the one checked out, the declared version parses as PEP
+   440, and the i18n `generate.py --check` and `check.py` pass) and `Build and
+   start the release artifact` on Python 3.12, 3.13 and 3.14
+   (`scripts/smoke_wheel.py` against the built wheel). That split is the point: the gate shows the bump
+   branch's head builds, installs and starts on every declared interpreter,
+   which is what a version bump can break, while the suite is skipped because
+   the diff is version-line-only (a dependency or metadata edit to
+   `pyproject.toml` is not a release bump and keeps the whole matrix). Those
+   rows cover the branch head as pushed, not the tag target: the bump's merge
+   commit on `main` is a different SHA, and the combined-target proof below
+   (the invariants re-run at the exact bump merge SHA before tagging, and
+   `publish.yml` repeating them at the event SHA) is what speaks for it.
+   **Six checks appear only when the bump is pushed from a `release-next*`
+   branch.** A bump PR showing just `changes` and `version-bump-guard` means
+   the artifact gate never ran: push from the mandated branch name rather
+   than reading that as green. Do not read the six-check list as a truncated
    pipeline, and do not "fix" it by adding an always-run job: the narrow green
    is the design (`scripts/ci_scope.py`, `release_bump`), and the code being
    released was gated on the PR that landed it.

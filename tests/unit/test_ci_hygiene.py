@@ -3183,3 +3183,41 @@ def test_agents_doc_names_every_job_a_local_run_skips() -> None:
             f"AGENTS.md does not name `{job}` among the jobs a local run never "
             "covers, so a reader can take a local green as covering it"
         )
+
+
+def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
+    """M1 (#2990). The release sections' check count must match the workflows.
+
+    `AGENTS.md` said a bump PR runs "two checks" for weeks after
+    `release-gate.yml` added four more, because nothing tied the prose number
+    to its source. The count is derived here, not pinned: the `ci.yml` jobs
+    `job_plan` runs on a real version-only diff, plus every `release-gate.yml`
+    job times its Python matrix (that file has no `if:`, so each leg reports
+    on a push to the bump branch).
+
+    Mutation that must fail this: add a job or interpreter to the release
+    gate, or ungate a `ci.yml` job, without updating the number word.
+    """
+    scope = _scope()
+    bump = scope.classify(["pyproject.toml"], VERSION_BUMP_DIFF)
+    ci_rows = [job for job, verdict in scope.job_plan(bump).items() if verdict == "run"]
+
+    gate = yaml.safe_load((CI_YML.parent / "release-gate.yml").read_text())
+    # PyYAML reads the bare `on:` key as the boolean True (YAML 1.1).
+    branches = gate.get("on", gate.get(True))["push"]["branches"]
+    assert "release-next" in branches, "the bump branch no longer triggers the release gate"
+    gate_rows = 0
+    for job_id, job in gate["jobs"].items():
+        assert "if" not in job, f"release-gate `{job_id}` is now conditional; recount by hand"
+        gate_rows += len(job.get("strategy", {}).get("matrix", {}).get("python-version", [None]))
+
+    expected = len(ci_rows) + gate_rows
+    doc = (REPO / "AGENTS.md").read_text()
+    for pattern in (r"release\s+bump runs (\w+) checks", r"\*\*Expect (\w+) checks on this PR"):
+        found = re.search(pattern, doc)
+        assert found, f"the sentence matching {pattern!r} changed shape; re-point this guard"
+        word = found.group(1).lower()
+        assert _COUNT_WORDS.get(word) == expected, (
+            f"AGENTS.md says a release-bump PR runs {word!r} checks; the workflows "
+            f"give {expected}: ci.yml {sorted(ci_rows)} + {gate_rows} release-gate rows"
+        )
