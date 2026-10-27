@@ -3592,6 +3592,31 @@ async def test_a_tenant_this_machine_did_not_enroll_with_is_invalid_tenant(api):
     assert ok.status_code == 200, ok.text
 
 
+async def test_an_enrolled_machine_requires_the_tenant_rather_than_letting_the_hub_pick(api):
+    """Omitted, the hub would answer for the account's FIRST membership (R2-2).
+
+    That need not be the enrolled org, so the route refuses before any I/O
+    instead of defaulting: a default could name an org the signed-in account
+    is not a member of. Naming the enrolled org still answers.
+    """
+
+    client, root, _d = api
+    _enroll(root)
+    calls = FakeClient.calls
+    omitted = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert omitted.status_code == 422, omitted.text
+    assert omitted.json()["detail"]["code"] == "invalid_request"
+    assert omitted.headers["cache-control"] == "private, no-store"
+    assert FakeClient.calls == calls, "an omitted tenant reached the transport"
+
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    named = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": _owner().tenant_id}
+    )
+    assert named.status_code == 200, named.text
+    assert FakeClient.behavior["last_invitations"]["tenant_id"] == _owner().tenant_id
+
+
 async def test_an_unenrolled_machine_is_not_refused_by_the_cross_check(api):
     """No committed owner: nothing to compare against, so the hub answers.
 
@@ -3612,8 +3637,17 @@ async def test_an_unenrolled_machine_is_not_refused_by_the_cross_check(api):
     [
         ("0", "bad_limit"),
         ("101", "bad_limit"),
-        ("+20", "invalid_request"),
-        ("1_0", "invalid_request"),
+        ("07", "bad_limit"),
+        ("+20", "bad_limit"),
+        ("1_0", "bad_limit"),
+        ("ten", "bad_limit"),
+        # Unicode digits pass `str.isdigit()`: "²" then crashed `int()` into a
+        # 500 and "٣" was forwarded as 3 (R2-1). ASCII only.
+        ("²", "bad_limit"),
+        ("٣", "bad_limit"),
+        ("١٢", "bad_limit"),
+        # An empty value is refused by the query-wide guard before the limit arm.
+        ("", "invalid_request"),
     ],
 )
 async def test_limit_is_canonical_digits_inside_the_inbox_window(api, limit, code):
@@ -3637,7 +3671,6 @@ async def test_limit_is_canonical_digits_inside_the_inbox_window(api, limit, cod
         "?expected_account_id=acc_1&endpoint_id=bep_1",  # no endpoint parameter
         "?expected_account_id=acc_1&scope=account",
         "?expected_account_id=acc_1&expected_account_id=acc_2",
-        "?expected_account_id=acc_1&limit=ten",
         "?expected_account_id=../x",
     ],
 )

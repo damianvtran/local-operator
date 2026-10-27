@@ -1915,8 +1915,10 @@ async def conversation_consent(
 
     The hub's state refusals (409 ``invalid_transition`` with ``rule``
     ``not_invited``/``not_active``, 400 ``rule=ambiguous``) pass through
-    verbatim; a hub that predates ``withdraw``/``endpoint_id`` is the client's
-    409 ``outdated_hub``.
+    verbatim. Only a hub that refuses ``withdraw`` as an unknown decision (coded
+    400 ``decision``/``unknown_value``) becomes the client's 409
+    ``outdated_hub``; an older hub's uncoded refusal of ``endpoint_id`` passes
+    through as its own 400 ``bridge_error``.
     """
     _require_conversation_id(conversation_id)
     _require_account_id(account_id)
@@ -1959,6 +1961,7 @@ async def conversation_consent(
 
 OWNER_INVITATIONS_CACHE_CONTROL = "private, no-store"
 _OWNER_INVITATIONS_QUERY = frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
+_OWNER_INVITATIONS_LIMIT = re.compile(r"[1-9][0-9]{0,2}")
 #: The whole vocabulary of ONE invitation row, and the subset this build cannot
 #: render without. The hub's guarantee is "metadata only, no body, preview or
 #: member list"; that guarantee is the HUB's, so the only way this build can
@@ -2036,6 +2039,15 @@ def _owner_invitation_page(payload: Any) -> dict[str, Any]:
 def _refuse_foreign_tenant(config_dir: Any, tenant_id: str | None) -> None:
     """Refuse a tenant this machine did not enroll with, as the inbox does (R1-2).
 
+    On an enrolled machine the tenant is REQUIRED (R2-2): omitted, the hub would
+    answer for the account's first active membership, which need not be the
+    enrolled org, so "a page answers for this machine's org" would hold only
+    when the caller happened to name it. Refusing beats defaulting to the
+    enrolled org: the store cannot tell a single-org account from a multi-org
+    one, and the enrolled owner's account is not compared to the caller's
+    ``expected_account_id`` here, so a silent default could send a tenant the
+    signed-in account does not belong to. The inbox requires the tenant too.
+
     The enrolled org is the only local fact that can answer this, and it lives in
     the bridge store — so the read is the READ-ONLY accessor (review R-1/M-9):
     a machine with no committed owner stays unenrolled rather than having a store
@@ -2045,12 +2057,10 @@ def _refuse_foreign_tenant(config_dir: Any, tenant_id: str | None) -> None:
     and this read exists to be answered before that.
     """
 
-    if tenant_id is None:
-        return
     from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
     from local_operator.team_bridge.store import Store, StoreRefused
 
-    if re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
+    if tenant_id is not None and re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
         _raise_read("invalid_request")
     try:
         owner = Store(config_dir).active_owner_readonly()
@@ -2058,7 +2068,11 @@ def _refuse_foreign_tenant(config_dir: Any, tenant_id: str | None) -> None:
         # A damaged store is a refusal on every read path (R-7), not a reason to
         # let the hub decide what this machine's org is.
         _raise_read(exc.code or "state_unreadable")
-    if owner is not None and owner.tenant_id != tenant_id:
+    if owner is None:
+        return
+    if tenant_id is None:
+        _raise_read("invalid_request")
+    if owner.tenant_id != tenant_id:
         _raise_read("invalid_tenant")
 
 
@@ -2098,13 +2112,15 @@ async def owned_agent_invitations(
         _refuse_foreign_tenant(config_manager.config_dir, query.get("tenant_id"))
         limit: int | None = None
         if "limit" in query:
-            # Canonical digits and the inbox's own 1..100 window: a value this
-            # route accepts is one the hub is known to accept, and `"+20"`/
-            # `"1_0"` are refused rather than read as numbers (R1-4).
-            if not query["limit"].isdigit():
-                _raise_read("invalid_request")
+            # Canonical ASCII digits and the inbox's own 1..100 window: a value
+            # this route accepts is one the hub is known to accept. `[0-9]` is
+            # deliberately not `str.isdigit()`/`\d`, which admit Unicode digits
+            # (`"²"` crashed `int()` into a 500, `"١٢"` was forwarded as 12; R2-1),
+            # and the leading `[1-9]` refuses `"0"`/`"07"` with `"+20"`/`"1_0"`.
+            if _OWNER_INVITATIONS_LIMIT.fullmatch(query["limit"]) is None:
+                _raise_read("bad_limit")
             limit = int(query["limit"])
-            if not 1 <= limit <= 100:
+            if limit > 100:
                 _raise_read("bad_limit")
 
         client = _conversation_client(config_manager)
