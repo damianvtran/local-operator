@@ -108,8 +108,8 @@ def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
             "network_id": data["network_id"],
             "recipient": {
                 "device_id": data["recipient_device"],
-                # Display-only and bounded: a record filed before the name was recorded on
-                # the card carries none, and the UI shows the device id alone then.
+                # Display-only and bounded. A card filed before #3002 (or for a member with
+                # no name) carries none, and the UI shows the device id alone then.
                 "name": _plain(device.get("name")),
                 "key_fingerprint": fingerprint,
             },
@@ -236,6 +236,16 @@ def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) 
             "finite_denial_mismatch": "The current or retained withdrawal tuples changed.",
             "finite_journal_conflict": "The retained transaction fence changed.",
         }
+        if exc.code == "busy":
+            # TRANSIENT, not a changed intent (QA #3002 round 1, Q3): another writer held the
+            # placement lock. The same signed card applies once it is released, so the
+            # "regenerate the approval" remedy would send the operator to re-request and
+            # re-sign for nothing.
+            raise MeshRefusal(
+                exc.code,
+                "Another change to who may borrow a credential was in progress; nothing was "
+                "changed. Apply the same approved card again in a moment.",
+            ) from exc
         leading = labels.get(exc.code, "The finite-share operation was refused (" + exc.code + ").")
         raise MeshRefusal(exc.code, leading + " " + _remedy(expected)) from exc
 
@@ -414,7 +424,13 @@ def request(
         kind=approvals.KIND_DEVICE_ONBOARD,
         request_id=approvals.new_request_id(),
         requested_by={"device_id": owner, "session_id": "", "surface": "cli"},
-        device={"device_id": recipient, "fingerprint": subject["public_key_fingerprint"]},
+        # The member's display name rides the digest-bound device block so the disclosure can
+        # name the recipient (QA #3002 round 1, Q2); display-only, never an identifier.
+        device={
+            "device_id": recipient,
+            "name": _plain(getattr(store.load(network, root).member(recipient), "name", "")),
+            "fingerprint": subject["public_key_fingerprint"],
+        },
         what={
             OP: subject,
             "anchor": {k: anchor[k] for k in ("key_id", "spki_fp", "statement_digest")},

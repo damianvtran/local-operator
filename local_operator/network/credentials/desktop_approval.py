@@ -73,12 +73,14 @@ ASSURANCE_FILE_ONLY = "file_only"
 #:   now, prompt to upgrade" ("Allow with the warning on file-only keys, and the approval
 #:   sheet offers a one-click 'Set up Touch ID approvals' upgrade"). The row carries the
 #:   ``unproven_human`` disclosure flag and the upgrade availability for that reason.
-#: * Standing inheritance -- REFUSED (``credential_presence_required``). Operator
-#:   decision, ask a-e3a5 (2026-10-26): "Finite shares only". This is the operator's
-#:   final boundary, not an interim default: a standing grant that lasts until revoked,
-#:   signed by a key that cannot prove a person approved it, is a larger risk than one
-#:   finite share, and the first answer was about credential SHARES. A presence-gated key
-#:   may sign it. Loosening it is a one-line change here and a new operator decision.
+#: * Standing inheritance -- REFUSED on the DESKTOP SURFACE (``credential_presence_required``).
+#:   Operator decision, ask a-e3a5 (2026-10-26): "Finite shares only" -- a standing grant
+#:   that lasts until revoked, signed by a key that cannot prove a person approved it, is a
+#:   larger risk than one finite share, and the first answer was about credential SHARES.
+#:   A presence-gated key may sign it. SCOPE: this switch governs the desktop routes only,
+#:   NOT a host-wide rule. The CLI ``lop network approvals approve`` verb is deliberately
+#:   unchanged (operator, ask a-b815, recommended option: desktop only). Loosening it is a
+#:   one-line change here and a new operator decision.
 FILE_ONLY_SIGNING: Mapping[str, bool] = {
     finite_share.OP: True,
     inheritance.OP: False,
@@ -96,9 +98,12 @@ _SIGN_LOCK = threading.Lock()
 _STATE_LOCK = threading.Lock()
 _ATTEMPTS: deque[float] = deque()
 #: Approvals whose presence prompt was cancelled (or otherwise did not sign). A second
-#: prompt for the same card is refused until the card is RE-FETCHED (the list or detail
-#: read clears it), so a dismissed sheet cannot be re-raised in a loop until a tired
-#: person clicks through it.
+#: prompt for the same card is refused until that ONE card is re-read through its detail
+#: route (``GET /v1/desktop/approvals/{id}``) -- the "review it again" step. The list read
+#: deliberately does NOT clear it: the desktop polls the list every 15 s, which made the
+#: latch last at most one poll (agent review #3002 round 1, R2). This is a speed bump for
+#: an accidental re-prompt, NOT a bound on a bearer-holding script, which can call the
+#: detail route too; the per-daemon rate limit above is what bounds that.
 _CANCELLED: set[str] = set()
 
 
@@ -152,10 +157,18 @@ def assurance() -> tuple[str | None, str]:
         LEVEL_OPERATOR_PRESENCE,
         authority_level_load,
     )
+    from local_operator.operator.trust import is_presence_backend
 
-    level, _ = authority_level_load()
-    if level == LEVEL_OPERATOR_PRESENCE:
+    level, loaded = authority_level_load()
+    # PRESENCE needs the anchor's BACKEND to be a presence backend, not only its
+    # ``presence`` flag (review #3002 round 1, N1): the signer is resolved from
+    # ``anchor.backend``, so the policy must read the same field. A statement whose flag
+    # and backend disagree falls to file-only, the stricter answer.
+    backend = loaded.anchor.backend if loaded.anchor is not None else ""
+    if level == LEVEL_OPERATOR_PRESENCE and is_presence_backend(backend):
         return ASSURANCE_PRESENCE, level
+    if level == LEVEL_OPERATOR_PRESENCE:
+        return ASSURANCE_FILE_ONLY, level
     if level == LEVEL_OPERATOR_FILE_ONLY:
         return ASSURANCE_FILE_ONLY, level
     return None, level
@@ -372,13 +385,54 @@ def approve(
     request_digest: str,
     disclosure_digest_: str,
 ) -> dict[str, Any]:
-    """Sign ONE reviewed card. Every refusal fires before the signer runs.
+    """Sign ONE reviewed card. Every refusal fires before the signer runs, and is audited.
 
     Returns ``{approval_id, state, operation, assurance, signature:{key_id}}``.
+
+    AUDITED REFUSALS (review #3002 round 1, R3/Q1): every refusal on this path -- in
+    flight, rate-limited, cancelled prompt, signer failure, digest/disclosure/operation
+    mismatch, expiry, state, anchor, policy -- writes ``credential.desktop_sign_refused``
+    with its code. The rate-limit, in-flight and cancel rows are the trace a prompt-bombing
+    loop leaves, which is what an incident review needs to see.
     """
     from local_operator.network import enrollment
 
     root = enrollment.bound_profile(root)
+    try:
+        return _approve_locked(
+            root,
+            approval_id,
+            op=op,
+            request_digest=request_digest,
+            disclosure_digest_=disclosure_digest_,
+        )
+    except MeshRefusal as refusal:
+        try:
+            authority_level = assurance()[1]
+        except Exception:  # noqa: BLE001 -- the refusal must reach the caller regardless
+            authority_level = ""
+        _audit(
+            "credential.desktop_sign_refused",
+            approval_id,
+            root,
+            {
+                "surface": "desktop",
+                "operation": op,
+                "code": refusal.code,
+                "authority_level": authority_level,
+            },
+        )
+        raise
+
+
+def _approve_locked(
+    root: Path,
+    approval_id: str,
+    *,
+    op: str,
+    request_digest: str,
+    disclosure_digest_: str,
+) -> dict[str, Any]:
     if not _SIGN_LOCK.acquire(blocking=False):
         # ONE credential sign in flight per daemon: a second request cannot stack a second
         # OS prompt behind the first, where a person cannot tell which card it is for.
@@ -397,20 +451,9 @@ def approve(
         )
         _require_requested(record)
         _require_anchor(record, root)
-        level, authority_level = assurance()
+        level, _ = assurance()
         refusal = _policy_refusal(op, level)
         if refusal is not None:
-            _audit(
-                "credential.desktop_sign_refused",
-                approval_id,
-                root,
-                {
-                    "surface": "desktop",
-                    "operation": op,
-                    "code": refusal.code,
-                    "authority_level": authority_level,
-                },
-            )
             raise refusal
         _admit(approval_id)
         decided_at = time.time()
@@ -504,6 +547,34 @@ def apply(
     from local_operator.network import enrollment
 
     root = enrollment.bound_profile(root)
+    try:
+        return _apply_checked(
+            root,
+            approval_id,
+            op=op,
+            request_digest=request_digest,
+            disclosure_digest_=disclosure_digest_,
+        )
+    except MeshRefusal as refusal:
+        # A signed-but-not-applied card is the state an operator asks about; the refusal
+        # code names why (review #3002 round 1, Q1).
+        _audit(
+            "credential.desktop_apply_refused",
+            approval_id,
+            root,
+            {"surface": "desktop", "operation": op, "code": refusal.code},
+        )
+        raise
+
+
+def _apply_checked(
+    root: Path,
+    approval_id: str,
+    *,
+    op: str,
+    request_digest: str,
+    disclosure_digest_: str,
+) -> dict[str, Any]:
     record, _ = _validated(
         root,
         approval_id,

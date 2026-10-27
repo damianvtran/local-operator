@@ -196,6 +196,7 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "credential.desktop_signed",
         "credential.desktop_sign_refused",
         "credential.desktop_applied",
+        "credential.desktop_apply_refused",
         # A refusal: which device asked, for which key, and the machine code. The
         # person-facing sentence is rendered where the operator is, never stored here.
         "credential.grant_refused",
@@ -514,6 +515,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
         {"surface", "operation", "code", "authority_level"}
     ),
     "credential.desktop_applied": frozenset({"surface", "operation"}),
+    "credential.desktop_apply_refused": frozenset({"surface", "operation", "code"}),
     "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),

@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import approvals as A
+from local_operator.network import store
 from local_operator.network.audit import AuditLog
 from local_operator.network.credentials import (
     consent,
@@ -116,6 +117,13 @@ def _ack(row: dict[str, Any], **override: str) -> dict[str, str]:
     }
     body.update(override)
     return body
+
+
+def _refusal_codes(rig: Any) -> list[str]:
+    """The codes of every ``credential.desktop_sign_refused`` row, oldest first."""
+    return [
+        e["detail"]["code"] for e in _events(rig) if e["event"] == "credential.desktop_sign_refused"
+    ]
 
 
 def _events(rig: Any) -> list[dict[str, Any]]:
@@ -442,6 +450,7 @@ async def test_one_credential_sign_in_flight_per_daemon(
             desktop_approval._SIGN_LOCK.release()
     assert response.json()["detail"]["code"] == "credential_sign_in_flight"
     assert counters["signer"] == 0
+    assert _refusal_codes(rig) == ["credential_sign_in_flight"]
 
 
 @pytest.mark.asyncio
@@ -470,7 +479,17 @@ async def test_a_cancelled_prompt_is_not_raised_again_until_the_card_is_refetche
         assert first.json()["detail"]["code"] == "approval_signing_unavailable"
         assert second.json()["detail"]["code"] == "credential_prompt_cancelled"
         assert calls["n"] == 1
-        row = await _row(client, aid)  # the re-fetch is the "review it again"
+        # A list poll -- what the desktop does every 15 s -- does NOT clear the latch
+        # (review #3002 round 1, R2): looping list + approve stays refused, with no prompt.
+        for _ in range(3):
+            row = await _row(client, aid)
+            looped = await client.post(
+                f"/v1/desktop/approvals/{aid}/approve-credential", json=_ack(row)
+            )
+            assert looped.json()["detail"]["code"] == "credential_prompt_cancelled"
+        assert calls["n"] == 1
+        # Only the per-card detail read is the "review it again".
+        assert (await client.get(f"/v1/desktop/approvals/{aid}")).status_code == 200
         third = await client.post(f"/v1/desktop/approvals/{aid}/approve-credential", json=_ack(row))
     assert third.status_code == 200, third.text
     assert calls["n"] == 2
@@ -686,3 +705,150 @@ def test_a_finite_apply_refusal_releases_its_run_instead_of_wedging_it(
     with pytest.raises(MeshRefusal) as second:
         finite_share.apply(aid, expected, rig.root)
     assert second.value.code == "consent_conflict"
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation (review #3002 R1, R3/Q1; QA Q2, Q3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_record_edited_during_the_sign_window_with_its_digest_field_kept_is_refused(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1: the write re-check RECOMPUTES the digest; the stored field alone is not trusted."""
+    record = _finite(rig, monkeypatch)
+    _level(monkeypatch, FILE_ONLY)
+    aid = record["approval_id"]
+    software = A.sign_decision
+
+    def tamper_then_sign(**kw: Any) -> str:
+        # Inside the prompt window: edit the signed intent, keep the stored digest field.
+        stored = A._load_raw(aid, rig.root)
+        stored["what"][finite_share.OP]["scope"] = "device"
+        A._write_record(stored, rig.root)
+        return software(**kw)
+
+    monkeypatch.setattr(A, "sign_decision", tamper_then_sign)
+    async with _desktop_client(rig, monkeypatch) as client:
+        row = await _row(client, aid)
+        response = await client.post(
+            f"/v1/desktop/approvals/{aid}/approve-credential", json=_ack(row)
+        )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "credential_request_changed"
+    stored = A._load_raw(aid, rig.root)
+    assert stored["state"] == "requested" and stored.get("signature") is None
+    events = [e["event"] for e in _events(rig)]
+    assert "credential.desktop_signed" not in events and "onboard_approved" not in events
+    assert _refusal_codes(rig) == ["credential_request_changed"]
+
+
+@pytest.mark.asyncio
+async def test_every_pre_signer_refusal_is_audited_with_its_code(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3/Q1: digest, rate-limit and cancelled-prompt refusals each leave an audit row."""
+    record = _finite(rig, monkeypatch)
+    _level(monkeypatch, FILE_ONLY)
+    aid = record["approval_id"]
+
+    def cancelled(**_: Any) -> str:
+        raise MeshRefusal("approval_signing_unavailable", "the presence prompt was cancelled")
+
+    async with _desktop_client(rig, monkeypatch) as client:
+        row = await _row(client, aid)
+        await client.post(
+            f"/v1/desktop/approvals/{aid}/approve-credential", json=_ack(row, request_digest=ZERO)
+        )
+        monkeypatch.setattr(A, "sign_decision", cancelled)
+        await client.post(f"/v1/desktop/approvals/{aid}/approve-credential", json=_ack(row))
+        await client.post(f"/v1/desktop/approvals/{aid}/approve-credential", json=_ack(row))
+        desktop_approval._CANCELLED.clear()
+        now = time.monotonic()
+        desktop_approval._ATTEMPTS.extend([now] * desktop_approval.RATE_LIMIT)
+        await client.post(f"/v1/desktop/approvals/{aid}/approve-credential", json=_ack(row))
+    assert _refusal_codes(rig) == [
+        "credential_request_changed",
+        "approval_signing_unavailable",
+        "credential_prompt_cancelled",
+        "credential_sign_rate_limited",
+    ]
+    assert A._load_raw(aid, rig.root)["state"] == "requested"
+
+
+@pytest.mark.asyncio
+async def test_an_apply_refusal_is_audited(rig: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    record = _finite(rig, monkeypatch)
+    _level(monkeypatch, FILE_ONLY)
+    aid = record["approval_id"]
+    async with _desktop_client(rig, monkeypatch) as client:
+        row = await _row(client, aid)
+        await client.post(f"/v1/desktop/approvals/{aid}/apply-credential", json=_ack(row))
+    refused = [e for e in _events(rig) if e["event"] == "credential.desktop_apply_refused"]
+    assert [e["detail"]["code"] for e in refused] == ["approval_not_approved"]
+
+
+def test_a_finite_card_names_its_recipient(rig: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Q2: the member's display name is recorded on the card and disclosed."""
+    network = store.load(N, rig.root)
+    member = network.member(rig.peer.device_id)
+    assert member is not None
+    member.name = "qa-recipient"
+    store.save(network, rig.root)
+    record = _finite(rig, monkeypatch)
+    facts = finite_share.disclosure(record)
+    assert facts is not None and facts["recipient"]["name"] == "qa-recipient"
+    assert record["device"]["name"] == "qa-recipient"
+
+
+def test_a_busy_apply_offers_a_retry_not_a_new_approval(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q3: a transient lock refusal tells the operator to apply the same card again."""
+    record = _finite(rig, monkeypatch)
+    aid = record["approval_id"]
+
+    def busy(*_: Any, **__: Any) -> Any:
+        raise MeshRefusal("busy", "another writer")
+
+    monkeypatch.setattr(finite_share, "_apply", busy)
+    with pytest.raises(MeshRefusal) as raised:
+        finite_share.apply(aid, {}, rig.root)
+    assert raised.value.code == "busy"
+    assert "again in a moment" in str(raised.value)
+    assert "Regenerate" not in str(raised.value) and "lop " not in str(raised.value)
+
+
+def test_assurance_reads_the_backend_the_signer_uses(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N1: a presence flag on a non-presence backend is NOT presence (the stricter answer)."""
+    import dataclasses
+
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import trust
+
+    staged = trust.load_staged_anchor(rig.root)
+    assert staged is not None
+
+    def pinned(anchor: Any) -> None:
+        # ``authority_level_load`` reads the package's own ``load_anchor`` binding.
+        monkeypatch.setattr(
+            operator_pkg,
+            "load_anchor",
+            lambda uid=None: trust.AnchorLoad(
+                anchor=anchor,
+                path=trust.anchor_path(uid),
+                root_owned=True,
+                reason="ok",
+                exists=True,
+            ),
+        )
+
+    pinned(dataclasses.replace(staged, backend="file-only", presence=True))
+    assert desktop_approval.assurance() == ("file_only", "operator-presence")
+    pinned(dataclasses.replace(staged, backend="secure-enclave", presence=True))
+    assert desktop_approval.assurance() == ("presence", "operator-presence")
+    pinned(dataclasses.replace(staged, backend="file-only", presence=False))
+    assert desktop_approval.assurance() == ("file_only", "operator-file-only")

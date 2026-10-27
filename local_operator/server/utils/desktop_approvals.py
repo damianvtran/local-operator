@@ -61,8 +61,9 @@ def approval_rows(root: Path | None = None) -> list[dict[str, Any]]:
             row["typed_approval"] = typed
             row.setdefault("can_approve_here", False)
         rows.append(row)
-    # Re-reading the list is the "review it again" a cancelled prompt asks for.
-    desktop_approval.refetched(row["approval_id"] for row in rows)
+    # NO cancel-latch reset here: the desktop polls this list every 15 s, so clearing it
+    # on a list read made the latch last one poll (review #3002 round 1, R2). Only the
+    # per-card detail read (``GET /v1/desktop/approvals/{id}``) clears it.
     return rows
 
 

@@ -1057,7 +1057,13 @@ def _record_decision(
     """
     with _record_lock(approval_id, root):
         record = _load_raw(approval_id, root)
-        if expected_digest is not None and record.get("request_digest") != expected_digest:
+        # RECOMPUTED, not only the stored field (agent review #3002 round 1, R1): an edit to
+        # ``what`` inside the prompt window that leaves the ``request_digest`` field alone
+        # matched the field and had a decision written onto a record nobody reviewed.
+        if expected_digest is not None and (
+            record.get("request_digest") != expected_digest
+            or request_digest(record) != expected_digest
+        ):
             raise changed or MeshRefusal("network_enrollment_snapshot_changed", enrollment.REMEDY)
         moment = time.time()
         if _materialize_expiry(record, moment, root):
