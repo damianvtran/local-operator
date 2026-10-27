@@ -928,8 +928,13 @@ def test_an_unreadable_anchor_forwards_the_command_rather_than_failing_it(
     ``load_anchor`` opens a directory, its owner and mode checks pass, and the read
     raises ``IsADirectoryError`` — which ``is_revoked`` does not catch. Measured on
     c661224c0f1 (the arm removed): the route raised. The revocation belt fails OPEN
-    here, as round 1 did, because the runtime's own anchor check still stands
-    behind it and cannot load that anchor either.
+    here, as round 1 did (R3-1): only root can create this state, and root can
+    already rewrite the anchor; a deleted or mode-0666 anchor already forwards a
+    stamped revocation (R9-2), so this keeps the three unusable-anchor states
+    consistent; and the revoked refusal would be false for this phone, while
+    ``/api/pair`` 500s in the same state. Residual: the runtime's cached anchor can
+    admit a locally stamped revocation for up to ~30 s; the follow-up is
+    ``load_anchor`` rejecting non-regular files.
 
     Only root ownership is faked — creating a root-owned directory needs root — and
     only for the anchor path; the directory and the real ``load_anchor`` are real.

@@ -2875,11 +2875,25 @@ def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
         # passes its owner and mode checks and then raises ``IsADirectoryError``
         # on the read (agent review round 2, R2-1 — reproduced). Swallowing it
         # forwards the command, as round 1 did, rather than failing it with a 500.
-        # That opens nothing: this is a belt, and the runtime's own anchor check
-        # still stands behind it — it cannot load this anchor either, so it
-        # honours no certificate. ``/api/pair`` meets the same state through the
-        # same ``is_revoked``, so refusing here would protect nothing the anchor
-        # does not. Only ``OSError``: anything else is a bug and should surface.
+        # Failing OPEN is deliberate (agent review round 3, R3-1), for three
+        # reasons. (1) Only root can create this state — the anchor directory is
+        # root-owned and an entry must be uid 0 to pass ``load_anchor`` — and root
+        # can already rewrite the anchor's revocation list, delete it, or install
+        # another key, so a refusal here protects nothing from the one actor who
+        # can trigger it. (2) It keeps the three "anchor unusable" states
+        # consistent: a DELETED anchor and a mode-0666 one already lose a stamped
+        # local revocation and forward the command (R9-2: a stamp counts only
+        # while its key is the installed anchor), and failing closed on this one
+        # alone would not change that. (3) The ``operator_device_revoked`` refusal
+        # would be false for a phone that is not revoked and would send it to a
+        # re-pair, and ``/api/pair`` itself 500s in this state; an honest refusal
+        # needs its own typed code and phone copy.
+        # RESIDUAL: the runtime serves its pinned pre-failure anchor for up to
+        # ``ANCHOR_REFRESH_S`` (~30 s), so in that window it can admit a
+        # certificate revoked only in the stamped local record. The fix at the
+        # source is ``load_anchor`` rejecting a non-regular file (a follow-up),
+        # which makes this arm dead code. Only ``OSError``: anything else is a bug
+        # and should surface.
         return None
     if not revoked:
         return None
