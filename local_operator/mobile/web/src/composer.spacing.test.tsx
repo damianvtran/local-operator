@@ -62,7 +62,7 @@ describe("the composer's spacing constants", () => {
 	});
 
 	it("lets the meta facts take only the LEFTOVER width in a short viewport (QA round 3, O1)", () => {
-		/* O1: with the keyboard open (max-height 480) the meta facts move inline
+		/* O1: with the keyboard open (visual viewport at most 480) the meta facts move inline
 		   beside attach and the stop/send pair. As `basis-auto` their flex basis
 		   was their max-content (cwd 44 + the model label + the 96 px reading,
 		   248 px [redacted] at 320), so the line breaker pushed the 90 px action

@@ -98,7 +98,7 @@ function isTextEntry(target: EventTarget | null): boolean {
 	);
 }
 
-export function SessionStatus({ projection, compact = false, detail = false, mode = "auto" }: { projection: SessionProjection; compact?: boolean; detail?: boolean; mode?: "auto" | "full" | "short" | "hidden" }) {
+export function SessionStatus({ projection, compact = false, detail = false, mode = "auto", short = false }: { projection: SessionProjection; compact?: boolean; detail?: boolean; mode?: "auto" | "full" | "short" | "hidden"; short?: boolean }) {
 	// THE PUBLISHED OBJECT WINS when the runtime has one: its `total_micro`
 	// already spans this session's inference, its channels AND its children,
 	// computed in one backend place — so the row renders that figure rather
@@ -171,18 +171,10 @@ export function SessionStatus({ projection, compact = false, detail = false, mod
 		   shrinks: the model label beside it is the elastic element, because a
 		   truncated NAME stays truthful while a truncated AMOUNT does not. */
 		const label = [context.spelling?.split("/")[0], spend.text].filter(Boolean).join(" · ");
-		/* ONE FIGURE WHERE TWO CANNOT FIT (QA round 3, O1). Below 359 px wide
-		   with the keyboard open the composer's footer is a single line (see
-		   `COMPOSER_CHIP_ROW`), and attach + cwd + a 44 px model floor + the
-		   stop/send pair leave the reading about 56 px, short of the 96 px the
-		   two facts need. Clipping the amount is the false reading D1 forbids,
-		   and wrapping the footer costs the decision above it 44 px, so the
-		   reading shows ONE whole figure there: the context percentage (the
-		   fact a long session watches), else the spend. The full pair stays in
-		   the accessible name and in the sheet one tap away. Switched by CSS,
-		   not state, so the first frame and a stop button appearing cannot
-		   reflow the row. */
-		const short = context.spelling?.split("/")[0] || spend.text;
+		/* The composer passes its measured level explicitly. The full pair stays in
+		   the accessible name and in the sheet; explicit modes do not inspect global
+		   DOM, so a viewport flip and the reading change in the same React commit. */
+		const shortReading = context.spelling?.split("/")[0] || spend.text;
 		return <>
 			<button type="button" onClick={() => setExpanded(true)}
 				aria-label={messageRuntime.t("relay.chrome.composer.spend_label", { label })}
@@ -193,7 +185,7 @@ export function SessionStatus({ projection, compact = false, detail = false, mod
 				   the reading's right edge lands at 15 px like the field's left inset.
 				   The slot's own outer edge still lines up with the stop/send discs. */
 				data-foot="reading"
-				data-foot-form={mode === "full" || mode === "short" ? mode : (typeof document !== "undefined" && document.querySelector("[data-short]") ? "short" : "full")}
+				data-foot-form={mode === "full" || mode === "short" ? mode : short ? "short" : "full"}
 				className={cn(
 					"flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap pe-[7px] text-meta tabular-nums text-ink-dim active:text-ink",
 					"min-w-11 max-w-full short-column:w-auto",
@@ -201,8 +193,8 @@ export function SessionStatus({ projection, compact = false, detail = false, mod
 				)}>
 				{/* Literal class strings: Tailwind only emits the utilities it finds
 				    spelled out in source. */}
-				<span className={cn(mode === "full" || mode === "short" ? "hidden" : "short-column:hidden")}>{label}</span>
-				<span aria-hidden className={cn(mode === "full" || mode === "short" ? "inline" : "hidden short-column:inline")}>{short}</span>
+				<span className={cn(mode === "full" ? "inline" : mode === "short" || mode === "hidden" ? "hidden" : "short-column:hidden")}>{label}</span>
+				<span aria-hidden className={cn(mode === "full" ? "hidden" : mode === "short" ? "inline" : mode === "hidden" ? "hidden" : "hidden short-column:inline")}>{shortReading}</span>
 			</button>
 			<Sheet open={expanded} onClose={() => setExpanded(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
 				<SessionStatus projection={projection} detail />

@@ -736,11 +736,16 @@ def _substitute_readers() -> None:
     # The mic's capability is a fixture input, not a new product default.
     if os.environ.get("LOP_SHOWCASE_MIC") == "1":
         import local_operator.mobile.stt as stt_module
-        stt_module.stt_availability = lambda: {
-            "available": True,
-            "path": "/fixture/stt",
-            "reason": "fixture",
-        }  # type: ignore[assignment]
+
+        async def stt_availability() -> dict[str, object]:
+            return {
+                "available": True,
+                "path": "/fixture/stt",
+                "reason": "fixture",
+            }
+
+        # The daemon awaits this reader, exactly like the real STT capability.
+        stt_module.stt_availability = stt_availability
     ranked = json.loads(
         (
             Path(__file__).resolve().parents[1]

@@ -22,7 +22,8 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { setSessionPin } from "../api";
 import { AskDock } from "../components/ask-dock";
 import { AsksSheet } from "../components/asks-sheet";
@@ -30,6 +31,7 @@ import { ModelSheet } from "../components/model-sheet";
 import { Composer, ComposerFrame } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
 import { SessionMenu } from "../components/session-menu";
+import { SessionStatus } from "../components/session-status";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
@@ -114,6 +116,8 @@ function Header({
 	ended,
 	gateOpen,
 	setGateOpen,
+	onOpenSpend,
+	fitLevel,
 }: {
 	projection: SessionProjection;
 	sessionId: string;
@@ -124,6 +128,8 @@ function Header({
 	ended: boolean;
 	gateOpen: boolean;
 	setGateOpen: (open: boolean) => void;
+	onOpenSpend: () => void;
+	fitLevel: number;
 }) {
 	const [menuOpen, setMenuOpen] = useState(false);
 	/* THE HEALTH SHEET AND THE ONE RESUME PATH, held here (UX round 1, U3) so the
@@ -284,6 +290,8 @@ function Header({
 				pinned={pinned}
 				onTogglePin={() => togglePin()}
 				onOpenApprovals={() => setGateOpen(true)}
+				onOpenSpend={onOpenSpend}
+				showSpend={fitLevel >= 2 && Boolean(projection.usage && Object.keys(projection.usage).length > 0)}
 				onResume={ended ? () => {
 					void resume.resume();
 					setHealthOpen(true);
@@ -542,6 +550,15 @@ export function SessionScreen({
 		if (decision === "open") openAsksByPolicy();
 	});
 	const rootRef = useRef<HTMLDivElement>(null);
+	/* The short layout and the footer's fit are ONE rendering decision. Keeping
+	   this only as a DOM attribute let CSS flip before React had fitted its facts
+	   row, painting one clipped frame on keyboard changes. Initialising from the
+	   visual viewport also makes a cold landscape load compact on its first paint. */
+	const [short, setShort] = useState(() =>
+		typeof window !== "undefined" && (window.visualViewport?.height ?? Infinity) <= SHORT_COLUMN_PX,
+	);
+	const [fitLevel, setFitLevel] = useState(0);
+	const [spendOpen, setSpendOpen] = useState(false);
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
 	/* THE LIST STREAM TOO, so the header's ☆/★ reflects the shared pin
 	   authoritatively rather than optimistically forever (review round 1, MINOR 1).
@@ -563,11 +580,11 @@ export function SessionScreen({
 
 	/* Keep the composer above the iOS keyboard: pin the layout column to
 	   the visual viewport's height and offset while the keyboard is open. */
-	useEffect(() => {
+	useLayoutEffect(() => {
 		const vv = window.visualViewport;
 		const el = rootRef.current;
 		if (!vv || !el) return;
-		const sync = () => {
+		const sync = (event?: Event) => {
 			/* Height + top, never transform: a transform on this column
 			   creates a containing block that traps `position: fixed`
 			   sheets (slash, model, effort) and clips them to a sliver. */
@@ -590,12 +607,11 @@ export function SessionScreen({
 			   box this column is pinned to. */
 			el.style.setProperty(COLUMN_HEIGHT_VAR, `${vv.height}px`);
 			el.style.setProperty(COLUMN_TOP_VAR, `${vv.offsetTop}px`);
-			/* THE SHORT LAYOUT FOLLOWS THE SAME NUMBER (review R1-1). The
-			   composer's one-line footer and the compact usage reading key
-			   off `data-short` through the `short-column:` variant, never off
-			   a `max-height` media query: that reads the layout viewport,
-			   which a phone keyboard leaves alone. */
-			el.toggleAttribute("data-short", vv.height <= SHORT_COLUMN_PX);
+			/* React owns data-short so this and the fit level commit together. */
+			/* Later native events must commit before paint. During this layout
+			   pass React already owns the flush; calling it here would warn. */
+			if (event) flushSync(() => setShort(vv.height <= SHORT_COLUMN_PX));
+			else setShort(vv.height <= SHORT_COLUMN_PX);
 		};
 		sync();
 		vv.addEventListener("resize", sync);
@@ -607,7 +623,6 @@ export function SessionScreen({
 			el.style.top = "";
 			el.style.removeProperty(COLUMN_HEIGHT_VAR);
 			el.style.removeProperty(COLUMN_TOP_VAR);
-			el.removeAttribute("data-short");
 		};
 	}, []);
 
@@ -748,6 +763,7 @@ export function SessionScreen({
 	return (
 		<div
 			ref={rootRef}
+			data-short={short ? "" : undefined}
 			className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 		>
 			{jobId ? (
@@ -758,7 +774,7 @@ export function SessionScreen({
 					connected={connected}
 				/>
 			) : <>
-			<Header projection={projection} sessionId={sessionId} connected={connected} ended={ended} gateOpen={gateOpen} setGateOpen={setGateOpen} />
+			<Header projection={projection} sessionId={sessionId} connected={connected} ended={ended} gateOpen={gateOpen} setGateOpen={setGateOpen} onOpenSpend={() => setSpendOpen(true)} fitLevel={fitLevel} />
 			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll
 				   area reads as "did it break?"; this placeholder says the
@@ -890,7 +906,12 @@ export function SessionScreen({
 				autoFocus={autoFocusComposer}
 				/* ONE "ended", the header dot's (review round 2, R2-2 = U7). */
 				ended={ended}
+				short={short}
+				onFitLevel={setFitLevel}
 			/>
+			<Sheet open={spendOpen} onClose={() => setSpendOpen(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
+				<SessionStatus projection={projection} detail />
+			</Sheet>
 
 			<ModelSheet
 				open={modelsOpen}

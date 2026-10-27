@@ -267,7 +267,10 @@ describe("an overflowing slot rests on the card's decision (design D6 = review R
 		vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
 			if (isSlot(this)) return new DOMRect(0, 72, 320, 64.6);
 			if (this instanceof HTMLElement && this.hasAttribute("data-slot-rest")) {
-				return new DOMRect(8, row.top, 304, row.bottom - row.top);
+				/* The row's viewport position follows the scroller. Keeping the
+				   pre-reveal rect would make a stale-rest mutation look correct. */
+				const scroller = this.closest<HTMLElement>("[data-above-composer]");
+				return new DOMRect(8, row.top - (scroller?.scrollTop ?? 0), 304, row.bottom - row.top);
 			}
 			return rect.call(this);
 		});

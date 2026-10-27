@@ -129,4 +129,21 @@ describe("SessionMenu", () => {
 		fireEvent.keyDown(window, { key: "Escape" });
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});
+
+	/* The footer's meter is the spend sheet's only other door, and at the
+	   tightest fit level it yields to the row's width (review Q2 / design D5).
+	   This row is that door: present only while the footer cannot offer it. */
+	it("carries a Spend & context row only while the footer's meter has yielded", () => {
+		const onClose = vi.fn();
+		const onOpenSpend = vi.fn();
+		setup({ onClose, onOpenSpend, showSpend: true });
+		fireEvent.click(screen.getByRole("button", { name: /Spend & context/ }));
+		expect(onOpenSpend).toHaveBeenCalledTimes(1);
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not duplicate the spend door while the meter is on screen", () => {
+		setup({ onOpenSpend: vi.fn(), showSpend: false });
+		expect(screen.queryByRole("button", { name: /Spend & context/ })).toBeNull();
+	});
 });

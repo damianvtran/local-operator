@@ -45,10 +45,10 @@ export const COLUMN_TOP_VAR = "--lo-vvh-top";
 
 /** The VISIBLE height at or below which the column takes its short layout.
  *
- *  Published as `data-short` on the pinned column by the same
- *  `visualViewport` handler that writes {@link COLUMN_HEIGHT_VAR}, and read in
- *  CSS through the `short-column:` variant (`styles/index.css`). 480 px is the
- *  bound the short footer was designed against (commit 8e65fe84, measured at
+ *  Initialised from the visual viewport and committed as React state on the
+ *  pinned column by the same handler that writes {@link COLUMN_HEIGHT_VAR}.
+ *  It is read in CSS through the `short-column:` variant and passed to the
+ *  footer fit in that same render. 480 px is the bound the short footer was designed against (commit 8e65fe84, measured at
  *  844x390 landscape) and it now also covers portrait phones with the keyboard
  *  up: 320x700 or 390x844 with a 260-300 px keyboard leaves 400-584 px, and the
  *  layouts that need the room (under ~480 px) are the ones that switch.

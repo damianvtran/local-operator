@@ -18,10 +18,13 @@
  *      never a clipped amount (design D1 of the composer redesign);
  *   2. the reading yields entirely: it is a glance, and its full pair returns
  *      the moment the keyboard closes and the facts get their own line;
- *   3. the model control yields too, leaving the folder glyph.
+ *   3. the model LABEL yields to a 44 px icon-only chip; the model-sheet
+ *      control and the mic never disappear. The spend sheet remains in the
+ *      session menu whenever the meter yields.
  *
  * The folder glyph and a queued count are never hidden: the folder is already
- * icon-only, and a queued count is state the user acted on.
+ * icon-only, and the count is text rather than a control, so it keeps its 44 px
+ * height but gives up width (truncating) before either door does.
  *
  * CONSTRAINTS, the same ones `use-priority-fit.ts` honours:
  * - First frame = final layout. Measured in a layout effect, so a level change
@@ -34,9 +37,10 @@
  *
  * `footFitLevel` is the pure rule (unit-tested); `useFootFit` only measures.
  */
+import { flushSync } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-/** 0 full · 1 compact reading · 2 no reading · 3 no reading and no model. */
+/** 0 full · 1 compact reading · 2 no reading · 3 icon-only model. */
 export type FootFit = 0 | 1 | 2 | 3;
 
 export type FootFitInput = {
@@ -70,11 +74,11 @@ export function footFitLevel(input: FootFitInput): FootFit {
 /** A model floor for a host without stylesheets: `min-w-11` is 44 px. */
 const MODEL_FLOOR_FALLBACK = 44;
 
-export function useFootFit() {
+export function useFootFit(short: boolean, inputKey: string) {
 	const [row, setRow] = useState<HTMLElement | null>(null);
 	const [level, setLevel] = useState<FootFit>(0);
 	const readings = useRef<{ full: number | null; short: number | null }>({ full: null, short: null });
-	const [, setTick] = useState(0);
+	const [tick, setTick] = useState(0);
 	const rowRef = useCallback((node: HTMLElement | null) => setRow(node), []);
 
 	useLayoutEffect(() => {
@@ -107,12 +111,14 @@ export function useFootFit() {
 			short: reading ? readings.current.short : 0,
 		});
 		setLevel((previous) => (previous === next ? previous : next));
-	});
+	/* Measure only inputs that can change geometry. Draft keystrokes and stream
+	   frames re-render the composer without invalidating this row's dimensions. */
+	}, [row, short, inputKey, level, tick]);
 
 	// The keyboard opening, a rotation, or the mic appearing changes the room.
 	useEffect(() => {
 		if (!row || typeof ResizeObserver === "undefined") return;
-		const observer = new ResizeObserver(() => setTick((tick) => tick + 1));
+		const observer = new ResizeObserver(() => flushSync(() => setTick((tick) => tick + 1)));
 		observer.observe(row);
 		return () => observer.disconnect();
 	}, [row]);

@@ -37,6 +37,25 @@ function projection(overrides: Record<string, unknown> = {}): SessionProjection 
 	} as unknown as SessionProjection;
 }
 
+describe("the compact composer's explicit fit modes", () => {
+	it.each([
+		["full", true, false],
+		["short", false, true],
+		["hidden", false, false],
+	] as const)("renders the %s reading without consulting the DOM", (mode, full, short) => {
+		document.body.setAttribute("data-short", "");
+		const { container } = render(<SessionStatus projection={projection()} compact short={false} mode={mode} />);
+		const button = container.querySelector<HTMLButtonElement>('[data-foot="reading"]');
+		const visible = (element: Element | null) => element !== null && !element.classList.contains("hidden");
+		expect(button).not.toBeNull();
+		expect(visible(button!.children[0])).toBe(full);
+		expect(visible(button!.children[1])).toBe(short);
+		expect(button?.dataset.footForm).toBe(mode === "hidden" ? "full" : mode);
+		expect(button?.classList.contains("hidden")).toBe(mode === "hidden");
+		document.body.removeAttribute("data-short");
+	});
+});
+
 describe("SessionStatus", () => {
 	it("reads context before spend, each cell keeping its own edge", () => {
 		const { container } = render(<SessionStatus projection={projection()} />);
@@ -610,7 +629,7 @@ describe("SessionStatus — the composer's compact reading on a short, narrow sc
 	   needs its fixed 96 px slot (D1), which only fits from 360 up. Below that
 	   it shows ONE figure (context, else spend), never a clipped one: the full
 	   reading stays in the accessible name and one tap away in the sheet. */
-	it("renders the full reading and a one-figure compact form, switched by CSS only", () => {
+	it("renders full and compact spans for the auto reading, selected by the short variant", () => {
 		const { container } = render(<SessionStatus projection={projection({ context_tokens: 61_800 })} compact />);
 		const button = container.querySelector("button")!;
 		const [full, short] = [...button.querySelectorAll("span")];

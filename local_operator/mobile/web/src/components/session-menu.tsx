@@ -37,6 +37,8 @@ export function SessionMenu({
 	pinned,
 	onTogglePin,
 	onOpenApprovals,
+	onOpenSpend,
+	showSpend = false,
 	onResume,
 	resuming = false,
 	returnFocusRef,
@@ -54,6 +56,10 @@ export function SessionMenu({
 	onTogglePin: () => Promise<boolean>;
 	/** Summon the existing gate sheet. The menu closes first. */
 	onOpenApprovals: () => void;
+	/** Fallback while the compact footer's meter has yielded to the phone's
+	    width. It uses the existing sheet title, so no new copy is introduced. */
+	onOpenSpend?: () => void;
+	showSpend?: boolean;
 	/** Present only while the session is ENDED (UX round 1, U3): the menu is
 	    where a reader looks for actions, and the header's status line carries
 	    no visual tap cue. The header's own resume path — this row starts it and
@@ -73,6 +79,12 @@ export function SessionMenu({
 	return (
 		<Sheet open={open} onClose={onClose} title="Session" returnFocusRef={returnFocusRef}>
 			<div className="flex flex-col gap-1 p-2">
+				{showSpend && onOpenSpend ? (
+					<button type="button" onClick={() => { onClose(); onOpenSpend(); }} className={MENU_ROW}>
+						<span className="min-w-0 flex-1 truncate">{messageRuntime.t("relay.chrome.spend.title")}</span>
+						<span aria-hidden className="shrink-0 text-ink-dim">▸</span>
+					</button>
+				) : null}
 				{onResume ? (
 					<button
 						type="button"

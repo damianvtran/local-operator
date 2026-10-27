@@ -465,7 +465,7 @@ const COMPOSER_LEADING = "-ms-1.5";
    structure is FIXED (not a width- or content-dependent wrap), so the
    first-paint frame reserves exactly these lines and a stop button appearing
    cannot reflow the composer. */
-/* SHORT VIEWPORTS (keyboard open, max-height 480) put the meta facts INLINE,
+/* SHORT VIEWPORTS put the meta facts INLINE,
    between attach and the stop/send pair, so the footer is one 44 px line
    instead of two. `basis-0`, not `basis-auto` (QA round 3, O1): an auto basis
    is the facts' max-content width (cwd 44 + model label + the 96 px reading =
@@ -552,6 +552,8 @@ export function Composer({
 	onCloseEffort,
 	autoFocus = false,
 	ended,
+	short = false,
+	onFitLevel,
 }: {
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
@@ -588,6 +590,8 @@ export function Composer({
 	    and the failure copy must say the same thing the header does. Defaults
 	    to the projection's own flag for callers without the screen's health. */
 	ended: boolean;
+	short?: boolean;
+	onFitLevel?: (level: number) => void;
 }) {
 	const [text, setText] = useDraft(pid);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
@@ -664,7 +668,10 @@ export function Composer({
 	   plain-HTTP case is deliberately excluded — a mic that appears and fails is
 	   worse than one that never does. */
 	const capabilities = useCapabilities();
-	const foot = useFootFit();
+	const readingKey = [projection.model_label, projection.effort, projection.queued_count,
+		projection.usage ? JSON.stringify(projection.usage) : ""].join("|");
+	const foot = useFootFit(short, readingKey);
+	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
 	const micAvailable =
 		capabilities?.stt?.available === true &&
 		typeof window !== "undefined" &&
@@ -1539,24 +1546,22 @@ export function Composer({
 				{/* A single meta cluster replaces two 44 px bands. Each reading keeps
 				    its real picker; only the presentation changes, never send/retry
 				    routing or the pending-envelope lifetime. */}
-				<div ref={foot.rowRef} data-foot-level={foot.level} className={COMPOSER_CHIP_ROW}>
+				<div ref={foot.rowRef} data-foot-level={foot.level} data-short={short ? "" : undefined} className={COMPOSER_CHIP_ROW}>
 					{projection.queued_count > 0 ? (
-						<span data-foot="queued" className={cn(COMPOSER_CHIP, "shrink-0")}>
-							{messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })}
+						<span data-foot="queued" className="flex min-h-11 min-w-0 shrink items-center text-meta tabular-nums text-ink-dim"
+							aria-label={messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })}>
+							<span className="truncate">{messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })}</span>
 						</span>
 					) : null}
 					<div data-foot="cwd" className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
-					{/* SHORT VIEWPORTS DEGRADE IN PRIORITY ORDER (review R1-2):
-					   the model name truncates first, then the reading compacts,
-					   then it yields, then the model control and mic yield. This
-					   last step preserves the row's 44 px controls instead of
-					   letting a reading paint over stop/send. The sheet remains
-					   reachable from the header's model action. */}
-					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink", foot.level >= 3 && "hidden")}
+					{/* At the last level the label yields to a 44px icon, never the
+					   control itself: this chip is the model sheet's door. The mic is
+					   an action and remains at its full touch target at every level. */}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level >= 3 ? "shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
-						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
+						{foot.level >= 3 ? <span aria-hidden className="text-body">◇</span> : <span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>}
 					</button>
-					<SessionStatus projection={projection} compact mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "auto"} />
+					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>
 
 				<div className={COMPOSER_ACTION_CLUSTER}>
