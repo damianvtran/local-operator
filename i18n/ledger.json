@@ -6950,6 +6950,139 @@
         "relay.health.reconnecting_detail"
       ],
       "note": "Round-2 delta on c53c9a5: 7 new keys (dropped_detail, ended_detail, ended_placeholder, ended_send_failed, quiet_detail, reconnecting, reconnecting_detail) translated in two translator runs (fr/es/ru/vi and zh-CN/hi/ur); live and live_detail carried byte-identical from the round-1 audit. Doubly audited, independently of the translator: translation-auditor A (lopdev session 6038f76924dc) and translation-auditor B, a second independent audit for safety copy (lopdev session f6c010722753), 9/9 keys against en sha256 b98c70197410d105aaf857fca3d4bc671552de15e2aeda6764ea76685997c571. Both audits back-translated the delivery semantics: no queueing promise, no duplicate risk, correct actor. 0 findings: clean in both audits. Bytes integrated verbatim. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "4-key delta audit (skill_not_editable, skill_alias_occupied, skill_local_changes_unpublished, skill_stale) against en a56418b1 and its context sidecar; 0 blocker/major. skill_local_changes_unpublished verified to say the unpublished edits are lost on remove and that only an explicit 'remove anyway' discards them. Placeholder/ICU parity recomputed independently over all 88 keys (ordered argument lists equal; all 616 values render through runtime.render_message). The other 84 keys are byte-unchanged from the rows at 9a164be4 (commit cdae7456 is +4 lines per locale) and were NOT re-audited here. Minor/nit findings are reported on PR #3013 and were not applied. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit's reading ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence from the translator is NOT claimed. Treat as a single-model audit. Findings: 1 minor (skill_not_editable 'Aqui esta habilidad' garden-path), 2 nits. Incidental, out of scope and not graded: carried keys answer_epoch_mismatch, aside_unavailable, aside_max_turns, aside_still_running diverge in meaning from en."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "4-key delta audit (skill_not_editable, skill_alias_occupied, skill_local_changes_unpublished, skill_stale) against en a56418b1 and its context sidecar; 0 blocker/major. skill_local_changes_unpublished verified to say the unpublished edits are lost on remove and that only an explicit 'remove anyway' discards them. Placeholder/ICU parity recomputed independently over all 88 keys (ordered argument lists equal; all 616 values render through runtime.render_message). The other 84 keys are byte-unchanged from the rows at 9a164be4 (commit cdae7456 is +4 lines per locale) and were NOT re-audited here. Minor/nit findings are reported on PR #3013 and were not applied. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit's reading ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence from the translator is NOT claimed. Treat as a single-model audit. Findings: 1 minor (skill_local_changes_unpublished 'les ferait perdre' elliptic calque; propose 'entrainerait leur perte'), 2 nits. Incidental, out of scope and not graded: carried keys answer_epoch_mismatch, aside_unavailable, aside_max_turns, aside_still_running diverge in meaning from en."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "4-key delta audit (skill_not_editable, skill_alias_occupied, skill_local_changes_unpublished, skill_stale) against en a56418b1 and its context sidecar; 0 blocker/major. skill_local_changes_unpublished verified to say the unpublished edits are lost on remove and that only an explicit 'remove anyway' discards them. Placeholder/ICU parity recomputed independently over all 88 keys (ordered argument lists equal; all 616 values render through runtime.render_message). The other 84 keys are byte-unchanged from the rows at 9a164be4 (commit cdae7456 is +4 lines per locale) and were NOT re-audited here. Minor/nit findings are reported on PR #3013 and were not applied. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit's reading ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence from the translator is NOT claimed. Treat as a single-model audit. Findings: 2 minor (skill_stale 'aapke is kaushal ko kholne' attaches aapke to the skill; skill_local_changes_unpublished 'chhodne' reads ambiguous but is consistent with tui discard wording), 0 nits."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "4-key delta audit (skill_not_editable, skill_alias_occupied, skill_local_changes_unpublished, skill_stale) against en a56418b1 and its context sidecar; 0 blocker/major. skill_local_changes_unpublished verified to say the unpublished edits are lost on remove and that only an explicit 'remove anyway' discards them. Placeholder/ICU parity recomputed independently over all 88 keys (ordered argument lists equal; all 616 values render through runtime.render_message). The other 84 keys are byte-unchanged from the rows at 9a164be4 (commit cdae7456 is +4 lines per locale) and were NOT re-audited here. Minor/nit findings are reported on PR #3013 and were not applied. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit's reading ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence from the translator is NOT claimed. Treat as a single-model audit. Findings: 1 minor (skill_alias_occupied 'nazvanie' vs 'imya' used for the same en 'name' in profile_name_taken/project keys), 0 nits."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "4-key delta audit (skill_not_editable, skill_alias_occupied, skill_local_changes_unpublished, skill_stale) against en a56418b1 and its context sidecar; 0 blocker/major. skill_local_changes_unpublished verified to say the unpublished edits are lost on remove and that only an explicit 'remove anyway' discards them. Placeholder/ICU parity recomputed independently over all 88 keys (ordered argument lists equal; all 616 values render through runtime.render_message). The other 84 keys are byte-unchanged from the rows at 9a164be4 (commit cdae7456 is +4 lines per locale) and were NOT re-audited here. Minor/nit findings are reported on PR #3013 and were not applied. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit's reading ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence from the translator is NOT claimed. Treat as a single-model audit. Findings: 1 minor (skill_local_changes_unpublished 'go bo de loai bo' repetitive), 1 nit (xuat ban vs cong bo for 'published' across two keys, different senses)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "4-key delta audit (skill_not_editable, skill_alias_occupied, skill_local_changes_unpublished, skill_stale) against en a56418b1 and its context sidecar; 0 blocker/major. skill_local_changes_unpublished verified to say the unpublished edits are lost on remove and that only an explicit 'remove anyway' discards them. Placeholder/ICU parity recomputed independently over all 88 keys (ordered argument lists equal; all 616 values render through runtime.render_message). The other 84 keys are byte-unchanged from the rows at 9a164be4 (commit cdae7456 is +4 lines per locale) and were NOT re-audited here. Minor/nit findings are reported on PR #3013 and were not applied. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit's reading ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence from the translator is NOT claimed. Treat as a single-model audit. Findings: 1 minor (three of four new keys add a bare 'qing' where en has no 'please' and the style guide limits it to blocking dialogs; only skill_local_changes_unpublished is a confirm dialog), 1 nit."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Full 88-key audit of ur wire.errors.desktop at en a56418b1; all 88 values read against en and the sidecar; 0 blocker/major. Placeholder/ICU parity recomputed independently: ordered argument lists equal for all 88 keys, all values render through runtime.render_message, code spans/flags/env vars/commands byte-identical (session_is_remote_open spans identical), no bidi control characters, no Hindi danda or Arabic-form letters or Arabic-Indic digits. High-risk keys read line by line: skill_local_changes_unpublished states that unpublished edits are lost on removal and that only an explicit 'remove anyway' discards them; force_requires_confirm_replace, project_confirm_mismatch, aside_adopt_unconfirmed, session_is_remote_write, library_metadata_unavailable (nothing changed) all accurate. Findings, all minor/nit and NOT applied: m1 claim_origin_outside_configured: '\u062f\u0639\u0648\u06d2 \u06a9\u06d2 \u0630\u0631\u06cc\u0639\u06d2 \u062a\u0631\u062a\u06cc\u0628 \u062f\u06cc\u06d2 \u06af\u0626\u06d2 \u0688\u06cc\u0633\u06a9\u0679\u0627\u067e \u0627\u0648\u0631\u06cc\u062c\u0646\u0632' can be read as origins configured BY the claim; propose '\u06a9\u0648\u0626\u06cc \u062f\u0639\u0648\u06cc\u0670 \u062a\u0631\u062a\u06cc\u0628 \u062f\u06cc\u06d2 \u06af\u0626\u06d2 \u0688\u06cc\u0633\u06a9\u0679\u0627\u067e \u0627\u0648\u0631\u06cc\u062c\u0646\u0632 \u0633\u06d2 \u0628\u0627\u06c1\u0631 \u06a9\u0627 \u0627\u0648\u0631\u06cc\u062c\u0646 \u0646\u0635\u0628 \u0646\u06c1\u06cc\u06ba \u06a9\u0631 \u0633\u06a9\u062a\u0627\u06d4'. m2 spelling drift: \u0688\u06cc\u0633\u06a9\u0679\u0627\u067e (8 uses in this namespace) vs \u0688\u06cc\u0633\u06a9 \u0679\u0627\u067e (8 uses in wire.settings, tui.team_authoring, relay.session.tags). m3 plane_already_controlled: '\u067e\u0644\u06cc\u0646' reads as plain/aeroplane, same transliteration as hi; en itself is cryptic. m4 session_is_remote_write interpolates an English {noun} (pin, notification, promotion, tag assignment) untranslated; applies to every locale, a code-side issue. nits: Library as \u0644\u0627\u0626\u0628\u0631\u06cc\u0631\u06cc here but Latin in wire.settings; \u0648\u06cc\u0648 here vs \u0646\u0638\u0627\u0631\u06c1 for 'view' elsewhere; \u062f\u0648\u0633\u0631\u06d2 \u0688\u06cc\u0648\u0627\u0626\u0633 (masc.) vs \u067e\u0648\u0631\u06cc \u0688\u06cc\u0648\u0627\u0626\u0633 (fem.) gender drift; runtime_unreachable repeats \u062f\u0648\u0628\u0627\u0631\u06c1; range hyphen 1-24 vs en dash 1\u201324 in tui.tags (both display correctly in RTL). Glossary choices confirmed consistent with other ur namespaces: \u0645\u06c1\u0627\u0631\u062a, \u06c1\u0679\u0627\u0646\u0627, \u0634\u0627\u0626\u0639, \u06a9\u0627\u067e\u06cc \u06a9\u0631\u06cc\u06ba, \u062f\u0648\u0628\u0627\u0631\u06c1 \u0644\u0648\u0688, \u0645\u0627\u0688\u0644, \u0688\u06cc\u0648\u0627\u0626\u0633, \u0633\u06cc\u0634\u0646, \u067e\u0627\u0633, \u0648\u0631\u06a9\u0646\u06af \u0688\u0627\u0626\u0631\u06cc\u06a9\u0679\u0631\u06cc, \u06a9\u0646\u0641\u06cc\u06af\u0631\u06cc\u0634\u0646, \u062a\u0627\u0632\u06c1. Flagged calls accepted: aside\u2192\u0636\u0645\u0646\u06cc \u0646\u0648\u0679, asset\u2192\u0627\u062b\u0627\u062b\u06c1, claim\u2192\u062f\u0639\u0648\u06cc\u0670, origin\u2192\u0627\u0648\u0631\u06cc\u062c\u0646, copy\u2192\u06a9\u0627\u067e\u06cc. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence is NOT claimed. Treat as a single-model audit; a second-model audit of the 84 previously unaudited keys is advisable before relying on it."
     }
   ]
 }
