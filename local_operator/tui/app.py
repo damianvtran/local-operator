@@ -37712,6 +37712,34 @@ class OperatorApp(App[None]):
                 return jobs, self._subagent_job(view.job_id, read) if view is not None else None
             # Old/local hosts without lineage can still show their root ledger,
             # but a child must never inherit its parent's roster by default.
+            if manager is None and comms is None and view is None:
+                # A RESOURCE-LESS facade — a cold saved view, a detached
+                # follower — owns no ledger and no comms graph, yet its
+                # installed frontend snapshot already carries the child rows the
+                # bind will paint. Reading them is what puts the panel in the
+                # frame that reveals the transcript: left to the 1 Hz poll, the
+                # panel mounted AFTER that frame, took its rows off the
+                # transcript and re-scrolled the conversation under the reader
+                # (QA: viewport 41 -> 26 rows, scroll 90 -> 105, ~39 lines
+                # moved; residual after the reveal-time band sync was the 3 rows
+                # of THIS panel).
+                #
+                # The gate is both handles ABSENT, deliberately: an owner with a
+                # ledger must keep answering from it, and a follower with a graph
+                # must keep the graph's ownership contract. `_frontend_state_store
+                # .state` is read rather than the `frontend_state` property for
+                # the reason the rest of this file reads it that way — the
+                # property deep-copies the whole state, and this runs on a tick.
+                #
+                # The rows are NOT re-filtered through `_within_roster_window`:
+                # a durable snapshot was already the runtime's own roster, and
+                # there is no manager here whose retention window it could be
+                # measured against.
+                store = getattr(session, "_frontend_state_store", None)
+                rows = getattr(getattr(store, "state", None), "jobs", None) or ()
+                tasks = [row for row in rows if getattr(row, "type", "") == "task"]
+                if tasks:
+                    return tasks, None
             return (
                 manager.list() if manager is not None and view is None else [],
                 self._subagent_job(view.job_id, read) if view is not None else None,
