@@ -1266,7 +1266,11 @@ def cap_preserved_user_turns(
     # Walk NEWEST first and stop at the budget; the surviving prefix is then
     # re-reversed so the block keeps chronological order.
     for turn in reversed(real_turns):
-        cost = _encode_len(str(turn.get("text", "")))
+        # ``memo=True``: a stored turn is immutable journal content, so its exact
+        # length is worth keeping across the replays every open performs. Opt-in
+        # because the same ruler serves provisional text — see
+        # ``tokens._TEXT_LENGTH_CACHE``.
+        cost = _encode_len(str(turn.get("text", "")), memo=True)
         if kept and used + cost > cap:
             break
         kept.append(turn)
