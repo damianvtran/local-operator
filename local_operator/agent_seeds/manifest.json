@@ -241,13 +241,14 @@
       "label": "Scout",
       "description": "Read-only research: investigates a question across the workspace and on the web, and reports findings with evidence. Changes nothing.",
       "when_to_use": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, researching a library or an API on the web, or gathering evidence — read-only, nothing is modified.",
-      "version": "1.2.0",
-      "instructions_sha256": "8cc5708e6983e5dff010daf95f48b3790f3a62901a072a477f0ba83bd28318d6",
-      "instructions_chars": 1148,
+      "version": "1.3.0",
+      "instructions_sha256": "39795754a665c9b63cb4d6f380de3de00acc9553cf392795aab8fd20e2e19248",
+      "instructions_chars": 1584,
       "tools": [
         "read",
         "glob",
         "grep",
+        "bash",
         "list_variables",
         "read_variable",
         "web_search",
@@ -257,7 +258,7 @@
       "delegate": false,
       "tags": [
         "role",
-        "tools:read,glob,grep,list_variables,read_variable,web_search,web_fetch",
+        "tools:read,glob,grep,bash,list_variables,read_variable,web_search,web_fetch",
         "class:reactive"
       ],
       "categories": [

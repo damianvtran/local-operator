@@ -112,8 +112,13 @@ The retained block rides inside the SAME detail artifact, under
 under `evaluator_result`. It is therefore bounded by the same limits, scanned by
 the same redaction pass, and referenced by the same digest — no second artifact
 and no new protocol field. The capture is additive: an evaluator that emitted
-nothing and fetched nothing produces no block, and the staged detail bytes are
-byte-identical to what they were before it existed. Nothing an evaluator
+nothing and fetched nothing produces no block. On the fake provider the staged
+detail bytes are then byte-identical to what they were before it existed; on
+AWS every detail is now the wrapped dict `{evaluator_result, guest_environment}`
+(plus `evaluator_diagnostics` when there is a block), because the guest-patch
+disclosure always rides it (see "Guest X-display leak" below) — a bare `0.0`
+detail from an earlier campaign is the same score in a different shape, so
+compare `evaluator_result`, not raw detail bytes, across campaigns. Nothing an evaluator
 returns changes, no task file is touched, and the worker's own stdout/stderr
 still carry what they carried (the capture tees rather than diverts).
 
@@ -679,6 +684,108 @@ exactly what this must not be. The disk-vs-filesystem geometry is **reported**
 instead, read-only — and that pair of numbers is what made the
 `AWS_ROOT_VOLUME_SIZE` claim above checkable from any bundle: 30,993,747,968 in
 a 40 GiB volume says the override never reached the filesystem.
+
+### Guest X-display leak: upstream's fix applied at episode start (deviation from the stock AMI)
+
+**This is a deviation from the stock guest image, and every score must name
+it.** The episode's guest runs upstream OSWorld's own fix for an X-server
+connection leak that the released 2.1 image predates. Nothing about the task,
+its setup, the evaluator, the step/wall caps or what the model sees changes;
+the guest simply stops dying part-way through long episodes.
+
+**The measured cause (2026-10-26).** 80 of 191 sealed 2.1 episodes (42%) ended
+`bridge-wedged` with the EC2 instance still `running` and the action server
+refusing connections. The released image (`ami-01017272139e01feb`, built
+2026-03-27) ships `/home/user/server/pyxcursor.py` (sha256 `0d8e3071…`) whose
+`Xcursor()` opens an X display and never closes it, and the `/screenshot`
+handler creates one per call. Measured on live guests with read-only
+`/execute` probes:
+
+| measurement | result |
+| --- | --- |
+| action-server fds, 50 stock `/screenshot` calls on a bare guest | 15 → 65 |
+| same, over a live episode | +102 per 100 screenshots; `/platform`, `/terminal` add 0 |
+| X clients at the moment of death (`ss -x` on `/tmp/.X11-unix/X0`) | 383 → 2 (episode guest), 494 → 8 (bare guest, at 487 screenshots) |
+| after death | the GNOME/Xorg session restarts; every `osworld.service` restart fails at `import pyautogui` with `Can't connect to display ":0"` / `Invalid MIT-MAGIC-COOKIE-1 key`; the unit's start limit and the guest watchdog's no-effect cap (`attempts: 2, capped: true`) leave nothing on :5000 |
+
+The harness takes about two screenshots per step, which is why the wedges
+cluster at 200–300 steps (hazard 0.34 per 50 steps in 200–249, against
+0.01–0.03 in 50–199). All three recorded diagnostics are this one death: a
+request in flight when the server died (`outcome is unknown; delivery=ambiguous`),
+a request after it died (`not_sent … connection refused`), and a statement that
+failed while the display went away (`input may be partial`). The early (≤35
+step) wedges in the record are a different, older class: the pre-#2929
+liveness probe timing out on `/terminal` with the server still alive.
+
+**The fix is upstream's, byte for byte.** xlang-ai/OSWorld PR #500 ("fix
+xserver connections leak", merge `8253399dfa8b3c1d5783a73c29a91f11f7c6d7c3`,
+2026-05-07). Only its `desktop_env/server/pyxcursor.py` is applied — the
+vendored copy is that file at the merge commit, sha256 `87d09a46…`, checked
+at load. The PR's `main.py` refactor is **not** taken: the stock handler holds
+the `Xcursor` in a local that CPython collects on return, and the new
+`__del__` closes the display. Measured with only the file replaced: 30
+screenshots, fds 15 → 15. The `main.py` changes touch `/screen_size`,
+`/window_size` and `/start_recording`, none of which runs per step.
+
+**Pixels are unchanged.** On a static screen, a stock and a patched screenshot
+differ only in the top-bar clock minute (bbox `(1030, 8, 1038, 18)`; identical
+once that strip is masked), and two stock captures in the same minute are
+byte-identical.
+
+**How it lands.** After disk preparation and before the supervisor install and
+upstream's reset, `guest_xcursor.apply_xcursor_patch` reads the file's digest
+and the serving PIDs, and only if the file is the exact stock file writes the
+upstream file atomically (temp, fsync, `os.replace`) as the server's own user —
+no sudo. The stock server runs `app.run(debug=True)`, so werkzeug's reloader
+re-execs the serving child (measured 0.8 s); a new serving PID with the patched
+digest is the proof it took.
+
+**Fail-open, never silent — and never "stock" without proof.** An
+unrecognised file is never overwritten. Before any write, an unreachable guest
+or a missing server leaves the episode on the stock guest (`applied: false`).
+Once a write has been attempted, the record says "stock" only if a later
+inspection actually observed the stock digest (or the guest's own pre-write
+check refused the write). Otherwise — the write's response was lost, every later
+inspection failed, or the patched file is on disk but no reload was seen —
+the status is `unconfirmed` with `applied: null`: the guest may serve either
+module, because werkzeug's reloader (or any later restart) can import a patched
+file at any point, and the write's own response can be lost precisely because
+the reloader re-exec'd the child serving `/execute`. A score reader must treat
+`null` as "deviation possible", never as stock. Every outcome writes
+`<run-root>/osworld-cache/<episode-id>/guest-xcursor-patch.json` with the
+tri-state `applied`, the status and reason, `write_attempted`, the upstream PR
+and merge SHA, and the before/after digests (`sha256_after`/`server_pids_after`
+are `null` when no post-write inspection succeeded or none was needed, never an
+empty "server gone" list). The same record rides the **sealed score detail**
+under `guest_environment.xcursor_patch`, so a score read from the bundle alone
+still says whether the guest carried the deviation; if an evaluator result is so
+large that the record cannot fit beside it, the key holds the fixed marker
+`{"refused": "over_budget"}` instead of disappearing.
+
+**Why only `pyxcursor.py`: the other `Display()` callers are off the per-step
+path.** Read from the AMI's own `/home/user/server/main.py` (sha256
+`b9b1031e…`, 1,799 lines, read back from a bare guest; it is upstream
+`36a6adf4`'s file plus a per-request `/execute` timeout), the X-display users are:
+
+| line | route | call | per step? |
+| --- | --- | --- | --- |
+| 321 | `/screenshot` | `Xcursor()` | **yes** (every observation) — fixed by this patch |
+| 354, 912 | `/terminal`, `/accessibility` | `pyatspi.Registry.getDesktop(0)` (AT-SPI over D-Bus, not an Xlib display) | no: `require_terminal`/`require_a11y_tree` are off; `/terminal` is allocation readiness only |
+| 971 | `/screen_size` | `display.Display()` | no |
+| 993 | `/window_size` | `display.Display()` | no |
+| 1509 | `/start_recording` | `display.Display()` | no |
+
+Per step the adapter calls only `/execute` (actions, via its own single-shot
+transport) and `/screenshot` (`DesktopEnv._get_obs`), plus `/platform` for
+liveness. Upstream reaches `/screen_size` and `/window_size` only through
+`DesktopEnv.vm_screen_size` and the evaluator getters `get_vm_screen_size` /
+`get_vm_window_size`, and `/start_recording` only through
+`controller.start_recording`. None of the 108 v2.1 task modules references any
+of them (by method or by route), and the adapter never calls them. The
+`/screenshot` handler's other X users (`pyautogui.screenshot()` and
+`pyautogui.position()`, lines 324-325) do not leak: measured on the val2 guest
+with only `pyxcursor.py` replaced, the serving process held 15–32 fds and 26–36
+X clients across the episode plus 1,300 extra `/screenshot` calls.
 
 ### Upstream is sealed after the first reset
 

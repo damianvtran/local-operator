@@ -140,6 +140,15 @@ def static_feature_flags() -> dict[str, Any]:
         # the pin in tests/unit/server/test_desktop_hub_skill_publish.py fails if
         # one is removed without also removing this key.
         "hub_skills": 1,
+        # THE SKILL LIBRARY ROWS: `GET /v1/desktop/skills` rows carry the
+        # additive `source`/`link_id`/`editable`/`installed`/`fingerprint`/`form`
+        # fields, the list also lists a subscribed-but-not-installed link, and the
+        # `name` arm adds `skill_detail` (body, files, fingerprint, publish budget).
+        # Its OWN key rather than a bump of `hub_skills` or `skill_catalogue`: a
+        # renderer gated on those keeps the plain name/description list and never
+        # draws a card from a field this backend does not send. Read-only in this
+        # version; writes will advertise their own key.
+        "skill_library": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #

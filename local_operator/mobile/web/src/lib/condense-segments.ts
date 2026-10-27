@@ -1,6 +1,6 @@
 /**
  * THE TURN SEGMENTS AND THE VISIBLE ROW SET, ported from the desktop.
- * Ported from `damianvtran/local-operator-ui` at sourceHash f9f4611dd3dbcc06…:src/renderer/src/features/chat/canonical/turn-segments.ts:71-1145
+ * Ported from `damianvtran/local-operator-ui` at sourceHash 929b6a1bbb151b60…:src/renderer/src/features/chat/canonical/turn-segments.ts:71-1145
  *
  * WHAT THIS PORT IS FOR. The phone must condense a settled turn the way the
  * desktop does: which row is the turn's ANSWER (the last RESPONSE cycle's close,
@@ -165,7 +165,7 @@ export type BoundaryKind = "compaction" | "terminal";
  * `MessagePhase::Commentary | FinalAnswer` - and its own warning, "providers do
  * not emit this consistently, so callers must treat `None` as phase unknown").
  * The durable reducer keeps that field on every text-bearing assistant row
- * (`transcript-reducer.ts:2264`), so this reads a fact the record already states.
+ * (`transcript-reducer.ts:2268`), so this reads a fact the record already states.
  *
  * WHY A DECLARATION AND NOT A LENGTH. The rows this rescues are the ones the
  * harness continued past: a `stop`-then-more-work pair is what the todo guardrail

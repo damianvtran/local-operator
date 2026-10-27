@@ -1346,6 +1346,45 @@ def _cmd_init(args: argparse.Namespace) -> int:
     settings = imported.NetworkSettings.from_config()
     listen_address = args.listen_address or settings.listen_address
     port = args.port or settings.port
+    if args.port and args.port != settings.port:
+        # THE PORT THE RECORD ADVERTISES MUST BE THE PORT THE RELAY BINDS. The
+        # record's listen block and our member row (below) publish ``port`` to
+        # every joiner, but ``serve``/autostart read ``network.port`` from the
+        # config — so a port given only here was advertised and never bound:
+        # measured, init advertised :47811 and the relay tried the default :4097
+        # ("address in use") until ``network.port`` was set by hand. Persisted
+        # through the registry writer (range-validated, watcher-notified) BEFORE
+        # the record exists, so a refused value creates no network either.
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.network.types import MeshRefusal
+        from local_operator.paths import config_dir
+
+        setting = settings_io.BY_KEY.get("network.port")
+        if setting is None:  # pragma: no cover - registry guarantee
+            raise RuntimeError("network.port is not registered in settings_io")
+        # A refused value is the CLI's normal refusal (a sentence, and a JSON body
+        # for --json), not a traceback (review round 1, m3; QA round 1, Q1).
+        problem = settings_io.validate(setting, port)
+        if problem is not None:
+            raise MeshRefusal("bad_request", f"--port {port}: {problem}")
+        # ONE RELAY, ONE PORT, PER DEVICE (review round 1, m2). ``network.port`` is
+        # device-wide; every existing network's record and member row still
+        # publish the old port, so moving it here would strand their peers on a
+        # closed port after the next relay restart. Refusing is the safe choice:
+        # nothing changes, and the operator can still move the port deliberately
+        # (`lop config` / settings), which is where a device-wide change belongs.
+        existing = [record.name for record in store.list_networks()]
+        if existing:
+            raise MeshRefusal(
+                "bad_request",
+                f"--port {port} would move this device's relay off port {settings.port}, "
+                f"which network {', '.join(repr(name) for name in existing)} already "
+                "advertises to its members; create the network without --port, or move "
+                f"the relay deliberately with 'lop config edit network.port {port}' — which "
+                "also changes the port the existing networks' peers dial",
+            )
+        settings_io.write_setting(ConfigManager(config_dir=Path(config_dir())), setting, port)
     identity = load_or_mint()
 
     # ONE ANSWER TO "WHERE CAN PEERS REACH US", used for BOTH the record's listen
@@ -1898,12 +1937,20 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
 
     Every user-scope HTTP/SSE server declared in this device's ``mcp.json`` (stdio
     servers have no login to share and are excluded), joined with (a) whether a login
-    row exists HERE — the same read the share verb's refusal makes, reused so the
-    ledger and the refusal cannot disagree — and (b) any placement entry this device
+    the runtime would USE is held here (``readiness.mcp_server_login_here``) and
+    (b) any placement entry this device
     holds for ``mcp:<url>``, so an already-shared login says where. READ-ONLY: no
     declare, no placement write, no broker semantics change; ``remedy`` is the
     command the operator would run next, with ``<device>`` standing where a target
     device goes (the ledger cannot know which one).
+
+    THE SHARE VERB'S READ IS WIDER BY ONE SHAPE, ON PURPOSE (review round 2, m1). Its
+    ``credential_here`` counts any ISSUED grant, so a TOMBSTONED login still shares:
+    the holder's borrow then says "sign in again on <this device>", the one remedy
+    that works. The ledger cannot call that row "login held" (nothing would serve)
+    nor "sign in here first" (one exists); it marks ``login_dead`` and prints
+    ``readiness.MCP_DEAD_LOGIN_REMEDY`` — the sentence the readiness viewer row and
+    the share receipt print too, so the three surfaces say one thing.
     """
     from local_operator.network import readiness as readiness_mod
     from local_operator.network.credentials import placement as placement_mod
@@ -1918,9 +1965,19 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
             # No URL, no login to hold and nothing to share: a row here would render
             # a remedy naming an empty command.
             continue
-        login_here = server.get("has_row")  # True | False | None (store unreadable)
+        # True | False | None (store unreadable). A registration-only or tombstoned
+        # row is NOT a login here: the runtime would borrow, so offering
+        # "login held — share" would promise a share this device cannot serve.
+        login_here = readiness_mod.mcp_server_login_here(server)
         shared_with: list[dict[str, str]] = []
         found = placement_mod.placement_entries_for(mcp_url=url, root=_config_dir())
+        if readiness_mod.mcp_header_ref_server(
+            server, shared=found is not None or bool(server.get("auth_evidence"))
+        ):
+            # Not a login: its credential is a ``${REF}`` secret, shared through
+            # the secret placement, so "sign in here first" was a dead end even
+            # with the secret set (QA round 1, Q2). Same rule readiness uses.
+            continue
         if found is not None:
             network_id, entry = found
             record = _record_for(network_id)
@@ -1937,14 +1994,19 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
                     }
                 )
         key = f"mcp:{url}"
+        dead = login_here is False and readiness_mod.mcp_login_dead(server)
         if login_here is True:
             remedy = f"lop network credential share {key} --with <device>"
+        elif dead:
+            remedy = readiness_mod.MCP_DEAD_LOGIN_REMEDY
         elif login_here is False:
             remedy = readiness_mod.mcp_login_remedy(url)
         else:
             remedy = ""
         rows.append(
             {
+                # Only on a tombstoned row, so every other row's shape is unchanged.
+                **({"login_dead": True} if dead else {}),
                 "server": str(server.get("name") or ""),
                 "url": url,
                 "transport": str(server.get("transport") or ""),
@@ -2519,6 +2581,32 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
+    from local_operator.network.credentials.types import is_mcp_key
+
+    if verb == "share" and is_mcp_key(key):
+        from local_operator.mcp.auth import server_has_stored_grant
+        from local_operator.network.credentials.offers import close_quietly, open_store
+        from local_operator.network.credentials.types import mcp_url_from_key
+
+        # A TOMBSTONED login shares on purpose (``holds_grant``), so the receipt says
+        # what the holder will see instead of implying a working borrow (review round
+        # 2, m1). Same sentence as the ledger and the readiness viewer row.
+        auth_store = open_store(_config_dir())
+        try:
+            usable = auth_store is not None and server_has_stored_grant(
+                mcp_url_from_key(key), auth_store
+            )
+        finally:
+            if auth_store is not None:
+                close_quietly(auth_store)
+        if not usable:
+            from local_operator.network import readiness as readiness_mod
+
+            payload["login_dead"] = True
+            lines.append(
+                "note: this device's login is no longer valid — "
+                f"{readiness_mod.MCP_DEAD_LOGIN_REMEDY}"
+            )
     if verb == "share" and github_mod.is_github_key(key):
         # The disclosure names the ARM that will serve (§3.4): only the App is
         # narrowed server-side, and the share receipt must not promise narrowing
@@ -3006,6 +3094,80 @@ def _member_name(record: Any, device_id: str) -> str:
     return str(member.name) if member is not None else ""
 
 
+def _member_rm_already_revoked(args: argparse.Namespace, record: Any) -> int | None:
+    """``member rm`` on an EXACT id that is already removed: say so, and repair.
+
+    WHY. ``lop network show`` lists a removed member (``active:false``) with its id,
+    so an operator cleaning up copies that id into ``member rm`` — and used to be
+    told ``unknown_member``, while credential metadata still named the device as a
+    holder and nothing would ever prune it. The removal already happened; what is
+    left is its idempotent local repair (``relay.repair_removed_member``: no epoch
+    rotation, tombstone and burned id kept, nothing remote claimed erased).
+
+    THE RECOGNITION LIVES HERE, NOT IN ``_resolve_device``. That resolver is shared
+    with ``credential share --with`` and ``member grant|revoke``, which must stay
+    ACTIVE-ONLY — a share or a grant resolving to a removed device would be a write
+    about a device that can no longer authenticate. Removal is the one operation
+    for which "already removed" is a meaningful answer, so only this verb asks.
+
+    EXACT ID ONLY: names are cosmetic and may be reused by an active member, and a
+    tail is a convenience for live devices — the burned id is the identity. Returns
+    ``None`` when the argument is not an already-removed id, so the caller's
+    ``unknown_member`` refusal stands unchanged.
+    """
+    from local_operator.network.credentials import messages as messages_mod
+
+    wanted = str(args.device or "").strip()
+    tombstone = next((row for row in record.members if str(row.device_id) == wanted), None)
+    if not wanted or not (record.is_burned(wanted) or (tombstone and not tombstone.active)):
+        return None
+    imported = _import_relay()
+    outcome = imported.repair_removed_member(record, device_id=wanted, by=record.self_device_id)
+    pruned = outcome.repaired
+    # R3: with the tombstone row gone only the burned id is left, and "<id> (<id[:8]>)"
+    # would print one identity twice. The short id alone is the readable spelling.
+    who = (
+        f"{tombstone.name} ({wanted[:8]})"
+        if tombstone is not None and tombstone.name
+        else wanted[:8]
+    )
+    repaired = (
+        f"removed {len(pruned)} stale credential reference(s) to it: {', '.join(pruned)}"
+        if pruned
+        else "no credential references to it remained on this device"
+    )
+    # R1: a row another device owns is that owner's to revise, so it is named, not
+    # rewritten — and not counted as repaired.
+    foreign = [
+        f"{key} is still listed by {owner_name or owner[:8]}, which owns it; "
+        "that device must revoke it (this device does not rewrite another owner's share)"
+        for key, owner, owner_name in outcome.owner_must_revoke
+    ]
+    return _emit(
+        args,
+        {
+            "ok": True,
+            "code": "already_revoked",
+            "network_id": record.network_id,
+            "removed": wanted,
+            "epoch": record.epoch,
+            "rotated": False,
+            "repaired": pruned,
+            "owner_must_revoke": [
+                {"key": key, "owner_device": owner, "owner_name": owner_name}
+                for key, owner, owner_name in outcome.owner_must_revoke
+            ],
+        },
+        [
+            f"{who} was already removed from {record.name}; "
+            f"the epoch was not rotated again (it is {record.epoch})",
+            repaired,
+            *foreign,
+            *messages_mod.COPY_CEILING_LINES,
+        ],
+    )
+
+
 def _cmd_member_rm(args: argparse.Namespace) -> int:
     """Revoke a member: tombstone, rotate, bump the epoch, fan out (R5)."""
     # THE ARGUMENT IS A DEVICE, AND EVERY OTHER SURFACE PRINTS ITS NAME — the same rule
@@ -3028,6 +3190,9 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
         # that could inform them — it is the one that matches what the write needs.)
         # Safe here because ``require_secrets`` only reads.
         store.require_secrets(record.network_id)
+        already = _member_rm_already_revoked(args, record)
+        if already is not None:
+            return already
         raise MeshRefusal(
             "unknown_member",
             f"{args.device!r} is not a device in {record.name}; run 'lop network show' "

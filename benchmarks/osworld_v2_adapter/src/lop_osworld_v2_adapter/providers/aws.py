@@ -58,7 +58,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from lop_osworld_v2_adapter import guest_disk, guest_loss, guest_supervisor, scoring
+from lop_osworld_v2_adapter import (
+    guest_disk,
+    guest_loss,
+    guest_supervisor,
+    guest_xcursor,
+    scoring,
+)
 from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_INSTANCE_ABSENT,
     EVIDENCE_INSTANCE_TERMINATED,
@@ -849,6 +855,9 @@ class AwsProvider:
         self._cache_root: Path | None = None
         self._schedule_created = False
         self._supervisor_install_attempted = False
+        # The guest leak-fix outcome (``guest_xcursor``); None until allocate
+        # reaches it. Public so the record of what the guest ran is readable.
+        self.guest_xcursor_patch: guest_xcursor.PatchReport | None = None
         self._supervisor_unit: str | None = None
         self._supervisor_password = ""
         self._supervisor_restart: int | None = None
@@ -979,8 +988,54 @@ class AwsProvider:
         # that did NOT land now refuses the episode here instead of being
         # recorded and stepped over.
         await asyncio.to_thread(self._prepare_guest_disk, plan)
+        # BEFORE the supervisor and upstream's reset: the server reloads the
+        # patched module here, so the supervisor installs over the serving
+        # process the episode will actually use, and the reset's first
+        # screenshot already runs leak-free. See ``guest_xcursor``.
+        await asyncio.to_thread(self._patch_guest_xcursor)
         await asyncio.to_thread(self._install_guest_supervisor, plan)
         await asyncio.to_thread(self._start_desktop_env, plan, task)
+
+    def _patch_guest_xcursor(self) -> None:
+        """Apply upstream's X-display leak fix to the guest, and always record it.
+
+        FAIL-OPEN BUT NEVER SILENT. The stock action server leaks one X client
+        per screenshot and the X session dies at roughly 480-500 of them -- the
+        measured cause of the ``bridge-wedged`` terminal (``guest_xcursor``
+        carries the evidence). A patch that cannot land leaves the episode on
+        the stock guest, exactly as before this existed; what it may not do is
+        leave no trace, because every reported score names whether the guest
+        carried the deviation. So ``guest-xcursor-patch.json`` is written on
+        every path, with the tri-state ``applied`` (true / false / null for
+        "write attempted, unconfirmed") and the reason.
+        """
+
+        try:
+            report = guest_xcursor.apply_xcursor_patch(
+                self._run_guest_command, clock=self._monotonic, sleep=self._sleep
+            )
+        except Exception as error:  # noqa: BLE001 - the module never raises; belt and braces
+            # Where it raised is unknown, so whether a write landed is unknown:
+            # the honest record is "unconfirmed", never "stock".
+            report = guest_xcursor.PatchReport(
+                status="unconfirmed", reason=f"patch pass raised {type(error).__name__}"
+            )
+        self.guest_xcursor_patch = report
+        if report.applied is True:
+            logger.info("guest xcursor patch: %s", report.status)
+        elif report.applied is False:
+            logger.warning(
+                "guest xcursor patch NOT applied (%s): the episode runs on the stock guest, "
+                "which leaks one X connection per screenshot",
+                report.status,
+            )
+        else:
+            logger.warning(
+                "guest xcursor patch UNCONFIRMED (%s): a write was attempted but its effect "
+                "was not verified; the guest may serve the stock or the patched module",
+                report.status,
+            )
+        self._write_supervisor_evidence(guest_xcursor.EVIDENCE_FILENAME, report.to_json())
 
     def _install_guest_supervisor(self, plan: ProvisioningPlan) -> None:
         """Optional preparation only; installation must never reject an episode."""

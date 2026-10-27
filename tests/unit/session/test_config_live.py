@@ -42,6 +42,7 @@ from local_operator.mobile.peer_send import journal_unconfirmed_enabled
 from local_operator.model.configure import (
     SessionStreamFn,
     _anthropic_cache_ttl_1h_min_context_tokens,
+    _anthropic_subagent_cache_ttl_1h_min_context_tokens,
     _openai_api_mode,
     _openai_use_max_context_window,
     _openrouter_provider_preferences,
@@ -488,6 +489,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "providers.anthropic.cache_ttl_1h_min_context_tokens": (
         999_999,
         lambda s, w: _anthropic_cache_ttl_1h_min_context_tokens(s.routing_settings),
+    ),
+    "providers.anthropic.subagent_cache_ttl_1h_min_context_tokens": (
+        888_888,
+        lambda s, w: _anthropic_subagent_cache_ttl_1h_min_context_tokens(s.routing_settings),
     ),
     # Observed through the same function the client builder calls, not through
     # the raw mapping: what makes this key live is that ``_openai_api_mode``

@@ -914,6 +914,12 @@ def test_ci_partitions_each_tree_by_measured_duration(job: str) -> None:
 #: against 650 s of tests, and the tui-e2e ubuntu leg was 1164 s against
 #: 1112 s. Observed overhead is therefore 38-52 s; 60 s is that rounded up,
 #: not a guess with room in it.
+#:
+#: The unit job's later `Install ripgrep` step postdates that run and is
+#: overhead too. As an apt install it cost 7-18 s per shard (#2997 round 1,
+#: review R2), enough to push the top of the range past 60 s. It now fetches
+#: one ~2.2 MB pinned release tarball, about 1-2 s, which keeps the measured
+#: range inside 60 s. Re-measure before you add another setup step here.
 SHARD_JOB_OVERHEAD_SECONDS = 60
 
 #: Workers the unit shard job actually gets, and the reason the two trees
@@ -3145,7 +3151,14 @@ def test_an_explicit_root_is_authoritative_for_base_resolution(tmp_path: Path) -
     )
 
 
-_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}
+# Through twelve so a correct doc update past seven reads as a match, not as an
+# unknown word that fails with "says 'eight'; the workflows give 8".
+_COUNT_WORDS = {
+    word: n
+    for n, word in enumerate(
+        "one two three four five six seven eight nine ten eleven twelve".split(), start=1
+    )
+}
 
 
 def test_agents_doc_names_every_job_a_local_run_skips() -> None:
@@ -3182,4 +3195,56 @@ def test_agents_doc_names_every_job_a_local_run_skips() -> None:
         assert f"`{job}`" in paragraph, (
             f"AGENTS.md does not name `{job}` among the jobs a local run never "
             "covers, so a reader can take a local green as covering it"
+        )
+
+
+def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
+    """M1 (#2990). The release sections' check count must match the workflows.
+
+    `AGENTS.md` said a bump PR runs "two checks" for weeks after
+    `release-gate.yml` added four more, because nothing tied the prose number
+    to its source. The count is derived here, not pinned: the `ci.yml` jobs
+    `job_plan` runs on a real version-only diff, plus every `release-gate.yml`
+    job times its Python matrix (that file has no `if:`, so each leg reports
+    on a push to the bump branch).
+
+    NOT covered, deliberately: only the `python-version` matrix axis is
+    counted, and trigger `paths:` filters are not checked. A second axis,
+    `include:` legs or a path filter that stops the gate firing on a bump
+    would pass unnoticed; neither exists today, so guarding them is
+    speculative.
+
+    Mutation that must fail this: add a job or interpreter to the release
+    gate, or ungate a `ci.yml` job, without updating every number word.
+    """
+    scope = _scope()
+    bump = scope.classify(["pyproject.toml"], VERSION_BUMP_DIFF)
+    ci_rows = [job for job, verdict in scope.job_plan(bump).items() if verdict == "run"]
+
+    gate = yaml.safe_load((CI_YML.parent / "release-gate.yml").read_text())
+    # PyYAML reads the bare `on:` key as the boolean True (YAML 1.1).
+    branches = gate.get("on", gate.get(True))["push"]["branches"]
+    assert "release-next" in branches, "the bump branch no longer triggers the release gate"
+    gate_rows = 0
+    for job_id, job in gate["jobs"].items():
+        assert "if" not in job, f"release-gate `{job_id}` is now conditional; recount by hand"
+        gate_rows += len(job.get("strategy", {}).get("matrix", {}).get("python-version", [None]))
+
+    expected = len(ci_rows) + gate_rows
+    doc = (REPO / "AGENTS.md").read_text()
+    # Every place the release sections state the count, including the
+    # round-1 remediation's own sentences: a stale one is the same M1 drift.
+    for pattern in (
+        r"release\s+bump runs (\w+) checks",
+        r"\*\*Expect (\w+) checks on this PR",
+        r"\*\*(\w+)\s+checks\s+appear\s+only\s+when\s+the\s+bump",
+        r"read\s+the\s+(\w+)-check\s+list",
+    ):
+        found = re.search(pattern, doc)
+        assert found, f"the sentence matching {pattern!r} changed shape; re-point this guard"
+        word = found.group(1).lower()
+        assert word in _COUNT_WORDS, f"teach _COUNT_WORDS the word {word!r}"
+        assert _COUNT_WORDS[word] == expected, (
+            f"AGENTS.md says a release-bump PR runs {word!r} checks; the workflows "
+            f"give {expected}: ci.yml {sorted(ci_rows)} + {gate_rows} release-gate rows"
         )

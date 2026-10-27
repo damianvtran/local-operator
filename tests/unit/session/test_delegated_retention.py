@@ -3592,6 +3592,309 @@ def test_the_report_still_reclaims_the_same_pad_when_nothing_is_recent(
     assert not any(name == "shapecold" for name, _ in dry.content_kept)
 
 
+# --------------------------------------------------------------------------
+# The RECORD pass honours the pad recency floor (transcript-idle != pad-idle)
+# --------------------------------------------------------------------------
+#
+# Live evidence: a session was removed WHOLE with its transcript 50.6 h idle while
+# pad files (a headless run's sqlite library, a status file, a pid file) had been
+# edited 5.4-8.7 h earlier. The floor only covered the content layer.
+
+
+def _record_pad(
+    root: Path, name: str, *, nested: str = "notes.txt", idle: bool = True
+) -> tuple[Path, Path]:
+    """A delegated session, 60 h idle by its transcript, with a pad file at ``nested``.
+
+    With ``idle`` (the default) every pad entry under ``root`` is aged to the idle
+    stamp through the explicit :func:`_idle_pads`; callers then freshen exactly
+    the thing the test is about. A test that builds SEVERAL pads passes
+    ``idle=False`` and calls ``_idle_pads`` once after the last: idling again
+    would also reset a file an earlier pad had just been freshened with.
+    Returns ``(session_dir, file)``.
+    """
+    directory = _mk(root, name, age_h=60)
+    target = directory / "scratchpad" / nested
+    target.parent.mkdir(parents=True)
+    target.write_text("work\n")
+    if idle:
+        _idle_pads(root)
+    return directory, target
+
+
+def _logged(root: Path) -> list[str]:
+    log = root / "sessions" / CLEANUP_LOG_NAME
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def test_a_pad_file_touched_an_hour_ago_keeps_the_whole_session(root: Path) -> None:
+    directory, target = _record_pad(root, "livepad")
+    _age(target, NOW - HOUR)
+
+    dry = _pass(root, idle=False, dry_run=True)
+    assert dry.removed == [] and dry.chosen == []
+    assert _kept(dry)["livepad"] == dr.CONTENT_PAD_RECENT_REASON
+    result = _pass(root, idle=False)
+    assert result.removed == [] and result.errors == 0
+    assert _kept(result)["livepad"] == dr.CONTENT_PAD_RECENT_REASON
+    assert directory.exists() and target.exists()
+    assert _logged(root) == [], "a kept session leaves no log row"
+
+
+def test_a_fresh_file_two_levels_deep_keeps_the_whole_session(root: Path) -> None:
+    directory, target = _record_pad(root, "deepfile", nested="first-paint/config/library.sqlite3")
+    _age(target, NOW - 5.4 * HOUR)  # the live evidence: 5.4 h, directories older
+
+    result = _pass(root, idle=False)
+    assert result.removed == []
+    assert _kept(result)["deepfile"] == dr.CONTENT_PAD_RECENT_REASON
+    assert directory.exists() and target.exists()
+    assert _logged(root) == []
+
+
+def test_a_fresh_file_inside_a_shape_directory_keeps_the_whole_session(root: Path) -> None:
+    """The content layer's shape arm is not the only way a ``build/`` dies: the
+    record removal takes it with everything else, so the scan must look in it."""
+    directory, target = _record_pad(root, "shapefile", nested="build/nested/edit.txt")
+    _age(target, NOW - 60)
+
+    result = _pass(root, idle=False)
+    assert result.removed == []
+    assert _kept(result)["shapefile"] == dr.CONTENT_PAD_RECENT_REASON
+    assert target.exists() and _logged(root) == []
+
+
+def test_an_unreadable_pad_subtree_keeps_the_session_and_counts_the_error(root: Path) -> None:
+    """Mode 0400: the directory LISTS but its entries cannot be statted.
+
+    That is the case the pad floor owns. A 0000 directory is caught EARLIER by
+    the existing git-hazard guard (see the next test), which would hide whether
+    the new code ran at all.
+    """
+    directory, target = _record_pad(root, "blindpad", nested="secret/draft.txt")
+    locked = target.parent
+    os.chmod(locked, 0o400)
+    record_only = _provider(
+        CleanupPolicy(
+            delegated_enabled=True, delegated_max_age_hours=48, delegated_scratchpad_enabled=False
+        )
+    )
+    try:
+        dry = _pass(root, idle=False, dry_run=True)
+        both_layers = _pass(root, idle=False)
+        alone = _pass(root, idle=False, policy=record_only)
+    finally:
+        os.chmod(locked, 0o700)
+    assert dry.removed == [] and both_layers.removed == [] and alone.removed == []
+    reason = _kept(alone)["blindpad"]
+    assert "could not be looked at completely" in reason and "draft.txt" in reason
+    # With the content layer OFF the record layer's count is the only one: could
+    # not look is counted, never silent. With it ON, the content layer reaches
+    # the same kept pad and aborts on the same subtree, so ONE unreadable pad
+    # counts twice - existing behaviour of that layer, not changed here; the
+    # session is kept and both counts are about the same condition.
+    assert alone.errors == 1
+    assert both_layers.errors == 2
+    assert directory.exists() and target.exists() and _logged(root) == []
+
+
+def test_a_wholly_unreadable_pad_subtree_is_kept_by_whichever_guard_sees_it_first(
+    root: Path,
+) -> None:
+    """Mode 0000 is refused by the older hazard guard before the floor runs; the
+    contract is only that the session is KEPT and its files survive."""
+    directory, target = _record_pad(root, "lockedpad", nested="secret/draft.txt")
+    locked = target.parent
+    os.chmod(locked, 0o000)
+    try:
+        result = _pass(root, idle=False)
+    finally:
+        os.chmod(locked, 0o700)
+    assert result.removed == [] and "lockedpad" in _kept(result)
+    assert directory.exists() and target.exists() and _logged(root) == []
+
+
+def test_a_pad_too_large_to_prove_idle_keeps_the_session(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dr, "CONTENT_RECENCY_MAX_ENTRIES", 6)
+    directory, _target = _record_pad(root, "hugepad")
+    for index in range(20):
+        (directory / "scratchpad" / f"part-{index:02d}.txt").write_text("")
+    _idle_pads(root)
+
+    result = _pass(root, idle=False)
+    assert result.removed == []
+    assert "too large to prove idle" in _kept(result)["hugepad"]
+    assert directory.exists()
+
+
+def test_an_all_old_pad_is_still_removed_with_one_log_row(root: Path) -> None:
+    """The control: the floor is a guard, not a switch that disables the pass."""
+    directory, _target = _record_pad(root, "coldpad", nested="a/b/old.txt")
+
+    result = _pass(root, idle=False)
+    assert [c.session for c in result.removed] == ["coldpad"]
+    assert not directory.exists()
+    assert len(_logged(root)) == 1
+
+
+def test_the_pad_floor_is_inclusive_at_exactly_the_grace(root: Path) -> None:
+    inside_dir, inside = _record_pad(root, "atgrace", idle=False)
+    outside_dir, outside = _record_pad(root, "pastgrace", idle=False)
+    _idle_pads(root)
+    _age(inside, NOW - dr.CONTENT_PAD_GRACE_S)
+    _age(outside, NOW - dr.CONTENT_PAD_GRACE_S - 60)
+
+    result = _pass(root, idle=False)
+    assert _kept(result)["atgrace"] == dr.CONTENT_PAD_RECENT_REASON
+    assert [c.session for c in result.removed] == ["pastgrace"]
+    assert inside_dir.exists() and not outside_dir.exists()
+
+
+def test_a_write_after_the_preview_still_keeps_the_session(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-asked at removal time, like the pin: the sizing walk and the decision
+    are a gap another process can write into."""
+    directory, target = _record_pad(root, "latewrite")
+    real = dr.bounded_dir_bytes
+
+    def write_then_size(path: Path, *args: Any, **kwargs: Any) -> int:
+        _age(target, time.time())  # the write lands between decision and removal
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(dr, "bounded_dir_bytes", write_then_size)
+    result = _pass(root, idle=False, now=time.time())
+    assert result.removed == [] and result.chosen == []
+    assert _kept(result)["latewrite"] == dr.CONTENT_PAD_RECENT_REASON
+    assert directory.exists() and target.exists() and _logged(root) == []
+
+
+def test_the_other_guards_still_name_themselves_before_the_pad_floor(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh pad does not rewrite the reason of a guard that already matched."""
+    live, live_file = _record_pad(root, "livefresh", idle=False)
+    (live / ".session.pid").write_text(str(os.getpid()))
+    _rostered, rostered_file = _record_pad(root, "rostered", idle=False)
+    _mk(root, "parent-rostered", None, age_h=1, roster=["rostered"])
+    _pinned, pinned_file = _record_pad(root, "pinnedfresh", idle=False)
+    monkeypatch.setattr(dr, "pinned_session_ids", lambda _config: frozenset({"pinnedfresh"}))
+    _bare, bare_file = _record_pad(root, "barefresh", idle=False)
+    # Idle ONCE, then freshen every pad: each guard must win with a genuinely
+    # fresh pad behind it, or "the guard names itself first" would pass vacuously.
+    _idle_pads(root)
+    for fresh_file in (live_file, rostered_file, pinned_file, bare_file):
+        _age(fresh_file, NOW - HOUR)
+
+    result = _pass(root, idle=False)
+    kept = _kept(result)
+    assert kept["livefresh"] == "claimed by a live process"
+    assert kept["rostered"] == "parent session still active"
+    assert kept["pinnedfresh"] == dr.PINNED_REASON
+    assert kept["barefresh"] == dr.CONTENT_PAD_RECENT_REASON  # nothing earlier matched
+    assert result.removed == []
+
+
+def _guard_project(root: Path, directory: Path) -> None:
+    _project(root, "open-p", "active", [directory.name])
+
+
+def _guard_hold(root: Path, directory: Path) -> None:
+    from local_operator.session.cleanup import set_hold
+
+    assert set_hold(
+        root / "sessions", directory.name, reason="evidence", by="operator", kind="evidence"
+    )
+
+
+def _guard_git_hazard(root: Path, directory: Path) -> None:
+    # An unborn, dirty repo in the pad: kept by the older hazard guard. It is
+    # created BEFORE the fixture ages the pad, so only the guard under test and
+    # the pad's own freshness (set after) differ between sessions.
+    repo = directory / "scratchpad" / "repo"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    (repo / "f").write_text("x")
+
+
+@pytest.mark.parametrize(
+    ("guard", "reason"),
+    [
+        (_guard_project, "linked to an open project"),
+        (_guard_hold, "held by the operator"),
+        (_guard_git_hazard, "scratchpad git repo has uncommitted/unpushed work"),
+    ],
+    ids=["project", "hold", "git-hazard"],
+)
+def test_project_hold_and_git_hazard_name_themselves_before_the_pad_floor(
+    root: Path, guard: Any, reason: str
+) -> None:
+    """M2: the same ordering contract as the claim/roster/pin test, for the rest.
+
+    Each session has a genuinely FRESH pad (touched an hour ago) AND a guard that
+    matches earlier in ``_evaluate``; the reason must be the guard's own. A
+    control session with only the fresh pad proves the pad reason would
+    otherwise have fired, so the assertion cannot pass vacuously.
+    """
+    guarded, guarded_file = _record_pad(root, "guarded", idle=False)
+    guard(root, guarded)
+    _bare, bare_file = _record_pad(root, "barepad", idle=False)
+    _idle_pads(root)
+    _age(guarded_file, NOW - HOUR)
+    _age(bare_file, NOW - HOUR)
+
+    result = _pass(root, idle=False)
+    kept = _kept(result)
+    assert kept["guarded"] == reason
+    assert kept["barepad"] == dr.CONTENT_PAD_RECENT_REASON
+    assert result.removed == []
+
+
+def test_a_pad_probe_that_raises_keeps_that_session_and_the_pass_carries_on(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: the ``scratchpad`` existence probe sits INSIDE the guarded region.
+
+    ``Path.is_symlink``/``is_dir`` re-raise anything but ENOENT-class errors, so
+    a pad that goes unreadable between the scan and the decision (a race, a
+    permission flip) used to raise out of ``run_delegated_pass`` and skip the
+    progress write for every OTHER session the pass had already removed. The
+    contract: that one session is kept as "could not be looked at completely",
+    the error is counted, the remaining candidates are still processed, and the
+    progress record is still written.
+    """
+    boom, boom_file = _record_pad(root, "boom", idle=False)
+    _record_pad(root, "cold-a", idle=False)
+    _record_pad(root, "cold-b", idle=False)
+    _idle_pads(root)
+    real = Path.is_symlink
+
+    def flaky(self: Path) -> bool:
+        if self.name == dr.PAD_DIRNAME and self.parent.name == "boom":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_symlink", flaky)
+    # Both layers on, as in production: the CONTENT layer reaches the same pad
+    # and has its own probe, which is not what this test is about.
+    record_only = _provider(
+        CleanupPolicy(
+            delegated_enabled=True, delegated_max_age_hours=48, delegated_scratchpad_enabled=False
+        )
+    )
+    result = _pass(root, idle=False, policy=record_only)
+
+    assert "could not be looked at completely" in _kept(result)["boom"]
+    assert "Permission denied" in _kept(result)["boom"]
+    assert result.errors == 1, "could not look is counted, never silent"
+    assert {c.session for c in result.removed} == {"cold-a", "cold-b"}
+    assert boom.exists() and boom_file.exists()
+    state = json.loads((root / "sessions" / dr.STATE_NAME).read_text())
+    assert state["removed_total"] == 2, "the progress write still happened"
+
+
 def test_an_unstattable_file_inside_a_shape_keeps_the_whole_pad(root: Path) -> None:
     """R4-3: the recency signal must never be silently blind.
 
