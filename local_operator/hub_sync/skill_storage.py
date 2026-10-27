@@ -640,13 +640,9 @@ class ManagedSkillStorage:
                         False,
                     )
                 if before != expected_fingerprint:
-                    raise LinkError(
-                        "local-concurrent-edit", "the skill changed since it was read"
-                    )
+                    raise LinkError("local-concurrent-edit", "the skill changed since it was read")
             transaction = self.journal.prepare(
-                LinkIdentity(
-                    "skill", local_id, _LOCAL_EDIT_SOURCE, "public", None, "local-edit"
-                ),
+                LinkIdentity("skill", local_id, _LOCAL_EDIT_SOURCE, "public", None, "local-edit"),
                 "pull",
                 before_fingerprint=before,
                 after_fingerprint=document.fingerprint,

@@ -18,7 +18,7 @@ from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import skill_storage
 from local_operator.hub_sync.identity import LinkError, LinkIdentity
 from local_operator.hub_sync.provenance import make_record, read_baseline
-from local_operator.hub_sync.skill_document import SkillDocument
+from local_operator.hub_sync.skill_document import SkillDocument, SkillValidationError
 from local_operator.hub_sync.skill_storage import ManagedSkillStorage
 from local_operator.hub_sync.transactions import TransactionError
 
@@ -270,3 +270,124 @@ def test_a_forged_local_edit_basis_is_not_trusted(tmp_path: Path) -> None:
     )
     with pytest.raises(TransactionError, match="malformed"):
         storage._finalize(forged)
+
+
+# --- the deletion ratchet's claim: these renames can never reach ``sessions/`` --------
+#
+# ``tests/unit/session/test_no_session_deletion.py`` allow-lists ``_swap`` and
+# ``remove_local`` on the argument that every path they rename is built from a
+# validated kebab-case alias under ``<config_dir>/skills`` plus fixed ``hub/``
+# names. These cells are that argument's evidence: each aims the write at a real
+# ``<config_dir>/sessions/<id>`` directory by name, by traversal, by absolute
+# path and through symlinks, and asserts it is refused with ``sessions/``
+# byte-identical afterwards.
+
+
+# The refusals are the module's own typed guards (``validate_name``, the symlink
+# checks, journal validation) -- a bare ``Exception`` would also pass on an
+# unrelated crash, which proves nothing about the guard the ratchet leans on.
+_GUARDS = (LinkError, SkillValidationError, TransactionError)
+
+
+def _sessions_tree(config: Path) -> Path:
+    session = config / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "transcript.jsonl").write_text('{"row": 1}\n')
+    (session / "scratchpad").mkdir()
+    (session / "scratchpad" / "note.md").write_text("keep me")
+    return config / "sessions"
+
+
+def _snapshot(root: Path) -> dict[str, bytes | None]:
+    return {
+        str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None)
+        for p in sorted(root.rglob("*"))
+    }
+
+
+_AIMED_NAMES = [
+    "../sessions/0123456789ab",
+    "..",
+    "sessions",
+    "sessions/0123456789ab",
+    "/abs/sessions/0123456789ab",
+    ".archive",
+    "0123456789ab/../../sessions",
+    "Sessions",
+    "a\\..\\sessions",
+]
+
+
+@pytest.mark.parametrize("alias", _AIMED_NAMES)
+def test_a_crafted_alias_cannot_aim_author_or_remove_at_sessions(
+    tmp_path: Path, alias: str
+) -> None:
+    config = tmp_path / "profile"
+    sessions = _sessions_tree(config)
+    before = _snapshot(sessions)
+    storage = ManagedSkillStorage(config)
+    with pytest.raises(_GUARDS):
+        storage.author(alias, _doc(), None)
+    with pytest.raises(_GUARDS):
+        storage.remove_local(alias)
+    assert _snapshot(sessions) == before
+
+
+@pytest.mark.parametrize("through", ["root", "alias", "hub", "hub-backups", "hub-staging"])
+def test_a_symlink_into_sessions_is_refused_by_every_rename(tmp_path: Path, through: str) -> None:
+    """A symlinked skills root, skill dir or hub scaffold is never followed into ``sessions/``."""
+    config = tmp_path / "profile"
+    sessions = _sessions_tree(config)
+    target = sessions / "0123456789ab"
+    document = _doc()
+    if through == "root":
+        (config / "skills").symlink_to(sessions)
+    elif through == "alias":
+        (config / "skills").mkdir()
+        (config / "skills" / document.name).symlink_to(target)
+    elif through == "hub":
+        (config / "hub").symlink_to(sessions)
+    elif through == "hub-backups":
+        (config / "hub").mkdir()
+        (config / "hub" / "backups").symlink_to(sessions)
+    else:
+        (config / "hub").mkdir()
+        (config / "hub" / "staging").symlink_to(sessions)
+    before = _snapshot(sessions)
+    storage = ManagedSkillStorage(config)
+    with pytest.raises(_GUARDS):
+        storage.author(document.name, document, None)
+    # remove_local needs a skill to move; a real one beside the hostile scaffold
+    # makes the refusal come from the symlink guard, not from "no such skill".
+    if through in ("hub", "hub-backups"):
+        if (config / "skills").is_symlink():
+            (config / "skills").unlink()
+        (config / "skills").mkdir(exist_ok=True)
+        (config / "skills" / document.name).mkdir(exist_ok=True)
+        (config / "skills" / document.name / "SKILL.md").write_text("x")
+    with pytest.raises(_GUARDS):
+        storage.remove_local(document.name)
+    assert _snapshot(sessions) == before
+    assert sorted(p.name for p in sessions.iterdir()) == ["0123456789ab"]
+
+
+def test_a_forged_journal_alias_cannot_aim_the_swap_at_sessions(tmp_path: Path) -> None:
+    """``_swap``'s paths come from ``_locations``; a forged payload alias is refused there."""
+    storage, identity, original, baseline = _linked(tmp_path)
+    sessions = _sessions_tree(storage.config_dir)
+    before = _snapshot(sessions)
+    storage.journal.prepare(
+        identity,
+        "pull",
+        before_fingerprint=original.fingerprint,
+        after_fingerprint=original.fingerprint,
+        payload={
+            "adapter": "managed-skill",
+            "local_alias": "../sessions/0123456789ab",
+            "baseline": baseline.to_json(),
+        },
+    )
+    with pytest.raises(_GUARDS):
+        storage.recover(local_id=identity.local_id)
+    assert _snapshot(sessions) == before
+    assert storage.path(original.name).is_dir()

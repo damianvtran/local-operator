@@ -889,9 +889,7 @@ def _skill_write_refusal(error: Exception) -> HTTPException:
     )
 
 
-async def _skill_write(
-    request: Request, key: str, body: Input, work: Any
-) -> CRUDResponse[Any]:
+async def _skill_write(request: Request, key: str, body: Input, work: Any) -> CRUDResponse[Any]:
     """Run ``work(config_dir)`` off the loop, receipted, with refusals typed."""
     from local_operator.hub_sync.identity import LinkError
     from local_operator.hub_sync.skill_document import SkillValidationError

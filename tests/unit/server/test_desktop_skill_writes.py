@@ -310,11 +310,12 @@ async def test_a_symlinked_skills_root_is_refused_not_followed(env) -> None:
 
 async def test_stale_expected_fingerprint_is_409_and_bytes_are_unchanged(env) -> None:
     await env.client.post(
-        "/v1/desktop/skills", json={
+        "/v1/desktop/skills",
+        json={
             "request_id": _rid(),
             "name": "cas-skill",
             "files": _files("cas-skill"),
-        }
+        },
     )
     folder = env.config_dir / "skills" / "cas-skill"
     before = (folder / "SKILL.md").read_bytes()
@@ -455,11 +456,12 @@ async def test_an_unknown_skill_is_404(env) -> None:
 
 async def test_removing_a_local_skill_moves_it_to_a_kept_backup(env) -> None:
     await env.client.post(
-        "/v1/desktop/skills", json={
+        "/v1/desktop/skills",
+        json={
             "request_id": _rid(),
             "name": "gone-skill",
             "files": _files("gone-skill"),
-        }
+        },
     )
     response = await env.client.request(
         "DELETE", "/v1/desktop/skills/gone-skill", json={"request_id": _rid()}
