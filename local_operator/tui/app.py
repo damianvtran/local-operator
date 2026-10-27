@@ -22523,6 +22523,11 @@ class OperatorApp(App[None]):
         outcome = getattr(session, "mcp_startup", None)
         if outcome is None:
             return
+        # WHETHER THIS OUTCOME IS NEWS OR HISTORY, decided once here and reused
+        # by both halves below. ``is_cold`` is the one owner of "no synchronized
+        # runtime is attached" (``SessionProtocol`` states it), so the toast and
+        # the rows can never disagree about the tense.
+        restored = bool(getattr(session, "is_cold", False))
         toast = self.query_one(Toast)
         payload = format_mcp_startup(outcome, max_cells=toast.content_cells)
         if payload is None:
@@ -22599,28 +22604,56 @@ class OperatorApp(App[None]):
                 # semantic lamp colour `format_mcp_startup` derived through the
                 # band's own rule.
                 before = toast.generation
-                toast.show(text, duration_ms=duration_ms, owner=MCP_STARTUP_TOAST_OWNER)
+                # A RESTORED round does not interrupt (review round 1,
+                # MINOR-1). The toast is this app's "this just happened"
+                # surface — it is one-shot, it takes the single courtesy slot,
+                # and on a cold open it announced yesterday's dead servers as
+                # breaking news even when no runtime would ever engage. Its
+                # content is already on screen as a durable row, worded as
+                # history; the interruption is what adds nothing. Nothing is
+                # recorded as told either, so the first LIVE round announcing
+                # the same servers still gets its card.
+                if not restored:
+                    toast.show(text, duration_ms=duration_ms, owner=MCP_STARTUP_TOAST_OWNER)
                 if toast.generation != before and toast.display:
                     announce = _McpAnnounce(sentence, toast.generation)
                     self._last_mcp_announce = announce
                     self._announced_mcp_startup[session_key] = announce
         if not outcome.failures:
             return
-        # No "server" in the wording: one failure key is ``discovery`` (the
-        # config layer itself), and "MCP server discovery failed" would name a
-        # server that does not exist. ``/mcp`` is named on the durable line
-        # because it is the standing answer and this is the surface with room to
-        # point at it — except when the failure text is already a ``/mcp``
-        # command, where the pointer is skipped instead of doubling the dash
-        # (design review D5).
         for name, error in sorted(outcome.failures.items()):
             notice_key = (session_key, name, str(error))
+            # ONE resolution of the column for this notice, used by the
+            # composition, the fold hint and the fit record below (see there).
+            column = self._mcp_notice_painted_column()
+            # THE LEDGER SAYS THIS SESSION ALREADY RECORDED THIS FAILURE, so this
+            # outcome CONFIRMS a row rather than reporting one — and a second row
+            # would spend a line to contradict the first. The only thing left to
+            # say is the tense: a projected "failed last session" that the live
+            # round still reports becomes the present again, IN PLACE, on the
+            # block the reader is already reading (``NoticeBlock.restate``: same
+            # widget, no second row, nothing above it moves). QA round 1 (Q2) is
+            # the failure this removes — a healthy live outcome beside nine
+            # unretracted red rows.
+            #
+            # The KEY is consulted before the view, deliberately: a failure
+            # another session recorded is this session's to write (two
+            # conversations in one process legitimately show the same server),
+            # and the view is then asked only whether the row is still there — a
+            # rebuilt view has none (``deferred`` in round 1's notes).
             if notice_key in self._mcp_failure_notices:
+                painted = self._mcp_failure_row(name, str(error))
+                if painted is not None and painted.mcp_failure_history and not restored:
+                    painted.restate(
+                        self._mcp_notice_line(
+                            name, str(error), budget=NoticeBlock.body_budget(column)
+                        ),
+                        "error",
+                    )
+                    painted.mcp_failure_fit = (name, str(error), column)
+                    painted.mcp_failure_history = False
                 continue
             self._mcp_failure_notices.add(notice_key)
-            # ONE resolution of the column for this notice, used by both the
-            # composition and the fit record below (see there).
-            column = self._mcp_notice_painted_column()
             # The pointer is appended ONLY when the line does not already name
             # ``/mcp`` itself. The auth requirement leads with its own
             # ``/mcp reauth`` command, so appending "— /mcp for details" gave the
@@ -22631,9 +22664,18 @@ class OperatorApp(App[None]):
             # rather than an instruction; when the text is already the command,
             # the reader has the answer. WHICH form it takes is now a budget
             # question as well — see :meth:`_mcp_notice_line`.
+            # `fold_width=column` is the SAME resolution the sentence was
+            # fitted to, handed over because a notice wraps itself when it is
+            # built: without it the rows are authored at the 80-column fallback
+            # and paint at the wrong height for one frame, which the adaptive
+            # spacing rule turns into a blank line above every row and then takes
+            # back (QA round 1, Q1).
             block = self._system_notice_block(
-                self._mcp_notice_line(name, str(error), budget=NoticeBlock.body_budget(column)),
+                self._mcp_notice_line(
+                    name, str(error), budget=NoticeBlock.body_budget(column), restored=restored
+                ),
                 "error",
+                fold_width=column,
             )
             # What the ladder needs to re-run if the column moves, carried ON the
             # block — see ``NoticeBlock.mcp_failure_fit`` for why it is not a side
@@ -22642,9 +22684,39 @@ class OperatorApp(App[None]):
             # built let the two describe different columns if anything moved
             # between the calls (review round 4, R4-1).
             block.mcp_failure_fit = (name, str(error), column)
+            block.mcp_failure_history = restored
 
-    def _mcp_notice_line(self, name: str, error: str, *, budget: int | None = None) -> str:
+    def _mcp_failure_row(self, name: str, error: str) -> NoticeBlock | None:
+        """The row already on screen for ``(name, error)``, if there is one.
+
+        Identity comes from ``NoticeBlock.mcp_failure_fit``, which every MCP
+        failure row carries — the same field ``_refit_mcp_failure_notices`` reads
+        to re-run its ladder. Asking the VIEW rather than remembering the widget
+        is what keeps this honest across a rebuild: a view that was swapped out
+        holds no rows, and one that was built carries its own. Restricts to the
+        current transcript for the same reason every other removal does — another
+        conversation's rows are not this one's to restate.
+        """
+        for block in self._transcript_view().query(".notice-block"):
+            if not isinstance(block, NoticeBlock):
+                continue
+            fit = block.mcp_failure_fit
+            if fit is not None and fit[0] == name and fit[1] == error:
+                return block
+        return None
+
+    def _mcp_notice_line(
+        self, name: str, error: str, *, budget: int | None = None, restored: bool = False
+    ) -> str:
         """``MCP <name> failed: <error>`` plus its signpost, fitted to the column.
+
+        ``restored`` states the fact about the PREVIOUS runtime instead —
+        ``MCP <name> failed last session: <error>`` — because a checkpoint's
+        failure is not a claim about now. The same server can already be healthy
+        in the round that lands a moment later, and the unqualified sentence then
+        contradicts the live toast on the same screen (QA round 1, Q2). The tense
+        is part of the composed HEAD, so the signpost ladder and the width budget
+        run over it unchanged: one ladder, one budget, two voices.
 
         The pointer is the standing answer to "where do I read this properly?"
         and the one part of the line that must never be SPLIT: a wrapped
@@ -22687,7 +22759,11 @@ class OperatorApp(App[None]):
         """
         from rich.cells import cell_len
 
-        head = f"MCP {name} failed: {error}"
+        head = (
+            f"MCP {name} failed last session: {error}"
+            if restored
+            else f"MCP {name} failed: {error}"
+        )
         if "/mcp" in error:
             # The failure text is already the command (the auth family), so the
             # signpost would double the dash and spend cells saying it twice.
@@ -22698,7 +22774,11 @@ class OperatorApp(App[None]):
                 return head + pointer
         trimmed_error = _drop_trailing_parenthetical(error)
         if trimmed_error != error:
-            trimmed = f"MCP {name} failed: {trimmed_error}"
+            trimmed = (
+                f"MCP {name} failed last session: {trimmed_error}"
+                if restored
+                else f"MCP {name} failed: {trimmed_error}"
+            )
             if cell_len(trimmed + _MCP_NOTICE_POINTER_SHORT) <= budget:
                 return trimmed + _MCP_NOTICE_POINTER_SHORT
         return head
@@ -22815,8 +22895,16 @@ class OperatorApp(App[None]):
             if fit is None or fit[2] <= column:
                 continue
             name, error, _ = fit
+            # The TENSE travels with the row: re-fitting a projected "failed last
+            # session" line to a narrower column must not quietly turn it into a
+            # claim about now (QA round 1, Q2).
             block.restate(
-                self._mcp_notice_line(name, error, budget=NoticeBlock.body_budget(column)),
+                self._mcp_notice_line(
+                    name,
+                    error,
+                    budget=NoticeBlock.body_budget(column),
+                    restored=block.mcp_failure_history,
+                ),
                 "error",
             )
             block.mcp_failure_fit = (name, error, column)
@@ -42576,7 +42664,9 @@ class OperatorApp(App[None]):
         """
         self._system_notice_block(body, kind)
 
-    def _system_notice_block(self, body: str, kind: NoticeKind = "info") -> NoticeBlock:
+    def _system_notice_block(
+        self, body: str, kind: NoticeKind = "info", *, fold_width: int = 0
+    ) -> NoticeBlock:
         """The same notice, handing back the block it created.
 
         One caller needs the block — the MCP failure notices re-run their signpost
@@ -42584,8 +42674,19 @@ class OperatorApp(App[None]):
         (``_refit_mcp_failure_notices``) — and that caller is a method on this app,
         so it calls this directly rather than widening the notice callback's type
         for every closure that produces nothing (review round 4, R4-5).
+
+        ``fold_width`` is the column this notice is ABOUT TO BE PAINTED IN, and
+        it has to come from the caller that resolved it: a notice wraps itself
+        when it is built, so a block authored without it folds at the 80-column
+        fallback and its ROW COUNT is pinned until ``on_resize`` lands a frame
+        later. That is not cosmetic here — the adaptive spacing rule asks whether
+        either neighbour ``spans_multiple_rows()``, so one frame of
+        narrow-authored rows puts a blank line above every one of them and the
+        next frame takes those rows (and the transcript's height) back. QA round
+        1, Q1 measured it on the real fixture: nine rows at ``[2,1,2,2,1,1,1,2,2]``
+        with ``gap-above`` on all of them, then all 1 row with one gap.
         """
-        block = NoticeBlock(body, kind)
+        block = NoticeBlock(body, kind, fold_width=fold_width)
         # While the boot CARD is up the notice is part of a centred composition;
         # below the card threshold the input is a full-width bar and the spine is
         # the axis everything shares. `_append_block` recomputes the boot layout

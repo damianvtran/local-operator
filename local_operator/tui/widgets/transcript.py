@@ -1923,6 +1923,20 @@ class NoticeBlock(TranscriptBlock):
     #: failures; design round 2, D2-1). Every other notice leaves it ``None``.
     mcp_failure_fit: tuple[str, str, int] | None = None
 
+    #: True while this row states a fact about the PREVIOUS runtime rather than
+    #: the live one: a failure projected out of the session's durable checkpoint
+    #: on a cold open, or out of an owner's last round on a viewer.
+    #:
+    #: It exists because the row outlives the moment it describes. The same
+    #: server can recover before the reader's next breath, and a present-tense
+    #: "MCP <x> failed" that nothing retracts is a standing contradiction of the
+    #: healthy toast beside it (QA round 1, Q2, measured on the real fixture: a
+    #: green "MCP ready: 12 servers" above nine red "failed" rows). Labelling it
+    #: as history makes it a true statement that no later state can contradict,
+    #: and it is what tells ``_report_mcp_startup`` to RESTATE this row in place
+    #: (never append beside it) once a live outcome confirms the same failure.
+    mcp_failure_history: bool = False
+
     #: Five tiers. ``info`` is `dim` — the quietest ink in the app, a step below a
     #: settled tool summary — which is right for a receipt nobody needs to read
     #: and wrong for one that answers a question the user is actively asking
