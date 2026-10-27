@@ -14830,11 +14830,10 @@ class OperatorApp(App[None]):
         # The pass is SYNCHRONOUS -- no await may be introduced between the
         # navigation's final identity check and this commit
         # (`session_navigation._prepare_and_commit`). It is also the pass that
-        # gives a FIRST-VISIT (`display_only`) presentation its first measurable
-        # viewport: `_prepare_sidebar_session` skips the in-prepare layout round
-        # trip deliberately, so a first saved view reveals its real rows without
-        # paying an extra frame first.
-        #
+        # corrects the viewport of a FIRST-VISIT (`display_only`)
+        # presentation: `_prepare_sidebar_session` skips the in-prepare layout
+        # round trip deliberately, so a first saved view reveals its real rows
+        # without paying an extra frame first, and arrives here unmeasured.
         # Paint suppressed for the same reason as the settle in the loop, and it
         # is the same defect: this layout runs with the transcript revealed and
         # the composer still holding the OUTGOING draft's rows, so the frame it
@@ -14850,6 +14849,20 @@ class OperatorApp(App[None]):
         finally:
             screen._compositor_refresh = paint
         viewport = view.container_size.height or view.size.height
+        if not view.size.height:
+            # `container_size` survives hiding, the widget's own size does not: a
+            # view under an ancestor that is not laid out keeps a stale
+            # `container_size` while measuring (0, 0), so the guard above cannot
+            # see it and every pass would read the same stale height. Measured at
+            # eight blind pages with `scroll_y` pinned at 0.0, ended only by the
+            # page cap (review round 2, m4 — latent today; production hides this
+            # view itself at every call site, but the rule must not depend on
+            # that). This is the same second clause the deferred fill stands down
+            # on, and it is checked AFTER the layout, deliberately: a first visit
+            # has no size UNTIL that pass, so checking it before would dead-end
+            # the very case the pass exists for.
+            self._start_resume_fill()
+            return
         if not viewport:
             # Still nothing to measure against, so a fill here would be blind.
             self._start_resume_fill()

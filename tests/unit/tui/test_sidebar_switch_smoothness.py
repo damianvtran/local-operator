@@ -1512,14 +1512,83 @@ async def test_the_pre_reveal_burst_stands_down_on_a_hidden_view() -> None:
             app._prefill_resume_before_reveal()
             for _ in range(12):
                 await pilot.pause()
-            after = len(view.blocks())
+            # SNAPSHOT BEFORE THE VIEW IS SHOWN AGAIN. Showing it lays it out,
+            # which fires the extent hook that LEGITIMATELY re-arms the deferred
+            # fill — those pages are the next cell's subject, not this one's
+            # (review round 2, M2: counting them made this fail 5/5 at 2-11
+            # mounts, a timing-dependent number, while the burst itself mounted
+            # nothing). The snapshot also has to be taken here rather than derived
+            # from `blocks()`, because the re-show legitimately mounts into it.
+            hidden_mounts = len(mounts)
+            hidden_blocks = len(view.blocks())
             view.display = True
             for _ in range(2):
                 await pilot.pause()
 
-    assert mounts == [], f"the burst mounted {len(mounts)} pages into a hidden transcript"
-    assert after == before, (
+    assert hidden_mounts == 0, f"the burst mounted {hidden_mounts} pages into a hidden transcript"
+    assert hidden_blocks == before, (
         "pages appeared in a transcript that could not be laid out",
         before,
-        after,
+        hidden_blocks,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_pre_reveal_burst_stands_down_when_an_ancestor_is_hidden() -> None:
+    """`container_size` survives hiding; the widget's own size does not (round 2, m4).
+
+    A view under an ancestor that is not laid out keeps its last
+    `container_size` while measuring (0, 0), so a stand-down that reads only
+    `view.display` lets the burst mount page after mount against a stale height:
+    eight blind pages with `scroll_y` pinned at 0.0, ended only by the page cap.
+    The deferred fill already refuses that state through its `view.size.height`
+    clause; the burst is the same work on the same view and applies the same rule
+    (checked after the layout pass, because a first visit has no size until that
+    pass runs).
+
+    Latent rather than reachable today — production hides this view itself at
+    every call site — so this cell exists to keep the rule from depending on that
+    list staying short.
+    """
+    app = OperatorApp(lambda: _factory(SidebarRemote("hidden-parent")))
+    with patch("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8):
+        async with app.run_test(size=(160, 70)) as pilot:
+            for _ in range(10):
+                await pilot.pause()
+            view = app._transcript_view()
+            assert view is not None
+            app._resume_pending_head = [
+                _message("assistant", "older row " + "x" * 100) for _ in range(200)
+            ]
+            mounts: list[int] = []
+            real_mount = app._mount_older_resume_page
+
+            def mount(*args, **kwargs):  # type: ignore[no-untyped-def]
+                mounts.append(1)
+                return real_mount(*args, **kwargs)
+
+            app._mount_older_resume_page = mount  # type: ignore[method-assign]
+            before = len(view.blocks())
+            parent = view.parent
+            assert parent is not None
+            parent.display = False
+            for _ in range(4):
+                await pilot.pause()
+            app._prefill_resume_before_reveal()
+            for _ in range(12):
+                await pilot.pause()
+            # Same split as the hidden-view cell: re-showing the ancestor lays
+            # the view out and re-arms the deferred fill, whose pages are not
+            # this test's subject.
+            hidden_mounts = len(mounts)
+            hidden_blocks = len(view.blocks())
+            parent.display = True
+            for _ in range(2):
+                await pilot.pause()
+
+    assert hidden_mounts == 0, f"the burst mounted {hidden_mounts} pages under a hidden ancestor"
+    assert hidden_blocks == before, (
+        "pages appeared in a transcript that could not be laid out",
+        before,
+        hidden_blocks,
     )
