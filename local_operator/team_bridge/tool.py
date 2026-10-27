@@ -26,6 +26,14 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
 - **channels** — one page of the owner account's conversations. Tenant-visible
   channels the owner has not joined come back with ``discoverable=true``,
   ``member=false`` and a member count, so an agent can find a channel to join.
+  It lists LIVE conversations only: an archived one has left the server's
+  default list (agent-server ``status=open``), so an agent cannot see or post to
+  it. That is the product intent. There is deliberately no ``status`` parameter:
+  measured against ``scripts/bench_context_budget.py``, publishing one optional
+  field costs ~22 billed tokens on both the main and the child arm, and the
+  child arm's ratchet had 2 tokens of headroom when this was decided, so the
+  field cannot ship without first paying for it elsewhere. The desktop
+  ``/conversations?status=archived`` route is the human's view of archives.
 - **channel_create** — a group or channel created by the agent identity. The
   creator agent member is added automatically (the server requires it); the
   human owner is added ONLY when named explicitly, because an agent-created
@@ -507,6 +515,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
             return _error(f"channels limit must be 1..{CONVERSATION_PAGE_MAX}")
         try:
+            # No ``status``: the server's default is ``open``, so archived
+            # conversations are intentionally invisible to the agent (module
+            # docstring, "channels", for why it is not a published option).
             result = await runtime.client.conversations(
                 tenant_id=runtime.tenant_id,
                 limit=int(params.limit),

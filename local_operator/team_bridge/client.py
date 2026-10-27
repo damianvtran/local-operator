@@ -2299,8 +2299,14 @@ class TeamBridgeClient:
 
         The server owns every rule (owner or organization owner/admin, archived
         only, never a built-in) and erases the history; this client only carries
-        the request. A repeat after completion answers ``conversation_not_found``,
-        which callers treat as done.
+        the request. A partly finished deletion is DURABLE: a large conversation is
+        drained in bounded requests, and a request that runs out of its budget (or
+        whose response is lost) answers 503 / a transport failure while the erasure
+        carries on, so the caller RETRIES the same call to finish it. A repeat after
+        completion answers ``conversation_not_found``, which is "done" only for a
+        retry of a delete that already got a 503 or a transport failure: the same
+        opaque 404 also answers a caller who has lost authority, so a first attempt
+        that gets it has NOT deleted anything.
         """
 
         return await self._send(
