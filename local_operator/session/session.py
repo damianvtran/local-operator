@@ -8380,9 +8380,18 @@ class Session:
         ``execute_bash`` awaits the full answer before every spawn and refuses
         rather than run unwrapped. With no root, ``bash`` is withheld at
         :meth:`_filter_declared`, the point every inventory writer passes.
+
+        The attached role's NAMES are floored too (see the end of this method),
+        because for ``lop exec --profile`` they are the unattended declaration:
+        filtering and rebuilding the inventory alone left a scout whose stored
+        row predates the shell with no ``bash`` at top level, while the same row
+        delegated got one through the child path's floor.
         """
         from local_operator.harness.subagent import (
+            BACKGROUND_OBSERVER_TOOLS,
+            _can_background,
             is_readonly_shell_role,
+            readonly_shell_floor_names,
             readonly_shell_write_root,
         )
 
@@ -8419,6 +8428,32 @@ class Session:
             except Exception:  # noqa: BLE001 — fail closed: drop the shell, never keep it open
                 logger.warning("could not rebuild the scout's sandboxed bash", exc_info=True)
                 self._shell_write_root = None
+        if self._attached_profile_tools:
+            # The SAME floor the delegated child gets
+            # (``harness.subagent.readonly_shell_floor_names``), applied to the
+            # names ``exec_startup.declared_tool_inventory`` turns into the
+            # declaration: an installed row frozen before the scout had a shell
+            # (seed sync holds tool changes back) still gets the sandboxed one,
+            # and a root-less session's declaration stops naming one it cannot
+            # have. AFTER the rebuild, whose failure clears the root. Only names:
+            # ``bash`` is admitted from the inventory the session already holds,
+            # never fabricated, like the child floor's ``available`` -- so the
+            # root is offered only when that inventory HAS a ``bash`` (a host or
+            # config that disabled it would otherwise declare a tool resolving
+            # to nothing, and the run would end reporting it unresolved).
+            holds_bash = any(tool.name == "bash" for tool in tools)
+            names = readonly_shell_floor_names(
+                self._attached_profile_tools,
+                shell_root=self._shell_write_root if holds_bash else None,
+            )
+            # Parity with the child prune: a shell that can background keeps
+            # the tools that observe and await its jobs, or its own
+            # ``background=true`` receipt points at a tool it was not declared.
+            if "bash" in names and _can_background([tool for tool in tools if tool.name == "bash"]):
+                names = (*names, *sorted(BACKGROUND_OBSERVER_TOOLS - set(names)))
+            self._attached_profile_tools = names
+            # Additive, so re-pinning only adds what the floor added.
+            self.set_tool_deferral(pins=names)
         self.refresh_tools(tools)
 
     def clear_agent_profile(self) -> None:
@@ -13852,6 +13887,10 @@ class Session:
     @property
     def attached_profile_tools(self) -> tuple[str, ...]:
         """The ``tools:`` allow-list the attached role declares, or ``()``.
+
+        For a read-only shell role this is the list AFTER the shell floor
+        (see :meth:`_apply_readonly_shell_role`), since it is what an unattended
+        ``lop exec --profile`` declares.
 
         ``()`` means "the role declares none", NOT "declare an empty
         inventory"; a caller deciding whether to bound itself on this must treat
