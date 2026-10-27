@@ -1086,3 +1086,30 @@ def test_apply_capture_elisions_uses_recorded_addresses_not_a_fresh_prefix() -> 
                 frame = block.captured_frame
                 kept_blocks.append((frame.producer_scope, frame.revision_id))
     assert kept_blocks == [("mcp:s:b", "1"), ("mcp:s:a", "2"), ("mcp:s:b", "2")]
+
+
+def test_superseded_text_reads_flush_at_the_text_ceiling():
+    """A text-only session that re-reads files is bounded too: the ceiling
+    counts superseded reads, not only frames, and needs no browser capture
+    (PR #3004 agent review round 2). Below the ceiling it stays quiet, so the
+    warm prefix is kept."""
+    from local_operator.compaction.pruning import STALE_FLUSH_MAX_TEXT_BYTES, stale_set
+
+    def read(path: str, size: int) -> Message:
+        return Message(
+            role="tool",
+            tool_call_id=f"call-{path}-{size}",
+            tool_name="read",
+            content=[TextContent(text="x" * size)],
+            provider_payload={"details": {"path": path}},
+        )
+
+    chunk = 16_000
+    copies = STALE_FLUSH_MAX_TEXT_BYTES // chunk
+    below = [read("/src/a.py", chunk) for _ in range(copies)]  # copies-1 stale
+    at = below + [read("/src/a.py", chunk)]  # copies stale
+    assert len(stale_set(below, frames=False).reads) == copies - 1
+    assert stale_flush_due(below, context_window=200_000) is False
+    assert stale_flush_due(at, context_window=200_000) is True
+    # Precomputed and computed agree (the session passes the former).
+    assert stale_flush_due(at, stale=stale_set(at, frames=False)) is True

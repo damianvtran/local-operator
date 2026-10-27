@@ -374,3 +374,38 @@ async def test_a_short_gap_between_runs_keeps_the_prefix(tmp_path, monkeypatch):
     finally:
         await session.dispose()
     assert _divergences(stream.sent) == []
+
+
+@pytest.mark.asyncio
+async def test_a_long_run_on_a_200k_model_stays_under_the_image_limit(tmp_path):
+    """One long run of small distinct frames on a 200k-window model, with a
+    small brief: every compaction trigger stays closed (140 frames is ~170k
+    estimated tokens only near the end, and a few MB), so the boundary sweep
+    inside ``_plan_compaction`` is never reached. The batch-flush ceiling must
+    be judged at the tool boundary anyway, or requests climb past Anthropic's
+    100-images-per-request limit (PR #3004 QA round 2, Q5: peak 112 images,
+    the frame sweep reached in 2 of 142 boundaries).
+    """
+    paths = [f"/scratch/small-{index}.png" for index in range(140)]
+    pixels = {path: base64.b64encode(f"png:{path}".encode() * 8).decode() for path in paths}
+    _PIXELS.update(pixels)
+    small_model = ModelSpec(
+        provider="anthropic",
+        model_id="claude-haiku-4-5",
+        context_window=200_000,
+        supports_images=True,
+    )
+    stream = RecordingStream(paths)
+    session = _session(tmp_path, stream, model=small_model)
+    try:
+        await session.prompt("Audit these screens.")
+    finally:
+        await session.dispose()
+        for path in paths:
+            _PIXELS.pop(path, None)
+
+    assert len(stream.frames_sent) == len(paths) + 2
+    # 90 is the provider limit (100) less the margin; the frame ceiling holds
+    # the run far below it (8 stale + 2 retained at most).
+    assert max(stream.frames_sent) <= 90
+    assert max(stream.frames_sent) <= 10

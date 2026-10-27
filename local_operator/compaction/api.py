@@ -73,6 +73,7 @@ from .pruning import (
     prune_tool_outputs,
     shed_frames_to_wire_budget,
     stale_flush_due,
+    stale_set,
 )
 from .thresholds import (
     DEFAULT_WIRE_BYTES_BUDGET,
@@ -169,6 +170,7 @@ __all__ = [
     "prune_tool_outputs",
     "shed_frames_to_wire_budget",
     "stale_flush_due",
+    "stale_set",
     "register_invalidator",
     "render_file_operations",
     "resolve_advisor_floor_tokens",
