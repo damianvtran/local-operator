@@ -645,6 +645,8 @@ _CALL_COLUMNS = (
     *_DECODE_MEASURE_COLUMNS,
     "billing_basis",
     "cost_source",
+    "cache_miss_type",
+    "cache_missed_tokens",
 )
 
 #: Columns added AFTER the first shipped schema. A database created by an older
@@ -712,6 +714,17 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # from a mapping that did not exist when it was written.
     ("billing_basis", "TEXT NOT NULL DEFAULT 'not_tracked'"),
     ("cost_source", "TEXT NOT NULL DEFAULT 'none'"),
+    # Anthropic cache diagnostics: WHY a call's prompt prefix diverged from the
+    # conversation's previous request (``system_changed``, ``tools_changed``,
+    # ``messages_changed``, ...), plus the API's estimate of the input tokens
+    # that divergence cost, or the non-break states ``baseline`` / ``unchanged``
+    # / ``pending``. '' = not diagnosed, which is the truth for every row
+    # recorded before this column and for every non-Anthropic call. Raw-ledger
+    # only (same scope as ``cache_write_1h_tokens``): it explains individual
+    # cache writes, and summing a reason across days answers nothing a GROUP BY
+    # over the 90-day ledger cannot.
+    ("cache_miss_type", "TEXT NOT NULL DEFAULT ''"),
+    ("cache_missed_tokens", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 #: Columns added to the ``session_daily`` ROLLUP after it first shipped, in the
@@ -1236,6 +1249,8 @@ def _row_values(
         snapshot.decode_calls,
         snapshot.billing_basis,
         snapshot.cost_source,
+        snapshot.cache_miss_type,
+        int(snapshot.cache_missed_tokens),
     )
 
 

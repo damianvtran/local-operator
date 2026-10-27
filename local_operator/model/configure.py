@@ -41,6 +41,7 @@ from local_operator.harness.types import (
     ChatRequest,
     ModelSpec,
     StreamEvent,
+    StreamStartEvent,
     Usage,
 )
 from local_operator.model import tariff
@@ -3775,6 +3776,20 @@ class SessionStreamFn:
         self._settings = settings
         self._session_id = session_id
         self._parent_session_id: str | None = None
+        # The Anthropic response id of this conversation's last DIAGNOSED turn,
+        # i.e. the ``previous_message_id`` the next turn's cache diagnostics
+        # compare against (``ChatRequest.cache_diagnostics``). Instance state,
+        # never shared: ``fork`` builds a fresh stream, so a subagent starts its
+        # own chain at ``None`` and can never be diffed against its parent's
+        # prompt (a guaranteed, meaningless ``system_changed``).
+        #
+        # KNOWN GAP: not persisted, so a RESUMED session (a new process) starts
+        # again at ``None`` and its first turn records ``baseline``, even when
+        # an edited instruction file just rewrote the whole prefix. Seeding it
+        # from the transcript would recover those attributions (a stale id is
+        # harmless: the API answers ``previous_message_not_found``); deferred
+        # on PR #2984 (QA Q1).
+        self._cache_diagnostics_previous_id: str | None = None
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
         # ``_observation_root`` is a reference to the ROOT stream of this fork
@@ -6866,6 +6881,17 @@ class SessionStreamFn:
         # no rotation, no chain), and an exhausted or disabled pinned route
         # therefore stops the recovery with that failure as its reason
         # instead of re-pointing the call at another credential or model.
+        if request.purpose == "turn":
+            # Conversation turns only: an aside, a compaction summary or a
+            # helper carries a different prompt, so comparing it with the
+            # turn chain would report a break that is by design. Isolated
+            # decoration returned above and never reaches here.
+            request = request.model_copy(
+                update={
+                    "cache_diagnostics": True,
+                    "cache_diagnostics_previous_id": self._cache_diagnostics_previous_id,
+                }
+            )
         if request.purpose == "turn" and not request.same_route_retry:
             await self.preflight_usage(request.model)
         # The binding boundary (``_note_serving_binding``): after the preflight
@@ -6889,6 +6915,23 @@ class SessionStreamFn:
             usage = getattr(event, "usage", None)
             if tracks_context and usage is not None:
                 self._context_tracker.record(binding.measured if binding else measured, usage)
+            if (
+                request.cache_diagnostics
+                and isinstance(event, StreamStartEvent)
+                and event.cache_miss_type is not None
+                and event.response_id
+            ):
+                # Only a DIAGNOSED response advances the chain: the API stores
+                # a fingerprint only for requests that opted in, so a fallback
+                # turn served elsewhere (or with the latch off) would name an id
+                # the comparison cannot find. The latest attempt supersedes,
+                # exactly as ``StreamStartEvent`` documents for retries.
+                # Advanced on ``message_start`` rather than at stream end on
+                # purpose: the API fingerprints the REQUEST when it accepts
+                # it, so even a stream that dies afterwards left a comparable
+                # entry, and the worst case is a benign
+                # ``previous_message_not_found`` on the next turn.
+                self._cache_diagnostics_previous_id = event.response_id
             yield event
 
     @property
@@ -6959,6 +7002,10 @@ class SessionStreamFn:
         first_output_at: float | None = None
         last_output_at: float | None = None
         outcome = "incomplete"
+        # Anthropic cache diagnostics from the LATEST ``StreamStartEvent``
+        # (a retried attempt supersedes an abandoned one); ``""`` = undiagnosed.
+        cache_miss_type = ""
+        cache_missed_tokens = 0
         # Snapshot char lengths BEFORE streaming: cheap (string length reads,
         # sub-millisecond even on a very large context) and safe to hand a
         # background thread, unlike the live message objects.
@@ -7068,6 +7115,9 @@ class SessionStreamFn:
                         last_output_at=last_output_at,
                         output_deltas=output_deltas,
                     )
+                if event_type == "start":
+                    cache_miss_type = getattr(event, "cache_miss_type", None) or ""
+                    cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
                 stop_reason = getattr(event, "stop_reason", None)
                 if stop_reason is not None:
                     outcome = str(stop_reason)
@@ -7217,6 +7267,8 @@ class SessionStreamFn:
                 # not a zero-length one.
                 decode_us=ledger_window_us,
                 output_deltas=output_deltas,
+                cache_miss_type=cache_miss_type,
+                cache_missed_tokens=cache_missed_tokens,
             )
             # The observation rides AFTER the analytics ledger, alongside it in
             # the same ``finally``: same facts, ONE clock read (``duration_ms``
@@ -7249,8 +7301,11 @@ class SessionStreamFn:
         usage_reported: bool = True,
         decode_us: int = 0,
         output_deltas: int = 0,
+        cache_miss_type: str = "",
+        cache_missed_tokens: int = 0,
     ) -> None:
         """Enqueue one call sample. Off the hot path; never raises."""
+        self._log_cache_break(usage, cache_miss_type, cache_missed_tokens)
         try:
             import time as _time
 
@@ -7386,10 +7441,51 @@ class SessionStreamFn:
                     decode_us=measured_us,
                     decode_tokens=measured_tokens,
                     decode_calls=measured_calls,
+                    cache_miss_type=cache_miss_type,
+                    cache_missed_tokens=int(cache_missed_tokens),
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
+
+    def _log_cache_break(self, usage: Usage, miss_type: str, missed_tokens: int) -> None:
+        """One ``[prompt cache break]`` INFO line for a costly diagnosed break.
+
+        Called once per call from ``_record_usage``, so the line is emitted at
+        most once per call. It fires only when the API NAMED a divergence
+        (``*_changed``, not the baseline/unchanged/pending states and not
+        "no comparison") AND the call actually rewrote a large share of its
+        context: a small late-prompt change behind a still-hitting breakpoint
+        is the API's documented "rare, low impact" case and would be noise.
+        The thresholds mirror the benchmark's break classifier (>= 20k written
+        and >= half the context), so log counts and ledger analysis agree.
+        """
+        try:
+            from local_operator.providers.clients import (
+                ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK,
+            )
+
+            if (
+                not miss_type
+                or miss_type in ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK
+                or miss_type in ("previous_message_not_found", "unavailable")
+            ):
+                return
+            written = int(usage.cache_write_tokens)
+            context = int(usage.input_tokens) + int(usage.cache_read_tokens) + written
+            if written < 20_000 or written * 2 < context:
+                return
+            logger.info(
+                "[prompt cache break] session=%s type=%s missed_tokens=%d "
+                "cache_write=%d context=%d",
+                self._session_id or "-",
+                miss_type,
+                int(missed_tokens),
+                written,
+                context,
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break a turn
+            logger.debug("cache-break log failed", exc_info=True)
 
     async def close(self) -> None:
         if self._closed:

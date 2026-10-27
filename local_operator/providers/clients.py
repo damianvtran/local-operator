@@ -19,6 +19,7 @@ retryable/auth flags for the failover layer.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import email.utils
 import functools
@@ -4192,6 +4193,80 @@ def _anthropic_stream_error(error: Mapping[str, Any]) -> ProviderError:
     )
 
 
+#: Process-wide latch: the API refused the ``diagnostics`` body field once, so
+#: no later request sends it. Cache diagnostics are GA and need no beta header
+#: (https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics),
+#: but they are pure telemetry: a workspace, region or future API version that
+#: rejects the key must cost one retried request, never a turn, and never one
+#: wasted round trip per call for the rest of the process. A list so the latch
+#: is a mutation rather than a ``global`` rebinding; tests reset it.
+#:
+#: PROCESS-wide rather than keyed by credential/workspace/model, deliberately.
+#: The cost is that one refusing org or model (e.g. a ZDR "covered model" that
+#: answers 400 rather than ``unavailable``) blinds diagnostics for every other
+#: account in the same process until it restarts. That costs telemetry only,
+#: never a turn, and no refusal has ever been observed, while a keyed latch adds
+#: state whose key (org id is not known for API keys) would itself be a guess.
+#: Revisit with a ``(credential, model)`` key if a real refusal shows up.
+_ANTHROPIC_DIAGNOSTICS_REFUSED: list[bool] = [False]
+
+#: ``StreamStartEvent.cache_miss_type`` values that are NOT a prefix break:
+#: the conversation's first diagnosed request, a compared request whose prefix
+#: matched (a miss there is TTL expiry), and a comparison still running.
+ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK = frozenset({"baseline", "unchanged", "pending"})
+
+
+def _anthropic_cache_diagnosis(
+    message: Mapping[str, Any], *, previous_id: str | None
+) -> tuple[str, int]:
+    """``(cache_miss_type, cache_missed_tokens)`` from a diagnosed ``message_start``.
+
+    Only called when the request carried ``diagnostics``. The API's three
+    shapes: ``diagnostics: null`` (no divergence, or the first turn — told
+    apart by whether we named a previous id), ``{"cache_miss_reason": null}``
+    (comparison still running) and ``{"cache_miss_reason": {"type": ...,
+    "cache_missed_input_tokens": n}}``. Anything unrecognised reads as
+    ``unavailable`` — the API's own word for "no comparison produced" — so a
+    shape change degrades the telemetry instead of raising into the stream.
+    """
+    diagnostics = message.get("diagnostics")
+    if diagnostics is None:
+        return ("unchanged" if previous_id else "baseline"), 0
+    if not isinstance(diagnostics, Mapping):
+        return "unavailable", 0
+    reason = diagnostics.get("cache_miss_reason")
+    if reason is None:
+        return "pending", 0
+    if not isinstance(reason, Mapping):
+        return "unavailable", 0
+    kind = _first_text(reason.get("type")) or "unavailable"
+    try:
+        missed = max(0, int(reason.get("cache_missed_input_tokens") or 0))
+    except (TypeError, ValueError):
+        missed = 0
+    return kind, missed
+
+
+async def _refuses_diagnostics(response: httpx.Response) -> bool:
+    """Whether an error response is the API rejecting the ``diagnostics`` key.
+
+    Matched on status 400 plus the field NAME in the refusal's own shape — the
+    message starts with ``diagnostics`` or names it as a path (``diagnostics:``
+    / ``diagnostics.``, e.g. ``diagnostics: Extra inputs are not permitted``) —
+    never on status alone: an ordinary 400 is a defect in the request and must
+    surface unchanged. Never on a bare substring either: a 400 about a tool or
+    schema path that merely CONTAINS the word (``tools.0.name: run_diagnostics
+    ...``) would otherwise switch the feature off for the whole process.
+    """
+    if response.status_code != 400:
+        return False
+    await response.aread()
+    message = _extract_error_message(response, _error_payload(response)).strip().lower()
+    # ``^diagnostics\b`` (not a bare ``startswith``) so ``diagnostics_level: ...``
+    # opening a message about some OTHER field cannot latch either.
+    return bool(re.search(r"^diagnostics\b|(?<![\w.])diagnostics[:.]", message))
+
+
 def _anthropic_cache_marker_ttl_ms(body: dict[str, Any]) -> int:
     """Read legal cache marker positions, never nested user/tool JSON fields.
 
@@ -4825,6 +4900,19 @@ class AnthropicClient:
             body["speed"] = fast.value
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
+        if (
+            request.cache_diagnostics
+            and self._base_url == ANTHROPIC_API_URL
+            and not _ANTHROPIC_DIAGNOSTICS_REFUSED[0]
+        ):
+            # First-party API only: Bedrock, Vertex and relays do not offer
+            # the feature, and an unknown key there is a guaranteed 400. Sent
+            # on EVERY turn of the conversation, including the first with an
+            # explicit null, because the object is the opt-in — the API
+            # fingerprints a response only when its request carried it, so a
+            # skipped turn would leave the next one nothing to compare with.
+            # Outside the cached prefix: the comparison is server-side.
+            body["diagnostics"] = {"previous_message_id": request.cache_diagnostics_previous_id}
         if self._base_url == ANTHROPIC_API_URL:
             lifetime = _anthropic_cache_marker_ttl_ms(body)
             if lifetime:
@@ -4832,6 +4920,32 @@ class AnthropicClient:
                 # context-size approximation or arbitrary nested tool input.
                 set_wire_hint(request, "anthropic:messages", lifetime, "explicit-wire")
         return body
+
+    @contextlib.asynccontextmanager
+    async def _open_messages_stream(
+        self, url: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> AsyncIterator[httpx.Response]:
+        """Open the Messages stream, shedding a refused ``diagnostics`` key once.
+
+        The fail-closed half of cache diagnostics: if the API answers 400
+        naming the field, the latch flips for the whole process, the key is
+        removed from ``body`` IN PLACE (the caller reads ``"diagnostics" in
+        body`` to know whether ``message_start`` carries a diagnosis) and the
+        identical request is sent again. Nothing has been streamed yet, so the
+        retry is invisible to the turn; every other status passes through.
+        """
+        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+            if not ("diagnostics" in body and await _refuses_diagnostics(response)):
+                yield response
+                return
+        _ANTHROPIC_DIAGNOSTICS_REFUSED[0] = True
+        body.pop("diagnostics", None)
+        logger.info(
+            "anthropic: cache diagnostics refused by the API (HTTP 400); "
+            "disabled for this process"
+        )
+        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+            yield response
 
     async def stream(
         self,
@@ -4848,12 +4962,12 @@ class AnthropicClient:
         usage = Usage(at_ms=tariff.now_ms())
         streamed_text = False
         block_index_to_call: dict[int, tuple[str, str]] = {}
+        body = self._build_body(request, oauth=self._is_oauth(oauth_access))
 
-        async with self._http.stream(
-            "POST",
+        async with self._open_messages_stream(
             url,
-            json=self._build_body(request, oauth=self._is_oauth(oauth_access)),
-            headers=self._headers(
+            body,
+            self._headers(
                 api_key,
                 oauth_access,
                 effort=request.model.reasoning_effort,
@@ -4885,8 +4999,23 @@ class AnthropicClient:
                     # an Anthropic-pinned run with NO native turn identity on
                     # any event — and therefore no way for an external runtime
                     # to commit no-replay proof.
+                    # ``diagnostics`` rides the same frame (streaming puts it
+                    # on ``message_start``, nowhere else). Read only when THIS
+                    # request opted in — the retry below may have dropped the
+                    # key — so an undiagnosed call reports ``None``, never a
+                    # fabricated "baseline".
+                    miss_type, missed_tokens = (
+                        _anthropic_cache_diagnosis(
+                            event.get("message") or {},
+                            previous_id=request.cache_diagnostics_previous_id,
+                        )
+                        if "diagnostics" in body
+                        else (None, 0)
+                    )
                     yield StreamStartEvent(
-                        response_id=_stream_id((event.get("message") or {}).get("id"))
+                        response_id=_stream_id((event.get("message") or {}).get("id")),
+                        cache_miss_type=miss_type,
+                        cache_missed_tokens=missed_tokens,
                     )
                     raw_usage = (event.get("message") or {}).get("usage") or {}
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
