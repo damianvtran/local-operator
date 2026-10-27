@@ -70,6 +70,10 @@ for `fr`; when this file and a habit disagree, this file wins.
 - Budgets: `maxCells` from the en sidecar; pinned: PERSIST_HINT 42/43 cells,
   tip pool 59, `/help` ≈ 55. French typographic spaces (U+202F) count one
   cell each — account for them.
+- Recorded width exception: relay.health.ended_placeholder reads
+  "dossier perso" — the full "dossier personnel" makes it 38 cells against its
+  36-cell cap; ended_detail and ended_hint keep the full form. Revisit only
+  with a budget change.
 
 ## Punctuation & typography
 

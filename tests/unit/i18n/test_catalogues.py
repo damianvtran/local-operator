@@ -205,9 +205,10 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # Borderless phone chrome carries its own audited namespace; existing
         # English labels stay untouched while all seven locales join the wave.
         "relay.chrome",
-        # The session status dot's 2-key namespace, carried only with its
-        # independently audited ledger row; it keeps relay.chrome's English
-        # bytes frozen, and sorts between relay.chrome and relay.session.tags.
+        # The session status dot's 9-key namespace (round 2 added the
+        # reconnecting/dropped/quiet/ended copy), carried only with its
+        # doubly audited ledger row; it keeps relay.chrome's English bytes
+        # frozen, and sorts between relay.chrome and relay.session.tags.
         "relay.health",
         "relay.session.tags",
         # Audited relay condensation copy adds 19 keys; keep this census exact.

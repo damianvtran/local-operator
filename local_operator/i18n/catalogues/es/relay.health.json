@@ -1,4 +1,11 @@
 {
   "relay.health.live": "En línea",
-  "relay.health.live_detail": "Se ejecuta en tu máquina — tus mensajes le llegan de inmediato"
+  "relay.health.live_detail": "Se ejecuta en tu máquina — tus mensajes le llegan de inmediato",
+  "relay.health.reconnecting": "Reconectando",
+  "relay.health.reconnecting_detail": "Este teléfono perdió la conexión con tu máquina y sigue intentando reconectarse. Puede que la sesión siga ejecutándose allí; un envío puede fallar hasta que vuelva la conexión.",
+  "relay.health.dropped_detail": "Tu máquina no logra comunicarse con esta sesión ahora mismo y sigue intentándolo. Hasta que lo consiga, cualquier envío falla de inmediato y lo que escribiste se queda en el campo de texto.",
+  "relay.health.quiet_detail": "Esta sesión dejó de responder en tu máquina — puede que esté ocupada o atascada. Un mensaje puede aparecer como fallido y aun así llegar cuando la sesión se ponga al día. Reintentar no lo enviará dos veces.",
+  "relay.health.ended_detail": "El historial se conserva. Envía un mensaje o toca Reanudar para reabrir la sesión en tu carpeta personal.",
+  "relay.health.ended_send_failed": "Esta sesión finalizó y no se pudo reabrir en este momento. Inténtalo de nuevo o toca “Finalizada” arriba y elige Reanudar.",
+  "relay.health.ended_placeholder": "Enviar la reabre (carpeta personal)…"
 }
