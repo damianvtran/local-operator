@@ -45,7 +45,44 @@ def linux_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         "which",
         lambda name: "/usr/bin/systemctl" if name == "systemctl" else f"/usr/bin/{name}",
     )
+    # THE PORT PROBE IS HOST-GLOBAL, so a scratch HOME does not isolate it. `ss`
+    # answers for the whole machine, and `service_action("start"|"restart")`
+    # ADOPTS (SIGTERMs) every listener on the unit's port whose argv verifies as
+    # a relay of ours. On a Linux host running a real relay on :4097, a cell
+    # whose `systemctl_user` stub reports no MainPID took the live relay for a
+    # hand-started one and stopped it (#3028 round 3: the remote node's
+    # local-operator-network exited 0 at 21:23:08Z during a unit run). Cells
+    # that need holders pin them explicitly through `_pin_supervision`.
+    monkeypatch.setattr(relay, "_port_holder_pids", lambda port: [])
     return home
+
+
+def test_the_linux_host_fixture_never_sees_a_real_listener(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real listening socket on this host must be invisible to the fixture's probe.
+
+    Fails on the old fixture on Linux: `ss` reports this test's own pid, the same
+    way it reported the live relay that a cell in this file then stopped.
+    """
+    import socket
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        assert relay._port_holder_pids(port) == []
+        # The whole adoption input, with the same "no MainPID" stub the log-parent
+        # cell uses: nothing on this host may become a holder to stop.
+        monkeypatch.setattr(
+            supervisors,
+            "systemctl_user",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+        assert relay._supervision_state(port)["holders"] == []
+    finally:
+        listener.close()
 
 
 def _unit(home: Path) -> Path:
