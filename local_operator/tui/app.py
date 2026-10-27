@@ -2067,8 +2067,10 @@ RESUME_PREFILL_MAX_PAGES = 8
 #: can make even two pages expensive. 200 ms is roughly the first-paint budget
 #: the whole reveal lives in, so the pre-fill may never own more than all of it:
 #: past this the view is shown with what it has and the deferred fill tops it up
-#: through the ordinary route (measured cost of the loop on the bench shapes:
-#: 11-16 ms, i.e. this ceiling is ~15x the observed work).
+#: through the ordinary route (measured cost of the loop at the bench size,
+#: 160x48: 11-16 ms, so this ceiling is ~15x the observed work — a very large
+#: terminal pays more, measured 48-81 ms at 300x200 where the reserve needs four
+#: pages, review round 1, n1).
 RESUME_PREFILL_BUDGET_S = 0.2
 
 #: The row that stands in for the un-rendered head of a resumed conversation.
@@ -14794,44 +14796,62 @@ class OperatorApp(App[None]):
         change.
         """
         view = self._transcript_view()
-        viewport = view.container_size.height or view.size.height
         # LOOP TO THE GOAL THE DEFERRED FILL WOULD STOP AT, not to a page count.
         # `_resume_fill_goal_met` IS the fill's own predicate, so the two cannot
         # disagree about when the reserve is done — a loop one row stingier than
         # the fill would hand it a page to mount into the revealed view, which is
         # the shift this method exists to prevent.
-        if not viewport and self._resume_pending_head and not self._resume_paging:
-            # A FIRST-VISIT (`display_only`) presentation is mounted without the
-            # in-prepare layout round trip -- `_prepare_sidebar_session` skips it
-            # deliberately so a first saved view reveals its real rows without
-            # paying an extra frame first. The consequence here is that the view
-            # has no measured viewport yet, and a fill with no geometry to
-            # measure against would mount pages blindly. Resolve the geometry
-            # instead of giving up on it: this is the same layout pass the next
-            # frame would run, pulled forward, and it is SYNCHRONOUS -- no await
-            # is introduced between the navigation's final identity check and
-            # this commit (`session_navigation._prepare_and_commit`).
-            #
-            # Paint suppressed for the same reason as the settle below, and it
-            # is the same defect: this layout runs with the transcript revealed
-            # and the composer still holding the OUTGOING draft's rows, so the
-            # frame it would paint shows 21 mounted blocks and NONE of them in
-            # view (design round 1, D1, cold/draft2 f001 at dock 7 / editor 3
-            # against a settled 5 / 1). The layout is needed -- it is what gives
-            # this first-visit view a measurable viewport -- but its
-            # intermediate arrangement must not reach the screen.
-            screen = self.screen
-            paint = screen._compositor_refresh
-            screen._compositor_refresh = _suppress_intermediate_paint
-            try:
-                screen._refresh_layout()
-            finally:
-                screen._compositor_refresh = paint
-            viewport = view.container_size.height or view.size.height
-        if not viewport or self._resume_paging or not self._resume_pending_head:
-            # Nothing locally pending, or a fetch already owns the gate. The
-            # scheduled fill below still runs and reaches the same goal by the
-            # ordinary route.
+        #
+        # A HIDDEN VIEW HAS NO GOAL TO MEASURE, and the burst must stand down for
+        # the same reason the deferred fill does (`not view.display or not
+        # view.size.height` there). `container_size` keeps the last height it had
+        # while nothing lays the view out, so `scroll_y` never moves however many
+        # pages are mounted and every pass reads as progress: measured at 8 pages
+        # blind, `scroll_y` stuck at 29, before the page cap ended it (review
+        # round 1, m2). Only `display` is tested here, not `size`: a first visit
+        # legitimately has no size yet, and that case is the layout below.
+        if not view.display or self._resume_paging or not self._resume_pending_head:
+            # Hidden, nothing locally pending, or a fetch already owns the gate.
+            # The scheduled fill below still runs and reaches the same goal — or
+            # stands down and remembers the view — by the ordinary route.
+            self._start_resume_fill()
+            return
+        # READ THE REAL VIEWPORT BEFORE THE FIRST CHECK — every burst, not only
+        # a first visit. `container_size` at entry is the last layout this view
+        # had, which is neither the height it is about to be given nor the height
+        # its rows measure once laid out: 44 rows at 160x70 against 61. A
+        # conversation whose reserve sits between those two readings is already
+        # "done" by the stale number, so a loop that trusted it exits with
+        # nothing mounted and hands the deferred fill a page to mount into the
+        # REVEALED view — the re-pin shift this method exists to remove, measured
+        # at 38 blocks in the first frame and 62 settled (review round 1, M1;
+        # the band is ordinary two-paragraph replies).
+        #
+        # The pass is SYNCHRONOUS -- no await may be introduced between the
+        # navigation's final identity check and this commit
+        # (`session_navigation._prepare_and_commit`). It is also the pass that
+        # gives a FIRST-VISIT (`display_only`) presentation its first measurable
+        # viewport: `_prepare_sidebar_session` skips the in-prepare layout round
+        # trip deliberately, so a first saved view reveals its real rows without
+        # paying an extra frame first.
+        #
+        # Paint suppressed for the same reason as the settle in the loop, and it
+        # is the same defect: this layout runs with the transcript revealed and
+        # the composer still holding the OUTGOING draft's rows, so the frame it
+        # would paint shows 21 mounted blocks and NONE of them in view (design
+        # round 1, D1, cold/draft2 f001 at dock 7 / editor 3 against a settled
+        # 5 / 1). The layout is needed — it is the measurement — but its
+        # intermediate arrangement must not reach the screen.
+        screen = self.screen
+        paint = screen._compositor_refresh
+        screen._compositor_refresh = _suppress_intermediate_paint
+        try:
+            screen._refresh_layout()
+        finally:
+            screen._compositor_refresh = paint
+        viewport = view.container_size.height or view.size.height
+        if not viewport:
+            # Still nothing to measure against, so a fill here would be blind.
             self._start_resume_fill()
             return
         self._resume_fill_active = True
@@ -14847,12 +14867,21 @@ class OperatorApp(App[None]):
         lease: _PagingLease | None = None
         try:
             deadline = time.monotonic() + RESUME_PREFILL_BUDGET_S
+            # THE BUDGET IS CHECKED AGAINST THE LAST PASS'S COST, not only against
+            # the clock at the top of the pass. A pass that starts at 199 ms runs
+            # its whole projection plus layout, so a bare `now < deadline` let a
+            # 200 ms budget spend 333 ms over two 150 ms pages (review round 1,
+            # m1). Predicting the next pass from the previous one errs toward
+            # stopping early, which is the safe direction: an unfinished reserve
+            # is the deferred fill's, a late first frame is nobody's.
+            pass_cost = 0.0
             while (
                 mounted < RESUME_PREFILL_MAX_PAGES
-                and time.monotonic() < deadline
+                and time.monotonic() + pass_cost < deadline
                 and self._resume_pending_head
                 and not self._resume_fill_goal_met(view, viewport=viewport)
             ):
+                started = time.monotonic()
                 if lease is None:
                     # Defensive, and today unreachable for the same reason the
                     # deferred fill's acquire is: `_resume_paging` IS this
@@ -14881,6 +14910,7 @@ class OperatorApp(App[None]):
                 finally:
                     screen._compositor_refresh = paint
                 viewport = view.container_size.height or view.size.height
+                pass_cost = time.monotonic() - started
         except Exception:
             # See the docstring: a projection failure must degrade to the
             # deferred fill, never propagate into the invalidation retry.
@@ -14894,6 +14924,14 @@ class OperatorApp(App[None]):
             # was released from a callback it had already returned past. Released
             # inline, the pages' own deferred `release_gate` calls find the lease
             # gone and return, and the fill below runs against clean state.
+            #
+            # WHAT THOSE RETURNS SKIP is the per-page tail of `release_gate`:
+            # `_reconcile_head_notice()` and `_transcript_scrolled(None)`. For a
+            # burst page the replacement is the fill started below — its
+            # goal-met exit reconciles the notice from the geometry this burst
+            # produced, and it is the only path that settles `_resume_fill_active`
+            # (review round 1, m3). Anything that changes that exit has to keep
+            # those two calls, or burst pages lose them silently.
             self._release_paging_lease(lease)
             # START THE ORDINARY FILL ALWAYS, including when the loop reached the
             # goal. Its first attempt re-measures laid-out geometry, finds the
