@@ -12923,9 +12923,22 @@ class OperatorApp(App[None]):
             forked=bool(getattr(session, "wears_inherited_title", False)),
         )
         self._wire_mcp_status(session)
-        self._report_mcp_startup(session)
         if replay_history:
             self._render_resumed_history(session)
+        # AFTER the replay, for the SAME load-bearing reason
+        # ``_report_attachment_restore`` documents four lines below: a durable
+        # failure row is a fact about THIS conversation's last runtime, so it
+        # belongs at its end, directly above the composer. Raised before the
+        # replay — where this call used to sit — it became block 0 of N and the
+        # replayed history was appended after it, which put the rows thousands of
+        # lines above the reader on any resumed conversation that had an outcome
+        # to report. A cold open now ALWAYS has one (the checkpoint's outcome is
+        # restored by ``_restore_cold_details``), so the ordering is what makes
+        # the reveal's rows the ones the reader is looking at rather than the
+        # ones they have to scroll back for. Costs nothing on an empty
+        # transcript: the replay no-ops there, so the boot splash is untouched
+        # and the row lands under it.
+        self._report_mcp_startup(session)
         # AFTER the replay, and the order is load-bearing (D1). A stale
         # attachment is by definition only reachable on a session that ALREADY
         # RAN, so this notice always lands on a transcript with history. Raised

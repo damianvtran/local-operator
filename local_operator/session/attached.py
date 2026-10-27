@@ -2192,6 +2192,20 @@ class AttachedSession:
                 # what the session was connected to, and the runtime's own
                 # state replaces it wholesale on first engage.
                 "mcp_servers": list(durable.mcp_servers),
+                # The startup OUTCOME is durable for the same reason, and it is
+                # the one thing that decides whether the transcript carries MCP
+                # FAILURE rows. Without it a cold frame cannot know about them:
+                # the first frame paints clean, and the runtime's first
+                # engagement reinjects the very same checkpoint and appends the
+                # rows under a reader who has already started reading, which is
+                # the tail shift this restore removes. Restored as HISTORY like
+                # ``mcp_servers``: the outcome the last runtime recorded, which
+                # the runtime's own state replaces wholesale on first engage.
+                # ``_apply_frontend_facades`` converts this Mapping into the
+                # ``McpStartupOutcome`` every in-process reader asks for (the
+                # notice projection, the toast, the band, ``/mcp``), so the cold
+                # frame and the attached frame render one outcome.
+                "mcp_startup": durable.mcp_startup,
                 # Wakes are deliberately NOT taken from the checkpoint. The
                 # synthesised state already read them from the wake index
                 # (``_synthesise_cold_state``), which is the live derived file
