@@ -928,6 +928,37 @@ _PER_TOKEN_EVENT_TYPES = (
 #: the merge added, and ``set_ask_handler`` re-runs one entry of it. A tool
 #: added to the registry with a session-gated builder and not added here is
 #: advertised to nobody.
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _notify_sentence(outcome: Any) -> str:
+    """What the ``notify`` tool tells the model about one write (§1.3).
+
+    Model-facing English (a tool result), so it is not catalogued. Each arm
+    names what happened and, where the next move differs, what to do — the
+    dismissed arm especially, so a wake that ticks every five minutes stops
+    re-raising something the operator already set aside.
+    """
+    item = outcome.item_id
+    if outcome.action == "unchanged":
+        return f"Unchanged — {item} already says this."
+    if outcome.action == "absorbed":
+        return (
+            f"The operator dismissed {item}; the update was recorded without notifying. "
+            "Use a higher priority or a new key only if it now needs them."
+        )
+    if outcome.action == "updated":
+        return f"Updated {item} ({_ordinal(max(1, outcome.repeat_count - 1))} update)."
+    if outcome.action == "revived":
+        return f"Raised {item} again at {outcome.priority} priority; it was dismissed before."
+    return f"Notified (id {item})."
+
+
 def _deferred_availability(name: str, published: bool) -> str:
     """The line a ``tool://`` read appends when it activated a deferred tool.
 
@@ -985,6 +1016,12 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # Appended last for the same prefix reason as `sessions`.
     "generate_video",
     "video_status",
+    # The inbox tool is gated on `notify_inbox`, a field only the session's own
+    # per-turn context binds, so — exactly the `no_reply` lesson above — without
+    # this line the tool is created nowhere a real session looks. A child never
+    # receives it (`_job_id` is set before the merge, so the builder refuses).
+    # Appended last for the same prefix reason as `sessions`.
+    "notify",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -3536,6 +3573,11 @@ class Session:
         #: consumed exactly once by ``_finalize_attention_notify``.
         self._run_triggers: set[str] = set()
         self._run_notify_requested: bool = False
+        #: Set when THIS run posted an inbox item through ``notify`` (any
+        #: priority; ``docs/design/notifications-inbox.md`` §3.4). Reset with
+        #: ``_run_notify_requested``. It is what lets a ``notify:true`` wake turn
+        #: end quietly: the operator asked to be told, and the item told them.
+        self._run_notified: bool = False
         #: The raw ``custom_type`` of every INTERNAL-class input this run
         #: consumed, beside the trigger record and reset with it. The class
         #: vocabulary deliberately collapses all of them into "internal", and
@@ -3984,6 +4026,15 @@ class Session:
         #: this task instead — see :meth:`_spawn_selected_model_write`.
         self._selected_model_task: "asyncio.Future[None] | None" = None
         self._system_blocks_provider = system_blocks_provider
+        if getattr(system_blocks_provider, "session_notify_membership", False):
+            # Factory-created providers render before their warm tool snapshot
+            # gains session-owned doors. Membership is authoritative here; a
+            # child/one-shot/output-contract never acquires the notify clause.
+            setattr(
+                system_blocks_provider,
+                "notify_available",
+                lambda: any(tool.name == "notify" for tool in self._tools),
+            )
         self._frozen_system_blocks: list[str] | None = None
         self._last_system_blocks: list[str] | None = None
         self._system_state_message_id: str | None = None
@@ -13745,11 +13796,15 @@ class Session:
         # drops ``ask``; clearing the contract restores the door, so re-run the
         # merge and let the builder decide (it refuses wherever the door stays
         # ``None`` for some other reason).
+        # ``notify`` shares the door's exclusions (``_notify_inbox_callable``),
+        # so it follows the same drop/re-merge.
         if contract is not None:
-            if any(tool.name == "no_reply" for tool in self._tools):
-                self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+            if any(tool.name in ("no_reply", "notify") for tool in self._tools):
+                self.refresh_tools(
+                    [tool for tool in self._tools if tool.name not in ("no_reply", "notify")]
+                )
         else:
-            self._merge_capability_tools(("no_reply",))
+            self._merge_capability_tools(("no_reply", "notify"))
 
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
@@ -16243,6 +16298,106 @@ class Session:
             return None
         return self._quiet_end_refusal
 
+    def _notify_inbox_callable(self) -> Callable[..., Awaitable[str]] | None:
+        """The ``notify`` tool's inbox door, or ``None`` where no inbox reads this session.
+
+        createIf rung 3 (``docs/design/notifications-inbox.md`` §3.2): the tool
+        exists only for a TOP-LEVEL conversation the operator's own listings
+        show, because that is the conversation an item can send them back to.
+        ``None`` for:
+
+        * a delegated child (``_job_id``): it reports through ``hub`` and its
+          parent decides whether the operator needs an item, so one event is
+          one item, attributed to a conversation the operator can open;
+        * a session the listings HIDE (``resume.is_user_session`` false, the
+          predicate ``_session_may_announce`` gates banners on): a hidden
+          session puts nothing on the operator's screen;
+        * a one-shot host or an output-contract session (the ``quiet_end``
+          exclusions — the host's product is the final text);
+        * ``LOP_NOTIFY=0``.
+
+        The gate answers "is there an inbox the operator reads for this
+        session" — reachability, not host identity (AGENTS.md footprint ladder).
+        """
+        if self._job_id is not None or self._one_shot_exit or self._output_contract is not None:
+            return None
+        from local_operator.tools import builtin
+
+        if not builtin.notify_enabled():
+            return None
+        if not self._session_is_listed():
+            return None
+        return self._notify_inbox
+
+    def _session_is_listed(self) -> bool:
+        """Whether the operator's own listings show this session (``is_user_session``).
+
+        A session with no directory answers YES, the ``_session_may_announce``
+        rule: absence of a marker means the user's own.
+        """
+        directory = getattr(getattr(self, "transcript", None), "directory", None)
+        if not directory:
+            return True
+        try:
+            from local_operator.resume import is_user_session
+
+            return is_user_session(Path(directory))
+        except Exception:  # noqa: BLE001 — an unanswered question keeps the tool
+            logger.debug("notify: could not read the session origin", exc_info=True)
+            return True
+
+    async def _notify_inbox(
+        self,
+        *,
+        title: str,
+        body: str,
+        priority: str,
+        key: str,
+        links: list[dict[str, str]],
+        anchor_id: str,
+    ) -> str:
+        """Persist unread; presence never proves a newly written callout was seen.
+
+        Even a focused session with fresh machine input may be scrolled up,
+        covered, or showing a child. Only a later item-specific render receipt
+        can acknowledge this revision. L1b owns bounded banner grace; it must
+        re-read the item's read watermark before claiming delivery.
+        """
+        from local_operator.notifications.store import NotificationStore
+
+        root = Path(self._config_dir)
+        store = NotificationStore(root)
+        outcome = await asyncio.to_thread(
+            store.notify,
+            session_id=self.session_id,
+            title=title,
+            body_md=body,
+            priority=priority,
+            key=key,
+            links=links,
+            anchor_id=anchor_id,
+            session_title=self.conversation_name,
+            agent_id=self._agent_id or "",
+        )
+        self._run_notified = True
+        return _notify_sentence(outcome)
+
+    def _notify_tui_evidence(self) -> Any:
+        """The attached TUI's input evidence, when the runtime reports one (L1b/L2).
+
+        ``None`` today: the ``activity`` control op that carries a TUI's
+        Key/MouseDown edges to its runtime lands with the TUI lane, and an
+        absent report is "not active" — the item stays unread, which is the
+        direction every unknown falls (§6.3).
+        """
+        probe = getattr(self, "_notify_tui_probe", None)
+        if not callable(probe):
+            return None
+        try:
+            return probe()
+        except Exception:  # noqa: BLE001 — unknown is "not active"
+            return None
+
     async def _quiet_end_refusal(self) -> str | None:
         """The refusal sentence for a quiet end, or ``None`` when it is allowed.
 
@@ -16280,7 +16435,12 @@ class Session:
             self._has_awaiting_user() and not self._body_turn_yields_to_person()
         ):
             return "A person asked this turn; answer them in one line."
-        if self._run_notify_requested:
+        # A ``notify:true`` delivery is answered by an inbox item as well as by
+        # text: the operator asked to be told, and the item (with its own
+        # banner per priority) tells them, durably, before the turn ends
+        # (docs/design/notifications-inbox.md §3.4). The person-asked rule above
+        # still wins — a human waiting on words gets words.
+        if self._run_notify_requested and not self._run_notified:
             return "This wake or monitor asked to tell the user; say what they need to know."
         return None
 
@@ -17750,6 +17910,7 @@ class Session:
         # exactly once, at turn end, by ``_finalize_attention_notify``.
         self._run_triggers = set()
         self._run_notify_requested = False
+        self._run_notified = False
         self._run_input_types = set()
         self._run_wake_ids = set()
         self._run_catchup_unidentified = False
@@ -19871,6 +20032,11 @@ class Session:
             # kill switch, which is exactly where the tool must not exist. Its
             # presence is what ``build_no_reply_tool``'s createIf gate reads.
             quiet_end=self._quiet_end_callable(),
+            # THE INBOX DOOR (docs/design/notifications-inbox.md §3.2): the
+            # whole availability fact of ``notify`` — ``None`` for delegated
+            # children, hidden sessions, one-shot hosts, output-contract
+            # sessions and under the kill switch.
+            notify_inbox=self._notify_inbox_callable(),
             # The channel-spend ingest seam. ACTIVE only where a session owns a
             # fold: tools build a frozen record and call it, and the session
             # folds, journals and publishes. A bound method (not a value) so the
@@ -21923,8 +22089,12 @@ class Session:
         # this method just closed is a one-way latch — the mounted tool could
         # only refuse from here on. Drop it the way
         # ``set_ask_handler(None)`` drops ``ask``.
-        if any(tool.name == "no_reply" for tool in self._tools):
-            self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+        # ``notify`` closes on the same latch (``_notify_inbox_callable``): a
+        # one-shot host's product is its final text, not an inbox item.
+        if any(tool.name in ("no_reply", "notify") for tool in self._tools):
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name not in ("no_reply", "notify")]
+            )
 
     def declare_headless_host(self) -> None:
         """Declare this session's host a HEADLESS print-mode host (turn-supplements R8).

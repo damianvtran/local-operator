@@ -914,7 +914,7 @@ def test_info_registry_row_carries_the_panel_destination():
     assert row["aliases"] == []
     # Parity with the registry: the catalogue is exactly the rows that carry a
     # destination, in registry order, which is what the transport's own record
-    # claims and what `/mobile` and `/notifications` are excluded from — both
+    # claims and what `/mobile` and `/unread` are excluded from — both
     # withhold a destination on purpose, because neither has a renderer adapter
     # (the phone is provisioned from a shell, the pile is cleared by the
     # sidebar's own control).

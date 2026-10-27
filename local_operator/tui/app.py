@@ -18359,6 +18359,9 @@ class OperatorApp(App[None]):
             "/hub",
             "/resume",
             "/notifications",
+            # The receipt listing's own name (decision D2): the same local-only
+            # handler, so the same exemption.
+            "/unread",
         }
     )
 
@@ -43227,7 +43230,12 @@ class OperatorApp(App[None]):
             self._cmd_accounts(notice)
         elif command == "/failovers":
             self._cmd_failovers(notice)
-        elif command == "/notifications":
+        elif command in ("/unread", "/notifications"):
+            # `/unread` is the completion-receipt listing's name now (decision
+            # D2, docs/design/notifications-inbox.md §7). `/notifications` still
+            # reaches the same handler ONLY until the TUI Notifications page
+            # lands (lane L2), so a terminal user keeps a working command in the
+            # release where the page does not exist yet; L2 replaces this arm.
             self._cmd_notifications(arg, notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
@@ -51261,7 +51269,10 @@ class OperatorApp(App[None]):
             picker.set_choices(self._goal_argument_choices())
             picker.set_notice("")
             return
-        if message.command == "notifications":
+        if message.command in ("unread", "notifications"):
+            # `/unread` is the listing's name (D2); `/notifications` shares the
+            # handler until the L2 page lands, so it shares this row too.
+            #
             # ONE row, and it is the clearing form — the bare command (which
             # lists) is what pressing Enter without a space already does, so
             # offering it here would be a row that restates the submit key.

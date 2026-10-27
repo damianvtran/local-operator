@@ -32775,3 +32775,197 @@ async def execute_no_reply(
         useless=True,
         details={QUIET_TURN_KEY: True},
     )
+
+
+# ---------------------------------------------------------------------------
+# notify — post an item to the operator's inbox
+# ---------------------------------------------------------------------------
+#
+# ``docs/design/notifications-inbox.md`` §3. A push or banner is gone once seen;
+# an inbox item stays until the operator reads or dismisses it, so a watcher's
+# finding (an outside PR needing review, a fraud attempt, a campaign's numbers)
+# is not buried by the next morning's backlog.
+#
+# createIf, footprint rung 3: the builder returns ``None`` unless the session
+# bound its inbox door (``ToolContext.notify_inbox``), which only a top-level
+# conversation the operator's listings show does (``Session.
+# _notify_inbox_callable``). PUBLISHED: the completed deferred pilot confused
+# notify with todo and falsely claimed delivery. The measured 573-token cost
+# is explicit in bench_context_budget.py; discovery cannot be a budget trick.
+# The system.md has_notify clause names when to reach for it. Appended at END
+# of TOOL_BUILDERS/DEFAULT_TOOL_NAMES for the prompt-cache reason every other
+# append states.
+
+#: The kill switch: ``LOP_NOTIFY=0`` (or false/no/off) removes the tool — env
+#: only, no config key, the ``LOP_NO_REPLY`` discipline: only an explicit off
+#: value turns it off, read ONCE at import; a test monkeypatches this attribute.
+NOTIFY_ENABLED: bool = os.environ.get("LOP_NOTIFY", "").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def notify_enabled() -> bool:
+    """Whether this process offers ``notify`` (``LOP_NOTIFY``, default on)."""
+    return NOTIFY_ENABLED
+
+
+class NotifyLink(BaseModel):
+    """One link the operator may follow from the item (http(s) only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(max_length=80)
+    url: str = Field(max_length=500)
+
+    @field_validator("url")
+    @classmethod
+    def _http_only(cls, value: str) -> str:
+        # The inbox renders links as clickable on every surface; a `file:`,
+        # `javascript:` or app-scheme URL is not something an agent should be
+        # able to put one click from the operator.
+        if not value.strip().lower().startswith(("http://", "https://")):
+            raise ValueError("links must be http(s) URLs")
+        return value.strip()
+
+
+class NotifyParams(BaseModel):
+    """Kept small on purpose (§3.1): metrics ride ``body`` as a markdown table,
+    and related projects come from the session's own project links."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(
+        min_length=1, max_length=120, description="One line the operator scans in a list."
+    )
+    body: str = Field(
+        "",
+        max_length=4000,
+        description="Markdown: what happened, numbers, what they may want to do.",
+    )
+    priority: Literal["normal", "high", "low"] = Field(
+        "normal", description="high also raises a banner; reserve for what needs them soon."
+    )
+    key: str = Field(
+        "",
+        max_length=120,
+        description=(
+            "Stable id for the thing; reuse it to update the same item instead of adding another."
+        ),
+    )
+    links: list[NotifyLink] = Field(default_factory=list, max_length=5)
+
+
+#: The HOW lives here; the WHEN also lives in the gated ``system.md`` clause.
+#: Published after the live deferred pilot failed reliable tool discovery.
+_NOTIFY_DESCRIPTION = (
+    "Post an item to the operator's Notifications inbox: it stays listed until "
+    "they read or dismiss it, across sessions and devices. Use for results, "
+    "metrics or events they must see on return, never routine progress. Pass a "
+    "stable `key` so a repeat (a wake tick, an updated count) updates one item "
+    "instead of adding another."
+)
+
+
+def build_notify_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf builder: present only where the session bound its inbox door.
+
+    ``approval_tier="read"``: writing the operator's own inbox touches no world
+    state, the ``no_reply`` reasoning. ``shared`` concurrency: an item write is
+    an independent, short transaction and never decides the turn's shape.
+    """
+    if getattr(context, "notify_inbox", None) is None:
+        return None
+    return AgentTool(
+        name="notify",
+        label="Notify",
+        description=_NOTIFY_DESCRIPTION,
+        parameters=NotifyParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="shared",
+        execute=execute_notify,
+    )
+
+
+@_guard("notify")
+async def execute_notify(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Validate, scrub, write through the session's door, and report what happened.
+
+    REDACTION HAPPENS HERE, before the door: the raw arguments are not redacted
+    by the loop (only the public start event is), so the store is the last
+    point a scrub can happen and an unredacted credential must never be
+    persisted into an inbox every surface paints (§1.5).
+    """
+    try:
+        params = NotifyParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "notify", exc)
+    door = getattr(context, "notify_inbox", None) if context is not None else None
+    if door is None:
+        return _error(
+            tool_call_id,
+            "notify",
+            "this session has no inbox door wired in — nothing was posted; say it in text instead.",
+        )
+    title = _redact_tool_text(params.title, context)
+    body = _redact_tool_text(params.body, context)
+    # A redacted URL is no longer necessarily the same destination. Drop the
+    # whole link rather than turn a credential-bearing URL into an ambiguous,
+    # actionable replacement. Decode every component too: encoded credentials
+    # in path/query/userinfo are just as sensitive as the raw spelling.
+    from urllib.parse import unquote, urlsplit
+
+    links = []
+    for link in params.links:
+        candidate = link.url
+        sensitive = False
+        for _ in range(len(candidate) + 1):
+            if _redact_tool_text(candidate, context) != candidate:
+                sensitive = True
+                break
+            decoded = unquote(candidate)
+            if decoded == candidate:
+                break
+            candidate = decoded
+        try:
+            parsed = urlsplit(link.url)
+            safe = bool(parsed.hostname) and parsed.username is None and parsed.password is None
+        except ValueError:
+            safe = False
+        if safe and not sensitive:
+            links.append({"label": _redact_tool_text(link.label, context), "url": link.url})
+    try:
+        sentence = await door(
+            title=title,
+            body=body,
+            priority=params.priority,
+            key=params.key,
+            links=links,
+            anchor_id=tool_call_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — every store refusal is a sentence
+        from local_operator.notifications.store import NotifyRefused
+
+        if isinstance(exc, NotifyRefused):
+            return _error(tool_call_id, "notify", str(exc))
+        from local_operator.session.store_failures import STORE_BUSY, store_failure
+
+        failure = store_failure(exc)
+        if failure is not None and failure.code == STORE_BUSY:
+            return _error(
+                tool_call_id,
+                "notify",
+                "the inbox store is busy (another process holds its lock); nothing was "
+                "posted — retry this call once.",
+            )
+        logger.exception("notify: the inbox write failed")
+        return _error(tool_call_id, "notify", "the inbox could not be written; nothing was posted.")
+    return _text(tool_call_id, "notify", sentence)

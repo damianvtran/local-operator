@@ -289,7 +289,8 @@ reason.
 The explicit half is load-bearing too. A timer, a poll, a subscription or a
 focus change may never reach the batch operation, and nothing here changes the
 per-result rule for the surfaces that acknowledge one at a time. The TUI's
-`/notifications read` renders the set it is about to clear — one catalogue read,
+`/unread read` (formerly `/notifications read`; the name moved to the
+Notifications page, decision D2) renders the set it is about to clear — one catalogue read,
 painted before the write — and acknowledges exactly that read's pairs, so the
 rows a user clears are rows they were shown, including the one that finished
 while they were typing; the desktop clears the rows its sidebar holds, and only
@@ -325,6 +326,48 @@ the watermark a human read), while `unseen` is the column an `AttentionState`
   carries. Two words with one meaning, owned by two layers, is a smaller defect
   than three surfaces renaming a status string — but it is a defect, and this is
   where a future round should look before it moves either one.
+
+## Inbox items: rung 0 and in-view auto-read
+
+The Notifications page (`docs/design/notifications-inbox.md`) holds items agents
+post with `notify` plus the open asks. Its items are a SECOND store
+(`notifications.db`) beside `attention.db`, with their own read and delivery
+marks, and the two stores never acknowledge each other: reading a completion
+never reads an item, and reading an item never reads a completion.
+
+**Creation is always unread.** Matching session presence and fresh activity
+are not item-specific evidence: the operator may be scrolled up, in a child
+view, behind a modal, or the new callout may not have rendered. Machine-wide
+OS idle time also includes activity in another app or pane. Neither signal
+acknowledges a new revision. Persist unread, publish/render the anchor, then
+accept a per-item token-bound receipt with fresh post-update input. Readable
+history remains available. The banner lane may use a short bounded grace and
+must re-check read state before delivery; presence alone never clears it.
+
+**In-view auto-read is the per-result rule applied to items.** A surface may mark
+an item read without a gesture only through `POST /v1/desktop/notifications/seen`,
+and only per item: the item's own rendered `revision` and `anchor_id`, rendered,
+uncovered and visible in a focused foreground interface, with a fresh input
+edge. The server re-checks what it can — the item belongs to
+`evidence.session_id`, the revision and anchor are current, and
+each item's own `visible_since_ms` (or the batch fallback when absent) is not
+before that item's current revision, visibility precedes input, input is not
+future and is within 120 s, and the anchor has stayed visible after input for at
+least 1 s on desktop (positive elapsed time on TUI). A window or app focus gain
+is never an input edge: only trusted pointer/key/wheel events on desktop, or
+key/mouse-down on TUI, count (D12) —
+and answers `skipped` with the reason (`unknown`, `stale_revision`,
+`anchor_mismatch`, `stale_evidence`, `already`) otherwise. The desktop sends it through the foreground
+receipt guard (`notifications.seen`), like the existing receipt ops.
+
+**No automatic path may acknowledge in bulk** (R10). Mark-all-read and dismiss-
+by-session are explicit gestures, token-bound: they carry the `through_seq` the
+surface first observed (the answer's `high_water`) PLUS exact `observed`
+id/revision tokens. Explicit All gestures enumerate the entire requested
+scope under that frozen boundary, then write batches of at most 500 tokens;
+neither late asks nor updated revisions enter the action. By-id writes carry the `revision` the surface
+rendered. An open ask is never dismissed through the reel (`skipped: live_ask`,
+ask log untouched); settling it goes through the existing reasoned door.
 
 ## Upgrade boundaries
 

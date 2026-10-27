@@ -916,7 +916,7 @@ that clears nothing is still `200` — a non-2xx would make a client discard the
 partial result it did get — while a per-item failure is `unknown` for that item
 rather than a 404 for the call. A store failure (`sqlite3.Error`) goes through the
 shared classifier (`session/store_failures.py` — the same module the TUI's
-`/notifications` consumes, so one store cannot be described two ways), which
+`/unread` (formerly `/notifications`) consumes, so one store cannot be described two ways), which
 splits it by condition: contention (`SQLITE_BUSY`) answers the retryable `503`,
 a full volume `507` `store_out_of_space`, and a store this process cannot read or
 open `500` `store_unavailable`. Each call writes inside a single transaction, so
@@ -2421,6 +2421,81 @@ uses operator credentials or connects to operator sessions. Unit tests exercise
 receipt crash ambiguity, byte/count overflow, lease aggregation, cache isolation
 and the inclusive history paging boundary.
 
+## The Notifications inbox (`notifications: 1`)
+
+The operator's machine-wide inbox: items agents post with the `notify` tool plus
+the OPEN asks agents are blocked on (`docs/design/notifications-inbox.md`). Every
+route is cold — none opens a session, dials or starts a runtime — because items
+outlive the runtime that raised them. All need the desktop bearer (401 without).
+Absent `features.notifications`, a renderer must offer no page, sidebar row,
+slash destination or feed branch, and must strip the `notifications` sidebar id
+on save (an older core refuses it).
+
+| Route | Body / query | Answer (`result`) |
+|---|---|---|
+| `GET /v1/desktop/notifications` | `state=unread\|all\|dismissed` (default `unread`), `source=notify\|ask`, `priority=high\|normal\|low`, `session_id`, `cursor`, `through_seq` (freeze first-page boundary), `limit` 1..100 (default 50) | `{items, next_cursor, observed:[{id,revision}], unread_count, waiting_count, waiting_unread_count, high_water, waiting?}` — `waiting` (open asks, not paged) rides the first page only |
+| `GET /v1/desktop/notifications/count` | — | `{unread_count, waiting_count, waiting_unread_count, high_water}` |
+| `GET /v1/desktop/notifications/{id}` | `id` = `n_<16 base32>` or `ask:<session_id>:<ask_id>` | `{item, history, session, anchor, projects, asks}`; 404 `wire.errors.notifications.unknown_item`, 422 for a malformed id |
+| `PATCH /v1/desktop/notifications` | `{op: read\|unread\|dismiss\|undismiss}` plus EXACTLY ONE target: `ids:[{id, revision}]` (1..500), or `session_id`+`through_seq`+`observed`, or `all:true`+`through_seq`+`observed` (0..500 tokens) | `{changed, skipped:[{id, reason}], unread_count, waiting_count, waiting_unread_count, high_water}` |
+| `POST /v1/desktop/notifications/seen` | `{items:[{id, revision, anchor_id, visible_since_ms?}] (1..100), evidence:{surface, session_id, input_kind, input_at_ms, visible_since_ms}}` | same shape as PATCH |
+
+**Item shape** (`notifications/items.py`, one shape for both sources): `id`,
+`source` (`notify`/`ask`), `priority`, `title`, `excerpt`, `created_at`,
+`updated_at`, `seq`, `revision`, `read`, `read_via`
+(`explicit`/`in_view`/`null`; creation is always unread), `dismissed`, `repeat_count`, `key`,
+`anchor_id`, `session{id, title, agent_id, live}`, `projects[{key, name,
+status}]`, `ask` (the open ask's question/dismissibility, else `null`) and
+`actions{dismiss, answer, read}`. An open ask always reports `high` and
+`actions.dismiss=false`.
+
+**Writes are token-bound (R10), never sweeps.** A by-id write names the
+`revision` it rendered — a newer revision is `skipped: stale_revision` and stays
+unread. A by-session or all-items write must carry `through_seq` AND the
+`observed:[{id,revision}]` tokens the list returned. Tokens bound both source
+stores and the rendered filters/page; the scalar bound alone cannot identify
+asks. Missing observations are 422, not a legacy sweep. Session scope only
+narrows that set. Concurrent new revisions are skipped, never silently cleared.
+
+**Seen evidence is per item, and focus is not an edge.** `input_kind` is
+`pointerdown`, `keydown` or `wheel`; a focus-only report is 422 (D12). When an
+item supplies its own `visible_since_ms`, the server checks that stamp against
+THAT row's current `updated_at`, then `visible_since <= input_at <= now` and the
+120 s freshness/dwell rules. The batch field remains the fallback for clients
+that have not added per-item stamps; a mixed batch is judged row by row (D13).
+
+**All means the entire explicitly requested scope, not the first 50 rows.** On
+an explicit mark-all/dismiss-session gesture, clients enumerate every page of
+that state/source/priority/session scope with progress/count feedback, freeze
+the FIRST response's `high_water`, pass it as `through_seq` on every later GET,
+and union each page's `observed` tokens. Keep the first page's ask refs; do not
+refresh them into a later ask set. Then PATCH batches of at most 500 tokens with
+the same boundary. A filtered action must name its filtered scope; it never
+silently widens to the whole inbox. Read/unread applies to observed live ask
+marks as well as notify revisions, without touching ask logs.
+
+`waiting_count` is all pending asks (the group); `waiting_unread_count` is its
+unread subset. The sidebar badge is `unread_count + waiting_unread_count`.
+Reading an ask clears that badge half but never removes its pending group row.
+
+An
+ask id under `dismiss`/`undismiss` is `skipped: live_ask` and the ask log is not
+written; under `read`/`unread` only its reel-side mark moves. Other skip
+reasons: `unknown`, `already`. `seen` re-checks its evidence per item (see
+`docs/ATTENTION.md`, "Inbox items") and adds `anchor_mismatch` and
+`stale_evidence`. Undo reuses the original by-id revision tokens, not the
+mutation receipt's newer high-water mark; an intervening content update makes
+that Undo `stale_revision`, not permission to affect a new revision.
+
+Consumers invalidate on EVERY `notifications` frame, not only a changed
+payload `revision`: replacing an ask can keep both SQLite high-water and all
+counts unchanged while the frame's envelope sequence advances.
+
+**Refusals** go through the shared classifier (`session/store_failures.py`)
+with this surface's own sentences (`wire.errors.notifications.*`, the
+`receipts_refusal` precedent): contention answers the retryable `503`
+`store_busy`, a full volume `507` `store_out_of_space`, and a store this process
+cannot read or open `500` `store_unavailable`.
+
 ## The machine-wide event feed
 
 `GET /v1/desktop/events` — authenticated SSE, the same bearer/Origin boundary as
@@ -2464,7 +2539,9 @@ to.
 {"epoch":"…","seq":16,"type":"authoring","payload":{"revision":7}}
 {"epoch":"…","seq":17,"type":"session_status","session_id":"<12 hex>",
  "payload":{"code":"approval","label":"Approval needed","revision":3}}
-{"epoch":"…","seq":18,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":18,"type":"notifications",
+ "payload":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0}}
+{"epoch":"…","seq":19,"type":"heartbeat","payload":{"ts":1699999999.5}}
 {"epoch":"…","seq":19,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```
 
@@ -2611,14 +2688,24 @@ to.
   refetch on window focus and on mount is the backstop for both. What a row's
   file being READ costs is bounded the same way: a probe re-reads a row only when
   that row's stat moved.
+- `notifications` (`features.notifications`) is the inbox's INVALIDATION frame:
+  `{revision, unread_count, waiting_count}`, where `revision` is the store's
+  `high_water`. No `session_id` (the inbox is machine-wide) and never item
+  bodies — a client refetches `GET /v1/desktop/notifications` when `revision`
+  moved past what it painted, and draws the badge from the counts. Two
+  doorbells feed it: `notifications.db` and its sidecars on every tick (an item
+  write lands within one tick), and the asks index directory on the 1 s probe
+  (the badge also counts open asks). Published only when the triple changed, at
+  most once per tick; the connection's first read is a baseline, so a
+  reconnect replays nothing.
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
   overflow emits `gap` and closes.
 
 ### The polling cadence
 
 One task per process, started with the first subscriber and stopped with the
-last. Each tick is FIVE `os.stat` calls — `attention.db` with its two journal
-sidecars, plus `run/mobile`, the discovery-record directory, which is where the
+last. Each tick is EIGHT `os.stat` calls — `attention.db` with its two journal
+sidecars, `notifications.db` with the same two (the inbox doorbell), plus `run/mobile`, the discovery-record directory, which is where the
 status channel's edges come from — the doorbell `config_watch` already uses for
 `config.yml` — plus `config.yml` ITSELF, the settings doorbell: its movement
 publishes a `config` frame naming the changed keys and the freshly resolved
@@ -2674,7 +2761,7 @@ row**; a row's metadata file is READ only when that row's stat moved, so an idle
 probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
 is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
 its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
-on the 100 ms tick — a quiet tick still pays exactly the five stats the doorbell
+on the 100 ms tick — a quiet tick still pays exactly the eight stats the doorbell
 is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
 other probe here. The projection is a line filter rather than a YAML parse for
 the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,

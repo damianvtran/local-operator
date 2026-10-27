@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a2",
+  "locale": "ur",
+  "namespace": "wire.slash.notifications_page",
+  "record": "i18n/audits/evidence/ur/wire.slash.notifications_page/nt25a2/record.json",
+  "provenance": "Original independent delta audit by translation-auditor session 89dbc1a173e9, instance 89dbc1a173e9-nt25a2, actual model openai/gpt-6-astra, 2026-10-25. nt25a1 remains immutable; command output is this auditor run.",
+  "hashes": {
+    "record.json": "0a2b05fd148a167fad390650fdb1ead3fac6cf04fea32874e67027aa427383c5",
+    "report.md": "c34ea5e7617ed1e07e522f3dd06ccbed5297dc7eaa1a1bb330b4096d3d4dac1f",
+    "audit.log": "7aed9e6d0be67a827470d7a68e638909d1a1259e3df0dd405bdb5b8a6e4bf7f6"
+  }
+}

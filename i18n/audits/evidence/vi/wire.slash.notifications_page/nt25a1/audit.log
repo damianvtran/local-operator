@@ -1,0 +1,8 @@
+SHA256 local_operator/i18n/catalogues/en/wire.slash.notifications_page.json 9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594
+SHA256 local_operator/i18n/catalogues/vi/wire.slash.notifications_page.json a84c7b4440b03da3cbd8fc81adeac1b400922e122c8b2f25b14570033518f9a2
+SHA256 local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json 2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0
+PASS wire.slash.notifications_page.help arguments= () plurals= ()
+RENDER Câu hỏi và tin tác nhân; read: đánh dấu đã đọc
+WIDTH 46 maxCells 50
+PASS namespace=wire.slash.notifications_page; keys=1; parsed=2; exact placeholder parity; source pin verified; NFC
+PROPOSED repair width 47 maxCells=50 Câu hỏi, cập nhật; read: đánh dấu tất cả đã đọc

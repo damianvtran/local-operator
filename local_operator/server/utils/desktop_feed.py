@@ -33,8 +33,10 @@ WHAT MAKES IT SAFE, and the property most likely to be broken by a later edit:
   guard and the store's no-flood bootstrap already apply.
 
 COST. One poller per process, started with the first subscriber and stopped with
-the last. Each tick is FIVE ``os.stat`` calls — the store, the two journal
-sidecars it commits through, ``run/mobile``, where the discovery records are
+the last. Each tick is EIGHT ``os.stat`` calls — the store, the two journal
+sidecars it commits through, ``notifications.db`` and the same two sidecars (the
+inbox doorbell, ``docs/design/notifications-inbox.md`` §5.3, through the one
+shared ``_db_fingerprint``), ``run/mobile``, where the discovery records are
 written (the status channel's doorbell) — both doorbells borrowed from
 ``config_watch.py``'s treatment of ``config.yml`` — and that same ``config.yml``
 itself, whose movement publishes the ``config`` frame: the settings doorbell,
@@ -46,18 +48,19 @@ them actually moved, plus one bounded authoritative read every
 read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
-COST, CONTINUED — the THREE 1 s invalidation probes are NOT in that five-stat
-figure: the catalogue's, the authoring one (O(profiles)), and the code-request one
-(one ``readdir`` of the derived code-request index plus one ``os.stat`` per session
-WITH rows — usually zero, since most sessions never touch a pull request, and one
-small file read per CHANGED index). The catalogue probe is a readdir
-and two stats. The authoring probe cannot be, because the rows it watches are
-FILES whose CONTENT is what changes: its price is one ``readdir`` of each
-registry plus one ``os.stat`` per row (a few dozen stats on a machine with a few
-dozen profiles), and a row's file is READ only when that stat moved — an
-unchanged row costs a stat and no read at all. Both run on
+COST, CONTINUED — the FOUR 1 s invalidation probes are NOT in that eight-stat figure:
+the catalogue's, the authoring one (O(profiles)), the code-request one (one ``readdir``
+of the derived code-request index plus one ``os.stat`` per session WITH rows — usually
+zero, since most sessions never touch a pull request, and one small file read per
+CHANGED index), and the inbox's asks-index one (one ``readdir`` of ``asks/`` plus one
+``os.stat`` per session with asks, the same shape). The catalogue probe is a readdir and
+two stats. The authoring probe cannot be, because the rows it watches are FILES whose
+CONTENT is what changes: its price is one ``readdir`` of each registry plus one
+``os.stat`` per row (a few dozen stats on a machine with a few dozen profiles), and a
+row's file is READ only when that stat moved — an unchanged row costs a stat and no read
+at all. Both run on
 ``CATALOGUE_PROBE_INTERVAL_S``, one second, NOT on the 100 ms tick, so a quiet
-tick still pays exactly the four stats above. The budget is deliberate and
+tick still pays exactly the eight stats above. The budget is deliberate and
 measured (34 ``agent.yml`` read + filter + ``crc32`` = 1.16 ms against 56.95 ms
 for a ``yaml.safe_load`` + re-dump of the same rows, both measured on this fleet;
 a probe whose stat memory is warm costs 0.31 ms and ZERO file reads — 36
@@ -123,6 +126,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
 import zlib
 from collections import deque
@@ -138,6 +142,7 @@ from local_operator.i18n.resolve import resolve_language
 from local_operator.monitors.store import read_index as read_monitor_index
 from local_operator.notifications import notification_payload
 from local_operator.notifications.compose import NotificationKind
+from local_operator.notifications.store import NotificationStore
 from local_operator.resume import SessionRow
 from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
 from local_operator.server.utils.desktop_sessions import (
@@ -193,6 +198,11 @@ CATALOGUE_PROBE_INTERVAL_S = 1.0
 #: the index is the answer, and the writer's order is cache first, index second, so a
 #: frame published on the cache would announce a change before the answer existed.
 CODE_REQUESTS_DIRNAME = "code_requests"
+
+#: The ask queue's derived index directory (``asks/store.py``'s
+#: ``ASKS_DIRNAME``), spelled here for the code-requests reason: this module
+#: must not import the store just for a directory name on its hot path.
+ASKS_DIRNAME = "asks"
 
 #: The two AUTHORING registries under the config dir, and the file each row's
 #: metadata lives in. Spelled here rather than imported: ``AgentRegistry`` and
@@ -281,6 +291,11 @@ AUTHORITATIVE_RECOVERY_INTERVAL_S = 30.0
 #: reported at WARNING immediately, and then at most once per this interval while
 #: it persists, so a persistent failure is visible without a traceback per tick.
 TICK_FAILURE_WARNING_INTERVAL_S = 60.0
+
+#: How often an unreadable inbox store may be reported. The condition repeats on
+#: every poll tick until a writer quarantines the file, and one line per minute
+#: is what makes it diagnosable without burying the log in it.
+INBOX_WARNING_INTERVAL_S = 60.0
 
 #: The shortest gap between two DOORBELL-fallback probes (review NIT 1). The
 #: fallback exists for a session's FIRST record, which has no cached file to
@@ -659,6 +674,29 @@ class DesktopFeed:
         self._code_requests_counts: dict[str, tuple[Any, int, int]] = {}
         #: Sessions whose token moved and whose frame has not been published yet.
         self._code_requests_invalidated: set[str] = set()
+
+        # -- the inbox channel (docs/design/notifications-inbox.md §5.3) -------
+        #: The operator's inbox store. Three more stats per tick on the doorbell
+        #: (the file, ``-wal`` and ``-journal`` through the shared
+        #: ``_db_fingerprint``), the attention store's treatment: a writer's
+        #: commit lands in ``-wal`` before the main file moves.
+        self.notifications = NotificationStore(root)
+        #: The asks index directory. The badge counts OPEN asks too, and nothing
+        #: else watches this directory, so it joins the 1 s probe as a readdir
+        #: plus one stat per entry (the ``_code_requests_probe`` shape).
+        self.asks_dir = root / ASKS_DIRNAME
+        self._notifications_fingerprint: tuple[tuple[int, int, int] | None, ...] | None = None
+        self._asks_token: int | None = None
+        self._asks_probed_at = 0.0
+        #: The last ``(revision, unread_count, waiting_count)`` published, so a
+        #: doorbell that moved without changing the counts or the high-water
+        #: mark (a WAL checkpoint, a no-op connect) publishes nothing.
+        self._notifications_seen: tuple[int, int, int, int] | None = None
+        #: When the inbox read last warned, so a corrupt store reports once a
+        #: minute instead of once per 100 ms tick.
+        self._inbox_warned_at = 0.0
+        self._asks_pending = False
+        self._notifications_pending = False
 
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
@@ -1139,6 +1177,13 @@ class DesktopFeed:
         # list the client is already loading, while a change landing inside that first
         # second is still caught.
         self._code_requests_tokens = self._code_requests_probe()
+        # The INBOX baseline, on the same no-replay rule: the counts as they
+        # stand at connect are what the client's own first list read shows.
+        self._notifications_fingerprint = _db_fingerprint(self.notifications.path)
+        self._asks_token = self._asks_probe()
+        # An unreadable store leaves this ``None`` (unknown), which is what
+        # stops a failed read being announced as "0 unread" on connect.
+        self._notifications_seen = self._notifications_state_or_none()
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -1331,6 +1376,10 @@ class DesktopFeed:
         # written by a scan that may be running in a different process entirely (the
         # desktop backend and a session runtime share the config root).
         await self._maybe_emit_code_requests()
+        # 8. THE INBOX INVALIDATION (docs/design/notifications-inbox.md §5.3):
+        # three stats per tick on ``notifications.db`` and its two sidecars —
+        # the documented eight-stat tick — and the asks index on the 1 s probe.
+        await self._maybe_emit_notifications()
 
     async def _maybe_probe_unattributed(self) -> None:
         """The doorbell's unattributed-move fallback, RATE-LIMITED (NIT 1).
@@ -1916,6 +1965,123 @@ class DesktopFeed:
                 session_id=session_id,
             )
         self._code_requests_invalidated.clear()
+
+    async def _maybe_emit_notifications(self) -> None:
+        """The inbox invalidation: the item list or the open-ask set moved.
+
+        TWO DOORBELLS, ONE FRAME (``docs/design/notifications-inbox.md`` §5.3).
+        ``notifications.db`` (+ ``-wal``) is stat'd every 100 ms tick, so an
+        item write reaches the client within one tick; the asks index directory
+        rides the 1 s probe, because the badge also counts open asks and no
+        other channel watches that directory. Either moving re-reads the counts
+        (two indexed SQL reads and one index walk), and a frame is published
+        when counts/revision changed OR the asks-index identity token moved.
+        Same-count replacement is not deduplicated away.
+
+        INVALIDATION ONLY: the payload carries the counts a badge draws and the
+        ``revision`` (the store's ``high_water``) a list compares against, never
+        items — the client refetches ``GET /v1/desktop/notifications``. At most
+        one frame per tick, because this runs once per tick.
+        """
+        fingerprint = await asyncio.to_thread(_db_fingerprint, self.notifications.path)
+        moved = fingerprint != self._notifications_fingerprint or self._notifications_pending
+        # Ask identity/content can change without changing either count. Keep
+        # its dirty bit through a failed read; clearing it would lose the only
+        # invalidation for a same-cardinality replacement.
+        asks_moved = getattr(self, "_asks_pending", False)
+        now = time.monotonic()
+        if now - self._asks_probed_at >= CATALOGUE_PROBE_INTERVAL_S:
+            self._asks_probed_at = now
+            token = await asyncio.to_thread(self._asks_probe)
+            if token != self._asks_token:
+                self._asks_token = token
+                self._asks_pending = asks_moved = True
+                moved = True
+        if not moved:
+            return
+        state = await asyncio.to_thread(self._notifications_state_or_none)
+        if state is None:
+            # A contended or damaged store is retried on the next tick rather
+            # than dropped: the fingerprint is not advanced, and the tick
+            # RETURNS instead of raising — a raise here would end the poll loop
+            # and take every other frame family down with it (CD1).
+            self._notifications_pending = True
+            return
+        self._notifications_pending = False
+        self._notifications_fingerprint = fingerprint
+        if state == self._notifications_seen and not asks_moved:
+            return
+        self._asks_pending = False
+        self._notifications_seen = state
+        revision, unread, waiting, waiting_unread = state
+        self._publish(
+            "notifications",
+            {
+                "revision": revision,
+                "unread_count": unread,
+                "waiting_count": waiting,
+                "waiting_unread_count": waiting_unread,
+            },
+        )
+
+    def _notifications_state_or_none(self) -> tuple[int, int, int, int] | None:
+        """The inbox counts, or ``None`` when the store cannot be read (CD1).
+
+        AN OPTIONAL STORE MUST NOT KILL THE FEED. ``_take_baseline`` runs inside
+        the poll loop, and an exception there fails ``baseline_ready`` for every
+        subscriber: attention, completion, catalogue and status frames would all
+        die because ``notifications.db`` is a damaged file. Measured: one garbage
+        byte sequence in that store turned ``GET /v1/desktop/events`` into an
+        empty 200 with ``DatabaseError: file is not a database`` in the log.
+
+        ``None`` means UNKNOWN, not zero: the caller keeps the previous state and
+        publishes nothing, so a badge never drops to 0 because a read failed. The
+        warning is rate-limited because the condition repeats every tick until a
+        writer quarantines the file (``NotificationStore._connect`` does).
+        """
+        try:
+            return self._notifications_state()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError) as error:
+            now = time.monotonic()
+            if now - self._inbox_warned_at >= INBOX_WARNING_INTERVAL_S:
+                self._inbox_warned_at = now
+                logger.warning(
+                    "desktop feed: notifications store could not be read (%s); "
+                    "inbox state is unknown until a write repairs or replaces it",
+                    error,
+                )
+            return None
+
+    def _notifications_state(self) -> tuple[int, int, int, int]:
+        """Total pending and unread pending asks stay distinct on the wire."""
+        from local_operator.notifications.items import counts
+
+        state = counts(self.root, self.notifications)
+        return (
+            state["high_water"],
+            state["unread_count"],
+            state["waiting_count"],
+            state["waiting_unread_count"],
+        )
+
+    def _asks_probe(self) -> int:
+        """One token over the asks index: a readdir plus one stat per entry.
+
+        The index is one small file per session with anything to show, so the
+        cost is O(sessions with asks), and nothing is READ unless the token
+        moved (``_notifications_state`` then walks it once).
+        """
+        parts: list[str] = []
+        try:
+            with os.scandir(self.asks_dir) as entries:
+                for entry in entries:
+                    if not entry.name.endswith(".json") or entry.name.startswith("."):
+                        continue
+                    stat = entry.stat()
+                    parts.append(f"{entry.name}:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            return 0
+        return zlib.crc32("|".join(sorted(parts)).encode()) & 0x7FFFFFFF
 
     def _code_requests_probe(self) -> dict[str, tuple[int, int]]:
         """``{session_id: (fingerprint, revision)}`` for sessions with an index.

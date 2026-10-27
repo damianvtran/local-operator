@@ -83,6 +83,7 @@ from . import (
     wire_errors_desktop,
     wire_errors_files,
     wire_errors_media,
+    wire_errors_notifications,
     wire_errors_sdk_spec,
     wire_errors_sdk_startup,
     wire_errors_settings,
@@ -97,6 +98,7 @@ from . import (
     wire_settings_hub_defaults,
     wire_slash,
     wire_slash_library,
+    wire_slash_notifications_page,
     wire_tunnel_setup,
 )
 
@@ -176,6 +178,7 @@ __all__ = [
     "wire_errors_desktop",
     "wire_errors_files",
     "wire_errors_media",
+    "wire_errors_notifications",
     "wire_errors_sdk_spec",
     "wire_errors_sdk_startup",
     "wire_errors_settings",
@@ -190,5 +193,6 @@ __all__ = [
     "wire_settings_hub_defaults",
     "wire_slash",
     "wire_slash_library",
+    "wire_slash_notifications_page",
     "wire_tunnel_setup",
 ]
