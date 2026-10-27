@@ -2205,6 +2205,13 @@ def test_the_payable_rule_is_the_manifest_rule() -> None:
     assert ti.scan_payable_in_budget(int(rate * 0.2), has_previous=False, wait_s=0.2)
     assert not ti.scan_payable_in_budget(int(rate * 0.2) + 1, has_previous=False, wait_s=0.2)
     assert not ti.scan_payable_in_budget(None, has_previous=False, wait_s=0.2)
+    # R2: with a previous index the RE-READ is planned against the same rate;
+    # an unknown re-read (a pre-head cache) keeps the old "payable".
+    budget = int(rate * 0.2)
+    assert ti.scan_payable_in_budget(10**12, has_previous=True, rederive_bytes=budget, wait_s=0.2)
+    assert not ti.scan_payable_in_budget(
+        10**3, has_previous=True, rederive_bytes=budget + 1, wait_s=0.2
+    )
 
 
 @pytest.mark.asyncio
@@ -2238,11 +2245,127 @@ async def test_a_small_journal_is_never_deferred(tmp_path):
         release()
 
 
+def _big_closed_prefix(root: Path) -> None:
+    """A journal over the cold gate whose resume window sits AFTER the big row.
+
+    Two small closed turns follow the big one because the window rewinds one
+    turn behind the last run start (``_Derivation.window``): with only one turn
+    after the big row the window would still land above it.
+    """
+    write_rows(
+        root,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1),
+            assistant("a1", 1.2, "x" * (6 << 20)),
+            marker("m1", 1.3, "t1"),
+            start("s2", 2.0, "t2"),
+            user("u2", 2.1),
+            assistant("a2", 2.2),
+            marker("m2", 2.3, "t2"),
+            start("s3", 3.0, "t3"),
+            user("u3", 3.1),
+            assistant("a3", 3.2),
+            marker("m3", 3.3, "t3"),
+        ],
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_cache_on_disk_makes_the_held_refresh_run_now(tmp_path, monkeypatch):
-    """A previous index (incremental refresh) is payable, so it is not deferred."""
+async def test_a_near_window_makes_the_held_refresh_run_now(tmp_path):
+    """An incremental refresh whose RE-READ is small is payable, so it is not
+    deferred even though the journal itself is over the cold gate."""
+    _big_closed_prefix(tmp_path)
+    previous = refreshed(tmp_path)  # writes the cache file
+    write_rows(tmp_path, [user("late", 4.0)])
+    size = journal_path(tmp_path).stat().st_size
+    assert not ti.scan_payable_in_budget(size, has_previous=False, wait_s=ti._FIRST_PAINT_WAIT_S)
+    assert size - previous.scan.window_offset < 4096, "the fixture's window must be near"
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert not ti.refresh_deferred(tmp_path, SID)
+        assert await asyncio.wait_for(task, 30) is not None
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_far_window_defers_the_held_refresh_like_a_cold_scan(tmp_path):
+    """R2 (conversation-first-paint): "a previous index exists" is not "cheap".
+
+    The incremental path re-derives from ``scan.window_offset``, which sits at
+    the start of the run holding the last user turn, so after a one-row append
+    to a long agent run it re-reads nearly the whole journal (measured: 37.9 MB
+    and 304-637 ms CPU on the 51.7 MB fixture, more than a cold scan). The hold
+    must judge that by the bytes the refresh will actually read. Fails on the
+    pre-R2 rule (``has_previous`` -> always payable -> not deferred). The index
+    it lands is the one a full rescan builds.
+    """
     _big_journal(tmp_path)
-    refreshed(tmp_path)  # writes the cache file
+    previous = refreshed(tmp_path)
+    write_rows(tmp_path, [user("late", 3.0)])
+    assert previous.scan.window_offset == 0, "the fixture's window must sit above the big row"
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and ti.refresh_deferred(tmp_path, SID)
+        await asyncio.sleep(0.2)
+        assert not task.done(), "the far-window refresh ran under a live paint hold"
+    finally:
+        release()
+    built = await asyncio.wait_for(task, 30)
+    assert built is not None and not ti.refresh_deferred(tmp_path, SID)
+    os.remove(ti.index_path(tmp_path, SID))
+    assert _derived(built) == _derived(refreshed(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_a_far_window_refresh_yields_to_another_open(tmp_path):
+    """The same rule gates #3026's pause: a far-window incremental refresh is a
+    multi-hundred-ms scan and must step aside for another conversation's first
+    frame. Fails on the pre-R2 rule (payable -> never pauses -> done at once)."""
+    _big_journal(tmp_path)
+    refreshed(tmp_path)
+    write_rows(tmp_path, [user("late", 3.0)])
+    release = ti.hold_paint(tmp_path, OTHER)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the far-window refresh kept the GIL during another open"
+    finally:
+        release()
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+def test_the_cache_head_states_the_resume_point_without_a_full_parse(tmp_path):
+    """The hold decides on the loop, so it must not parse the multi-MB cache:
+    the resume point is read from the document's HEAD, and it is the same
+    figure the full parse gives."""
+    _big_closed_prefix(tmp_path)
+    index = refreshed(tmp_path)
+    head = ti._read_resume_head(tmp_path, SID)
+    assert head is not None
+    sig, scan, generation = head
+    assert scan == index.scan and generation == index.journal_generation
+    assert (sig["size"], sig["inode"]) == (index.sig["size"], index.sig["inode"])
+    raw = ti.index_path(tmp_path, SID).read_bytes()
+    assert raw.index(b'"scan":') < ti._RESUME_HEAD_BYTES, "scan must ride in the head"
+
+
+@pytest.mark.asyncio
+async def test_a_cache_written_before_the_head_layout_keeps_the_old_rule(tmp_path):
+    """A cache whose ``scan`` sits at the END (every cache written before R2)
+    cannot state its resume point cheaply; it is treated as before -- payable,
+    never deferred -- and the next write moves it to the head."""
+    _big_journal(tmp_path)
+    refreshed(tmp_path)
+    path = ti.index_path(tmp_path, SID)
+    doc = json.loads(path.read_text())
+    scan = doc.pop("scan")
+    doc["scan"] = scan  # re-inserted last: the pre-R2 key order
+    path.write_text(json.dumps(doc, separators=(",", ":")))
+    assert ti._read_resume_head(tmp_path, SID) is None
     write_rows(tmp_path, [user("late", 3.0)])
     release = ti.hold_paint(tmp_path, SID)
     try:
@@ -2251,6 +2374,7 @@ async def test_a_cache_on_disk_makes_the_held_refresh_run_now(tmp_path, monkeypa
         assert await asyncio.wait_for(task, 30) is not None
     finally:
         release()
+    assert ti._read_resume_head(tmp_path, SID) is not None
 
 
 @pytest.mark.asyncio
