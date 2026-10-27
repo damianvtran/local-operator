@@ -164,12 +164,26 @@ def _varied_reasoning(chars: int) -> str:
         "the selection moved before clicking again because the previous attempt "
         "landed on the header instead of the body and the crop handles are visible"
     ).split()
+    #
+    # A RUNNING length, never ``sum(...)`` over ``out`` per word. This runs at
+    # IMPORT -- it builds a ``parametrize`` case -- so it runs during collection
+    # in every xdist worker. The re-summed form was quadratic: 15 s for 200 K
+    # chars on an idle laptop, and CI shards holding this file sat 292-405 s
+    # before their first test against a fleet median of 168 s (PR #2993 CI
+    # investigation, round 3). That was enough to push a shard past its job
+    # timeout. The text is byte-identical to the old loop's: the same words,
+    # the same stop condition.
     out: list[str] = []
+    length = 0
     i = 0
-    while sum(len(w) + 1 for w in out) < chars:
-        out.append(words[(i * 7 + i // len(words)) % len(words)])
+    while length < chars:
+        word = words[(i * 7 + i // len(words)) % len(words)]
+        out.append(word)
+        length += len(word) + 1
         if i % 13 == 12:
-            out.append(f"(step {i}).")
+            step = f"(step {i})."
+            out.append(step)
+            length += len(step) + 1
         i += 1
     return " ".join(out)
 
@@ -230,6 +244,41 @@ def test_legitimate_long_output_never_trips(text: str) -> None:
     # Delta size must not matter: one-character and large fragments too.
     assert _feed(text, size=1) is None
     assert _feed(text, size=4_000) is None
+
+
+def test_the_never_trip_corpus_builds_in_linear_time() -> None:
+    """The corpus above is built at IMPORT, so what it costs is a collection cost.
+
+    ``parametrize`` arguments are evaluated when the module loads, which means in
+    every xdist worker of whichever CI shard holds this file, under coverage
+    tracing. The quadratic generator this replaced cost 15 s per import on a
+    laptop and kept a CI shard collecting for 402 s (fleet median 168 s) until
+    the job timeout cancelled it (PR #2993 CI investigation, round 3).
+
+    COUNTED, NOT TIMED: a wall-clock bound flakes on a loaded runner, while the
+    number of profiled calls is deterministic. Ten times the text must cost
+    about ten times the calls. The quadratic form costs about a hundred times,
+    so a ceiling of 20 separates the two with room on both sides.
+    """
+    import sys
+
+    def calls(chars: int) -> int:
+        count = 0
+
+        def profile(_frame: Any, _event: str, _arg: Any) -> None:
+            nonlocal count
+            count += 1
+
+        previous = sys.getprofile()
+        sys.setprofile(profile)
+        try:
+            _varied_reasoning(chars)
+        finally:
+            sys.setprofile(previous)
+        return count
+
+    small, large = calls(1_000), calls(10_000)
+    assert large < 20 * small, (small, large)
 
 
 def test_a_repeat_longer_than_the_period_ceiling_does_not_trip() -> None:
