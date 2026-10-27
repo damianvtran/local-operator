@@ -35,6 +35,36 @@ from local_operator.i18n.messages import Msg, envelope
 REPO = Path(__file__).resolve().parents[3]
 
 
+def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict]) -> None:
+    """Judge ledger freshness on the LATEST row per namespace, and prove the rest superseded.
+
+    WHY NOT EVERY ROW. ``i18n/ledger.json`` is append-only: re-auditing a namespace at
+    new English bytes appends a row and keeps the old one at its superseded source
+    hash, and ``generate.py`` ships by the LAST row per ``(locale, namespace)``. A
+    check that demanded every row be fresh would forbid ever re-auditing.
+
+    WHY NOT ONLY THE LATEST. Reading just the last row would let a stale duplicate,
+    or an older audit appended AFTER a newer one, pass unseen. So: the last row must
+    be at the current English hash, and every earlier row for that namespace must be
+    at a DIFFERENT hash (a second row at the same hash is a duplicate, not history).
+    """
+
+    by_namespace: dict[str, list[dict]] = {}
+    for entry in rows:  # file order: the ledger is read last-wins
+        by_namespace.setdefault(entry["namespace"], []).append(entry)
+    for namespace, entries in by_namespace.items():
+        current = catalogues.catalogue_sha256("en", namespace)
+        assert entries[-1]["source_sha256"] == current, (
+            namespace,
+            "stale audit against the current English bytes",
+        )
+        for earlier in entries[:-1]:
+            assert earlier["source_sha256"] != current, (
+                namespace,
+                "an earlier row is at the current hash: a duplicate, or a stale row after it",
+            )
+
+
 def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     ledger = json.loads((REPO / "i18n" / "ledger.json").read_bytes())["entries"]
     chinese = [entry for entry in ledger if entry["locale"] == "zh-CN"]
@@ -69,11 +99,7 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
-    for entry in chinese:
-        assert entry["source_sha256"] == catalogues.catalogue_sha256("en", entry["namespace"]), (
-            entry["namespace"],
-            "stale audit against the current English bytes",
-        )
+    _assert_latest_row_is_fresh_and_earlier_rows_superseded(chinese)
 
     hindi = [entry for entry in ledger if entry["locale"] == "hi"]
     # TWENTY-FOUR: the union plus independently audited P3a/P3b namespaces,
@@ -120,8 +146,11 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # (Anthropic cache-TTL help + subagent row) appends a fresh Hindi row at the
     # new English bytes: FORTY. The session status dot's independently audited
     # `hi/relay.health` row makes it FORTY-ONE.
-    assert len(hindi) == 41
+    # The skill-write error re-audit (PR #3013) appends a second hi row for the
+    # already-carried `wire.errors.desktop`: FORTY-TWO.
+    assert len(hindi) == 42
     assert all(entry["status"] == "passed" for entry in hindi)
+    _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 
 
 def test_the_active_tree_holds_bytes_only_for_shipped_locales() -> None:
