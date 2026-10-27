@@ -474,7 +474,18 @@ def detail_text(
             )
         )
     if is_ask:
-        deadline = int(item.get("expires_at") or item.get("deadline_at") or 0)
+        # D3: the deadline lives where the PRODUCER puts it. `notifications/
+        # items.py:ask_item` nests it at ``ask.deadline_at`` (from the ask row's
+        # own ``expires_at``); the top-level read here was a shape the producer
+        # never emits, so every real ask pane omitted its expiry while the same
+        # ask named it under "Waiting on you". The two top-level keys stay as
+        # fallbacks for rows a hand-built caller may pass.
+        deadline = int(
+            item.get("expires_at")
+            or item.get("deadline_at")
+            or (item.get("ask") or {}).get("deadline_at")
+            or 0
+        )
         if deadline:
             meta.append(_t(_k.ask_expires(time=compact_until(deadline, now_ms))))
     seen = _seen_clause(item) if item.get("read") else ""
@@ -496,16 +507,31 @@ def detail_text(
         for paragraph in body.strip().splitlines():
             for line in wrap_cells(paragraph, width - 4):
                 text.append("   " + line + "\n", style=ink("fg"))
-    else:
+    elif not is_ask:
+        # D7: "No details were attached." under an ask read like an ERROR — for
+        # an ask the question IS the detail, so the line said the item was
+        # broken when it was complete. An ask simply has no body row: its meta
+        # line (with the expiry) sits straight above Related projects.
         text.append(" " + _t(_k.no_body()) + "\n", style=ink("muted"))
     links = item.get("links") or []
     if links:
         text.append("\n")
         text.append_text(section_header(_t(_k.section_links()), len(links), width))
         for link in links:
+            # D6: the URL was appended raw, so a long one was folded by the
+            # widget at column 0 — one cell LEFT of its own label's inset, which
+            # read as a broken continuation. It is wrapped here, cell-aware, and
+            # a URL that cannot share the label's line moves onto its own lines
+            # at the block's inset (2), the body's own rule.
+            label = str(link.get("label") or "")
+            url = str(link.get("url") or "")
             text.append("\n  ")
-            text.append(str(link.get("label") or ""), style=ink("fg"))
-            text.append("  " + str(link.get("url") or ""), style=ink("muted"))
+            text.append(label, style=ink("fg"))
+            if url and cell_len(label) + 2 + cell_len(url) <= width - 2:
+                text.append("  " + url, style=ink("muted"))
+            elif url:
+                for line in wrap_cells(url, width - 4):
+                    text.append("\n  " + line, style=ink("muted"))
         text.append("\n")
     asks = [a for a in (payload or {}).get("asks") or [] if a.get("status", "open") == "open"]
     if asks:
@@ -585,16 +611,23 @@ def detail_text(
 #: rediscover": ``esc`` is the way out, then the row actions, then the bulk
 #: gestures, then selection, and only then browsing/filters, which the detail
 #: and the header both restate.
+#:
+#: ``z`` sits at 1, directly behind ``esc``, because D1 measured the opposite:
+#: it was ranked 8, so at 80 columns the row dropped it FIRST, and an undo
+#: receipt ("Dismissed 1 update.") then sat above a footer naming every key but
+#: the one that reverses it — right after `E`, the most destructive gesture on
+#: the page. It costs the row nothing when no undo is live: the label is only
+#: emitted while the window is open.
 _HINT_RANK = {
     "esc": 0,
-    "e": 1,
-    "E": 2,
-    "A": 3,
-    "space": 4,
-    "↵": 5,
-    "a": 6,
-    "u": 7,
-    "z": 8,
+    "z": 1,
+    "e": 2,
+    "E": 3,
+    "A": 4,
+    "u": 5,
+    "space": 6,
+    "↵": 7,
+    "a": 8,
     "o": 9,
     "f": 10,
 }

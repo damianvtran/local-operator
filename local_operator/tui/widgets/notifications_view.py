@@ -835,7 +835,21 @@ class NotificationsView(Vertical):
             )
         )
         self._rule.update(Text(render.RULE_GLYPH * 400, style="dim"))
-        self._edge.update(Text("\n".join([render.EDGE_GLYPH] * 200), style="dim"))
+        # D2: the pane's focus marker was painted INSIDE the scrolling text, so
+        # the first scroll took it off screen and the only remaining cue was the
+        # footer — which then said `esc back` and nothing else. The edge column
+        # is one cell wide and never scrolls, so it carries the marker while the
+        # pane owns the keys; the in-text glyph stays, because it also names the
+        # line the pane is showing.
+        edge = [render.EDGE_GLYPH] * 400
+        if self._detail_focus and self.wide:
+            edge[0] = render.CURSOR
+        self._edge.update(
+            Text(
+                "\n".join(edge),
+                style=render.ink("warning") if self._detail_focus and self.wide else "dim",
+            )
+        )
         if snapshot is None:
             # DT1: not an empty state, and not a blank either. A lone ellipsis is
             # CHROME, not copy — the page's namespace is frozen and audited at an
@@ -928,6 +942,31 @@ class NotificationsView(Vertical):
             return self._confirm[0]
         return self.notice
 
+    def _item_hints(self, row: dict[str, Any]) -> list[tuple[str, str]]:
+        """The gestures the detail surfaces offer for ONE item, in one order.
+
+        D2: the wide pane and the narrow detail act on the same item with the
+        same keys, so they must NAME the same keys. This is the single builder
+        both call; the only difference is that the narrow detail is the whole
+        screen and the wide pane is a column beside the list.
+
+        Every label is an existing key: a new one would invalidate the seven
+        audited locale rows for this namespace, which is the same trade the DT3
+        note records.
+        """
+        is_ask = row.get("source") == "ask"
+        labels: list[tuple[str, str]] = [
+            ("o", _t(_k.hint_conversation())),
+            ("a", _t(_k.hint_answer())),
+        ]
+        if not is_ask:
+            # An ask offers no dismiss (the reel never dismisses an open ask,
+            # §2.3); not naming the key is how both surfaces say so.
+            labels.append(("e", _t(_k.hint_dismiss())))
+            labels.append(("E", _t(_k.hint_dismiss_all())))
+            labels.append(("u", _t(_k.hint_unread()) if row.get("read") else _t(_k.hint_read())))
+        return labels
+
     def _hint_labels(self) -> list[tuple[str, str]]:
         row = self.detail_row
         labels: list[tuple[str, str]] = []
@@ -937,26 +976,22 @@ class NotificationsView(Vertical):
             # keys that do work appeared only inside the sentence.
             return [("y", _t(_k.hint_confirm())), ("n", _t(_k.hint_cancel()))]
         if self._detail_focus:
-            # DT3: while the pane owns the keys the footer narrows to the way
-            # back, and the pane's own top line carries the ▸ marker
-            # (`render.detail_text(focused=True)`). A "scroll" label would be a
-            # NEW string in a namespace whose seven ledger rows are keyed to its
-            # exact English source hash, so the mode is signalled in chrome
-            # instead: the cursor glyph moves from the list to the pane.
-            return [("esc", _t(_k.hint_back()))]
+            # D2: the pane's footer said only `esc back` while `e`, `E`, `u`,
+            # `o` and `a` all acted on the pane's item — it named the way out
+            # and none of the four gestures that still fire. It reuses the
+            # narrow detail's own label set (no new copy: those strings are the
+            # ones seven audited locale rows already carry).
+            if row is None:
+                return [("esc", _t(_k.hint_back()))]
+            labels = self._item_hints(row)
+            labels.append(("esc", _t(_k.hint_back())))
+            return labels
         if self.undo_live:
             labels.append(("z", _t(_k.hint_undo())))
         if row is not None and self._confirm is None:
             is_ask = row.get("source") == "ask"
             if self.view_mode == "detail" and not self.wide:
-                labels.append(("o", _t(_k.hint_conversation())))
-                labels.append(("a", _t(_k.hint_answer())))
-                if not is_ask:
-                    labels.append(("e", _t(_k.hint_dismiss())))
-                    labels.append(("E", _t(_k.hint_dismiss_all())))
-                    labels.append(
-                        ("u", _t(_k.hint_unread()) if row.get("read") else _t(_k.hint_read()))
-                    )
+                labels.extend(self._item_hints(row))
             else:
                 labels.append(("↵", _t(_k.hint_answer()) if is_ask else _t(_k.hint_open())))
                 if not is_ask:

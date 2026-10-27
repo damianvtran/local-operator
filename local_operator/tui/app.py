@@ -46616,6 +46616,17 @@ class OperatorApp(App[None]):
             self._welcome.refresh()
         if self._status is not None:
             self._status.refresh()
+        # Q2-1: the notifications page holds PAINTED rows, its header and its
+        # hint row between polls, and its 2 s poll only repaints when the STORE
+        # moved — so an open page kept the old language until an unrelated
+        # event (a key, a filter change, a new row) repainted it. Measured on
+        # the real app: the header stayed `通知 · 0条未读 · 0项待你处理` through a
+        # switch to ru and back to en, at 0.5 s, 3 s and 6 s. `_paint` is the
+        # same entry the poll uses, so a same-locale call is just one more
+        # paint of identical text.
+        view = self._notifications_view
+        if view is not None:
+            view._paint()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.

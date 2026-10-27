@@ -406,7 +406,12 @@ async def test_the_wide_pane_takes_the_keys_and_esc_returns_them(
         await pilot.press("enter")  # second ↵: hand the keys to the pane
         await _settle(pilot, 8)
         assert view._detail_focus is True
-        assert [key for key, _ in view._hint_labels()] == ["esc"], "the pane's own row"
+        # D2 superseded the round-1 rule that this row narrowed to `esc` alone:
+        # the pane keeps acting on its item, so the row must NAME those keys.
+        keys = [key for key, _ in view._hint_labels()]
+        assert keys[-1] == "esc", keys
+        for key in ("o", "a", "e", "u"):
+            assert key in keys, (key, keys)
         await pilot.press("escape")
         await _settle(pilot, 6)
         assert view._detail_focus is False, "esc returns the keys to the list"
@@ -567,24 +572,38 @@ def test_the_volume_keys_survive_the_eighty_column_footer() -> None:
         assert key not in kept, kept
 
 
-def test_an_ask_pane_names_its_expiry_projects_and_gesture() -> None:
-    """DT4: the ask detail repeated its question and dropped its context."""
-    row = {
-        "id": "ask:s1:ask_1",
-        "source": "ask",
-        "priority": "ask",
-        "title": "Block the /24 for 24 hours, or keep watching?",
-        "excerpt": "Block the /24 for 24 hours, or keep watching?",
-        "created_at": 1_000,
-        "updated_at": 1_000,
-        "session": {"id": "s1"},
-        "projects": [{"title": "Radient free-credit defence", "status": "active"}],
-        "expires_at": 1_000 + 37 * 60 * 1000,
-    }
+def test_an_ask_pane_names_its_expiry_projects_and_gesture(tmp_path: Path) -> None:
+    """DT4 + D3: the ask detail names its expiry and does not repeat its question.
+
+    D3: the fixture is the REAL serialiser's output, not a hand-built dict. The
+    hand-built shape carried a top-level ``expires_at`` that ``ask_item`` never
+    emits — the deadline is nested at ``ask.deadline_at`` — so the test passed
+    while every real ask pane omitted its expiry.
+    """
+    from local_operator.notifications.items import ProjectFacts, SessionFacts, ask_item
+
+    # The facts objects are the PRODUCER's own, over an isolated config dir —
+    # the repo's convention for a shape test (test_inbox.py's live_state cell) —
+    # never hand-built dicts, which is how the old fixture drifted from the
+    # producer in the first place.
+    row = ask_item(
+        {
+            "ask_id": "ask_1",
+            "session_id": "s1",
+            "status": "open",
+            "created_at": 1_000,
+            "expires_at": 1_000 + 37 * 60 * 1000,
+            "questions": [{"question": "Block the /24 for 24 hours, or keep watching?"}],
+        },
+        {},
+        SessionFacts(tmp_path),
+        ProjectFacts(tmp_path),
+    )
+    assert row["ask"]["deadline_at"] == 1_000 + 37 * 60 * 1000, "the producer nests the deadline"
+    assert "expires_at" not in row, "the producer does not put the deadline at the top level"
     text = render.detail_text(
         None, row, 75, position=(1, 1), now_ms=1_000 + 60 * 60 * 1000, show_back=False
     ).plain
-    assert "Radient free-credit defence" in text
     assert "expires" in text
     assert "a ↵" in text
     # The question appears ONCE (as the title), not again as a body.
@@ -1289,3 +1308,192 @@ def test_every_shipped_locale_fits_its_time_column() -> None:
             render.TIME_CELLS,
         )
     set_active_locale("en")
+
+
+@pytest.mark.asyncio
+async def test_the_undo_key_outranks_every_hint_the_eighty_column_row_drops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """D1: the undo key must survive the narrow footer while it is live.
+
+    Ranked eighth, ``z`` was the FIRST label an 80-column row dropped, so the
+    receipt ("Dismissed 1 update.") sat above a footer that named every gesture
+    except the one that reverses it — immediately after `e`, and immediately
+    after `E` dismissed a whole conversation. The window is transient, so the
+    label costs the row nothing once it closes; while it is open it is the
+    safety net that justifies `e` firing without a confirm.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed(tmp_path, 4)
+    app = _app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        app._cmd_notifications_page("", app._system_notice)
+        await _settle(pilot)
+        view = _page(app)
+
+        await pilot.press("e")
+        await _settle(pilot, 10)
+        assert view.undo_live, "the dismissal did not open an undo window"
+        assert "z" in [key for key, _label in view._hint_labels()], "the label was not offered"
+        assert "z undo" in view._hints.render().plain, view._hints.render().plain
+
+        # The whole-conversation gesture, which is the one the finding called
+        # most destructive: `E` then `y`, then the same footer rule.
+        await pilot.press("E")
+        await _settle(pilot)
+        assert view.confirming
+        await pilot.press("y")
+        await _settle(pilot, 10)
+        assert view.undo_live, "the bulk dismissal did not open an undo window"
+        painted = view._hints.render().plain
+        assert "z undo" in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_switching_language_repaints_the_open_page(tmp_path: Path, monkeypatch) -> None:
+    """Q2-1: an open page followed the store, not the locale.
+
+    `_apply_language` repainted the transcript, the welcome band and the status
+    bar; the page holds PAINTED copy of its own and its 2 s poll only repaints
+    on a store change, so the header kept the previous language indefinitely —
+    measured on the real app as still Chinese through a switch to ru and back.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed(tmp_path, 2)
+    app = _app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        app._cmd_notifications_page("", app._system_notice)
+        await _settle(pilot)
+        view = _page(app)
+        before = view._title.render().plain if hasattr(view, "_title") else None
+        assert before, "the page paints a title"
+        app._apply_language("ru")
+        await _settle(pilot)
+        after = view._title.render().plain
+        assert after != before, (before, after)
+        assert "Уведомления" in after, after
+        app._apply_language("en")
+        await _settle(pilot)
+        assert "Notifications" in view._title.render().plain, view._title.render().plain
+
+
+@pytest.mark.asyncio
+async def test_the_focused_pane_names_the_gestures_that_still_fire(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """D2: the pane footer said `esc back` while five keys still acted.
+
+    With the wide pane focused, `e`, `E`, `u`, `o` and `a` all acted on the
+    PANE's item, and the footer named none of them. The focus marker was also
+    painted inside the scrolling text, so the first scroll took it off screen
+    and `esc back` was the only cue left.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    store = _seed(tmp_path, 4)
+    # A tall item, so the pane can actually scroll: the marker's whole point is
+    # that it stays visible when the pane's content does not.
+    store.notify(S1, title="a long update", key="long", body_md="line\n" * 60)
+    app = _app()
+    async with app.run_test(size=(140, 32)) as pilot:
+        await _settle(pilot)
+        app._cmd_notifications_page("", app._system_notice)
+        await _settle(pilot)
+        view = _page(app)
+        assert view.wide
+
+        # `enter` opens (and pins) the row; the SECOND `enter` on the row the
+        # pane already shows hands it the keys (DT3).
+        await pilot.press("enter")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert view._detail_focus
+        painted = view._hints.render().plain
+        for key in ("o", "a", "e", "E", "u", "esc"):
+            assert key in [k for k, _label in view._hint_labels()], (key, view._hint_labels())
+        assert "esc back" in painted, painted
+        assert "e dismiss" in painted, painted
+
+        # The marker survives scrolling: the edge column does not scroll.
+        # pgdn is the pane's own key (DT3), so the scroll is driven the way the
+        # operator drives it rather than by writing the offset.
+        for _ in range(4):
+            await pilot.press("pagedown")
+        await _settle(pilot)
+        assert view._detail.scroll_offset.y > 0, "the pane did not scroll"
+        assert (
+            render.CURSOR in view._edge.render().plain.splitlines()[0]
+        ), view._edge.render().plain.splitlines()[:2]
+
+
+def test_a_long_link_url_hangs_at_its_labels_inset() -> None:
+    """D6: a folded URL started one column LEFT of its label's inset.
+
+    The URL was appended raw and the widget folded it at column 0, so a wrapped
+    link read as a stray left-aligned run under ` Admin: frozen credits`.
+    """
+    from local_operator.tui.notifications_render import detail_text
+
+    row = {
+        "id": "n_link",
+        "source": "notify",
+        "priority": "normal",
+        "title": "14 sign-ups, 12 blocked",
+        "body_md": "Seventeen attempts from one /24 between 10:12 and 10:40.",
+        "created_at": 1_000,
+        "updated_at": 1_000,
+        "revision": 1,
+        "repeat_count": 1,
+        "session": {"id": "s1"},
+        "links": [
+            {
+                "label": "Admin: frozen credits",
+                "url": "https://example.invalid/admin/credits/" + "x" * 60,
+            }
+        ],
+    }
+    text = detail_text(None, row, 60, position=(1, 1), now_ms=2_000, show_back=False).plain
+    lines = text.splitlines()
+    label_at = next(i for i, line in enumerate(lines) if "Admin: frozen credits" in line)
+    # The URL's own lines follow the label, each hung at the block's inset (2);
+    # joined back up they are exactly the URL, so nothing was dropped.
+    url_lines: list[str] = []
+    for line in lines[label_at + 1 :]:
+        if not line.startswith("  ") or not line.strip():
+            break
+        url_lines.append(line)
+    assert len(url_lines) > 1, ("the URL must wrap here, or the case proves nothing", url_lines)
+    assert "".join(line[2:] for line in url_lines) == (
+        "https://example.invalid/admin/credits/" + "x" * 60
+    )
+    for line in url_lines:
+        assert len(line) <= 60, (len(line), line)
+
+
+def test_an_ask_pane_never_reads_like_an_error(tmp_path: Path) -> None:
+    """D7: "No details were attached." under an ask read like a failure.
+
+    For an ask the question IS the detail, so the line said the item was broken
+    when it was complete.
+    """
+    from local_operator.notifications.items import ProjectFacts, SessionFacts, ask_item
+    from local_operator.tui.notifications_render import detail_text
+
+    row = ask_item(
+        {
+            "ask_id": "ask_1",
+            "session_id": "s1",
+            "status": "open",
+            "created_at": 1_000,
+            "expires_at": 1_000 + 37 * 60 * 1000,
+            "questions": [{"question": "Block the /24 for 24 hours, or keep watching?"}],
+        },
+        {},
+        SessionFacts(tmp_path),
+        ProjectFacts(tmp_path),
+    )
+    text = detail_text(None, row, 75, position=(1, 1), now_ms=2_000, show_back=False).plain
+    assert "No details were attached." not in text, text
+    assert "expires" in text, "the meta line still names the expiry"
