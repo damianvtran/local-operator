@@ -120,6 +120,7 @@ read.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -2391,13 +2392,20 @@ def _verify_tail(path: Path, end: int, last_id: str) -> bool:
 
 
 def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex:
-    """A first read (or a rewrite's forced rescan) of the whole journal."""
+    """A first read (or a rewrite's forced rescan) of the whole journal.
+
+    Pauses between rows when run as a background refresh (``_YIELD_TO``, see
+    "Yielding to other opens"); the rows and their order are unaffected.
+    """
+    yield_to = _YIELD_TO.get()
     reader = _RowReader(path, 0, 0)
     state = _Derivation()
     journal_rows: dict[str, int] = {}
     journal_ranges: dict[str, tuple[int, int]] = {}
     source_facts = []
     for row in reader:
+        if yield_to is not None:
+            yield_to()
         source_facts.append(row.source_fact or source_projection_fact(None, row.ordinal))
         if row.id:
             journal_rows[row.id] = row.ordinal
@@ -2440,6 +2448,7 @@ def _scan_incremental(
     path: Path, previous: TranscriptIndex, naming_raw: dict[str, Any] | None
 ) -> TranscriptIndex:
     """Re-derive from the resume window and extend through the appended bytes."""
+    yield_to = _YIELD_TO.get()
     window_offset = previous.scan.window_offset
     window_rows = previous.scan.window_rows
     keep_checkpoints = [c for c in previous.checkpoints if c.seq < window_rows]
@@ -2472,6 +2481,8 @@ def _scan_incremental(
     }
     source_facts = [fact for fact in previous.source_projection_facts if fact["seq"] < window_rows]
     for row in reader:
+        if yield_to is not None:
+            yield_to()
         source_facts.append(row.source_fact or source_projection_fact(None, row.ordinal))
         if row.id:
             journal_rows[row.id] = row.ordinal
@@ -2543,6 +2554,13 @@ def _sig_matches(sig: dict[str, Any], st: os.stat_result) -> bool:
 def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     """Bring one session's cache up to date; ``None`` when there is no journal.
 
+    A background refresh started by :func:`start_refresh` runs with
+    :data:`_YIELD_TO` set, and this calls it at every pause point -- between rows
+    and before each whole-document JSON step -- so a CPU-bound scan in a worker
+    thread steps aside while another conversation's first frame is being built
+    (see "Yielding to other opens"). It never changes what is built, only when
+    the thread holds the GIL. A synchronous caller sees no pause at all.
+
     The whole invalidation ladder, in order: an exact (size, mtime, inode)
     match reuses; a GROWN file from the SAME inode whose recorded tail still
     verifies increments; anything else — including a compact rewrite, whose
@@ -2551,11 +2569,14 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
     read).
     """
     path = _journal_path(config_dir, session_id)
+    yield_to = _YIELD_TO.get()
     for attempt in (0, 1):
         try:
             st = path.stat()
         except OSError:
             return None
+        if yield_to is not None:
+            yield_to()
         raw = _read_raw(config_dir, session_id)
         previous = _index_from_raw(raw)
         if previous is not None and previous.journal_generation and _sig_matches(previous.sig, st):
@@ -2601,6 +2622,10 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             merged = dict(carried) if isinstance(carried, dict) else {}
             merged.update(fresh_section["items"])
             index.naming = {"prompt_version": NAMING_PROMPT_VERSION, "items": merged}
+        if yield_to is not None:
+            # The document's ``json.dumps`` is one uninterruptible C call (~20-60 ms
+            # for the 51.7 MB fixture's 4.5 MB index): pause BEFORE it, not inside.
+            yield_to()
         write_index(config_dir, session_id, index)
         return index
     return None
@@ -2762,6 +2787,76 @@ def hold_paint(config_dir: str | Path, session_id: str) -> Callable[[], None]:
             current[1].set()
 
     return release
+
+
+# ---------------------------------------------------------------------------
+# Yielding to other opens: a background scan never starves another first frame
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS (conversation-first-paint, residual 2, 2026-10-27). The paint
+# hold above protects an open from ITS OWN cold scan. It does nothing for the
+# NEXT conversation: switching from the 51.7 MB journal to the 8 MB legacy one
+# released the first hold at its snapshot, the deferred scan started 0.2 ms
+# later in a worker thread, and the legacy open -- loop-thread Python the whole
+# way (facade build, attention, page reads) -- then fought that thread for the
+# GIL: 298-306 ms back-to-back (5/5, real ``lop serve``) against 28-40 ms opened
+# first or after a 3 s gap. Attribution, same rig, injected in place of the
+# scan's first 0.5 s: ``time.sleep`` (thread and executor slot occupied, GIL
+# free) -> legacy 29-32 ms; a busy loop (GIL held) -> 707-739 ms. The executor
+# is not the contended resource, and no lock is: the GIL is. Python's 5 ms
+# switch interval hands the loop thread only a share of the interpreter, so
+# every millisecond of the open stretched by the scan's share.
+#
+# THE RULE. A background refresh pauses at row boundaries (and before each
+# whole-document JSON step) while ANY paint hold is live for a session OTHER
+# than its own, sleeping in short slices that release the GIL. Its own
+# session's hold never pauses it: an open that waits on its own payable refresh
+# would otherwise wait on itself.
+#
+# WHAT IT NEVER CHANGES. The rows consumed, their order and the document
+# written are identical; only wall time moves, and only while another open is
+# mid-first-frame (tens of ms). Ready-state transitions are unchanged -- the
+# task still settles exactly once, through the same ``_wrapped``.
+#
+# HOW IT CANNOT WEDGE. Paint holds are released on every exit of the events
+# route, but a leaked one (or a user switching conversations nonstop) must not
+# stall indexing: a scan's cumulative pause is capped at
+# :data:`_YIELD_BUDGET_S`, after which it runs straight through as before.
+#
+# THREAD SAFETY. The check runs in the worker thread and only READS
+# ``_PAINT_HOLDS`` (``len`` and ``in`` -- single atomic operations on a dict the
+# loop mutates); it never iterates or writes it.
+
+#: Sleep slice while yielding: short enough that the scan resumes within a few
+#: ms of the other open's snapshot, long enough to hand the GIL over outright.
+_YIELD_SLICE_S = 0.002
+#: Ceiling on one refresh's total pause. A desktop first frame is tens to a few
+#: hundred ms; this only bounds a leaked hold or a nonstop run of opens.
+_YIELD_BUDGET_S = 2.0
+
+
+#: The pause callable the CURRENT background refresh honours; ``None`` (every
+#: synchronous caller: the TUI, peer cycle display, tests) means never pause.
+_YIELD_TO: contextvars.ContextVar[Callable[[], None] | None] = contextvars.ContextVar(
+    "transcript_index_yield_to", default=None
+)
+
+
+def _yield_to_other_opens(own: tuple[str, str]) -> Callable[[], None]:
+    """The ``yield_to`` callable for one background refresh of ``own``."""
+    spent = 0.0
+
+    def pause() -> None:
+        nonlocal spent
+        holds = _PAINT_HOLDS
+        while spent < _YIELD_BUDGET_S and len(holds) > (1 if own in holds else 0):
+            # Measured, not counted: on a loaded host a 2 ms sleep can overrun
+            # several-fold, and the budget is a wall-clock promise.
+            started = time.monotonic()
+            time.sleep(_YIELD_SLICE_S)
+            spent += time.monotonic() - started
+
+    return pause
 
 
 def refresh_deferred(config_dir: str | Path, session_id: str) -> bool:
@@ -3072,6 +3167,10 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
             # route's ``a.wire.frame kind=snapshot`` row says whether the scan
             # started before or after the first frame was written.
             open_trace.mark("index.refresh_start", session=session_id, deferred=hold is not None)
+        # Set in THIS task's own context, which ``to_thread`` copies into the
+        # worker: only this refresh yields, and ``refresh_index``'s signature
+        # (which tests and callers substitute) stays two-argument.
+        _YIELD_TO.set(_yield_to_other_opens(key))
         return await asyncio.to_thread(refresh_index, config_dir, session_id)
 
     async def _wrapped() -> TranscriptIndex | None:

@@ -2303,3 +2303,94 @@ async def test_no_hold_means_no_deferral(tmp_path):
     task, _ = ti.start_refresh(tmp_path, SID)
     assert not ti.refresh_deferred(tmp_path, SID)
     assert await asyncio.wait_for(task, 30) is not None
+
+
+# ---------------------------------------------------------------------------
+# Yielding to other opens (conversation-first-paint residual 2): a background
+# scan of one session steps aside while ANOTHER session's first frame is held.
+# ---------------------------------------------------------------------------
+
+OTHER = "aabbccddee02"
+
+
+def _derived(index: ti.TranscriptIndex) -> tuple[Any, ...]:
+    """Everything a refresh derives, minus the per-scan generation uuid."""
+    return (
+        index.checkpoints,
+        index.messages,
+        index.runs,
+        index.journal_rows,
+        index.journal_ranges,
+        index.source_projection_facts,
+        index.coverage,
+        index.scan,
+    )
+
+
+def _three_turns(root: Path) -> None:
+    write_rows(
+        root,
+        [
+            user("u1", 1.0),
+            assistant("a1", 1.1),
+            user("u2", 2.0),
+            assistant("a2", 2.1),
+            user("u3", 3.0),
+            assistant("a3", 3.1),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_background_refresh_pauses_while_another_open_is_held(tmp_path):
+    """Held other session: the scan does not finish; released: it does, unchanged."""
+    _three_turns(tmp_path)
+    release = ti.hold_paint(tmp_path, OTHER)
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and not ti.refresh_deferred(tmp_path, SID), "payable: never deferred"
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the scan kept the GIL while another first frame was held"
+    finally:
+        release()
+    built = await asyncio.wait_for(task, 30)
+    assert built is not None
+    os.remove(ti.index_path(tmp_path, SID))
+    rebuilt = ti.refresh_index(tmp_path, SID)
+    assert rebuilt is not None
+    assert _derived(built) == _derived(rebuilt), "yielding changed what the scan derived"
+
+
+@pytest.mark.asyncio
+async def test_its_own_hold_never_pauses_a_refresh(tmp_path):
+    """The open waiting on its own payable refresh must not wait on itself."""
+    _three_turns(tmp_path)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert await asyncio.wait_for(task, 5) is not None
+        view = await ti.checkpoints_view(tmp_path, SID)
+        assert view["index"]["state"] == "ready"
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_other_hold_costs_at_most_the_yield_budget(tmp_path, monkeypatch):
+    """A hold nobody releases delays the scan by the budget, never forever."""
+    _three_turns(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 0.1)
+    ti.hold_paint(tmp_path, OTHER)  # never released
+    task, _ = ti.start_refresh(tmp_path, SID)
+    assert await asyncio.wait_for(task, 5) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_synchronous_refresh_never_pauses(tmp_path):
+    """The TUI / peer-cycle callers run ``refresh_index`` directly: no yield."""
+    _three_turns(tmp_path)
+    release = ti.hold_paint(tmp_path, OTHER)
+    try:
+        assert ti.refresh_index(tmp_path, SID) is not None
+    finally:
+        release()
