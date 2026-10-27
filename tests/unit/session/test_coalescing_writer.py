@@ -25,6 +25,11 @@ from local_operator.session import subagent_ledger as ledger
 from local_operator.session.coalescing_writer import EVIDENCE_WRITER, CoalescingWriter
 
 
+def _wait(gate: threading.Event) -> None:
+    # Ops are ``() -> None``; ``Event.wait`` returns a bool.
+    gate.wait(5)
+
+
 def _seed_lane(child: Path, job_id: str = "job-1") -> Path:
     child.mkdir(parents=True, exist_ok=True)
     path = ledger.write_lane_receipt(child, ledger.build_lane_payload(job_id=job_id))
@@ -58,7 +63,7 @@ def test_a_burst_on_one_key_coalesces_to_the_latest_op() -> None:
     gate = threading.Event()
     ran: list[str] = []
     # Park the writer on an unrelated key so the burst below queues behind it.
-    writer.submit("blocker", lambda: gate.wait(5))
+    writer.submit("blocker", lambda: _wait(gate))
     for value in ("a", "b", "c"):
         writer.submit("same", lambda v=value: ran.append(v))
     gate.set()
@@ -98,7 +103,7 @@ def test_a_forced_step_survives_being_coalesced_with_a_throttled_one(
     payload["step_written_at"] = time.time()
     path.write_text(json.dumps(payload))
     gate = threading.Event()
-    EVIDENCE_WRITER.submit("blocker", lambda: gate.wait(5))
+    EVIDENCE_WRITER.submit("blocker", lambda: _wait(gate))
     try:
         ledger.note_lane_step(child, "job-1", "checkpoint", 11.0, "refs/lop/wip/x", force=True)
         ledger.note_lane_step(child, "job-1", "bash: later", 12.0, "refs/lop/wip/x")
@@ -117,7 +122,7 @@ def test_a_withdrawn_lane_receipt_is_never_resurrected_by_a_queued_step(tmp_path
     child = tmp_path / "child"
     path = _seed_lane(child)
     gate = threading.Event()
-    EVIDENCE_WRITER.submit("blocker", lambda: gate.wait(5))
+    EVIDENCE_WRITER.submit("blocker", lambda: _wait(gate))
     try:
         ledger.note_lane_step(child, "job-1", "bash: last", 13.0, force=True)
         ledger.withdraw_lane_receipt(child, "job-1")
@@ -161,7 +166,7 @@ def test_wip_note_step_defers_the_receipt_and_clear_is_final(tmp_path: Path, mon
     writers: list[int] = []
     real = cp._store
 
-    def recording(payload: dict) -> None:
+    def recording(payload: dict[str, object]) -> None:
         writers.append(threading.get_ident())
         real(payload)
 
@@ -175,7 +180,7 @@ def test_wip_note_step_defers_the_receipt_and_clear_is_final(tmp_path: Path, mon
 
     # A step queued just before ``clear`` must not land after it.
     gate = threading.Event()
-    EVIDENCE_WRITER.submit("blocker", lambda: gate.wait(5))
+    EVIDENCE_WRITER.submit("blocker", lambda: _wait(gate))
     try:
         cp.last_receipt = 0.0
         cp.note_step("write", "Racing the settle", 101.0)
@@ -212,7 +217,7 @@ def test_the_notify_path_rereads_the_ask_log_at_most_once_per_floor(monkeypatch)
     reads: list[int] = []
     installed: list[object] = []
 
-    def fake_ask_wire(session: object) -> tuple[list[dict], int]:
+    def fake_ask_wire(session: object) -> tuple[list[dict[str, object]], int]:
         reads.append(1)
         return [], 0
 
@@ -252,7 +257,7 @@ def test_the_channel_sidecar_is_read_at_most_once_per_floor_on_the_tick_path(
 
     reads: list[int] = []
 
-    def fake_read(directory: object) -> list[dict]:
+    def fake_read(directory: object) -> list[dict[str, object]]:
         reads.append(1)
         return []
 
