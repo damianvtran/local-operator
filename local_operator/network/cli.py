@@ -1380,8 +1380,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 "bad_request",
                 f"--port {port} would move this device's relay off port {settings.port}, "
                 f"which network {', '.join(repr(name) for name in existing)} already "
-                "advertises to its members; create the network without --port, or "
-                "change the device's relay port in settings first",
+                "advertises to its members; create the network without --port, or move "
+                f"the relay deliberately with 'lop config edit network.port {port}' — which "
+                "also changes the port the existing networks' peers dial",
             )
         settings_io.write_setting(ConfigManager(config_dir=Path(config_dir())), setting, port)
     identity = load_or_mint()
@@ -1936,12 +1937,20 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
 
     Every user-scope HTTP/SSE server declared in this device's ``mcp.json`` (stdio
     servers have no login to share and are excluded), joined with (a) whether a login
-    row exists HERE — the same read the share verb's refusal makes, reused so the
-    ledger and the refusal cannot disagree — and (b) any placement entry this device
+    the runtime would USE is held here (``readiness.mcp_server_login_here``) and
+    (b) any placement entry this device
     holds for ``mcp:<url>``, so an already-shared login says where. READ-ONLY: no
     declare, no placement write, no broker semantics change; ``remedy`` is the
     command the operator would run next, with ``<device>`` standing where a target
     device goes (the ledger cannot know which one).
+
+    THE SHARE VERB'S READ IS WIDER BY ONE SHAPE, ON PURPOSE (review round 2, m1). Its
+    ``credential_here`` counts any ISSUED grant, so a TOMBSTONED login still shares:
+    the holder's borrow then says "sign in again on <this device>", the one remedy
+    that works. The ledger cannot call that row "login held" (nothing would serve)
+    nor "sign in here first" (one exists); it marks ``login_dead`` and prints
+    ``readiness.MCP_DEAD_LOGIN_REMEDY`` — the sentence the readiness viewer row and
+    the share receipt print too, so the three surfaces say one thing.
     """
     from local_operator.network import readiness as readiness_mod
     from local_operator.network.credentials import placement as placement_mod
@@ -1985,14 +1994,19 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
                     }
                 )
         key = f"mcp:{url}"
+        dead = login_here is False and readiness_mod.mcp_login_dead(server)
         if login_here is True:
             remedy = f"lop network credential share {key} --with <device>"
+        elif dead:
+            remedy = readiness_mod.MCP_DEAD_LOGIN_REMEDY
         elif login_here is False:
             remedy = readiness_mod.mcp_login_remedy(url)
         else:
             remedy = ""
         rows.append(
             {
+                # Only on a tombstoned row, so every other row's shape is unchanged.
+                **({"login_dead": True} if dead else {}),
                 "server": str(server.get("name") or ""),
                 "url": url,
                 "transport": str(server.get("transport") or ""),
@@ -2567,6 +2581,32 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
+    from local_operator.network.credentials.types import is_mcp_key
+
+    if verb == "share" and is_mcp_key(key):
+        from local_operator.mcp.auth import server_has_stored_grant
+        from local_operator.network.credentials.offers import close_quietly, open_store
+        from local_operator.network.credentials.types import mcp_url_from_key
+
+        # A TOMBSTONED login shares on purpose (``holds_grant``), so the receipt says
+        # what the holder will see instead of implying a working borrow (review round
+        # 2, m1). Same sentence as the ledger and the readiness viewer row.
+        auth_store = open_store(_config_dir())
+        try:
+            usable = auth_store is not None and server_has_stored_grant(
+                mcp_url_from_key(key), auth_store
+            )
+        finally:
+            if auth_store is not None:
+                close_quietly(auth_store)
+        if not usable:
+            from local_operator.network import readiness as readiness_mod
+
+            payload["login_dead"] = True
+            lines.append(
+                "note: this device's login is no longer valid — "
+                f"{readiness_mod.MCP_DEAD_LOGIN_REMEDY}"
+            )
     if verb == "share" and github_mod.is_github_key(key):
         # The disclosure names the ARM that will serve (§3.4): only the App is
         # narrowed server-side, and the share receipt must not promise narrowing

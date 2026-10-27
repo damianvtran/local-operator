@@ -702,15 +702,48 @@ def mcp_header_ref_server(server: Mapping[str, Any], *, shared: bool) -> bool:
     side, or recorded owner evidence — keeps the server on the login path, where
     the pull gap and an observed owner refusal are reported instead of hidden
     behind a green "resolves every referenced credential" row.
+
+    ANY LOCAL ROW IS OAUTH EVIDENCE (review round 2, M1-r2), so ``has_row`` is
+    read raw here, not through :func:`mcp_server_login_here`. The SDK writes a
+    registration row only after a challenge plus discovery, and a tombstoned row
+    means a real login existed; the runtime does not authenticate either one, so
+    sending them down the ref path printed "resolves every referenced credential"
+    over a session that fails, and dropped the one login needing repair from the
+    ledger. Slack's shape has no row at all and keeps the ref path.
     """
     if str(server.get("transport") or "") not in ("http", "sse"):
         return False
     return (
         bool(server.get("refs"))
         and not server.get("auth_declared")
-        and mcp_server_login_here(server) is not True
+        and server.get("has_row") is not True
         and not shared
     )
+
+
+def mcp_login_dead(server: Mapping[str, Any]) -> bool:
+    """Whether a server's local login row is a TOMBSTONED grant (value-free facts).
+
+    The one shape the owner side answers differently from the runtime: the
+    runtime will not use it, yet sharing it is deliberate — the holder's borrow
+    then says "sign in again on <owner>" (``McpTokenStorage.holds_grant``). The
+    ledger, the readiness viewer row and the share receipt all name it with
+    :data:`MCP_DEAD_LOGIN_REMEDY`, so the three agree (review round 2, m1; QA Q3).
+    """
+    diagnostics = server.get("auth_diagnostics")
+    return (
+        server.get("has_row") is True
+        and isinstance(diagnostics, Mapping)
+        and diagnostics.get("access_state") == "dead"
+    )
+
+
+#: The ONE sentence for a tombstoned local login, on every owner-side surface.
+#: Each surface says "no longer valid" in its own frame; this is the action.
+MCP_DEAD_LOGIN_REMEDY = (
+    "sign in again here; until then a share of it tells its holders to sign in "
+    "again on this device"
+)
 
 
 def mcp_login_remedy(url: str) -> str:
@@ -947,6 +980,8 @@ def shareable_lines(rows: Iterable[Mapping[str, Any]]) -> list[str]:
             login = row.get("login_here")
             if login is True:
                 summary = f"login held — share: {row.get('remedy') or ''}"
+            elif row.get("login_dead"):
+                summary = f"login no longer valid — {row.get('remedy') or ''}"
             elif login is False:
                 summary = f"no login here yet — {row.get('remedy') or ''}"
             else:
@@ -1426,6 +1461,22 @@ class ViewerFacts:
         if store is None:
             return False
         return _mcp_row_exists(store, url)
+
+    def mcp_login_usable(self, url: str) -> bool | None:
+        """Whether this device's login for ``url`` is one the runtime would USE.
+
+        Optional on the ``Viewer`` protocol (read with ``getattr``, like
+        ``secret_placement``): it only refines the "holds a login" row for a
+        tombstoned grant, so a viewer without it keeps the plain wording.
+        """
+        store = self._open()
+        if self._store_unreadable:
+            return None
+        if store is None:
+            return False
+        from local_operator.mcp.auth import server_has_stored_grant
+
+        return server_has_stored_grant(url, store)
 
     def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
         return placement_fact(provider=provider, mcp_url=mcp_url, root=self.root)
@@ -2873,6 +2924,25 @@ def _mcp_credential_row(
             observed={"server": name, "url": url},
         )
     mine = viewer.holds_mcp_login(url)
+    usable_lookup = getattr(viewer, "mcp_login_usable", None)
+    if mine and callable(usable_lookup) and usable_lookup(url) is False:
+        # A TOMBSTONED login here (review round 2, m1): still shareable on purpose,
+        # but "holds a login … share it" promised a working borrow. Same sentence
+        # the ledger and the share receipt print.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_NOT_SHARED,
+            detail=(
+                f"this device's login for {name} is no longer valid and is not shared "
+                f"with {peer_label}"
+            ),
+            remedies=[f"{MCP_DEAD_LOGIN_REMEDY}; then share it with {peer_label}"],
+            source=SOURCE_LOCAL,
+            observed={"server": name, "url": url},
+        )
     if mine:
         return _capability_row(
             device_id=member.device_id,

@@ -500,3 +500,136 @@ def test_ledger_omits_an_unshared_header_ref_server(
     )
     rows = net_cli._shareable_servers(SELF)  # noqa: SLF001
     assert [row["server"] for row in rows] == ["linear"]
+
+
+# ---------------------------------------------------------------------------
+# Round 2 remediation: any local row is OAuth evidence on the ref path (M1-r2)
+# ---------------------------------------------------------------------------
+
+
+def _ref_holder_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An OAuth server that ALSO carries a set ``${REF}`` header, no share anywhere."""
+    from local_operator.network import mcpdefs
+
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "linear": {
+                        "type": "http",
+                        "url": URL,
+                        "headers": {"X-Workspace": "${LINEAR_WS}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # The ref is SET: the false green needs a resolving reference to appear.
+    monkeypatch.setattr(mcpdefs, "reference_present", lambda _root, _ref: True)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("shape", "code", "remedy"),
+    [
+        ("dead", "local_grant_unavailable", "sign in again on holder"),
+        ("registration-only", readiness.CODE_NO_CREDENTIAL, None),
+    ],
+)
+def test_a_local_row_keeps_a_ref_server_on_the_login_path(
+    shape: str,
+    code: str,
+    remedy: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _ref_holder_root(tmp_path, monkeypatch)
+    _write_shape(root, shape)
+    fact = readiness.mcp_servers_fact(root)
+    assert fact["servers"][0]["refs"][0]["set"] is True  # the discriminating setup
+
+    row = _holder_row(root, viewer=_FakeViewer(holds_mcp=False))
+
+    assert row["ok"] is False and row["code"] == code, row
+    assert "resolves every referenced credential" not in row["detail"]
+    if remedy is not None:
+        assert row["remedies"] == [remedy]
+
+
+@pytest.mark.parametrize("shape", ["dead", "registration-only"])
+def test_the_ledger_keeps_a_ref_server_with_a_local_row(
+    shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network import cli as net_cli
+
+    root = _ref_holder_root(tmp_path, monkeypatch)
+    _write_shape(root, shape)
+    rows = net_cli._shareable_servers(SELF)  # noqa: SLF001
+    assert [row["server"] for row in rows] == ["linear"]
+    assert rows[0]["login_here"] is False
+
+
+# ---------------------------------------------------------------------------
+# Round 2 remediation: a dead OWNER login says one thing on three surfaces (m1/Q3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dead_owner_login_reads_the_same_on_ledger_viewer_and_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from argparse import Namespace
+
+    from local_operator.network import cli as net_cli
+
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    _write_shape(root, "dead")
+    remedy = readiness.MCP_DEAD_LOGIN_REMEDY
+
+    # 1. Ledger: not "login held", not "sign in here first".
+    ledger = net_cli._shareable_servers(SELF)  # noqa: SLF001
+    assert ledger[0]["login_here"] is False and ledger[0]["login_dead"] is True
+    assert ledger[0]["remedy"] == remedy
+    assert "login no longer valid" in "\n".join(readiness.shareable_lines(ledger))
+
+    # 2. Readiness viewer row for an unshared peer: not "holds a login … share it".
+    server = {"name": "linear", "url": URL, "transport": "http", "has_row": False}
+    viewer = readiness.ViewerFacts(root, device_id=SELF)
+    try:
+        rows = readiness.mcp_credential_rows(
+            SimpleNamespace(device_id=OWNER, name="peer"),
+            _facts(mcp={"servers": [server]}),
+            viewer=viewer,
+            peer_label="peer",
+        )
+    finally:
+        viewer.close()
+    assert "holds a login" not in rows[0]["detail"], rows[0]
+    assert rows[0]["remedies"] == [f"{remedy}; then share it with peer"]
+
+    # 3. The share still succeeds (the repair path) and its receipt says the same.
+    record = net_store.load(NETWORK, root)
+    record.members[1].name = "peer"
+    net_store.save(record, root)
+    monkeypatch.setattr(net_cli, "_apply_capability_change", lambda *_a, **_k: ({}, "test"))
+    from local_operator.network import identity as identity_mod
+
+    monkeypatch.setattr(
+        identity_mod,
+        "load",
+        lambda *_a, **_k: SimpleNamespace(device_id=SELF, name="holder"),
+    )
+    rc = net_cli._cmd_credential(  # noqa: SLF001
+        Namespace(
+            credential_command="share",
+            key=credential_key_for_mcp(URL),
+            device="peer",
+            network="",
+            scope="",
+            json=True,
+        )
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True and payload["login_dead"] is True

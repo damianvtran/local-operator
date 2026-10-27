@@ -1840,5 +1840,7 @@ def test_init_port_refuses_to_move_the_relay_under_an_existing_network(
     body = json.loads(capsys.readouterr().out)
     assert rc == 1 and body["code"] == "bad_request"
     assert "a-net" in body["message"]
+    # Review round 2, n1: the refusal names the deliberate command.
+    assert "lop config edit network.port 47811" in body["message"]
     assert [record.name for record in store.list_networks(root)] == ["a-net"]
     assert store.read_config(("network", "port"), None, root=root) is None
