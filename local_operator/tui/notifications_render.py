@@ -618,15 +618,22 @@ def detail_text(
 #: the one that reverses it — right after `E`, the most destructive gesture on
 #: the page. It costs the row nothing when no undo is live: the label is only
 #: emitted while the window is open.
+#:
+#: ``↵`` keeps rank 2, ABOVE the secondary row gestures (R4-2). The D1 re-rank that
+#: put ``z`` first also pushed ``↵`` behind ``u`` and ``space``, and the 80-column
+#: row then dropped the PRIMARY action — open — while keeping the enable/select
+#: pair. The rule the order follows: the way out, then the undo of a destructive
+#: act, then the primary action, then the row's own gestures, then volume and
+#: selection, then the browse-only keys the header and the detail both restate.
 _HINT_RANK = {
     "esc": 0,
     "z": 1,
-    "e": 2,
-    "E": 3,
-    "A": 4,
-    "u": 5,
-    "space": 6,
-    "↵": 7,
+    "↵": 2,
+    "e": 3,
+    "E": 4,
+    "space": 5,
+    "A": 6,
+    "u": 7,
     "a": 8,
     "o": 9,
     "f": 10,

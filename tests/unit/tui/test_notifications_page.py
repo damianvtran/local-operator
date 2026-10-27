@@ -1367,7 +1367,7 @@ async def test_switching_language_repaints_the_open_page(tmp_path: Path, monkeyp
         app._cmd_notifications_page("", app._system_notice)
         await _settle(pilot)
         view = _page(app)
-        before = view._title.render().plain if hasattr(view, "_title") else None
+        before = view._title.render().plain
         assert before, "the page paints a title"
         app._apply_language("ru")
         await _settle(pilot)
@@ -1497,3 +1497,64 @@ def test_an_ask_pane_never_reads_like_an_error(tmp_path: Path) -> None:
     text = detail_text(None, row, 75, position=(1, 1), now_ms=2_000, show_back=False).plain
     assert "No details were attached." not in text, text
     assert "expires" in text, "the meta line still names the expiry"
+
+
+@pytest.mark.asyncio
+async def test_the_focused_pane_names_the_undo_it_can_still_take(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """R4-1: the pane's footer returned before the undo check, so it never named `z`.
+
+    Every other branch passes through `undo_live`; the focused pane's branch
+    returns first. It is also the branch that NAMES `e dismiss` / `E dismiss all`,
+    so it invited the destructive gesture and hid the key that reverses it — D1's
+    exact defect, in the state D2 made reachable.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed(tmp_path, 4)
+    app = _app()
+    async with app.run_test(size=(160, 40)) as pilot:
+        await _settle(pilot)
+        app._cmd_notifications_page("", app._system_notice)
+        await _settle(pilot)
+        view = _page(app)
+        await pilot.press("enter")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert view._detail_focus
+        await pilot.press("e")
+        await _settle(pilot, 10)
+        assert view.undo_live, "the dismissal did not open an undo window"
+        painted = view._hints.render().plain
+        assert "z undo" in painted, painted
+
+
+def test_the_eighty_column_row_never_drops_the_primary_action() -> None:
+    """R4-2: the D1 re-rank pushed `↵` behind `u` and `space`, so the row dropped OPEN.
+
+    The update row's ladder at the painted 80-column width (75 cells) must keep
+    the way out, the undo, and the primary action before it spends anything on
+    the secondary gestures.
+    """
+    labels = [
+        ("z", "undo"),
+        ("↵", "open"),
+        ("e", "dismiss"),
+        ("E", "dismiss all"),
+        ("space", "select"),
+        ("A", "read all"),
+        ("u", "read"),
+        ("o", "conversation"),
+        ("f", "filter"),
+        ("esc", "back"),
+    ]
+    kept = [key for key, _label in render.hint_row(labels, 75)]
+    # The ladder drops by RANK but paints in emission order (`esc` is appended
+    # last by `_hint_labels`), so membership is the property, not position.
+    assert "esc" in kept, kept
+    assert "z" in kept, kept
+    assert "↵" in kept, ("the primary action was dropped", kept)
+    # The tail is what pays: the browse-only keys go first, the volume keys last.
+    assert "f" not in kept and "o" not in kept, kept
+    assert "e" in kept and "E" in kept, kept

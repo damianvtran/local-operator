@@ -981,9 +981,13 @@ class NotificationsView(Vertical):
             # and none of the four gestures that still fire. It reuses the
             # narrow detail's own label set (no new copy: those strings are the
             # ones seven audited locale rows already carry).
-            if row is None:
-                return [("esc", _t(_k.hint_back()))]
-            labels = self._item_hints(row)
+            labels = [] if row is None else self._item_hints(row)
+            # R4-1: every other branch passes through the `undo_live` check
+            # below this one, so the pane's own footer never emitted `z` — and
+            # this branch is the one that NAMES `e dismiss` / `E dismiss all`,
+            # inviting the destructive act while hiding the key that reverses it.
+            if self.undo_live:
+                labels.insert(0, ("z", _t(_k.hint_undo())))
             labels.append(("esc", _t(_k.hint_back())))
             return labels
         if self.undo_live:
