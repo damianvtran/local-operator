@@ -1072,3 +1072,48 @@ async def test_a_host_less_source_resolves_its_roster_from_the_snapshot() -> Non
 
     assert [job.id for job in jobs] == ["child"], "a task row was lost or a bash row leaked in"
     assert selected is None
+
+
+@pytest.mark.asyncio
+async def test_the_resume_fill_mounts_a_bounded_number_of_pages(monkeypatch) -> None:
+    """One reveal mounts a bounded number of older pages, however deep the tail.
+
+    The fill's cap used to be per BURST: reaching it called `_start_resume_fill`,
+    which restarts the attempt counter at zero, so a view whose scroll never
+    reaches the goal kept mounting pages until the pending head emptied. One warm
+    legacy revisit mounted 20,200 blocks — the whole 27,003-message history —
+    before settling to 38. The burst yield stays (a long hidden prefix must not
+    strand the reader) but the count is monotonic, so the total budget ends the
+    chain; anything deeper is the reader's own scrolling.
+    """
+    from local_operator.tui.app import RESUME_FILL_TOTAL_PAGES
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+        monkeypatch.setattr(app, "_release_resume_tail_hold", lambda: None)
+        monkeypatch.setattr(app, "_reconcile_head_notice", lambda: None)
+        app._resume_fill_active = True
+        app._resume_pending_head = [object() for _ in range(500)]
+        mounted: list[int] = []
+
+        def mount(*, on_settled=None):  # type: ignore[no-untyped-def]
+            mounted.append(1)
+            app._resume_pending_head.pop()  # every page makes progress
+            if on_settled is not None:
+                on_settled()
+
+        monkeypatch.setattr(app, "_mount_older_resume_page", mount)
+        monkeypatch.setattr(type(app._transcript_view()), "scroll_y", property(lambda self: 0.0))
+
+        await pilot.pause()
+        app._fill_resume_until_scrollable(0)
+        for _ in range(30):
+            await pilot.pause()
+
+    assert mounted, "the fill never ran"
+    assert len(mounted) <= RESUME_FILL_TOTAL_PAGES, (
+        "the fill mounted past its total budget (a history-exhausting chain)",
+        len(mounted),
+    )

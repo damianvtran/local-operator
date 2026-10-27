@@ -1997,6 +1997,14 @@ RESUME_PAGE_TRIGGER_ROWS = 4
 #: Hidden-only pages still advance through yielded bursts until real content
 #: fills the reserve, the cursor stops advancing, or the reader takes over.
 RESUME_FILL_MAX_PAGES = 16
+# ...and the TOTAL a single reveal may mount, across every burst. The
+# per-burst cap alone bounded nothing: reaching it re-armed the fill, which
+# restarted the attempt counter at zero, so a view whose scroll never reaches
+# the goal kept mounting until the pending head emptied — one warm legacy
+# revisit mounted 20,200 blocks (the whole 27,003-message history) before
+# settling to 38. Four bursts is far more than any viewport needs (the
+# reserve is one screenful, ~2-3 pages) while still bounding the worst case.
+RESUME_FILL_TOTAL_PAGES = RESUME_FILL_MAX_PAGES * 4
 
 #: The row that stands in for the un-rendered head of a resumed conversation.
 #: It exists because the failure mode of a display bound is a user believing
@@ -14758,7 +14766,7 @@ class OperatorApp(App[None]):
             if not chained:
                 self._start_resume_fill()
 
-    def _start_resume_fill(self, *, target: float | None = None) -> None:
+    def _start_resume_fill(self, *, target: float | None = None, attempt: int = 0) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
 
         Raw-event tail bounds are deliberately cheap first paint, not geometry:
@@ -14786,7 +14794,7 @@ class OperatorApp(App[None]):
                 self._reconcile_head_notice()
                 return
             if self._resume_fill_active:
-                self._fill_resume_until_scrollable(target=target)
+                self._fill_resume_until_scrollable(attempt, target=target)
 
         if not view.call_after_refresh(start):
             # SAME UNKEPT PROMISE as the insert seam, one screen away: the
@@ -14870,11 +14878,21 @@ class OperatorApp(App[None]):
                 if not progressed:
                     self._resume_fill_active = False
                     self._reconcile_head_notice()
+                elif _attempt + 1 >= RESUME_FILL_TOTAL_PAGES:
+                    # The total budget, not the burst cap, is what ends a chain.
+                    # Pages past the viewport are the reader's to ask for; the
+                    # fill must not keep mounting them while a view refuses to
+                    # scroll (see RESUME_FILL_TOTAL_PAGES).
+                    self._resume_fill_active = False
+                    self._release_resume_tail_hold()
+                    self._reconcile_head_notice()
                 elif _attempt + 1 >= RESUME_FILL_MAX_PAGES:
                     # A long hidden prefix is not a reason to strand the
                     # reader. Yield an additional idle frame between bursts;
                     # _start_resume_fill fences the new callback to this view.
-                    self._start_resume_fill(target=target)
+                    # The RUNNING count is carried in, so the burst boundary
+                    # cannot be mistaken for the end of the budget.
+                    self._start_resume_fill(target=target, attempt=_attempt + 1)
                 else:
                     self._fill_resume_until_scrollable(_attempt + 1, target=target)
 
