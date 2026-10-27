@@ -25,11 +25,11 @@ unknown or repeated query name is a `422 invalid_request` before any I/O.
 | `/v1/desktop/team-bridge/owner-audit/conversations` | `limit`, `cursor` | `OwnerAuditConversationPage` |
 | `.../owner-audit/conversations/{conversation_id}/messages` | `limit`, `before_seq` \| `after_seq` | `OwnerAuditMessagePage` (newest-first) |
 | `.../owner-audit/conversations/{conversation_id}/messages/{message_id}/replies` | `limit`, `after_seq` | `OwnerAuditThread` (oldest-first) |
+| `.../owner-audit/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}` | none | bytes |
 
 `before_seq` is exclusive. `after_seq` is **inclusive** on both routes, the same
 as the hub's member history (`after_seq=9` returns seq 9 and later), so a "load
 newer" page must drop the boundary row it already shows.
-| `.../owner-audit/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}` | none | bytes |
 
 JSON results ride the usual `CRUDResponse` envelope (`result`). The contract
 models live in `local_operator/server/models/desktop_team_bridge_owner_audit.py`
@@ -83,9 +83,11 @@ able to obtain it. Measured reaches, and what closes each one:
 | Reach | Closed by |
 | --- | --- |
 | `bash`, `eval` (Python kernel) and their descendants inherit it from the session runtime's environment | withheld by name from every model child in BOTH `shell_environment` modes (`tools/shell_env.HARNESS_PLANE_CREDENTIALS`) |
+| a `PostToolUse` hook command (a model can write a project settings file naming one) and the `network` tool's `lop network` child | spawned with the same name-based withholding (`hook_forwarding.run_hook`, `network/tool.py`) |
 | `ps eww $PPID` (Darwin) or `/proc/$PPID/environ` (Linux) on the session runtime | the runtime is launched without it (`session/runtime/launch.py`, `standby.py`, `mobile/daemon.py`) |
 | `ps eww <daemon pid>` on the `lop serve` daemon | the daemon takes it out of its environment at boot and overwrites the original bytes (`server/desktop.capture_launch_token`); the plane is governed from the captured value |
-| a `--reload` successor | re-supplied only to that exec, then captured again |
+| the exec successor of a NORMAL daemon's in-place reload (`server/reload.py`) | re-supplied only to that exec, then captured again |
+| a daemon started with `lop serve --reload` (uvicorn's development auto-reloader) | **not closed**: that daemon never captures, because uvicorn's reloader child reads the plane from its own environment. Development mode only; the desktop app never starts it |
 | the serve record (`run/serve/<pid>.json`) | an app-spawned daemon publishes `claim_key: ""`; a claimed daemon's key is spent by the claim |
 | argv / inherited fds | never carried there |
 
@@ -99,8 +101,13 @@ uid. This is not a boundary against same-uid code that goes looking:
 - **Window:** the launch-environment window before the daemon's capture runs
   (milliseconds at boot) is the same one the app's own spawn opens.
 
-Closing those needs a different uid or a sandbox for model commands; the
-confined (benchmark) mode's seatbelt profile is that sandbox. The guarantee
+Closing those needs a different uid or a sandbox for model commands. The
+confined (benchmark) mode's seatbelt profile is such a sandbox for its shell:
+it denies reads of `auth.db` under each config root and of the app's
+`desktop-token` file at `~/Library/Application Support/Local Operator/` (and a
+dev build's `local-operator-ui/`). A packaged app under ANOTHER product name, a
+custom `userData` path, or any session that is not confined, is outside that
+deny. The guarantee
 here is that no harness path HANDS the bearer to the model, and that no
 ambient read of the model's own or its parents' environment yields it.
 

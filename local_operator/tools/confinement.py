@@ -617,6 +617,13 @@ _HOME_SECRET_SUBPATHS: tuple[str, ...] = (
     ".netrc",
     ".codex/auth.json",
     ".config/op",
+    # The desktop app's persisted desktop-plane bearer (Electron ``userData`` is
+    # ``Application Support/<productName>``; a dev build runs under the package
+    # name). It opens every ``/v1/desktop/...`` route, including the human-only
+    # Team Bridge owner audit (#3022 r2 M3). ``*token*`` cannot carry it: that
+    # leaf glob is excluded from the kernel deny (``tokenizer.py``).
+    "Library/Application Support/Local Operator/desktop-token",
+    "Library/Application Support/local-operator-ui/desktop-token",
 )
 
 #: lop's OWN credential stores, relative to a config root (the active one and

@@ -664,11 +664,18 @@ def _owner_audit_scope() -> Any:
 def _refuse_unscoped_owner_audit(path: str) -> None:
     """Refuse a hub request on the owner-audit family outside its four methods.
 
-    Matched after collapsing slashes and case, so ``//messaging/Agents/owned``
-    is the same path to this check as it is to a lenient router.
+    Matched after percent-decoding and collapsing slashes and case, so
+    ``//messaging/Agents/%6Fwned`` is the same path to this check as it is to
+    the hub's router.
     """
 
-    normalized = re.sub(r"/+", "/", path).lower()
+    # Percent-decoded first (repeatedly, so ``%256F`` is not a second spelling):
+    # the hub routes on the DECODED path, so ``agents/%6Fwned`` is the audit
+    # family there and must be here too (#3022 r2 N2).
+    decoded, previous = path, None
+    while decoded != previous:
+        previous, decoded = decoded, urllib.parse.unquote(decoded)
+    normalized = re.sub(r"/+", "/", decoded).lower()
     if "/agents/owned" in normalized and not _OWNER_AUDIT_SCOPE.get():
         raise BridgeRefusal(
             "owner_audit_not_in_scope",

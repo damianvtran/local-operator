@@ -304,6 +304,8 @@ def test_the_tripwire_fires_on_an_audit_method(tmp_path: Path) -> None:
         "/messaging/agents/" + "owned/conversations",
         "/messaging/agents/owned/conversations/bcv_abcd1234/messages",
         "//messaging//Agents/Owned/conversations",
+        "/messaging/agents/%6Fwned/conversations",
+        "/messaging/agents/%256Fwned/conversations",
     ],
 )
 @pytest.mark.asyncio

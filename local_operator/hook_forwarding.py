@@ -502,7 +502,14 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
 
 async def run_hook(hook: HookCommand, payload: Mapping[str, Any], cwd: str) -> HookRun:
     """Run one hook in its own process group; reap the whole tree on timeout or cancel."""
-    env = dict(os.environ)
+    # A hook is a command the MODEL can cause to run (a project settings file it
+    # wrote names one), so it never gets the harness's own plane bearer — the
+    # same withholding every model child gets (#3022 r2 M2). Only that, not the
+    # shell policy: hooks are the operator's configured tools and keep the rest
+    # of the environment, as they did before. Lazy: this module stays light.
+    from local_operator.tools.shell_env import withhold_harness_plane
+
+    env = withhold_harness_plane(dict(os.environ))
     env["CLAUDE_PROJECT_DIR"] = str(_project_root(cwd))
     if hook.plugin_root:
         env["CLAUDE_PLUGIN_ROOT"] = hook.plugin_root
