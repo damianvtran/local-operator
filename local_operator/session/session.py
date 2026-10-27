@@ -15509,12 +15509,57 @@ class Session:
         ``admission_drift`` and a later turn re-serves it), and it keeps the
         person's interrupt: their steer still cancels the running tool.
 
+        A TURN THAT ENDS ON ITS ANSWER IS NOT CUT. This predicate is the
+        HOLD (``_drain_steering`` keeps the person's row off the body turn);
+        the CUT is :meth:`_body_turn_cut_for_person`, which also requires
+        another model call to be coming. Cutting a finished turn released the
+        row and re-served the body: answered twice, and an earlier
+        side-effecting tool (a bridge ``reply``) run twice (PR #2999 agent
+        review round 2, MAJOR-R2-1).
+
         STEERS ONLY. A prompt waiting for the lock does not cut a running body
         turn: it waits for that turn (bounded: the current turn), because
         cutting it would re-serve the body and repeat the side effects its
         tools already had. It does stop the NEXT body turn from starting.
         """
         return self._pending_body_turn is not None and self._person_steer_queued()
+
+    def _body_turn_cut_for_person(self) -> bool:
+        """Whether the loop's boundary-cancel hook must END the body turn now.
+
+        :meth:`_body_turn_yields_to_person`, narrowed to boundaries where the
+        loop would make another model call: the turn's context ends on a tool
+        batch that feeds back, or on input drained for the next request. At a
+        TERMINAL step the body has been answered and no later request carries
+        its frame, so there is nothing to protect: the turn ends normally,
+        ``settle`` completes the row, and the held row gets its own turn from
+        the turn-end flush. That terminal step is also where a body turn
+        spends most of its streaming time, so a steer usually lands there
+        (MAJOR-R2-1, probe C).
+
+        Read from the shared loop context because the hook takes no
+        arguments. At the post-response boundary the loop has already
+        appended the step's assistant message and its tool results, so the
+        tail shows what ``has_more_tool_calls`` will be. The two terminal
+        tails mirror the loop's rule exactly: an assistant message with no
+        tool calls, and a batch whose LAST result is the quiet-turn marker
+        (``harness.loop._batch_ends_quiet``).
+        """
+        return self._body_turn_yields_to_person() and not self._context_tail_is_terminal()
+
+    def _context_tail_is_terminal(self) -> bool:
+        """Whether the live context ends on a step after which the loop stops."""
+        if not self._context.messages:
+            return False
+        tail = self._context.messages[-1]
+        role = getattr(tail, "role", None)
+        if role == "assistant":
+            return not getattr(tail, "tool_calls", None)
+        if role == "tool":
+            payload = getattr(tail, "provider_payload", None)
+            details = payload.get("details") if isinstance(payload, Mapping) else None
+            return bool(details) and details.get(QUIET_TURN_KEY) is True
+        return False
 
     def _rearm_pending_body_followup(self) -> None:
         """Re-arm the body follow-up pass at a turn's release and at bind (D-F2).
@@ -17667,11 +17712,24 @@ class Session:
                     # ordinary wake it would have had without the body route.
                     # The pipeline still offers the oldest eligible body, so a
                     # retained failed row gets at most one more attempt here.
+                    #
+                    # A waiting person refuses it UNDER THE LOCK, like the
+                    # per-row attempts: a prompt that starts waiting while this
+                    # call is queued on the lock goes first instead of behind
+                    # one paid wake turn (PR #2999 round 2, MINOR-R2-1). The
+                    # refusal leaves the card owed, and the person's turn-end
+                    # re-arm opens a fresh pass for it (this pass's own re-arm
+                    # is skipped, see ``_rearm_pending_body_followup``).
                     await self._prompt_messages(
                         [],
                         carried_prompt=True,
-                        guard=self._bridge_card_wake_still_owed,
-                        guard_note="woken bridge card already read by a later turn",
+                        guard=lambda: (
+                            not self._person_is_waiting() and self._bridge_card_wake_still_owed()
+                        ),
+                        guard_note=(
+                            "a person is waiting, or the woken bridge card was already"
+                            " read by a later turn"
+                        ),
                         initial_after_guard=self._fallback_card_wake_initial,
                     )
                 if not self._pending_body_followup_again:
@@ -18290,12 +18348,14 @@ class Session:
                 # opening-drain comment).
                 drain_steering_on_open=drain_steering_on_open,
                 # A body-carrying turn also stops at the next safe boundary
-                # when a person is waiting: their words are held off this turn
-                # (``_drain_steering``) and open their own turn next. The
-                # urgent-steer poll still cancels a running tool, so the person
-                # can always interrupt; only the fold-in is refused.
+                # when a person is waiting AND another model call is coming:
+                # their words are held off this turn (``_drain_steering``) and
+                # open their own turn next. A turn ending on its answer is not
+                # cut (``_body_turn_cut_for_person``). The urgent-steer poll
+                # still cancels a running tool, so the person can always
+                # interrupt; only the fold-in is refused.
                 graceful_cancel_requested=lambda: (
-                    self._graceful_cancel_requested or self._body_turn_yields_to_person()
+                    self._graceful_cancel_requested or self._body_turn_cut_for_person()
                 ),
                 has_urgent_steering_messages=self._has_urgent_steering,
                 # Rides the SAME interrupt poll steering uses, so a fork

@@ -1180,3 +1180,145 @@ async def test_a_persons_ask_answer_turn_is_body_free(tmp_path) -> None:
     assert BODY not in "\n".join(stream.texts(0)), "the person's answer turn carried a body"
     assert _carrying(stream) == [1]
     assert _row(config_dir)["state"] == "completed"
+
+
+# -- MAJOR-R2-1 cells (agent review round 2 remediation) ----------------------
+
+
+class SteeringStream(CapturingStream):
+    """A ``CapturingStream`` that runs ``during`` INSIDE the answer of request ``at``.
+
+    Probe C's shape: the model's events for that request are being streamed when
+    the person acts, so the steer lands after the provider has already answered
+    and before the loop reaches its post-response boundary.
+    """
+
+    def __init__(self, scripted: list[list[StreamEvent]], *, at: int, during) -> None:
+        super().__init__(scripted)
+        self.at = at
+        self.during = during
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+        index = len(self.requests) - 1
+        events = self.scripted[min(index, len(self.scripted) - 1)]
+
+        async def gen():
+            for position, event in enumerate(events):
+                if index == self.at and position == len(events) - 1:
+                    self.during()
+                yield event
+
+        return gen()
+
+
+def _record_settles(monkeypatch) -> list[tuple[dict[str, Any], str]]:
+    """Every ``PendingTurn.settle`` call: its verdict and the outcome it returned."""
+
+    from local_operator.team_bridge.pending_turn import PendingTurn
+
+    seen: list[tuple[dict[str, Any], str]] = []
+    original = PendingTurn.settle
+
+    def spy(self, **kwargs: Any) -> str:
+        outcome = original(self, **kwargs)
+        seen.append((kwargs, outcome))
+        return outcome
+
+    monkeypatch.setattr(PendingTurn, "settle", spy)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_steer_during_the_final_answer_does_not_re_serve_the_body(
+    tmp_path, monkeypatch
+) -> None:
+    """MAJOR-R2-1, probe C: the body was answered, so the turn ends normally.
+
+    A person steering while the body turn's FINAL answer streams must not cut a
+    turn that already finished: no further request would carry the frame, so
+    there is nothing left to protect. Cutting it released the row and re-served
+    the body (answered twice). The person's row is held off the body turn and
+    gets its own turn from the turn-end flush.
+    """
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    settles = _record_settles(monkeypatch)
+    holder: dict[str, Session] = {}
+    stream = SteeringStream(
+        [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]],
+        at=0,
+        during=lambda: holder["session"].steer("PERSON-C", []),
+    )
+    session = _session(tmp_path, stream, _runtime(config_dir, client))
+    holder["session"] = session
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+
+    assert client.fetches == [MESSAGE_ID], _layout(stream)
+    assert settles, "the body turn settled"
+    verdict, outcome = settles[0]
+    assert verdict["aborted"] is False and outcome == "completed", settles
+    assert _row(config_dir)["state"] == "completed"
+    assert _carries_both(stream, "PERSON-C") == [], _layout(stream)
+    assert _carrying(stream)[0] == 0
+    person = [i for i in range(len(stream.requests)) if "PERSON-C" in "\n".join(stream.texts(i))]
+    assert person == [1], "the person's held row opens its own turn next"
+    assert BODY not in "\n".join(stream.texts(1)), "the person's turn carried the body"
+
+
+@pytest.mark.asyncio
+async def test_a_steer_during_the_final_answer_never_repeats_an_earlier_side_effect(
+    tmp_path, monkeypatch
+) -> None:
+    """MAJOR-R2-1: the tool a body turn already ran is not run a second time.
+
+    The turn ran a side-effecting tool (a bridge ``reply`` in production), then
+    the person steered while the final answer streamed. Re-serving the body
+    would make a fresh model decision and repeat the effect.
+    """
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    client = FakeBridgeClient()
+    settles = _record_settles(monkeypatch)
+    effects: list[str] = []
+    holder: dict[str, Session] = {}
+    # Scripted so a RE-SERVED body turn (request 3) would call the tool again:
+    # the fix must leave ``effects`` at one, not merely the fetch count.
+    answer: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+    stream = SteeringStream(
+        [_tool_call("call-1", "hook"), answer, answer, _tool_call("call-2", "hook"), answer],
+        at=1,
+        during=lambda: holder["session"].steer("PERSON-C", []),
+    )
+    session = _session(
+        tmp_path,
+        stream,
+        _runtime(config_dir, client),
+        tools=[_hook_tool(lambda: effects.append("reply sent"))],
+    )
+    holder["session"] = session
+    try:
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+
+    assert effects == ["reply sent"], _layout(stream)
+    assert client.fetches == [MESSAGE_ID]
+    assert [outcome for _, outcome in settles][:1] == ["completed"], settles
+    assert settles[0][0]["aborted"] is False
+    assert _carrying(stream) == [0, 1], "the body turn ran to its answer"
+    assert _carries_both(stream, "PERSON-C") == [], _layout(stream)
+    assert BODY not in "\n".join(stream.texts(2)), "the person's turn carried the body"
+    assert "PERSON-C" in "\n".join(stream.texts(2))
