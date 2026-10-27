@@ -803,9 +803,7 @@ async def test_an_id_that_resolves_to_no_card_writes_no_audit_row(
         before = len(_events(rig))
         for junk in ("ap_" + "z" * 4000, "ap_x%0Aforged%1B%5B31m", "ap_doesnotexist0"):
             for verb in ("approve-" "credential", "apply-credential"):
-                response = await client.post(
-                    f"/v1/desktop/approvals/{junk}/{verb}", json=_ack(row)
-                )
+                response = await client.post(f"/v1/desktop/approvals/{junk}/{verb}", json=_ack(row))
                 assert response.status_code in (404, 409), response.text
     assert len(_events(rig)) == before
 

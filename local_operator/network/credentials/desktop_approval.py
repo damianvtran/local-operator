@@ -428,9 +428,7 @@ def _resolvable(approval_id: str, root: Path) -> bool:
         return False
 
 
-def _audit_refusal(
-    event: str, approval_id: str, root: Path, detail: dict[str, Any]
-) -> None:
+def _audit_refusal(event: str, approval_id: str, root: Path, detail: dict[str, Any]) -> None:
     if _resolvable(approval_id, root):
         _audit(event, approval_id, root, detail)
 
