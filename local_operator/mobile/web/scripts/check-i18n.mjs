@@ -6,7 +6,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ENFORCED = ["src/i18n/runtime.ts", "src/i18n/wire-cache.ts", "src/store.ts", "src/main.tsx", "src/screens/session-list.tsx", "src/screens/session-view.tsx", "src/screens/past-sessions.tsx", "src/components/directory-sheet.tsx", "src/components/model-sheet.tsx", "src/components/ask-card.tsx", "src/components/ask-dock.tsx", "src/components/ask-row.tsx", "src/components/asks-sheet.tsx", "src/components/gate-sheet.tsx", "src/components/pending-card.tsx", "src/components/ui/disclosure.tsx", "src/lib/asks.ts"];
+export const ENFORCED = ["src/i18n/runtime.ts", "src/i18n/wire-cache.ts", "src/store.ts", "src/main.tsx", "src/screens/session-list.tsx", "src/screens/session-view.tsx", "src/screens/past-sessions.tsx", "src/components/directory-sheet.tsx", "src/components/model-sheet.tsx", "src/components/ask-card.tsx", "src/components/ask-dock.tsx", "src/components/ask-row.tsx", "src/components/asks-sheet.tsx", "src/components/gate-sheet.tsx", "src/components/pending-card.tsx", "src/components/ui/disclosure.tsx", "src/lib/asks.ts", "src/screens/notifications.tsx", "src/screens/notification-detail.tsx", "src/components/notification-row.tsx", "src/components/notification-receipt.tsx", "src/lib/notifications.ts"];
 /** Generated from the en catalogues themselves, never hand-authored copy.
  *  Counting its values is double counting: the same sentence is extracted from
  *  an app file (which lowers that file's debt) and re-counted here as a bundle

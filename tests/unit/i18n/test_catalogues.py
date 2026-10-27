@@ -210,6 +210,10 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # with the files in the same commit, and the seventh (ru) is still absent
     # for want of its round-2 delta audit. Mechanical parity is asserted below
     # for every namespace in this tuple, so the new one is checked too.
+    # `relay.ask`. The phone inbox adds `relay.notifications` (77 keys) with
+    # the other seven locales; it sorts after `relay.chrome`. Carrying it
+    # pins key/placeholder parity here, while shipping still waits on its
+    # independent audit row, exactly as each namespace above did.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
@@ -224,6 +228,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # doubly audited ledger row; it keeps relay.chrome's English bytes
         # frozen, and sorts between relay.chrome and relay.session.tags.
         "relay.health",
+        "relay.notifications",
         "relay.session.tags",
         # Audited relay condensation copy adds 19 keys; keep this census exact.
         "relay.transcript",

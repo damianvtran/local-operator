@@ -14,6 +14,7 @@ import { createWireLoader } from "./i18n/wire-cache";
 import { BUNDLED_OWNED } from "./i18n/bundled.gen";
 import type {
 	Capabilities,
+	NotificationsBlock,
 	SessionProjection,
 	SubagentRow,
 	TodoPhase,
@@ -87,6 +88,13 @@ let sessionsRevision = 0;
    "unchanged" — and the voice mic's rule for it is the rule for
    ``available: false``: hide. */
 let capabilities: Capabilities | null = null;
+/* The inbox badge block off the same list frame (`notifications`, a sibling of
+   `unread`). `undefined` = the relay predates the inbox, so no destination is
+   offered; `{}` = the relay has an inbox whose store it could not read this
+   frame, so the destination stays and the count says nothing (D16: unknown is
+   never painted as 0). Replaced, never merged, so a frame that drops a number
+   cannot leave the previous frame's value standing in for it. */
+let notificationsBlock: NotificationsBlock | undefined = undefined;
 /* Backend preference and actual UI copy language are different facts. Until
    C bundles own copy, the SPA remains English/LTR under every backend frame.
    No OS/device/storage guess is allowed to impersonate backend authority. */
@@ -268,6 +276,31 @@ export function useMarkNotice(): MarkNotice | null {
 export function publishMarkNotice(notice: MarkNotice | null): void {
 	markNotice = notice;
 	emit();
+}
+
+/** The inbox badge block (see `notificationsBlock`), as the last list frame
+    carried it. `undefined` when the relay does not serve the inbox. */
+export function useNotificationsBlock(): NotificationsBlock | undefined {
+	return useSyncExternalStore(subscribe, () => notificationsBlock);
+}
+
+/** Keep only finite, non-negative integers: a wire value is untrusted, and a
+    count this screen cannot vouch for must read as absent, never as a number. */
+function readNotificationsBlock(raw: unknown): NotificationsBlock | undefined {
+	if (raw === undefined || raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const block: NotificationsBlock = {};
+	for (const key of ["unread_count", "waiting_count", "waiting_unread_count", "high_water"] as const) {
+		const value = (raw as Record<string, unknown>)[key];
+		if (typeof value === "number" && Number.isInteger(value) && value >= 0) block[key] = value;
+	}
+	return block;
+}
+
+/** The badge formula, ONE everywhere (D16): unread updates + unread live asks.
+    `undefined` when either half is unknown, so the caller draws nothing. */
+export function notificationsBadge(block: NotificationsBlock | undefined): number | undefined {
+	if (block?.unread_count === undefined || block.waiting_unread_count === undefined) return undefined;
+	return block.unread_count + block.waiting_unread_count;
 }
 
 /** The daemon's capability answer (``capabilities`` on the list payload). */
@@ -545,11 +578,13 @@ export function retainSessionListStream(): () => void {
 					const payload = JSON.parse(data) as {
 						sessions: SessionSummary[];
 						capabilities?: Capabilities;
+						notifications?: unknown;
 					};
 					if (!Array.isArray(payload.sessions)) return false;
 					sessions = payload.sessions;
 					sessionsRevision++;
 					capabilities = payload.capabilities ?? null;
+					notificationsBlock = readNotificationsBlock(payload.notifications);
 					wireCatalogueLoader.invalidateCapabilities();
 					sessionsConnected = connected;
 					publishAsksRevision(payload.sessions);

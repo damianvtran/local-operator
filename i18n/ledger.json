@@ -7482,6 +7482,139 @@
       },
       "status": "passed",
       "note": "Round-2 delta audit on PR #2943 head 897ffb54fef0f6a889bb135a22c80f7eebc3e0e5 (catalogue bytes identical to 0bffa9f447f). Source en SHA-256 b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224 (75 keys), context 1b4fcb28e063b7e646809d801675dfbda00f691ba7cec57edab6a322d0cab4d4. 75/75 keys, order==en, 71 carried values byte-identical to the prior audited target, arguments (count plural, updates plural, source simple) in English order, both plurals carry every CLDR category of this locale with no empty arm, all 72 count x updates sample combinations rendered through local_operator.i18n.runtime.render_message (counts 0,1,2,3,5,6,11,21,22,25,101,1234 x updates 0,1,2,5,6,11), locale number grouping intact, NFC, no bidi controls, trailing LF/no BOM/no CR, re-serialises byte-identically. Widths via rich cell_len: hints within maxCells (hint_mark_all<=12, hint_confirm<=10, hint_cancel<=8); confirm_dismiss_session <=96 for every arm with a 13-cell source. zh-CN/ur/hi nesting of updates inside each count arm accepted: count/updates categories still selected independently and count is printed via {count, number}. ur arrow convention untouched (back still U+2192); the ur sentence painted through the real display_tr isolate path and resolved with fribidi, Latin source and y/n correct. IA2-1 is the fr U+202F typographic regression; fr deliberately left pending_audit. Verdict PASS for this locale only; auditor served kimi/k3.1-pro after the disclosed provider-quota fallback chain; auditor authored none of this delta. Evidence: i18n/audits/evidence/zh-CN/tui.notifications/nd2/ plus PR #2943 comment \"i18n audit - round 2\"."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session e0fbf6386238)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. No minors or nits assigned to fr; select.count 17/16 at a four-digit count is a declared out-of-domain overrun. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail-level widths measured with rich cell_len over every plural/select arm (counts 0\u2013999; age.* over their real domains). Over budget: select.count 17/16 only at a four-digit count (1,234 s\u00e9lections). fr age.* use the compact feed form (\u00ab 5 min \u00bb, \u00ab 3 h \u00bb, \u00ab 2 j \u00bb) because \u00ab il y a 5 min \u00bb exceeds 12 cells at two digits."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session e0fbf6386238)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read uses status form \"Le\u00eddo\"); IA-X-N1 NIT (age.days 15/14 only at >=1000 days, undeclared); detail.mark_unread 15/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_unread 'Marcar no le\u00eddo' 15/14 (keeps the merged relay.chrome 'Marcar como le\u00eddo' verb family; 'No le\u00eddo' alone reads as a status, not an action); select.dismiss 15/14 only at a four-digit count."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session e0fbf6386238)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read \"\u5df2\u8bfb\" status form; \"\u6807\u4e3a\u5df2\u8bfb\" 8/10 fits); IA-ZH-M1 MINOR (11 strings put spaces around digit runs against the zh-CN style guide; merged relay.asks.duration.* has the same deviation, so it is a style-owner consistency question). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio row.repeat 6/6)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session e0fbf6386238)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-RU-M1 MINOR (detail.mark_unread \"\u041e\u0442\u043c\u0435\u0442\u0438\u0442\u044c \u043d\u043e\u0432\u044b\u043c\" synonym; \"\u041e\u0442\u043c. \u043d\u0435\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u043d\u043d\u044b\u043c\" is 18 and does not fit, accepted as is); IA-RU-N1 NIT (filter.unread overrun starts at count 100, 17/16, not at two digits; corrected in this note); IA-X-N1 NIT (age.days overrun only at >=1000 days). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: filter.unread 17/16 from count 100, 19/16 at four \u2014 kept byte-identical to the merged relay.chrome.list.filter.unread ('\u041d\u0435\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u043d\u043e \u00b7 {count}', same 16-cell budget, already audited); shortening would split one chip term across two screens."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session e0fbf6386238)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read and confirm.read use status form \"\u0110\u00e3 \u0111\u1ecdc\"; action form is 15/14); IA-X-N1 NIT (age.days overrun only at >=1000 days); detail.mark_read 15/14 and detail.mark_unread 17/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_read 15/14 and detail.mark_unread 17/14 \u2014 '\u0110\u00e1nh d\u1ea5u \u0111\u00e3 \u0111\u1ecdc'/'\u0110\u00e1nh d\u1ea5u ch\u01b0a \u0111\u1ecdc' keep the merged relay.chrome.row.mark_read verb; the bare '\u0110\u00e3 \u0111\u1ecdc'/'Ch\u01b0a \u0111\u1ecdc' fit but read as statuses, not actions. age.minutes uses the established 'ph' abbreviation (relay.asks.duration.minutes) to fit 12 cells."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session 5d1b0f9ad13e, round-1 remediation of session e0fbf6386238's translation)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Accepted NIT IA-UR-N2 and optional ur select.read form left as follow-ups. Round 1 audit FAILED at the previous target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-UR-1 MAJOR fixed: detail.mark_read and confirm.read \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627\" (status) -> \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627 \u06a9\u0631\u06cc\u06ba\" (action, 13/14). Same-pass MINOR: receipt.read/receipt.unread aligned to the feminine of \u0627\u0637\u0644\u0627\u0639 (\"# \u067e\u0691\u06be\u06cc \u06c1\u0648\u0626\u06cc \u0646\u0634\u0627\u0646 \u0632\u062f\", \"# \u0646\u0627\u067e\u0691\u06be\u06cc \u0646\u0634\u0627\u0646 \u0632\u062f\"; both plural arms and # kept), matching receipt.dismissed/restored/stale/already and filter.unread \"\u0646\u0627\u067e\u0691\u06be\u06cc\". Not applied: IA-X-M1 select.read action form \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627 \u06a9\u0631\u06cc\u06ba\" is 13/10 and does not fit, so it stays \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627\". New target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: select.dismiss 15/14 only at a four-digit count. age.* use '\u0642\u0628\u0644' (not '\u067e\u06c1\u0644\u06d2') so two-digit hours fit 12 cells; receipt.undo '\u0648\u0627\u067e\u0633 \u0644\u06cc\u06ba' 8/8."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session 5d1b0f9ad13e, round-1 remediation of session e0fbf6386238's translation)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Round 1 audit FAILED at the previous target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315 (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-HI-1 MAJOR fixed: detail.mark_read and confirm.read \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906\" (status) -> \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u0915\u0930\u0947\u0902\" (action, 8/14). Same-pass MINORs: mark_all -> \"\u0938\u092d\u0940 \u0915\u094b \u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u091a\u093f\u0939\u094d\u0928\u093f\u0924 \u0915\u0930\u0947\u0902\" (18/20, plural agreement); IA-X-M1 select.read -> \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u0915\u0930\u0947\u0902\" (8/10). New target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio receipt.undo 8/8)."
     }
   ]
 }

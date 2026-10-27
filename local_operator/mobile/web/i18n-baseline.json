@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "Exact literal+sink multisets freeze existing copy in activated mechanism paths; new/replaced/deleted fingerprints require reviewed extraction, never a file exemption. C (relay.shell) activated the two relay SPA shell screens it extracts from; C2 (relay.session) adds the two history/start surfaces it extracts from (past-sessions.tsx, and the directory/model sheets that carry the retired new-session screen's copy) — their residual (unextracted SessionCard/state/resume/sheet-row) copy is frozen as advisory-equivalent legacy, so a NEW hardcoded string in a touched path fails the gate. The asks/cards slice activates the eight ask and decision surfaces it fully extracts (ask card/dock/row/sheet, pending card, approval gate, disclosure and lib/asks): each now carries no unextracted prose, so its allowance is empty and any new literal fails. Other app paths remain scanned advisory until a later slice activates them.",
+  "note": "Exact literal+sink multisets freeze existing copy in activated mechanism paths; new/replaced/deleted fingerprints require reviewed extraction, never a file exemption. C (relay.shell) activated the two relay SPA shell screens it extracts from; C2 (relay.session) adds the two history/start surfaces it extracts from (past-sessions.tsx, and the directory/model sheets that carry the retired new-session screen's copy) — their residual (unextracted SessionCard/state/resume/sheet-row) copy is frozen as advisory-equivalent legacy, so a NEW hardcoded string in a touched path fails the gate. The asks/cards slice activates the eight ask and decision surfaces it fully extracts (ask card/dock/row/sheet, pending card, approval gate, disclosure and lib/asks): each now carries no unextracted prose, so its allowance is empty and any new literal fails. Other app paths remain scanned advisory until a later slice activates them. The notifications inbox slice (relay.notifications) activates the five phone-inbox files it adds (reel, item detail, row, receipt bar, lib/notifications): they carry no unextracted prose, so their allowance is empty.",
   "enforced": [
     "src/i18n/runtime.ts",
     "src/i18n/wire-cache.ts",
@@ -18,7 +18,12 @@
     "src/components/gate-sheet.tsx",
     "src/components/pending-card.tsx",
     "src/components/ui/disclosure.tsx",
-    "src/lib/asks.ts"
+    "src/lib/asks.ts",
+    "src/screens/notifications.tsx",
+    "src/screens/notification-detail.tsx",
+    "src/components/notification-row.tsx",
+    "src/components/notification-receipt.tsx",
+    "src/lib/notifications.ts"
   ],
   "nontranslatable": [
     {
