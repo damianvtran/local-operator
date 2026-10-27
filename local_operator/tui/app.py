@@ -2045,6 +2045,32 @@ RESUME_FILL_MAX_PAGES = 16
 # reserve is one screenful, ~2-3 pages) while still bounding the worst case.
 RESUME_FILL_TOTAL_PAGES = RESUME_FILL_MAX_PAGES * 4
 
+#: How many older pages a single REVEAL may mount synchronously, while the
+#: incoming view is still parked and the reader is looking at the outgoing one.
+#: `_prefill_resume_before_reveal` loops to the same goal the deferred fill
+#: would have reached one page per painted frame.
+#:
+#: This is a backstop, not the real bound — `RESUME_PREFILL_BUDGET_S` is. A page
+#: here is ~24 messages, so eight pages cover a 70-row reserve several times
+#: over; the passes that matter are the ones whose blocks author no height (a
+#: collapsed tool run, hidden rows), where a loop can spend passes without the
+#: ruler moving. Past this many, the reserve is the deferred fill's to finish:
+#: a view that cannot be filled in eight pages has a geometry problem, and
+#: spending the first frame on it is worse than showing the rows it has.
+RESUME_PREFILL_MAX_PAGES = 8
+
+#: Wall-clock budget for that same synchronous burst, in seconds.
+#:
+#: The page count bounds passes; this bounds what a pass COSTS. Projection is
+#: linear in the page's message count and each page is followed by a real
+#: layout pass, so a pathological conversation (huge tool payloads, deep wraps)
+#: can make even two pages expensive. 200 ms is roughly the first-paint budget
+#: the whole reveal lives in, so the pre-fill may never own more than all of it:
+#: past this the view is shown with what it has and the deferred fill tops it up
+#: through the ordinary route (measured cost of the loop on the bench shapes:
+#: 11-16 ms, i.e. this ceiling is ~15x the observed work).
+RESUME_PREFILL_BUDGET_S = 0.2
+
 #: The row that stands in for the un-rendered head of a resumed conversation.
 #: It exists because the failure mode of a display bound is a user believing
 #: history was LOST — so the transcript says, in its own voice, that the older
@@ -14733,6 +14759,30 @@ class OperatorApp(App[None]):
         for a socket before showing anything is the one thing worse than a
         shuffle.
 
+        ONE PAGE WAS NOT ENOUGH, and the reason a loop was rejected here before
+        is gone. The old note measured a mounted page as unmeasurable from this
+        section (51 -> 75 blocks with `scroll_y` unmoved) — but that was
+        measured BEFORE this method started laying the page out itself, and the
+        D1 blank-frame fix is what changed it: `_refresh_layout` now runs here on
+        every pass, which is exactly the step that lets each mounted block
+        author its real height, that carries a tail follower to the new extent,
+        and therefore makes `scroll_y` a reading rather than a constant. Without
+        that call a loop measures a ruler that cannot move, which is what the
+        old measurement saw.
+
+        With it, the goal is reachable before the reveal, and it has to be:
+        a page mounted AFTER the reveal does not merely arrive late —
+        `insert_blocks`'s follower branch re-pins the tail (`if following_tail:
+        self._scroll_to_tail()`), so it drags the visible rows up by its own
+        height. Measured on the bench's legacy shape: 20 lines, twice.
+
+        BOTH BOUNDS ARE REAL. `RESUME_PREFILL_MAX_PAGES` bounds passes and
+        `RESUME_PREFILL_BUDGET_S` bounds what those passes may cost, checked per
+        pass so a slow projection cannot spend the whole first paint here. A
+        burst that hits either bound ends where the old code ended every time:
+        the deferred fill finishes the reserve through the ordinary route, one
+        page per settled frame.
+
         NOTHING HERE MAY RAISE INTO `PreparationInvalidated`. That retry path
         (`session_navigation._prepare_and_commit`) releases the prepared widgets
         and re-prepares, and it is reached by the invalidation check ABOVE this
@@ -14745,23 +14795,11 @@ class OperatorApp(App[None]):
         """
         view = self._transcript_view()
         viewport = view.container_size.height or view.size.height
-        # ONE PAGE, NOT A LOOP TO THE GOAL. A page mounted here cannot be
-        # measured here: `insert_blocks` schedules the settle that lets each
-        # block author its real height, and that needs refresh hops this
-        # synchronous section does not have. Measured at 100x100: the transcript
-        # grew 51 -> 75 blocks while `scroll_y`, `max_scroll_y` and
-        # `virtual_size.height` all stayed exactly where they started, so a loop
-        # here is measuring a ruler that cannot move and every extra iteration
-        # is a page mounted blind. It also left the paging lease HELD on exit —
-        # `_mount_older_resume_page` releases it from that same deferred settle
-        # — which made the ordinary fill stand down against a gate the commit
-        # had taken and never returned.
-        #
-        # One page is what this can honestly do: it is the page that closes the
-        # under-fill the reveal would otherwise show (21 blocks against a
-        # 27-row viewport), it is the page whose absence caused the visible
-        # 14 -> 62 scroll jump, and the `_start_resume_fill` below still reaches
-        # the real goal by the settling route that owns it.
+        # LOOP TO THE GOAL THE DEFERRED FILL WOULD STOP AT, not to a page count.
+        # `_resume_fill_goal_met` IS the fill's own predicate, so the two cannot
+        # disagree about when the reserve is done — a loop one row stingier than
+        # the fill would hand it a page to mount into the revealed view, which is
+        # the shift this method exists to prevent.
         if not viewport and self._resume_pending_head and not self._resume_paging:
             # A FIRST-VISIT (`display_only`) presentation is mounted without the
             # in-prepare layout round trip -- `_prepare_sidebar_session` skips it
@@ -14798,76 +14836,43 @@ class OperatorApp(App[None]):
             return
         self._resume_fill_active = True
         self._resume_fill_serial += 1
-        chained = False
+        mounted = 0
+        # ONE TRANSACTION FOR THE WHOLE BURST, for the reason
+        # `_fetch_older_display_page` holds one across a network page: the gate
+        # must never be briefly free between two pages that belong to the same
+        # answer. A mount that opened its own lease would find this one still
+        # held on the second pass — `_acquire_paging_lease` refuses rather than
+        # queues — and return without mounting, so the loop would mount one page
+        # and then spin against an unchanged ruler until its budget expired.
+        lease: _PagingLease | None = None
         try:
-            notice = self._resume_head_notice
-            prefix = (
-                notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
-            )
-            if view.scroll_y < viewport + prefix:
-                # CHAIN THE ORDINARY FILL TO THIS PAGE'S SETTLE, rather than
-                # scheduling it beside one. `_mount_older_resume_page` holds the
-                # single-flight paging lease until the settle callback
-                # `insert_blocks` schedules releases it, and
-                # `_fill_resume_attempt` stands down immediately while that gate
-                # is held. So a fill started independently of this page raced it
-                # and lost -- it saw `_resume_paging` true, returned, and the
-                # goal was never reached: `test_real_sidebar_projection_runs_
-                # rendered_fill` measured the view stranded at `scroll_y=0`
-                # against a 91-row viewport. Handing the continuation to
-                # `on_settled` is the seam that method documents for exactly
-                # this, and it is why the `finally` below only starts a fill
-                # when no page was mounted here.
-                self._mount_older_resume_page(on_settled=self._start_resume_fill)
-                # ONLY NOW is the deferred fill genuinely chained. Setting this
-                # BEFORE the mount meant a raising mount was swallowed by the
-                # `except` with `chained` already True, so the `finally` skipped
-                # the very fallback the docstring promises -- reproduced at 18
-                # blocks / scroll_y 15 against 42 / 63 normal. `_mount_older_
-                # resume_page` restores `_resume_pending_head` and releases the
-                # paging lease before re-raising, so the deferred fill that then
-                # starts runs against clean state.
-                chained = True
-                # SETTLE THE GEOMETRY THIS PAGE JUST CHANGED before the view is
-                # handed to the readiness gate. A mounted block authors its real
-                # height during a layout pass, so without this the view is
-                # revealed with its tail block not yet in the compositor's
-                # painted map -- which the gate reads as NOT READY and pays a
-                # recovery relayout for. Measured: 12 TAIL_BLOCK refusals across
-                # 4 cold switches without this call, 0 with it. Synchronous, for
-                # the same reason as above: this commit may not await.
-                #
-                # THE LAYOUT IS WANTED HERE; THE PAINT IS NOT. `_refresh_layout`
-                # ends in `_compositor_refresh()`, which calls `App._display`
-                # straight away -- so this settle PAINTED a frame of its own,
-                # mid-commit, and that frame is a half-arranged one: the
-                # transcript has already been revealed and tail-scrolled, while
-                # the composer still occupies the OUTGOING draft's rows (dock 7
-                # / editor 3 against the incoming draft's final 5 / 1). Content
-                # drawn against a box that is about to shrink lands outside the
-                # viewport, so the frame showed an EMPTY conversation -- design
-                # round 1, D1, reproduced at `blocks_mounted=46,
-                # blocks_in_view=0, scroll_y=84=max` immediately before a
-                # settled `82`. On a warm switch that was the FIRST painted
-                # frame, i.e. the fastest switch opened on a blank screen, and
-                # at 80x24 the whole screen blanked. It also produced the
-                # `84 -> 82` scroll excursion (D4) and showed the incoming
-                # draft inside the outgoing-sized box (D2).
-                #
-                # Suppressing just the paint keeps every reason this call is
-                # here -- the mounted page still authors its height, the gate
-                # still gets a complete painted map from the NEXT real frame --
-                # while the user never sees the intermediate arrangement.
-                # Measured across warm/cold/draft2 at 120x36 and 80x24: blank
-                # frames 1-3 -> 0 in every arm, painted frames 12 -> 9 (cold)
-                # and 11 -> 8 (draft2), the scroll excursion collapses to a
-                # single settled position, and gate refusals stay 0.
-                #
-                # `_compositor_refresh` rather than `App.batch_update()`: the
-                # batch defers this paint to a `call_later`, which still paints
-                # the same stale arrangement one turn later (measured: blanks
-                # unchanged at `[0]`). The frame must not exist at all, not
-                # arrive late.
+            deadline = time.monotonic() + RESUME_PREFILL_BUDGET_S
+            while (
+                mounted < RESUME_PREFILL_MAX_PAGES
+                and time.monotonic() < deadline
+                and self._resume_pending_head
+                and not self._resume_fill_goal_met(view, viewport=viewport)
+            ):
+                if lease is None:
+                    # Defensive, and today unreachable for the same reason the
+                    # deferred fill's acquire is: `_resume_paging` IS this
+                    # lookup's answer and the guard above returned on it, with no
+                    # await in between. Kept so a future yield here cannot turn
+                    # into a page mounted through somebody else's lease.
+                    lease = self._acquire_paging_lease(self._interaction)
+                    if lease is None:
+                        break
+                self._mount_older_resume_page(lease=lease)
+                mounted += 1
+                # LAYOUT IS ALSO WHAT THE REVEAL CONTRACT NEEDS, not just the
+                # loop's next reading: a mounted block authors its real height
+                # during a layout pass, and a view revealed with its tail block
+                # missing from the compositor's painted map is read by the
+                # readiness gate as NOT READY — measured at 12 TAIL_BLOCK
+                # refusals across 4 cold switches without this call, 0 with it.
+                # Paint suppressed because the intermediate offsets this
+                # produces are not states the reader may see; the outgoing view
+                # is the one on screen.
                 screen = self.screen
                 paint = screen._compositor_refresh
                 screen._compositor_refresh = _suppress_intermediate_paint
@@ -14875,22 +14880,31 @@ class OperatorApp(App[None]):
                     screen._refresh_layout()
                 finally:
                     screen._compositor_refresh = paint
+                viewport = view.container_size.height or view.size.height
         except Exception:
             # See the docstring: a projection failure must degrade to the
             # deferred fill, never propagate into the invalidation retry.
             logger.debug("pre-reveal resume fill failed; deferring", exc_info=True)
         finally:
-            # Start the ordinary fill only when no page was mounted above; when
-            # one was, it is chained to that page's settle instead (see there),
-            # so the two can never race for the same paging lease.
-            # That fill re-measures against real laid-out geometry, tops up
-            # anything this synchronous pass could not reach (a page behind a
-            # network fetch), and settles `_resume_fill_active` and the head
-            # notice through the one path that owns them. When the goal is
-            # already met its first attempt exits immediately, which is the
-            # normal case after this pre-fill.
-            if not chained:
-                self._start_resume_fill()
+            # THE BURST'S LEASE IS THE COMMIT'S TO RETURN. Each mount hands its
+            # release to the settle `insert_blocks` schedules, two refresh hops
+            # away — far too late for the fill started below, which would stand
+            # down against a gate the commit had taken and not yet returned. That
+            # is exactly what stranded the old one-page form: the lease it took
+            # was released from a callback it had already returned past. Released
+            # inline, the pages' own deferred `release_gate` calls find the lease
+            # gone and return, and the fill below runs against clean state.
+            self._release_paging_lease(lease)
+            # START THE ORDINARY FILL ALWAYS, including when the loop reached the
+            # goal. Its first attempt re-measures laid-out geometry, finds the
+            # goal met, exits immediately, and that exit is the one path that
+            # reconciles the head notice and settles `_resume_fill_active` — so
+            # the deferred fill finding nothing to do is a property of the shared
+            # predicate, not a second code path that has to be kept in step. A
+            # goal it could NOT reach here (a budget stop, or a page that needs a
+            # network fetch) is picked up by the same call: the fill tops the
+            # view up on the next paint, which is the pre-existing behaviour.
+            self._start_resume_fill()
 
     def _start_resume_fill(self, *, target: float | None = None, attempt: int = 0) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
@@ -14958,6 +14972,31 @@ class OperatorApp(App[None]):
             self._release_resume_tail_hold()
             raise
 
+    def _resume_fill_goal_met(
+        self, view: TranscriptView, *, viewport: int, target: float | None = None
+    ) -> bool:
+        """Has this resume reserved its viewport above the reader yet?
+
+        ONE RULE, TWO CALLERS, on purpose. The deferred fill asks this to decide
+        whether to mount another page, and `_prefill_resume_before_reveal` asks
+        it whether to mount one more BEFORE the view is ever shown. They have to
+        agree exactly: a prefill that stopped even slightly short would hand the
+        deferred fill work to do on the frame after reveal, and since a fill's
+        page re-pins the tail, that is not a late arrival — it is a jump the
+        reader sees. Two hand-kept copies of this arithmetic is how they drifted
+        apart in the first place.
+
+        `scroll_y` is a scroll OFFSET, so at the tail this compares the content
+        mounted above the viewport against one viewport plus the head notice —
+        the notice's own rows are loader chrome, not historical content, and at
+        exact-fit sizes it used to supply the last row of the promised reserve
+        itself. `target` outranks the reserve for an anchored restore, where the
+        goal is a position rather than a viewport.
+        """
+        notice = self._resume_head_notice
+        prefix = notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
+        return view.scroll_y >= max(viewport + prefix, target or 0)
+
     def _fill_resume_attempt(self, _attempt: int, *, target: float | None = None) -> None:
         """Reserve one real viewport above the reader, progressively and bounded.
 
@@ -14989,12 +15028,12 @@ class OperatorApp(App[None]):
             self._reconcile_head_notice()
             return
         viewport = view.container_size.height or view.size.height
-        notice = self._resume_head_notice
-        prefix = notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
-        # Loader chrome is not historical content. At exact-fit sizes it used
-        # to supply the last row of the promised one-viewport reserve itself.
-        goal = max(viewport + prefix, target or 0)
-        if view.parent is None or not viewport or self._resume_paging or view.scroll_y >= goal:
+        if (
+            view.parent is None
+            or not viewport
+            or self._resume_paging
+            or self._resume_fill_goal_met(view, viewport=viewport, target=target)
+        ):
             self._resume_fill_active = False
             # The window stops growing HERE, so the render's own tail hold ends
             # with it (F3). Every other exit from the fill releases it too.
