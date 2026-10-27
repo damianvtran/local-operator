@@ -304,6 +304,17 @@ class ManagedSkillStorage:
 
     def _finalize(self, transaction: LocalTransaction) -> None:
         if transaction.basis == LOCAL_EDIT_BASIS:
+            # The basis is a string read back from disk, and it SKIPS the
+            # baseline/policy settlement -- so it is trusted only when the record
+            # has the shape ``author`` writes: the reserved local-edit origin and
+            # no baseline payload. Anything else claiming it is a malformed or
+            # forged journal record, never a licence to skip finalisation.
+            if transaction.link.get("hub_source") != _LOCAL_EDIT_SOURCE or (
+                "baseline" in transaction.payload
+            ):
+                raise TransactionError(
+                    "local-concurrent-edit", "local-edit journal record is malformed"
+                )
             # A local edit has no baseline or policy to settle (see
             # ``LOCAL_EDIT_BASIS``); completing the journal record is all of it.
             self.journal.transition(transaction, "complete")
@@ -546,7 +557,7 @@ class ManagedSkillStorage:
             raise LinkError("baseline-unknown", "the skill's link baseline is unreadable")
         return local_id, record
 
-    def _refuse_live_transaction(self, local_id: str) -> None:
+    def refuse_live_transaction(self, local_id: str) -> None:
         # After ``recover`` the only unsettled records left are (a) blocked ones --
         # recovery already declared them dead, ``apply`` ignores them too, and
         # refusing on them would lock a skill forever -- and (b) one whose lease a
@@ -604,7 +615,7 @@ class ManagedSkillStorage:
                     raise LinkError(
                         "skill-not-editable", "this skill's link has no editable text copy here"
                     )
-            self._refuse_live_transaction(local_id)
+            self.refuse_live_transaction(local_id)
             destination = self.path(alias)
             if expected_fingerprint is None:
                 if record is not None or destination.exists():
@@ -687,6 +698,26 @@ class ManagedSkillStorage:
         finally:
             lease.__exit__(None, None, None)
 
+    def keep_copy(self, alias: str) -> Path:
+        """COPY a skill folder to ``hub/backups/skill-local-<alias>-<op>`` and return it.
+
+        For a removal that is about to destroy the only copy of local edits (the
+        unpull of a modified linked skill deletes its own tombstone). Symlinks are
+        copied AS links, never followed: the backup must not pull outside bytes in.
+        """
+        validate_name(alias)
+        with config_write_lock(self.config_dir):
+            source = self.path(alias)
+            backup = self.config_dir / "hub" / "backups" / f"skill-local-{alias}-{uuid.uuid4().hex}"
+            for directory in (self.config_dir / "hub", backup.parent):
+                if directory.is_symlink():
+                    raise LinkError("skill-validation", "managed skill backup path is unsafe")
+            backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _sync_ancestors(backup.parent, self.config_dir / "hub")
+            shutil.copytree(source, backup, symlinks=True)
+            _sync_directory(backup.parent)
+            return backup
+
     def remove_local(self, alias: str) -> Path:
         """Take an UNLINKED skill out of the skills folder, KEEPING its bytes.
 
@@ -701,7 +732,7 @@ class ManagedSkillStorage:
             if alias_owner(self.config_dir, "skill", alias) is not None:
                 raise LinkError("origin-conflict", "a linked skill is removed by unpulling it")
             self.recover(local_id=f"local-{alias}")
-            self._refuse_live_transaction(f"local-{alias}")
+            self.refuse_live_transaction(f"local-{alias}")
             source = self.path(alias)
             if not source.exists():
                 raise LinkError("skill-not-found", "no such skill in the managed skills folder")

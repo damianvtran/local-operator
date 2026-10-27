@@ -11,7 +11,7 @@ import time
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.providers.usage import META_MUSE_USAGE_NOTES
@@ -851,8 +851,9 @@ class SkillUpdate(Input):
 class SkillRemove(Input):
     request_id: RequestID
     #: A hub-linked skill's removal deletes its only copy of unpublished edits;
-    #: refused (409) unless the caller says so.
-    discard_local_changes: bool = False
+    #: refused (409) unless the caller says so. STRICT: a lenient bool coerced
+    #: "yes", "true", "1" and 1 into a discard, so a client typo destroyed work.
+    discard_local_changes: StrictBool = False
 
 
 def _skill_write_refusal(error: Exception) -> HTTPException:

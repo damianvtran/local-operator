@@ -35,6 +35,7 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from local_operator.config_writer import config_write_lock
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync.identity import LinkError
 from local_operator.hub_sync.skill_document import (
@@ -95,6 +96,12 @@ def require_managed(config_dir: Path, name: str) -> ManagedSkillStorage:
     """
     validate_name(name)
     storage = ManagedSkillStorage(config_dir)
+    # Settle a crashed swap/unpull BEFORE judging what exists. After a crash
+    # between the two renames the alias is absent from disk while its baseline
+    # still owns it; judging first answered the user's first request with a
+    # misleading "not editable" even though the very next step restores the skill.
+    storage.recover()
+    storage.recover_unpull()
     # ``path`` refuses a symlinked skills root or alias directory: a link is never
     # followed to bytes outside the store.
     destination = storage.path(name)
@@ -214,37 +221,50 @@ def remove_linked(
 ) -> dict[str, Any]:
     """Unpull a hub-linked skill (the link survives; only the local copy goes).
 
-    ``unpull`` deletes its own tombstone once the state write is durable, so unlike
-    a local remove nothing is kept. If the folder differs from the baseline those
-    bytes exist nowhere else, hence the refusal unless the caller said, in so many
-    words, to discard them. The comparison and the unpull run under ONE hub lease
-    so a runner tick cannot change either side between the check and the removal.
+    ``unpull`` deletes its own tombstone once the state write is durable, so a
+    folder that differs from the baseline would be lost for good. Hence: refused
+    unless the caller said, in so many words, to discard -- and even then the
+    discarded folder is first COPIED to ``hub/backups/skill-local-<name>-<op>``
+    (the scheme a local remove uses), so a deliberate discard stays recoverable.
+
+    THE LOCKS. The hub lease orders this against the runner; ``author`` does NOT
+    take it, only ``config_write_lock``. So the dirty check and the unpull must
+    also share ONE hold of ``config_write_lock``, or an edit can commit between
+    "the folder is clean" and the removal and be destroyed unseen (review M1).
+    The lock is re-entrant, so ``recover``/``unpull`` below simply nest in it. An
+    edit already staging (live lease, not yet swapped) is refused instead of raced.
     """
     from local_operator.hub_sync import service as svc
 
     config_dir = ctx.config_dir
     storage = ManagedSkillStorage(config_dir)
-    with svc.exclusive(ctx, wait_s=0.0):
-        # The unpull below recovers first; settle here too so the comparison reads
-        # the bytes a reader would see, not a half-swapped directory.
+    backup: Path | None = None
+    with svc.exclusive(ctx, wait_s=0.0), config_write_lock(config_dir):
+        # Settle crashes first so the comparison reads the bytes a reader would
+        # see, not a half-swapped directory.
         storage.recover(local_id=record.local_id)
         storage.recover_unpull(local_id=record.local_id)
         current = prov.read_baseline(config_dir, "skill", record.local_id)
         if current is None or current.identity is None:
             raise LinkError("baseline-unknown", "the skill's link baseline is unreadable")
-        if current.content_state == "absent":
-            storage.unpull(record.local_id)  # idempotent: already absent
-        else:
-            if not discard_local_changes and folder_differs_from_baseline(storage, current):
-                raise LinkError(
-                    "skill-local-changes-unpublished",
-                    "this skill has local changes that were never published",
-                )
-            storage.unpull(record.local_id)
+        if current.content_state != "absent":
+            storage.refuse_live_transaction(record.local_id)
+            if folder_differs_from_baseline(storage, current):
+                if not discard_local_changes:
+                    raise LinkError(
+                        "skill-local-changes-unpublished",
+                        "this skill has local changes that were never published",
+                    )
+                backup = storage.keep_copy(current.local_alias or current.local_id)
+        storage.unpull(record.local_id)  # idempotent when already absent
     return {
         "name": record.local_alias or record.local_id,
         "removed": True,
         "mode": "unpull",
-        "backup": None,
+        "backup": (
+            backup.relative_to(Path(config_dir).expanduser().resolve()).as_posix()
+            if backup is not None
+            else None
+        ),
         "link_id": current.identity.link_id,
     }

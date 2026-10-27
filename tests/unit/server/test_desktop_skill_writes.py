@@ -553,3 +553,192 @@ async def test_unknown_body_fields_are_rejected(env) -> None:
         json={"request_id": _rid(), "name": "k-skill", "files": _files("k-skill"), "surprise": 1},
     )
     assert response.status_code == 422
+
+
+# -- review round 1 ----------------------------------------------------------------------
+
+
+def _ctx(config_dir: Path) -> Any:
+    from local_operator.hub_sync import service as svc
+
+    return svc.HubSyncContext(
+        config_dir=config_dir, config_manager=None, client_for_tenant=lambda _tenant: None
+    )
+
+
+def _linked_edit_doc(name: str, body: str) -> SkillDocument:
+    return SkillDocument.from_json(
+        {
+            "document_version": 1,
+            "name": name,
+            "description": f"hub {name}",
+            "files": [
+                {"path": "SKILL.md", "content": _skill_md(name, f"hub {name}", body)},
+                {"path": "scripts/doctor.sh", "content": "#!/bin/sh\necho ok\n"},
+            ],
+        }
+    )
+
+
+def _tree_bytes(root: Path) -> set[bytes]:
+    return {p.read_bytes() for p in root.rglob("*") if p.is_file()} if root.exists() else set()
+
+
+def _interleaved_remove(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, *, hold_lock: bool
+) -> tuple[Any, str]:
+    """Force the order: dirty check says CLEAN -> an edit commits -> the unpull runs.
+
+    The edit is started from the check's own return path (the exact window the
+    review found), in another thread. Returns ``(edit outcome, edit marker)``.
+    """
+    import contextlib
+    import threading
+
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    _link(config_dir)
+    record = prov.read_baseline(config_dir, "skill", "id-linked-skill")
+    assert record is not None
+    marker = "FRESH-EDIT-MARKER"
+    current = _fp(config_dir, "linked-skill")
+    outcome: dict[str, Any] = {}
+
+    def edit() -> None:
+        try:
+            outcome["result"] = writes.update(
+                config_dir,
+                "linked-skill",
+                [
+                    {
+                        "path": "SKILL.md",
+                        "content": _skill_md("linked-skill", "hub linked-skill", marker),
+                    },
+                    {"path": "scripts/doctor.sh", "content": "#!/bin/sh\necho ok\n"},
+                ],
+                current,
+            )
+        except Exception as error:  # noqa: BLE001 - the outcome IS the observation
+            outcome["error"] = error
+
+    real = writes.folder_differs_from_baseline
+
+    def check_then_edit(storage: Any, rec: Any) -> bool:
+        answer = real(storage, rec)
+        thread = threading.Thread(target=edit)
+        thread.start()
+        # With the lock held the edit cannot finish inside this window; without
+        # it, it commits before the unpull below -- the race itself.
+        thread.join(timeout=2.0 if not hold_lock else 0.5)
+        outcome["thread"] = thread
+        return answer
+
+    monkeypatch.setattr(writes, "folder_differs_from_baseline", check_then_edit)
+    if not hold_lock:
+        monkeypatch.setattr(writes, "config_write_lock", lambda *_a, **_k: contextlib.nullcontext())
+    result = writes.remove_linked(_ctx(config_dir), record, discard_local_changes=False)
+    outcome["thread"].join(timeout=10)
+    return outcome, marker, result  # type: ignore[return-value]
+
+
+async def test_an_edit_racing_a_linked_remove_is_refused_not_destroyed(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outcome, marker, _result = _interleaved_remove(env.config_dir, monkeypatch, hold_lock=True)
+    # The edit lost the race cleanly (the skill is gone, so its CAS has nothing to
+    # match) -- it was told "no", it was not silently accepted and then deleted.
+    assert "error" in outcome and "result" not in outcome
+    code = getattr(outcome["error"], "code", "")
+    assert code in ("skill-not-editable", "skill-not-found", "local-concurrent-edit")
+    assert not (env.config_dir / "skills" / "linked-skill").exists()
+
+
+async def test_negative_control_without_the_lock_the_edit_is_destroyed(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same interleave, lock removed: proves the test above can fail.
+
+    The edit is ACCEPTED (200-equivalent) and then unpulled away with no copy
+    anywhere -- exactly the silent loss of review M1.
+    """
+    outcome, marker, _result = _interleaved_remove(env.config_dir, monkeypatch, hold_lock=False)
+    assert "result" in outcome, outcome
+    assert not (env.config_dir / "skills" / "linked-skill").exists()
+    assert not any(marker.encode() in blob for blob in _tree_bytes(env.config_dir / "hub"))
+
+
+@pytest.mark.parametrize("value", ["false", "yes", "true", "1", 0, 1, None, "0", []])
+async def test_discard_local_changes_must_be_a_real_boolean(env, value: Any) -> None:
+    _link(env.config_dir)
+    response = await env.client.request(
+        "DELETE",
+        "/v1/desktop/skills/linked-skill",
+        json={"request_id": _rid(), "discard_local_changes": value},
+    )
+    assert response.status_code == 422, (value, response.text)
+    assert (env.config_dir / "skills" / "linked-skill").is_dir()
+
+
+async def test_a_deliberate_discard_keeps_a_recoverable_copy(env) -> None:
+    _link(env.config_dir)
+    current = _fp(env.config_dir, "linked-skill")
+    await env.client.put(
+        "/v1/desktop/skills/linked-skill",
+        json={
+            "request_id": _rid(),
+            "expected_fingerprint": current,
+            "files": [
+                {
+                    "path": "SKILL.md",
+                    "content": _skill_md("linked-skill", "hub linked-skill", "KEEP-ME\n"),
+                },
+                {"path": "scripts/doctor.sh", "content": "#!/bin/sh\necho ok\n"},
+            ],
+        },
+    )
+    response = await env.client.request(
+        "DELETE",
+        "/v1/desktop/skills/linked-skill",
+        json={"request_id": _rid(), "discard_local_changes": True},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["result"]
+    kept = env.config_dir / data["backup"]
+    assert data["mode"] == "unpull" and kept.is_dir()
+    assert "KEEP-ME" in (kept / "SKILL.md").read_text()
+    # A CLEAN linked remove has nothing to keep.
+    _link(env.config_dir, "clean-skill")
+    clean = await env.client.request(
+        "DELETE", "/v1/desktop/skills/clean-skill", json={"request_id": _rid()}
+    )
+    assert clean.json()["result"]["backup"] is None
+
+
+async def test_the_first_request_after_a_between_renames_crash_succeeds(env) -> None:
+    """m2: the alias is absent but its link owns it; recover first, never 'not editable'."""
+    storage, document = _link(env.config_dir)
+    edited = _linked_edit_doc("linked-skill", "crashed edit\n")
+
+    def crash(phase: str) -> None:
+        if phase == "old-renamed":
+            raise RuntimeError("synthetic crash")
+
+    with pytest.raises(RuntimeError):
+        storage.author("linked-skill", edited, document.fingerprint, checkpoint=crash)
+    assert not (env.config_dir / "skills" / "linked-skill").exists()  # the gap
+
+    response = await env.client.put(
+        "/v1/desktop/skills/linked-skill",
+        json={
+            "request_id": _rid(),
+            "expected_fingerprint": document.fingerprint,
+            "files": [
+                {
+                    "path": "SKILL.md",
+                    "content": _skill_md("linked-skill", "hub linked-skill", "after recovery\n"),
+                },
+                {"path": "scripts/doctor.sh", "content": "#!/bin/sh\necho ok\n"},
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text

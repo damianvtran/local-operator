@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.hub_sync import provenance as prov
+from local_operator.hub_sync import skill_storage
 from local_operator.hub_sync.identity import LinkError, LinkIdentity
 from local_operator.hub_sync.provenance import make_record, read_baseline
 from local_operator.hub_sync.skill_document import SkillDocument
@@ -250,3 +251,22 @@ def test_remove_local_refuses_a_linked_alias(tmp_path: Path) -> None:
         storage.remove_local(original.name)
     assert caught.value.code == "origin-conflict"
     assert storage.path(original.name).is_dir()
+
+
+def test_a_forged_local_edit_basis_is_not_trusted(tmp_path: Path) -> None:
+    """m5: ``basis`` skips baseline settlement, so only an ``author``-shaped record may claim it."""
+    storage, identity, original, baseline = _linked(tmp_path)
+    forged = storage.journal.prepare(
+        identity,
+        "pull",
+        before_fingerprint=original.fingerprint,
+        after_fingerprint=original.fingerprint,
+        payload={
+            "adapter": "managed-skill",
+            "local_alias": original.name,
+            "baseline": baseline.to_json(),
+        },
+        basis=skill_storage.LOCAL_EDIT_BASIS,
+    )
+    with pytest.raises(TransactionError, match="malformed"):
+        storage._finalize(forged)
