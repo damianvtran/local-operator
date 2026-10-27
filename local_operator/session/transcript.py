@@ -2349,16 +2349,25 @@ class Transcript:
         of two ``Transcript`` objects on the same directory keep the lock for
         the one that is still open.
         """
+        self._release_writer_lock(finalising=False)
+
+    def __del__(self) -> None:
+        # The finaliser path, not ``close``: the GC can run this on a thread
+        # that is inside ``compression.acquire_writer`` holding the writer
+        # guard, and ``release_writer`` would wait on that guard forever.
+        self._release_writer_lock(finalising=True)
+
+    def _release_writer_lock(self, *, finalising: bool) -> None:
         if not getattr(self, "_writer_lock_held", False):
             return
         self._writer_lock_held = False
         try:
-            compression.release_writer(self.directory)
+            if finalising:
+                compression.release_writer_from_finaliser(self.directory)
+            else:
+                compression.release_writer(self.directory)
         except Exception:  # noqa: BLE001 — a finaliser must never raise
             logger.debug("transcript: writer lock release failed", exc_info=True)
-
-    def __del__(self) -> None:
-        self.close()
 
     # -- append -------------------------------------------------------------
 
