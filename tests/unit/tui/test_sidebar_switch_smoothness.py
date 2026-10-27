@@ -1212,8 +1212,12 @@ async def test_the_revealed_frame_is_already_the_settled_frame(
         "the reveal left a paging transaction open, so the fill the commit chained is not the "
         "one that would settle it"
     )
+    # Hoisted out of the f-string below: `at_reveal` is a `dict[str, object]`, so
+    # `len()` needs the same argument-type waiver the equivalent assertion further
+    # down this file carries, and an f-string expression cannot hold one.
+    revealed_blocks = len(at_reveal["blocks"])  # type: ignore[arg-type]
     assert at_reveal["blocks"] == settled, (
-        f"the block list moved between the revealed frame ({len(at_reveal['blocks'])}) and "
+        f"the block list moved between the revealed frame ({revealed_blocks}) and "
         f"settled ({len(settled)}) at {size}"
     )
 
