@@ -448,7 +448,11 @@ def build_cold_tail_metadata(key: ReplayKey, path: Path) -> ColdMetadata | None:
     if suffix is None:
         return None
     seed = seed_reported_usage(usages_since_newest_shrink(suffix.entries))
-    if seed is None:
+    # ``None`` has two meanings. With usage PROVEN ABSENT from the whole journal
+    # it is eager's own answer (no receipt anywhere to seed from). Otherwise it
+    # means the tail met no parseable receipt, so eager might seed from an older
+    # one, and the tail must decline.
+    if seed is None and not suffix.usage_proven_absent:
         return None
     selection = read_selection_reading(Path(key.directory))
     fresh = replay_key(

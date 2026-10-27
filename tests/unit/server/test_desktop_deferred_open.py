@@ -589,6 +589,12 @@ async def test_tail_miss_wire_matrix(
     assert tail["page"] == eager["page"]
     assert tail["open"] == eager["open"]
     assert tail["frame"] == eager["frame"]
-    assert tail["deferred_after_page"] == (shape in {"unchanged", "append", "checkpoint"})
+    # ``legacy`` (no checkpoint row anywhere) defers since #2996: the cold tail
+    # proves the checkpoint spelling absent below its bounded window instead of
+    # declining at the bound. The other shapes still decline for their own
+    # reasons, none of which R1 touched: ``compaction`` meets a shrink row
+    # before any parseable usage receipt, ``archive`` has a codec, ``truncated``
+    # has a torn final line and ``corrupt`` a row that does not parse.
+    assert tail["deferred_after_page"] == (shape in {"unchanged", "append", "checkpoint", "legacy"})
     if shape == "checkpoint":
         assert "newest title" in str(tail["frame"])
