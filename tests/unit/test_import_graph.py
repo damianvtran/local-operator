@@ -881,6 +881,7 @@ _SUBAGENT_LEDGER_LEAF_MODULES = frozenset(
         "local_operator",
         "local_operator.paths",
         "local_operator.session",
+        "local_operator.session.coalescing_writer",
         "local_operator.session.subagent_ledger",
     }
 )

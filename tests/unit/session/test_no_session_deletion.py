@@ -1741,13 +1741,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # never the child directory or its transcript. The two snapshot unlinks
     # cover the empty mkstemp index before read-tree and that same index on exit.
     (
-        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._write",
+        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._store",
         "os.replace",
         "Sibling mkstemp FILE -> fixed subagent-wip-<job>.v1.json sidecar in the CHILD's "
         "own transcript directory; cannot name a session directory or transcript file.",
     ),
     (
-        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._write",
+        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._store",
         "os.unlink",
         "Only the sibling mkstemp FILE created for that fixed sidecar write; "
         "cannot name a session directory or transcript file.",

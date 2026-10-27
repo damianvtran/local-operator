@@ -5,7 +5,9 @@ rewrites the shared worktree and index, potentially destroying another lane's
 work. This deliberately captures the whole repository, not just files attributed
 to the child (Git cannot reliably attribute concurrent writes). Recovery is
 explicit: inspect the checkpoint before applying ``restore_hint()``. No recovery
-command is executed automatically. Only stdlib/subprocess imports belong here.
+command is executed automatically. Only stdlib/subprocess imports belong here,
+plus the stdlib-only ``session.coalescing_writer`` that keeps step receipts off
+the parent's event loop.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+from local_operator.session.coalescing_writer import EVIDENCE_WRITER
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +110,8 @@ class WipCheckpointer:
             timeout=15,
         ).stdout.strip()
 
-    def _write(self) -> None:
-        payload = {
+    def _payload(self) -> dict[str, Any]:
+        return {
             "version": 1,
             "artifact": "subagent-wip",
             "job_id": self.job_id,
@@ -124,6 +128,18 @@ class WipCheckpointer:
             "step": self.step,
             "last_step_at": self.step_at,
         }
+
+    def _write(self) -> None:
+        """Write the receipt NOW, on the calling thread (the snapshot worker).
+
+        Under the evidence writer's ``exclusive``: this payload is the freshest
+        state, so a deferred step write still queued from ``note_step`` is
+        dropped rather than allowed to land after it with an older ``result``.
+        """
+        with EVIDENCE_WRITER.exclusive(self.path):
+            self._store(self._payload())
+
+    def _store(self, payload: dict[str, Any]) -> None:
         fd, name = tempfile.mkstemp(dir=self.child_dir, prefix=f".{self.path.name}.")
         try:
             with os.fdopen(fd, "w") as handle:
@@ -237,14 +253,28 @@ class WipCheckpointer:
         return self.result
 
     def note_step(self, tool_name: str, intent: str, at: float) -> None:
-        """Remember a completed tool, throttling durable receipt churn to 5s."""
+        """Remember a completed tool, throttling durable receipt churn to 5s.
+
+        Called from the child's ``on_tool_end`` relay, i.e. ON THE PARENT
+        SESSION'S LOOP, so the write is deferred to the process evidence writer
+        (``session.coalescing_writer``): the payload is snapshotted here (a dict
+        copy) and the ``mkstemp``/``json.dump``/``os.replace`` run off-loop,
+        latest-wins per receipt. Measured before: up to 206 ms per call and
+        ~1 s of loop wall per 40 s on a 12-lane manager.
+        """
         self.step = f"{tool_name}: {intent}" if intent else tool_name
         self.step_at = at
         if not self.result.get("superseded") and time.monotonic() - self.last_receipt >= 5:
-            try:
-                self._write()
-            except OSError:
-                logger.warning("Could not write WIP step", exc_info=True)
+            payload = self._payload()
+            self.last_receipt = time.monotonic()
+
+            def write() -> None:
+                try:
+                    self._store(payload)
+                except OSError:
+                    logger.warning("Could not write WIP step", exc_info=True)
+
+            EVIDENCE_WRITER.submit(self.path, write)
 
     def restore_hint(self) -> str:
         """Restore tracked AND untracked captured files, never auto-apply them.
@@ -260,7 +290,11 @@ class WipCheckpointer:
             self._git("update-ref", "-d", self.ref)
         except (OSError, subprocess.SubprocessError):
             logger.warning("Could not clear WIP ref", exc_info=True)
-        try:
-            self.path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("Could not clear WIP receipt", exc_info=True)
+        # Under the writer's ``exclusive``: a step write still queued from
+        # ``note_step`` is dropped and one mid-write finishes first, so no
+        # deferred receipt can land AFTER the unlink and resurrect it.
+        with EVIDENCE_WRITER.exclusive(self.path):
+            try:
+                self.path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not clear WIP receipt", exc_info=True)

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.harness.wip_checkpoint import WipCheckpointer
+from local_operator.session.coalescing_writer import EVIDENCE_WRITER
 
 
 def git(repo: Path, *args: str) -> str:
@@ -144,9 +145,13 @@ def test_unsupported_hosts_skip_without_failure(tmp_path, monkeypatch, kind):
 def test_step_receipts_and_debounce(tmp_path):
     repo = make_repo(tmp_path / "repo")
     cp = checkpoint(repo, tmp_path, interval_s=3600)
+    # ``note_step`` defers its receipt to the evidence writer (off the parent's
+    # loop); flushing lands it so the five-second bound is observable here.
     cp.note_step("bash", "Writing checkpoint test", 100.0)
+    assert EVIDENCE_WRITER.flush()
     before = cp.path.read_bytes()
     cp.note_step("write", "Adding recovery case", 101.0)
+    assert EVIDENCE_WRITER.flush()
     assert cp.path.read_bytes() == before  # within the five-second receipt bound
     (repo / "tracked").write_text("changed")
     result = cp.snapshot(force=True)
