@@ -555,7 +555,7 @@ def summary(record: dict[str, Any]) -> str | None:
     account = parsed["account"] + (f" / org {parsed['org']}" if parsed["org"] else "")
     return (
         f"Let {_recipient_label(parsed)} borrow your {parsed['provider']} login for account "
-        f"{account}: this sign-in and any later re-login of the SAME account, until you "
+        f"{account}: this sign-in and any later re-login of the same account, until you "
         "revoke it. Nothing is copied; the device gets short-lived access only."
     )
 
@@ -633,13 +633,14 @@ def details(record: dict[str, Any]) -> list[str]:
     )
     expires = facts["request_window"]["expires_at"]
     window = (
-        time.strftime("%Y-%m-%d %H:%M", time.localtime(float(expires)))
+        # The zone is named (design N2): the card is read on other machines of the mesh too.
+        time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(float(expires)))
         if isinstance(expires, (int, float)) and expires
         else "its set time"
     )
     return [
         heading,
-        f"Provider: {facts['provider']} (a native sign-in on THIS device; copied, borrowed, "
+        f"Provider: {facts['provider']} (a native sign-in on this device; copied, borrowed, "
         "device-bound, static-key and MCP logins are not covered)",
         f"Account: {facts['account']}",
         "Org: " + (facts["org"] or "not constrained (any org of this account)"),
@@ -647,10 +648,10 @@ def details(record: dict[str, Any]) -> list[str]:
         f"Recipient key fingerprint: {recipient['key_fingerprint']}",
         f"Network: {facts['network_id']}",
         f"Signing principal: your operator key {facts['signing_principal']} on this machine",
-        "Duration: UNTIL YOU REVOKE IT. This permission has no automatic expiry; a sign-in "
+        "Duration: until you revoke it. This permission has no automatic expiry; a sign-in "
         "to the same account later is covered without asking again, a different account is not.",
-        f"Request window: this CARD can be approved and applied until {window}. That one-hour "
-        "window only limits how long this request stays answerable; it is NOT the lifetime "
+        f"Request window: this card can be approved and applied until {window}. That one-hour "
+        "window only limits how long this request stays answerable; it is not the lifetime "
         "of the permission.",
         "What the device receives: short-lived access minted here on request. The sign-in "
         "and its refresh token stay on this device; nothing is copied.",
@@ -660,6 +661,22 @@ def details(record: dict[str, Any]) -> list[str]:
         f"Revoke at any time: {_revoke_command(parsed)}",
         f"Approving records your decision only. Then run: "
         f"{_apply_command(parsed, str(record.get('approval_id', '')))}",
+    ]
+
+
+def next_lines(record: dict[str, Any]) -> list[str]:
+    """What the operator does next with an inheritance card after a CLI approve (UX U5).
+
+    ``details`` already ends with the apply command for a card still awaiting a decision;
+    this is the same step for the moment right after signing, when the disclosure is not
+    printed again.
+    """
+    if intent(record) is None or record.get("state") != approvals.STATE_APPROVED:
+        return []
+    parsed = _parse(record)
+    return [
+        "Approved, not applied yet. Run: "
+        + _apply_command(parsed, str(record.get("approval_id", "")))
     ]
 
 
@@ -699,8 +716,13 @@ def row_extras(record: dict[str, Any]) -> dict[str, Any] | None:
         "summary": heading,
         "details": lines,
         "can_approve_here": False,
+        # For a desktop that predates ``typed_approval`` (it ignores that block): one
+        # remedy, and it agrees with the typed route's rule rather than contradicting it
+        # (UX U3). A renderer that knows ``typed_approval`` shows its ``refusal_message``
+        # or its Approve instead and should not show this beside it.
         "approve_remedy": (
-            "Review and approve it from the command line on this machine: "
+            "This permission can't be approved in this version of the desktop app. Approve "
+            "it in a terminal on this Mac: "
             f"lop network approvals approve {record.get('approval_id', '')}"
         ),
     }

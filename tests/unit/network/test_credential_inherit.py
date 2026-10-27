@@ -145,7 +145,8 @@ def test_request_approve_apply_status_through_the_real_entrypoints(
     assert "Account: account-one" in err
     assert f"Recipient device: {rig.peer.device_id}" in err
     assert "Recipient key fingerprint: sha256:" in err
-    assert "UNTIL YOU REVOKE IT" in err and "NOT the lifetime" in err
+    # Sentence case since design review #3002 r1 (N1): emphasis comes from the order.
+    assert "until you revoke it" in err and "not the lifetime" in err
     assert "credential revoke" in err and "broker_credential" in err
     assert policy_bytes(rig) is None, "approving records a decision, not the permission"
     state = status(rig, capsys)
@@ -224,9 +225,11 @@ def test_no_key_material_reaches_output_record_policy_or_audit(
 
 
 def test_the_card_never_calls_the_permission_expiring(
-    ready: Any, capsys: pytest.CaptureFixture[str]
+    ready: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rig = ready
+    # Logical lines: the CLI word-wraps to the terminal since design review #3002 r1 (D3).
+    monkeypatch.setenv("COLUMNS", "1000")
     code, out, err = run(capsys, *base(rig, "--request-approval"))
     assert code == 0
     text = out.lower()
@@ -660,9 +663,11 @@ def test_approvals_run_never_launches_the_ssh_runner_for_this_record(
 
 
 def test_approvals_show_and_list_describe_a_permission_not_an_onboarding(
-    ready: Any, capsys: pytest.CaptureFixture[str]
+    ready: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rig = ready
+    # Logical lines: the CLI word-wraps to the terminal since design review #3002 r1 (D3).
+    monkeypatch.setenv("COLUMNS", "1000")
     aid = request_id(rig, capsys)
     for argv in (("approvals", "show", aid), ("approvals", "list")):
         code, out, err = run(capsys, *argv)
@@ -674,7 +679,8 @@ def test_approvals_show_and_list_describe_a_permission_not_an_onboarding(
     shown = run(capsys, "approvals", "show", aid)[1]
     assert "Recipient key fingerprint" in shown and len(shown.splitlines()) >= 12
     listed = run(capsys, "approvals", "list")[1]
-    assert "Recipient key fingerprint" not in listed and "UNTIL YOU REVOKE IT" not in listed
+    # The Duration LINE is disclosure-only; the summary itself also says "until you revoke it".
+    assert "Recipient key fingerprint" not in listed and "Duration:" not in listed
     assert f"lop network approvals show {aid}" in listed and "borrow your" in listed
     assert len(listed.splitlines()) <= 4, listed
     # The machine half is unchanged: ``--json`` still carries the whole frozen row.
@@ -796,8 +802,8 @@ def test_desktop_rows_carry_optional_keyless_extras_only_for_this_kind(
     row = rows[aid]
     assert row["can_approve_here"] is False
     assert f"lop network approvals approve {aid}" in row["approve_remedy"]
-    assert row["summary"].startswith("Let ") and "SAME account" in row["summary"]
-    assert any(line.startswith("Duration: UNTIL YOU REVOKE IT") for line in row["details"])
+    assert row["summary"].startswith("Let ") and "same account" in row["summary"]
+    assert any(line.startswith("Duration: until you revoke it") for line in row["details"])
     assert not any(marker in json.dumps(row) for marker in PRIVATE_MARKERS)
     # The builder's own frozen key set (``machine`` is a ``local_authority`` key; the route's
     # model adds it as ``None``): an ordinary row gains NOTHING.

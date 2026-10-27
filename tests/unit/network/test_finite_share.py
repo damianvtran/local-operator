@@ -94,14 +94,14 @@ def test_public_request_approve_apply_restores_only_exact_finite_share(
     output = capsys.readouterr()
     payload = json.loads(output.out)
     aid = payload["approval_id"]
-    assert payload["state"] == "requested" and "FINITE" in payload["summary"]
+    assert payload["state"] == "requested" and "Restore sharing of" in payload["summary"]
     assert consent.ConsentDocument(N, rig.own.device_id, rig.root).load() == before
     assert _lop_network("approvals", "run", aid, "--json") == 1
     assert "finite-share" in capsys.readouterr().err
     assert _lop_network("approvals", "approve", aid, "--json") == 0
     output = capsys.readouterr()
     assert json.loads(output.out)["state"] == "approved"
-    assert "No automatic future-sign-in inheritance enabled" in output.err
+    assert "No automatic future sign-ins" in " ".join(output.err.split())
     assert _lop_network(*base, "--approval", aid, "--json") == 0
     payload = json.loads(capsys.readouterr().out)
     row = consent.ConsentDocument(N, rig.own.device_id, rig.root).load()["recipients"][
@@ -575,10 +575,10 @@ def test_cli_finite_approval_still_validates_then_signs_without_apply(
     output = capsys.readouterr()
     assert json.loads(output.out)["state"] == "approved"
     assert "Withdrawal 1:" in output.err
-    # The second details call is the post-decision renderer. The discriminating
-    # requirement is that complete validation happened BEFORE the one signature.
-    assert events == ["details", "signer", "details"]
-    assert counters == {"signer": 1, "details": 2}
+    # The disclosure is rendered ONCE, before the one signature (UX #3002 r1, U5: the
+    # post-decision block used to repeat it). That ordering is the discriminating part.
+    assert events == ["details", "signer"]
+    assert counters == {"signer": 1, "details": 1}
     assert A.load_record(valid["approval_id"], root=rig.root)["state"] == "approved"
     A.verify_for_run(valid["approval_id"], root=rig.root)
     assert consent.ConsentDocument(N, rig.own.device_id, rig.root).path.read_bytes() == policy

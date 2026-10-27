@@ -1105,7 +1105,8 @@ def _emit(args: argparse.Namespace, payload: dict[str, Any], lines: list[str]) -
     if _json_mode(args):
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
     else:
-        for line in lines:
+        # Word-wrapped to the terminal (design D3), human half only.
+        for line in _wrap_lines(lines):
             print(line)
     return 0 if payload.get("ok", True) else 1
 
@@ -8764,6 +8765,9 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
         return [
             *finite_share.details(dict(record)),
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            # The reason and the next step for THIS state (UX U1, U5): a failed card says
+            # why it stopped and what to do; an approved one says how to apply it.
+            *finite_share.next_lines(dict(record)),
             "This operation restores only the signed finite share; nothing is installed or joined.",
         ]
     from local_operator.network.credentials import inheritance
@@ -8914,6 +8918,75 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _approved_credential_lines(record: Mapping[str, Any]) -> list[str]:
+    """After a CLI approve of a credential card: its state and how to apply it (UX U5)."""
+    from local_operator.network.credentials import finite_share, inheritance
+
+    approval_id = record.get("approval_id", "")
+    lines = [f"Approval {approval_id}: {record.get('state', '')}"]
+    if finite_share.intent(dict(record)) is not None:
+        return lines + finite_share.next_lines(dict(record))
+    return lines + inheritance.next_lines(dict(record))
+
+
+def _print_file_only_notice() -> None:
+    """Before a credential card is signed here with a FILE-ONLY key, say so (UX U3).
+
+    COPY, NOT A GATE: the approval proceeds exactly as before (operator a-4ba6 keeps the
+    terminal path allowed; a-b492 attached "with the warning" to file-only approval). The
+    words are the desktop sheet's own (:data:`approval_copy.FILE_ONLY_DISCLOSURE`), so the
+    two surfaces warn about the same key the same way. Read failures print nothing: an
+    unreadable level is not evidence of a file-only key, and the signer decides anyway.
+    """
+    from local_operator.network.credentials import approval_copy, desktop_approval
+
+    try:
+        level, _ = desktop_approval.assurance()
+    except Exception:  # noqa: BLE001 - a notice must never block or break the approval
+        return
+    if level == desktop_approval.ASSURANCE_FILE_ONLY:
+        _print_wrapped(["Note: " + approval_copy.FILE_ONLY_DISCLOSURE], sys.stderr)
+
+
+def _wrap_lines(lines: list[str], width: int | None = None) -> list[str]:
+    """Wrap logical lines to the terminal on WORDS, with a hanging indent (design D3).
+
+    A long line used to be left to the terminal, which cuts mid-word (``Th|at``,
+    ``ma|chine``) and drops the continuation to column 0, where it reads as a new fact.
+    ``Label: value`` lines keep the label on the first row and indent the value under it;
+    a single token longer than the row (a fingerprint, a JSON tuple) gets its own indented
+    row and is never broken, so it can still be selected and compared whole. Pipes and
+    ``--json`` are unaffected: this runs only for the human half.
+    """
+    import shutil
+    import textwrap
+
+    width = width or shutil.get_terminal_size((100, 24)).columns
+    width = max(40, width)
+    out: list[str] = []
+    for line in lines:
+        if len(line) <= width:
+            out.append(line)
+            continue
+        lead = len(line) - len(line.lstrip(" "))
+        indent = " " * (lead + 2)
+        wrapped = textwrap.wrap(
+            line,
+            width=width,
+            initial_indent="",
+            subsequent_indent=indent,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        out.extend(wrapped or [line])
+    return out
+
+
+def _print_wrapped(lines: list[str], stream: Any) -> None:
+    for line in _wrap_lines(lines):
+        print(line, file=stream)
+
+
 def _approval_signature_payload(record: Mapping[str, Any]) -> dict[str, Any]:
     """The frozen ``{key_id}`` half of the approve/deny payload (§3.5)."""
     signature = record.get("signature") or {}
@@ -9001,10 +9074,9 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     from local_operator.network.credentials import finite_share
 
     finite_summary = finite_share.summary(record)
+    disclosed: list[str] = []
     if finite_summary is not None:
-        # Presign intent is stderr; JSON stdout remains one complete object.
-        for disclosure_line in finite_share.details(record):
-            print(disclosure_line, file=sys.stderr)
+        disclosed = finite_share.details(record)
     from local_operator.network.credentials import inheritance
 
     # A credential PERMISSION is described from its own signed record, in full, BEFORE the
@@ -9012,8 +9084,11 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     # be disclosed is never signed; the generic "onboard/anchor install" card text is not
     # what a person is approving here.
     if inheritance.intent(record) is not None:
-        for disclosure_line in inheritance.details(record):
-            print(disclosure_line, file=sys.stderr)
+        disclosed = inheritance.details(record)
+    if disclosed:
+        # Presign intent is stderr; JSON stdout remains one complete object.
+        _print_wrapped(disclosed, sys.stderr)
+        _print_file_only_notice()
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between
@@ -9033,6 +9108,10 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
         "state": decided["state"],
         "signature": _approval_signature_payload(decided),
     }
+    if disclosed:
+        # The disclosure was printed ONCE, above, before signing (UX U5). After it: the state
+        # and the next step only -- printing the whole block again doubled the output.
+        return _emit(args, payload, _approved_credential_lines(decided))
     return _emit(args, payload, _approval_lines(decided))
 
 
@@ -9119,11 +9198,16 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
             if lines:
                 lines.append("")
             # A credential permission is one summary line here; its full disclosure is `show`.
-            lines.extend(
-                inheritance.list_lines(row)
-                if inheritance.intent(row) is not None
-                else _approval_lines(row)
-            )
+            from local_operator.network.credentials import finite_share
+
+            if inheritance.intent(row) is not None:
+                lines.extend(inheritance.list_lines(row))
+            elif finite_share.intent(row) is not None:
+                # The same compact card as inheritance (UX U6, design D4), not the full
+                # disclosure: `show` keeps every fact.
+                lines.extend(finite_share.list_lines(row))
+            else:
+                lines.extend(_approval_lines(row))
         return _emit(args, payload, lines or ["no approvals on this device"])
     if verb == "show":
         record = approval_store.load_record(args.approval)

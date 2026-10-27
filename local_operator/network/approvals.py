@@ -918,17 +918,34 @@ def sign_decision(
         signer = load_signer(config_root=root, backend_name=resolve_backend_name(root))
     except KeyBackendError:
         signer = None
+    from local_operator.network.credentials.approval_copy import KEY_DID_NOT_SIGN
+
     if signer is None:
-        raise MeshRefusal("approval_signing_unavailable", NO_SIGNING_SURFACE_SENTENCE)
+        # "Not set up" only when it is TRUE (UX U4): with an operator anchor installed,
+        # authority IS set up and the key simply could not be loaded (an unreadable or moved
+        # key file), so the setup advice would send the operator into setup again.
+        raise MeshRefusal(
+            "approval_signing_unavailable",
+            KEY_DID_NOT_SIGN if _anchor_installed() else NO_SIGNING_SURFACE_SENTENCE,
+        )
     try:
         return sign_message(signer, message, timeout=None).sig
     except KeyBackendError as exc:
-        raise MeshRefusal(
-            "approval_signing_unavailable",
-            f"the operator key did not sign, so nothing was approved: {exc}",
-        ) from exc
+        # The key exists and did not sign (a dismissed prompt). No exception text in the
+        # sentence: it can carry paths and OS jargon (UX U4).
+        raise MeshRefusal("approval_signing_unavailable", KEY_DID_NOT_SIGN) from exc
     finally:
         signer.close()
+
+
+def _anchor_installed() -> bool:
+    """Whether this machine has an operator anchor installed (pinned or merely present)."""
+    try:
+        from local_operator.operator.trust import load_anchor
+
+        return bool(load_anchor().exists)
+    except Exception:  # noqa: BLE001 - unreadable reads as "not set up", today's sentence
+        return False
 
 
 def local_anchor_trio(root: Path | None = None) -> dict[str, Any] | None:

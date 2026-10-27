@@ -255,6 +255,9 @@ def test_complete_disclosure_is_before_signer_and_stdout_stays_one_object(
             assert error.code == "not_a_holder"
     rec = F.request(N, rig.own.device_id, rig.peer.device_id, P, "session", rig.root)
     expected = F.details(rec)
+    # Logical lines are compared, so the terminal is wide enough not to wrap them (the CLI
+    # word-wraps to the terminal since design review #3002 r1, D3).
+    monkeypatch.setenv("COLUMNS", "1000")
     software = A.sign_decision
     observed = []
 

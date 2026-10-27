@@ -181,12 +181,14 @@ def _policy_refusal(op: str, level: str | None) -> MeshRefusal | None:
     if level == ASSURANCE_FILE_ONLY:
         if FILE_ONLY_SIGNING.get(op, False):
             return None
+        from local_operator.network.credentials import approval_copy
+
+        # SURFACE-ACCURATE (UX U3): it is the DESKTOP that needs Touch ID here (a-e3a5,
+        # desktop surface per a-b815); the terminal still approves it (a-4ba6). The upgrade
+        # is named as the fix only when this install can actually set it up.
         return _refuse(
             "credential_presence_required",
-            "This permission lasts until you revoke it, so it can only be approved with an "
-            "operator key that asks for Touch ID (or your password) each time. This "
-            "machine's key is a file any program running as you could use. Nothing was "
-            "approved.",
+            approval_copy.inheritance_desktop_refusal(bool(upgrade().get("available"))),
         )
     return _refuse(
         "credential_authority_unavailable",
@@ -276,6 +278,18 @@ def row_fields(record: Mapping[str, Any]) -> dict[str, Any] | None:
     block["signable_here"] = refusal is None and record.get("state") == approvals.STATE_REQUESTED
     if refusal is not None:
         block["refusal"] = refusal.code
+        # The sentence beside the code, so the row and the typed route say the same thing
+        # (UX U3: a row whose only remedy pointed at a terminal contradicted the refusal).
+        block["refusal_message"] = str(refusal)
+    from local_operator.network.credentials import approval_copy
+
+    # A FAILED card carries why it stopped, whether the same card can be applied again,
+    # and the next step -- read from its durable receipt, so the list and the detail read
+    # still say it after a reload or a daemon restart (UX U2). ``retryable`` is the only
+    # signal a renderer may use to offer "Try again".
+    failure = approval_copy.last_failure(dict(record))
+    if failure is not None:
+        block["apply_outcome"] = failure
     if level != ASSURANCE_PRESENCE:
         block["upgrade"] = upgrade()
     return block
@@ -641,6 +655,11 @@ def approve_and_apply(
         phases["applied"] = {"ok": True, "code": ""}
         phases["state"] = applied["state"]
     except MeshRefusal as exc:
-        phases["applied"] = {"ok": False, "code": exc.code, "message": str(exc)}
+        from local_operator.network.credentials import approval_copy
+
+        # ``retryable`` decides whether the UI may offer "Try again" (UX U2): only a
+        # refusal after which the SAME signed card can succeed. ``reason``/``remedy`` are
+        # desktop-safe sentences; ``message`` stays the CLI-shaped text for compatibility.
+        phases["applied"] = {"ok": False, "message": str(exc), **approval_copy.outcome(exc.code)}
         phases["state"] = approvals.load_record(approval_id, root=root).get("state")
     return phases

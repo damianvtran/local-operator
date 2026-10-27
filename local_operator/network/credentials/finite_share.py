@@ -28,15 +28,27 @@ def intent(record: dict[str, Any]) -> dict[str, Any] | None:
     return what.get(OP) if isinstance(what, dict) and isinstance(what.get(OP), dict) else None
 
 
+def _recipient_label(record: dict[str, Any], data: dict[str, Any]) -> str:
+    """``name (device id)`` when the card recorded the member's name, else the id alone.
+
+    The NAME leads (design D1): a non-technical reader decides from the first line, and the
+    sibling inheritance card already opens the same way.
+    """
+    raw_device = record.get("device")
+    device: dict[str, Any] = raw_device if isinstance(raw_device, dict) else {}
+    name = _plain(device.get("name"))
+    recipient = str(data.get("recipient_device", ""))
+    return f"{name} ({recipient})" if name else recipient
+
+
 def summary(record: dict[str, Any]) -> str | None:
     data = intent(record)
     if data is None:
         return None
     return (
-        f"Restore FINITE sharing of {data.get('key', '')!r} with "
-        f"{data.get('recipient_device', '')} ({data.get('scope', '')}); "
-        "clear only the withdrawals listed below. No automatic future-sign-in inheritance "
-        "enabled by this operation; no install, join or trust."
+        f"Restore sharing of {data.get('key', '')!r} with {_recipient_label(record, data)} "
+        f"({data.get('scope', '')} scope); this clears only the withdrawals listed below. "
+        "No automatic future sign-ins, and nothing is installed, joined or trusted."
     )
 
 
@@ -144,22 +156,47 @@ def _plain(text: Any, limit: int = 64) -> str:
 
 
 def _when(value: Any) -> str:
+    # The zone is named (design N2): the card is read on other machines of the mesh too.
     return (
-        time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value)))
+        time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(float(value)))
         if isinstance(value, (int, float)) and value
         else "its set time"
     )
 
 
+def _apply_argv(data: dict[str, Any], approval_id: str) -> list[str]:
+    return [
+        "lop",
+        "network",
+        "credential",
+        "share",
+        str(data.get("key", "")),
+        "--with",
+        str(data.get("recipient_device", "")),
+        "--network",
+        str(data.get("network_id", "")),
+        "--scope",
+        str(data.get("scope", "session")),
+        "--approval",
+        approval_id,
+    ]
+
+
 def details(record: dict[str, Any]) -> list[str]:
     """The CLI's rendering of :func:`disclosure` -- the SAME facts the desktop renders.
+
+    ORDER (design D2): who gets access and for how long come first, then the evidence a
+    careful reader checks (withdrawals, revision, fingerprint, network, principal). Every
+    fact stays; only the order changed. Lines are logical: the CLI wraps them to the
+    terminal (design D3), the desktop renders the dict instead.
 
     Raises (fail closed) for a record this build cannot describe, so the CLI refuses to
     sign what it cannot state.
     """
     facts = disclosure(record)
     heading = summary(record)
-    if facts is None or heading is None:
+    data = intent(record)
+    if facts is None or heading is None or data is None:
         return []
     recipient = facts["recipient"]
     label = (
@@ -167,59 +204,136 @@ def details(record: dict[str, Any]) -> list[str]:
         if recipient["name"]
         else recipient["device_id"]
     )
-    lines = [heading, f"Signed policy revision: {facts['policy_revision']}"]
+    count = len(facts["withdrawals"])
+    lines = [
+        heading,
+        f"Recipient device: {label}",
+        "Duration: until you revoke it. The restored share has no automatic expiry.",
+        f"Request window: this card can be approved and applied until "
+        f"{_when(facts['request_window']['expires_at'])}. That window only limits how long "
+        "this request stays answerable; it is not the lifetime of the share.",
+        # One plain line above the JSON (design D5), so "clears only the withdrawals listed
+        # below" is understandable without parsing ``owner-revoke:<ns>``.
+        f"What this undoes: {count} earlier "
+        + ("withdrawal" if count == 1 else "withdrawals")
+        + f" of {facts['credential_key']!r} for this device, listed exactly below.",
+    ]
+    for number, deny in enumerate(facts["withdrawals"], 1):
+        lines.append(f"Withdrawal {number}: " + json.dumps(deny, sort_keys=True, ensure_ascii=True))
     if facts["retained_fence"]:
         lines.append(
             "Recover retained fence: " + json.dumps(facts["retained_fence"], ensure_ascii=True)
         )
-    for number, deny in enumerate(facts["withdrawals"], 1):
-        lines.append(f"Withdrawal {number}: " + json.dumps(deny, sort_keys=True, ensure_ascii=True))
     lines += [
-        f"Recipient device: {label}",
+        f"Signed policy revision: {facts['policy_revision']}",
         f"Recipient key fingerprint: {recipient['key_fingerprint']}",
         f"Network: {facts['network_id']}",
         f"Signing principal: your operator key {facts['signing_principal']} on this machine",
-        "Duration: UNTIL YOU REVOKE IT. The restored share has no automatic expiry.",
-        f"Request window: this CARD can be approved and applied until "
-        f"{_when(facts['request_window']['expires_at'])}. That window only limits how long "
-        "this request stays answerable; it is NOT the lifetime of the share.",
     ]
     if len("\n".join(lines).encode("utf-8")) > finite_journal.LIMIT:
         consent.refuse("finite_disclosure_invalid")
     return lines
 
 
-def _remedy(expected: dict[str, Any]) -> str:
-    # Quote public context as command arguments, never concatenate arbitrary
-    # selector account strings, signatures, request digests or credential data.
+def next_lines(record: dict[str, Any]) -> list[str]:
+    """What the operator does next with this card, per state (UX U1, U5).
+
+    A ``failed`` card names WHY it stopped and the actual next step from its durable
+    receipt (:func:`approval_copy.last_failure`) -- before this, ``show`` printed
+    ``failed`` and nothing else, and the reason lived only in ``--json``. The terminal
+    command rides beside the plain sentence, never instead of it.
+    """
     import shlex
 
-    argv = [
-        "lop",
-        "network",
-        "credential",
-        "share",
-        str(expected.get("key", "")),
-        "--with",
-        str(expected.get("recipient_device", "")),
-        "--network",
-        str(expected.get("network_id", "")),
-        "--scope",
-        str(expected.get("scope", "session")),
-        "--request-approval",
-    ]
+    from local_operator.network.credentials import approval_copy
+
+    data = intent(record)
+    if data is None:
+        return []
+    approval_id = str(record.get("approval_id", ""))
+    state = record.get("state")
+    apply_cmd = shlex.join(_apply_argv(data, approval_id))
+    if state == approvals.STATE_REQUESTED:
+        return [f"Approving records your decision only. Then run: {apply_cmd}"]
+    if state == approvals.STATE_APPROVED:
+        return [f"Approved, not applied yet. Run: {apply_cmd}"]
+    failure = approval_copy.last_failure(record)
+    if failure is None:
+        return []
+    lines = [f"Why it stopped: {failure['reason']}", f"What to do: {failure['remedy']}"]
+    if failure["retryable"]:
+        lines.append(f"Apply again: {apply_cmd}")
+    else:
+        lines.append(
+            "To file the new request from a terminal on this Mac: " + _request_command(data)
+        )
+    return lines
+
+
+def list_lines(record: dict[str, Any]) -> list[str]:
+    """The ``approvals list`` block, in the SAME shape as the inheritance card (UX U6, D4).
+
+    A header, the one-line summary, a failed card's reason and next step, and the pointer
+    to the full disclosure -- not the whole block, so a list of several cards stays
+    scannable. ``approvals show`` and the pre-sign print keep every fact.
+    """
+    from local_operator.network.credentials import approval_copy
+
+    try:
+        heading = summary(record)
+    except MeshRefusal:
+        heading = "A credential-share request this build cannot describe; do not approve it."
+    approval_id = record.get("approval_id", "")
+    lines = [f"approval {approval_id} — {record.get('state', '')}", f"  {heading}"]
+    failure = approval_copy.last_failure(record)
+    if failure is not None:
+        lines += [f"  Why it stopped: {failure['reason']}", f"  What to do: {failure['remedy']}"]
+    lines.append(f"  Full details: lop network approvals show {approval_id}")
+    return lines
+
+
+def _request_command(data: dict[str, Any]) -> str:
+    import shlex
+
+    return shlex.join(
+        [
+            "lop",
+            "network",
+            "credential",
+            "share",
+            str(data.get("key", "")),
+            "--with",
+            str(data.get("recipient_device", "")),
+            "--network",
+            str(data.get("network_id", "")),
+            "--scope",
+            str(data.get("scope", "session")),
+            "--request-approval",
+        ]
+    )
+
+
+def _remedy(expected: dict[str, Any]) -> str:
+    """The permanent-refusal remedy: the shared sentence, then the terminal route beside it.
+
+    The sentence comes first and stands alone (operator a-b815: connections must be possible
+    without a command), so the desktop can show it as is; the command is for a terminal user.
+    Public context is quoted as command arguments, never concatenated.
+    """
+    from local_operator.network.credentials import approval_copy
+
     return (
-        "Inspect the current key, recipient fingerprint, scope and withdrawals. "
-        "Regenerate exact finite approval: "
-        + shlex.join(argv)
-        + ". Then lop network approvals approve <new-approval-id>; apply the same "
-        "key/peer/network/scope with --approval <new-approval-id>. "
-        "This is finite sharing, not onboarding or operator-anchor installation."
+        approval_copy.NEW_REQUEST_NEEDED
+        + " From a terminal on this Mac: "
+        + _request_command(expected)
+        + ", then lop network approvals approve <new-approval-id>, then apply it with "
+        "--approval <new-approval-id>."
     )
 
 
 def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
     try:
+        _refuse_spent(approval_id, root)
         return _apply(approval_id, expected, root)
     except MeshRefusal as exc:
         labels = {
@@ -236,18 +350,37 @@ def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) 
             "finite_denial_mismatch": "The current or retained withdrawal tuples changed.",
             "finite_journal_conflict": "The retained transaction fence changed.",
         }
-        if exc.code == "busy":
-            # TRANSIENT, not a changed intent (QA #3002 round 1, Q3): another writer held the
-            # placement lock. The same signed card applies once it is released, so the
-            # "regenerate the approval" remedy would send the operator to re-request and
-            # re-sign for nothing.
+        from local_operator.network.credentials import approval_copy
+
+        if approval_copy.retryable(exc.code):
+            # TRANSIENT, not a changed intent (QA #3002 round 1, Q3; UX U2): the same signed
+            # card applies once the other writer is done, so the "new request" remedy would
+            # send the operator to re-request and re-sign for nothing.
             raise MeshRefusal(
-                exc.code,
-                "Another change to who may borrow a credential was in progress; nothing was "
-                "changed. Apply the same approved card again in a moment.",
+                exc.code, approval_copy.reason(exc.code) + " " + approval_copy.TRY_AGAIN
             ) from exc
         leading = labels.get(exc.code, "The finite-share operation was refused (" + exc.code + ").")
         raise MeshRefusal(exc.code, leading + " " + _remedy(expected)) from exc
+
+
+def _refuse_spent(approval_id: str, root: Path | None) -> None:
+    """Refuse a ``failed`` card whose last failure was PERMANENT, before any new run (UX U1).
+
+    Such a card cannot succeed again -- the policy revision it signed only moves forward,
+    a changed recipient key does not change back -- so re-running Apply used to add one
+    more ``failed`` receipt per attempt and repeat the same refusal. It now answers at once
+    with the stored code, so the caller's label and the "new request is needed" remedy are
+    the same words every time. A transient last failure is let through to retry.
+    """
+    from local_operator.network.credentials import approval_copy
+
+    try:
+        record = approvals.load_record(approval_id, root=placement._config_root(root))
+    except MeshRefusal:
+        return  # the apply's own load names a missing card
+    failure = approval_copy.last_failure(record)
+    if failure is not None and not failure["retryable"] and failure["code"]:
+        raise MeshRefusal(failure["code"], approval_copy.reason(failure["code"]))
 
 
 def _reject_future_overlap(rec: dict[str, Any], key: str) -> None:

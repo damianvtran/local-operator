@@ -635,6 +635,8 @@ def test_finite_disclosure_matches_the_cli_show_field_by_field(
     facts = finite_share.disclosure(record)
     assert facts is not None
     capsys.readouterr()
+    # Unwrapped lines: the CLI word-wraps to the terminal (design D3), the facts are what count.
+    monkeypatch.setenv("COLUMNS", "1000")
     assert _lop_network("approvals", "show", record["approval_id"]) == 0
     shown = capsys.readouterr().out.splitlines()
     assert f"Signed policy revision: {facts['policy_revision']}" in shown
@@ -644,7 +646,7 @@ def test_finite_disclosure_matches_the_cli_show_field_by_field(
     assert f"Recipient key fingerprint: {facts['recipient']['key_fingerprint']}" in shown
     assert f"Network: {facts['network_id']}" in shown
     assert any(facts["signing_principal"] in line for line in shown)
-    assert any(line.startswith("Duration: UNTIL YOU REVOKE IT") for line in shown)
+    assert any(line.startswith("Duration: until you revoke it") for line in shown)
     assert any(line.startswith("Request window:") for line in shown)
     assert repr(facts["credential_key"]) in shown[0] and facts["scope"] in shown[0]
     # The dict carries no CLI command and no English prose (the UI localizes labels).
@@ -852,3 +854,167 @@ def test_assurance_reads_the_backend_the_signer_uses(
     assert desktop_approval.assurance() == ("presence", "operator-presence")
     pinned(dataclasses.replace(staged, backend="file-only", presence=False))
     assert desktop_approval.assurance() == ("file_only", "operator-file-only")
+
+
+# ---------------------------------------------------------------------------
+# Design/UX review round 1 (U1, U2, U3): a failed card says why and what next; retry only
+# when it can work; the desktop refusal states the real rule
+# ---------------------------------------------------------------------------
+
+
+def _policy_moved_failed_card(rig: Any, monkeypatch: pytest.MonkeyPatch) -> str:
+    """A finite card signed, then a concurrent withdrawal moves the policy -> ``failed``."""
+    record = _finite(rig, monkeypatch)
+    aid = record["approval_id"]
+    at = time.time()
+    signature = A.sign_decision(
+        kind=record["kind"],
+        request_id=record["request_id"],
+        request_digest=record["request_digest"],
+        decided_at=at,
+    )
+    A.approve(aid, signature_hex=signature, decided_at=at, root=rig.root)
+    consent.restrict_and_revoke(
+        N, rig.own.device_id, rig.peer.device_id, {"credential_key": "other-key"}, "moved", rig.root
+    )
+    with pytest.raises(MeshRefusal):
+        finite_share.apply(aid, _finite_expected(rig), rig.root)
+    assert A.load_record(aid, root=rig.root)["state"] == "failed"
+    return aid
+
+
+def _finite_expected(rig: Any) -> dict[str, Any]:
+    return {
+        "owner_device": rig.own.device_id,
+        "network_id": N,
+        "recipient_device": rig.peer.device_id,
+        "key": P,
+        "scope": "session",
+    }
+
+
+def test_a_failed_finite_card_says_why_and_what_to_do_in_show_and_list(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U1: ``show`` and ``list`` name the stored reason and the real next step."""
+    aid = _policy_moved_failed_card(rig, monkeypatch)
+    capsys.readouterr()
+    assert _lop_network("approvals", "show", aid) == 0
+    shown = capsys.readouterr().out
+    assert "Why it stopped: Who may use this credential changed" in shown, shown
+    assert "can't be used again; a new request is needed" in shown
+    assert "--request-approval" in shown  # the terminal route rides BESIDE the sentence
+    assert _lop_network("approvals", "list") == 0
+    listed = capsys.readouterr().out
+    assert "Why it stopped:" in listed and "a new request is needed" in listed
+    assert f"lop network approvals show {aid}" in listed
+    assert "Recipient key fingerprint" not in listed, "list is the compact card (U6)"
+
+
+def test_re_applying_a_permanently_failed_card_refuses_with_the_same_words_and_no_new_run(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U1: Apply again on a spent card answers at once; no extra ``failed`` receipt."""
+    aid = _policy_moved_failed_card(rig, monkeypatch)
+    receipts = len(A.load_record(aid, root=rig.root)["receipts"])
+    with pytest.raises(MeshRefusal) as again:
+        finite_share.apply(aid, _finite_expected(rig), rig.root)
+    assert again.value.code == "consent_conflict"
+    assert "can't be used again; a new request is needed" in str(again.value)
+    assert len(A.load_record(aid, root=rig.root)["receipts"]) == receipts
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_offers_a_retry_only_when_one_can_succeed_and_the_row_keeps_it(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U2: ``retryable`` false + a no-command remedy for a permanent refusal, persisted."""
+    record = _finite(rig, monkeypatch)
+    _level(monkeypatch, FILE_ONLY)
+    software = A.sign_decision
+
+    def sign_then_revoke(**kw: Any) -> str:
+        signature = software(**kw)
+        consent.restrict_and_revoke(
+            N, rig.own.device_id, rig.peer.device_id, {"credential_key": "x"}, "c", rig.root
+        )
+        return signature
+
+    monkeypatch.setattr(A, "sign_decision", sign_then_revoke)
+    aid = record["approval_id"]
+    async with _desktop_client(rig, monkeypatch) as client:
+        row = await _row(client, aid)
+        result = (
+            await client.post(f"/v1/desktop/approvals/{aid}/approve-" "credential", json=_ack(row))
+        ).json()["result"]
+        reloaded = await _row(client, aid)
+    applied = result["applied"]
+    assert applied["ok"] is False and applied["code"] == "consent_conflict"
+    assert applied["retryable"] is False
+    assert "a new request is needed" in applied["remedy"] and "lop " not in applied["remedy"]
+    assert "Who may use this credential changed" in applied["reason"]
+    # PERSISTED: a later list read (a reload) still carries the outcome.
+    outcome = reloaded["typed_approval"]["apply_outcome"]
+    assert outcome == {k: applied[k] for k in ("code", "retryable", "reason", "remedy")}
+
+
+def test_a_transient_refusal_is_the_only_kind_marked_retryable() -> None:
+    """U2: the one classification every surface reads; unknown codes are permanent."""
+    from local_operator.network.credentials import approval_copy
+
+    assert approval_copy.outcome("busy")["retryable"] is True
+    assert "again in a moment" in approval_copy.outcome("busy")["remedy"]
+    for code in ("consent_conflict", "finite_denial_mismatch", "approval_expired", "x_new"):
+        assert approval_copy.outcome(code)["retryable"] is False, code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("available", [False, True])
+async def test_the_desktop_inheritance_refusal_states_the_desktop_rule_and_a_real_fix(
+    rig: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    available: bool,
+) -> None:
+    """U3: the rule is the DESKTOP's; an unavailable upgrade is never offered as the fix."""
+    record = _inherit(rig, monkeypatch, capsys)
+    _level(monkeypatch, FILE_ONLY)
+    monkeypatch.setattr(
+        desktop_approval,
+        "upgrade",
+        lambda: {"available": available, "helper": "verified" if available else "absent"},
+    )
+    aid = record["approval_id"]
+    async with _desktop_client(rig, monkeypatch) as client:
+        row = await _row(client, aid)
+        refused = await client.post(
+            f"/v1/desktop/approvals/{aid}/approve-" "credential", json=_ack(row)
+        )
+    message = refused.json()["detail"]["text"]
+    assert refused.json()["detail"]["code"] == "credential_presence_required"
+    assert "the desktop app approves it only with" in message
+    assert "can only be approved with" not in message, "not a host-wide rule (a-b815)"
+    if available:
+        assert "Set up Touch ID approvals on this Mac" in message
+    else:
+        assert "can't be set up on this install" in message
+        assert "Set up Touch ID approvals" not in message
+    # The row says the same thing: its refusal sentence IS the route's.
+    assert row["typed_approval"]["refusal_message"] == message
+    assert "terminal" in row["approve_remedy"] and "command line" not in row["approve_remedy"]
+
+
+def test_cli_approve_on_a_file_only_key_warns_once_and_names_the_apply_step(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U3 (copy, not a gate) + U5: the warning, one disclosure, then how to apply."""
+    record = _finite(rig, monkeypatch)
+    _level(monkeypatch, FILE_ONLY)
+    capsys.readouterr()
+    assert _lop_network("approvals", "approve", record["approval_id"]) == 0
+    captured = capsys.readouterr()
+    both = captured.err + captured.out
+    assert "cannot prove that a person approved" in both
+    assert both.count("Recipient key fingerprint") == 1, "the disclosure prints once"
+    assert "approved" in captured.out and "Run: lop network credential share" in captured.out
+    assert A.load_record(record["approval_id"], root=rig.root)["state"] == "approved"
