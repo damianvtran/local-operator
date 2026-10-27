@@ -172,12 +172,14 @@ _UNWORDED_CODES = frozenset(
 #: well succeed (an fs error, a superseded run). See :func:`outcome`.
 KNOWN_CODES = frozenset(_REASONS) | RETRYABLE_CODES | _UNWORDED_CODES
 
-#: The SHAPE of a refusal code (``word_word``), the backstop beside :data:`KNOWN_CODES`: a
-#: code raised by a module outside the credential package (``enrollment``'s, the store's)
-#: keeps the permanent "refused" reading instead of being shown raw as if it were prose.
-#: Neither failure detail the whitelist exists for has this shape -- the supersede receipt
-#: is a sentence, and an exception class name is CamelCase.
-_CODE_SHAPE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
+#: The SHAPE of a refusal code, the backstop beside :data:`KNOWN_CODES`: a code raised by a
+#: module outside the credential package (``enrollment``'s, the store's) keeps the permanent
+#: "refused" reading instead of being shown raw as if it were prose. ONE lowercase word with
+#: no underscore counts too (#3039 review m-3): ``expired`` or ``declined`` is a code that
+#: lost its prefix, and reading it as prose offered "Try again" on a refusal that cannot
+#: succeed. Neither failure detail the whitelist exists for has this shape -- the supersede
+#: receipt is a sentence with spaces, and an exception class name is CamelCase.
+_CODE_SHAPE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 
 
 def is_refusal_code(value: str) -> bool:

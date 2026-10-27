@@ -54,15 +54,101 @@ def _no_relaunch(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_descriptor_is_adopted_and_both_names_leave_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _no_relaunch(monkeypatch)
     fd = _pipe_with(TOKEN.encode() + b"\n")
     monkeypatch.setenv(desktop.TOKEN_FD_ENV, str(fd))
-    monkeypatch.setenv(desktop.TOKEN_ENV, "env-loses")
+    monkeypatch.setenv(desktop.TOKEN_ENV, "env-loses-env-loses")
     desktop.adopt_spawn_bearer()
     assert desktop.desktop_posture().token == TOKEN
     assert desktop.TOKEN_FD_ENV not in os.environ
     assert desktop.TOKEN_ENV not in os.environ
     with pytest.raises(OSError):
         os.fstat(fd)  # consumed and closed: a child cannot inherit the read end
+
+
+def _capture_exec(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Stub a relaunchable launch and record the ``execve`` it makes (then fail it)."""
+    argv = [sys.executable, "-c", "from local_operator.cli import main; main()", "serve"]
+    monkeypatch.setattr(desktop, "_relaunchable_argv", lambda: argv)
+    seen: dict[str, Any] = {"calls": 0}
+
+    def capture(path: str, args: list[str], env: dict[str, str]) -> None:
+        seen["calls"] += 1
+        seen.update(path=path, argv=args, env=env)
+        named = env.get(desktop.TOKEN_FD_ENV)
+        seen["delivered"] = os.read(int(named), 4096) if named else None
+        raise OSError("stubbed exec")
+
+    monkeypatch.setattr(os, "execve", capture)
+    return seen
+
+
+def test_both_names_set_still_relaunches_after_a_good_descriptor_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3039 review M-1 / QA Q1: the env value must leave the exec-time block here too."""
+    seen = _capture_exec(monkeypatch)
+    monkeypatch.setenv(desktop.TOKEN_FD_ENV, str(_pipe_with(TOKEN.encode() + b"\n")))
+    monkeypatch.setenv(desktop.TOKEN_ENV, "env-value-the-app-forgot-to-drop")
+    desktop.adopt_spawn_bearer()
+    assert seen["calls"] == 1
+    assert desktop.TOKEN_ENV not in seen["env"]
+    assert "env-value-the-app-forgot-to-drop" not in "".join(seen["env"].values())
+    # The descriptor's bearer -- not the env one -- is what the successor is handed.
+    assert seen["delivered"] == TOKEN.encode() + b"\n"
+    assert desktop.desktop_posture().token == TOKEN
+
+
+@pytest.mark.parametrize("named", ["987654", "not-a-number", "EMPTY"])
+def test_both_names_set_still_relaunches_after_a_failed_descriptor_read(
+    monkeypatch: pytest.MonkeyPatch, named: str
+) -> None:
+    """A failed read closes the plane AND still scrubs the env value by re-exec."""
+    seen = _capture_exec(monkeypatch)
+    if named == "EMPTY":
+        named = str(_pipe_with(b""))
+    monkeypatch.setenv(desktop.TOKEN_FD_ENV, named)
+    monkeypatch.setenv(desktop.TOKEN_ENV, TOKEN)
+    desktop.adopt_spawn_bearer()
+    assert seen["calls"] == 1
+    assert desktop.TOKEN_ENV not in seen["env"]
+    assert TOKEN not in "".join(seen["env"].values())
+    # Nothing adopted: the successor gets no descriptor either, so its plane is closed.
+    assert desktop.TOKEN_FD_ENV not in seen["env"]
+    assert desktop.desktop_posture().enabled is False
+
+
+def test_the_size_cap_without_a_newline_is_a_failure_not_a_truncation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#3039 review m-2 / QA Q3: 4096 bytes and no newline adopts nothing."""
+    read_end, write_end = os.pipe()
+    os.write(write_end, b"A" * 5000)  # under the 64 KiB pipe buffer, so one write fits
+    os.close(write_end)
+    monkeypatch.setenv(desktop.TOKEN_FD_ENV, str(read_end))
+    with caplog.at_level("WARNING", logger=desktop.logger.name):
+        desktop.adopt_spawn_bearer()
+    assert desktop.desktop_posture().enabled is False
+    assert "no newline" in caplog.text
+
+
+@pytest.mark.parametrize("payload", [b"", b"\n", b"short-prefix\n", b"0123456789"])
+def test_an_empty_or_torn_token_is_refused_and_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, payload: bytes
+) -> None:
+    """m-2 (a writer that died after N bytes) and Q4 (an empty pipe was silent)."""
+    monkeypatch.setenv(desktop.TOKEN_FD_ENV, str(_pipe_with(payload)))
+    with caplog.at_level("WARNING", logger=desktop.logger.name):
+        desktop.adopt_spawn_bearer()
+    assert desktop.desktop_posture().enabled is False
+    assert "desktop plane stays closed" in caplog.text
+
+
+def test_a_token_at_the_minimum_length_is_adopted(monkeypatch: pytest.MonkeyPatch) -> None:
+    token = "x" * desktop._TOKEN_MIN_CHARS
+    monkeypatch.setenv(desktop.TOKEN_FD_ENV, str(_pipe_with(token.encode() + b"\n")))
+    desktop.adopt_spawn_bearer()
+    assert desktop.desktop_posture().token == token
 
 
 def test_eof_without_a_newline_still_delivers_the_token(monkeypatch: pytest.MonkeyPatch) -> None:

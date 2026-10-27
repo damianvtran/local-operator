@@ -1019,6 +1019,17 @@ def test_a_detail_that_is_not_a_refusal_code_keeps_its_own_words_and_is_retryabl
     assert approval_copy.last_failure(record) == outcome
 
 
+@pytest.mark.parametrize("code", ["expired", "declined", "busy2", "approval_expired", "x_new"])
+def test_a_one_word_or_unlisted_code_is_still_a_code(code: str) -> None:
+    """#3039 review m-3: ``expired`` is a code that lost its prefix, never "Try again" prose."""
+    from local_operator.network.credentials import approval_copy
+
+    assert approval_copy.is_refusal_code(code)
+    outcome = approval_copy.outcome(code)
+    assert outcome["retryable"] is False
+    assert outcome["remedy"] == approval_copy.NEW_REQUEST_NEEDED
+
+
 def test_a_raw_reason_is_printable_path_free_and_bounded() -> None:
     from local_operator.network.credentials import approval_copy
 

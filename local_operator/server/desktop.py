@@ -130,10 +130,19 @@ ORIGINS_ENV = "LOCAL_OPERATOR_DESKTOP_ORIGINS"
 #: the SAME way -- a fresh pipe -- so a reload keeps the plane without ever re-exporting it.
 TOKEN_FD_ENV = "LOCAL_OPERATOR_DESKTOP_TOKEN_FD"
 
-#: The longest bearer this reads off the descriptor. The app's tokens are 32-byte urlsafe
-#: base64 (~43 chars); the bound only keeps a misbehaving writer from making boot read
-#: forever.
+#: The longest bearer this reads off the descriptor. The app's tokens are 32 random bytes as
+#: hex (64 chars, ``randomBytes(32).toString("hex")`` in the app's ``backend-service.ts``);
+#: the bound only keeps a misbehaving writer from making boot read forever. Reaching it with
+#: no newline is a FAILURE, never a truncation (#3039 review m-2 / QA Q3): adopting the first
+#: 4096 bytes opened the plane on a token the launcher never meant.
 _TOKEN_FD_MAX_BYTES = 4096
+
+#: The shortest bearer either channel adopts (#3039 review m-2). A writer that dies part-way
+#: through leaves a PREFIX of the real token followed by EOF, and a 10-character prefix was
+#: adopted and answered 200. Sixteen characters rejects a torn write of any real token while
+#: still admitting the short synthetic tokens the UI repo's evidence rigs launch with
+#: (``rig-token-not-a-secret``); the app's own are 64.
+_TOKEN_MIN_CHARS = 16
 
 #: How long boot waits for the writer to deliver the line, on platforms where the wait can
 #: be bounded (POSIX ``select``). A spawner that names a descriptor and never writes is a
@@ -230,9 +239,12 @@ def desktop_posture() -> DesktopPosture:
 def _read_bearer_fd(fd: int) -> str:
     """The bearer line off an inherited descriptor, then the descriptor is closed.
 
-    Reads to the first newline or EOF, bounded in size and (on POSIX) in time. Any failure
-    yields ``""``: the plane stays closed, which is the fail-closed direction -- the app then
-    sees 401 and reports the daemon unpaired instead of a daemon answering anyone.
+    Reads to the first newline or EOF, bounded in size and (on POSIX) in time. Any failure --
+    no data in time, an unreadable descriptor, the size cap reached with no newline, an empty
+    or too-short line -- yields ``""`` and logs why. The plane then stays CLOSED: every desktop
+    route answers 503 and ``/v1/capabilities`` reports ``desktop_available: false`` (the
+    ``require_desktop`` refusal for a backend no app governs), not 401 -- the app reads it as
+    "not started by the desktop app" rather than "unpaired" (#3039 review m-1 / QA Q2).
     """
     data = b""
     try:
@@ -252,7 +264,35 @@ def _read_bearer_fd(fd: int) -> str:
         return ""
     finally:
         _retire_descriptor(fd)
-    return data.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+    if b"\n" not in data and len(data) >= _TOKEN_FD_MAX_BYTES:
+        logger.warning(
+            "desktop bearer descriptor sent %d bytes with no newline; desktop plane stays closed",
+            len(data),
+        )
+        return ""
+    return _usable_bearer(data.split(b"\n", 1)[0].decode("utf-8", "replace").strip(), "descriptor")
+
+
+def _usable_bearer(token: str, source: str) -> str:
+    """``token`` when it is long enough to be a whole bearer, else ``""`` with a warning.
+
+    One floor for both channels, so the environment fallback can never hand its successor
+    (:func:`_relaunch_with_bearer_fd`) a value the descriptor read would then refuse. The
+    empty case is logged too (QA Q4): an empty pipe was the one silent way to a closed plane.
+    """
+    if not token:
+        logger.warning("desktop bearer %s was empty; desktop plane stays closed", source)
+        return ""
+    if len(token) < _TOKEN_MIN_CHARS:
+        logger.warning(
+            "desktop bearer from the %s is %d characters, under the %d minimum; desktop plane "
+            "stays closed",
+            source,
+            len(token),
+            _TOKEN_MIN_CHARS,
+        )
+        return ""
+    return token
 
 
 def _retire_descriptor(fd: int) -> None:
@@ -295,26 +335,34 @@ def adopt_spawn_bearer() -> None:
       block until the app moves to the descriptor.
 
     The descriptor wins when both are set. Both names are removed from ``os.environ`` either
-    way. Idempotent: a second call finds nothing left to adopt and keeps the first bearer.
+    way, and WHENEVER :data:`TOKEN_ENV` was present the process re-execs -- also when the
+    descriptor branch was taken, and also when nothing was adopted (#3039 review M-1 / QA Q1).
+    A launcher that sets both names is the likeliest migration shape (an app that adds the
+    descriptor but keeps the variable for older cores), and returning from the descriptor
+    branch left the value in this process's exec-time block for its whole life, readable by
+    a tool child through ``ps -E``. After a failed read the successor carries no bearer at all
+    and the plane stays closed, but the value is still gone from the block.
+
+    Idempotent: a second call finds nothing left to adopt and keeps the first bearer.
     """
     global _SPAWN_BEARER
     named_fd = os.environ.pop(TOKEN_FD_ENV, "")
     env_token = os.environ.pop(TOKEN_ENV, "")
+    token = ""
     if named_fd:
         try:
-            fd = int(named_fd)
+            token = _read_bearer_fd(int(named_fd))
         except ValueError:
             logger.warning(
                 "%s is not a descriptor number; desktop plane stays closed", TOKEN_FD_ENV
             )
-            return
-        token = _read_bearer_fd(fd)
-        if token:
-            _SPAWN_BEARER = token
-        return
+    elif env_token:
+        token = _usable_bearer(env_token, "environment")
+    if token:
+        _SPAWN_BEARER = token
     if env_token:
-        _SPAWN_BEARER = env_token
-        # Never returns when it re-execs; the successor adopts the bearer off the pipe.
+        # Never returns when it re-execs; the successor adopts the bearer off the pipe, or
+        # (nothing adopted) finds neither name and keeps the plane closed.
         _relaunch_with_bearer_fd()
 
 
@@ -370,14 +418,17 @@ def _relaunch_with_bearer_fd() -> None:
     any thread, so nothing is lost but one interpreter start (~0.2-0.4 s, once per daemon).
 
     LOOP-FREE BY CONSTRUCTION: the successor's environment has no :data:`TOKEN_ENV`, so its
-    :func:`adopt_spawn_bearer` takes the descriptor branch, which never re-execs.
+    :func:`adopt_spawn_bearer` never re-execs. With a bearer adopted it names the pipe; with
+    none (a failed descriptor read, a refused token) it names nothing, so the plane is closed
+    in the successor exactly as it was here -- the exec still runs, because scrubbing the
+    block is the point even when there is nothing to hand on.
 
     Returns normally (bearer kept in memory, residual as documented) when the launch is not
     re-execable or the exec fails -- a daemon that keeps the plane is better than one that
     cannot start.
     """
     argv = _relaunchable_argv()
-    if argv is None or not _SPAWN_BEARER:
+    if argv is None:
         return
     bearer_env, bearer_fd = spawn_bearer_handoff()
     try:
