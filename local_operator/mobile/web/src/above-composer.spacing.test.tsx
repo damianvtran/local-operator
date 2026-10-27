@@ -111,7 +111,13 @@ describe("everything stacked above the composer shares one slot", () => {
 		const cls = stack().className.split(/\s+/);
 		// 8 px between items and 8 px down to the composer card's top edge.
 		expect(cls).toContain("gap-2");
-		expect(cls).toContain("pb-2");
+		/* `mb-2`, OUTSIDE the scrollport (design round 2, D6 = review R2-1): a
+		   `pb-2` sits at the END of the scrolled content, so an overflowing slot
+		   rested flush on the composer (slot bottom 144.6 = composer top 144.6
+		   at 320x440) and its cut edge fused into the card below. A margin keeps
+		   the 8 px whether or not the slot scrolls. */
+		expect(cls).toContain("mb-2");
+		expect(cls).not.toContain("pb-2");
 		// The composer card's own outer inset (`COMPOSER_SHELL` is `mx-2`), so an
 		// item's edge sits on the composer's edge.
 		expect(cls).toContain("px-2");
@@ -119,7 +125,7 @@ describe("everything stacked above the composer shares one slot", () => {
 		// No top padding: the transcript's own `py-2` already leaves 8 px under
 		// its last line, so a top pad would double the gap above the first item.
 		expect(cls.some((c) => /^p[ty]-/.test(c))).toBe(false);
-		// Nothing between it and the composer card in flow, so its `pb-2` IS the
+		// Nothing between it and the composer card in flow, so its `mb-2` IS the
 		// gap to the card's top edge (sheets render nothing while closed).
 		const composer = document.querySelector(".lo-composer")!;
 		let next = stack().nextElementSibling;
@@ -232,5 +238,73 @@ describe("the slot never paints over the composer (QA round 1, Q2)", () => {
 		} finally {
 			localStorage.removeItem("lo-mobile-command:s1");
 		}
+	});
+});
+
+describe("an overflowing slot rests on the card's decision (design D6 = review R2-1)", () => {
+	/* At 320x440 with the card, the tray and the retry alert, the slot's 65 px
+	   viewport showed only the card's "approval needed / bash" head and its
+	   Approve sat below a fold with no cue (touch scrollbars are transient and
+	   the slot carries no mask). Resting at the raw END was measured wrong too:
+	   it shows the tray, whose "Approve" chip opens the approvals-mode sheet,
+	   and leaves the card's own Approve/Deny above the fold. So the slot brings
+	   the row that ANSWERS the request to its bottom edge.
+
+	   happy-dom does no layout, so the boxes are stubbed on the slot and the
+	   answering row alone, with the geometry measured on the rendered page:
+	   slot 72-136.6, content 316 px, the Approve/Deny row 252-296 at rest. */
+	function stubLayout(scrollHeight: number, clientHeight: number, row: { top: number; bottom: number }) {
+		const isSlot = (el: Element) => el instanceof HTMLElement && el.hasAttribute("data-above-composer");
+		const sh = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight")!;
+		const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight")!;
+		const rect = Element.prototype.getBoundingClientRect;
+		vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(function (this: Element) {
+			return isSlot(this) ? scrollHeight : (sh.get!.call(this) as number);
+		});
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+			return isSlot(this) ? clientHeight : (ch.get!.call(this) as number);
+		});
+		vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+			if (isSlot(this)) return new DOMRect(0, 72, 320, 64.6);
+			if (this instanceof HTMLElement && this.hasAttribute("data-slot-rest")) {
+				return new DOMRect(8, row.top, 304, row.bottom - row.top);
+			}
+			return rect.call(this);
+		});
+	}
+	afterEach(() => vi.restoreAllMocks());
+
+	it("brings the card's Approve/Deny row to the slot's bottom edge, not the raw end", () => {
+		stubLayout(316, 65, { top: 252, bottom: 296 });
+		slot = { projection: projection(), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		const row = document.querySelector<HTMLElement>("[data-slot-rest]")!;
+		// The marked row is the one that answers: it holds Approve and Deny.
+		expect(row.textContent).toMatch(/approve/i);
+		expect(row.textContent).toMatch(/deny/i);
+		expect(screen.getByTestId("pending-card").contains(row)).toBe(true);
+		// 296 - 136.6: the row's bottom lands on the slot's bottom edge.
+		expect(stack().scrollTop).toBeCloseTo(159.4, 1);
+		expect(stack().scrollTop).toBeLessThan(316 - 65);
+	});
+
+	it("leaves a slot alone when nothing in it asks for a decision", () => {
+		stubLayout(316, 65, { top: 252, bottom: 296 });
+		slot = { projection: projection({ pending: null, pending_count: 0 }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		expect(document.querySelector("[data-slot-rest]")).toBeNull();
+		expect(stack().scrollTop).toBe(0);
+	});
+
+	it("does nothing when the slot fits, or the row is already in view", () => {
+		stubLayout(120, 120, { top: 252, bottom: 296 });
+		slot = { projection: projection(), connected: true };
+		const fits = render(<SessionScreen sessionId="s1" />);
+		expect(stack().scrollTop).toBe(0);
+		fits.unmount();
+		vi.restoreAllMocks();
+		stubLayout(316, 65, { top: 80, bottom: 124 });
+		render(<SessionScreen sessionId="s1" />);
+		expect(stack().scrollTop).toBe(0);
 	});
 });

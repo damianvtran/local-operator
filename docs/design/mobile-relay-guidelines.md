@@ -89,10 +89,12 @@ static replay, an old screenshot or an intended interaction as current live proo
 - Anything stacked between the transcript and the composer (the pending card,
   the status tray, any future strip) goes inside the one above-composer slot,
   `ABOVE_COMPOSER_STACK` in `components/above-composer.tsx`: one 8 px gap between
-  items and down to the composer card, its edge on the composer's `mx-2`, and no
-  outer margin or side padding on the item itself. Session health is not a strip
-  here: it is the header's status dot, whose sheet carries the explanation and
-  the Resume action.
+  items and down to the composer card (a margin, so it holds while the slot
+  scrolls), its edge on the composer's `mx-2`, and no outer margin or side
+  padding on the item itself. On a column too short for it the slot scrolls,
+  never over the composer, and rests with its action card's answering row in
+  view. Session health is not a strip here: it is the header's status dot, whose
+  sheet carries the explanation and the Resume action.
 - **First-editable startup — requirement, not yet shipped here:** opening a new
   conversation must expose an editable draft immediately. Session creation, model
   lists, directory discovery or reconnects must not hold the user's typing behind

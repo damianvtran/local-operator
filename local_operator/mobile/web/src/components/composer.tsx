@@ -540,6 +540,7 @@ export function Composer({
 	effortOpen,
 	onCloseEffort,
 	autoFocus = false,
+	ended = projection.ended,
 }: {
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
@@ -568,6 +569,14 @@ export function Composer({
 	    alternative — forcing a keyboard open from script — fights the platform
 	    and is worse than a focused field with a closed keyboard. */
 	autoFocus?: boolean;
+	/** Whether the session is ENDED as the header's status dot reads it — the
+	    screen passes `sessionHealth(...) === "ended"` (review round 2, R2-2 =
+	    U7). Not `projection.ended` alone: a conversation opened from history is
+	    a disk rebuild with no running owner (`pid: 0`, `ended: false`), the dot
+	    calls it Ended, and a send to it is the same wake, so the placeholder
+	    and the failure copy must say the same thing the header does. Defaults
+	    to the projection's own flag for callers without the screen's health. */
+	ended?: boolean;
 }) {
 	const [text, setText] = useDraft(pid);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
@@ -711,7 +720,7 @@ export function Composer({
 	   menu) is the one action: it
 	   is the path that respawns the session, and one act must not read as two
 	   different controls. */
-	const showResume = projection.stop_reason === "aborted" && !projection.ended;
+	const showResume = projection.stop_reason === "aborted" && !ended;
 
 	/* WHICH word, when it does, follows the verdict the notice above it states.
 	   `aborted` covers a deliberate stop and a harness cut-off alike, and the
@@ -1180,7 +1189,7 @@ export function Composer({
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
-				projection.ended
+				ended
 					/* U15's other half (UX round 1, U20; issue #1875): on an ENDED
 					   session `Try again.` is not the whole story. A send to an ended
 					   session is itself resume-then-send (the daemon wakes a host for
@@ -1496,7 +1505,7 @@ export function Composer({
 						   folder" above the field; with the band gone, the empty field
 						   says it where the reader is about to type. Live sessions
 						   keep the plain placeholder. */
-						placeholder={projection.ended
+						placeholder={ended
 							? messageRuntime.t("relay.health.ended_placeholder")
 							: COMPOSER_PLACEHOLDER}
 						aria-label={messageRuntime.t("relay.chrome.composer.label")}

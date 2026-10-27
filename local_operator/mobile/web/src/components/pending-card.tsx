@@ -561,6 +561,10 @@ export function PendingCard({
 			    control rows carry it — over prose the overlay behaviour is the
 			    app-wide `lo-scroll` idiom and was ruled acceptable, and a gutter
 			    would cost 4px of line length on every card at 360px. */}
+			{/* `data-slot-rest` marks the row that ANSWERS the request (Approve/Deny,
+			    or the ask's answer field and Send): the above-composer slot rests
+			    on it when it is too short to show the card whole (design D6 =
+			    review R2-1). A behaviour handle, like `data-testid` below. */}
 			{pending.kind === "approval" ? (
 				<div className="mt-2 flex shrink-0 flex-col gap-2 pe-1.5">
 					<label className="flex min-h-11 items-center gap-2 text-body-sm text-ink-muted select-none">
@@ -572,7 +576,7 @@ export function PendingCard({
 						/>
 						{messageRuntime.t("relay.asks.pending.remember")}
 					</label>
-					<div className="flex gap-2">
+					<div data-slot-rest="" className="flex gap-2">
 						<button
 							type="button"
 							disabled={busy}
@@ -666,7 +670,7 @@ export function PendingCard({
 							{messageRuntime.t("relay.asks.card.secret_notice")}
 						</p>
 					) : null}
-					<div className="flex gap-2">
+					<div data-slot-rest="" className="flex gap-2">
 						<input
 							/* No per-field remount key needed: the whole card is keyed
 							   on request_id+question_index at the render site, so this

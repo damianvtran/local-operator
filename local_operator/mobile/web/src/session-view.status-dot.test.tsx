@@ -22,6 +22,7 @@ const DROPPED_DETAIL = "Your computer can't reach this session right now and kee
 const QUIET_DETAIL = "This session on your computer has stopped responding — it may be busy or stuck. A send can show a failure and still arrive once it catches up. Retrying won't send it twice.";
 const ENDED_DETAIL = "History is kept. Send a message or tap Resume to reopen it in your home folder.";
 const ENDED_PLACEHOLDER = "Send to reopen in your home folder…";
+const ENDED_SEND_FAILED = "This session has ended and couldn't be reopened just now. Try again, or tap “Ended” at the top and choose Resume.";
 
 const mocks = vi.hoisted(() => ({
 	resumeSession: vi.fn(async () => ({ ok: true, pid: 42, session_id: "s1" })),
@@ -387,5 +388,23 @@ describe("the ended composer says what a send does BEFORE the tap (UX U4)", () =
 		slot = { projection: projection(), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 		expect(screen.getByRole("textbox", { name: /message/i }).getAttribute("placeholder")).toBe("Message…");
+	});
+
+	/* ROUND 2, R2-2 = U7: the composer reads the SAME "ended" the header dot
+	   does. A conversation opened from history is a disk rebuild with no
+	   running owner (`pid: 0`, `ended: false`) — the dot says "Ended" there, and
+	   a send to it is the same wake, so the composer must say the same before
+	   and after the tap, not the live wording. */
+	it("treats a history rebuild with no running owner (pid 0) as ended too", async () => {
+		const api = await import("./api");
+		mocks.sendCommand.mockRejectedValueOnce(new api.HttpError(502, "bad gateway"));
+		slot = { projection: projection({ pid: 0, ended: false }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		expect(control().dataset.health).toBe("ended");
+		const field = screen.getByRole("textbox", { name: /message/i });
+		expect(field.getAttribute("placeholder")).toBe(ENDED_PLACEHOLDER);
+		fireEvent.change(field, { target: { value: "who won?" } });
+		fireEvent.click(screen.getByRole("button", { name: "send" }));
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(ENDED_SEND_FAILED));
 	});
 });

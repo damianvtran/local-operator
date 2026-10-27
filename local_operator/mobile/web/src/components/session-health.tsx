@@ -79,17 +79,31 @@ export function healthLabel(health: SessionHealth): string {
     `degraded` wins over a stale beat for the same reason it does in
     `sessionHealth`: a dial that is down is the fact a send meets first. */
 export function healthDetail(health: SessionHealth, projection: HealthInput): string {
+	return messageRuntime.t(healthDetailKey(health, projection));
+}
+
+/** WHICH sentence, as a catalogue key — split from {@link healthDetail} so the
+    precedence tests can tell the two yellow causes apart (review round 2,
+    R2-3): both read "Not answering", and only the sheet's key says which one
+    won. Pure, so the rule is asserted without a mounted catalogue. */
+export function healthDetailKey(
+	health: SessionHealth,
+	projection: HealthInput,
+):
+	| "relay.health.live_detail"
+	| "relay.health.dropped_detail"
+	| "relay.health.quiet_detail"
+	| "relay.health.reconnecting_detail"
+	| "relay.health.ended_detail" {
 	switch (health) {
 		case "live":
-			return messageRuntime.t("relay.health.live_detail");
+			return "relay.health.live_detail";
 		case "not_answering":
-			return projection.degraded
-				? messageRuntime.t("relay.health.dropped_detail")
-				: messageRuntime.t("relay.health.quiet_detail");
+			return projection.degraded ? "relay.health.dropped_detail" : "relay.health.quiet_detail";
 		case "reconnecting":
-			return messageRuntime.t("relay.health.reconnecting_detail");
+			return "relay.health.reconnecting_detail";
 		case "ended":
-			return messageRuntime.t("relay.health.ended_detail");
+			return "relay.health.ended_detail";
 	}
 }
 

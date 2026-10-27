@@ -668,6 +668,10 @@ export function SessionScreen({
 	   leaves the composer, and hiding its row behind "no messages yet" would put
 	   the placeholder in front of the very message that proves the send worked. */
 	const needsApproval = blocking?.kind === "approval";
+	/* The pending card's identity: its React key (one remount per question of
+	   a multi-part ask) and the slot's `restOn`, so a new decision is
+	   scrolled into view on a slot too short to show it whole (D6 = R2-1). */
+	const blockingKey = blocking ? `${blocking.request_id}:${blocking.kind}:${blocking.question_index}` : null;
 	const taskItems = projection.todos.flatMap(phase => phase.items);
 	const tasksDone = taskItems.filter(task => task.status === "done" || task.status === "dropped").length;
 
@@ -770,7 +774,7 @@ export function SessionScreen({
 			    with one gap and one inset (`components/above-composer.tsx`), never
 			    its own padding — the stacked independent insets that left the old
 			    ended banner flush on the composer card. */}
-			<AboveComposerStack>
+			<AboveComposerStack restOn={blockingKey}>
 			{blocking ? (
 				/* Key the WHOLE card on request_id + question_index so React
 				   remounts it for each question of a multi-part ask. A
@@ -796,7 +800,7 @@ export function SessionScreen({
 				   revisit only if the daemon ever wires `remember` through
 				   to a per-tool store. */
 				<PendingCard
-					key={`${blocking.request_id}:${blocking.kind}:${blocking.question_index}`}
+					key={blockingKey ?? undefined}
 					pid={sessionId}
 					pending={blocking}
 					count={projection.pending_count}
@@ -867,6 +871,8 @@ export function SessionScreen({
 				effortOpen={effortOpen}
 				onCloseEffort={() => setEffortOpen(false)}
 				autoFocus={autoFocusComposer}
+				/* ONE "ended", the header dot's (review round 2, R2-2 = U7). */
+				ended={sessionHealth(projection, connected) === "ended"}
 			/>
 
 			<ModelSheet

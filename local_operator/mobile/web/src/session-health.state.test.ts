@@ -6,6 +6,7 @@
 // once read as broken; enumerating them is the guard.
 import { describe, expect, it } from "vitest";
 import { sessionHealth, type SessionHealth } from "./lib/session-health";
+import { healthDetailKey } from "./components/session-health";
 import type { SessionProjection } from "./types";
 
 type Facts = {
@@ -84,11 +85,25 @@ describe("sessionHealth — each precedence pair", () => {
 		["the phone's link beats degraded", { ...owner, degraded: true }, false, "reconnecting"],
 		["the phone's link beats a stale beat", { ...owner, heartbeat_stale: true }, false, "reconnecting"],
 		["the phone's link beats a disk rebuild", { ...owner, pid: 0 }, false, "reconnecting"],
-		["degraded beats a stale beat (both yellow; the sheet says dropped)", { ...owner, degraded: true, heartbeat_stale: true }, true, "not_answering"],
 		["degraded beats a disk rebuild (an older daemon's live-but-down entry)", { ...owner, degraded: true, pid: 0 }, true, "not_answering"],
 		["a stale beat beats a disk rebuild", { ...owner, heartbeat_stale: true, pid: 0 }, true, "not_answering"],
 		["a disk rebuild beats live", { ...owner, pid: 0 }, true, "ended"],
 	])("%s", (_name, input, connected, want) => {
 		expect(sessionHealth(input, connected)).toBe(want);
+	});
+
+	/* THE ONE PAIR THE STATE WORD CANNOT TELL APART (review round 2, R2-3).
+	   Degraded and a stale beat both read "Not answering", so asserting the
+	   state passes whichever wins. What differs is the sheet's sentence — a
+	   send fails at once (409) vs. may still arrive (504) — so the pair is
+	   asserted on the catalogue KEY the sheet renders, against both
+	   single-cause controls. */
+	it("degraded beats a stale beat: the sheet says dropped, not quiet", () => {
+		const both = { ...owner, degraded: true, heartbeat_stale: true };
+		const dropped = { ...owner, degraded: true };
+		const quiet = { ...owner, heartbeat_stale: true };
+		expect(healthDetailKey(sessionHealth(dropped, true), dropped)).toBe("relay.health.dropped_detail");
+		expect(healthDetailKey(sessionHealth(quiet, true), quiet)).toBe("relay.health.quiet_detail");
+		expect(healthDetailKey(sessionHealth(both, true), both)).toBe("relay.health.dropped_detail");
 	});
 });
