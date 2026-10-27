@@ -1272,31 +1272,38 @@ async def test_consent_state_refusals_pass_through_untouched(status, code, detai
     )
 
 
-@pytest.mark.parametrize(
-    ("response", "kwargs"),
-    [
-        # The pre-#227 service's closed decision set.
-        (
-            _err(400, "invalid_request", details={"field": "decision", "rule": "unknown_value"}),
-            {"decision": "withdraw"},
-        ),
-        # The pre-#227 strict body decoder on an unknown key: an uncoded 400.
-        (httpx.Response(400, json={"error": "invalid request body"}), {"decision": "withdraw"}),
-        (
-            httpx.Response(400, json={"error": "invalid request body"}),
-            {"decision": "decline", "consent_version": "v1", "endpoint_id": "bep_1"},
-        ),
-        # A fronting validator may say 422.
-        (httpx.Response(422, json={"error": "unprocessable"}), {"decision": "withdraw"}),
-    ],
-)
-async def test_an_old_hub_refusing_the_new_wire_is_outdated_hub(response, kwargs):
+async def test_an_old_hub_refusing_the_new_wire_is_outdated_hub():
+    """The one CODED shape a pre-#227 hub answers `withdraw` with, and #227 cannot."""
+
+    response = _err(400, "invalid_request", details={"field": "decision", "rule": "unknown_value"})
     client = _make_client(lambda request: response)
     with pytest.raises(BridgeRefusal) as info:
-        await client.conversation_consent("bcv_abc12345", "acc_1", **kwargs)
+        await client.conversation_consent("bcv_abc12345", "acc_1", decision="withdraw")
     assert info.value.code == tb_client.OUTDATED_HUB
     assert info.value.http_status == 409
-    assert info.value.details["hub_status"] == response.status_code
+    assert info.value.details == {"hub_status": 400, "hub_code": "invalid_request"}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # An uncoded body is what a strict body decoder, a proxy and an unrelated
+        # refusal all look like: not evidence of an old hub (review R1-3), so the
+        # hub's own answer surfaces instead of "the server needs an update".
+        httpx.Response(400, json={"error": "invalid request body"}),
+        httpx.Response(422, json={"error": "unprocessable"}),
+        # Plain text (a proxy page) is the same class.
+        httpx.Response(400, text="Bad Request"),
+    ],
+)
+async def test_an_uncoded_400_or_422_is_never_an_update_prompt(response):
+    client = _make_client(lambda request: response)
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_consent(
+            "bcv_abc12345", "acc_1", decision="withdraw", endpoint_id="bep_1"
+        )
+    assert info.value.code == "bridge_error"
+    assert info.value.http_status == response.status_code
 
 
 async def test_an_old_wire_refusal_is_never_reclassified_as_outdated_hub():

@@ -58,6 +58,9 @@ pytestmark = pytest.mark.asyncio
 
 TOKEN = "test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+#: Bound at IMPORT time: the `api` fixture swaps `tb_client.TeamBridgeClient` for
+#: the fake, and a composed test needs the class this module shipped.
+_REAL_TEAM_BRIDGE_CLIENT = tb_client.TeamBridgeClient
 
 
 # --- the tripwire: no REAL wire object may be built inside these cells (R-2) --
@@ -3465,10 +3468,31 @@ async def test_consent_refusals_pass_through_untouched(api, status, code, detail
     assert response.json()["detail"] == {"code": code, "message": "refused", "details": details}
 
 
+def _invitation(**over: Any) -> dict[str, Any]:
+    """One served invitation row, in the hub's own field names."""
+
+    row = {
+        "conversation_id": "bcv_abc12345",
+        "tenant_id": "tnt_1",
+        "kind": "channel",
+        "name": "opaque name",
+        "visibility": "private",
+        "status": "open",
+        "created_by": "acc_human",
+        "created_by_label": "Ana",
+        "endpoint_id": "bep_1",
+        "agent_label": "Aida",
+        "invited_at": "2026-10-01T10:00:00Z",
+        "last_message_at": "2026-10-02T11:00:00Z",
+    }
+    row.update(over)
+    return row
+
+
 async def test_owned_invitations_pass_through_with_no_store_and_the_opaque_cursor(api):
     client, _root, _d = api
     page = {
-        "invitations": [{"conversation_id": "bcv_abc12345", "endpoint_id": "bep_1"}],
+        "invitations": [_invitation()],
         "next_cursor": "opaque+/=",
         "has_more": True,
     }
@@ -3494,6 +3518,118 @@ async def test_owned_invitations_pass_through_with_no_store_and_the_opaque_curso
 
 
 @pytest.mark.parametrize(
+    "page",
+    [
+        # The hub's "metadata only" guarantee is the hub's, so a page carrying a
+        # field this build cannot classify (a body, a preview, a member list) is
+        # refused rather than forwarded to the renderer (review R1-1).
+        {"invitations": [_invitation(body={"text": "secret"})], "has_more": False},
+        {"invitations": [_invitation()], "has_more": False, "counts": {}},
+        {
+            "invitations": [{k: v for k, v in _invitation().items() if k != "endpoint_id"}],
+            "has_more": False,
+        },
+        {"invitations": [_invitation(invited_at=0)], "has_more": False},
+        {"invitations": [], "has_more": "no"},
+        {"invitations": {}, "has_more": False},
+        {"invitations": [], "has_more": False, "next_cursor": "x" * 513},
+        [],
+    ],
+)
+async def test_a_page_this_build_cannot_read_is_malformed_page(api, page):
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = page
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "malformed_page"
+    assert response.headers["cache-control"] == "private, no-store"
+
+
+@pytest.mark.parametrize("tenant", ["../tnt_1", "tnt_1!", "TNT_1", "x" * 200])
+async def test_a_malformed_tenant_is_refused_on_this_family_s_own_grammar(api, tenant):
+    """A tenant outside the accepted grammar never becomes a hub round trip (R1-2)."""
+
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": tenant}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls, "a refused tenant reached the transport"
+
+
+async def test_a_tenant_this_machine_did_not_enroll_with_is_invalid_tenant(api):
+    """The inbox's cross-check, over the READ-ONLY owner accessor (review R1-2)."""
+
+    from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
+
+    client, root, _d = api
+    Store(root).commit_enrollment(
+        OwnerSnapshot(
+            credential_id=1,
+            account_id="acc_1",
+            tenant_id="tnt_enrolled",
+            endpoint_id="bep_1",
+            canonical_base_url="https://api.radienthq.com/v1",
+            enrollment_generation=1,
+        ),
+        OwnerReceipt("bridge_consent_v1", "ref-1"),
+    )
+    calls = FakeClient.calls
+    foreign = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_other"}
+    )
+    assert foreign.status_code == 422, foreign.text
+    assert foreign.json()["detail"]["code"] == "invalid_tenant"
+    assert FakeClient.calls == calls
+
+    # The enrolled org itself passes the cross-check.
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    ok = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_enrolled"}
+    )
+    assert ok.status_code == 200, ok.text
+
+
+async def test_an_unenrolled_machine_is_not_refused_by_the_cross_check(api):
+    """No committed owner: nothing to compare against, so the hub answers.
+
+    Requiring an enrollment would make the invitation list unreadable exactly for
+    an owner who has not committed yet -- the person the list exists for.
+    """
+
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_1"}
+    )
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize(
+    ("limit", "code"),
+    [
+        ("0", "bad_limit"),
+        ("101", "bad_limit"),
+        ("+20", "invalid_request"),
+        ("1_0", "invalid_request"),
+    ],
+)
+async def test_limit_is_canonical_digits_inside_the_inbox_window(api, limit, code):
+    """The value validated is the value sent, and the window is the inbox's (R1-4)."""
+
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "limit": limit}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == code
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
     "query",
     [
         "",  # the captured-owner receipt is required
@@ -3501,7 +3637,6 @@ async def test_owned_invitations_pass_through_with_no_store_and_the_opaque_curso
         "?expected_account_id=acc_1&endpoint_id=bep_1",  # no endpoint parameter
         "?expected_account_id=acc_1&scope=account",
         "?expected_account_id=acc_1&expected_account_id=acc_2",
-        "?expected_account_id=acc_1&limit=0",
         "?expected_account_id=acc_1&limit=ten",
         "?expected_account_id=../x",
     ],
@@ -3531,3 +3666,76 @@ def test_owner_invitations_capability_is_advertised():
     from local_operator.server.features import static_feature_flags
 
     assert static_feature_flags()["team_bridge_owner_invitations"] == 1
+
+
+class _CredentialStore:
+    """The credential seam the REAL client resolves through (test_client's shape)."""
+
+    class Row:
+        def __init__(self) -> None:
+            self.id = 1
+            self.data = {"access": "token-1", "account_id": "acc_1"}
+            self.provider = "radient"
+            self.credential_type = "oauth"
+
+    def __init__(self) -> None:
+        self.rows = [self.Row()]
+
+    def list_credentials(self, provider=None, include_disabled=False):
+        return [r for r in self.rows if provider is None or r.provider == provider]
+
+    def get_credential(self, credential_id: int):
+        return next((r for r in self.rows if r.id == credential_id), None)
+
+    async def ensure_oauth_fresh_or_raise(self, credential_id: int, *, force: bool = False):
+        row = self.get_credential(credential_id)
+        return dict(row.data) if row is not None else None
+
+
+async def test_the_composed_seam_an_old_hub_becomes_an_update_prompt_not_a_retry(
+    api, monkeypatch: pytest.MonkeyPatch
+):
+    """Fake hub bytes -> the REAL client's reclassification -> the route's answer.
+
+    Each half was pinned separately (review R1-6); this drives the seam a renderer
+    actually consumes: an uncoded 404 on the invitations path must arrive as a 409
+    `outdated_hub` carrying no-store, not as a 404 the UI would render as "gone".
+    """
+
+    import httpx as httpx_mod
+
+    client, _root, _d = api
+    seen: list[httpx_mod.Request] = []
+
+    def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        seen.append(request)
+        return httpx_mod.Response(404, json={"message": "Not Found"})
+
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+
+    # The cell DECLARES its real client: a scripted fake cannot prove the
+    # reclassification the client performs. The tripwire bomb sits on the CLASS
+    # (the fixture arms it before the fake replaces the module attribute), so the
+    # allowance is aimed at the class, restored in `finally`. MockTransport is the
+    # only transport, so no socket is opened and the httpx/subprocess arms stay
+    # armed throughout.
+    saved_init = _REAL_TEAM_BRIDGE_CLIENT.__init__
+    _REAL_TEAM_BRIDGE_CLIENT.__init__ = _REAL_CLIENT_INIT
+    try:
+        wire = _REAL_TEAM_BRIDGE_CLIENT(
+            None,
+            base_url="https://hub.example/v1",
+            store=_CredentialStore(),
+            transport=httpx_mod.MockTransport(handler),
+        )
+    finally:
+        _REAL_TEAM_BRIDGE_CLIENT.__init__ = saved_init
+    monkeypatch.setattr(desktop_team_bridge, "_conversation_client", lambda cm: wire)
+
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "outdated_hub"
+    assert detail["details"] == {"hub_status": 404, "hub_code": "bridge_error"}
+    assert response.headers["cache-control"] == "private, no-store"
+    assert [r.url.path for r in seen] == ["/v1/messaging/agents/owned/invitations"]

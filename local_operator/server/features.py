@@ -416,10 +416,10 @@ def static_feature_flags() -> dict[str, Any]:
         # (no consent_version) plus an optional `endpoint_id` pin on the
         # consent route. Its own key by the `radient_org` rule: a renderer that
         # does not see it neither mounts the invitations list nor offers
-        # "Remove my agent", because this core would 404 the read and 422 the
-        # decision. It promises the RUNTIME only; a hub that predates #227
-        # answers either with 409 `outdated_hub`, which the renderer shows as
-        # "the server needs an update" rather than probing for it.
+        # "Remove my agent", because a build without this key would 404 the
+        # read and 422 the decision. It promises the RUNTIME only; a hub that
+        # predates #227 answers either with 409 `outdated_hub`, which the
+        # renderer shows as "the server needs an update" rather than probing.
         "team_bridge_owner_invitations": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a

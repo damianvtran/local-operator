@@ -897,27 +897,23 @@ OUTDATED_HUB_SENTENCE = (  # i18n: ignore machine-coded refusal; the renderer ow
 )
 
 
-def _consent_predates_withdraw(refusal: BridgeRefusal, body: Mapping[str, Any]) -> bool:
-    """Whether a consent refusal is a pre-#227 hub not knowing the new wire.
+def _consent_predates_withdraw(refusal: BridgeRefusal) -> bool:
+    """Whether a consent refusal is a pre-#227 hub not knowing `withdraw`.
 
-    Only a body carrying something #227 added (``decision=withdraw`` or
-    ``endpoint_id``) can be refused for that reason, so an accept/decline on
-    the old wire is never reclassified. A pre-#227 hub answers ``withdraw``
-    with 400 ``invalid_request`` ``{field: decision, rule: unknown_value}`` and
-    an unknown body key (``endpoint_id``) with its strict decoder's uncoded 400
-    (``bridge_error`` here); a fronting proxy may say 422. A #227 hub's own
-    400 ``rule=ambiguous`` names ``field=endpoint_id`` and is NOT matched: it is
-    an answer about the caller's rows, passed through untouched.
+    CODED answers only (review R1-3). `bridge_error` is what :func:`_refusal`
+    assigns to any body without a `code` — a fronting proxy's plain-text 400, an
+    unrelated refusal, and the pre-#227 strict decoder's complaint about an
+    unknown body key all arrive that way — so treating it as "the server needs
+    an update" sent the operator to the wrong remedy. The one shape a pre-#227
+    hub answers `withdraw` with, and a #227 hub cannot, is the closed-set
+    refusal `invalid_request` naming `decision`/`unknown_value`. Everything else
+    (including an uncoded 400/422 for `endpoint_id`) surfaces as the hub's own
+    answer, which is honest: this build cannot tell why that hub refused.
     """
 
-    if body.get("decision") != "withdraw" and "endpoint_id" not in body:
-        return False
-    if refusal.http_status not in (400, 422):
-        return False
-    if refusal.code == "bridge_error":
-        return True
     return (
-        refusal.code == "invalid_request"
+        refusal.http_status == 400
+        and refusal.code == "invalid_request"
         and refusal.details.get("field") == "decision"
         and refusal.details.get("rule") == "unknown_value"
     )
@@ -2503,7 +2499,10 @@ class TeamBridgeClient:
                 expected_account_id=expected_account_id,
             )
         except BridgeRefusal as refusal:
-            if _consent_predates_withdraw(refusal, body):
+            # Only a WITHDRAW is judged, and only on the shape above: an
+            # accept/decline is the pre-#227 wire and its refusals are always
+            # about the caller's rows (R1-3).
+            if decision == "withdraw" and _consent_predates_withdraw(refusal):
                 raise _outdated_hub(refusal) from refusal
             raise
 
@@ -2546,6 +2545,13 @@ class TeamBridgeClient:
                 expected_account_id=expected_account_id,
             )
         except BridgeRefusal as refusal:
+            # An UNCODED 404 here is "this hub has no such route": the path
+            # carries no id, so a coded 404 is the hub speaking about the caller
+            # (no membership, unknown tenant) and passes through. Deliberately
+            # unlike the consent arm (R1-3): there an uncoded 400/422 is
+            # ambiguous, while a router's 404 on a fixed metadata path is the
+            # absent-route answer itself — a #227 hub has no way to code a route
+            # it does not serve.
             if refusal.http_status == 404 and refusal.code == "bridge_error":
                 raise _outdated_hub(refusal) from refusal
             raise

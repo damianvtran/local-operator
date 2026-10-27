@@ -82,6 +82,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
@@ -1958,6 +1959,107 @@ async def conversation_consent(
 
 OWNER_INVITATIONS_CACHE_CONTROL = "private, no-store"
 _OWNER_INVITATIONS_QUERY = frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
+#: The whole vocabulary of ONE invitation row, and the subset this build cannot
+#: render without. The hub's guarantee is "metadata only, no body, preview or
+#: member list"; that guarantee is the HUB's, so the only way this build can
+#: keep it is to refuse a page it cannot account for (review R1-1). An unknown
+#: key is not dropped, it is malformed_page: a hub that starts sending `body`
+#: must surface as "this build cannot read that", never as a forwarded body
+#: nobody validated. Same rule as the inbox's `inbox_view`/`malformed_page`.
+_OWNER_INVITATION_ROW_FIELDS = frozenset(
+    {
+        "conversation_id",
+        "tenant_id",
+        "kind",
+        "name",
+        "visibility",
+        "status",
+        "created_by",
+        "created_by_label",
+        "invited_by",
+        "invited_by_label",
+        "endpoint_id",
+        "agent_label",
+        "invited_at",
+        "last_message_at",
+    }
+)
+_OWNER_INVITATION_ROW_REQUIRED = frozenset(
+    {
+        "conversation_id",
+        "tenant_id",
+        "kind",
+        "visibility",
+        "status",
+        "created_by",
+        "created_by_label",
+        "endpoint_id",
+        "agent_label",
+        "invited_at",
+        "last_message_at",
+    }
+)
+_OWNER_INVITATIONS_PAGE_FIELDS = frozenset({"invitations", "next_cursor", "has_more"})
+
+
+def _owner_invitation_page(payload: Any) -> dict[str, Any]:
+    """The invitations page as this build can read it, or ``malformed_page``.
+
+    Every served field is a string (the hub's row is ids, labels, timestamps), so
+    a non-string is as unreadable as an unknown name — including the nested
+    value a `body`/`members` regression would carry.
+    """
+
+    if not isinstance(payload, Mapping) or set(payload) - _OWNER_INVITATIONS_PAGE_FIELDS:
+        _raise_read("malformed_page")
+    rows = payload.get("invitations")
+    if not isinstance(rows, list) or not isinstance(payload.get("has_more"), bool):
+        _raise_read("malformed_page")
+    cursor = payload.get("next_cursor")
+    if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 512):
+        _raise_read("malformed_page")
+    out_rows: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) - _OWNER_INVITATION_ROW_FIELDS:
+            _raise_read("malformed_page")
+        if _OWNER_INVITATION_ROW_REQUIRED - set(row):
+            _raise_read("malformed_page")
+        if any(not isinstance(value, str) for value in row.values()):
+            _raise_read("malformed_page")
+        out_rows.append(dict(row))
+    page: dict[str, Any] = {"invitations": out_rows, "has_more": payload["has_more"]}
+    if cursor is not None:
+        page["next_cursor"] = cursor
+    return page
+
+
+def _refuse_foreign_tenant(config_dir: Any, tenant_id: str | None) -> None:
+    """Refuse a tenant this machine did not enroll with, as the inbox does (R1-2).
+
+    The enrolled org is the only local fact that can answer this, and it lives in
+    the bridge store — so the read is the READ-ONLY accessor (review R-1/M-9):
+    a machine with no committed owner stays unenrolled rather than having a store
+    made for it, and the hub's own membership gate answers instead. Skipping the
+    cross-check there is deliberate: requiring an enrollment would make the
+    invitation list unreadable exactly for an owner who has not committed yet,
+    and this read exists to be answered before that.
+    """
+
+    if tenant_id is None:
+        return
+    from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    if re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
+        _raise_read("invalid_request")
+    try:
+        owner = Store(config_dir).active_owner_readonly()
+    except StoreRefused as exc:
+        # A damaged store is a refusal on every read path (R-7), not a reason to
+        # let the hub decide what this machine's org is.
+        _raise_read(exc.code or "state_unreadable")
+    if owner is not None and owner.tenant_id != tenant_id:
+        _raise_read("invalid_tenant")
 
 
 @router.get(
@@ -1973,7 +2075,9 @@ async def owned_agent_invitations(
 
     Result: ``{invitations: [...], next_cursor?, has_more}``. Unknown or
     repeated query names are refused before any I/O rather than dropped (the
-    hub refuses ``endpoint_id``/``scope``/``before`` on this read too).
+    hub refuses ``endpoint_id``/``scope``/``before`` on this read too), a
+    malformed or foreign ``tenant_id`` is refused on this family's own
+    vocabulary, and the page is shape-checked before the renderer sees it.
     """
 
     response.headers["Cache-Control"] = OWNER_INVITATIONS_CACHE_CONTROL
@@ -1986,32 +2090,33 @@ async def owned_agent_invitations(
             values = request.query_params.getlist(name)
             if len(values) != 1 or not values[0].strip() or len(values[0]) > 512:
                 _raise_read("invalid_request")
-            query[name] = values[0]
+            # The STRIPPED value is what is validated and what is sent: keeping
+            # the raw one made the two disagree about what was checked (R1-4).
+            query[name] = values[0].strip()
         if not is_account_id(query["expected_account_id"]):
             _raise_read("invalid_request")
-        if len(query.get("tenant_id", "")) > 128:
-            _raise_read("invalid_request")
+        _refuse_foreign_tenant(config_manager.config_dir, query.get("tenant_id"))
         limit: int | None = None
         if "limit" in query:
-            # Parsed, never interpolated; the hub owns the upper bound.
-            try:
-                limit = int(query["limit"])
-            except ValueError:
+            # Canonical digits and the inbox's own 1..100 window: a value this
+            # route accepts is one the hub is known to accept, and `"+20"`/
+            # `"1_0"` are refused rather than read as numbers (R1-4).
+            if not query["limit"].isdigit():
                 _raise_read("invalid_request")
-            if limit < 1:
-                _raise_read("invalid_request")
+            limit = int(query["limit"])
+            if not 1 <= limit <= 100:
+                _raise_read("bad_limit")
 
         client = _conversation_client(config_manager)
-        return reply(
-            await _conversation_reply(
-                client.owned_agent_invitations(
-                    expected_account_id=query["expected_account_id"],
-                    tenant_id=query.get("tenant_id"),
-                    limit=limit,
-                    cursor=query.get("cursor"),
-                )
+        payload = await _conversation_reply(
+            client.owned_agent_invitations(
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                cursor=query.get("cursor"),
             )
         )
+        return reply(_owner_invitation_page(payload))
     except HTTPException as exc:
         # A refusal is an answer about the owner's agent too; it must not sit
         # in a shared cache either (the hub stamps its refusals the same way).
