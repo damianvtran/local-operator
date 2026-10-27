@@ -308,7 +308,9 @@ def _withheld_env() -> dict[str, str]:
 
     from local_operator.agent_shell import without_daemon_bearer
 
-    return without_daemon_bearer(dict(os.environ))
+    env = dict(os.environ)
+    without_daemon_bearer(env)
+    return env
 
 
 def _cli_argv() -> list[str]:
