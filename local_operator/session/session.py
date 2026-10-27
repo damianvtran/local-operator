@@ -57,6 +57,7 @@ from collections.abc import (
     Callable,
     Collection,
     Coroutine,
+    Iterator,
     Mapping,
     Sequence,
 )
@@ -4323,6 +4324,9 @@ class Session:
         # turn. The reservation, not this task or the card text, owes the work.
         self._pending_body_followup_task: asyncio.Task[Any] | None = None
         self._pending_body_followup_again = False
+        # Person prompts waiting for the turn lock (see
+        # ``person_prompt_waiting``): the body path yields to them.
+        self._person_prompts_waiting = 0
         # The wake a woken idle bridge card is owed when it is routed through
         # the body-only pass instead of the ordinary wake. That pass may open no
         # turn (a retained failed body fails again), and a self-contained card
@@ -6059,6 +6063,9 @@ class Session:
             loop = asyncio.get_running_loop()
             delay_s = max(0.0, (self._resume_grace_ends_ms - int(time.time() * 1000)) / 1000.0)
             loop.call_later(delay_s + 0.05, self._handle_missed_wakes)
+        # A body left pending by the previous runtime (restart, crash) has no
+        # arrival coming to arm its turn: offer it once at bind (D-F2).
+        self._rearm_pending_body_followup()
 
     # -- runtime role (SessionProtocol) --------------------------------------
     # This class IS the runtime: it holds the harness loop, the lease and the
@@ -9187,52 +9194,58 @@ class Session:
         # ``AudioInputUnsupported``); it is the audio door's rung-6 honest
         # error. It is cheap for every OTHER prompt: the check is one truthiness
         # test when ``audio`` is empty, which is every send but the recording.
-        if audio:
-            await self._refuse_audio_admission(audio)
-        # `@path` expansion, and it runs HERE — after the probe, before the
-        # lock, not inside it. An approval can park on a human indefinitely, and
-        # in the TUI the app awaiting this prompt is the same one that would
-        # draw the approval card; awaiting a person while holding `_turn_lock`
-        # also blocks the compaction that shares it, which is a deadlock-shaped
-        # risk rather than a slow turn. Expanding before `acquire()` costs
-        # nothing and removes the shape entirely.
-        #
-        # This one call is what gives EVERY composer surface the feature: CLI,
-        # headless, server, scheduler, mobile, subagents and the TUI's own
-        # submit exits all funnel through `prompt`. The TUI does NOT expand
-        # earlier — that pass was removed, because awaiting an approval card
-        # inside a Textual message handler deadlocks the composer (the pump
-        # awaits the handler to completion, and the card is mounted AND
-        # answered through that same pump; `on_editor_submitted` records the
-        # probe). So this is the first and only expansion of a composer draft,
-        # and the transcript row stays the typed line because the row is built
-        # from it, not because a second pass declined to touch it.
-        #
-        # THREE entry paths predate the feature and bypass `prompt`, so an
-        # `@path` in them stays inert prose: `steer` (queues the message
-        # directly — and `_submit_prompt` routes a draft typed while a turn
-        # runs there, so the TUI's own submit exit is on both lists), a wake
-        # delivery (`_prompt_messages`), and an aside fork (`adopt_aside`,
-        # which adopts the TYPED question — `_aside_worker` expands only the
-        # text it hands the model, and the panel keeps the typed one).
-        #
-        # IDEMPOTENCE is still a hard requirement with a single expansion site,
-        # because this pass runs on text it did not type: a subagent launch
-        # forwards the manager's own prompt into `child.prompt`, and a manager
-        # that quoted an already-expanded block out of its context would have
-        # it doubled here.
-        expansion = await expand_references(
-            text,
-            self._cwd,
-            request_approval=None if self._yolo else self._request_approval,
-        )
-        # Notices are discarded deliberately: `prompt` has no channel back to a
-        # UI, and no surface pre-expands a composer draft, so an unresolved
-        # token on a submit exit is sent verbatim and silently — the accepted
-        # cost `on_editor_submitted` records. The aside is the one path that
-        # paints its notices, from its own call in `_aside_worker`.
-        text = expansion.sent
-        await self._turn_lock.acquire()
+        # A PERSON'S PROMPT IS VISIBLE FROM HERE UNTIL IT HOLDS THE LOCK, so a
+        # Team Bridge body follow-up that wins the lock first (queued on the
+        # FIFO before this acquire, or across the expansion's await) yields
+        # instead of running one more body turn ahead of the person. Harness
+        # rows (goal continuations) are not a person and are not marked.
+        with contextlib.nullcontext() if harness_injected else self.person_prompt_waiting():
+            if audio:
+                await self._refuse_audio_admission(audio)
+            # `@path` expansion, and it runs HERE — after the probe, before the
+            # lock, not inside it. An approval can park on a human indefinitely, and
+            # in the TUI the app awaiting this prompt is the same one that would
+            # draw the approval card; awaiting a person while holding `_turn_lock`
+            # also blocks the compaction that shares it, which is a deadlock-shaped
+            # risk rather than a slow turn. Expanding before `acquire()` costs
+            # nothing and removes the shape entirely.
+            #
+            # This one call is what gives EVERY composer surface the feature: CLI,
+            # headless, server, scheduler, mobile, subagents and the TUI's own
+            # submit exits all funnel through `prompt`. The TUI does NOT expand
+            # earlier — that pass was removed, because awaiting an approval card
+            # inside a Textual message handler deadlocks the composer (the pump
+            # awaits the handler to completion, and the card is mounted AND
+            # answered through that same pump; `on_editor_submitted` records the
+            # probe). So this is the first and only expansion of a composer draft,
+            # and the transcript row stays the typed line because the row is built
+            # from it, not because a second pass declined to touch it.
+            #
+            # THREE entry paths predate the feature and bypass `prompt`, so an
+            # `@path` in them stays inert prose: `steer` (queues the message
+            # directly — and `_submit_prompt` routes a draft typed while a turn
+            # runs there, so the TUI's own submit exit is on both lists), a wake
+            # delivery (`_prompt_messages`), and an aside fork (`adopt_aside`,
+            # which adopts the TYPED question — `_aside_worker` expands only the
+            # text it hands the model, and the panel keeps the typed one).
+            #
+            # IDEMPOTENCE is still a hard requirement with a single expansion site,
+            # because this pass runs on text it did not type: a subagent launch
+            # forwards the manager's own prompt into `child.prompt`, and a manager
+            # that quoted an already-expanded block out of its context would have
+            # it doubled here.
+            expansion = await expand_references(
+                text,
+                self._cwd,
+                request_approval=None if self._yolo else self._request_approval,
+            )
+            # Notices are discarded deliberately: `prompt` has no channel back to a
+            # UI, and no surface pre-expands a composer draft, so an unresolved
+            # token on a submit exit is sent verbatim and silently — the accepted
+            # cost `on_editor_submitted` records. The aside is the one path that
+            # paints its notices, from its own call in `_aside_worker`.
+            text = expansion.sent
+            await self._turn_lock.acquire()
         try:
             # A USER TURN IS A REPLY (R34): retire every pending patience row
             # before anything else in this turn. Over-cancel is deliberate —
@@ -9330,6 +9343,8 @@ class Session:
                 carried_prompt=True,
             )
         finally:
+            # A body this person's turn left pending is served by its own turn.
+            self._rearm_pending_body_followup()
             # D8: anything queued after the pipeline's own flush (or on an
             # early exit before it) lands before the lock goes free.
             # Release in its own ``finally`` (R2-1): see the helper.
@@ -15393,15 +15408,133 @@ class Session:
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).
 
-        A typed prompt (TUI, desktop/phone/``lop send`` via the runtime handle,
-        or a spooled ``SOURCE_USER`` row steered into the run) is "typed" in
-        ``_run_typed_user``/``_has_awaiting_user``; a person answering an ask
-        counts too. Peer, wake, monitor, job and bridge follow-up runs are none
-        of those. The broader ``'user' in _run_triggers`` is deliberately NOT
-        the test: harness-minted continuations (goal loop, owner chrome) land in
-        that class but are not a person speaking, so they may still serve a body.
+        Read at ``_run_turn``'s claim site. True when this run consumed a
+        person's words (``_run_typed_user``: a typed TUI/desktop/phone prompt,
+        or a person answering an ask) or a person is waiting to speak
+        (:meth:`_person_is_waiting`). Three shapes reach it without a typed
+        ``initial``, and each is covered on purpose:
+
+        * the IDLE user steer (``_ensure_steering_wake``): its row is still on
+          the steering queue when the run opens, so the waiting arm sees it;
+        * the post-compaction continuation (``_drain_continuation``): the run
+          flags are reset only at the pipeline head, so it inherits the
+          originating run's verdict;
+        * the ask answer: ``_note_run_input`` sets ``_run_typed_user`` for it.
+
+        DELIBERATELY NOT ``'user' in _run_triggers``: harness-minted rows (goal
+        loop and judge continuations, spooled owner chrome) land in that class
+        but are no person speaking, and excluding them would starve a body
+        behind a long goal loop. A PEER message (``lop send``, another
+        session's agent) is also not this session's operator, so a peer-opened
+        run may still serve a body.
         """
-        return self._run_typed_user or self._has_awaiting_user()
+        return self._run_typed_user or self._person_is_waiting()
+
+    def _person_is_waiting(self) -> bool:
+        """Whether a PERSON's words are waiting for a turn on this session.
+
+        The priority signal for the Team Bridge body path: a direct user
+        message always goes first and is about the user, so a body turn that
+        has not started yields to it, and one that has started ends at its
+        next boundary instead of folding the person's words in after the frame.
+
+        Two places a person's words wait, and both count:
+
+        * the steering queue (:meth:`_person_steer_queued`);
+        * the turn lock: a prompt admitted and waiting for the lock, marked by
+          :meth:`person_prompt_waiting` (``prompt`` itself, and the serving
+          handle's prompt queue). Without it a desktop prompt arriving while
+          the follow-up waiter was queued ran AFTER one more body turn
+          (design review D-F2: body0, body1, USER).
+        """
+        return self._person_prompts_waiting > 0 or self._person_steer_queued()
+
+    def _person_steer_queued(self) -> bool:
+        """Whether a PERSON's row sits on the steering queue, unconsumed.
+
+        A typed or spooled ``SOURCE_USER`` steer, or an answered ask parked by
+        its busy arm. Harness-injected rows are NOT a person
+        (``is_harness_injection``: spooled owner chrome, goal continuations),
+        which is why this does not reuse ``_has_awaiting_user`` -- that one
+        feeds the notify rule, where any queued user-role row must count.
+        """
+        return any(
+            ask_answer_is_person(message)
+            or (
+                getattr(message, "custom_type", None) is None
+                and getattr(message, "role", None) == "user"
+                and not is_harness_injection(message)
+            )
+            for message in self.queued_steering()
+        )
+
+    @contextlib.contextmanager
+    def person_prompt_waiting(self) -> Iterator[None]:
+        """Mark a person's prompt as waiting for this session's turn lock.
+
+        A counter, not a flag: the serving handle's queue and a direct
+        ``prompt`` can both be waiting at once. Hosts that queue a person's
+        prompt OUTSIDE ``prompt`` (``serving._drain_prompt_queue`` waits out a
+        foreign turn first) hold this across that wait so a body follow-up that
+        wins the lock first still sees the person and yields.
+        """
+        self._person_prompts_waiting += 1
+        try:
+            yield
+        except BaseException:
+            # The prompt never reached its turn (refused, cancelled), so its
+            # release will not re-arm a body pass that yielded to it.
+            self._person_prompts_waiting -= 1
+            self._rearm_pending_body_followup()
+            raise
+        else:
+            self._person_prompts_waiting -= 1
+
+    def _body_turn_yields_to_person(self) -> bool:
+        """Whether the running body-carrying turn must stop for a person's steer.
+
+        A person who steers (TUI text while a turn streams, a spooled
+        ``SOURCE_USER`` row, an answered ask) into a turn that holds a Team
+        Bridge frame would otherwise have their words folded in at the tool
+        boundary with the frame appended AFTER them on every later call --
+        their message riding the body's request. So ``_drain_steering`` holds
+        the queue back and the loop's boundary-cancel hook ends the turn at
+        its next safe boundary; the person's row then opens its own turn
+        (the turn-end flush gives it a consumer).
+
+        WHY END THE TURN, not let it finish: a held steer keeps the urgent
+        interrupt poll true, which cancels every later interruptible tool, so
+        a body turn that carried on would thrash. Ending it is what an Esc
+        does to a body turn already (``settle`` releases the row as
+        ``admission_drift`` and a later turn re-serves it), and it keeps the
+        person's interrupt: their steer still cancels the running tool.
+
+        STEERS ONLY. A prompt waiting for the lock does not cut a running body
+        turn: it waits for that turn (bounded: the current turn), because
+        cutting it would re-serve the body and repeat the side effects its
+        tools already had. It does stop the NEXT body turn from starting.
+        """
+        return self._pending_body_turn is not None and self._person_steer_queued()
+
+    def _rearm_pending_body_followup(self) -> None:
+        """Re-arm the body follow-up pass at a turn's release and at bind (D-F2).
+
+        A person's turn no longer claims bodies, so nothing else would retry a
+        body left pending by an Esc, a once-failed attempt, a yield to a
+        person or a restart: the follow-up drain had only arrival-driven call
+        sites. This is a read-only check (``_pending_body_followup_row``) that
+        refuses while an abort is pending, so an Esc is honoured until the
+        next turn ends. The drain's OWN turns are skipped: re-arming itself
+        would re-run the card-fallback branch. Never raises -- it runs in
+        ``finally`` blocks.
+        """
+        task = self._pending_body_followup_task
+        if task is not None and task is asyncio.current_task():
+            return
+        try:
+            self._ensure_pending_body_followup()
+        except Exception:  # noqa: BLE001 — a re-arm never fails the turn releasing
+            logger.debug("bridge: body follow-up re-arm failed", exc_info=True)
 
     def _has_awaiting_user(self) -> bool:
         """§14.2's ``awaiting_user``: a plain user message queued, unconsumed.
@@ -17058,6 +17191,13 @@ class Session:
             # ``test_a_peer_prompt_cut_with_zero_round_trips_still_errors``).
             opened_body = None
             if pending_body_only:
+                if self._person_is_waiting():
+                    # A person is waiting (a queued steer, or a prompt waiting
+                    # on this lock): their turn goes first and the body is not
+                    # even hydrated. Releasing hands the lock on; the drain
+                    # ends its pass and the person's turn re-arms it at its end
+                    # (``_rearm_pending_body_followup``).
+                    return
                 # The normal guard ran under the lock. Hydrate before opening
                 # a turn, so a refused body costs no empty model request.
                 await self._open_pending_body_turn(selected=pending_body_selected)
@@ -17077,6 +17217,7 @@ class Session:
                 # Cancellation between hydration and pipeline entry still
                 # releases our claim; normal settlement already cleared it.
                 self._settle_pending_body()
+            self._rearm_pending_body_followup()
             # Release in its own ``finally`` (R2-1): see the helper.
             try:
                 await self._flush_queued_before_release()
@@ -17513,6 +17654,12 @@ class Session:
                     )
                     # Each attempt releases the ordinary turn lock. Selecting
                     # B explicitly prevents failed A being hydrated again here.
+                    if self._person_is_waiting():
+                        # A person spoke while this pass held or waited for
+                        # the lock: end the pass so their turn runs next (no
+                        # body0, body1, USER). Their turn's release re-arms a
+                        # fresh pass, which re-offers a yielded row.
+                        return
                 if self._pending_body_followup_again:
                     continue
                 if self._bridge_cards_owed_wake:
@@ -18077,16 +18224,13 @@ class Session:
                 return witness()
 
             if opened_body is None:
-                if self._turn_is_user_directed():
-                    # A person's own message is about the person: it must never
-                    # carry (or be delayed by) a Team Bridge body, which would
-                    # land after their words in the same request. The body stays
-                    # pending and is served by its own turn -- queue the finite
-                    # follow-up pass NOW, since no arrival may be coming to
-                    # rearm it. It waits on the FIFO turn lock behind this turn.
-                    self._ensure_pending_body_followup()
-                else:
+                if not self._turn_is_user_directed():
                     await self._open_pending_body_turn()
+                # else: a person's own message is about the person and must
+                # never carry (or be delayed by) a Team Bridge body, which
+                # would land after their words in the same request. The body
+                # stays pending; the lock release at this turn's end re-arms
+                # the follow-up pass that serves it in its own turn.
             else:
                 # The guarded same-session follow-up already claimed/fetched
                 # this immutable turn frame. Never claim a second body here.
@@ -18145,7 +18289,14 @@ class Session:
                 # paid no-op call (see ``_ensure_steering_wake`` and the loop's
                 # opening-drain comment).
                 drain_steering_on_open=drain_steering_on_open,
-                graceful_cancel_requested=lambda: self._graceful_cancel_requested,
+                # A body-carrying turn also stops at the next safe boundary
+                # when a person is waiting: their words are held off this turn
+                # (``_drain_steering``) and open their own turn next. The
+                # urgent-steer poll still cancels a running tool, so the person
+                # can always interrupt; only the fold-in is refused.
+                graceful_cancel_requested=lambda: (
+                    self._graceful_cancel_requested or self._body_turn_yields_to_person()
+                ),
                 has_urgent_steering_messages=self._has_urgent_steering,
                 # Rides the SAME interrupt poll steering uses, so a fork
                 # requested mid-tool reaches its boundary in ~250 ms instead of
@@ -21632,6 +21783,14 @@ class Session:
         self._flush_context_journal()
         messages: list[AgentMessage] = []
         while not self._steering_queue.empty():
+            if self._body_turn_yields_to_person():
+                # A person's words must never ride a request that carries a
+                # Team Bridge body (the frame goes last, after them). Leave the
+                # rest of the queue, in order: the boundary-cancel hook ends
+                # this turn, and the turn-end flush gives the queue its own
+                # consumer. Re-asked per item because the append below awaits,
+                # and a person can steer during it.
+                break
             message = self._steering_queue.get_nowait()
             # THE PRODUCERS MAP IS KEYED BY THE QUEUED OBJECT'S IDENTITY, so it
             # is captured before the append below can REPLACE the object with a
