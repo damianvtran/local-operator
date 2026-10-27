@@ -665,6 +665,29 @@ async def test_concurrent_gate_answers_have_one_authoritative_winner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_signal_exit_refuses_parked_and_later_gates() -> None:
+    """M1 on #3028: once a signal commits the exit, no gate parks on a person.
+
+    A parked approval is denied (``False``, the stop/timeout answer) and the
+    count says so; a gate opened afterwards answers at once instead of parking
+    a fresh card that would hold the drain open again; an ask answers ``None``.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "Allow?"))
+    await asyncio.sleep(0)
+    assert handle.is_busy() is True
+
+    assert handle.refuse_gates_for_exit() == 1
+    assert await asyncio.wait_for(parked, timeout=2) is False
+    assert handle.is_busy() is False
+
+    assert await asyncio.wait_for(handle._approval_gate("bash", "again"), timeout=1) is False
+    assert handle._pending_futures == {}
+    question = SimpleNamespace(id="q1", question="Proceed?", options=[], secret=False)
+    assert await asyncio.wait_for(handle._ask_gate([question]), timeout=1) is None
+
+
+@pytest.mark.asyncio
 async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
     handle, session = make_handle()
     receipts = await asyncio.gather(

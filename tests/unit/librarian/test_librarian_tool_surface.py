@@ -61,10 +61,11 @@ def test_the_seed_declares_a_read_tier_allow_list_and_no_hand_off() -> None:
     assert "`send`" not in seed.instructions, "the seed still tells her to send"
 
 
-def _session(root: Path, session_id: str, *, duty: bool) -> Session:
+def _session(root: Path, session_id: str, *, duty: bool, attach: bool = True) -> Session:
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
-    write_session_attachment(directory, team="", agent="librarian", goal="")
+    if attach:
+        write_session_attachment(directory, team="", agent="librarian", goal="")
     if duty:
         state.update_state(root, session_id=session_id)
     from local_operator.harness.types import ToolContext
@@ -126,5 +127,24 @@ async def test_an_agent_librarian_attach_elsewhere_is_not_narrowed(isolated_root
     try:
         assert session._librarian_duty is False
         assert "bash" in {t.name for t in session._tools}
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_attachment_still_binds_her_duty_session(isolated_root: Path) -> None:
+    """m1 (agent review round 1 on #3028): the duty flag is the identity, not the attachment.
+
+    A duty session whose attachment did not resolve (``ProfileRegistryUnavailable``
+    leaves the agent name empty — modelled here by no attachment at all) used to
+    return early and run her unattended pass with every tool. It now falls back
+    to the packaged seed's list.
+    """
+    session = _session(isolated_root, "l1brar1an0a3", duty=True, attach=False)
+    try:
+        assert session._librarian_duty is True
+        names = {t.name for t in session._tools}
+        assert names <= set(SEED_TOOLS), sorted(names - set(SEED_TOOLS))
+        assert "bash" not in names and "send" not in names, names
     finally:
         await session.dispose()

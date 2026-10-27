@@ -4282,6 +4282,9 @@ async def _drain_for_signal(
         SIGNAL_DRAIN_S,
     )
     if getattr(handle, "_draining", False) and not stop.is_set():
+        # The signal decides that this process ends; a gate parked on a person
+        # would hold the progress bound off forever (see ``_refuse_gates``).
+        _refuse_gates(handle, sig_name)
         # A departure is ALREADY committed to — the build on disk was replaced
         # first — so its own call site owns the exit and this signal adds only
         # the one thing that path does not have: a bound, judged on PROGRESS
@@ -4323,6 +4326,10 @@ async def _drain_for_signal(
         # then asserts no pair, which is what this path means).
         reasons=(f"{sig_name}: drained to the end of the turn in flight",),
     )
+    if drain is not None:
+        # AFTER the latch, never before: only a runtime that has committed to
+        # leaving may answer its gates on the operator's behalf.
+        _refuse_gates(handle, sig_name)
     if drain is None:
         if stop.is_set() or getattr(handle, "_disposing", False):
             # An exit is already under way and owns the ordering; a second
@@ -4360,6 +4367,37 @@ async def _drain_for_signal(
         await asyncio.sleep(REAP_CHECK_S)
     _warn_signal_reap(sig_name, bound)
     stop.set()
+
+
+def _refuse_gates(handle: object, sig_name: str) -> None:
+    """Settle parked approvals/asks once a signal has committed this runtime to leave.
+
+    A gate-parked call is an EXECUTING step to :func:`_step_in_flight` (its tool
+    batch is open while it waits), so :class:`_SignalDrainBound` never sees the
+    silence it cuts on, and the published "cut if silent 2 min" was false for
+    exactly the state a headless node gets stuck in (agent review round 1 on
+    #3028, M1). Denying here — the socket stop's and a timeout's answer — lets
+    the turn reach its boundary and the drain end it. Chosen over "do not count
+    a parked gate as executing" because that would still hold the process for
+    the whole bound and then cut the turn, where denying ends it at once with
+    the model told the call did not run. Best-effort: a handle without the hook
+    (an older host, a test double) keeps today's behaviour.
+    """
+    refuse = getattr(handle, "refuse_gates_for_exit", None)
+    if not callable(refuse):
+        return
+    try:
+        denied = refuse()
+    except Exception:  # noqa: BLE001 — the drain still runs; it is only slower
+        logger.warning("session runtime: could not settle parked gates on %s", sig_name)
+        return
+    if denied:
+        logger.info(
+            "session runtime: %s settled %d parked gate(s) as refused; nobody can answer "
+            "them before this process exits",
+            sig_name,
+            denied,
+        )
 
 
 def _resume_consumed_ids(directory: Path) -> set[str]:

@@ -26716,10 +26716,16 @@ class Session:
         """
         if not getattr(self, "_librarian_duty", False):
             return
-        if (self._goal_state.agent_name or "").strip().casefold() != "librarian":
-            return
+        # GATED ON THE DUTY FLAG ALONE (agent review round 1 on #3028, m1): the
+        # attachment is NOT the identity. ``_restore_attachment`` can leave it
+        # unresolved (``ProfileRegistryUnavailable``: empty agent name), and
+        # returning early then let her unattended pass run with every tool —
+        # fail-open on exactly the path this method closes. The attached row's
+        # list is used only when the attachment really is hers; anything else
+        # falls back to the packaged seed's list.
+        attached_is_hers = (self._goal_state.agent_name or "").strip().casefold() == "librarian"
         try:
-            names: tuple[str, ...] = tuple(self._attached_profile_tools)
+            names: tuple[str, ...] = tuple(self._attached_profile_tools) if attached_is_hers else ()
             if not names:
                 from local_operator.agent_profiles import load_seed
 

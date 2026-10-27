@@ -1474,6 +1474,11 @@ def update_peer(server: "RelayServer", device_id: str, *, rollout: str = "") -> 
         "method": str(detail_out.get("method") or ""),
         "version": str(detail_out.get("version") or ""),
         "sessions": detail_out.get("sessions") or {"moved": 0, "kept": 0},
+        # The member's structured twin of its "stay on … until they settle"
+        # clause (QA round 1 on #3028, Q2): rebuilt field by field above, this
+        # answer dropped it, so no `--json` reader and no rollout record ever
+        # saw which sessions a generation-layout update left behind.
+        "left_busy": list(detail_out.get("left_busy") or []),
         "device_id": device_id,
         "name": label,
     }

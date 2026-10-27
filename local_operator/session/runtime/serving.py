@@ -1067,6 +1067,10 @@ class ServingSessionHandle(SessionHandle):
         self._rehome_retry_task: asyncio.Task[None] | None = None
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
+        #: Set by :meth:`refuse_gates_for_exit` once a SIGNAL has committed this
+        #: runtime to leaving: every gate opened afterwards answers at once with
+        #: the deny/escape answer instead of parking. See that method for why.
+        self._gates_closed_for_exit = False
         # request_id -> (monotonic instant, settled value) for gates that LANDED
         # recently. The desktop answer path retries ONCE under the same id when an
         # acknowledgement is lost, so a repeat that finds no parked future is a
@@ -1284,6 +1288,11 @@ class ServingSessionHandle(SessionHandle):
             # turn never stalls on a card no front end would present.
             if self._auto_approve:
                 return True
+            if self._gates_closed_for_exit:
+                # Leaving on a signal: nobody will be asked before the exit, and
+                # a card parked now would hold the drain open (see
+                # ``refuse_gates_for_exit``). The same answer a stop gives.
+                return False
             request_id = secrets.token_hex(8)
             future: asyncio.Future[bool] = self._loop.create_future()
             self._pending_futures[request_id] = future
@@ -1316,6 +1325,9 @@ class ServingSessionHandle(SessionHandle):
             if not questions:
                 # Nothing to ask: answer NOTHING (the harness's "user escaped"
                 # signal) rather than parking a card with no question on it.
+                return None
+            if self._gates_closed_for_exit:
+                # Same rule as the approval gate: leaving on a signal.
                 return None
             total = len(questions)
             if total > 1:
@@ -3117,6 +3129,31 @@ class ServingSessionHandle(SessionHandle):
         note = getattr(self._session, "note_deliberate_stop", None)
         if callable(note):
             note()
+
+    def refuse_gates_for_exit(self) -> int:
+        """Deny every parked gate and refuse new ones: a signal committed this runtime to leave.
+
+        WHY (agent review round 1 on #3028, M1; QA Q5). The signal drain
+        (``process._drain_for_signal``) waits for the turn to end, cutting it
+        only after ``SIGNAL_DRAIN_S`` with NO progress. A call parked on an
+        approval counts as a step executing (its tool batch is open), so that
+        bound never fired: a SIGTERMed runtime parked on an approval nobody
+        could answer stayed up until the gate's own day-long timeout, while its
+        record promised "cut if silent 2 min" — and systemd's 90 s SIGKILL was
+        the only thing that ended it. A signal means this process is ending; no
+        answer can arrive in time to be acted on, so the drain answers the
+        gate now with the same deny the socket stop (``request_stop``) and a
+        timeout give, and the turn reaches its boundary and exits.
+
+        Gates opened AFTER this answer immediately too, without parking: the
+        model's next step after a denial is often another gated call, and a
+        fresh card would hold the drain open exactly as the first one did.
+        One-way for the life of the process — it is only called on an exit
+        that has already been committed to. Returns how many parked gates were
+        settled, for the log.
+        """
+        self._gates_closed_for_exit = True
+        return self._deny_pending_gates()
 
     def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.

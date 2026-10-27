@@ -177,6 +177,41 @@ def test_the_mcp_push_receipt_names_the_next_step_for_a_withheld_row(
     assert "— not sent;" in out and "push again" in out, out
 
 
+def test_network_update_names_the_sessions_a_peer_left_on_its_old_build(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q2/Q3 (QA round 1 on #3028): both the human line and ``--json`` carry ``left_busy``.
+
+    A generation-layout member updates past a busy or approval-parked session;
+    the operator who asked must be told which sessions stayed on the old build,
+    and the plain-text ``done`` branch used to drop the member's sentence.
+    """
+    answer = {
+        "ok": True,
+        "code": "done",
+        "state": "done",
+        "message": "this device moved from 0.0.1 to 0.99.0; 1 busy session(s) stay on 0.0.1",
+        "method": "uv-tool-generation",
+        "version": "0.99.0",
+        "sessions": {"moved": 0, "kept": 1},
+        "left_busy": [{"session_id": "p4rk-cli-0001", "name": "Librarian", "pending": "approval"}],
+        "device_id": "d_a",
+        "name": "device-a",
+    }
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **fields: dict(answer))
+    assert net_cli.main(_parser().parse_args(["network", "update", "device-a"])) == 0
+    out = capsys.readouterr().out
+    assert "device-a updated to 0.99.0" in out, out
+    assert (
+        "1 busy session(s) there stay on their old build until they settle: "
+        "Librarian (p4rk-cli-0001, waiting for approval)"
+    ) in out, out
+
+    assert net_cli.main(_parser().parse_args(["network", "update", "device-a", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["left_busy"] == answer["left_busy"], payload
+
+
 def test_mcp_state_render_marks_a_row_that_will_not_travel(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

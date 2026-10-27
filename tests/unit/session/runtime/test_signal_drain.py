@@ -267,6 +267,68 @@ async def test_the_drain_commits_at_the_signal_and_waits_afterwards() -> None:
     assert len(runtime.announced) == 1, "one departure, one announcement"
 
 
+class _GateHandle(_WorkHandle):
+    """A working handle that also carries the production gate-refusal hook."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.refusals = 0
+
+    def refuse_gates_for_exit(self) -> int:
+        self.refusals += 1
+        self.events.append("refuse-gates")
+        # A parked approval was the only thing keeping the turn open; answering
+        # it lets the turn reach its boundary, which is the production shape.
+        self.busy = False
+        return 1
+
+
+@pytest.mark.asyncio
+async def test_a_signal_settles_a_parked_gate_so_the_drain_can_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M1 (a) on #3028: a parked approval must not hold a signalled runtime open.
+
+    The progress bound reads a gate-parked call as an executing step, so before
+    this the drain waited on a person nobody could reach until the gate's own
+    day-long timeout (QA Q5: no exit in 200 s). The drain now refuses the gates
+    once it has committed to leaving — after the latch, never before — and the
+    runtime leaves at its next boundary, well inside the bound.
+    """
+    monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 30.0)
+    events: list[str] = []
+    stop = asyncio.Event()
+    handle = _GateHandle(busy=True, events=events)
+    runtime = _RecordingRuntime(events)
+
+    await asyncio.wait_for(_drain_for_signal(handle, runtime, stop, sig_name="SIGTERM"), timeout=5)
+
+    assert stop.is_set()
+    assert handle.refusals == 1
+    assert events.index("refuse-gates") > events.index("drain:runtime-shutdown"), events
+    # Left at the BOUNDARY (retirement latched), not cut by the bound.
+    assert handle.retires == [
+        ("runtime-shutdown", "SIGTERM: drained to the end of the turn in flight")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_handle_that_never_latched_answers_no_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal belongs to a COMMITTED departure: a refused latch refuses nothing.
+
+    The bound is shortened because an un-latched busy handle is waited out by it.
+    """
+    monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 0.3)
+    stop = asyncio.Event()
+    handle = _GateHandle(busy=True, drains=False)
+    await asyncio.wait_for(
+        _drain_for_signal(handle, _RecordingRuntime(), stop, sig_name="SIGTERM"), timeout=5
+    )
+    assert handle.refusals == 0
+
+
 @pytest.mark.asyncio
 async def test_the_drain_is_bounded_and_then_disposes_as_the_signal_path_always_did(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

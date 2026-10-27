@@ -307,7 +307,8 @@ def test_aida_duty_session_is_engine_owned_too(tmp_path: Path) -> None:
         still_runs="aida",
     )
     assert (
-        line == 'stopped "Aida" — Aida\'s scheduled check-ins still run (pause Aida to stop them)'
+        line == 'stopped "Aida" — Aida\'s scheduled check-ins still run (to stop them, turn on '
+        "aida.cadence.paused in /settings, or /aida pause)"
     )
 
 
@@ -1206,6 +1207,34 @@ async def test_a_healthy_busy_session_is_still_stopped_promptly_by_the_socket_ru
         assert outcome.method == "socket"
         assert handle.stops == [True]
         assert no_signals[0] == []
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_signalled_runtime_parked_on_a_person_is_stopped_by_the_socket_rung(
+    no_signals,
+) -> None:
+    """M1 (b) on #3028: ``leaving`` plus ``pending`` is not "finishing its turn".
+
+    A runtime SIGTERMed while parked on an approval reaches no boundary by
+    itself (on any build without the drain's gate refusal), so the skip's
+    "it leaves by itself, nothing to do" sent the operator away from the one
+    rung that ends it: the socket stop, which denies the parked gate at once.
+    Measured on the node and by QA (Q5): a plain ``lop stop`` refused and only
+    ``--force`` got out. Here a plain stop takes the socket rung.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(record, busy=True, pending="approval", leaving=LEAVING_ON_SIGNAL)
+    try:
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "socket", outcome.line
+        assert handle.stops == [True], "the plain stop reached the rung that denies the gate"
+        assert no_signals[0] == [], "and needed no signal"
     finally:
         server.close()
 

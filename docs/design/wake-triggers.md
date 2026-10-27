@@ -132,6 +132,13 @@ imports inside the functions that need them.
   scratch root — is refused rather than repointed (the 2026-10-08 incident),
   and wakes there fire only while a session is open; that is the workflow a
   custom-store user should run, since the shared unit will not supervise it.
+- THE SYSTEMD UNIT STOPS ONLY THE SUPERVISOR (`KillMode=process`, #3028). The
+  session runtimes it engages are detached but stay in its cgroup, so the
+  default `control-group` SIGTERMed every wake-spawned session on any unit
+  stop/restart and SIGKILLed it at 90 s, shorter than the runtime's own signal
+  drain. The relay's unit made the same choice for the same reason
+  (`supervisors.render_systemd_unit`). An installed unit picks it up on the
+  next `install` (the rendered text differs, so it is rewritten and reloaded).
 
 ## 7. The project-staleness source
 

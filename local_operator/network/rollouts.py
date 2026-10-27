@@ -519,9 +519,12 @@ def summary(record: Mapping[str, Any]) -> str:
             if str(record.get("state") or "") == "active":
                 at = float(member.get("next_ask_at") or 0.0)
                 when = time.strftime("%H:%M", time.localtime(at)) if at > 0 else "now"
-                label = f"waiting for {version} on PyPI (next check {when})"
+                # No parentheses: the label sits inside the summary's own
+                # bracketed group list, and "(… (next check 06:24): device-a)"
+                # read as a typo (QA round 1 on #3028, copy).
+                label = f"waiting for {version} on PyPI, next check {when}"
             else:
-                label = f"not updated ({version} is not on PyPI)"
+                label = f"not updated, {version} is not on PyPI"
         else:
             label = state
         groups.setdefault(label, []).append(str(member.get("name") or member.get("device") or "?"))
@@ -555,6 +558,19 @@ def summary(record: Mapping[str, Any]) -> str:
 def _backoff_s(fails: int) -> float:
     index = min(max(fails, 1), len(FAIL_BACKOFF_S)) - 1
     return FAIL_BACKOFF_S[index]
+
+
+def _left_busy_ids(answer: Mapping[str, Any]) -> list[str]:
+    """The session ids a generation-layout member left on its old build, from its answer."""
+    raw = answer.get("left_busy")
+    if not isinstance(raw, list):
+        return []
+    ids = []
+    for item in raw:
+        ident = item.get("session_id") if isinstance(item, Mapping) else item
+        if ident:
+            ids.append(str(ident)[:80])
+    return ids
 
 
 def classify_answer(
@@ -598,16 +614,23 @@ def classify_answer(
             # the ladder anyway, and the ladder's own comment claims
             # "consecutive". The failure arms override this with fails + 1.
             "fails": 0,
-            # The not-published wait's own rung counter, consecutive in the
-            # same sense; only that arm advances it.
-            "waits": 0,
+            # The not-published wait's own rung counter. CARRIED, not reset, by
+            # every other answer (agent review round 1 on #3028, m3): a busy or
+            # dropped ask between two 404s says nothing about whether PyPI has
+            # the wheel yet, so restarting the ladder at 5 min would re-poll the
+            # channel faster for no new fact. Only that arm advances it, and a
+            # settled member (the done arm) or ``--resume`` clears it.
+            "waits": waits,
         }
 
     if answer.get("ok") and state in DONE_STATES:
         # The member's own receipt sentence rides ``detail`` — the count line
         # (`this device moved from … ; N retired, M kept`) is authored prose
         # for a reader, and the record is where it belongs.
-        return moved(state)
+        # ``left_busy`` rides alongside as data (QA round 1 on #3028, Q2): the
+        # sentence can be cut at DETAIL_CAP with two or three named sessions,
+        # and the ids are what a `--json` reader and the audit row need.
+        return moved(state) | {"waits": 0, "left_busy": _left_busy_ids(answer)}
     if state == "busy" or code == "update_in_progress":
         # Skip-then-retry: parked on the cadence, a FRESH probe each time, and
         # nothing was touched on the member (its own sentence rides `detail`).
@@ -719,7 +742,7 @@ def _audit_member_state(
     try:
         from local_operator.network.audit import AuditEvent, AuditLog
 
-        detail = {
+        detail: dict[str, Any] = {
             "rollout": str(record.get("id") or ""),
             "state": str(member.get("state") or ""),
             "code": str(member.get("code") or ""),
@@ -727,6 +750,10 @@ def _audit_member_state(
             "method": str(update.get("method") or ""),
             "version": str(update.get("version") or ""),
         }
+        if update.get("left_busy"):
+            # The ids the member deliberately left on its old build (QA Q2):
+            # the reason above is capped and may have lost the names.
+            detail["left_busy"] = list(update.get("left_busy") or [])
         event = AuditEvent(
             event=MEMBER_STATE,
             actor="self",
@@ -900,6 +927,8 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             target_member["fails"] = int(_update.get("fails") or 0)
             target_member["waits"] = int(_update.get("waits") or 0)
             target_member["next_ask_at"] = float(_update.get("next_ask_at") or 0.0)
+            if "left_busy" in _update:
+                target_member["left_busy"] = list(_update.get("left_busy") or [])
             note_receipt(
                 target_member,
                 state=str(_update["state"]),

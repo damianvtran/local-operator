@@ -380,6 +380,11 @@ def test_a_busy_generation_member_updates_and_names_what_it_left_behind(
     message = detail["message"]
     assert "1 busy session(s) stay on 0.0.1 until they settle" in message, message
     assert "Librarian (p4rk-cell-0001, waiting for approval)" in message, message
+    # Q2 (QA round 1): the ORIGIN's answer — what `lop network update <peer>
+    # --json` prints and what the rollout driver records — carries the ids too.
+    assert detail["left_busy"] == [
+        {"session_id": "p4rk-cell-0001", "name": "Librarian", "pending": "approval"}
+    ], detail
     rows = registry.scan(server_a.root, reap=False, check_zombie=False)
     live = [r for r, _s in rows if r.session_id == "p4rk-cell-0001"]
     assert live and live[0].busy is True and live[0].pending == "approval", rows

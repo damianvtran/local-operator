@@ -4,6 +4,10 @@ label: Librarian
 version: 1.1.0
 description: "The Library's organizing agent: names, describes and tags the assets the operator keeps, learns their vocabulary, and keeps the global catalog usable."
 when_to_use: "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds."
+# No web_search/web_fetch, deliberately: an unattended local-metadata curator has
+# no web duty (nothing in this pass fetches or searches the web), and keeping her
+# off the network shrinks what an unanswerable pass can reach. Exempted by name in
+# test_every_allowlisted_seed_carries_the_read_only_network_tools.
 tools: library, read, glob, grep, todo
 delegate: yes
 class: proactive

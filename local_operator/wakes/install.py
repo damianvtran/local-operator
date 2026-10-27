@@ -202,6 +202,18 @@ def render_systemd(config_dir: Path) -> str:
         # the one the wake was armed in. The quoting rule lives in
         # ``supervisors`` because the tunnel arm was already spelling it.
         exec_start=f"{supervisors.quoted(str(image))} -m local_operator.wakes.supervisor",
+        # THE RELAY'S CHOICE, FOR THE RELAY'S REASON (see the ``kill_mode``
+        # comment in ``supervisors.render_systemd_unit``): the session runtimes
+        # this supervisor starts are detached (``start_new_session``) but stay
+        # in its CGROUP, so systemd's default ``control-group`` made every stop
+        # or restart of this unit SIGTERM every wake-spawned session and
+        # SIGKILL it 90 s later — shorter than the runtime's own signal drain
+        # (``SIGNAL_DRAIN_S``), so honest turns were cut, not only parked ones
+        # (agent review round 1 on #3028, M2). Under ``process`` only the
+        # supervisor itself is stopped; sessions end through their own verbs.
+        # An installed unit picks this up on the next ``install`` (the rewrite
+        # below compares the rendered text and reloads the manager).
+        kill_mode="process",
         post_lines=[
             f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir}')}",
             *supervisors.output_redirect_lines(log_path(config_dir)),

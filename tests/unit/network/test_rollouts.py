@@ -1578,6 +1578,51 @@ def test_a_not_yet_published_target_is_retried_on_the_ladder_then_installs(
     assert done_rows and done_rows[-1].outcome == "ok", done_rows
 
 
+def test_the_wait_rung_survives_an_interleaved_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m3 (agent review round 1): a busy ask between two 404s keeps the wait's rung.
+
+    The busy answer says nothing about PyPI, so the ladder must not restart at
+    5 min; the next 404 climbs to the third rung, not the first.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    _scripted(monkeypatch, [_not_published(), _answer("busy"), _not_published()])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    member = _member(_live(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=member["next_ask_at"] + 1.0)
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["code"] == "busy" and member["waits"] == 1, member
+    at = member["next_ask_at"] + 1.0
+    rollouts.step_record(cast(Any, server), record["id"], now=at)
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["waits"] == 2, member
+    assert member["next_ask_at"] == at + rollouts.FAIL_BACKOFF_S[1], member
+
+
+def test_a_done_member_keeps_the_sessions_it_left_behind_in_record_and_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2 (QA round 1): ``left_busy`` reaches the rollout record and the audit row.
+
+    The member's sentence is capped at DETAIL_CAP in the record, so with two or
+    three named sessions the names could be lost; the ids ride as data.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.0.1 to 0.99.0")
+    done["left_busy"] = [{"session_id": "p4rk-r-0001", "name": "Librarian", "pending": "approval"}]
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    closed = _live(record["id"], root)
+    assert _member(closed, "d_a")["left_busy"] == ["p4rk-r-0001"], closed
+    rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
+    assert rows and rows[-1].detail.get("left_busy") == ["p4rk-r-0001"], rows
+
+
 def test_a_target_that_never_appears_stops_at_the_window_and_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1595,7 +1640,7 @@ def test_a_target_that_never_appears_stops_at_the_window_and_says_so(
     line = rollouts.summary(closed)
     assert "0.99.0 never appeared on PyPI" in line, line
     assert "may not have been published at all" in line, line
-    assert "not updated (0.99.0 is not on PyPI)" in line, line
+    assert "not updated, 0.99.0 is not on PyPI" in line, line
     assert "no longer active" not in line, "the generic nudge must not sit beside the remedy"
     rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
     assert rows and rows[-1].outcome == "partial", rows

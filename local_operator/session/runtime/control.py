@@ -920,11 +920,18 @@ def _stopped_line(
     # "switched off" — the receipt names the pass and the real off switch.
     pass_part = ""
     if still_runs == "librarian":
+        # The off switch is named by the SURFACE that reaches it (QA round 1 on
+        # #3028, Q4): there is no `lop config set` verb, so a raw key read as
+        # a command nobody can type. Both keys are rows in /settings.
         pass_part = (
-            " — the Librarian's daily pass still runs " "(set librarian.cadence.paused to stop it)"
+            " — the Librarian's daily pass still runs (to stop it, turn on "
+            "librarian.cadence.paused in /settings)"
         )
     elif still_runs == "aida":
-        pass_part = " — Aida's scheduled check-ins still run (pause Aida to stop them)"
+        pass_part = (
+            " — Aida's scheduled check-ins still run (to stop them, turn on "
+            "aida.cadence.paused in /settings, or /aida pause)"
+        )
     return f'{verb} "{name}"{rung}{proof}{dormant_part}{pass_part}'
 
 
@@ -1468,7 +1475,21 @@ async def stop_session(
             f'"{name}" (pid {record.pid}) {_drain_phrase(record)}, but {stalled}, so it is '
             "not left to finish; trying the ordinary stop"
         )
-    if leaving and not force and not stalled and registry.pid_alive(record.pid):
+    # A RECORD WAITING ON A PERSON IS NOT "FINISHING ITS TURN" (agent review round
+    # 1 on #3028, M1 (b)). A runtime that was signalled while parked on an approval
+    # never reaches its boundary by itself on a build without the drain's gate
+    # refusal, so "it leaves by itself, nothing to do" sent the operator away from
+    # the one rung that ends it: the socket stop below denies the parked gate at
+    # once, which is what a plain `lop stop` is for. Read defensively, like
+    # ``leaving``: a record from an older runtime may lack the field.
+    waiting_on_person = bool(getattr(record, "pending", None))
+    if (
+        leaving
+        and not force
+        and not stalled
+        and not waiting_on_person
+        and registry.pid_alive(record.pid)
+    ):
         # THE REMEDY IS TWO-SIDED, and the line is read by whichever front end
         # asked: ``--force`` is a flag of ``lop stop`` and the TUI's ``/stop``
         # takes no flags at all (U7). Named in the reader's own vocabulary —
