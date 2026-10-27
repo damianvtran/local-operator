@@ -175,7 +175,7 @@ def test_full_store_status_says_so_plainly_and_offers_the_way_out(tmp_path, monk
     # The exact contradiction the defect reported: the TOKEN quota is empty of
     # use while the byte cap refuses writes. Both must be on the page.
     assert usage["active_tokens"] == 0
-    assert "Quota: global 0/16000" in text
+    assert "Quota: global 0/24000" in text
     assert "Store FULL" in text
     flat = unwrapped(text)
     assert "writes that need a new page are refused until space is freed" in flat

@@ -123,7 +123,8 @@ def test_no_whole_bank_and_bounded_recall(store):
     assert store.search("release", tokens=1) == []
     with pytest.raises(MemoryError):
         store.search("release", tokens=2001)
-    with pytest.raises(MemoryError, match="256"):
+    # The refusal names the content-token bound and the overage (counts only).
+    with pytest.raises(MemoryError, match=r"content tokens; the limit is 512 \(\d+ over\)"):
         store.put("global", fact("very long sentence " * 300))
 
 

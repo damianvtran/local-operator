@@ -875,3 +875,35 @@ def test_status_bounds_a_300_char_peer_name(tmp_path):
     assert long_name not in human
     assert "…" in " ".join(block)
     assert all(len(line) <= 80 for line in block)
+
+
+def test_peer_without_item_512_receives_a_withheld_skip_not_a_gap_refusal(devices, monkeypatch):
+    """Slice A1 over a REAL link: a fact over the old 256-wire-token cap is withheld
+    from a peer that did not advertise ``memory-item-512``, as a content-free skip.
+    The push succeeds (no permanent sequence gap) and the other facts land."""
+    from local_operator.compaction.tokens import count_text_tokens
+    from local_operator.memory import LEGACY_ITEM_WIRE_TOKENS, _dump
+
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Elara", "body": "Elara lives in Dunedin"})
+    big = sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    sender.put("global", {"title": "Kai", "body": "Kai lives in Nelson"})
+    assert count_text_tokens(_dump(sender.show("global", big["id"])["fact"])) > (
+        LEGACY_ITEM_WIRE_TOKENS
+    )
+    link = a._ensure_link(b.identity.device_id)
+    assert link is not None and wire.MEMORY_ITEM_512 in link.capabilities
+    monkeypatch.setattr(
+        link, "capabilities", tuple(c for c in link.capabilities if c != wire.MEMORY_ITEM_512)
+    )
+    result = memory.push_to_peer(a, b.identity.device_id)
+    assert result["code"] == "withheld" and len(result["withheld"]) == 1, result
+    receiving = bank(b)
+    assert receiving.search("Elara", "global") and receiving.search("Kai", "global")
+    assert not receiving.search("coastal walks", "global")
+    # A later write still flows: the skip advanced the cursor, no gap remains.
+    sender.put("global", {"title": "Ana", "body": "Ana lives in Napier"})
+    again = memory.push_to_peer(a, b.identity.device_id)
+    assert again["code"] in ("withheld", "in_sync"), again
+    assert receiving.search("Napier", "global")

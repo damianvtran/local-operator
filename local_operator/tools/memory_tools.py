@@ -21,6 +21,7 @@ from local_operator.memory import (
     MEMORY_TOOL_CONTRACT_ERROR,
     MEMORY_TOOL_OPS,
     MEMORY_TOOL_REQUIRED,
+    MEMORY_TOOL_SCOPES,
     RECALL_TOKENS,
     MemoryError,
     MemoryIdentity,
@@ -37,6 +38,11 @@ from local_operator.paths import config_dir
 #: its VALUE is ever left out of the text the free-text guards inspect — never the
 #: scheme, the scope or another parameter.
 _QUERY_VALUE = re.compile(r"(?<=[?&])q=[^&]*")
+
+#: The receipt label per tool scope, so the agent reads where a fact lives and for
+#: how long without knowing the URL scheme.
+_LIFETIMES = {"session": "session/this conversation", "global": "global/across sessions"}
+assert set(_LIFETIMES) == set(MEMORY_TOOL_SCOPES)
 
 
 def store_for(context: ToolContext | None) -> MemoryStore:
@@ -317,10 +323,23 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
         if not valid_memory_tool_arguments(args):
             raise MemoryError(MEMORY_TOOL_CONTRACT_ERROR)
         text = args["text"]
-        # The tool's declared domain is durable personal knowledge, bound to
-        # the global bank. Scope-bearing calls are INVALID above, never silently
-        # stripped/promoted. Work/checkpoints keep explicit four-scope URLs.
-        path = "memory://global"
+        # Default SESSION. This reverses #2414, which bound the tool to global after
+        # a model-chosen FOUR-way scope mis-filed personal facts into session. The
+        # asymmetry now runs the other way: a session default loses nothing durable
+        # (the fact is recallable here and `lop memory triage`/move can promote it),
+        # while the global default filled the one shared bank with work state and
+        # then refused writes in every session. Personal facts take scope="global"
+        # explicitly, and scope_fit still refuses work shapes there.
+        scope = args.get("scope", "session")
+        unscoped_recall = args["op"] == "recall" and "scope" not in args
+        if scope == "session" and not unscoped_recall and not (context and context.session_id):
+            # Never a silent promotion to the shared bank.
+            raise MemoryError(
+                "No session is bound, so session memory is unavailable here; pass "
+                'scope="global" only for a durable personal fact.'
+            )
+        lifetime = _LIFETIMES[scope]
+        path = "memory://" + scope
         if args["op"] == "store":
             guard(text, opaque=True)
             payload = {
@@ -331,16 +350,41 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
             result = await execute_memory(
                 call_id, "write", {"path": path, "content": json.dumps(payload)}, context
             )
+            if result.is_error and scope == "global":
+                # Agent-facing only: the store's quota/scope-fit text names the human
+                # remedy; the agent's cheapest correct move is the session bank.
+                refusal = str(getattr(result.content[0], "text", ""))
+                if refusal.startswith("Memory quota reached"):
+                    result = result.model_copy(
+                        update={
+                            "content": [
+                                TextContent(
+                                    text=refusal
+                                    + ' Or store this in session scope (scope="session").'
+                                )
+                            ]
+                        }
+                    )
         else:
+            # No scope: recall BOTH banks (session first in the receipt label, as it
+            # is the default write target); a scope restricts it to that bank.
+            if unscoped_recall:
+                # ``memory://`` unions every bank this identity is authorised for (a
+                # bound team/agent included), so the label is derived, not assumed;
+                # each item's own ``scope`` says which bank it came from.
+                path = "memory://"
+                lifetime = " + ".join(
+                    _LIFETIMES.get(name, name) for name, _ in store_for(context).identity.scopes()
+                )
             result = await execute_memory(
                 call_id, "read", {"path": path + "?q=" + quote(text)}, context
             )
         if not result.is_error:
             value = json.loads(str(getattr(result.content[0], "text", "")))
             if args["op"] == "store":
-                value.update(uri=path + "/" + value["id"], lifetime="global/across sessions")
+                value.update(uri=path + "/" + value["id"], lifetime=lifetime)
             else:
-                value = {"bank": "global/across sessions", "items": value}
+                value = {"bank": lifetime, "items": value}
                 # Count the actual lifetime-labelled receipt inside the existing
                 # recall ceiling. Drop whole return candidates only, never bodies
                 # or stored facts; report paging rather than hiding that reduction.
@@ -368,6 +412,18 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
         )
 
 
+def _approval_text(args: dict[str, Any]) -> str:
+    """The approval line names the BANK, so a human approving a store sees where it lands."""
+    scope = args.get("scope")
+    if args.get("op") == "store":
+        if scope == "global":
+            return "Store durable personal fact in global memory (across sessions)"
+        return "Store fact in session memory (this conversation)"
+    if scope in _LIFETIMES:
+        return f"Recall {scope} memory"
+    return "Recall session and global memory"
+
+
 def build_memory_tool():
     """Always available by default, but never override an explicit role tool allowlist."""
     from local_operator.harness.types import AgentTool
@@ -375,28 +431,27 @@ def build_memory_tool():
     return AgentTool(
         name="memory",
         label="Memory",
+        # Kept to ~60 tokens: it sits in every session's cached prefix. The scope
+        # rule leads because the default is the routing decision the model makes.
         description=(
-            "Store/recall durable personal facts across sessions: user/colleague names, "
-            "locations, contacts. Temporary work: read/write/edit memory://session "
-            '(or team/agent); move with edit new_text={"move":"scope"}. '
-            "Secrets/IDs: use secret; NAMEs only here."
+            "Store/recall memory. Default scope=session: this conversation's goals, "
+            "decisions, constraints. scope=global ONLY for durable personal facts — "
+            "names, contacts, preferences, environment — never work state. "
+            "Secrets: use secret; NAMEs only."
         ),
         parameters={
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "op": {"type": "string", "enum": list(MEMORY_TOOL_OPS)},
-                "text": {"type": "string", "description": "Durable personal fact or query"},
+                "text": {"type": "string", "description": "Fact or query"},
+                "scope": {"type": "string", "enum": list(MEMORY_TOOL_SCOPES)},
             },
             "required": list(MEMORY_TOOL_REQUIRED),
         },
         approval_tier="write",
         call_approval_tier=lambda args: "read" if args.get("op") == "recall" else "write",
-        describe_approval=lambda args, _context: (
-            "Store durable personal fact in global memory (across sessions)"
-            if args.get("op") == "store"
-            else "Recall global personal memory"
-        ),
+        describe_approval=lambda args, _context: _approval_text(args),
         concurrency="exclusive",
         interruptible=False,
         execute=execute_fact_memory,

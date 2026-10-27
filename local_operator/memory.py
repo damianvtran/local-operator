@@ -47,9 +47,16 @@ DEFAULT_EXCLUDED_DEVICES: tuple[str, ...] = ()
 # an opaque credential that no named text-field guard ever inspects (R6 residual).
 MEMORY_TOOL_OPS = ("store", "recall")
 MEMORY_TOOL_REQUIRED = ("op", "text")
+#: The ONLY scopes the plain-text ``memory`` tool accepts, default ``session``.
+#: Two values, not the four URL scopes: PR #2414 removed a model-selected FOUR-way
+#: scope because it mis-routed personal facts, and team/agent need registry
+#: identity that the URL form (``memory://team``) already owns. The default is
+#: session because a global default filled the shared bank with work state and
+#: then refused writes in every session (2026-10-27, global at 15,892/16,000).
+MEMORY_TOOL_SCOPES = ("session", "global")
 MEMORY_TOOL_CONTRACT_ERROR = (
-    "Invalid memory contract. Use op=store|recall and text only for durable personal/global "
-    "memory; scoped work uses read/write/edit memory://. No scope argument is accepted."
+    "Invalid memory contract. Use op=store|recall, text, and optional "
+    "scope=session|global (default session); other scopes use read/write/edit memory://."
 )
 
 
@@ -57,21 +64,42 @@ def valid_memory_tool_arguments(value: Any) -> bool:
     return (
         isinstance(value, dict)
         and set(MEMORY_TOOL_REQUIRED).issubset(value)
-        and not set(value) - {*MEMORY_TOOL_REQUIRED, "i"}
+        and not set(value) - {*MEMORY_TOOL_REQUIRED, "scope", "i"}
         and isinstance(value["op"], str)
         and value["op"] in MEMORY_TOOL_OPS
         and isinstance(value["text"], str)
         and ("i" not in value or isinstance(value["i"], str))
+        # An enum check, never a coercion: a team/agent/unknown scope stays a
+        # contract error the retained-copy path redacts, not a silent session write.
+        and ("scope" not in value or value["scope"] in MEMORY_TOOL_SCOPES)
     )
 
 
-ITEM_TOKENS = 256
+#: Per-fact cap in CONTENT tokens: title + body + subject + tags + aliases. It was
+#: 256 WIRE tokens, which charged the ~75-token JSON envelope (source, timestamps,
+#: status keys) to the writer: a 689-character goal (164 body tokens, 273 wire)
+#: was refused. 512 content tokens is about 2,000 characters — a multi-line goal
+#: or decision record still fits as ONE atomic fact, while recall's hard cap
+#: (``RECALL_HARD_TOKENS``) still holds two max-size items.
+ITEM_TOKENS = 512
+#: The wire/storage guard, deliberately unchanged: 512 content tokens plus the
+#: envelope is ~2.4 KB of ASCII and ~1.5 KB of CJK body, both well under it.
 ITEM_BYTES = 8192
+#: The item bound builds before ``memory-item-512`` enforced, in WIRE tokens of
+#: ``_dump(fact)``. Only mesh compatibility reads it: ``network.memory.batch``
+#: withholds a fact over it from a peer that did not advertise the new cap, because
+#: that peer's ``validate_fact`` would refuse the WHOLE batch and then sit behind a
+#: permanent sequence gap. Never use it to validate a local write.
+LEGACY_ITEM_WIRE_TOKENS = 256
 #: Token caps per scope. One authority: the write gate (``_quota``), the move
 #: destination check, the warning state and inventory/status all read these, so
 #: a reported headroom cannot disagree with the number a write is refused on.
 #: Global is the shared bank everyone reads; every other scope is per-owner.
-GLOBAL_TOKENS = 16000
+#: Global was 16,000 and filled to 99% with MISROUTED work state, not demand: bank
+#: size never reaches the prompt (bodies enter only via budgeted recall and the
+#: clamped carry tier), so 24,000 is headroom while routing and triage land. Do
+#: not raise it further to paper over misrouting — `lop memory triage` is the fix.
+GLOBAL_TOKENS = 24000
 OWNER_TOKENS = 50000
 #: Percent thresholds that warn ONCE on the write that crosses them, highest
 #: first: a write jumping straight past both reports the endangering one.
@@ -292,6 +320,39 @@ _WORK_HOLD = re.compile(
 )
 
 
+# Three narrow SHAPES the original four missed on the live global bank (2026-10-27:
+# they flagged 2 of 78 rows, while 28 were plainly one session's work). Each is a
+# shape, not a topic, and each was checked against the bank's personal rows
+# (contacts, handles, preferences, disk rules), none of which it matches.
+# A 12-hex session ID, bare after "session" or parenthesised: a global fact that
+# names a session is session-scoped by construction.
+# The parenthesised form needs a hex LETTER: a 12-digit phone or account number
+# in parentheses is personal data, not a session ID.
+_SESSION_SELF_REF = re.compile(
+    r"\bsession\s+[0-9a-f]{12}\b|\(\s*(?=[0-9]*[a-f])[0-9a-f]{12}\s*\)", re.I
+)
+# A line that OPENS as a goal statement ("Session goal (…):", "Lane goal:").
+_GOAL_STATEMENT = re.compile(
+    r"^\s*(?:session |lane |programme |campaign )?goal\b[^\n]{0,30}[:(]", re.I | re.M
+)
+# An ISO date within 200 characters of a delivery noun: a dated work log, which
+# a durable personal fact ("born 1990-04-02") does not carry. `lane` is matched
+# lowercase only: a capitalised "Lane" is a street ("Miikan Lane"), which made a
+# verified registered address read as work on the live bank (2026-10-27).
+_DATED_WORK_NOUN = (
+    r"(?:\b(?:PR|MR|merged|release|QA|review|round|worktree|CI|gate)\b"
+    r"|\b(?-i:lane)\b|\bv\d+\.\d+\.\d+\b)"
+)
+_DATED_WORK_LOG = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}\b[\s\S]{0,200}?"
+    + _DATED_WORK_NOUN
+    + r"|"
+    + _DATED_WORK_NOUN
+    + r"[\s\S]{0,200}?\b\d{4}-\d{2}-\d{2}\b",
+    re.I,
+)
+
+
 def work_progress_markers(text: str) -> list[str]:
     """Names of work/lane/progress markers in ``text`` — value-free, never the match."""
     folded = _fold(text)
@@ -301,10 +362,28 @@ def work_progress_markers(text: str) -> list[str]:
         ("named-commit", _WORK_SHA),
         ("ci-release-status", _WORK_STATUS),
         ("hold-token", _WORK_HOLD),
+        ("session-self-reference", _SESSION_SELF_REF),
+        ("goal-statement", _GOAL_STATEMENT),
+        ("dated-work-log", _DATED_WORK_LOG),
     ):
         if pattern.search(folded):
             found.append(name)
     return found
+
+
+def fact_markers(fact: dict[str, Any]) -> list[str]:
+    """Work-marker NAMES over a fact's text fields — the one haystack definition.
+
+    ``scope_fit`` (the write refusal), ``memory_inspect`` (the candidate column) and
+    ``lop memory triage`` (the move plan) all read this, so a row one of them calls
+    work-shaped is exactly a row a new global write would refuse.
+    """
+    haystack = "\n".join(str(fact.get(key) or "") for key in ("title", "body", "subject"))
+    for key in ("tags", "aliases"):
+        value = fact.get(key) or []
+        if isinstance(value, list):
+            haystack += "\n" + "\n".join(str(item) for item in value)
+    return work_progress_markers(haystack)
 
 
 def scope_fit(scope: str, fact: dict[str, Any]) -> None:
@@ -318,16 +397,14 @@ def scope_fit(scope: str, fact: dict[str, Any]) -> None:
     """
     if scope != "global" or not isinstance(fact, dict):
         return
-    haystack = "\n".join(str(fact.get(key) or "") for key in ("title", "body", "subject"))
-    for key in ("tags", "aliases"):
-        value = fact.get(key) or []
-        if isinstance(value, list):
-            haystack += "\n" + "\n".join(str(item) for item in value)
-    if work_progress_markers(haystack):
+    markers = fact_markers(fact)
+    if markers:
+        # Marker NAMES only (a closed vocabulary), never the matched text, and both
+        # routes that work: the tool's scope and the URL form.
         raise MemoryError(
-            "This looks like session-scoped work (a tracker reference, CI/release "
-            "status or a next step). Store work state in memory://session; global is "
-            "for durable personal facts, contacts, preferences and environment."
+            f"This looks like session work ({', '.join(markers)}). It was not stored. "
+            'Store it with scope="session" (the default), or as memory://session; '
+            "global is for durable personal facts, contacts, preferences and environment."
         )
 
 
@@ -784,10 +861,23 @@ def validate_fact(raw: Any) -> dict[str, Any]:
         safe_segment(source["session"])
     if fact["replaces"]:
         safe_segment(fact["replaces"])
-    wire = _dump(fact)
-    if len(wire.encode()) > ITEM_BYTES or count_text_tokens(wire) > ITEM_TOKENS:
+    # Two bounds, two questions. CONTENT tokens are what the writer chose to say,
+    # so the envelope (source, timestamps, status keys) is never charged to them;
+    # wire BYTES are what storage, the session export and the mesh carry. Each
+    # refusal names its bound and the overage — counts only, so it stays value-free.
+    content = count_text_tokens(
+        "\n".join([fact["title"], fact["body"], fact["subject"], *fact["tags"], *fact["aliases"]])
+    )
+    if content > ITEM_TOKENS:
         raise MemoryError(
-            "Memory item exceeds 256 tokens/8192 bytes including metadata. Split or consolidate it."
+            f"Memory item is {content} content tokens; the limit is {ITEM_TOKENS} "
+            f"({content - ITEM_TOKENS} over). Split it into atomic facts or shorten it."
+        )
+    size = len(_dump(fact).encode())
+    if size > ITEM_BYTES:
+        raise MemoryError(
+            f"Memory item is {size} bytes stored; the limit is {ITEM_BYTES} "
+            f"({size - ITEM_BYTES} over). Split it into atomic facts or shorten it."
         )
     return fact
 
@@ -895,9 +985,12 @@ def quota_relief(scope: str) -> tuple[str, str]:
     belong elsewhere.
     """
     if scope == "global":
+        # Triage, not `move ID`: an agent (or a human at 99%) cannot know WHICH
+        # ids are work state; triage previews them grouped by source session.
         return (
-            "Consolidate stale facts with forget, or move work-state facts to session " "scope.",
-            "`lop memory move ID --to session`",
+            "Consolidate stale facts with forget, or move work-state facts back to "
+            "their source sessions.",
+            "`lop memory triage --scope global`",
         )
     if scope == "session":
         return (
@@ -1437,10 +1530,28 @@ class MemoryStore:
         )
 
     @staticmethod
-    def _quota(db: sqlite3.Connection, scope: str, owner: str, *, relief: bool = False) -> None:
+    def _quota(
+        db: sqlite3.Connection,
+        scope: str,
+        owner: str,
+        *,
+        relief: bool = False,
+        needed: int | None = None,
+    ) -> None:
         """Refuse growth past the caps. ``relief`` (a forget) skips the OP/TOMBSTONE counts:
         a tombstone is the only way to remove a sensitive body, so refusing it at the cap
-        would make the cap a trap. The token quota still applies, and a forget only shrinks it."""
+        would make the cap a trap. The token quota still applies, and a forget only shrinks it.
+
+        Runs AFTER the write's rows are inserted, inside the uncommitted transaction,
+        so the counts include the refused write; ``needed`` is that write's own token
+        charge, reported so the reader knows how much room to make.
+
+        One message per cause, because the remedies differ: tokens need consolidation
+        or a move, history needs `compact`, tombstones need an export (compaction
+        never drops them). Each names the bank, the usage and the remedy from
+        ``quota_relief`` — counts and an 8-character owner prefix only, like
+        ``_store_full_message``, so the refusal stays value-free.
+        """
         count = db.execute(
             "SELECT count(*) FROM ops WHERE scope=? AND owner=?", (scope, owner)
         ).fetchone()[0]
@@ -1451,12 +1562,29 @@ class MemoryStore:
         tokens = db.execute(
             "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?", (scope, owner)
         ).fetchone()[0]
-        if (not relief and (count > MAX_OWNER_OPS or tombs > MAX_TOMBSTONES)) or tokens > (
-            GLOBAL_TOKENS if scope == "global" else OWNER_TOKENS
-        ):
+        bank = "global bank" if scope == "global" else f"{scope} bank {owner[:8]}"
+        tail = " Nothing was stored or evicted."
+        cap = GLOBAL_TOKENS if scope == "global" else OWNER_TOKENS
+        if tokens > cap:
+            advice, hint = quota_relief(scope)
+            used = tokens - (needed or 0)
+            need = f"; this item needs {needed}" if needed is not None else ""
             raise MemoryError(
-                "Memory quota reached (including history/tombstones). Inspect memory://, "
-                "consolidate explicitly, or export history; no facts were evicted."
+                f"Memory quota reached: {bank} {used:,}/{cap:,} tokens "
+                f"({100.0 * used / cap:.1f}%){need}.{tail} Remedy: {advice.rstrip('.')} ({hint})."
+            )
+        if relief:
+            return
+        if count > MAX_OWNER_OPS:
+            raise MemoryError(
+                f"Memory quota reached: {bank} has {count:,}/{MAX_OWNER_OPS:,} history "
+                f"operations.{tail} Remedy: compact the journal (`lop memory compact`)."
+            )
+        if tombs > MAX_TOMBSTONES:
+            raise MemoryError(
+                f"Memory quota reached: {bank} has {tombs:,}/{MAX_TOMBSTONES:,} tombstones."
+                f"{tail} Remedy: compaction keeps tombstones, so export that history and "
+                "consolidate the bank (`lop memory compact` first frees other history)."
             )
 
     def prepare_fact(self, fact: Any) -> dict[str, Any]:
@@ -1629,8 +1757,16 @@ class MemoryStore:
                 (op["op_id"], entity, origin, seq, scope, owner, op["kind"], _dump(op)),
             )
             db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+            # The write's own charge, so a refusal can say how much room to make: a
+            # correction is charged its growth over the row it replaces, not its size.
+            replaced = db.execute(
+                "SELECT coalesce(sum(tokens),0) FROM current WHERE entity_id=?", (entity,)
+            ).fetchone()[0]
             self._reindex(db, entity)
-            self._quota(db, scope, owner, relief=forget)
+            grown = db.execute(
+                "SELECT coalesce(sum(tokens),0) FROM current WHERE entity_id=?", (entity,)
+            ).fetchone()[0]
+            self._quota(db, scope, owner, relief=forget, needed=grown - replaced)
             # Headroom/percent every write, but a warning only on a NEW crossing;
             # the state lives in meta, committed with the write it describes.
             quota, warning = self._quota_notice(db, scope, owner)
@@ -2279,8 +2415,18 @@ class MemoryStore:
         *,
         expected_version: str | None = None,
         scope: str | None = None,
+        destination_owner: str | None = None,
     ) -> dict[str, Any]:
         """Move one or more facts to ``destination`` atomically, preserving the fact.
+
+        ``destination_owner`` sends a ``session`` move to a NAMED session instead of
+        the caller's own — how ``lop memory triage`` returns a misrouted global fact
+        to the session that wrote it. It is a human/CLI affordance only: the agent
+        routes (``memory_tools``) never pass it, the store refuses it when this
+        identity is bound to a session (an agent's store always is), and the named
+        session's directory must exist so its portable log can be written.
+        Ownership is otherwise unchanged: the source-scope checks below still use
+        this identity.
 
         WHY this exists: a fact written to the wrong scope could previously only be
         forgotten (destroys it) or edited (scope is immutable). The global bank filled
@@ -2317,7 +2463,22 @@ class MemoryStore:
             raise MemoryError("A move accepts at most 64 memories at once.")
         if destination not in SCOPES:
             raise MemoryError("Unknown move destination; use session, team, agent or global.")
-        dest_owner = self.identity.owner(destination)
+        if destination_owner is None:
+            dest_owner = self.identity.owner(destination)
+        else:
+            if destination != "session" or self.identity.session_id:
+                # Only an unbound (CLI) identity may address another owner, and only
+                # a session: a bound agent store must never write into a session
+                # it does not own, and team/agent owners come from the registry.
+                raise MemoryError(
+                    "A named destination owner is a human `lop memory triage` move to a "
+                    "session only."
+                )
+            dest_owner = safe_segment(destination_owner)
+            if self._session_directory(dest_owner) is None:
+                raise MemoryError(
+                    f"Session {dest_owner[:8]} has no directory here; its facts stay in place."
+                )
         if expected_version is not None:
             safe_segment(expected_version)
         resolved: list[tuple[str, str]] = []
@@ -2344,6 +2505,17 @@ class MemoryStore:
             # has not rebuilt yet; moving against a stale index could miss a
             # conflict or resurrect a forgotten fact on the next import.
             self.import_session()
+        if destination_owner is not None:
+            # The commit below re-exports the named session's portable log FROM THE
+            # INDEX. Rows that only exist in that log (written while the index was
+            # elsewhere) would be overwritten, so fold the log in first, exactly as
+            # that session would on its own next open.
+            MemoryStore(
+                self.root.parent,
+                MemoryIdentity(dest_owner),
+                self._session_directory(dest_owner),
+                origin=self.origin,
+            ).import_session()
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             origin = self._origin(db)
@@ -2544,7 +2716,7 @@ class MemoryStore:
                 if destination == "session":
                     affected_sessions.add(dest_owner)
             db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
-            self._quota(db, destination, dest_owner)
+            self._quota(db, destination, dest_owner, needed=needed)
             quota, warning = self._quota_notice(db, destination, dest_owner)
             # Move-out relief must reset the SOURCE's crossing state exactly like a
             # forget does, or a later recross into that scope warns nothing.

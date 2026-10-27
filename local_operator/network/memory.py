@@ -19,8 +19,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from local_operator.compaction.tokens import count_text_tokens
 from local_operator.memory import (
     DEFAULT_EXCLUDED_DEVICES,
+    LEGACY_ITEM_WIRE_TOKENS,
     MAX_BATCH_BYTES,
     SCOPES,
     MemoryError,
@@ -114,8 +116,19 @@ def batch(
     origins: set[str],
     source_generation: int = 0,
     withheld: list[str] | None = None,
+    *,
+    legacy_item_cap: bool = False,
 ) -> dict[str, Any]:
-    """Bounded operations and content-free skipped ranges, never guessed bodies."""
+    """Bounded operations and content-free skipped ranges, never guessed bodies.
+
+    ``legacy_item_cap`` is set for a peer that did not advertise
+    ``wire.MEMORY_ITEM_512``: its validator still refuses a fact over
+    ``LEGACY_ITEM_WIRE_TOKENS`` wire tokens, and one refused op fails the whole
+    batch and strands that peer behind a sequence gap. Such a fact is withheld
+    as a content-free skip instead — the same channel an unverifiable row uses —
+    and is reported in ``withheld``. The skip advances that peer's cursor, so this
+    revision is not re-sent once the peer updates; the next revision is.
+    """
     _checked_vector(vector)
     result: dict[str, Any] = {
         "v": 1,
@@ -148,6 +161,12 @@ def batch(
                     validate_op(op, allow_redacted=True)
                     if op["origin_device"] != origin or op["seq"] != seq or op["op_id"] != row[1]:
                         raise MemoryError("Memory operation/index identity mismatch.")
+                    if (
+                        legacy_item_cap
+                        and op["fact"] is not None
+                        and count_text_tokens(_dump(op["fact"])) > LEGACY_ITEM_WIRE_TOKENS
+                    ):
+                        raise MemoryError("Memory item exceeds the peer's legacy item cap.")
                     if op["scope"] in scopes:
                         if op["kind"] == "put" and op["fact"] is None:
                             proof = db.execute(
@@ -441,7 +460,15 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                     ).fetchone()
                     withheld.append(_safe_ref(reference[0]))
     while batches < 8:
-        payload = batch(memory, vector, scopes, active, source_generation, withheld)
+        payload = batch(
+            memory,
+            vector,
+            scopes,
+            active,
+            source_generation,
+            withheld,
+            legacy_item_cap=wire.MEMORY_ITEM_512 not in link.capabilities,
+        )
         if payload["after"] == vector:
             return {
                 "ok": not withheld,

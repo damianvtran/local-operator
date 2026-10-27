@@ -32,17 +32,23 @@ description: "Save or recall goals, files, channels, threads, contacts and decis
 
 ## Durable personal helper; scoped work URLs
 
-`memory(op="store", text="My colleague Elara lives in Dunedin")` deliberately retains
-nonsecret personal/user knowledge in **global** memory, across sessions. Recall with
-`memory(op="recall", text="Elara location")`. Both operations are bound to global;
-there is **no scope argument**. Old scope-bearing calls are refused, never stripped
-or reinterpreted. This is a declared personal-only convenience with a bounded shape
-check: a `#N` tracker reference next to a work word, any `!N` (GitLab work syntax),
-a `commit`/`sha`/`head` hex, a CI/release status verb, or a `next step`/`HOLD` tied to
-a work word is refused with a redirect to `memory://session`. It is a bounded locator
-filter, not a classifier — prose work text with no locator, or a hyphenated key like
-`LOH-13`, still passes, and it is not a guarantee that a model will always choose the
-right tool.
+`memory(op="store", text="Goal: ship the context-reduction POC")` stores in the
+**session** bank — the default — and the receipt says `session/this conversation`.
+Personal facts take `scope="global"` explicitly:
+`memory(op="store", scope="global", text="My colleague Elara lives in Dunedin")`
+retains nonsecret personal/user knowledge across sessions (`global/across sessions`).
+`memory(op="recall", text="Elara location")` with no scope searches session **and**
+global; `scope="session"` or `scope="global"` restricts it. Only those two scope
+values are accepted; team/agent and anything else is refused, never coerced.
+
+Global keeps a bounded shape check: a `#N` tracker reference next to a work word,
+any `!N` (GitLab work syntax), a `commit`/`sha`/`head` hex, a CI/release status verb,
+a `next step`/`HOLD` tied to a work word, a 12-hex session ID, a line opening as a
+goal statement (`Session goal (…):`), or an ISO date near PR/MR/merged/release/QA/
+review/round/lane/worktree/CI/gate/vX.Y.Z is refused, naming the marker and
+`scope="session"`. It is a bounded locator filter, not a classifier — prose work text
+with no locator, or a hyphenated key like `LOH-13`, still passes, and it is not a
+guarantee that a model will always choose the right scope.
 
 Work state and checkpoints use `memory://session`; intentionally shared work uses
 `memory://team`, and persistent profile knowledge uses `memory://agent` when authorized.
@@ -55,8 +61,11 @@ host approvals are shared. Explicit role allowlists are never widened; when the
 helper is absent, use read/write/edit URLs with the same scope boundaries.
 
 The human CLI verbs are `list`, `show`, `search`, `move`, `edit`, `forget`, `status`,
-`inspect` and `consolidate` — there are no `lop memory remember` or `recall` CLI
-commands.
+`inspect`, `consolidate`, `compact` and `triage` — there are no `lop memory remember`
+or `recall` CLI commands. `lop memory triage --scope global` previews work-shaped
+global facts grouped by the session that wrote them; a human applies it with
+`--apply --expect FINGERPRINT` (optionally `--only SESSION`, `--include ID`), which
+moves them back to those sessions and never deletes.
 
 ## Existing read/write/edit tools
 
@@ -119,15 +128,18 @@ Never mark an inference as observed. Captures are candidates, not confirmed fact
 - Promote only with explicit intent: inspect and verify a fact, then store a new
   scoped fact with source attribution. Do not silently copy a session bank.
 
-Items cap at 256 tokens/8192 bytes including metadata. Global active quota is
-16k tokens; each session/team/agent owner 50k. Recall, suggestions (≤3/180 tokens)
+Items cap at 512 content tokens (title, body, subject, tags and aliases; metadata
+is not charged) and 8192 stored bytes. Global active quota is 24k tokens; each
+session/team/agent owner 50k. A quota refusal names the bank, its usage, what the
+write needs and the remedy (`lop memory triage --scope global` for global, `lop
+memory compact` for history). Recall, suggestions (≤3/180 tokens)
 and compaction hints (≤80 tokens) have separate budgets. History, conflicts,
 tombstones, metadata, storage and WAL are bounded too. Overflow refuses with
 inventory/consolidation guidance; it never evicts explicit or pinned facts. Every
 write reports the scope's headroom and percent, and crossing 80% or 90% warns
 once (in the write result) with relief for the scope under pressure: forget
-stale facts everywhere, and move work-state facts to session scope where that
-move exists (global); session and the other scopes consolidate in place.
+stale facts everywhere, and triage work-state facts back to their sessions
+(global); session and the other scopes consolidate in place.
 
 ## Compaction and mobility
 

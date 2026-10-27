@@ -48,11 +48,11 @@ from local_operator.memory import (
     MemoryError,
     MemoryIdentity,
     MemoryStore,
+    fact_markers,
     guard,
     origin_label,
     safe_segment,
     structural_reference,
-    work_progress_markers,
 )
 
 #: Stable contract for `--json` consumers. Bump only on a breaking shape change;
@@ -502,14 +502,9 @@ def _entry(row: sqlite3.Row, now: float, team_id: str) -> dict[str, Any]:
     title = fact.get("title")
     body = fact.get("body")
     provenance, provenance_redacted = _provenance(fact)
-    # Same field set as ``scope_fit`` on the write path: a row this listing
-    # calls a candidate is exactly a row a new global write would refuse.
-    haystack = "\n".join(str(fact.get(key) or "") for key in ("title", "body", "subject"))
-    for key in ("tags", "aliases"):
-        value = fact.get(key) or []
-        if isinstance(value, list):
-            haystack += "\n" + "\n".join(str(item) for item in value)
-    markers = work_progress_markers(haystack)
+    # Same helper as ``scope_fit`` on the write path: a row this listing calls a
+    # candidate is exactly a row a new global write would refuse.
+    markers = fact_markers(fact)
     withheld = not (_exportable(title) and _exportable(body))
     return _project(
         _Row(
