@@ -531,16 +531,37 @@ def _warm_tokenizer_in_background() -> threading.Thread | None:
 #: measured rather than sent as a control token.
 _DISALLOWED_SPECIAL: tuple[str, ...] = ()
 
+# Preserved user turns are immutable journal content replayed on every open.
+# Memoize their exact lengths by tokenizer epoch: the epoch keeps a reset or a
+# recovered encoding from inheriting counts produced by a different ruler. The
+# text itself is the key (not a turn id), so identical copies also share a count.
+_TEXT_LENGTH_CACHE: OrderedDict[tuple[int, str], int] = OrderedDict()
+_TEXT_LENGTH_CACHE_MAX = 4096
+
 
 def _encode_len(text: str) -> int:
     """Token count of ``text`` via cl100k_base, or the chars/4 fallback."""
     if not text:
         return 0
     encoding = _get_encoding()
-    if encoding is not None:
-        encode = encoding.encode  # type: ignore[attr-defined]
-        return len(encode(text, disallowed_special=_DISALLOWED_SPECIAL))
-    return len(text) // _CHARS_PER_TOKEN_FALLBACK
+    if encoding is None:
+        # A transient failure must not be cached: the next call may recover the
+        # real encoding, and chars/4 is deliberately a different ruler.
+        return len(text) // _CHARS_PER_TOKEN_FALLBACK
+    key = (_ENCODING_EPOCH, text)
+    with _CACHE_LOCK:
+        cached = _TEXT_LENGTH_CACHE.get(key)
+        if cached is not None:
+            _TEXT_LENGTH_CACHE.move_to_end(key)
+            return cached
+    encode = encoding.encode  # type: ignore[attr-defined]
+    count = len(encode(text, disallowed_special=_DISALLOWED_SPECIAL))
+    with _CACHE_LOCK:
+        _TEXT_LENGTH_CACHE[key] = count
+        _TEXT_LENGTH_CACHE.move_to_end(key)
+        while len(_TEXT_LENGTH_CACHE) > _TEXT_LENGTH_CACHE_MAX:
+            _TEXT_LENGTH_CACHE.popitem(last=False)
+    return count
 
 
 #: Per-model encodings, resolved lazily and cached. Separate from the compaction

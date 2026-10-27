@@ -158,7 +158,9 @@ def test_an_in_place_rewind_invalidates_even_at_the_same_size_and_mtime(tmp_path
     journal(tmp_path, [message("one", "aaaa"), message("two", "bbbb")])
     assert [m.text for m in read_saved_preview(tmp_path).messages] == ["aaaa", "bbbb"]
     before = path.stat()
-    path.write_text(message("one", "cccc").to_json() + "\n" + message("two", "dddd").to_json() + "\n")
+    path.write_text(
+        message("one", "cccc").to_json() + "\n" + message("two", "dddd").to_json() + "\n"
+    )
     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
     assert path.stat().st_size == before.st_size
 
@@ -174,6 +176,35 @@ def test_a_compaction_replacement_cannot_serve_the_old_preview(tmp_path):
     replacement.replace(path)
 
     assert read_saved_preview(tmp_path).messages[0].text == "after compaction"
+
+
+def test_a_write_during_replay_is_not_published_as_current(tmp_path, monkeypatch):
+    """An overlapping writer invalidates the in-flight read before publication."""
+    journal(tmp_path, [message("one", "before")])
+    from local_operator.session import saved_preview
+
+    original = saved_preview.replay_entries
+
+    def append_while_reading(*args, **kwargs):
+        result = original(*args, **kwargs)
+        with (tmp_path / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(message("two", "after").to_json() + "\n")
+        return result
+
+    monkeypatch.setattr(saved_preview, "replay_entries", append_while_reading)
+    racing = read_saved_preview(tmp_path)
+
+    assert [m.text for m in racing.messages] == ["before"]
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["before", "after"]
+
+
+def test_cached_messages_are_not_shared_with_history_consumers(tmp_path):
+    """History annotation on one visit must not mutate the cached preview."""
+    journal(tmp_path, [message("one", "original")])
+    first = read_saved_preview(tmp_path)
+    first.messages[0].provider_payload = {"consumer": "annotation"}
+
+    assert read_saved_preview(tmp_path).messages[0].text == "original"
 
 
 def test_preview_walks_by_rows_not_a_byte_window(tmp_path, monkeypatch):

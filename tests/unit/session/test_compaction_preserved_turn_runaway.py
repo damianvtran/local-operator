@@ -505,6 +505,30 @@ def test_a_non_positive_cap_fails_closed():
         assert total <= DEFAULT_PRESERVED_TURN_CAP
 
 
+def test_repeated_preserved_text_reuses_its_exact_token_length(monkeypatch):
+    """Reopening a compaction must not encode the same immutable turn again."""
+    from local_operator.compaction import tokens
+
+    encoding = tokens._get_encoding()
+    if encoding is None:
+        pytest.skip("tiktoken is an optional dependency")
+    calls = 0
+    original = encoding.encode
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(encoding, "encode", counted)
+    turns = [{"id": "preserved", "text": "a stable operator constraint"}]
+    first = cap_preserved_user_turns(turns, cap=1_000)
+    second = cap_preserved_user_turns(turns, cap=1_000)
+
+    assert first == second
+    assert calls == 1
+
+
 def test_the_running_count_is_carried_structurally_not_reparsed():
     """The count must survive a round trip without existing as content.
 
