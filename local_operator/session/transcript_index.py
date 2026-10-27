@@ -2235,10 +2235,31 @@ class _Derivation:
         """
         self._close_run()
         runs = list(prior_runs) + self.runs
+        carried = len(prior_runs)
         out: list[RunRecord] = []
         for position, run in enumerate(runs):
             is_tail = position == len(runs) - 1
             outcome: str | None = None
+            if position < carried and run.settled and not is_tail:
+                # A SETTLED PRIOR RUN'S OUTCOME IS FINAL, and this region cannot
+                # recompute it. ``_scan_incremental`` keeps only runs whose last
+                # row lies above the re-derived region, so their markers and
+                # ``attention_started`` rows were consumed by an EARLIER scan and
+                # are absent from ``self.markers``/``self.starts``: recomputing
+                # here resolved nothing and overwrote every settled run's
+                # error/complete with None after any append (measured on a real
+                # journal: error,error,complete -> None,None,None) until a full
+                # rescan. Settled means the earlier scan already decided the
+                # outcome from every marker inside the run's own rows, and a kept
+                # run gains no rows, so the stored value is what a full scan
+                # derives. An UNSETTLED kept run is the previous scan's open tail
+                # (a user-less hub/wake run the window moved past): its stored
+                # ``open`` is provisional and its closing marker may sit in this
+                # region, so it keeps the recompute below. The tail is excluded
+                # defensively: a region with no run of its own leaves a kept run
+                # as the tail, and that one must still take the open-tail rule.
+                out.append(run)
+                continue
             # The run before this one: a marker's ``attention_started`` is written
             # BEFORE its user row, so the start row legitimately lies ABOVE the
             # run's opening user row — requiring ``start >= first_seq`` dropped
