@@ -334,10 +334,18 @@ async def replay_ready_journal(root: Path, session_id: str, *, mtime: float, row
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
     transcript = Transcript(directory, defer_materialise=False)
-    for index in range(rows):
-        await transcript.append_message(
-            Message(role="user", content=[TextContent(text=f"turn {index}")])
-        )
+    try:
+        for index in range(rows):
+            await transcript.append_message(
+                Message(role="user", content=[TextContent(text=f"turn {index}")])
+            )
+    finally:
+        # RELEASE THE WRITER LOCK NOW, not whenever ``__del__`` runs. A
+        # ``Transcript`` holds the session's writer lock until it is closed, and
+        # ``compress_session`` refuses a locked session as "session in use".
+        # Leaving the release to finalisation made an archive fixture pass
+        # locally and fail on CI's 3.12 runner (PR #3009, run 40431878619).
+        transcript.close()
     os.utime(directory / "transcript.jsonl", (mtime, mtime))
 
 
@@ -754,12 +762,14 @@ async def test_the_model_warm_never_selects_an_archived_journal(tmp_path, monkey
     archived = root / "sessions" / "archived"
     old = time.time() - 30 * 86400
     os.utime(archived / "transcript.jsonl", (old, old))
-    assert compression.compress_session(archived).status == "compressed"
+    outcome = compression.compress_session(archived)
+    assert outcome.status == "compressed", outcome.reason
     assert compression.archive_path(archived) is not None
 
     both = root / "sessions" / "both"
     journal(root, "both", mtime=old)
-    assert compression.compress_session(both).status == "compressed"
+    outcome = compression.compress_session(both)
+    assert outcome.status == "compressed", outcome.reason
     archive = compression.archive_path(both)
     assert archive is not None
     plain_bytes = (root / "sessions" / "plain" / "transcript.jsonl").read_bytes()
@@ -794,7 +804,8 @@ async def test_the_replay_warm_files_its_one_slot_for_the_users_journal(
     root = tmp_path
     await replay_ready_journal(root, "user0000001", mtime=1_000.0)
     await replay_ready_journal(root, "archived001", mtime=500.0)
-    assert compression.compress_session(root / "sessions" / "archived001").status == "compressed"
+    outcome = compression.compress_session(root / "sessions" / "archived001")
+    assert outcome.status == "compressed", outcome.reason
     archive = compression.archive_path(root / "sessions" / "archived001")
     assert archive is not None
     # The archive is the NEWEST file in the store, so mtime order alone would pick it.

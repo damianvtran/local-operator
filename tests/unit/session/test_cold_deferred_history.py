@@ -1548,7 +1548,8 @@ async def test_the_startup_replay_prewarm_files_no_record_for_an_archive_or_a_mo
     archived = await seed_journal(isolated_config, session_id="archived000")
     old = time.time() - 30 * 86400
     os.utime(archived / "transcript.jsonl", (old, old))
-    assert compression.compress_session(archived).status == "compressed"
+    outcome = compression.compress_session(archived)
+    assert outcome.status == "compressed", outcome.reason
     moving = await seed_journal(isolated_config, session_id="moving00000")
 
     original = replay_cache.read_replay_suffix
