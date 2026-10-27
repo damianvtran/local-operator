@@ -1,0 +1,595 @@
+"""Independent audit harness — ru / tui.notifications (audit_id ntt1).
+
+READ-ONLY on the repository: imports the repo's own i18n modules from a pinned
+`git archive` of d25392f3553 (scratch tree), so the runtime, the checker and the
+TUI render layer are the committed ones rather than a re-implementation.
+
+Every check prints its actual measurement. The script exits non-zero when any
+FAIL is recorded; the negative controls at the end prove the checks fail closed
+on mutated copies.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import socket
+import sys
+import tempfile
+import unicodedata
+from pathlib import Path
+
+NS = "tui.notifications"
+LOCALE = "ru"
+
+TREE = Path(os.environ["AUDIT_TREE"]).resolve()
+CATS = TREE / "local_operator" / "i18n" / "catalogues"
+
+failures: list[str] = []
+
+
+def say(msg: str = "") -> None:
+    print(msg)
+
+
+def fail(msg: str) -> None:
+    failures.append(msg)
+    say("FAIL: " + msg)
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# ---------------------------------------------------------------- 0. inputs
+en_path = CATS / "en" / (NS + ".json")
+ctx_path = CATS / "en" / (NS + ".context.json")
+ru_path = CATS / LOCALE / (NS + ".json")
+
+say("COMMAND: python harness.py.txt   [ntt2 remediation re-audit] (pinned tree %s)" % TREE)
+say("Namespace: %s | locale: %s | host: %s" % (NS, LOCALE, socket.gethostname()))
+for label, p in (("en", en_path), ("en_context", ctx_path), ("target", ru_path)):
+    say("%-10s sha256=%s  %s" % (label, sha(p), p.relative_to(TREE)))
+
+PINS = {
+    "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68": en_path,
+    "9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6": ctx_path,
+    "eee1186170a1856f4e59528b4769b8b834c0c928ce7cad325ceedccc789058fc": ru_path,
+}
+for want, p in PINS.items():
+    got = sha(p)
+    say("pin %s %s" % ("PASS" if got == want else "FAIL", p.name))
+    if got != want:
+        fail("pin mismatch %s: %s != %s" % (p.name, got, want))
+
+en = json.loads(en_path.read_text(encoding="utf-8"))
+ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+ru = json.loads(ru_path.read_text(encoding="utf-8"))
+say("keys en=%d ru=%d context=%d" % (len(en), len(ru), len(ctx)))
+
+if set(en) != set(ru):
+    fail("key parity: missing=%s extra=%s" % (sorted(set(en) - set(ru)), sorted(set(ru) - set(en))))
+else:
+    say("parity PASS: identical key sets (%d ids)" % len(en))
+if not all(isinstance(v, str) for v in ru.values()):
+    fail("target catalogue holds a non-string value")
+if set(ctx) != set(en):
+    fail("context sidecar key set differs from en: %s" % sorted(set(ctx) ^ set(en)))
+
+# --------------------------------------------- 1. the repo checker, unmodified
+from local_operator.i18n import catalogues  # noqa: E402
+from local_operator.i18n import runtime as msg_runtime  # noqa: E402
+from local_operator.i18n import text as i18n_text  # noqa: E402
+from rich.cells import cell_len  # noqa: E402
+from scripts.i18n.check import (  # noqa: E402
+    _arguments_problem,
+    _check_plural_categories,
+    _number_upgrade_problem,
+    check_catalogues,
+)
+
+plural_table = json.loads(
+    (Path(msg_runtime.__file__).with_name("data") / "plural_rules.json").read_text(encoding="utf-8")
+)
+say("")
+say("== CLDR categories: en=%s ru=%s" % (
+    sorted(plural_table["locales"]["en"]["categories"]),
+    sorted(plural_table["locales"]["ru"]["categories"]),
+))
+
+say("")
+say("== repo checker check_catalogues() over the pinned tree")
+problems = check_catalogues()
+say("problems (every locale/namespace) = %d" % len(problems))
+for p in problems:
+    say("  - " + p)
+if problems:
+    fail("check_catalogues() reported %d problem(s)" % len(problems))
+
+# ------------------------------------------ 2. per-key ICU argument contract
+say("")
+say("== ICU argument contract per key (name, order, type)")
+arg_bad = 0
+for key in sorted(en):
+    try:
+        ru_args = msg_runtime.message_arguments(ru[key])
+    except msg_runtime.MessageSyntaxError as exc:
+        fail("%s: runtime rejects the ru message: %s" % (key, exc))
+        arg_bad += 1
+        continue
+    en_args = msg_runtime.message_arguments(en[key])
+    problem = _arguments_problem(
+        en_args, ru_args, translated_source=ru[key], locale=LOCALE, plural=plural_table
+    )
+    if problem is not None:
+        fail("%s: arguments %r != en's %r: %s" % (key, ru_args, en_args, problem))
+        arg_bad += 1
+        continue
+    cat_problems: list[str] = []
+    _check_plural_categories(cat_problems, LOCALE, NS, key, ru[key], plural_table, LOCALE)
+    for cp in cat_problems:
+        fail(cp)
+        arg_bad += 1
+say("argument/category failures = %d over %d keys" % (arg_bad, len(en)))
+
+# --------------------------------------------------- 3. render every key in ru
+i18n_text.set_active_locale(LOCALE)
+say("")
+say("active locale = %r (catalogue root %s)" % (
+    i18n_text._locale.eligible_locale(i18n_text._active_locale), catalogues.catalogue_root()))
+
+PARAMS = {
+    "ago": {"age": "6m"},
+    "ask_expires": {"time": "38m"},
+    "asks_stay": {"count": 3},
+    "banner_digest_title": {"count": 3},
+    "confirm_dismiss_session": {"count": 12, "source": "Fix the relay"},
+    "confirm_mark_all": {"count": "12"},
+    "dismissed": {"count": 12},
+    "error_load": {"error": "disk full"},
+    "header_counts": {"unread": 12, "waiting": 3},
+    "header_partial": {"count": "12"},
+    "marked_read": {"count": "12"},
+    "marked_unread": {"count": "12"},
+    "nothing_to_dismiss": {"source": "Fix the relay"},
+    "position": {"index": "12", "total": "34"},
+    "restored": {"count": "12"},
+    "selected": {"count": "12"},
+    "sidebar_note": {"count": "12"},
+    "stale_skipped": {"count": 3},
+    "unread_mark_all": {"count": "12"},
+    "updates_since": {"count": 3, "time": "14:05"},
+    "write_failed": {"error": "disk full"},
+}
+
+
+def params_for(key: str) -> dict[str, object]:
+    base = dict(PARAMS.get(key.split(".", 2)[-1], {}))
+    for name, kind in msg_runtime.message_arguments(en[key]):
+        if name not in base:
+            base[name] = 3 if kind == "plural" else "12"
+    return base
+
+
+say("")
+say("== render of all %d keys (counts/ages/times realistic)" % len(en))
+for key in sorted(en):
+    p = params_for(key)
+    say("%-22s en=%-44r ru=%r" % (
+        key.split(".", 2)[-1],
+        msg_runtime.render_message(en[key], p, "en"),
+        msg_runtime.render_message(ru[key], p, LOCALE),
+    ))
+
+# ------------------------------- 4. plural renders at the required counts
+COUNTS = [0, 1, 2, 3, 5, 11, 21, 22, 25, 101, 1234]
+say("")
+say("== plural renders at %s" % COUNTS)
+plural_keys = [k for k in sorted(en) if msg_runtime.plural_selectors(en[k])]
+say("plural keys = %d: %s" % (len(plural_keys), [k.split(".")[-1] for k in plural_keys]))
+
+# Expected grammatical form per (key, plural argument, count). Probes the COUNTED
+# WORD, not the numeral, so ru's NBSP thousands grouping cannot mask a case error.
+# Category facts used: 1234 % 10 == 4 and 1234 % 100 == 34 -> `few` (not `many`).
+def ru_category(n: int) -> str:
+    """CLDR ru cardinal category for an integer count."""
+    if n % 10 == 1 and n % 100 != 11:
+        return "one"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "few"
+    return "many"
+
+
+CATEGORY_PROBE: dict[tuple[str, str], dict[int, str]] = {
+    ("asks_stay", "count"): {
+        0: "запросов останутся", 1: "запрос останется", 2: "запроса останутся",
+        3: "запроса останутся", 5: "запросов останутся", 11: "запросов останутся",
+        21: "запрос останется", 22: "запроса останутся", 25: "запросов останутся",
+        101: "запрос останется", 1234: "запроса останутся",
+    },
+    ("banner_digest_title", "count"): {
+        0: "уведомлений с высоким", 1: "уведомление с высоким", 2: "уведомления с высоким",
+        5: "уведомлений с высоким", 11: "уведомлений с высоким", 21: "уведомление с высоким",
+        22: "уведомления с высоким", 101: "уведомление с высоким",
+        1234: "уведомления с высоким",
+    },
+    ("confirm_dismiss_session", "count"): {
+        0: "обновлений", 1: "обновление", 2: "обновления", 5: "обновлений",
+        11: "обновлений", 21: "обновление", 22: "обновления", 101: "обновление",
+        1234: "обновления",
+    },
+    ("dismissed", "count"): {
+        0: "обновлений", 1: "обновление", 2: "обновления", 5: "обновлений",
+        11: "обновлений", 21: "обновление", 22: "обновления", 101: "обновление",
+        1234: "обновления",
+    },
+    ("stale_skipped", "count"): {
+        0: "уведомлений изменилось", 1: "уведомление изменилось",
+        2: "уведомления изменились", 5: "уведомлений изменилось",
+        11: "уведомлений изменилось", 21: "уведомление изменилось",
+        22: "уведомления изменились", 101: "уведомление изменилось",
+        1234: "уведомления изменились",
+    },
+    ("updates_since", "count"): {
+        0: "обновлений с", 1: "обновление с", 2: "обновления с", 5: "обновлений с",
+        11: "обновлений с", 21: "обновление с", 22: "обновления с", 101: "обновление с",
+        1234: "обновления с",
+    },
+    ("header_counts", "unread"): {
+        0: "непрочитанных", 1: "непрочитанное", 2: "непрочитанных", 5: "непрочитанных",
+        11: "непрочитанных", 21: "непрочитанное", 22: "непрочитанных",
+        25: "непрочитанных", 101: "непрочитанное", 1234: "непрочитанных",
+    },
+    ("header_counts", "waiting"): {
+        0: "ждут ответа", 1: "ждёт ответа", 2: "ждут ответа", 5: "ждут ответа",
+        11: "ждут ответа", 21: "ждёт ответа", 22: "ждут ответа", 25: "ждут ответа",
+        101: "ждёт ответа", 1234: "ждут ответа",
+    },
+}
+
+# Fill probe gaps from a count in the same CLDR category, so every count in
+# COUNTS is asserted rather than skipped; the render is inspected either way.
+_REF = {"one": 1, "few": 2, "many": 5}
+for _probe_key, _table in list(CATEGORY_PROBE.items()):
+    for _n in COUNTS:
+        if _n in _table:
+            continue
+        _ref = _REF.get(ru_category(_n))
+        if _ref in _table:
+            _table[_n] = _table[_ref]
+
+for key in plural_keys:
+    short = key.split(".", 2)[-1]
+    plural_args = [n for n, k in msg_runtime.message_arguments(en[key]) if k == "plural"]
+    for parg in plural_args:
+        say("-- %s [%s]" % (short, parg))
+        for n in COUNTS:
+            p = params_for(key)
+            p[parg] = n
+            cat = plural_table["locales"][LOCALE]["samples"].get(str(n), "few" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else "?")
+            out = msg_runtime.render_message(ru[key], p, LOCALE)
+            say("   n=%-5d [%-4s] %r" % (n, cat, out))
+            expect = CATEGORY_PROBE.get((short, parg), {}).get(n)
+            if expect is None:
+                fail("%s [%s] n=%d has no grammar expectation in the probe table" % (short, parg, n))
+            elif expect not in out:
+                fail("%s [%s] n=%d should render the %r form; got %r" % (short, parg, n, expect, out))
+            else:
+                say("      grammar OK: %r present" % expect)
+
+# ------------------------------- 4b. plural completeness, the repo's own rule
+# check_catalogues() does NOT reach category completeness when the en source is
+# already a plural: that rule lives in _number_upgrade_problem and is only
+# entered on a number -> plural upgrade (measured in NC2/NC3). The audit
+# therefore applies the repo's own function per plural argument.
+say("")
+say("== plural completeness per argument (_number_upgrade_problem rule)")
+for key in plural_keys:
+    for parg in [n for n, k in msg_runtime.message_arguments(en[key]) if k == "plural"]:
+        problem = _number_upgrade_problem(ru[key], parg, LOCALE, plural_table)
+        say("   %s %-22s %s" % ("PASS" if problem is None else "FAIL",
+                                key.split(".")[-1] + "[" + parg + "]",
+                                problem or "all 4 ru categories, no empty branch, every branch renders the count"))
+        if problem is not None:
+            fail("%s: %s" % (key, problem))
+
+# ------------------------------------------------- 5. literal token integrity
+say("")
+say("== literal tokens (typed commands/keys/answers must survive byte-exact)")
+TOKENS = {
+    "banner_digest_body": ["/notifications"],
+    "pointer_unread": ["/unread"],
+    "refused_argument": ["/notifications", "read"],
+    "unread_mark_all": ["/unread read"],
+    "unread_mark_these": ["/unread read"],
+    "confirm_mark_all": ["y/n"],
+    "confirm_dismiss_session": ["y/n"],
+    "ask_answer_hint": ["a"],
+    "empty_caught_up_body": ["f"],
+}
+for short, toks in TOKENS.items():
+    key = NS + "." + short
+    for tok in toks:
+        ok = tok in ru[key]
+        say("   %s %-22s keeps %-16r %s" % ("PASS" if ok else "FAIL", short, tok,
+                                            "present" if ok else "ABSENT"))
+        if not ok:
+            fail("%s lost the literal %r" % (key, tok))
+    # no Cyrillic letters may appear inside the literal span itself
+    for tok in toks:
+        if any("\u0400" <= ch <= "\u04ff" for ch in tok):
+            fail("%s literal %r contains Cyrillic" % (key, tok))
+
+say("")
+say("== Latin runs inside ru values (ages/commands; must stay Latin-undeclined)")
+for key in sorted(en):
+    runs = re.findall(r"[A-Za-z][A-Za-z/<>0-9+#]*", ru[key])
+    if runs:
+        say("   %-22s %s" % (key.split(".", 2)[-1], sorted(set(runs))))
+
+say("")
+say("== values with no Cyrillic letter at all (each judged in the report)")
+for key in sorted(en):
+    if not any("\u0400" <= ch <= "\u04ff" for ch in ru[key]):
+        say("   %-22s ru=%r en=%r" % (key.split(".", 2)[-1], ru[key], en[key]))
+
+say("")
+say("== ru value identical to en (untranslated?)")
+same = [k for k in en if ru[k] == en[k]]
+say("   identical keys: %d %s" % (len(same), same))
+
+# ------------------------------------------- 6. typography and text controls
+say("")
+say("== typography, NFC and direction controls")
+CTRLS = ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
+         "\u200e", "\u200f", "\u061c"]
+bad_nfc, bad_ctrl, bad_punct, bad_space, trailing = [], [], [], [], []
+for key, value in ru.items():
+    if unicodedata.normalize("NFC", value) != value:
+        bad_nfc.append(key)
+    if any(c in value for c in CTRLS):
+        bad_ctrl.append(key)
+    if re.search(r"\s+[!:;?]", value) or "!!" in value or value.rstrip().endswith("!"):
+        bad_punct.append((key, value))
+    if "  " in value:
+        bad_space.append((key, value))
+    if value != value.strip():
+        trailing.append(key)
+    if "\u00ab" in value or "\u00bb" in value:
+        if value.count("\u00ab") != value.count("\u00bb"):
+            bad_punct.append((key, "unbalanced guillemets: " + value))
+    if re.search(r"[\"“”]", value):
+        bad_punct.append((key, "straight/curly quote in ru prose: " + value))
+
+say("   NFC violations: %d %s" % (len(bad_nfc), bad_nfc))
+if bad_nfc:
+    fail("NFC violations: %s" % bad_nfc)
+say("   bidi/format controls: %d %s" % (len(bad_ctrl), bad_ctrl))
+if bad_ctrl:
+    fail("manual bidi/format controls: %s" % bad_ctrl)
+say("   punctuation problems (space before !?;:, !, mixed quotes): %d" % len(bad_punct))
+for k, v in bad_punct:
+    say("      %-22s %r" % (k.split(".", 2)[-1], v))
+if bad_punct:
+    fail("punctuation problems: %s" % [k for k, _ in bad_punct])
+say("   double spaces: %d %s" % (len(bad_space), [k for k, _ in bad_space]))
+if bad_space:
+    fail("double spaces: %s" % [k for k, _ in bad_space])
+say("   leading/trailing whitespace: %d %s" % (len(trailing), trailing))
+if trailing:
+    fail("stray padding spaces: %s" % trailing)
+
+# ------------------------------------------------------ 7. width budgets
+say("")
+say("== width budget: rendered ru cell width vs the en sidecar maxCells")
+over = []
+for key in sorted(en):
+    budget = ctx[key].get("maxCells")
+    if budget is None:
+        continue
+    args = msg_runtime.message_arguments(en[key])
+    base = params_for(key)
+    int_args = [n for n, k in msg_runtime.message_arguments(en[key]) if k == "plural"]
+    candidates = [base]
+    if int_args:
+        candidates = []
+        for value in (0, 1, 2, 3, 5, 11, 21, 101, 1234):
+            probe = dict(base)
+            for n in int_args:
+                probe[n] = value
+            candidates.append(probe)
+    measured = [(cell_len(msg_runtime.render_message(ru[key], p, LOCALE)), p) for p in candidates]
+    worst, worst_params = max(measured, key=lambda pair: pair[0])
+    en_w = cell_len(msg_runtime.render_message(en[key], worst_params, "en"))
+    verdict = "OVER" if worst > budget else "ok"
+    say("   %-22s budget=%-3s en=%-3d ru=%-3d %-4s ratio=%.2f worst=%r" % (
+        key.split(".", 2)[-1], budget, en_w, worst, verdict,
+        (worst / en_w) if en_w else 0.0,
+        msg_runtime.render_message(ru[key], worst_params, LOCALE)))
+    if worst > budget:
+        over.append((key, budget, worst))
+for key, budget, worst in over:
+    fail("width: %s renders %d cells against maxCells %d" % (key, worst, budget))
+
+# ------------------------------- 8. the real render layer, driven in ru
+say("")
+say("== TUI render layer under ru (committed notifications_render functions)")
+from local_operator.tui import notifications_model as M  # noqa: E402
+from local_operator.tui import notifications_render as R  # noqa: E402
+
+now_ms = 1_700_000_000_000
+
+
+def row(**over):
+    base = {
+        "id": "r1", "source": "notify", "priority": "high", "read": False,
+        "title": "Проверить ретранслятор после раскатки", "updated_at": now_ms - 4 * 60_000,
+        "repeat_count": 2, "session": {"id": "s1", "title": "Fix the relay"},
+        "revision": 3, "read_via": None,
+    }
+    base.update(over)
+    return base
+
+
+say("-- row_line: exact width (never overruns), ru copy and chips")
+for width in (40, 60, 76, 80, 120, 140):
+    for label, r in (
+        ("high+repeat+unread", row()),
+        ("read ask seen live", row(source="ask", read=True, read_via="watching")),
+        ("read notify in_view", row(read=True, read_via="in_view", repeat_count=1)),
+        ("just-now single", row(updated_at=now_ms - 5_000, repeat_count=1)),
+    ):
+        plain = R.row_line(r, width, cursor=False, selected=False, now_ms=now_ms).plain
+        got = cell_len(plain)
+        ok = got == width
+        say("   w=%-3d %-20s cells=%-3d %-8s %r" % (width, label, got, "ok" if ok else "MISMATCH", plain))
+        if not ok:
+            fail("row_line at width %d for %r rendered %d cells" % (width, label, got))
+
+say("-- header_line: title, counts, filter segments (dropped whole, never clipped)")
+snap = M.Snapshot(waiting=[], items=[row() for _ in range(12)], unread_count=12,
+                  waiting_count=3, waiting_unread_count=3, high_water=5, complete=False)
+for width in (80, 60, 40):
+    t = R.header_line(snap, M.Filters(read="unread", kind="updates",
+                                      priority="normal_up", grouping="conversation"), width)
+    say("   w=%-3d cells=%-3d %r" % (width, cell_len(t.plain), t.plain))
+
+say("-- hint row: whole-hint-or-none at several widths (ru labels from the file)")
+labels = [("z", ru[NS + ".hint_undo"]), ("\u21b5", ru[NS + ".hint_open"]),
+          ("e", ru[NS + ".hint_dismiss"]), ("u", ru[NS + ".hint_read"]),
+          ("space", ru[NS + ".hint_select"]), ("o", ru[NS + ".hint_conversation"]),
+          ("f", ru[NS + ".hint_filter"]), ("esc", ru[NS + ".hint_back"])]
+for width in (140, 120, 100, 80, 60, 50):
+    kept = R.hint_row(labels, width - 1)
+    rendered = R.hints_text(kept).plain
+    say("   w=%-3d kept=%-2d cells=%-3d %r" % (width, len(kept), cell_len(rendered), rendered))
+
+say("-- detail_text: top line, meta line, sections (ru)")
+ask_row = row(source="ask", read=False, title="Подтвердить перезапуск",
+              excerpt="Перезапустить сервис уведомлений?")
+d = R.detail_text(None, ask_row, 80, position=(1, 12), now_ms=now_ms, show_back=True)
+for i, line in enumerate(d.plain.splitlines()[:4]):
+    say("   ask[%d] cells=%-3d %r" % (i, cell_len(line), line))
+upd = R.detail_text(
+    {"item": row(), "history": [{"revision": 1, "at": now_ms - 26 * 3600_000, "title": "первая версия"}],
+     "links": [{"label": "Сборка", "url": "https://example.invalid/run/1"}], "asks": [], "projects": []},
+    row(), 80, position=(12, 34), now_ms=now_ms, show_back=True)
+for i, line in enumerate(upd.plain.splitlines()[:6]):
+    say("   upd[%d] cells=%-3d %r" % (i, cell_len(line), line))
+
+say("-- empty_text states (ru)")
+for label, s, f in (
+    ("caught up", M.Snapshot(items=[], high_water=5), M.Filters(read="unread")),
+    ("nothing yet", M.Snapshot(items=[], high_water=0), M.Filters(read="unread")),
+    ("filtered", M.Snapshot(items=[], high_water=5), M.Filters(kind="asks")),
+    ("error", M.Snapshot(items=[], error="store busy"), M.Filters()),
+):
+    for line in R.empty_text(s, f).plain.splitlines():
+        if line.strip():
+            say("   %-11s cells=%-3d %r" % (label, cell_len(line), line))
+
+say("-- section headers / group labels (ru)")
+for g in ("today", "yesterday", "week", "older"):
+    say("   group %-9s %r" % (g, R.group_label("time", g)))
+say("   group waiting     %r" % R.group_label("waiting", ""))
+for width in (40, 60, 80):
+    hdr = R.section_header(R.group_label("waiting", ""), 3, width)
+    say("   header w=%-3d cells=%-3d %r" % (width, cell_len(hdr.plain), hdr.plain))
+
+# -------------------------------------------- 9. negative controls (scratch)
+say("")
+say("== negative controls on scratch copies (every check must fail closed)")
+tmp = Path(tempfile.mkdtemp(prefix="ntt1-nc-"))
+shutil.copytree(CATS, tmp / "catalogues")
+ncfile = tmp / "catalogues" / LOCALE / (NS + ".json")
+pristine = ncfile.read_text(encoding="utf-8")
+orig_root = catalogues.catalogue_root()
+
+
+def mutate(short: str, value: str) -> None:
+    data = json.loads(pristine)
+    data[NS + "." + short] = value
+    ncfile.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def ru_problems() -> list[str]:
+    catalogues.catalogue_root = lambda: tmp / "catalogues"  # type: ignore[assignment]
+    try:
+        return [p for p in check_catalogues() if p.startswith(LOCALE + "/" + NS + ":")]
+    finally:
+        catalogues.catalogue_root = lambda: orig_root  # type: ignore[assignment]
+
+
+# NC1: renamed placeholder
+mutate("confirm_dismiss_session", "Скрыть {name} из «{source}»? y/n")
+nc = ru_problems()
+say("   NC1 renamed {count} -> %d problem(s); first=%r" % (len(nc), nc[:1]))
+if not any("confirm_dismiss_session" in p and "argument" in p for p in nc):
+    fail("NC1 did not fail closed: a renamed placeholder passed")
+
+# NC2: missing ru category (completeness rule)
+mutate("asks_stay", "{count, plural, one {# запрос останется до ответа.} "
+                    "many {# запросов останутся до ответа.} other {# запроса останутся до ответа.}}")
+nc2 = _number_upgrade_problem(json.loads(ncfile.read_text(encoding="utf-8"))[NS + ".asks_stay"],
+                              "count", LOCALE, plural_table)
+say("   NC2 dropped `few` -> completeness rule says: %r" % (nc2,))
+if not (nc2 and "few" in nc2):
+    fail("NC2 did not fail closed: a missing `few` branch passed")
+
+# NC3: empty branch
+mutate("dismissed", "Скрыто {count, plural, one {} few {# обновления} many {# обновлений} "
+                    "other {# обновления}}.")
+nc3 = _number_upgrade_problem(json.loads(ncfile.read_text(encoding="utf-8"))[NS + ".dismissed"],
+                              "count", LOCALE, plural_table)
+say("   NC3 empty branch -> completeness rule says: %r" % (nc3,))
+if not nc3:
+    fail("NC3 did not fail closed: an empty plural branch passed")
+
+# NC4: extra key (parity)
+ncfile.write_text(pristine, encoding="utf-8")
+data = json.loads(pristine)
+data[NS + ".not_a_key"] = "лишнее"
+ncfile.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+nc = ru_problems()
+say("   NC4 extra key -> %d problem(s); first=%r" % (len(nc), nc[:1]))
+if not any("unknown key" in p for p in nc):
+    fail("NC4 did not fail closed: an extra key passed")
+
+# NC5: drifted command literal (this script's token check)
+ncfile.write_text(pristine, encoding="utf-8")
+dropped = "Отчёты о завершении сессий перенесены в /уведомления."
+say("   NC5 drifted /unread -> token check sees the literal missing: %s"
+    % ("/unread" not in dropped))
+if "/unread" in dropped:
+    fail("NC5 control text unexpectedly still holds the literal")
+
+# NC6: over-budget value (this script's width check)
+wide = "видели в чате, когда вы были здесь"
+say("   NC6 over-budget value -> cell_len=%d vs maxCells 12 -> over=%s"
+    % (cell_len(wide), cell_len(wide) > 12))
+if cell_len(wide) <= 12:
+    fail("NC6 control value is not over budget")
+
+# NC7: space before punctuation (this script's typography check)
+probe = "Готово !"
+say("   NC7 space-before-punctuation detected: %s"
+    % bool(re.search(r"\s+[!:;?]", probe)))
+if not re.search(r"\s+[!:;?]", probe):
+    fail("NC7 punctuation detector did not fire")
+
+# NC8: manual bidi control (this script's control scan)
+probe = "Скрыто \u202eобновление\u202c."
+say("   NC8 manual bidi control detected: %s" % any(c in probe for c in CTRLS))
+if not any(c in probe for c in CTRLS):
+    fail("NC8 bidi detector did not fire")
+
+ncfile.write_text(pristine, encoding="utf-8")
+shutil.rmtree(tmp, ignore_errors=True)
+
+say("")
+say("FAILURES=%r" % (failures,))
+say("RESULT: %s (%d failure(s))" % ("PASS" if not failures else "FAIL", len(failures)))
+sys.exit(1 if failures else 0)

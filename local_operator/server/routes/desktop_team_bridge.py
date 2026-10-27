@@ -552,6 +552,11 @@ def _raise_read(code: str) -> NoReturn:
 #: scope.
 ACCOUNT_SCOPE = "account"
 
+#: The list's lifecycle selector (agent-server ``status`` query). Closed here
+#: for the same reason ``scope`` is: a stale or mistyped value must not be
+#: forwarded as if the server had a mode for it.
+_LIST_STATUSES: dict[str, Literal["open", "archived"]] = {"open": "open", "archived": "archived"}
+
 
 def _account_scope(scope: str | None) -> bool:
     """Normalize a read's ``scope``: the one account literal, or absent.
@@ -1682,9 +1687,15 @@ async def list_conversations(
     before: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     scope: str | None = Query(default=None),
+    status: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """One page, tenant-scoped or (with ``scope=account``) merged across orgs.
+
+    ``status=archived`` selects the archived half (the "Archived channels"
+    surface); omitted/``open`` is the live list. The set is closed here so a typo
+    is this family's ``invalid_request`` rather than a hub round trip, and what
+    the caller may see in the archived half is entirely the server's rule.
 
     The account page is ordered by activity across the caller's organizations and
     carries each row's own ``tenant_id``; conversations are never merged into one
@@ -1701,7 +1712,10 @@ async def list_conversations(
         "before",
         "cursor",
         "scope",
+        "status",
     }:
+        _raise_read("invalid_request")
+    if status is not None and status not in _LIST_STATUSES:
         _raise_read("invalid_request")
     account_wide = _account_scope(scope)
     if before is not None and cursor is not None:
@@ -1726,6 +1740,7 @@ async def list_conversations(
             before=before,
             cursor=cursor,
             scope=ACCOUNT_SCOPE if account_wide else None,
+            status=_LIST_STATUSES[status] if status is not None else None,
         )
     )
     return reply(payload)
@@ -1785,7 +1800,7 @@ async def conversation_archive(
     request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Archive (read-only for every member)."""
+    """Archive (read-only for every member). Owner, or an org owner/admin on a channel."""
     _require_conversation_id(conversation_id)
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
@@ -1807,7 +1822,7 @@ async def conversation_unarchive(
     request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Unarchive (owner only, server-enforced)."""
+    """Unarchive (same authority as archive, server-enforced)."""
     _require_conversation_id(conversation_id)
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
@@ -1815,6 +1830,36 @@ async def conversation_unarchive(
         await _conversation_reply(
             client.conversation_lifecycle(
                 conversation_id, "unarchive", **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_delete(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Permanently delete an ARCHIVED conversation (irreversible).
+
+    Passed through untouched: the server permits only the conversation owner or
+    an organization owner/admin, only on an archived non-built-in conversation,
+    and answers ``not_archived`` / ``builtin`` / ``conversation_not_found``
+    itself. Nothing is cached locally (the store keeps no bodies), so there is
+    nothing to purge on this side. The same owner receipt as every other write
+    is accepted and stripped.
+    """
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_delete(
+                conversation_id, **_conversation_owner_query(request).model_dump()
             )
         )
     )

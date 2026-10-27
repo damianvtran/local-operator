@@ -67,6 +67,8 @@ CASES = [
     pytest.param("POST", "/bcv_01234567/leave", None, True, id="leave"),
     pytest.param("POST", "/bcv_01234567/members", [MEMBER], True, id="add-members"),
     pytest.param("DELETE", "/bcv_01234567/members/acc_guest", None, True, id="remove-member"),
+    # Irreversible, so it carries the same captured-owner receipt as every other write.
+    pytest.param("DELETE", "/bcv_01234567", None, True, id="delete"),
 ]
 
 

@@ -1229,3 +1229,52 @@ async def test_conversation_react_percent_encodes_and_uses_delete_query():
     assert seen[1].method == "DELETE"
     assert seen[1].url.params["tenant_id"] == "tnt_1"
     assert not seen[1].content
+
+
+async def test_conversations_sends_the_status_wire_name_only_when_asked():
+    """``status`` selects the archived half; the default must not change the wire."""
+
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return _ok({"conversations": []})
+
+    client = _make_client(handler)
+    await client.conversations(tenant_id="tnt_1", status="archived")
+    await client.conversations(tenant_id="tnt_1")
+
+    assert dict(seen[0].params) == {"tenant_id": "tnt_1", "status": "archived"}
+    assert "status" not in dict(seen[1].params), "an older server must see the unchanged request"
+
+
+async def test_conversation_delete_is_a_delete_on_the_conversation_with_the_tenant():
+    """The irreversible verb: method, path and the tenant it names are the contract."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"id": "bcv_abc12345", "deleted": True, "messages_erased": 2})
+
+    client = _make_client(handler)
+    out = await client.conversation_delete("bcv_abc12345", tenant_id="tnt_1")
+
+    assert out["deleted"] is True
+    assert len(seen) == 1
+    assert seen[0].method == "DELETE"
+    assert seen[0].url.path == "/v1/messaging/conversations/bcv_abc12345"
+    assert dict(seen[0].url.params) == {"tenant_id": "tnt_1"}
+    assert seen[0].content == b""
+
+
+async def test_conversation_delete_surfaces_the_servers_refusal_unchanged():
+    """not_archived is the server's rule; the client must not translate or retry it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _err(409, "invalid_transition", details={"rule": "not_archived"})
+
+    client = _make_client(handler)
+    with pytest.raises(BridgeRefusal) as exc:
+        await client.conversation_delete("bcv_abc12345")
+    assert exc.value.code == "invalid_transition"

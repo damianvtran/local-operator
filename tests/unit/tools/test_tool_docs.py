@@ -454,6 +454,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # it" notes. Re-measured via this test's own print, and it is the ONLY
     # entry that moved: every other count above is byte-identical.
     "no_reply": 109,
+    # NEW (notifications inbox, docs/design/notifications-inbox.md §3.1): the
+    # ``notify`` doc — its description plus the five-field schema rendered by
+    # this file's own renderer. Re-measured via this test's print; it is the
+    # ONLY entry that moved, every other count is byte-identical.
+    "notify": 242,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now

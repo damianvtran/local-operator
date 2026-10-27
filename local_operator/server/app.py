@@ -31,6 +31,7 @@ from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
+from local_operator.server import early_paint_hold
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
@@ -55,6 +56,7 @@ from local_operator.server.routes import (
     desktop_mcp,
     desktop_mesh,
     desktop_monitors,
+    desktop_notifications,
     desktop_preferences,
     desktop_profiles,
     desktop_projects,
@@ -985,6 +987,11 @@ app.include_router(desktop_session_files.router)
 # the sessions router, so declaration order cannot shadow a session child; the
 # service's own content route is id-addressed and never accepts a path.
 app.include_router(desktop_library.router)
+# The operator's inbox (`features.notifications`). `/v1/desktop/notifications`
+# shares no prefix with the sessions router, and its literal children (`/count`,
+# `/seen`) are declared BEFORE the `/{item_id}` template inside the module, so
+# a literal can never be read as an item id.
+app.include_router(desktop_notifications.router)
 # The desktop's own PREFERENCES: `/v1/desktop/sidebar-layout`, the sidebar's
 # persisted destination order (capability `features.sidebar_layout`). It is a
 # single-segment literal path (`/v1/desktop/sidebar-layout`) with no child
@@ -1206,6 +1213,15 @@ async def desktop_supplement_response_policy(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+# REGISTERED LAST, SO OUTERMOST: a desktop first-paint ``/events`` open takes its
+# paint hold before any layer above runs, so other conversations' background
+# index scans yield during the stack's GIL hand-offs too (R1; the measurement
+# and the handoff contract are in ``server/early_paint_hold.py``). Anything
+# added after this line would run before the hold exists -- the test
+# ``test_the_real_app_takes_the_early_hold_outermost`` pins the position.
+app.add_middleware(early_paint_hold.EarlyPaintHoldMiddleware)
 
 
 # Include routers from the routes modules

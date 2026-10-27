@@ -42,6 +42,7 @@ describe("retainConfigStream", () => {
 		// either side of the rebase; the namespace names differ on purpose.
 		// relay.approvals is the approvals-policy slice's own en-only copy (the
 		// policy state line, the global scope and the mode-change links).
+		// relay.notifications is the phone inbox's own (#/notifications).
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
@@ -49,7 +50,9 @@ describe("retainConfigStream", () => {
 			"relay.ask",
 			"relay.asks",
 			"relay.chrome",
+			"relay.health",
 			"relay.library",
+			"relay.notifications",
 			"relay.session",
 			"relay.session.tags",
 			"relay.shell",

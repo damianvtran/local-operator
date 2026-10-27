@@ -1,0 +1,583 @@
+Auditor: translation-auditor / 0603506819c6 / radient/auto
+Namespace: tui.notifications   Locale: zh-CN   Audit id: ntt2 (round 2)
+Audited code: 8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a
+Before arm code: d25392f3553c38ce1740c98e53c9c66a700e9e64
+en_sha256=b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+context_sha256=0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+target_sha256=cd60e55f3d532f44848fe44a88ee87b879192f1b5149545526b7ded829768156
+renderer_after_sha256=64ca3084716c99b33823a1123efe0879764af1573a464b3b8a092057b98cad72
+
+===== COMMAND: .venv/bin/python audit.py  (round-1 mechanical harness, fixed tree) =====
+COMMAND: .venv/bin/python work/audit.py  (pinned tree exported from d25392f3553)
+Auditor: translation-auditor / session 0603506819c6
+Namespace: tui.notifications   Locale: zh-CN   Audit id: ntt1
+Pinned source revision: d25392f3553c38ce1740c98e53c9c66a700e9e64
+
+== 1. input pins
+[PASS] sha256 source.en.json — b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68 (want b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68)
+[PASS] sha256 context.en.json — 0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907 (want 0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907)
+[PASS] sha256 target.zh-CN.tui.notifications.json — cd60e55f3d532f44848fe44a88ee87b879192f1b5149545526b7ded829768156 (want cd60e55f3d532f44848fe44a88ee87b879192f1b5149545526b7ded829768156)
+
+en keys=72 context entries=72 target keys=72
+
+== 2. key parity
+[PASS] no missing keys — []
+[PASS] no unknown keys — []
+[PASS] key count 72 — en=72 target=72
+[PASS] context covers every key — []
+[PASS] every key repeats its namespace
+[PASS] UTF-8, no BOM
+[PASS] trailing newline
+[PASS] valid UTF-8
+[PASS] no duplicate JSON keys
+[PASS] keys sorted (repo convention)
+
+resolved modules: runtime=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/ntt2-work/pinned/local_operator/i18n/runtime.py checker=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/ntt2-work/pinned/scripts/i18n/check.py repo=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/ntt2-work/pinned
+[PASS] modules are the pinned tree (not the worktree HEAD)
+
+== 3. repo checker: check_catalogues()
+[PASS] isolated root (en + zh-CN/tui.notifications): no problems — []
+[PASS] full pinned tree + new namespace: no problems — []
+[PASS] no problems attributable to the new namespace — []
+
+== 4. ICU argument parity and plural categories (per key)
+[PASS] argument names/kinds/order match en for all 72 — []
+[PASS] plural selectors are zh-CN categories for every plural — []
+zh-CN CLDR categories: ['other']
+plural keys (7): ['tui.notifications.asks_stay', 'tui.notifications.banner_digest_title', 'tui.notifications.confirm_dismiss_session', 'tui.notifications.dismissed', 'tui.notifications.header_counts', 'tui.notifications.stale_skipped', 'tui.notifications.updates_since']
+target plural selector tuples: {'tui.notifications.asks_stay': [('other',)], 'tui.notifications.banner_digest_title': [('other',)], 'tui.notifications.confirm_dismiss_session': [('other',)], 'tui.notifications.dismissed': [('other',)], 'tui.notifications.header_counts': [('other',), ('other',)], 'tui.notifications.stale_skipped': [('other',)], 'tui.notifications.updates_since': [('other',)]}
+[PASS] every target plural branch list is exactly ('other',) (no invented one/other split) — []
+
+== 5. plural renders at 0/1/2/5/21/1000
+[PASS] every plural renders with its count at all six samples — []
+  tui.notifications.asks_stay:
+        0 -> 0项请求在回答前会一直保留。
+        1 -> 1项请求在回答前会一直保留。
+        2 -> 2项请求在回答前会一直保留。
+        5 -> 5项请求在回答前会一直保留。
+       21 -> 21项请求在回答前会一直保留。
+     1000 -> 1,000项请求在回答前会一直保留。
+  tui.notifications.banner_digest_title:
+        0 -> 另有0条高优先级通知
+        1 -> 另有1条高优先级通知
+        2 -> 另有2条高优先级通知
+        5 -> 另有5条高优先级通知
+       21 -> 另有21条高优先级通知
+     1000 -> 另有1,000条高优先级通知
+  tui.notifications.confirm_dismiss_session:
+        0 -> 清除来自Release triage的0条更新？y/n
+        1 -> 清除来自Release triage的1条更新？y/n
+        2 -> 清除来自Release triage的2条更新？y/n
+        5 -> 清除来自Release triage的5条更新？y/n
+       21 -> 清除来自Release triage的21条更新？y/n
+     1000 -> 清除来自Release triage的1,000条更新？y/n
+  tui.notifications.dismissed:
+        0 -> 已清除0条更新。
+        1 -> 已清除1条更新。
+        2 -> 已清除2条更新。
+        5 -> 已清除5条更新。
+       21 -> 已清除21条更新。
+     1000 -> 已清除1,000条更新。
+  tui.notifications.header_counts:
+        0 -> 0条未读 · 0项待你处理
+        1 -> 1条未读 · 1项待你处理
+        2 -> 2条未读 · 2项待你处理
+        5 -> 5条未读 · 5项待你处理
+       21 -> 21条未读 · 21项待你处理
+     1000 -> 1,000条未读 · 1,000项待你处理
+  tui.notifications.stale_skipped:
+        0 -> 有0条在你查看后发生变动，已跳过。
+        1 -> 有1条在你查看后发生变动，已跳过。
+        2 -> 有2条在你查看后发生变动，已跳过。
+        5 -> 有5条在你查看后发生变动，已跳过。
+       21 -> 有21条在你查看后发生变动，已跳过。
+     1000 -> 有1,000条在你查看后发生变动，已跳过。
+  tui.notifications.updates_since:
+        0 -> 自38m起更新0次
+        1 -> 自38m起更新1次
+        2 -> 自38m起更新2次
+        5 -> 自38m起更新5次
+       21 -> 自38m起更新21次
+     1000 -> 自38m起更新1,000次
+[PASS] every non-plural key renders at realistic values — []
+
+== 6. literal tokens, NFC, bidi/control, banned particles, spacing
+[PASS] every context-pinned literal survives byte-exact — []
+[PASS] every literal key letter in en prose survives — []
+[PASS] no slash-command transliterated into CJK — {}
+[PASS] y/n kept verbatim on every confirm — []
+  y/n keys: ['tui.notifications.confirm_dismiss_session', 'tui.notifications.confirm_mark_all']
+[PASS] all values NFC — []
+[PASS] no control characters — []
+[PASS] no manual bidi controls — []
+[PASS] no 您 (style guide: 你) — []
+[PASS] no exclamation mark / particles — {'您': [], '！': [], '啦': [], '哦': [], '呀': [], 'Inbox': []}
+[PASS] never calls the page 'Inbox' — []
+[PASS] no Chinese-guilt ellipsis '...'
+[PASS] no CJK<->Latin space insertion beyond the source's own separators — {}
+
+== 7. maxCells fit at realistic worst cases
+  tui.notifications.ago    max=12  zh=4   en=6   2d前
+  tui.notifications.arg_read max=44  zh=22  en=35  将所有未读通知标为已读
+  tui.notifications.ask_expires max=18  zh=9   en=14  38m后过期
+  tui.notifications.ask_kind max=8   zh=4   en=3   请求
+  tui.notifications.back   max=24  zh=6   en=15  ← 通知
+  tui.notifications.banner_digest_body max=60  zh=28  en=32  输入/notifications即可查看。
+  tui.notifications.banner_digest_title max=60  zh=23  en=38  另有1,000条高优先级通知
+  tui.notifications.chip_high max=6   zh=2   en=4   高
+  tui.notifications.empty_caught_up_title max=30  zh=10  en=13  已全部看完
+  tui.notifications.empty_filtered_title max=40  zh=22  en=29  没有符合筛选条件的通知
+  tui.notifications.empty_none_title max=30  zh=8   en=20  暂无通知
+  tui.notifications.filter_all max=8   zh=4   en=3   全部
+  tui.notifications.filter_unread max=8   zh=4   en=6   未读
+  tui.notifications.group_conversation max=12  zh=6   en=12  按对话
+  tui.notifications.group_older max=30  zh=4   en=5   更早
+  tui.notifications.group_time max=12  zh=6   en=4   按时间
+  tui.notifications.group_today max=30  zh=4   en=5   今天
+  tui.notifications.group_waiting max=30  zh=8   en=14  待你处理
+  tui.notifications.group_week max=30  zh=12  en=17  本周早些时候
+  tui.notifications.group_yesterday max=30  zh=4   en=9   昨天
+  tui.notifications.header_counts max=40  zh=29  en=35  1,000条未读 · 1,000项待你处理
+  tui.notifications.header_partial max=12  zh=8   en=10  前1000条
+  tui.notifications.hint_answer max=8   zh=4   en=6   回答
+  tui.notifications.hint_back max=8   zh=4   en=4   返回
+  tui.notifications.hint_clear max=8   zh=8   en=5   取消选择
+  tui.notifications.hint_conversation max=14  zh=8   en=12  打开对话
+  tui.notifications.hint_dismiss max=10  zh=4   en=7   清除
+  tui.notifications.hint_dismiss_all max=12  zh=8   en=11  清除全部
+  tui.notifications.hint_filter max=8   zh=4   en=6   筛选
+  tui.notifications.hint_open max=10  zh=4   en=4   打开
+  tui.notifications.hint_read max=8   zh=8   en=4   标为已读
+  tui.notifications.hint_select max=8   zh=4   en=6   选择
+  tui.notifications.hint_undo max=8   zh=4   en=4   撤销
+  tui.notifications.hint_unread max=8   zh=8   en=6   标为未读
+  tui.notifications.just_now max=12  zh=4   en=8   刚刚
+  tui.notifications.kind_asks max=8   zh=4   en=4   请求
+  tui.notifications.kind_updates max=8   zh=4   en=7   更新
+  tui.notifications.no_body max=40  zh=12  en=25  未附带详情。
+  tui.notifications.position max=12  zh=7   en=10  120/120
+  tui.notifications.priority_high max=8   zh=2   en=4   高
+  tui.notifications.priority_normal_up max=8   zh=5   en=7   普通+
+  tui.notifications.row_now max=5   zh=4   en=3   刚刚
+  tui.notifications.section_history max=30  zh=10  en=15  更早的更新
+  tui.notifications.section_links max=20  zh=4   en=5   链接
+  tui.notifications.section_projects max=30  zh=8   en=16  相关项目
+  tui.notifications.section_waiting_here max=40  zh=16  en=35  此对话中待你处理
+  tui.notifications.seen_in_chat max=12  zh=10  en=12  对话中已读
+  tui.notifications.seen_live max=12  zh=8   en=9   实时已读
+  tui.notifications.selected max=16  zh=10  en=13  已选1000条
+  tui.notifications.sidebar_note max=18  zh=10  en=18  1000条通知
+  tui.notifications.title  max=20  zh=4   en=13  通知
+  tui.notifications.update_kind max=8   zh=4   en=6   更新
+  tui.notifications.updates_since max=30  zh=18  en=23  自38m起更新1,000次
+[PASS] every key with a maxCells budget fits at worst case — []
+
+== 7b. the three pinned 8-cell labels
+[PASS] hint_read is '标为已读' at 8/8 cells — '标为已读' 8 cells
+[PASS] hint_unread is '标为未读' at 8/8 cells — '标为未读' 8 cells
+[PASS] hint_clear is '取消选择' at 8/8 cells — '取消选择' 8 cells
+
+== 8. hint row drops whole hints, never clips (real renderer, real labels)
+[PASS] active locale is zh-CN for the render exercise — zh-CN
+  list_unread            w=40  kept=['↵', 'e', 'f', 'esc']
+     ↵ 打开  e 清除  f 筛选  esc 返回
+  list_unread            w=80  kept=['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+     ↵ 打开  e 清除  u 标为已读  space 选择  o 打开对话  f 筛选  esc 返回
+  list_unread            w=140 kept=['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+     ↵ 打开  e 清除  u 标为已读  space 选择  o 打开对话  f 筛选  esc 返回
+  list_read              w=40  kept=['↵', 'e', 'f', 'esc']
+     ↵ 打开  e 清除  f 筛选  esc 返回
+  list_read              w=80  kept=['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+     ↵ 打开  e 清除  u 标为未读  space 选择  o 打开对话  f 筛选  esc 返回
+  list_read              w=140 kept=['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+     ↵ 打开  e 清除  u 标为未读  space 选择  o 打开对话  f 筛选  esc 返回
+  detail_unread          w=40  kept=['a', 'e', 'u', 'esc']
+     a 回答  e 清除  u 标为已读  esc 返回
+  detail_unread          w=80  kept=['o', 'a', 'e', 'E', 'u', 'esc']
+     o 打开对话  a 回答  e 清除  E 清除全部  u 标为已读  esc 返回
+  detail_unread          w=140 kept=['o', 'a', 'e', 'E', 'u', 'esc']
+     o 打开对话  a 回答  e 清除  E 清除全部  u 标为已读  esc 返回
+  list_undo_unread       w=40  kept=['↵', 'e', 'f', 'esc']
+     ↵ 打开  e 清除  f 筛选  esc 返回
+  list_undo_unread       w=80  kept=['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+     ↵ 打开  e 清除  u 标为已读  space 选择  o 打开对话  f 筛选  esc 返回
+  list_undo_unread       w=140 kept=['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+     ↵ 打开  e 清除  u 标为已读  space 选择  o 打开对话  f 筛选  esc 返回
+  list_selected_read     w=40  kept=['↵', 'e', 'f', 'esc']
+     ↵ 打开  e 清除  f 筛选  esc 返回
+  list_selected_read     w=80  kept=['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+     ↵ 打开  e 清除  u 标为未读  space 选择  o 打开对话  f 筛选  esc 返回
+  list_selected_read     w=140 kept=['↵', 'e', 'u', 'space', 'o', 'f', 'esc']
+     ↵ 打开  e 清除  u 标为未读  space 选择  o 打开对话  f 筛选  esc 返回
+[PASS] hint row is whole-hint-or-nothing at every state and width — []
+  widest realistic list row at 80 cols: 7 hints -> 7 kept, cost 69 of 79
+[PASS] negative control: fitter drops an overlong hint whole, keeps esc — [('e', '清除'), ('esc', '返回')]
+
+== 9. negative controls (each must be caught)
+[PASS] negative control renamed argument: caught ('argument') — problems=["zh-CN/tui.notifications: tui.notifications.asks_stay: arguments (('total', 'plural'),) != en's (('count', 'plural'),): argument 1 is 'total', en's is 'count' (renamed or reordered)"]
+    zh-CN/tui.notifications: tui.notifications.asks_stay: arguments (('total', 'plural'),) != en's (('count', 'plural'),): argument 1 is 'total', en's is 'count' (renamed or reordered)
+[PASS] negative control wrong plural category (one): caught ("plural category 'one'") — problems=["zh-CN/tui.notifications: tui.notifications.dismissed: plural category 'one' not in ['other']"]
+    zh-CN/tui.notifications: tui.notifications.dismissed: plural category 'one' not in ['other']
+[PASS] negative control dropped {source}: caught ('argument') — problems=["zh-CN/tui.notifications: tui.notifications.nothing_to_dismiss: arguments () != en's (('source', 'simple'),): en has 1 argument(s), translation has 0"]
+    zh-CN/tui.notifications: tui.notifications.nothing_to_dismiss: arguments () != en's (('source', 'simple'),): en has 1 argument(s), translation has 0
+[PASS] negative control plural downgraded to plain args: caught ('changed kind') — problems=["zh-CN/tui.notifications: tui.notifications.header_counts: arguments (('unread', 'simple'), ('waiting', 'simple')) != en's (('unread', 'plural'), ('waiting', 'plural')): argument 'unread' changed kind 'plural' -> 'simple'"]
+    zh-CN/tui.notifications: tui.notifications.header_counts: arguments (('unread', 'simple'), ('waiting', 'simple')) != en's (('unread', 'plural'), ('waiting', 'plural')): argument 'unread' changed kind 'plural' -> 'simple'
+[PASS] negative control dropped count: caught ('argument') — problems=["zh-CN/tui.notifications: tui.notifications.marked_read: arguments () != en's (('count', 'simple'),): en has 1 argument(s), translation has 0"]
+    zh-CN/tui.notifications: tui.notifications.marked_read: arguments () != en's (('count', 'simple'),): en has 1 argument(s), translation has 0
+[PASS] negative control bidi control: caught
+[PASS] negative control 您: caught
+[PASS] negative control over-budget label: caught by cell_len vs maxCells — 16 > 5
+[PASS] negative control dropped /unread read token: caught — ['tui.notifications.refused_argument:/notifications', 'tui.notifications.unread_mark_these:/unread read']
+[PASS] negative control transliterated /通知: caught
+
+FAILURES=[]
+RESULT=PASS
+keys_read=72
+
+===== COMMAND: .venv/bin/python measure.py <pre-fix tree d25392f3553> <cat> 78 =====
+TREE=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/work/pinned
+renderer_uses_str_rjust=True  has_pad_cells=False
+width=78 cells (what the view hands row_line for a 80-column window)
+  zh-CN (a) just-now, ASCII conversation title               cells= 80 cells-78=+2 exact=False
+         row=|  • ▁▃  Deploy finished                                     Release tri…    刚刚|
+         source_column(12)=|<row not exact>|  last5='   刚刚'
+  zh-CN (b) just-now, Chinese conversation title             cells= 84 cells-78=+6 exact=False
+         row=|  • ▁▃  Deploy finished                                             发布排查    刚刚|
+         source_column(12)=|<row not exact>|  last5='   刚刚'
+  zh-CN (c) 2h-old row, ASCII title                          cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished                                     Release tri…    2h|
+         source_column(12)=|Release tri…|  last5='   2h'
+  en    (d) just-now, Chinese conversation title (EN arm)    cells= 82 cells-78=+4 exact=False
+         row=|  • ▁▃  Deploy finished                                             发布排查   now|
+         source_column(12)=|<row not exact>|  last5='  now'
+  en    (e) control: normal en row, long ASCII title         cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished with 2 warnings on the release tra… Release tri…   now|
+         source_column(12)=|Release tri…|  last5='  now'
+  en    (f) control: 30-char ASCII conversation title        cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished                                     Release tri…   now|
+         source_column(12)=|Release tri…|  last5='  now'
+  zh-CN (g) just-now, high + repeat chips, Chinese title     cells= 84 cells-78=+6 exact=False
+         row=|  • ▁▃▅ Deploy finished                               高 ×3         发布排查    刚刚|
+         source_column(12)=|<row not exact>|  last5='   刚刚'
+
+===== COMMAND: .venv/bin/python measure.py <fix tree 8976104b83b> <cat> 78 =====
+TREE=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/ntt2-work/pinned
+renderer_uses_str_rjust=False  has_pad_cells=True
+width=78 cells (what the view hands row_line for a 80-column window)
+  zh-CN (a) just-now, ASCII conversation title               cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished                                     Release tri…  刚刚|
+         source_column(12)=|  Release tr|  last5='…  刚刚'
+  zh-CN (b) just-now, Chinese conversation title             cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished                                         发布排查  刚刚|
+         source_column(12)=|          发布|  last5='查  刚刚'
+  zh-CN (c) 2h-old row, ASCII title                          cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished                                     Release tri…    2h|
+         source_column(12)=|Release tri…|  last5='   2h'
+  en    (d) just-now, Chinese conversation title (EN arm)    cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished                                         发布排查   now|
+         source_column(12)=|        发布排查|  last5='  now'
+  en    (e) control: normal en row, long ASCII title         cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished with 2 warnings on the release tra… Release tri…   now|
+         source_column(12)=|Release tri…|  last5='  now'
+  en    (f) control: 30-char ASCII conversation title        cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃  Deploy finished                                     Release tri…   now|
+         source_column(12)=|Release tri…|  last5='  now'
+  zh-CN (g) just-now, high + repeat chips, Chinese title     cells= 78 cells-78=+0 exact=True
+         row=|  • ▁▃▅ Deploy finished                               高 ×3     发布排查  刚刚|
+         source_column(12)=| 高 ×3     发布|  last5='查  刚刚'
+
+===== COMMAND: .venv/bin/python verify_rows.py <pre-fix tree> <cat>   [must fail] =====
+TREE=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/work/pinned
+  zh-CN (a) zh just-now, ASCII source                PASS=False
+        width  : cells=80 ok=False
+        time   : |   刚刚| cells=7 expect=| 刚刚| ok=False
+        source : |Release tri…| cells=12 expect=|Release tri…| ok=True (trunc 'Release tri…' 12 cells)
+        row    : |  • ▁▃  Deploy finished                                     Release tri…    刚刚|
+  zh-CN (b) zh just-now, CJK source                  PASS=False
+        width  : cells=84 ok=False
+        time   : <not reachable: row wider than width> ok=False
+        source : |        发布| cells=12 expect=|    发布排查| ok=False (trunc '发布排查' 8 cells)
+        row    : |  • ▁▃  Deploy finished                                             发布排查    刚刚|
+  zh-CN (c) zh 2h-old, ASCII source                  PASS=True
+        width  : cells=78 ok=True
+        time   : |   2h| cells=5 expect=|   2h| ok=True
+        source : |Release tri…| cells=12 expect=|Release tri…| ok=True (trunc 'Release tri…' 12 cells)
+        row    : |  • ▁▃  Deploy finished                                     Release tri…    2h|
+  en    (d) en just-now, CJK source                  PASS=False
+        width  : cells=82 ok=False
+        time   : <not reachable: row wider than width> ok=False
+        source : |        发布| cells=12 expect=|    发布排查| ok=False (trunc '发布排查' 8 cells)
+        row    : |  • ▁▃  Deploy finished                                             发布排查   now|
+  en    (e) en normal row                            PASS=True
+        width  : cells=78 ok=True
+        time   : |  now| cells=5 expect=|  now| ok=True
+        source : |Release tri…| cells=12 expect=|Release tri…| ok=True (trunc 'Release tri…' 12 cells)
+        row    : |  • ▁▃  Deploy finished                                     Release tri…   now|
+  en    (f) en 30-char source                        PASS=True
+        width  : cells=78 ok=True
+        time   : |  now| cells=5 expect=|  now| ok=True
+        source : |Release tri…| cells=12 expect=|Release tri…| ok=True (trunc 'Release tri…' 12 cells)
+        row    : |  • ▁▃  Deploy finished                                     Release tri…   now|
+  zh-CN (g) zh just-now, CJK source, high+repeat     PASS=False
+        width  : cells=84 ok=False
+        time   : <not reachable: row wider than width> ok=False
+        source : |        发布| cells=12 expect=|    发布排查| ok=False (trunc '发布排查' 8 cells)
+        row    : |  • ▁▃▅ Deploy finished                               高 ×3         发布排查    刚刚|
+
+ALL_PASS=False
+
+===== COMMAND: .venv/bin/python verify_rows.py <fix tree> <cat>       [must pass] =====
+TREE=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/ntt2-work/pinned
+  zh-CN (a) zh just-now, ASCII source                PASS=True
+        width  : cells=78 ok=True
+        time   : | 刚刚| cells=5 expect=| 刚刚| ok=True
+        source : |Release tri…| cells=12 expect=|Release tri…| ok=True (trunc 'Release tri…' 12 cells)
+        row    : |  • ▁▃  Deploy finished                                     Release tri…  刚刚|
+  zh-CN (b) zh just-now, CJK source                  PASS=True
+        width  : cells=78 ok=True
+        time   : | 刚刚| cells=5 expect=| 刚刚| ok=True
+        source : |    发布排查| cells=12 expect=|    发布排查| ok=True (trunc '发布排查' 8 cells)
+        row    : |  • ▁▃  Deploy finished                                         发布排查  刚刚|
+  zh-CN (c) zh 2h-old, ASCII source                  PASS=True
+        width  : cells=78 ok=True
+        time   : |   2h| cells=5 expect=|   2h| ok=True
+        source : |Release tri…| cells=12 expect=|Release tri…| ok=True (trunc 'Release tri…' 12 cells)
+        row    : |  • ▁▃  Deploy finished                                     Release tri…    2h|
+  en    (d) en just-now, CJK source                  PASS=True
+        width  : cells=78 ok=True
+        time   : |  now| cells=5 expect=|  now| ok=True
+        source : |    发布排查| cells=12 expect=|    发布排查| ok=True (trunc '发布排查' 8 cells)
+        row    : |  • ▁▃  Deploy finished                                         发布排查   now|
+  en    (e) en normal row                            PASS=True
+        width  : cells=78 ok=True
+        time   : |  now| cells=5 expect=|  now| ok=True
+        source : |Release tri…| cells=12 expect=|Release tri…| ok=True (trunc 'Release tri…' 12 cells)
+        row    : |  • ▁▃  Deploy finished                                     Release tri…   now|
+  en    (f) en 30-char source                        PASS=True
+        width  : cells=78 ok=True
+        time   : |  now| cells=5 expect=|  now| ok=True
+        source : |Release tri…| cells=12 expect=|Release tri…| ok=True (trunc 'Release tri…' 12 cells)
+        row    : |  • ▁▃  Deploy finished                                     Release tri…   now|
+  zh-CN (g) zh just-now, CJK source, high+repeat     PASS=True
+        width  : cells=78 ok=True
+        time   : | 刚刚| cells=5 expect=| 刚刚| ok=True
+        source : |    发布排查| cells=12 expect=|    发布排查| ok=True (trunc '发布排查' 8 cells)
+        row    : |  • ▁▃▅ Deploy finished                               高 ×3     发布排查  刚刚|
+
+ALL_PASS=True
+
+===== COMMAND: .venv/bin/python verify_extra.py <pre-fix tree> <cat> =====
+TREE=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/work/pinned
+  zh-CN detail top priority=normal cells= 80 raw_english_token=True  | ← 通知                                                  ▁▃ normal · 更新 · 1/3 |
+  zh-CN detail top priority=high   cells= 80 raw_english_token=True  | ← 通知                                                   ▁▃▅ high · 更新 · 1/3 |
+  zh-CN combined receipt cells=77  |已清除5条更新。 3项请求在回答前会一直保留。 有2条在你查看后发生变动，已跳过。|
+  en    detail top priority=normal cells= 80 raw_english_token=True  | ← Notifications                                    ▁▃ normal · update · 1 of 3 |
+  en    detail top priority=high   cells= 80 raw_english_token=True  | ← Notifications                                     ▁▃▅ high · update · 1 of 3 |
+  en    combined receipt cells=98  |Dismissed 5 updates. 3 asks stay until they're answered. 2 changed since you looked and were left.|
+
+===== COMMAND: .venv/bin/python verify_extra.py <fix tree> <cat> =====
+TREE=/Users/damian/.local-operator/sessions/0603506819c6/scratchpad/tui-audit/zh-CN/ntt2-work/pinned
+  zh-CN detail top priority=normal cells= 80 raw_english_token=False  | ← 通知                                                         ▁▃ · 更新 · 1/3 |
+  zh-CN detail top priority=high   cells= 80 raw_english_token=False  | ← 通知                                                     ▁▃▅ 高 · 更新 · 1/3 |
+  zh-CN combined receipt cells=77  |已清除5条更新。 3项请求在回答前会一直保留。 有2条在你查看后发生变动，已跳过。|
+  en    detail top priority=normal cells= 80 raw_english_token=False  | ← Notifications                                           ▁▃ · update · 1 of 3 |
+  en    detail top priority=high   cells= 80 raw_english_token=True  | ← Notifications                                     ▁▃▅ high · update · 1 of 3 |
+  en    combined receipt cells=98  |Dismissed 5 updates. 3 asks stay until they're answered. 2 changed since you looked and were left.|
+
+===== COMMAND: .venv/bin/python render_check.py (composite, 40/80/120) =====
+[PASS] zh-CN@40 header fits — 37 cells: ' 通知 · 4条未读 · 1项待你处理 · 前1条'
+[PASS] zh-CN@40 list line fits 38 — 38: ' ── 待你处理 · 1 ─────────────────────'
+[PASS] zh-CN@40 list line fits 38 — 38: '  ◼ ?   Ship the 0… Release tri…  刚刚'
+[PASS] zh-CN@40 list line fits 38 — 38: ' ── 今天 · 1 ─────────────────────────'
+[PASS] zh-CN@40 list line fits 38 — 38: '▸ • ▁▃▅ Depl… 高 ×3 Release tri…    1m'
+[PASS] zh-CN@40 detail top (no_wrap) fits 40 — 40: ' ← 通知             ▁▃▅ 高 · 更新 · 1/3 '
+    zh-CN@40 detail body line 2 wraps at 32 cells: ' Deploy finished with 2 warnings'
+    zh-CN@40 detail body line 3 wraps at 41 cells: ' Release triage · 1m前 · 自02:53起更新3次'
+    zh-CN@40 detail body line 4 wraps at 39 cells: ' ──────────────────────────────────────'
+    zh-CN@40 detail body line 5 wraps at 13 cells: ' 未附带详情。'
+    zh-CN@40 detail body line 6 wraps at 0 cells: ''
+    zh-CN@40 detail body line 7 wraps at 40 cells: ' ── 相关项目 · 1 ───────────────────────'
+    zh-CN@40 detail body line 8 wraps at 30 cells: '  notifications-inbox · active'
+    zh-CN@40 detail body line 9 wraps at 0 cells: ''
+    zh-CN@40 detail body line 10 wraps at 40 cells: ' ── 更早的更新 · 1 ─────────────────────'
+    zh-CN@40 detail body line 11 wraps at 23 cells: '  02:53  Deploy started'
+    zh-CN@40 detail body line 12 wraps at 0 cells: ''
+[PASS] zh-CN@40 hints list_unread fit — 29 of 39: ' ↵   e 清除  f 筛选  esc 返回'
+[PASS] zh-CN@40 hints list_unread whole-hints-only — [('↵', ''), ('e', '清除'), ('f', '筛选'), ('esc', '返回')]
+[PASS] zh-CN@40 hints list_undo fit — 33 of 39: ' ↵ 打开  e 清除  f 筛选  esc 返回'
+[PASS] zh-CN@40 hints list_undo whole-hints-only — [('↵', '打开'), ('e', '清除'), ('f', '筛选'), ('esc', '返回')]
+[PASS] zh-CN@40 hints list_selected fit — 37 of 39: ' ↵ 打开  e 清除  f 筛选  esc 取消选择'
+[PASS] zh-CN@40 hints list_selected whole-hints-only — [('↵', '打开'), ('e', '清除'), ('f', '筛选'), ('esc', '取消选择')]
+[PASS] zh-CN@40 hints detail_wide fit — 29 of 39: ' e 清除  a 回答  esc 取消选择'
+[PASS] zh-CN@40 hints detail_wide whole-hints-only — [('e', '清除'), ('a', '回答'), ('esc', '取消选择')]
+[PASS] zh-CN@80 header fits — 80 cells: ' 通知 · 4条未读 · 1项待你处理 · 前1条                             未读 │ 按时间 '
+[PASS] zh-CN@80 list line fits 78 — 78: ' ── 待你处理 · 1 ─────────────────────────────────────────────────────────────'
+[PASS] zh-CN@80 list line fits 78 — 78: '  ◼ ?   Ship the 0.9.7 patch today?                         Release tri…  刚刚'
+[PASS] zh-CN@80 list line fits 78 — 78: ' ── 今天 · 1 ─────────────────────────────────────────────────────────────────'
+[PASS] zh-CN@80 list line fits 78 — 78: '▸ • ▁▃▅ Deploy finished with 2 warnings               高 ×3 Release tri…    1m'
+[PASS] zh-CN@80 detail top (no_wrap) fits 80 — 80: ' ← 通知                                                     ▁▃▅ 高 · 更新 · 1/3 '
+    zh-CN@80 detail body line 2 wraps at 32 cells: ' Deploy finished with 2 warnings'
+    zh-CN@80 detail body line 3 wraps at 41 cells: ' Release triage · 1m前 · 自02:53起更新3次'
+    zh-CN@80 detail body line 4 wraps at 79 cells: ' ──────────────────────────────────────────────────────────────────────────────'
+    zh-CN@80 detail body line 5 wraps at 13 cells: ' 未附带详情。'
+    zh-CN@80 detail body line 6 wraps at 0 cells: ''
+    zh-CN@80 detail body line 7 wraps at 80 cells: ' ── 相关项目 · 1 ───────────────────────────────────────────────────────────────'
+    zh-CN@80 detail body line 8 wraps at 30 cells: '  notifications-inbox · active'
+    zh-CN@80 detail body line 9 wraps at 0 cells: ''
+    zh-CN@80 detail body line 10 wraps at 80 cells: ' ── 更早的更新 · 1 ─────────────────────────────────────────────────────────────'
+    zh-CN@80 detail body line 11 wraps at 23 cells: '  02:53  Deploy started'
+    zh-CN@80 detail body line 12 wraps at 0 cells: ''
+[PASS] zh-CN@80 hints list_unread fit — 65 of 79: ' ↵   e 清除  u 标为已读  space 选择  o 打开对话  f 筛选  esc 返回'
+[PASS] zh-CN@80 hints list_unread whole-hints-only — [('↵', ''), ('e', '清除'), ('u', '标为已读'), ('space', '选择'), ('o', '打开对话'), ('f', '筛选'), ('esc', '返回')]
+[PASS] zh-CN@80 hints list_undo fit — 77 of 79: ' z 撤销  ↵ 打开  e 清除  u 标为已读  space 选择  o 打开对话  f 筛选  esc 返回'
+[PASS] zh-CN@80 hints list_undo whole-hints-only — [('z', '撤销'), ('↵', '打开'), ('e', '清除'), ('u', '标为已读'), ('space', '选择'), ('o', '打开对话'), ('f', '筛选'), ('esc', '返回')]
+[PASS] zh-CN@80 hints list_selected fit — 69 of 79: ' z 撤销  ↵ 打开  e 清除  space 选择  o 打开对话  f 筛选  esc 取消选择'
+[PASS] zh-CN@80 hints list_selected whole-hints-only — [('z', '撤销'), ('↵', '打开'), ('e', '清除'), ('space', '选择'), ('o', '打开对话'), ('f', '筛选'), ('esc', '取消选择')]
+[PASS] zh-CN@80 hints detail_wide fit — 65 of 79: ' u 标为未读  e 清除  E 清除全部  o 打开对话  a 回答  esc 取消选择'
+[PASS] zh-CN@80 hints detail_wide whole-hints-only — [('u', '标为未读'), ('e', '清除'), ('E', '清除全部'), ('o', '打开对话'), ('a', '回答'), ('esc', '取消选择')]
+[PASS] zh-CN@120 header fits — 120 cells: ' 通知 · 4条未读 · 1项待你处理 · 前1条                                                                     未读 │ 按时间 '
+[PASS] zh-CN@120 list line fits 118 — 118: ' ── 待你处理 · 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────'
+[PASS] zh-CN@120 list line fits 118 — 118: '  ◼ ?   Ship the 0.9.7 patch today?                                                                 Release tri…  刚刚'
+[PASS] zh-CN@120 list line fits 118 — 118: ' ── 今天 · 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────'
+[PASS] zh-CN@120 list line fits 118 — 118: '▸ • ▁▃▅ Deploy finished with 2 warnings                                                       高 ×3 Release tri…    1m'
+[PASS] zh-CN@120 detail top (no_wrap) fits 120 — 120: ' ← 通知                                                                                             ▁▃▅ 高 · 更新 · 1/3 '
+    zh-CN@120 detail body line 2 wraps at 32 cells: ' Deploy finished with 2 warnings'
+    zh-CN@120 detail body line 3 wraps at 41 cells: ' Release triage · 1m前 · 自02:53起更新3次'
+    zh-CN@120 detail body line 4 wraps at 119 cells: ' ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────'
+    zh-CN@120 detail body line 5 wraps at 13 cells: ' 未附带详情。'
+    zh-CN@120 detail body line 6 wraps at 0 cells: ''
+    zh-CN@120 detail body line 7 wraps at 120 cells: ' ── 相关项目 · 1 ───────────────────────────────────────────────────────────────────────────────────────────────────────'
+    zh-CN@120 detail body line 8 wraps at 30 cells: '  notifications-inbox · active'
+    zh-CN@120 detail body line 9 wraps at 0 cells: ''
+    zh-CN@120 detail body line 10 wraps at 120 cells: ' ── 更早的更新 · 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────'
+    zh-CN@120 detail body line 11 wraps at 23 cells: '  02:53  Deploy started'
+    zh-CN@120 detail body line 12 wraps at 0 cells: ''
+[PASS] zh-CN@120 hints list_unread fit — 65 of 119: ' ↵   e 清除  u 标为已读  space 选择  o 打开对话  f 筛选  esc 返回'
+[PASS] zh-CN@120 hints list_unread whole-hints-only — [('↵', ''), ('e', '清除'), ('u', '标为已读'), ('space', '选择'), ('o', '打开对话'), ('f', '筛选'), ('esc', '返回')]
+[PASS] zh-CN@120 hints list_undo fit — 77 of 119: ' z 撤销  ↵ 打开  e 清除  u 标为已读  space 选择  o 打开对话  f 筛选  esc 返回'
+[PASS] zh-CN@120 hints list_undo whole-hints-only — [('z', '撤销'), ('↵', '打开'), ('e', '清除'), ('u', '标为已读'), ('space', '选择'), ('o', '打开对话'), ('f', '筛选'), ('esc', '返回')]
+[PASS] zh-CN@120 hints list_selected fit — 81 of 119: ' z 撤销  ↵ 打开  e 清除  u 标为未读  space 选择  o 打开对话  f 筛选  esc 取消选择'
+[PASS] zh-CN@120 hints list_selected whole-hints-only — [('z', '撤销'), ('↵', '打开'), ('e', '清除'), ('u', '标为未读'), ('space', '选择'), ('o', '打开对话'), ('f', '筛选'), ('esc', '取消选择')]
+[PASS] zh-CN@120 hints detail_wide fit — 65 of 119: ' u 标为未读  e 清除  E 清除全部  o 打开对话  a 回答  esc 取消选择'
+[PASS] zh-CN@120 hints detail_wide whole-hints-only — [('u', '标为未读'), ('e', '清除'), ('E', '清除全部'), ('o', '打开对话'), ('a', '回答'), ('esc', '取消选择')]
+[FAIL] en@40 header fits — 54 cells: ' Notifications · 4 unread · 1 waiting on you · first 1'
+[PASS] en@40 list line fits 38 — 38: ' ── Waiting on you · 1 ───────────────'
+[PASS] en@40 list line fits 38 — 38: '  ◼ ?   Ship the 0… Release tri…   now'
+[PASS] en@40 list line fits 38 — 38: ' ── Today · 1 ────────────────────────'
+[PASS] en@40 list line fits 38 — 38: '▸ • ▁▃▅ Deploy fin… Release tri…    1m'
+[FAIL] en@40 detail top (no_wrap) fits 40 — 44: ' ← Notifications ▁▃▅ high · update · 1 of 3 '
+    en@40 detail body line 2 wraps at 32 cells: ' Deploy finished with 2 warnings'
+    en@40 detail body line 3 wraps at 48 cells: ' Release triage · 1m ago · 3 updates since 02:53'
+    en@40 detail body line 4 wraps at 39 cells: ' ──────────────────────────────────────'
+    en@40 detail body line 5 wraps at 26 cells: ' No details were attached.'
+    en@40 detail body line 6 wraps at 0 cells: ''
+    en@40 detail body line 7 wraps at 40 cells: ' ── Related projects · 1 ───────────────'
+    en@40 detail body line 8 wraps at 30 cells: '  notifications-inbox · active'
+    en@40 detail body line 9 wraps at 0 cells: ''
+    en@40 detail body line 10 wraps at 40 cells: ' ── Earlier updates · 1 ────────────────'
+    en@40 detail body line 11 wraps at 23 cells: '  02:53  Deploy started'
+    en@40 detail body line 12 wraps at 0 cells: ''
+[PASS] en@40 hints list_unread fit — 31 of 39: ' ↵   u read  f filter  esc back'
+[PASS] en@40 hints list_unread whole-hints-only — [('↵', ''), ('u', 'read'), ('f', 'filter'), ('esc', 'back')]
+[PASS] en@40 hints list_undo fit — 33 of 39: ' z undo  ↵ open  u read  esc back'
+[PASS] en@40 hints list_undo whole-hints-only — [('z', 'undo'), ('↵', 'open'), ('u', 'read'), ('esc', 'back')]
+[PASS] en@40 hints list_selected fit — 36 of 39: ' z undo  ↵ open  f filter  esc clear'
+[PASS] en@40 hints list_selected whole-hints-only — [('z', 'undo'), ('↵', 'open'), ('f', 'filter'), ('esc', 'clear')]
+[PASS] en@40 hints detail_wide fit — 30 of 39: ' u unread  a answer  esc clear'
+[PASS] en@40 hints detail_wide whole-hints-only — [('u', 'unread'), ('a', 'answer'), ('esc', 'clear')]
+[PASS] en@80 header fits — 80 cells: ' Notifications · 4 unread · 1 waiting on you · first 1            unread │ time '
+[PASS] en@80 list line fits 78 — 78: ' ── Waiting on you · 1 ───────────────────────────────────────────────────────'
+[PASS] en@80 list line fits 78 — 78: '  ◼ ?   Ship the 0.9.7 patch today?                         Release tri…   now'
+[PASS] en@80 list line fits 78 — 78: ' ── Today · 1 ────────────────────────────────────────────────────────────────'
+[PASS] en@80 list line fits 78 — 78: '▸ • ▁▃▅ Deploy finished with 2 warnings             high ×3 Release tri…    1m'
+[PASS] en@80 detail top (no_wrap) fits 80 — 80: ' ← Notifications                                     ▁▃▅ high · update · 1 of 3 '
+    en@80 detail body line 2 wraps at 32 cells: ' Deploy finished with 2 warnings'
+    en@80 detail body line 3 wraps at 48 cells: ' Release triage · 1m ago · 3 updates since 02:53'
+    en@80 detail body line 4 wraps at 79 cells: ' ──────────────────────────────────────────────────────────────────────────────'
+    en@80 detail body line 5 wraps at 26 cells: ' No details were attached.'
+    en@80 detail body line 6 wraps at 0 cells: ''
+    en@80 detail body line 7 wraps at 80 cells: ' ── Related projects · 1 ───────────────────────────────────────────────────────'
+    en@80 detail body line 8 wraps at 30 cells: '  notifications-inbox · active'
+    en@80 detail body line 9 wraps at 0 cells: ''
+    en@80 detail body line 10 wraps at 80 cells: ' ── Earlier updates · 1 ────────────────────────────────────────────────────────'
+    en@80 detail body line 11 wraps at 23 cells: '  02:53  Deploy started'
+    en@80 detail body line 12 wraps at 0 cells: ''
+[PASS] en@80 hints list_unread fit — 72 of 79: ' ↵   e dismiss  u read  space select  o conversation  f filter  esc back'
+[PASS] en@80 hints list_unread whole-hints-only — [('↵', ''), ('e', 'dismiss'), ('u', 'read'), ('space', 'select'), ('o', 'conversation'), ('f', 'filter'), ('esc', 'back')]
+[PASS] en@80 hints list_undo fit — 68 of 79: ' z undo  ↵ open  e dismiss  u read  space select  f filter  esc back'
+[PASS] en@80 hints list_undo whole-hints-only — [('z', 'undo'), ('↵', 'open'), ('e', 'dismiss'), ('u', 'read'), ('space', 'select'), ('f', 'filter'), ('esc', 'back')]
+[PASS] en@80 hints list_selected fit — 71 of 79: ' z undo  ↵ open  e dismiss  u unread  space select  f filter  esc clear'
+[PASS] en@80 hints list_selected whole-hints-only — [('z', 'undo'), ('↵', 'open'), ('e', 'dismiss'), ('u', 'unread'), ('space', 'select'), ('f', 'filter'), ('esc', 'clear')]
+[PASS] en@80 hints detail_wide fit — 72 of 79: ' u unread  e dismiss  E dismiss all  o conversation  a answer  esc clear'
+[PASS] en@80 hints detail_wide whole-hints-only — [('u', 'unread'), ('e', 'dismiss'), ('E', 'dismiss all'), ('o', 'conversation'), ('a', 'answer'), ('esc', 'clear')]
+[PASS] en@120 header fits — 120 cells: ' Notifications · 4 unread · 1 waiting on you · first 1                                                    unread │ time '
+[PASS] en@120 list line fits 118 — 118: ' ── Waiting on you · 1 ───────────────────────────────────────────────────────────────────────────────────────────────'
+[PASS] en@120 list line fits 118 — 118: '  ◼ ?   Ship the 0.9.7 patch today?                                                                 Release tri…   now'
+[PASS] en@120 list line fits 118 — 118: ' ── Today · 1 ────────────────────────────────────────────────────────────────────────────────────────────────────────'
+[PASS] en@120 list line fits 118 — 118: '▸ • ▁▃▅ Deploy finished with 2 warnings                                                     high ×3 Release tri…    1m'
+[PASS] en@120 detail top (no_wrap) fits 120 — 120: ' ← Notifications                                                                             ▁▃▅ high · update · 1 of 3 '
+    en@120 detail body line 2 wraps at 32 cells: ' Deploy finished with 2 warnings'
+    en@120 detail body line 3 wraps at 48 cells: ' Release triage · 1m ago · 3 updates since 02:53'
+    en@120 detail body line 4 wraps at 119 cells: ' ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────'
+    en@120 detail body line 5 wraps at 26 cells: ' No details were attached.'
+    en@120 detail body line 6 wraps at 0 cells: ''
+    en@120 detail body line 7 wraps at 120 cells: ' ── Related projects · 1 ───────────────────────────────────────────────────────────────────────────────────────────────'
+    en@120 detail body line 8 wraps at 30 cells: '  notifications-inbox · active'
+    en@120 detail body line 9 wraps at 0 cells: ''
+    en@120 detail body line 10 wraps at 120 cells: ' ── Earlier updates · 1 ────────────────────────────────────────────────────────────────────────────────────────────────'
+    en@120 detail body line 11 wraps at 23 cells: '  02:53  Deploy started'
+    en@120 detail body line 12 wraps at 0 cells: ''
+[PASS] en@120 hints list_unread fit — 72 of 119: ' ↵   e dismiss  u read  space select  o conversation  f filter  esc back'
+[PASS] en@120 hints list_unread whole-hints-only — [('↵', ''), ('e', 'dismiss'), ('u', 'read'), ('space', 'select'), ('o', 'conversation'), ('f', 'filter'), ('esc', 'back')]
+[PASS] en@120 hints list_undo fit — 84 of 119: ' z undo  ↵ open  e dismiss  u read  space select  o conversation  f filter  esc back'
+[PASS] en@120 hints list_undo whole-hints-only — [('z', 'undo'), ('↵', 'open'), ('e', 'dismiss'), ('u', 'read'), ('space', 'select'), ('o', 'conversation'), ('f', 'filter'), ('esc', 'back')]
+[PASS] en@120 hints list_selected fit — 87 of 119: ' z undo  ↵ open  e dismiss  u unread  space select  o conversation  f filter  esc clear'
+[PASS] en@120 hints list_selected whole-hints-only — [('z', 'undo'), ('↵', 'open'), ('e', 'dismiss'), ('u', 'unread'), ('space', 'select'), ('o', 'conversation'), ('f', 'filter'), ('esc', 'clear')]
+[PASS] en@120 hints detail_wide fit — 72 of 119: ' u unread  e dismiss  E dismiss all  o conversation  a answer  esc clear'
+[PASS] en@120 hints detail_wide whole-hints-only — [('u', 'unread'), ('e', 'dismiss'), ('E', 'dismiss all'), ('o', 'conversation'), ('a', 'answer'), ('esc', 'clear')]
+
+== cross-locale hint comparison (zh must keep >= what en keeps)
+[FAIL] @40 list_unread: zh keeps every hint en keeps — zh dropped ['u']
+[FAIL] @40 list_undo: zh keeps every hint en keeps — zh dropped ['z', 'u']
+[FAIL] @40 list_selected: zh keeps every hint en keeps — zh dropped ['z']
+[FAIL] @40 detail_wide: zh keeps every hint en keeps — zh dropped ['u']
+  @40: en={'list_unread': ['↵', 'u', 'f', 'esc'], 'list_undo': ['z', '↵', 'u', 'esc'], 'list_selected': ['z', '↵', 'f', 'esc'], 'detail_wide': ['u', 'a', 'esc']} 
+  @40: zh={'list_unread': ['↵', 'e', 'f', 'esc'], 'list_undo': ['↵', 'e', 'f', 'esc'], 'list_selected': ['↵', 'e', 'f', 'esc'], 'detail_wide': ['e', 'a', 'esc']} 
+[PASS] @80 list_unread: zh keeps every hint en keeps — zh dropped []
+[PASS] @80 list_undo: zh keeps every hint en keeps — zh dropped []
+[FAIL] @80 list_selected: zh keeps every hint en keeps — zh dropped ['u']
+[PASS] @80 detail_wide: zh keeps every hint en keeps — zh dropped []
+  @80: en={'list_unread': ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'list_undo': ['z', '↵', 'e', 'u', 'space', 'f', 'esc'], 'list_selected': ['z', '↵', 'e', 'u', 'space', 'f', 'esc'], 'detail_wide': ['u', 'e', 'E', 'o', 'a', 'esc']} 
+  @80: zh={'list_unread': ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'list_undo': ['z', '↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'list_selected': ['z', '↵', 'e', 'space', 'o', 'f', 'esc'], 'detail_wide': ['u', 'e', 'E', 'o', 'a', 'esc']} 
+[PASS] @120 list_unread: zh keeps every hint en keeps — zh dropped []
+[PASS] @120 list_undo: zh keeps every hint en keeps — zh dropped []
+[PASS] @120 list_selected: zh keeps every hint en keeps — zh dropped []
+[PASS] @120 detail_wide: zh keeps every hint en keeps — zh dropped []
+  @120: en={'list_unread': ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'list_undo': ['z', '↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'list_selected': ['z', '↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'detail_wide': ['u', 'e', 'E', 'o', 'a', 'esc']} 
+  @120: zh={'list_unread': ['↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'list_undo': ['z', '↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'list_selected': ['z', '↵', 'e', 'u', 'space', 'o', 'f', 'esc'], 'detail_wide': ['u', 'e', 'E', 'o', 'a', 'esc']} 
+
+FAILURES=['en@40 header fits', 'en@40 detail top (no_wrap) fits 40', '@40 list_unread: zh keeps every hint en keeps', '@40 list_undo: zh keeps every hint en keeps', '@40 list_selected: zh keeps every hint en keeps', '@40 detail_wide: zh keeps every hint en keeps', '@80 list_selected: zh keeps every hint en keeps']
+RESULT=FAIL
+
+===== COMMAND: .venv/bin/python _pad_cells behaviour probe =====
+_pad_cells source:
+def _pad_cells(text: str, cells: int) -> str:
+    """Right-align ``text`` in ``cells`` terminal cells (never truncating).
+
+    The complement of ``truncate_cells``: a cell budget needs cell-aware
+    padding, because a wide character occupies two columns and a combining
+    mark none.
+    """
+    return " " * max(0, cells - cell_len(text)) + text
+
+  _pad_cells('刚刚', 5) -> ' 刚刚' cells=5 exact=True overrun=0
+  _pad_cells('now', 5) -> '  now' cells=5 exact=True overrun=0
+  _pad_cells('123456789', 5) -> '123456789' cells=9 exact=False overrun=4
+  _pad_cells('Release triage', 12) -> 'Release triage' cells=14 exact=False overrun=2
+  _pad_cells('', 5) -> '     ' cells=5 exact=True overrun=0
+
+===== COMMAND: .venv/bin/python catalogue sentinel probe (chip_high patched) =====
+catalogue chip_high patched to CHIPMARK (en) / 标记X (zh-CN) in roots/isolated2
+  en: ' ← Notifications                                 ▁▃▅ CHIPMARK · update · 1 of 3 ' uses_catalogue_chip=True
+  zh-CN: ' ← 通知                                                  ▁▃▅ 标记X · 更新 · 1/3 ' uses_catalogue_chip=True
+

@@ -146,7 +146,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The EIGHT, and why each is persisted:
+    The NINE, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``CONTINUATION_AFTER_COMPACTION`` — the session's auto-continuation after a
@@ -168,6 +168,10 @@ def harness_chrome_prompts() -> tuple[str, ...]:
       limit cut a delegated CHILD's answer off mid-prose; the live run showed a
       notice instead, and the child finishes the deliverable rather than its
       parent paying a resume for the rest.
+    - ``DEGENERATE_STREAM_RECOVERY_PROMPT`` — the steer after the in-stream
+      degeneration guard cut a response that had become one passage repeated
+      verbatim; the looping message itself is dropped, so this is the only
+      record of why the conversation continues.
 
     This is the EXACT-match half of the decision, and it is no longer the whole
     of it: two fixed prompts that look like the user's words do not, because the
@@ -196,6 +200,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         CONNECTIVITY_CONTINUATION_PROMPT,
         CONTINUATION_AFTER_COMPACTION,
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
+        DEGENERATE_STREAM_RECOVERY_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         NO_PROGRESS_RECOVERY_PROMPT,
@@ -203,6 +208,9 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     )
     from local_operator.session.goal_loop import LOOP_PROMPT
 
+    # Appended LAST, never inserted: tests and hosts index this tuple
+    # (``harness_chrome_prompts()[2]``), so a new member must not shift the
+    # positions the earlier ones hold.
     return (
         LOOP_PROMPT,
         CONTINUATION_AFTER_COMPACTION,
@@ -212,6 +220,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         WORDLESS_STOP_RECOVERY_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
+        DEGENERATE_STREAM_RECOVERY_PROMPT,
     )
 
 
@@ -226,7 +235,7 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
 
     Two legs, one decision. Exact membership covers the prompts that are
-    single fixed strings (the seven listed above); a producer-side recogniser covers each family the
+    single fixed strings (the nine listed above); a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's
@@ -1599,6 +1608,21 @@ def assistant_stop_notice(
             "model refused the request (no details recorded)"
         )
         return refusal, "error"
+    if stop_reason == "length" and (provider_payload or {}).get("degenerate_stream"):
+        # THE DEGENERATION GUARD'S CUT (``harness.degeneration``), not the
+        # output limit. The loop ends a guard-cut turn as ``length`` so no
+        # surface reads it as a complete answer, but every sentence in the arm
+        # below names the OUTPUT LIMIT or BUDGET -- false here: the guard stopped
+        # the stream after ~10 KB precisely so the budget was not spent (review
+        # round 1, m2). The cut message is dropped from durable history, so this
+        # is reached by a fold over LIVE rows: an attached viewer's
+        # ``_live_history`` re-prepared mid-run, or the phone/TUI replay of the
+        # same window. ``interrupted`` is the existing, cause-neutral word for a
+        # turn that ended before it finished, and it claims nothing about why.
+        # Warning tier, like the length arm: the harness recovered the turn, it
+        # did not fail. (A properly worded, translated notice is a follow-up:
+        # a new message needs a new catalogue key in every carried locale.)
+        return "interrupted", "warning"
     if stop_reason == "length":
         # Tier `warning`, not `error`: the turn produced what it produced and
         # stopped where the limit sits, which is a statement about the reply's

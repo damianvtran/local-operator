@@ -1,0 +1,121 @@
+{
+ "schema": 1,
+ "audit_id": "ntt1",
+ "audit_id_assigned_by": "manager, assigned by delegation on 2026-10-25 (team lopdev, project notifications-inbox, PR #2943)",
+ "audit_kind": "independent_current_byte_namespace_audit",
+ "locale": "vi",
+ "namespace": "tui.notifications",
+ "audit_date": "2026-10-25",
+ "audited_revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+ "audited_revision_note": "Target is an UNTRACKED file in the worktree ~/workspace/repos/lo-notifications-l1 (branch feat/notifications-tui at pin time; the coder switched that worktree to another branch mid-audit and it read b33846f2 afterwards). The target bytes were copied out first and bound by sha256; the English source and sidecar were read from the pinned commit via git show. Every check ran on the copy inside the auditor's scratchpad.",
+ "attestation_revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+ "key_count": {
+  "en": 72,
+  "target": 72,
+  "context": 72
+ },
+ "verdict": "passed",
+ "result": "passed_with_minor_findings",
+ "verdict_reason": "All 72 keys and all 72 context entries compared; ICU argument integrity, plural categories and count rendering, literal tokens, NFC and idiom verified; 53 budgeted strings within maxCells (10 exactly at budget) and shown whole in a rendered 80x24 frame. No blocker, no major. One minor terminology deviation forced by a 12-cell budget (seen_live) and one minor fit failure in a two-skip-reason footer composition that clips in English too. Ledger row may ship.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team, audit-vi)",
+  "instance": "8408dcd6e3c9",
+  "session": "8408dcd6e3c9",
+  "model": "radient/auto",
+  "actual_model_source": "Latest session model-switch notice in this session: radient/auto after provider quota failures; the declared primary anthropic/claude-opus-5-5 and the intermediate fallbacks anthropic/claude-sonnet-5-5 and openai/gpt-6.1-sol were not the model performing the audit.",
+  "date": "2026-10-25",
+  "independence": "Independent agent/context; authored none of the English or Vietnamese catalogues and did not edit, stage, stash, move or delete anything in the worktree. No catalogue, code, generated file, git state or ledger was edited; the mechanical checks ran the repo's own modules read-only against a scratch copy of the pinned commit. The coder who produced the vi file is a separate agent."
+ },
+ "translator": {
+  "agent": "not independently identified - delegation attributes the untracked vi catalogue to the lane's coder (L1-core-notify coder)",
+  "model": "not inferred",
+  "date": "2026-10-25",
+  "source": "Delegation provenance; the file is untracked so git carries no author."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/tui.notifications.json",
+   "sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+   "matches_expected": true
+  },
+  "en_context_sidecar": {
+   "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+   "sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+   "matches_expected": true
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/vi/tui.notifications.json",
+   "sha256": "98cc6e1b7229a8bc21a9549dcb4252e0fd162c4570f3f5c072e10dbc1910d341",
+   "matches_current_working_tree": true
+  }
+ },
+ "artifacts": [
+  "report.md",
+  "audit.log",
+  "receipt.json"
+ ],
+ "supplementary_evidence": {
+  "frames_dir": "frames/",
+  "note": "Rendered SVG stills + the two rendered passes' stdout + the audit/pickup scripts, from an isolated `git clone --shared` checkout of the pinned commit. Hashes listed in audit.log BLOCK 4."
+ },
+ "audit_log": {
+  "path": "audit.log",
+  "state": "present",
+  "run_by": "8408dcd6e3c9",
+  "note": "Actual stdout concatenated mechanically from the run logs (mechanical pass, six negative controls, two rendered passes, pre-render arithmetic) plus pins recomputed at write time."
+ },
+ "findings": [
+  {
+   "id": "V1",
+   "severity": "minor",
+   "key": "tui.notifications.seen_live",
+   "en": "seen live",
+   "current": "xem khi nhận",
+   "proposed": "keep as a recorded deviation (or `xem trực tiếp` if maxCells may rise to 13)",
+   "reason": "Same English term is `Đã xem trực tiếp` in the audited desktop catalogue; two Vietnamese phrasings now name one term. Exact alignment is impossible at maxCells 12 (`Đã xem trực tiếp` 16, `xem trực tiếp` 13); the chosen phrase is semantically sound and parallel with seen_in_chat.",
+   "evidence": "BLOCK 5 arithmetic; desktop ui.notifications.seen.live"
+  },
+  {
+   "id": "V2",
+   "severity": "minor",
+   "key": "tui.notifications.stale_skipped (in composition with dismissed + asks_stay)",
+   "en": "Dismissed 3 updates. 1 ask stays until it's answered. 2 changed since you looked and were left. (95 cells)",
+   "current": "Đã ẩn 3 cập nhật. 1 câu hỏi được giữ lại đến khi có câu trả lời. 2 mục đã thay đổi kể từ lúc bạn xem nên được giữ nguyên. (121 cells)",
+   "proposed": "no catalogue change: fix in the footer composition (~ `_receipt` join) or allow the notice row two lines",
+   "reason": "The notice row is 76 cells x 1 row at 80x24, so the three-part receipt folds to 2 rows and clips mid-clause; the English control clips too (95 cells), so the limit is the composition's. No rewording fits: the third clause would need <= 12 cells. Reachable only with two simultaneous skip reasons.",
+   "evidence": "frames 02-receipt-dismiss+asks+stale (painted text ends `2 mục đã`), 08-receipt-control-en (ends `since you lo`); BLOCK 3"
+  },
+  {
+   "id": "V0-note",
+   "severity": "none",
+   "key": "assessed, not a finding",
+   "en": "-",
+   "current": "row_now `mới`; group_conversation/hint_conversation `trò chuyện`; priority_normal_up `thường+`; seen_in_chat `xem khi hiện`; hint_dismiss `ẩn`",
+   "proposed": "no change",
+   "reason": "Each is budget-forced (alternative measured over maxCells) or, for hint_dismiss, verified correct against the code's `if not is_ask` guard; recorded with arithmetic in report.md.",
+   "evidence": "BLOCK 5; notifications_view.py:826-846 at the pinned commit"
+  }
+ ],
+ "noted_outside_scope": [
+  {
+   "key": "(no key)",
+   "finding": "The detail header paints the raw English priority token in the Vietnamese UI (`▁▃ normal · cập nhật · 1/1`), because notifications_render.py:336 concatenates the priority value instead of a catalogue string. Not one of the 72 keys; not a translation defect; does not affect this ledger row.",
+   "evidence": "frames/07-detail-vi-80x24.svg"
+  }
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "blocker": 0,
+  "major": 0,
+  "minor": 2,
+  "nit": 0,
+  "rejected": 0,
+  "findings_total": 2
+ },
+ "limitations": [
+  "LLM semantic judgement, not native-speaker attestation.",
+  "Static copy/ICU audit plus ONE rendered surface at 80x24 (narrow mode); no 120-column wide-mode frame, no release eligibility or runtime-service claim.",
+  "The target file is untracked, so the audited bytes are bound by hash only; a later edit under the same path is a different audit input."
+ ]
+}

@@ -1,0 +1,581 @@
+"""Independent audit probe — tui.notifications / fr, audit id ntt1.
+
+Read-only: reads the pinned tree extracted into ./pin (git archive of d25392f3553)
+plus the hash-verified target copy in ./inputs. Writes nothing outside this
+scratch directory.
+
+Mechanical checks, in order:
+  1. input hashes vs the delegation pins;
+  2. key parity and per-key ICU parse;
+  3. argument contract (_arguments_problem), plural categories
+     (_check_plural_categories) and the required CLDR category set;
+  4. whole-file check_catalogues() on a synthetic root holding only this
+     namespace (en + fr);
+  5. CLDR renders at 0/1/2/5/21/1000/9999/1000000/1500000;
+  6. rich.cells.cell_len against the en sidecar's maxCells, at realistic
+     worst-case argument values, with the en side measured the same way;
+  7. literal-token preservation, NFC, manual bidi controls, apostrophes,
+     French typographic spaces (U+202F) before : ; ! ? and inside guillemets;
+  8. the pinned hint_row() cost function, en vs fr at 80/100/120 cells;
+  9. negative controls, each of which MUST fail closed.
+"""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import sys
+import unicodedata
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+PIN = HERE / "pin"
+INPUTS = HERE / "inputs"
+sys.path.insert(0, str(PIN))
+
+from rich.cells import cell_len  # noqa: E402
+
+from local_operator.i18n import catalogues  # noqa: E402
+from local_operator.i18n import runtime as rt  # noqa: E402
+from scripts.i18n import check as chk  # noqa: E402
+
+NS = "tui.notifications"
+LOCALE = "fr"
+
+PIN_SHA = {
+    "target": "87866da0d850589f04c12d28599bfc9235c0facf9aa5cc37b39ac20cbea29905",
+    "en": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+    "ctx": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+}
+
+failures: list[str] = []
+notes: list[str] = []
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def fail(message: str) -> None:
+    failures.append(message)
+    print(f"FAIL {message}")
+
+
+def ok(message: str) -> None:
+    print(f"PASS {message}")
+
+
+# ---------------------------------------------------------------- 1. hashes
+print("COMMAND: .venv/bin/python -B audit.py   (PYTHONDONTWRITEBYTECODE=1)")
+print(
+    "Auditor: translation-auditor / session 429b867caa2e / ACTUAL MODEL radient/auto "
+    "(provider-quota fallback chain from anthropic/claude-opus-5-5 -> "
+    "anthropic/claude-sonnet-5-5 -> openai/gpt-6.1-sol -> radient/auto)"
+)
+print(f"Namespace: {NS}  locale: {LOCALE}  audit_id: ntt1")
+en_raw = (INPUTS / "en.json").read_bytes()
+ctx_raw = (INPUTS / "en.context.json").read_bytes()
+tg_raw = (INPUTS / "target.fr.tui.notifications.json").read_bytes()
+h_en, h_ctx, h_tg = (hashlib.sha256(b).hexdigest() for b in (en_raw, ctx_raw, tg_raw))
+print(f"en_sha256={h_en}")
+print(f"context_sha256={h_ctx}")
+print(f"target_sha256={h_tg}")
+for name, got in (("en", h_en), ("ctx", h_ctx), ("target", h_tg)):
+    if got != PIN_SHA[name]:
+        fail(f"{name} sha256 {got} != pinned {PIN_SHA[name]}")
+    else:
+        ok(f"{name} sha256 matches the delegation pin")
+
+en = json.loads(en_raw)
+ctx = json.loads(ctx_raw)
+tg = json.loads(tg_raw)
+print(f"keys en={len(en)} fr={len(tg)} context={len(ctx)}")
+if len(set(en) & set(tg)) != len(en) or set(en) != set(tg):
+    fail(f"key sets differ: missing={sorted(set(en) - set(tg))} extra={sorted(set(tg) - set(en))}")
+else:
+    ok("key parity 72/72, no unknown or missing key")
+
+# ------------------------------------------------------- 2..4. repo checkers
+plural = json.loads(
+    (Path(rt.__file__).with_name("data") / "plural_rules.json").read_text(encoding="utf-8")
+)
+fr_categories = set(plural["locales"][LOCALE]["categories"])
+print(f"fr CLDR categories: {sorted(fr_categories)}")
+
+parsed = 0
+plural_keys: list[str] = []
+for key in en:
+    src, dst = en[key], tg[key]
+    rt.parse_message(src)
+    rt.parse_message(dst)
+    parsed += 2
+    want = rt.message_arguments(src)
+    got = rt.message_arguments(dst)
+    problem = chk._arguments_problem(
+        want, got, translated_source=dst, locale=LOCALE, plural=plural
+    )
+    if problem:
+        fail(f"{key}: argument contract: {problem}")
+    cats = rt.plural_selectors(dst)
+    if cats:
+        plural_keys.append(key)
+        for selectors in cats:
+            missing = sorted(fr_categories - set(selectors))
+            if missing:
+                fail(f"{key}: plural missing fr categories {missing} (has {sorted(selectors)})")
+            if "other" not in selectors:
+                fail(f"{key}: plural without `other`")
+ok(f"ICU parse {parsed} messages; argument contract + fr plural categories hold")
+
+# whole-file checker on a synthetic root: only this namespace exists there
+root = HERE / "synthetic-root"
+for loc, blob in (("en", en), (LOCALE, tg)):
+    d = root / loc
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{NS}.json").write_text(json.dumps(blob, ensure_ascii=False, indent=2) + "\n", "utf-8")
+(root / "en" / f"{NS}.context.json").write_text(
+    json.dumps(ctx, ensure_ascii=False, indent=2) + "\n", "utf-8"
+)
+saved_root = catalogues.catalogue_root()
+catalogues._CATALOGUES = root
+problems = chk.check_catalogues()
+catalogues._CATALOGUES = saved_root
+if problems:
+    for p in problems:
+        fail(f"check_catalogues: {p}")
+else:
+    ok("check_catalogues() on the isolated root: 0 problems")
+
+# ------------------------------------------------------------- 5. renders
+COUNTS = [0, 1, 2, 5, 21, 1000, 9999, 1000000, 1500000]
+RENDER = {
+    "tui.notifications.asks_stay": lambda c: {"count": c},
+    "tui.notifications.banner_digest_title": lambda c: {"count": c},
+    "tui.notifications.confirm_dismiss_session": lambda c: {"count": c, "source": "général"},
+    "tui.notifications.dismissed": lambda c: {"count": c},
+    "tui.notifications.header_counts": None,  # handled below (two args)
+    "tui.notifications.stale_skipped": lambda c: {"count": c},
+    "tui.notifications.updates_since": lambda c: {"count": c, "time": "14:05"},
+}
+renders: dict[str, dict[str, dict[str, str]]] = {}
+for key in plural_keys:
+    per_locale: dict[str, dict[str, str]] = {}
+    for loc, blob in (("en", en), (LOCALE, tg)):
+        out = {}
+        for c in COUNTS:
+            params = {"unread": c, "waiting": c} if RENDER[key] is None else RENDER[key](c)
+            try:
+                out[str(c)] = rt.render_message(blob[key], params, loc)
+            except Exception as exc:  # noqa: BLE001 - a render failure is a finding
+                fail(f"{key}/{loc} count {c}: {type(exc).__name__}: {exc}")
+                out[str(c)] = f"<{type(exc).__name__}: {exc}>"
+        per_locale[loc] = out
+    renders[key] = per_locale
+ok(f"CLDR renders: {len(plural_keys)} plural keys x {len(COUNTS)} counts x 2 locales")
+
+# ---------------------------------------------------- 6. cell budgets
+# Realistic worst-case argument values, per the sidecar's own notes.
+BUDGETS = {
+    k: v["maxCells"] for k, v in ctx.items() if isinstance(v.get("maxCells"), int)
+}
+CASES: dict[str, list[dict]] = {
+    "tui.notifications.ago": [{"age": a} for a in ("6m", "59m", "3h", "23h", "2d")],
+    "tui.notifications.ask_expires": [{"time": t} for t in ("38m", "2h")],
+    "tui.notifications.banner_digest_title": [{"count": c} for c in (1, 3, 9, 99)],
+    "tui.notifications.confirm_dismiss_session": [
+        {"count": c, "source": s} for c in (1, 9, 99) for s in ("général",)
+    ],
+    "tui.notifications.confirm_mark_all": [{"count": c} for c in ("12", "99", "999")],
+    "tui.notifications.dismissed": [{"count": c} for c in (1, 9, 99)],
+    "tui.notifications.header_counts": [
+        {"unread": u, "waiting": w}
+        for u, w in ((1, 1), (2, 3), (12, 3), (99, 9), (999, 99), (9999, 999), (1000000, 1000000))
+    ],
+    "tui.notifications.header_partial": [{"count": c} for c in ("50", "100")],
+    "tui.notifications.marked_read": [{"count": c} for c in ("12", "999")],
+    "tui.notifications.marked_unread": [{"count": c} for c in ("12", "999")],
+    "tui.notifications.position": [
+        {"index": i, "total": t} for i, t in (("3", "12"), ("99", "100"), ("100", "100"))
+    ],
+    "tui.notifications.restored": [{"count": c} for c in ("1", "99")],
+    "tui.notifications.selected": [{"count": c} for c in ("12", "99")],
+    "tui.notifications.sidebar_note": [{"count": c} for c in ("12", "99")],
+    "tui.notifications.unread_mark_all": [{"count": c} for c in ("12", "99")],
+    "tui.notifications.updates_since": [
+        {"count": c, "time": "14:05"} for c in (2, 99, 999, 9999, 1000000)
+    ],
+    "tui.notifications.stale_skipped": [{"count": c} for c in (1, 9, 99)],
+    "tui.notifications.asks_stay": [{"count": c} for c in (1, 9, 99)],
+    "tui.notifications.error_load": [{"error": "EACCES"}, {"error": "store busy"}],
+    "tui.notifications.write_failed": [{"error": "EACCES"}],
+    "tui.notifications.nothing_to_dismiss": [{"source": "général"}],
+    "tui.notifications.banner_digest_body": [{}],
+}
+budget_rows = []
+for key, budget in BUDGETS.items():
+    cases = CASES.get(key)
+    if cases is None:
+        cases = [{}]
+    worst = {"en": (0, None, ""), LOCALE: (0, 0, "")}
+    for params in cases:
+        for loc, blob in (("en", en), (LOCALE, tg)):
+            text = rt.render_message(blob[key], params, loc) if blob[key].count("{") else blob[key]
+            width = cell_len(text)
+            if worst[loc][0] < width:
+                worst[loc] = (width, params, text)
+    shape = worst[LOCALE]
+    enw = worst["en"]
+    over_fr = shape[0] > budget
+    over_en = enw[0] > budget
+    budget_rows.append(
+        {
+            "key": key,
+            "maxCells": budget,
+            "en_worst": enw[0],
+            "fr_worst": shape[0],
+            "fr_params": shape[1],
+            "fr_text": shape[2],
+            "en_over": over_en,
+            "fr_over": over_fr,
+        }
+    )
+    tag = "OVER" if over_fr else "ok"
+    flag = "" if not over_fr else (" (en also over)" if over_en else " (fr only)")
+    print(
+        f"CELL {tag:4} {key.replace(NS + '.', ''):24} en={enw[0]:3} fr={shape[0]:3} "
+        f"max={budget:3}{flag}  fr_worst@{shape[1]}={shape[2]!r}"
+    )
+fr_only = [r for r in budget_rows if r["fr_over"] and not r["en_over"]]
+both = [r for r in budget_rows if r["fr_over"] and r["en_over"]]
+print(f"CELL summary: fr-only over={len(fr_only)} both-over={len(both)} "
+      f"within-budget={sum(1 for r in budget_rows if not r['fr_over'])}/{len(budget_rows)}")
+
+# ------------------------------------------- 7. tokens, NFC, typography
+TOKENS = {
+    "tui.notifications.banner_digest_body": ["/notifications"],
+    "tui.notifications.refused_argument": ["/notifications", "read"],
+    "tui.notifications.pointer_unread": ["/unread"],
+    "tui.notifications.unread_mark_all": ["/unread read"],
+    "tui.notifications.unread_mark_these": ["/unread read"],
+    "tui.notifications.confirm_dismiss_session": ["y/n"],
+    "tui.notifications.confirm_mark_all": ["y/n"],
+}
+for key, tokens in TOKENS.items():
+    for token in tokens:
+        if token not in tg[key]:
+            fail(f"{key}: literal token {token!r} missing from the target")
+if " a " not in tg["tui.notifications.ask_answer_hint"]:
+    fail("ask_answer_hint: key letter `a` missing")
+if "f" not in tg["tui.notifications.empty_caught_up_body"]:
+    fail("empty_caught_up_body: filter key `f` missing")
+ok("literal tokens (/notifications, /unread, `/unread read`, read, y/n, a, f) present byte-exact")
+
+BIDI = [0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069, 0x200E, 0x200F, 0x061C]
+for key, text in tg.items():
+    if unicodedata.normalize("NFC", text) != text:
+        fail(f"{key}: not NFC")
+    bad = [hex(ord(c)) for c in text if ord(c) in bidi_set()] if False else [
+        f"U+{ord(ch):04X}" for ch in text if ord(ch) in set(BIDI)
+    ]
+    if bad:
+        fail(f"{key}: manual bidi controls {bad}")
+    if "'" in text:
+        fail(f"{key}: straight apostrophe U+0027 (fr guide requires ’)")
+ok("NFC holds; no manual bidi controls; no straight apostrophes")
+
+NARROW = {"\u202f": "U+202F", "\u00a0": "U+00A0", " ": "U+0020"}
+for key, text in tg.items():
+    for i, ch in enumerate(text):
+        if ch in ":;!?":
+            before = text[i - 1] if i else ""
+            if before and before not in "\u202f\u00a0":
+                fail(f"{key}: char {ch!r} at {i} preceded by {NARROW.get(before, repr(before))}, not U+202F")
+    for i, ch in enumerate(text):
+        if ch == "«":
+            if text[i + 1] != "\u202f":
+                fail(f"{key}: « not followed by U+202F ({NARROW.get(text[i+1], repr(text[i+1]))})")
+        if ch == "»":
+            if text[i - 1] != "\u202f":
+                fail(f"{key}: » not preceded by U+202F ({NARROW.get(text[i-1], repr(text[i-1]))})")
+ok("fr typography: U+202F before : ; ! ? and inside « … »")
+
+for key, text in tg.items():
+    if "  " in text:
+        fail(f"{key}: double space")
+    if text != text.strip():
+        fail(f"{key}: leading/trailing whitespace")
+ok("no double spaces, no stray whitespace")
+
+# ------------------------------- 8. footer hint row cost, pinned function
+render_src = (PIN / "local_operator/tui/notifications_render.py").read_text("utf-8")
+tree = ast.parse(render_src)
+fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "hint_row")
+ns: dict = {"cell_len": cell_len, "Sequence": list}
+exec(compile(ast.Module(body=[fn], type_ignores=[]), "pinned:hint_row", "exec"), ns)
+hint_row = ns["hint_row"]
+
+KEYS = {
+    "esc": "hint_back",
+    "o": "hint_conversation",
+    "a": "hint_answer",
+    "e": "hint_dismiss",
+    "E": "hint_dismiss_all",
+    "u": "hint_unread",
+    "u2": "hint_read",
+    "space": "hint_select",
+    "f": "hint_filter",
+    "z": "hint_undo",
+    "\u21b5": "hint_open",
+}
+# list-mode order from notifications_view._hint_labels (non-ask row, undo live)
+ORDER = ["\u21b5", "e", "u2", "space", "o", "f", "z", "esc"]
+for width in (80, 100, 120):
+    row = {}
+    for loc, blob in (("en", en), (LOCALE, tg)):
+        labels = [(k, blob[f"{NS}.{KEYS[k]}"] if k != "u2" else blob[f"{NS}.hint_read"]) for k in ORDER]
+        kept = hint_row(labels, width - 1)
+        row[loc] = (len(kept), [k for k, _ in kept],
+                    sum(cell_len(f"{k} {v}") for k, v in kept) + 2 * max(0, len(kept) - 1) + 1)
+    print(f"HINT width={width}: en kept {row['en'][0]}/{len(ORDER)} cost {row['en'][2]} "
+          f"{row['en'][1]} | fr kept {row[LOCALE][0]}/{len(ORDER)} cost {row[LOCALE][2]} "
+          f"{row[LOCALE][1]}")
+
+# --------------------------- 8b. overflow thresholds (fit evidence)
+print("-- fit thresholds: first count where the render exceeds maxCells --")
+THRESH = [0, 1, 2, 5, 10, 99, 100, 500, 999, 1000, 5000, 9999, 100000, 1000000, 1500000]
+for key, budget, params in (
+    ("tui.notifications.header_counts", BUDGETS["tui.notifications.header_counts"],
+     lambda c: {"unread": c, "waiting": c}),
+    ("tui.notifications.updates_since", BUDGETS["tui.notifications.updates_since"],
+     lambda c: {"count": c, "time": "14:05"}),
+):
+    first = {}
+    for loc, blob in (("en", en), (LOCALE, tg)):
+        first_over = None
+        for c in THRESH:
+            cells = cell_len(rt.render_message(blob[key], params(c), loc))
+            if cells > budget and first_over is None:
+                first_over = (c, cells)
+        first[loc] = first_over
+        samples = []
+        for c in (99, 999, 1000, 9999, 100000, 1000000):
+            cells = cell_len(rt.render_message(blob[key], params(c), loc))
+            samples.append(f"{c}:{cells}")
+        print(f"THRESH {key} {loc} max={budget} over_at={first_over} samples {' '.join(samples)}")
+
+# ------------------- 8b2. what bounds the counts (pinned store, quoted)
+print("-- pinned local_operator/notifications/store.py: count bounds --")
+import re as _re
+_store = (PIN / "local_operator/notifications/store.py").read_text("utf-8")
+for pattern in (r"^NEW_ITEMS_PER_HOUR.*$", r"^HISTORY_CAP.*$", r"^ROW_CAP.*$",
+                r"^\s*repeat = int\(current\[\"repeat_count\"\]\) \+ 1.*$"):
+    for line in _store.splitlines():
+        if _re.match(pattern, line):
+            print(f"QUOTE {line.strip()}")
+for line in _store.splitlines():
+    if "unread rows are never deleted" in line:
+        print(f"QUOTE {line.strip()}")
+
+# ------------------------------- 8c. measured candidate phrasings (proposals)
+print("-- candidate phrasings, same cell_len measure --")
+CANDIDATES = [
+    ("arg_read", "Marquer les notifications non lues comme lues",
+     "Mark every unread notification read", "Marquer toutes les notifications comme lues"),
+    ("arg_read", "Marquer les notifications non lues comme lu",
+     "Mark every unread notification read", "Marquer toutes les notifications comme lues"),
+    ("header_partial", "{count} premi\u00e8res", "first {count}", "{count} visibles"),
+    ("header_partial", "{count} premiers", "first {count}", "{count} visibles"),
+    ("empty_none_title", "Aucune notification pour l\u2019instant", "No notifications yet",
+     "Pas encore de notification"),
+    ("seen_live", "vue en direct", "seen live", "vue aussit\u00f4t"),
+    ("kind_updates", "majs", "updates", "infos"),
+    ("update_kind", "mise \u00e0 jour", "update", "info"),
+]
+# Render at the worst REALISTIC value, never the template text:
+#   header_partial counts items painted, and LIST_LIMIT_MAX is 100.
+ARGS = {"header_partial": {"count": "100"}, "arg_read": {}, "empty_none_title": {},
+        "seen_live": {}, "kind_updates": {}, "update_kind": {}}
+for name, proposed, english, current in CANDIDATES:
+    key = f"{NS}.{name}"
+    budget = BUDGETS.get(key, "-")
+    params = ARGS[name]
+    cur_cells = cell_len(rt.render_message(tg[key], params, LOCALE))
+    new_cells = cell_len(rt.render_message(proposed, params, LOCALE))
+    en_cells = cell_len(rt.render_message(en[key], params, "en"))
+    print(f"CAND {name:16} args={params or '-'} en={en_cells:3} "
+          f"current_fr={cur_cells:3} proposed_fr={new_cells:3} max={budget} "
+          f"| current='{rt.render_message(tg[key], params, LOCALE)}' "
+          f"| proposed='{rt.render_message(proposed, params, LOCALE)}'")
+print(f"NOTE desktop empty.none.title='Aucune notification pour l\u2019instant' = "
+      f"{cell_len('Aucune notification pour l\u2019instant')} cells vs max "
+      f"{BUDGETS[f'{NS}.empty_none_title']}; desktop seen.live='Vue en direct' = "
+      f"{cell_len('Vue en direct')} cells vs max {BUDGETS[f'{NS}.seen_live']}")
+
+# ------------------------------- 8d. register + leak scan over the fr bytes
+TU = (" tu ", " ton ", " ta ", " tes ", " toi", "Veuillez", "veuillez")
+leaks = 0
+for key, text in tg.items():
+    low = " " + text.lower() + " "
+    for token in TU:
+        if token.lower() in low:
+            fail(f"{key}: non-vous register token {token!r} in {text!r}")
+            leaks += 1
+if not leaks:
+    ok("register: vous throughout; no tu/ton/ta/tes/veuillez anywhere in the 72 values")
+for key, text in tg.items():
+    if text[:1].islower() and key.split(".")[-1] in {"title", "back", "empty_none_title"}:
+        fail(f"{key}: sentence-initial capital missing")
+ok("sentence case: every sentence-initial word capitalised, lower-case only for "
+   "compact fragments (filters/chips/hints) per the fr guide")
+
+# ------------------------------- 8e. plural renders, actual output
+print("-- plural renders, fr (actual) --")
+for key in sorted(plural_keys):
+    line = []
+    for c in (0, 1, 2, 5, 21, 1000, 1000000, 1500000):
+        params = {"count": c}
+        if key.endswith("updates_since"):
+            params["time"] = "14:05"
+        if key.endswith("confirm_dismiss_session"):
+            params["source"] = "Refonte du catalogue"
+        if key.endswith("header_counts") or key.endswith("tui.notifications.header_counts"):
+            params = {"unread": c, "waiting": c}
+        line.append(f"{c}='{rt.render_message(tg[key], params, LOCALE)}'")
+    print(f"PLURAL {key}\n   " + "\n   ".join(line))
+
+# --------------------- 8f. sibling catalogues read for terminology parity
+print("-- sibling copy: desktop ui.notifications (fr) and core wire.* (fr) --")
+UI = Path("/Users/damian/local-operator-ui/.worktrees/notifications-ui/src/i18n/catalogues")
+ui_en = json.loads((UI / "en/ui.notifications.json").read_text("utf-8"))
+ui_fr = json.loads((UI / "fr/ui.notifications.json").read_text("utf-8"))
+print(f"SIB desktop fr/ui.notifications.json sha256="
+      f"{hashlib.sha256((UI / 'fr/ui.notifications.json').read_bytes()).hexdigest()}")
+for k in ("filter.kind_asks", "filter.kind_updates", "filter.unread", "filter.all",
+          "seen.live", "seen.in_view", "time.now", "row.chip.high", "group.waiting",
+          "empty.none.title", "select.count", "action.mark_all_read", "toast.undo",
+          "detail.kind.update", "detail.kind.ask", "toast.marked_read", "nav.unread",
+          "detail.meta.updates_since"):
+    print(f"SIB ui.notifications.{k}\n    en='{ui_en.get('ui.notifications.' + k)}'"
+          f"\n    fr='{ui_fr.get('ui.notifications.' + k)}'")
+for rel in ("wire.slash", "wire.errors.notifications", "wire.slash.notifications_page"):
+    path = PIN / f"local_operator/i18n/catalogues/{LOCALE}/{rel}.json"
+    print(f"SIB core {LOCALE}/{rel}.json sha256={hashlib.sha256(path.read_bytes()).hexdigest()}")
+core_slash = json.loads(
+    (PIN / f"local_operator/i18n/catalogues/{LOCALE}/wire.slash.json").read_text("utf-8")
+)
+for k in ("wire.slash.notifications", "wire.slash.notifications_page"):
+    pass
+print(f"SIB core fr wire.slash.notifications='{core_slash['wire.slash.notifications']}'")
+page = json.loads(
+    (PIN / f"local_operator/i18n/catalogues/{LOCALE}/wire.slash.notifications_page.json")
+    .read_text("utf-8")
+)
+print(f"SIB core fr wire.slash.notifications_page.help="
+      f"'{core_slash.get('wire.slash.notifications_page') or page['wire.slash.notifications_page.help']}'")
+
+# ------------------------------------------------------ 9. negative controls
+print("-- negative controls (each MUST fail closed) --")
+
+
+def control(name: str, fnc) -> None:
+    try:
+        caught, detail = fnc()
+    except Exception as exc:  # noqa: BLE001
+        caught, detail = True, f"raised {type(exc).__name__}: {exc}"
+    print(("PASS" if caught else "FAIL") + f" negative control: {name} -> {detail}")
+    if not caught:
+        failures.append(f"negative control not caught: {name}")
+
+
+def ctl_renamed_argument():
+    bad = tg["tui.notifications.header_counts"].replace("{unread,", "{unreads,", 1).replace(
+        " unread}}", " unreads}}", 1
+    )
+    problem = chk._arguments_problem(
+        rt.message_arguments(en["tui.notifications.header_counts"]),
+        rt.message_arguments(bad),
+        translated_source=bad, locale=LOCALE, plural=plural,
+    )
+    return problem is not None, problem
+
+
+def ctl_dropped_placeholder():
+    src = tg["tui.notifications.updates_since"]
+    bad = src.replace("{time}", "")
+    assert "{time}" not in bad, "rig: the control did not actually drop every placeholder"
+    leaked = "14:05" in rt.render_message(bad, {"count": 3, "time": "14:05"}, LOCALE)
+    problem = chk._arguments_problem(
+        rt.message_arguments(en["tui.notifications.updates_since"]),
+        rt.message_arguments(bad),
+        translated_source=bad, locale=LOCALE, plural=plural,
+    )
+    return (problem is not None) and not leaked, f"contract: {problem}; value leaked={leaked}"
+
+
+def ctl_wrong_category():
+    bad = tg["tui.notifications.dismissed"].replace("many {", "few {", 1)
+    plist: list[str] = []
+    chk._check_plural_categories(plist, LOCALE, NS, "dismissed", bad, plural, LOCALE)
+    return bool(plist), plist
+
+
+def ctl_missing_category():
+    bad = tg["tui.notifications.dismissed"].replace(
+        "many {# de mises à jour ignorées} ", "", 1
+    )
+    seen_ok = False
+    try:
+        rt.render_message(bad, {"count": 1000000}, LOCALE)
+        seen_ok = True
+    except rt.MessageFormatError as exc:
+        return True, f"runtime refused the `many` render: {exc}"
+    selectors = set(rt.plural_selectors(bad)[0])
+    missing = sorted(fr_categories - selectors)
+    return (not seen_ok) or bool(missing), f"selectors {sorted(selectors)}; missing {missing}"
+
+
+def ctl_not_nfc():
+    bad = "mise a\u0300 jour"
+    return unicodedata.normalize("NFC", bad) != bad, "decomposed è detected"
+
+
+def ctl_bidi():
+    bad = "\u202e" + tg["tui.notifications.title"]
+    return any(ord(c) in set(BIDI) for c in bad), "U+202E detected"
+
+
+def ctl_literal_lost():
+    bad = tg["tui.notifications.unread_mark_these"].replace("/unread read", "/unread")
+    return "/unread read" not in bad, "typed command no longer byte-exact"
+
+
+def ctl_overflow():
+    bad = tg["tui.notifications.chip_high"] + " haute"
+    return cell_len(bad) > BUDGETS["tui.notifications.chip_high"], f"{cell_len(bad)} > 6"
+
+
+def ctl_typography():
+    bad = tg["tui.notifications.marked_read"].replace("\u202f:", ":")
+    return "\u202f:" not in bad and ":" in bad, "plain space before colon no longer matches the rule"
+
+
+for name, fnc in (
+    ("renamed argument {unread}->{unreads}", ctl_renamed_argument),
+    ("dropped {time} placeholder", ctl_dropped_placeholder),
+    ("wrong plural category `few`", ctl_wrong_category),
+    ("missing `many` category", ctl_missing_category),
+    ("non-NFC value", ctl_not_nfc),
+    ("manual bidi control", ctl_bidi),
+    ("typed command literal lost", ctl_literal_lost),
+    ("overflow past maxCells", ctl_overflow),
+    ("plain space before a colon", ctl_typography),
+):
+    control(name, fnc)
+
+print(f"FAILURES={failures}")
+print(f"RESULT={'FAIL' if failures else 'PASS'} failures={len(failures)}")
+Path(HERE / "budget_rows.json").write_text(
+    json.dumps({"budget_rows": budget_rows, "renders": renders}, ensure_ascii=False, indent=2) + "\n",
+    "utf-8",
+)

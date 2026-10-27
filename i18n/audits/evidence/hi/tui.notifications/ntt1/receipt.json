@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "audit_id": "ntt1",
+  "locale": "hi",
+  "namespace": "tui.notifications",
+  "record": "i18n/audits/evidence/hi/tui.notifications/ntt1/record.json",
+  "bundle_path_local": "~/.local-operator/sessions/d184e3a74566/scratchpad/tui-audit/hi/tui.notifications/ntt1",
+  "verdict": "passed",
+  "provenance": "Original evidence written by independent translation-auditor instance d184e3a74566 (lopdev team, tui-audit-hi), latest serving model radient/auto after provider-quota fallbacks, on 2026-10-25; every PASS/FAIL line in audit.log and render.log is actual captured stdout, not reconstructed notes.",
+  "target_sha256": "8d503495a5aed2562306b7c06ed15eac6bbb5486c2717bb10bbda65e3303fc1e",
+  "source_sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+  "context_sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+  "key_count": 72,
+  "hashes": {
+    "record.json": "0903f9d571547a8b0deb26226ff644128a212b87669d0c3053c07208ac7c885e",
+    "report.md": "e66bb964dfbd77e93facb17d03c93dd1801e209aef56c8faeb9e8f1410a42372",
+    "audit.log": "9d151e1c43006922a9df34e9009b540177f69da1a0e83d03d6d5e42b56e9ed4e",
+    "render.log": "ad5ea1245b4cdff3da2915944929db396efe3275825e1aca6cda48901670d29f"
+  }
+}

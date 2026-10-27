@@ -23,6 +23,10 @@ import type {
 	LibraryChatLink,
 	LibraryListing,
 	LibraryTag,
+	NotificationDetail,
+	NotificationsPage,
+	NotificationsReceipt,
+	NotificationToken,
 	SessionSummary,
 	SessionTagsResponse,
 	SlashCommand,
@@ -553,6 +557,11 @@ export function pairingStatus(deviceId: string): Promise<{
 	    `GateSheet`/`PairScreen`: false between `lop operator init` and
 	    `lop operator install`, which is the state the old success box lied about. */
 	authority_ready?: boolean;
+	/** The installed operator key's public point (base64url SPKI) that signed
+	    `certificate`, so the phone could verify its own certificate rather than
+	    trust this answer. Empty when the installed anchor is not the signer (a
+	    superseded or missing anchor). Not read by the phone yet. */
+	operator_spki?: string;
 }> {
 	return request(`/api/pair/${encodeURIComponent(deviceId)}`);
 }
@@ -1028,4 +1037,49 @@ export function libraryThumbUrl(assetId: string, width = 480): string {
     no-waveform state, which the player draws as a flat scrubber. */
 export function libraryWaveformUrl(assetId: string): string {
 	return `/api/library/assets/${encodeURIComponent(assetId)}/waveform`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Notifications inbox (#2939's relay routes, contract §5.4)            */
+/* ------------------------------------------------------------------ */
+
+/** One reel page. `through_seq` pins later pages to the FIRST page's
+    `high_water`, so a bulk write over every loaded page names one consistent
+    read rather than a moving one. */
+export function getNotifications(query: {
+	state: "unread" | "all";
+	cursor?: string;
+	through_seq?: number;
+	/** Narrow to one conversation (the by-session dismiss reads its own set). */
+	session_id?: string;
+	limit?: number;
+}): Promise<NotificationsPage> {
+	const params = new URLSearchParams({ state: query.state });
+	if (query.session_id) params.set("session_id", query.session_id);
+	if (query.limit !== undefined) params.set("limit", String(query.limit));
+	if (query.cursor) params.set("cursor", query.cursor);
+	if (query.through_seq !== undefined) params.set("through_seq", String(query.through_seq));
+	return request(`/api/notifications?${params.toString()}`);
+}
+
+export function getNotification(itemId: string): Promise<NotificationDetail> {
+	return request(`/api/notifications/${encodeURIComponent(itemId)}`);
+}
+
+/** The ONE write door, token-bound (contract §5.2). Exactly one target:
+    `ids` (each `{id, revision}` the reader rendered), or `session_id` +
+    `through_seq` + `observed`, or `all` + `through_seq` + `observed`. A bulk
+    write never discovers rows itself: an item published after the read is
+    not in `observed` and is left untouched (the late-arrival rule). */
+export type NotificationsPatchBody =
+	| { op: "read" | "unread" | "dismiss" | "undismiss"; ids: NotificationToken[] }
+	| { op: "read" | "dismiss"; session_id: string; through_seq: number; observed: NotificationToken[] }
+	| { op: "read" | "dismiss"; all: true; through_seq: number; observed: NotificationToken[] };
+
+export function patchNotifications(body: NotificationsPatchBody): Promise<NotificationsReceipt> {
+	return request("/api/notifications", {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
 }

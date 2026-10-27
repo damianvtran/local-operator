@@ -116,11 +116,11 @@ describe("the phone's resume button", () => {
 		expect(screen.queryByText("interrupted — tap to resume")).toBeNull();
 	});
 
-	it("yields to the strip's resume once the session has ENDED (U15)", () => {
+	it("yields to the status dot's resume once the session has ENDED (U15)", () => {
 		/* The primary real-world route into the ended state: the mid-turn death
 		   whose terminal repaint stamps `ended` beside the cut-off receipt. The
-		   composer's button sent `continue` to a runtime that is gone; the strip's
-		   resume is the one action that respawns it. */
+		   composer's button sent `continue` to a runtime that is gone; the header
+		   dot's sheet holds the one resume that respawns it. */
 		const { rerender } = render(<SessionScreen sessionId="s1" />);
 		slot = {
 			projection: projection({ cut_off: true, ended: true }),
@@ -130,8 +130,10 @@ describe("the phone's resume button", () => {
 
 		expect(screen.queryByRole("button", { name: "turn cut off — tap to resume" })).toBeNull();
 		expect(screen.queryByRole("button", { name: /tap to resume/ })).toBeNull();
-		// The one affordance left is the strip's.
-		expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
+		// The one affordance left is the status dot's, in its sheet.
+		expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+		fireEvent.click(document.querySelector<HTMLElement>("button[data-health]")!);
+		expect(screen.getAllByRole("button", { name: "Resume" })).toHaveLength(1);
 	});
 
 	it("an ended session's failed send names the resume path, not 'Try again' (U20)", async () => {
@@ -142,14 +144,15 @@ describe("the phone's resume button", () => {
 		slot = { projection: projection({ cut_off: true, ended: true }), connected: true };
 		rerender(<SessionScreen sessionId="s1" />);
 
-		fireEvent.change(screen.getByPlaceholderText("Message…"), {
+		fireEvent.change(screen.getByPlaceholderText("Send to reopen in your home folder…"), {
 			target: { value: "are you there?" },
 		});
 		fireEvent.click(screen.getByRole("button", { name: "send" }));
 
 		await waitFor(() =>
 			expect(screen.getByRole("alert").textContent).toContain(
-				"This session has ended and couldn’t be woken just now. Tap “Retry earlier instruction” to send it again, or reopen it from the sessions list.",
+				/* UX U5: points at the header's Resume, never the sessions list. */
+				"This session has ended and couldn't be reopened just now. Try again, or tap “Ended” at the top and choose Resume.",
 			),
 		);
 		expect(screen.queryByText(/Couldn’t continue this conversation/)).toBeNull();

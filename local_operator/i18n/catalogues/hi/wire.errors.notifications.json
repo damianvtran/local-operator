@@ -1,0 +1,6 @@
+{
+  "wire.errors.notifications.store_busy": "सूचना स्टोर अभी व्यस्त है, इसलिए कुछ नहीं बदला। थोड़ी देर में फिर कोशिश करें।",
+  "wire.errors.notifications.store_full": "इस कंप्यूटर की डिस्क में जगह नहीं बची है, इसलिए कुछ नहीं बदला। {where} वाले वॉल्यूम पर कुछ जगह खाली करें, फिर दोबारा कोशिश करें।",
+  "wire.errors.notifications.store_unavailable": "सूचना स्टोर पढ़ा या लिखा नहीं जा सका। फिर कोशिश करने से कुछ नहीं होगा; {where} और उसकी डिस्क जाँचें।",
+  "wire.errors.notifications.unknown_item": "यह सूचना अब “सूचनाएँ” में नहीं है।"
+}

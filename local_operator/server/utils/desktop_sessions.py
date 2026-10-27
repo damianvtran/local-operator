@@ -1390,6 +1390,41 @@ class DesktopSubscription:
     dwell_until: float = 0.0
 
 
+def _json_copy(value: Any) -> Any:
+    """A fresh copy of a JSON value, equal to ``json.loads(json.dumps(value))``.
+
+    WHY NOT THE ROUND TRIP (conversation-first-paint R5, 2026-10-27). The open
+    frame's ``_wire_rows`` used ``json.loads(entry.to_json())`` per row to copy
+    a cached page's payload before the frame steps edit it: 12 ms for a 200-row
+    page of the 51.7 MB fixture, on the event loop, before the snapshot. This
+    walks the same tree in ~3 ms.
+
+    WHY A COPY AT ALL: the page cache SHARES pages between requests
+    (``page_cache.TranscriptPageCache.get``), so a wire row must never alias the
+    cached entry. ``copy.deepcopy`` measured the same 12 ms as the round trip.
+
+    IDENTICAL TO THE ROUND TRIP, NOT MERELY CLOSE. A page payload comes from
+    ``json.loads`` of a journal line, so it is ``dict`` (str keys) / ``list`` /
+    scalars, and those are copied directly; a float is the same object, so its
+    ``repr`` (the wire spelling) cannot change. Anything else — a tuple, a
+    non-``str`` key, a subclass — is what the round trip NORMALISES, so that
+    subtree takes the round trip itself and keeps its exact old spelling.
+    """
+    kind = type(value)
+    if kind is dict:
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                return json.loads(json.dumps(value))
+            out[key] = _json_copy(item)
+        return out
+    if kind is list:
+        return [_json_copy(item) for item in value]
+    if kind is str or kind is int or kind is float or kind is bool or value is None:
+        return value
+    return json.loads(json.dumps(value))
+
+
 class DesktopSessionBridge:
     def __init__(
         self,
@@ -4250,7 +4285,16 @@ class DesktopSessionBridge:
         second vocabulary for one screen.
         """
         return visible_transcript_rows(
-            [{**json.loads(entry.to_json()), "ts_source": "entry"} for entry in entries]
+            [
+                {
+                    "id": entry.id,
+                    "ts": entry.ts,
+                    "type": entry.type,
+                    "payload": _json_copy(entry.payload),
+                    "ts_source": "entry",
+                }
+                for entry in entries
+            ]
         )
 
     async def _frame_index(self, deadline: float) -> Any:

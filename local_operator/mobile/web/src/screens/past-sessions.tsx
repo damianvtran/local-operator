@@ -63,7 +63,7 @@ export function PastSessionsScreen() {
 			const r = await resumeSession(id);
 			navigate(`/s/${encodeURIComponent(r.session_id)}`);
 		} catch (e) {
-			/* The same refusal voice the ended strip paints (design round 1, D5). */
+			/* The same refusal voice the health sheet's Resume paints (design round 1, D5). */
 			setResumeError(resumeRefusalText(e));
 			setResumingId("");
 		}

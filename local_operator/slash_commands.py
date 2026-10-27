@@ -22,6 +22,7 @@ from local_operator.i18n.keys import (
     wire_memory,
     wire_slash,
     wire_slash_library,
+    wire_slash_notifications_page,
 )
 from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
@@ -2006,15 +2007,52 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.PROVIDER,
         desktop_destination="auth.logout",
     ),
-    # The listing is the receipt, and the argument is a WORD the command reads
-    # (`read`), never model text -- so no echo, and no prompt to consume.
-    # `desktop_destination` is deliberately UNSET, following `/mobile` above: the
-    # desktop's affordance for this is its own sidebar control, and a
-    # destination the renderer has no adapter for is an offered-but-broken row.
+    # THE NOTIFICATIONS PAGE (docs/design/notifications-inbox.md §7-§8;
+    # decision D2): the inbox of open asks and the items agents post with
+    # `notify`. The operator named the feature `/notifications`, so the page
+    # takes the name and the old completion-receipt listing moved to `/unread`
+    # below, unchanged.
     #
-    # 50 cells, inside the /help wrap budget (74 at 80 columns). The word
-    # `notifications` is long enough that the description has to stay short or
-    # the composed row wraps and the tail lands in the glyph gutter.
+    # `desktop_destination="notifications"`: on the desktop, typing the command
+    # NAVIGATES to the Notifications page and sends nothing (the renderer's
+    # navigate branch; an older renderer shows its existing "unknown
+    # destination" note). The renderer also gates the row on
+    # `features.notifications`.
+    #
+    # INTERIM, until the TUI page lands (lane L2): the terminal still routes
+    # `/notifications` to the receipt handler `/unread` uses, so a terminal user
+    # keeps a working command in the one release where the page does not exist
+    # yet. L2 replaces that dispatch with the page mode.
+    #
+    # The description is an English-only child namespace
+    # (`wire.slash.notifications_page`), the `/library` precedent: adding or
+    # rewording a key in the audited `wire.slash` catalogue would void every
+    # translated locale's ledger hash.
+    SlashCommand(
+        "notifications",
+        _tr(wire_slash_notifications_page.help()),
+        arguments=ArgumentMode.OPTIONAL,
+        # One word (`read`, mark all read through the painted high-water mark),
+        # refused by name otherwise — the same WORD criterion as `/unread`.
+        argument_shape=ArgumentShape.WORD,
+        desktop_destination="notifications",
+    ),
+    # THE COMPLETION-RECEIPT LISTING, formerly `/notifications` (decision D2):
+    # behaviour and receipt copy unchanged. The listing is the receipt, and the
+    # argument is a WORD the command reads (`read`), never model text -- so no
+    # echo, and no prompt to consume. `desktop_destination` is deliberately
+    # UNSET, following `/mobile` above: the desktop's affordance for this is its
+    # own sidebar control, and a destination the renderer has no adapter for is
+    # an offered-but-broken row.
+    #
+    # ITS DESCRIPTION KEEPS THE `wire.slash.notifications` KEY on purpose. The
+    # i18n rule is "change a value, not its identity; a new MEANING needs a new
+    # key", and the meaning did not change — the same listing moved to a new
+    # word. Reusing the audited key keeps every translated locale's text and
+    # ledger hash valid, where a new `wire.slash.unread` key would grow the
+    # audited catalogue and void them.
+    #
+    # 50 cells, inside the /help wrap budget (74 at 80 columns).
     #
     # THE VERB IS `read`, and neither rejected alternative is spelled here
     # (design round 1, D1): `clear` collides with `/clear` on the one surface a
@@ -2025,7 +2063,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # vocabulary it then rejects. The receipt below says "marks … read", so the
     # row and the answer now use one verb for one act.
     SlashCommand(
-        "notifications",
+        "unread",
         _tr(wire_slash.notifications()),
         arguments=ArgumentMode.OPTIONAL,
         # The vocabulary is one word (`read`). Declared `WORD` rather than

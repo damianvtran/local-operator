@@ -544,6 +544,13 @@ export interface SessionProjection {
 	ended: boolean;
 	/** Record fresh but socket unreachable. */
 	degraded: boolean;
+	/** The relay's "owner has gone quiet" verdict (`SessionProjection.
+	    heartbeat_stale` in `mobile/types.py`): true once BOTH the runtime's
+	    heartbeat and its frames are older than the daemon's one health window
+	    (`SESSION_HEALTH_WINDOW_S`), false while either is fresh. OPTIONAL and
+	    absent on an older daemon and on a disk rebuild — absence is "not
+	    reported", never stale (`lib/session-health.ts`). */
+	heartbeat_stale?: boolean | null;
 	transcript: TranscriptEntry[];
 	/** Todos grouped into phases. One implicit `"Todos"` phase carries a flat
 	    list and renders without a header. */
@@ -1165,4 +1172,115 @@ export interface LibraryFacets {
 	counts: LibraryListing["counts"];
 	tags: LibraryTag[];
 	scan: LibraryListing["scan"];
+}
+
+/* ------------------------------------------------------------------ */
+/* Notifications inbox (docs/design/notifications-inbox.md §5.4)        */
+/* ------------------------------------------------------------------ */
+
+/** The list frame's `notifications` block: the inbox badge, read per frame.
+
+    THREE STATES, and the difference is load-bearing (decision D16: "a missing
+    or unknown count renders nothing, never 0"):
+    - key ABSENT on the frame: this relay predates the inbox routes. The store
+      keeps `undefined`, and the drawer offers no destination at all.
+    - `{}`: the relay serves the inbox but could not read its store this frame.
+      The destination stays (its screen says why), the badge shows nothing.
+    - the four numbers: the desktop's own `notifications.items.counts`. */
+export interface NotificationsBlock {
+	unread_count?: number;
+	waiting_count?: number;
+	waiting_unread_count?: number;
+	high_water?: number;
+}
+
+export interface NotificationSessionFacts {
+	id: string;
+	title: string;
+	agent_id: string;
+	live: boolean;
+	live_state: string;
+	/** Detail answers only. */
+	cwd?: string;
+}
+
+export interface NotificationProjectFacts {
+	key: string;
+	name: string;
+	status: string;
+}
+
+/** One reel row, the normalized item shape (contract §2.2) as #2939 serves it.
+    Timestamps are epoch MILLISECONDS (unlike the session list's seconds). */
+export interface NotificationItem {
+	/** `n_<16 base32>` for a notify item, `ask:<session_id>:<ask_id>` for an ask. */
+	id: string;
+	source: "notify" | "ask";
+	priority: "high" | "normal" | "low";
+	title: string;
+	excerpt: string;
+	created_at: number;
+	updated_at: number;
+	seq: number;
+	/** The ack token every write must echo (an ask is always 1). */
+	revision: number;
+	read: boolean;
+	read_via: string | null;
+	dismissed: boolean;
+	repeat_count: number;
+	key?: string;
+	anchor_id?: string;
+	session: NotificationSessionFacts | null;
+	projects: NotificationProjectFacts[] | null;
+	ask: {
+		ask_id: string;
+		status: string;
+		deadline_at: number;
+		question_count: number;
+		dismissible: boolean;
+	} | null;
+	actions: { dismiss: boolean; answer: boolean; read: boolean };
+	/** Relay-only, like `/api/asks`: can the relay reach that conversation now. */
+	runtime_live?: boolean;
+	durable?: boolean;
+	/** Detail answers only. */
+	body_md?: string;
+	links?: { label: string; url: string }[];
+}
+
+/** A `{id, revision}` pair: what the reader saw, and so what a write may touch. */
+export interface NotificationToken {
+	id: string;
+	revision: number;
+}
+
+export interface NotificationsPage {
+	items: NotificationItem[];
+	/** Live asks, first page only (asks are not paged). */
+	waiting?: NotificationItem[];
+	/** Every token this page rendered; bulk writes echo the union they loaded. */
+	observed: NotificationToken[];
+	next_cursor: string | null;
+	unread_count: number;
+	waiting_count: number;
+	waiting_unread_count: number;
+	/** The conservative `through_seq` boundary for a bulk write over this read. */
+	high_water: number;
+}
+
+export interface NotificationDetail {
+	item: NotificationItem;
+	history: { revision: number; at: number; title: string; excerpt: string }[];
+	session: NotificationSessionFacts;
+	anchor: { id: string; excerpt: string } | null;
+	projects: NotificationProjectFacts[] | null;
+	asks: PendingAsk[];
+}
+
+export type NotificationSkipReason = "live_ask" | "stale_revision" | "unknown" | "already";
+
+/** `PATCH /api/notifications`: per-id verdicts plus the badge after the write. */
+export interface NotificationsReceipt extends NotificationsBlock {
+	changed: string[];
+	skipped: { id: string; reason: NotificationSkipReason | string }[];
 }

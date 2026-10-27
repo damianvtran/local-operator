@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a2",
+  "audit_kind": "independent_current_byte_namespace_delta_audit",
+  "locale": "ur",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "audited_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "source_audit_revision": "3c16a9e77c63dce7082af6137e151421b6cbf2be",
+  "audited_revision_note": "Observed core HEAD; target is an uncommitted one-line replacement (status M, numstat 1/1). The input hashes bind actual audited working-tree bytes, not an invented commit.",
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "passed",
+  "verdict_reason": "T-UR-CORE-1 fixed: the repaired clause states the mark-all-read action, keeps literal read, and measures 47/50 terminal cells. No new findings in the one-key delta.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "89dbc1a173e9",
+    "instance": "89dbc1a173e9-nt25a2",
+    "model": "openai/gpt-6-astra",
+    "actual_model_source": "Resumed session-state Environment Model: openai/gpt-6-astra. Prior nt25a1 model provenance preserved, not rewritten.",
+    "date": "2026-10-25",
+    "independence": "Same independent auditor session as nt25a1; no authorship of original translation or coder-applied repair; no catalogue, code, ledger or git edits."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25",
+    "source": "Original delegating task brief; remediation implemented by original coder per resumed delegation, no independently verified remediation-model claim."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/wire.slash.notifications_page.json",
+      "sha256": "88c087d1e231da9b916472cb38b733b1fba07fa010ec3e9c8943a22fe7d1d378"
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "provenance": "Byte-identical original stdout/stderr of isolated auditor-run core parser/render, Rich cell lengths, four negative controls and compatibility hash checks."
+  },
+  "findings": [],
+  "resolved_findings": [
+    {
+      "id": "T-UR-CORE-1",
+      "key": "wire.slash.notifications_page.help",
+      "previous_severity": "major",
+      "status": "fixed",
+      "previous_record": "i18n/audits/evidence/ur/wire.slash.notifications_page/nt25a1/record.json",
+      "previous_target_sha256": "d35277e21a1f9d26cf99b5007acd383d8ba30fd0f2c3c8068c7afc8421de76af",
+      "target_sha256": "88c087d1e231da9b916472cb38b733b1fba07fa010ec3e9c8943a22fe7d1d378",
+      "evidence": "Current bytes equal prior proposed repair; direct semantic re-read and actual parse/render; literal read retained; Rich cell_len 47 <= maxCells 50. Remediation is uncommitted; no SHA invented."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 0
+  },
+  "current_bytes_match_audited_hashes": true,
+  "retained_audits": [
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.notifications",
+      "record": "i18n/audits/evidence/ur/wire.errors.notifications/nt25a1/record.json",
+      "key_count": 4,
+      "result": "clean",
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/wire.errors.notifications.json",
+          "sha256": "f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c",
+          "matches_task_source_sha256": true
+        },
+        "en_context_sidecar": {
+          "path": "local_operator/i18n/catalogues/en/wire.errors.notifications.context.json",
+          "sha256": "07ad1e5da403a5fccde5648f04cd10bf1263cabc50f5e1804644630c7ce13106",
+          "note": "Actual audited working-tree bytes"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/ur/wire.errors.notifications.json",
+          "sha256": "ed6f12c19808f626546e3650dd57c0561aee232062203f42fe7944f2fc2dade9",
+          "matches_current_working_tree": true
+        }
+      },
+      "retention_basis": "English, context and target byte-identical to nt25a1; hash-only verification, not a new semantic audit."
+    },
+    {
+      "locale": "ur",
+      "namespace": "ui.notifications",
+      "repository": "local-operator-ui",
+      "receipt": "i18n/receipts/nt-ur-89dbc1a173e9.json",
+      "key_count": 130,
+      "result": "clean-with-findings",
+      "existing_minor_count": 2,
+      "en_sha256": "ce0c8d6d9af80980667741dd6d289ab7312d04aaea0e717e5cef4cf55c2b37ae",
+      "target_sha256": "d5c4a7e21e450d9a21a06b85198bd8a2ed78cd2d5c007e0ab10c930d60fdae4d",
+      "context_sha256": "3804068c75073ce9663f73539b508cbb46e495488dc47e5dd97aa80fd1a6918e",
+      "retention_basis": "English, context and target byte-identical to prior receipt; existing two UI minors retained, no new audit."
+    }
+  ],
+  "negative_controls": {
+    "malformed_icu": "expected MessageSyntaxError observed",
+    "missing_required_argument": "expected MessageFormatError observed",
+    "translated_literal_command": "missing read correctly detected",
+    "over_budget_string": "53 > 50 correctly detected"
+  },
+  "limitations": [
+    "LLM textual audit, not native-speaker certification.",
+    "No rendered RTL/Nastaliq, UI geometry or release eligibility claim.",
+    "Only one repaired key re-audited; 134 unchanged keys retained by hash compatibility."
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "audit_id": "ntt2",
+  "locale": "ur",
+  "namespace": "tui.notifications",
+  "record": "record.json",
+  "provenance": "Original evidence written by independent translation-auditor session 6cd869512279, actual model radient/auto (after provider-quota fallbacks from anthropic/claude-opus-5-5 via anthropic/claude-sonnet-5-5 and openai/gpt-6.1-sol), on 2026-10-25; actual command output captured in-session.",
+  "hashes": {
+    "record.json": "17331690309500af3ae8ba2b6bac8b52d98fdc06d900a83561b7e5eccdb98d85",
+    "report.md": "eb0f1a31084ad8a5d5b61e1503b41092ab141a3374b9a45d32896570be1914aa",
+    "audit.log": "848abda20d79de9cb940019da4f3a7ed967d29fa72c7d719e971f2663221efb8"
+  },
+  "audited_target_sha256": "07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a",
+  "ledger_gate_sentence": "The ur ledger row may ship at this hash: 07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a"
+}

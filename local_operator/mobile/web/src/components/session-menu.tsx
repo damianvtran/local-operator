@@ -25,6 +25,7 @@
 import { useEffect, useState, type RefObject } from "react";
 import { applyWideView, getWideView } from "../lib/viewport";
 import { Sheet } from "./ui/sheet";
+import { messageRuntime } from "../store";
 
 /** One full-width menu row: the 44px touch floor the header controls use. */
 const MENU_ROW =
@@ -36,6 +37,8 @@ export function SessionMenu({
 	pinned,
 	onTogglePin,
 	onOpenApprovals,
+	onResume,
+	resuming = false,
 	returnFocusRef,
 }: {
 	open: boolean;
@@ -51,6 +54,12 @@ export function SessionMenu({
 	onTogglePin: () => Promise<boolean>;
 	/** Summon the existing gate sheet. The menu closes first. */
 	onOpenApprovals: () => void;
+	/** Present only while the session is ENDED (UX round 1, U3): the menu is
+	    where a reader looks for actions, and the header's status line carries
+	    no visual tap cue. The header's own resume path — this row starts it and
+	    the health sheet shows how it went — so there is one implementation. */
+	onResume?: () => void;
+	resuming?: boolean;
 	/** The ⋮ button, so closing returns focus to the control that opened it. */
 	returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
@@ -64,6 +73,25 @@ export function SessionMenu({
 	return (
 		<Sheet open={open} onClose={onClose} title="Session" returnFocusRef={returnFocusRef}>
 			<div className="flex flex-col gap-1 p-2">
+				{onResume ? (
+					<button
+						type="button"
+						disabled={resuming}
+						onClick={() => {
+							/* Close first, like Approvals: the health sheet is where the
+							   outcome lands, and two stacked dialogs would hide it. */
+							onClose();
+							onResume();
+						}}
+						className={MENU_ROW}
+					>
+						<span className="min-w-0 flex-1 truncate">
+							{resuming
+								? messageRuntime.t("relay.chrome.session.resuming")
+								: messageRuntime.t("relay.chrome.session.resume")}
+						</span>
+					</button>
+				) : null}
 				<button
 					type="button"
 					onClick={async () => {

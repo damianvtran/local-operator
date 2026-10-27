@@ -1171,6 +1171,25 @@ class SessionProjection:
     queued_count: int = 0  # user messages waiting for the turn boundary
     ended: bool = False  # process gone; history still resumable
     degraded: bool = False  # record fresh but socket unreachable
+    #: THE RELAY'S "IS THE OWNER STILL ANSWERING" VERDICT, for the phone's header
+    #: status dot. ``True`` when the runtime's record has not been re-stamped
+    #: (``heartbeat_at``) inside ``SESSION_HEALTH_WINDOW_S`` AND no projection
+    #: frame has arrived from it inside the same window; ``False`` when either
+    #: is fresh. Written only by the relay daemon (``daemon._sync_heartbeat_stale``,
+    #: from its registry scan); a runtime never knows its own staleness.
+    #:
+    #: WHY A VERDICT AND NOT AN AGE. A ``heartbeat_age_s`` would be frozen at
+    #: the instant the frame was serialised, and a phone holding that frame
+    #: while the runtime goes quiet would keep painting the old, fresh number —
+    #: the frame stops arriving exactly when the age would need to grow. The
+    #: daemon re-evaluates the verdict on every scan and pushes a repaint on
+    #: each transition, so the one window lives in ONE server constant.
+    #:
+    #: ``None`` IS "NOT REPORTED": an older daemon omits the key, and a durable
+    #: rebuild has no live owner to measure. A client must read ``None`` as "no
+    #: heartbeat evidence either way" and paint nothing from it — never as
+    #: stale, which would turn every older relay's sessions yellow.
+    heartbeat_stale: bool | None = None
     transcript: list[TranscriptEntry] = field(default_factory=list)
     # Optional DISPLAY capability, never inferred from raw entry details. Old
     # owners omit it; only the updated owner source binding sets version 1.
@@ -1288,6 +1307,12 @@ class SessionProjection:
             data.pop("asks", None)
         if self.asks_open is None:
             data.pop("asks_open", None)
+        # Same absence rule for the health verdict: ``None`` ("not reported" —
+        # a durable rebuild, a relay that never measured) is POPPED, so a
+        # durable frame stays byte-identical to what it was before the field
+        # existed and only a live frame the daemon measured carries the key.
+        if self.heartbeat_stale is None:
+            data.pop("heartbeat_stale", None)
         # The per-channel spend object follows the same absence rule as
         # ``asks`` above: a None field is POPPED rather than sent as null, so
         # the key's presence is the capability proxy — an old runtime never

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "locale": "fr",
+  "namespace": "wire.slash.notifications_page",
+  "record": "i18n/audits/evidence/fr/wire.slash.notifications_page/nt25a1/record.json",
+  "provenance": "Written directly by independent auditor translation-auditor/766adb539e6a, actual model openai/gpt-6-astra, on 2026-10-25; audit.log contains this audit’s actual outputs including its initial setup failure and successful recovery.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "766adb539e6a",
+    "model": "openai/gpt-6-astra",
+    "actual_model_source": "Session runtime header: Model: openai/gpt-6-astra",
+    "fallback_used": false,
+    "independence": "Separate agent/context from both translators; did not draft, polish or modify either translation. Independently read all catalogue values and context sidecars and derived parser/format/width results here."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/wire.slash.notifications_page.json",
+      "sha256": "b7e183e9efbd5a40c1819556433bca46ed5c98029fefd152e6a1352dca4b3952"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0,
+    "findings_total": 1
+  },
+  "hashes": {
+    "record.json": "849de8d17b23a59fe20ade7723bb349945d3cfd1a724c3bf8fb95af5d4f8b005",
+    "audit.log": "cf798b40301cc039f84218d098dbee209d799baf05afedecd7ea4d61b7dcf443",
+    "report.md": "157cebe0a608d70aa8a6ffe1e5fb8b04e00f1614bbb9ac7a75bec558b7503d3c",
+    "recheck.py.txt": "692267a2e677b149e44157e9b1e0d7dcd05f7574d480d38a4476a52d6d92bd7e"
+  }
+}

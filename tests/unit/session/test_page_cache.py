@@ -566,3 +566,108 @@ async def test_the_byte_budget_admits_a_page_the_size_of_a_real_conversation(tmp
 
     assert page_cache().oversize == 0, "a page the size of a real one was refused"
     assert page_cache().entry_count == 1
+
+
+# ---------------------------------------------------------------------------
+# conversation-first-paint R5(i): the sizing walk is cheaper, never different.
+# ---------------------------------------------------------------------------
+
+
+def _reference_retained_bytes(value: object, limit: int) -> int | None:
+    """The walk as it stood before R5, kept verbatim as the oracle: the fast
+    walk must give the same figure and the same over-limit answer, because the
+    byte budget and every calibration comment are stated in THIS figure."""
+    import sys
+    from dataclasses import is_dataclass
+
+    from pydantic import BaseModel
+
+    pending = [value]
+    seen: set[int] = set()
+    total = 0
+    while pending:
+        item = pending.pop()
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += sys.getsizeof(item)
+        if total > limit:
+            return None
+        if isinstance(item, BaseModel):
+            pending.extend(
+                (
+                    item.__dict__,
+                    item.__pydantic_fields_set__,
+                    item.__pydantic_extra__,
+                    item.__pydantic_private__,
+                )
+            )
+        elif is_dataclass(item) and not isinstance(item, type):
+            pending.extend(vars(item).values())
+        elif isinstance(item, dict):
+            pending.extend(item)
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+    return total
+
+
+def test_retained_bytes_matches_the_reference_walk_on_every_shape(tmp_path):
+    """Every branch the walk has, plus shared and subclassed containers: the
+    figure and the over-limit cut are the reference's to the byte."""
+    from collections import OrderedDict, namedtuple
+    from dataclasses import dataclass
+
+    from pydantic import BaseModel
+
+    class Model(BaseModel):
+        name: str
+        items: list[int]
+
+    @dataclass
+    class Box:
+        inner: Any
+        label: str
+
+    Pair = namedtuple("Pair", "left right")
+    shared = {"shared": ["x" * 100, 1.5, None, True]}
+    value = (
+        Model(name="m", items=[1, 2, 3]),
+        Box(inner=shared, label="b"),
+        OrderedDict(a=shared, b=Pair(shared, frozenset({1, 2}))),
+        [shared, shared, {1, 2, 3}, b"bytes", 10**30, "ü" * 50],
+        Model,
+    )
+    directory = tmp_path / "sess"
+    _journal(directory, [f"row-{n}" for n in range(30)])
+    page = read_transcript_page(directory, limit=30)
+    for subject in (value, (_key(directory, limit=30), page)):
+        expected = _reference_retained_bytes(subject, 1 << 40)
+        assert expected is not None
+        assert retained_bytes(subject, 1 << 40) == expected
+        assert retained_bytes(subject, expected) == expected
+        assert retained_bytes(subject, expected - 1) is None
+
+
+@pytest.mark.asyncio
+async def test_eviction_keeps_the_accounted_total_inside_the_byte_budget(tmp_path):
+    """The byte bound, at its byte dimension: whatever the admission order, the
+    resident total never exceeds the budget less the allowance, and it is
+    exactly the sum of the resident pages' sizes (no drift from the walk)."""
+    pages = []
+    for n in range(6):
+        directory = tmp_path / f"s{n}"
+        _journal(directory, [f"r{n}-{i}-" + "z" * 2000 for i in range(20)])
+        key = _key(directory, limit=20)
+        pages.append((key, await load_transcript_page(directory, limit=20)))
+    one = retained_bytes(pages[0], 1 << 40)
+    assert one is not None
+    budget = int(one * 2.5) + page_cache_module._PAGE_CACHE_ALLOWANCE
+    cache = TranscriptPageCache(entries=PAGE_CACHE_ENTRIES, byte_budget=budget)
+    for key, page in pages:
+        cache.put(key, page)
+        assert cache.accounted_bytes <= budget - page_cache_module._PAGE_CACHE_ALLOWANCE
+        resident = [(k, p) for k, p in pages if cache.get(k) is p]
+        assert cache.accounted_bytes == sum(retained_bytes(e, 1 << 40) or 0 for e in resident)
+    assert cache.entry_count == 2, "the budget admits two of these pages, never three"

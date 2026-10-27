@@ -89,6 +89,13 @@ def test_shipped_wire_namespaces_exist() -> None:
         # which fr/hi/vi CARRY, and an English edit to a carried namespace
         # invalidates that locale's ledger row and unships the whole locale.
         "wire.remote_compute",
+        # The Notifications inbox (docs/design/notifications-inbox.md): the
+        # desktop routes' refusal copy, and the `/notifications` page row's
+        # description as an English-only CHILD of `wire.slash` (the
+        # `wire.slash.library` shape — the audited `wire.slash` bytes and their
+        # locale ledger hashes do not move).
+        "wire.errors.notifications",
+        "wire.slash.notifications_page",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -107,6 +114,8 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
+    assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
+    assert catalogues.load_catalogue("en", "wire.slash.notifications_page") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale
@@ -195,7 +204,16 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     # slice adds `relay.approvals` (17 keys, the approval-scope copy main added
     # as literals) on the same terms: carried only now that its independent
     # audit row exists against the current en bytes. It sorts before
-    # `relay.ask`.
+    # `relay.ask`. The notifications-inbox wave adds `tui.notifications` (the
+    # inbox page's 72 keys) on exactly the same terms: six locales carry it
+    # only because their independent audit bundles and fresh ledger rows landed
+    # with the files in the same commit, and the seventh (ru) is still absent
+    # for want of its round-2 delta audit. Mechanical parity is asserted below
+    # for every namespace in this tuple, so the new one is checked too.
+    # `relay.ask`. The phone inbox adds `relay.notifications` (77 keys) with
+    # the other seven locales; it sorts after `relay.chrome`. Carrying it
+    # pins key/placeholder parity here, while shipping still waits on its
+    # independent audit row, exactly as each namespace above did.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
@@ -205,12 +223,19 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         # Borderless phone chrome carries its own audited namespace; existing
         # English labels stay untouched while all seven locales join the wave.
         "relay.chrome",
+        # The session status dot's 9-key namespace (round 2 added the
+        # reconnecting/dropped/quiet/ended copy), carried only with its
+        # doubly audited ledger row; it keeps relay.chrome's English bytes
+        # frozen, and sorts between relay.chrome and relay.session.tags.
+        "relay.health",
+        "relay.notifications",
         "relay.session.tags",
         # Audited relay condensation copy adds 19 keys; keep this census exact.
         "relay.transcript",
         "tui.asks",
         "tui.authoring",
         "tui.notices",
+        "tui.notifications",
         "tui.palette",
         "tui.projects_edit",
         "tui.review",
@@ -223,6 +248,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "tui.welcome",
         "wire.errors",
         "wire.errors.desktop",
+        "wire.errors.notifications",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
@@ -231,6 +257,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "wire.remote_compute",
         "wire.settings",
         "wire.slash",
+        "wire.slash.notifications_page",
     )
     assert catalogues.namespaces(locale) == namespaces
     for namespace in namespaces:

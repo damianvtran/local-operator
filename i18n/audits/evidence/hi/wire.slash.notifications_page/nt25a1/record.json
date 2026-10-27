@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "audit_id_assigned_by": "Manager audit-hi delegation, 2026-10-25",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "hi",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "audited_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "source_audit_revision": "3c16a9e77c63dce7082af6137e151421b6cbf2be",
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "passed",
+  "verdict_reason": "clean-with-findings; no unresolved blocker or major.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "instance": "audit-hi-c9c5d8079e51",
+    "session": "c9c5d8079e51",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session model-switch notice: openai/gpt-6.1-sol fallback after provider quota; no delegated model used.",
+    "date": "2026-10-25",
+    "independence": "Independent audit-hi agent/context; authored none of the English or Hindi translations; not tr-hi or L1-core-notify coder."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594",
+      "matches_supplied_source_pin": true
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/wire.slash.notifications_page.json",
+      "sha256": "b83f2d2f098c7de709e8a69ae22f9cc88c2907ba430b9448b0f4f617152e40fa",
+      "matches_current_working_tree": true
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    "audit.log",
+    "report.md",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "command": "PYTHONPATH=\"$PWD\" .venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/audit-hi-core.py\""
+  },
+  "findings": [
+    {
+      "key": "wire.slash.notifications_page.help",
+      "severity": "minor",
+      "current_text": "सवाल और एजेंट अपडेट; read सब पढ़ा हुआ करता है",
+      "proposed_text": "सवाल व एजेंट अपडेट; read सबको पढ़ा हुआ चिह्नित करे",
+      "reason": "सब पढ़ा हुआ करता है is an unnatural literal construction for marking read; the proposed description states the status operation idiomatically, preserves literal read, and measures 38 cells against maxCells 50 (current 36)."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 1
+  },
+  "limitations": [
+    "LLM linguistic audit, not native-speaker certification.",
+    "No rendered-fit evidence claimed."
+  ]
+}

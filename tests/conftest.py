@@ -138,6 +138,9 @@ _AMBIENT_VARS = (
     # paths untested. The kill-switch cell sets the resolved constant through
     # ``monkeypatch`` explicitly, which is where that reason is written down.
     "LOP_NO_REPLY",
+    # Inbox kill switch is sampled at import; inherited off must not disable
+    # every test of the shipped tool. Explicit tests patch the resolved flag.
+    "LOP_NOTIFY",
     # The turn-supplement kill switch (``supplements/policy.SUPPLEMENTS``, read from
     # ``LOP_SUPPLEMENTS``). The same ESCAPE-HATCH class as the ask gate: the feature is the
     # shipped default, and an inherited kill value would silently move every cell that

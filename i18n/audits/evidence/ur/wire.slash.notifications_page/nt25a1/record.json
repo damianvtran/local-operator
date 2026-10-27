@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "ur",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "audited_revision": "27763f663df0da7c849186f1e62e01eb98e3df96",
+  "source_audit_revision": "3c16a9e77c63dce7082af6137e151421b6cbf2be",
+  "audited_revision_note": "Task pin source bytes verified identical to observed HEAD using git diff --quiet; actual catalogue and context hashes below bind this audit, including uncommitted target bytes.",
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "changes_requested",
+  "verdict_reason": "The clause after literal read is an adjective fragment (all read), dropping the English action marks all read; the help no longer states what the subcommand does. The proposed clause restores the state-changing action and measures 47/50 terminal cells with Rich.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "89dbc1a173e9",
+    "instance": "89dbc1a173e9",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Session model-switch event to openai/gpt-6.1-sol after provider quota failures; not the originally requested anthropic/claude-opus-5-5.",
+    "date": "2026-10-25",
+    "independence": "Independent agent/context from L1-core-notify coder/translator; authored none of these translations and changed no catalogue/code/ledger files."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25",
+    "source": "delegating task brief, not independently discovered model provenance"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594",
+      "matches_task_source_sha256": true
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0",
+      "note": "Actual audited working-tree bytes"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/wire.slash.notifications_page.json",
+      "sha256": "d35277e21a1f9d26cf99b5007acd383d8ba30fd0f2c3c8068c7afc8421de76af",
+      "matches_current_working_tree": true
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "recheck.py.txt",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "provenance": "Direct stdout of auditor-run isolated real core runtime parser/rendering and Rich cell measurement; not a reconstructed translator log."
+  },
+  "findings": [
+    {
+      "id": "T-UR-CORE-1",
+      "key": "wire.slash.notifications_page.help",
+      "severity": "major",
+      "current_text": "سوالات اور ایجنٹ اپ ڈیٹس؛ read سب پڑھا ہوا",
+      "proposed_text": "سوالات و ایجنٹ اپ ڈیٹس؛ read سب کو پڑھا قرار دے",
+      "reason": "The clause after literal read is an adjective fragment (all read), dropping the English action marks all read; the help no longer states what the subcommand does. The proposed clause restores the state-changing action and measures 47/50 terminal cells with Rich."
+    }
+  ],
+  "noted_outside_scope": [],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "result": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 1
+  },
+  "current_bytes_match_audited_hashes": true,
+  "limitations": [
+    "LLM textual audit; no native-speaker review.",
+    "No native/rendered RTL or release-eligibility claim.",
+    "First setup attempt imported missing wcwidth and stopped; successful replay uses already installed rich.cells.cell_len, no dependency installation."
+  ]
+}
