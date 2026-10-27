@@ -3289,12 +3289,27 @@ def test_the_shell_floor_itself_adds_or_strips_bash() -> None:
 # test_exec_profile_scout_shell_is_sandboxed_or_absent``.
 
 
-def _session_with_bash(tmp_path, monkeypatch, *, available: bool):
+#: The scout row as installed BEFORE the seed had a shell (seed 1.2.0), spelled
+#: as the literal tag so it cannot track the seed. Seed sync holds tool changes
+#: back, so this is what an installed machine still resolves.
+_PRE_SHELL_SCOUT_TOOLS = "read,glob,grep,list_variables,read_variable,web_search,web_fetch"
+
+
+def _session_with_bash(
+    tmp_path,
+    monkeypatch,
+    *,
+    available: bool,
+    pre_shell_row: bool = False,
+    holds_bash: bool = True,
+):
     """A real Session over a real session-store directory, holding the
     ordinary ``exec``-tier ``bash`` -- the shape ``lop exec`` builds before
-    the profile is attached."""
+    the profile is attached. ``pre_shell_row`` rewrites the installed scout
+    row's tool tag to :data:`_PRE_SHELL_SCOUT_TOOLS`; ``holds_bash=False``
+    builds the session without ``bash`` (a host or config that disabled it)."""
     from local_operator.agent_profiles import install_seed
-    from local_operator.agents import AgentRegistry
+    from local_operator.agents import AgentEditFields, AgentRegistry
     from local_operator.tools import builtin
     from local_operator.tools import confinement as confinement_module
 
@@ -3308,12 +3323,20 @@ def _session_with_bash(tmp_path, monkeypatch, *, available: bool):
     agents = AgentRegistry(config)
     assert install_seed("scout", registry=agents, scope="global") is not None
     assert install_seed("coder", registry=agents, scope="global") is not None
+    if pre_shell_row:
+        row = agents.get_agent_by_name("scout")
+        assert row is not None
+        tags = [
+            f"tools:{_PRE_SHELL_SCOUT_TOOLS}" if tag.startswith("tools:") else tag
+            for tag in row.tags
+        ]
+        agents.update_agent(row.id, AgentEditFields.model_validate({"tags": tags}))
     ordinary = builtin.build_bash_tool()
     assert ordinary.approval_tier == "exec"
     session = Session(
         model=MODEL,
         stream_fn=OneShotStream(),
-        tools=[ordinary, builtin.build_read_tool()],
+        tools=[ordinary, builtin.build_read_tool()] if holds_bash else [builtin.build_read_tool()],
         transcript=Transcript(config / "sessions" / "scout-top-level"),
         system_blocks_provider=lambda: [],
         agent_registry=agents,
@@ -3451,3 +3474,92 @@ async def test_a_child_of_an_attached_scout_is_confined(tmp_path, monkeypatch):
     assert child._shell_write_root == str(child.transcript.directory / "scratchpad")
     await child.dispose()
     await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_shell_scout_row_attached_top_level_gets_the_sandboxed_shell(
+    tmp_path, monkeypatch
+):
+    """The gap after #2987: ``lop exec --profile scout`` on a machine whose
+    installed row predates the shell declared the raw row, so the top-level
+    scout had NO ``bash`` while the same row delegated got one. The attached
+    names are now floored like the child's, ``bash`` stays the sandboxed
+    ``read``-tier tool through the unattended declaration, and ``jobs``/
+    ``wait`` ride along because that shell can background (child parity)."""
+    from argparse import Namespace
+
+    from local_operator.exec_startup import declared_tool_inventory
+
+    session = _session_with_bash(tmp_path, monkeypatch, available=True, pre_shell_row=True)
+    assert session.attach_agent_profile("scout")
+    names = session.attached_profile_tools
+    assert "bash" in names and {"jobs", "wait"} <= set(names)
+    assert {"write", "edit", "eval", "task"}.isdisjoint(names)
+    assert {"bash", "jobs", "wait"} <= session._deferral_pins
+    # The real declaration ``exec_startup.apply_startup`` makes, non-tty.
+    declared = declared_tool_inventory(session, Namespace(tools=None))
+    assert declared == names
+    session.set_tool_inventory(declared, unattended=True)
+    bash = _bash_of(session)
+    assert bash is not None and bash.approval_tier == "read"
+    assert "SANDBOXED" in bash.description
+    assert session._build_tool_context().shell_write_root == session._scratchpad_dir()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pre_shell_row", [True, False])
+async def test_a_top_level_scout_without_a_sandbox_declares_no_shell(
+    tmp_path, monkeypatch, pre_shell_row
+):
+    """No root: the floor adds nothing to an old row and REMOVES ``bash``
+    from a current one, so the declaration never names a shell the session
+    cannot have -- and with no shell there is nothing for ``jobs``/``wait``
+    to observe, so they are not added either."""
+    from argparse import Namespace
+
+    from local_operator.exec_startup import declared_tool_inventory
+
+    session = _session_with_bash(
+        tmp_path, monkeypatch, available=False, pre_shell_row=pre_shell_row
+    )
+    assert session.attach_agent_profile("scout")
+    names = session.attached_profile_tools
+    assert "bash" not in names and not {"jobs", "wait"} & set(names)
+    session.set_tool_inventory(
+        declared_tool_inventory(session, Namespace(tools=None)), unattended=True
+    )
+    assert _bash_of(session) is None
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_top_level_scout_whose_session_holds_no_bash_declares_none(tmp_path, monkeypatch):
+    """A root but no ``bash`` in the inventory (a host or config disabled
+    it): the floor admits the shell, never fabricates it, like the child
+    floor's ``available`` -- so the declaration names no ``bash`` (which
+    would resolve to nothing and be reported unresolved at run end) and no
+    ``jobs``/``wait`` to observe it."""
+    session = _session_with_bash(
+        tmp_path, monkeypatch, available=True, pre_shell_row=True, holds_bash=False
+    )
+    assert session.attach_agent_profile("scout")
+    assert session._shell_write_root is not None
+    names = session.attached_profile_tools
+    assert "bash" not in names and not {"jobs", "wait"} & set(names)
+    await session.dispose()
+
+
+def test_the_shell_floor_names_rule() -> None:
+    """THE name-level rule both paths share, on its own: add with a root,
+    strip without one, never duplicate, keep order."""
+    from local_operator.harness.subagent import readonly_shell_floor_names
+
+    assert readonly_shell_floor_names(("read", "grep"), shell_root="/x") == ("read", "grep", "bash")
+    assert readonly_shell_floor_names(("read", "bash", "grep"), shell_root="/x") == (
+        "read",
+        "bash",
+        "grep",
+    )
+    assert readonly_shell_floor_names(("read", "bash", "grep"), shell_root=None) == ("read", "grep")
+    assert readonly_shell_floor_names(("read",), shell_root=None) == ("read",)

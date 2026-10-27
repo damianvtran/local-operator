@@ -266,6 +266,10 @@ def _build(
         await transcript.append_prune("early-a0", "[pruned: superseded]")
 
     asyncio.run(run())
+    # Release the writer lock now rather than at finalisation: a test that then
+    # compresses this journal would otherwise be refused as "session in use"
+    # whenever the GC has not yet run ``__del__``.
+    transcript.close()
     return ids
 
 

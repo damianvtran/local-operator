@@ -52,9 +52,12 @@ SELECTION_VERSION = 2
 #: ``transcript.find_row_for_custom_type`` already depend on the compact
 #: spelling. The spaced one is accepted too because it is free (one more
 #: substring search on a skipped row) and is what a hand-written or test journal
-#: built with plain ``json.dumps`` contains. A NEW writer that escapes key
-#: characters (``\\u`` sequences) would make these readers skip its selection
-#: rows: route it through ``to_json``. A false presence — the spelling inside
+#: built with plain ``json.dumps`` contains. The reachable hazard is a NEW
+#: writer with non-standard separators — ``"custom_type" :`` (space before the
+#: colon), a custom ``separators=`` pair, or a pretty-printer's newline — whose
+#: selection rows these readers would skip: route it through ``to_json``. (An
+#: escaped key is not reachable from a JSON library: the member is all-ASCII, so
+#: ``ensure_ascii`` leaves it as is.) A false presence — the spelling inside
 #: some string value — is harmless: the row is decoded and judged exactly as
 #: before (and inside a JSON string the quotes are escaped, so it is rare).
 _SELECTION_ROW_NEEDLES = tuple(

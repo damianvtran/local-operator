@@ -54,12 +54,14 @@ from local_operator.harness.message_types import (
 )
 from local_operator.harness.types import (
     ATTACHMENT_KINDS,
+    CACHE_DIAGNOSTICS_ID_KEY,
     AgentMessage,
     AudioContent,
     CustomMessage,
     DocumentContent,
     Message,
     TextContent,
+    cache_diagnostics_id_of,
     drop_blank_text_blocks,
 )
 
@@ -505,6 +507,7 @@ def encode_message_payload(
     payload = message.model_dump(exclude_defaults=True, exclude={"id"})
     _stamp_audio_discriminants(message, payload)
     _stamp_document_discriminants(message, payload)
+    _stamp_cache_diagnostics_id(message, payload)
     _externalize_attachments(payload, attachments)
     for call in payload.get("tool_calls") or ():
         raw = call.get("raw_arguments")
@@ -517,6 +520,41 @@ def encode_message_payload(
         if redundant:
             call.pop("raw_arguments")
     return payload
+
+
+def _stamp_cache_diagnostics_id(message: Message | CustomMessage, payload: dict[str, Any]) -> None:
+    """Write the turn's diagnosed Anthropic id into the row's ``usage``, in place.
+
+    The id rides ``Usage`` as a PRIVATE attribute so no frame or receipt pays
+    for it, which also means ``model_dump`` above never sees it: this encoder is
+    the one place it reaches disk (see ``CACHE_DIAGNOSTICS_ID_KEY``). A row
+    without a diagnosed call gains nothing, so every other row stays
+    byte-identical.
+    """
+    usage_payload = payload.get("usage")
+    if not isinstance(usage_payload, dict):
+        return
+    diagnosed = cache_diagnostics_id_of(getattr(message, "usage", None))
+    if diagnosed:
+        usage_payload[CACHE_DIAGNOSTICS_ID_KEY] = diagnosed
+
+
+def newest_cache_diagnostics_id(entries: Sequence[TranscriptEntry]) -> str | None:
+    """The newest persisted cache-diagnostics id in ``entries``, or ``None``.
+
+    Read by a resumed ``Session`` to continue the diagnostics chain. Newest row
+    wins, uncut by compaction: the API compares against the last REQUEST it
+    fingerprinted, which a later rewrite of the local context does not change.
+    """
+    for entry in reversed(entries):
+        if entry.type != ENTRY_MESSAGE:
+            continue
+        usage_payload = entry.payload.get("usage")
+        if isinstance(usage_payload, dict):
+            value = usage_payload.get(CACHE_DIAGNOSTICS_ID_KEY)
+            if isinstance(value, str) and value:
+                return value
+    return None
 
 
 def _without_blank_user_text(message: Message | CustomMessage) -> Message | CustomMessage:

@@ -183,6 +183,10 @@ async def _journal(directory: Path, *, checkpoint_cwd: str | None = None) -> Non
         await transcript.append_custom(
             FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": {"cwd": checkpoint_cwd}}
         )
+    # Release the writer lock now rather than at finalisation: a test that then
+    # compresses this journal would otherwise be refused as "session in use"
+    # whenever the GC has not yet run ``__del__``.
+    transcript.close()
 
 
 def _without_the_scan(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -477,6 +481,9 @@ def test_the_chrome_prompts_are_one_literal_behind_two_spellings() -> None:
     )
     assert loop.CONTINUE_TRUNCATED_ANSWER_PROMPT is chrome_prompts.CONTINUE_TRUNCATED_ANSWER_PROMPT
     assert loop.LENGTH_STOP_RECOVERY_PROMPT is chrome_prompts.LENGTH_STOP_RECOVERY_PROMPT
+    assert (
+        loop.DEGENERATE_STREAM_RECOVERY_PROMPT is chrome_prompts.DEGENERATE_STREAM_RECOVERY_PROMPT
+    )
     assert loop.NAMELESS_CALL_RECOVERY_PROMPT is chrome_prompts.NAMELESS_CALL_RECOVERY_PROMPT
     assert loop.WORDLESS_STOP_RECOVERY_PROMPT is chrome_prompts.WORDLESS_STOP_RECOVERY_PROMPT
     assert loop.is_connectivity_continuation_instruction is (

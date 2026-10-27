@@ -4763,7 +4763,24 @@ class ServingSessionHandle(SessionHandle):
             unsubscribe_outcome = self._session.subscribe(observe_end)
             try:
                 if command.wait_for_turn:
-                    await self._await_turn_lock_free()
+                    # A person's prompt is visible to the Team Bridge body path
+                    # while it waits out a foreign turn, so a body follow-up
+                    # does not start one more body turn ahead of it. Harness
+                    # rows (goal continuations) are not a person and do not
+                    # hold it; a session without the seam keeps the plain wait.
+                    # Annotated because ``getattr`` on the probe yields ``Any |
+                    # None`` and ``callable()`` narrows that to a callable
+                    # returning ``object``, which a ``with`` cannot enter. The
+                    # seam is ``Session.person_prompt_waiting``, a
+                    # ``contextlib.contextmanager``.
+                    waiting: Callable[[], contextlib.AbstractContextManager[object]] | None = (
+                        getattr(self._session, "person_prompt_waiting", None)
+                    )
+                    if callable(waiting) and not command.harness_injected:
+                        with waiting():
+                            await self._await_turn_lock_free()
+                    else:
+                        await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {

@@ -940,6 +940,38 @@ async def test_fallback_keeps_unread_cards_and_never_ends_on_a_reply(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_fallback_card_wake_yields_to_a_waiting_person(tmp_path, monkeypatch):
+    """PR #2999 round 2 MINOR-R2-1: the owed-card wake never runs ahead of a person.
+
+    The per-row attempts already end their pass for a waiting person; the
+    fallback must refuse under the lock too, leave the card owed, and let the
+    person's own turn (which re-arms the pass at its end) go first.
+    """
+
+    async with runtime_rig(tmp_path, monkeypatch) as rig:
+        session = rig.session
+        rig.stream.scripted = [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]]
+        card = CustomMessage(
+            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            attribution="user",
+            details={"text": "OWED-CARD-4242", "body": "OWED-CARD-4242", "sender": {}},
+        )
+        session._context.messages.append(card)
+        session._bridge_cards_owed_wake = [card]
+        before = len(rig.stream.requests)
+        with session.person_prompt_waiting():
+            session._ensure_pending_body_followup()
+            await settle(session)
+            assert len(rig.stream.requests) == before, "the card wake ran ahead of the person"
+            assert session._bridge_cards_owed_wake == [card], "the refusal dropped the debt"
+
+        await session.prompt("PERSON-FIRST")
+        await settle(session)
+        assert "PERSON-FIRST" in "\n".join(rig.stream.texts(before)), "the person went first"
+        assert session._bridge_cards_owed_wake == [], "the person's turn read the live card"
+
+
+@pytest.mark.asyncio
 async def test_arrival_during_failed_hydration_rearms_same_waiter(tmp_path, monkeypatch):
     """B arrives after A's finite-pass horizon, before is_streaming turns true."""
     tool_entered, finish_tool = asyncio.Event(), asyncio.Event()
