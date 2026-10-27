@@ -352,19 +352,6 @@ function EffortSheet({
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
-/* U15's other half (UX round 1, U20; reworded for issue #1875): on an ENDED
-   session the generic line's `Try again.` is not the whole story — the runtime
-   is gone — and the old sentence ("tap resume to continue") was WRONG about the
-   mechanism: a send to an ended session is itself resume-then-send (the daemon
-   wakes a host for a prompt with no live entry and the continuation carries the
-   text into it), so resume is never a prerequisite. A send that FAILED here means
-   that wake failed, and the honest remedies are the two that exist: send again
-   (the retained draft goes under the same envelope), or resume, which is the one
-   thing a send cannot do — reopen the session without composing. (The composer
-   is NOT disabled for an ended session: a disabled composer would change the
-   draft, attachment and retained-envelope flows, and sending is a real way back.) */
-const ENDED_CONTINUATION_ERROR =
-	"This session has ended and couldn’t be woken just now. Tap “Retry earlier instruction” to send it again, or reopen it from the sessions list.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 /* U5: one vocabulary for the retained instruction across the alert, the retry
@@ -553,6 +540,7 @@ export function Composer({
 	effortOpen,
 	onCloseEffort,
 	autoFocus = false,
+	ended = projection.ended,
 }: {
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
@@ -581,6 +569,14 @@ export function Composer({
 	    alternative — forcing a keyboard open from script — fights the platform
 	    and is worse than a focused field with a closed keyboard. */
 	autoFocus?: boolean;
+	/** Whether the session is ENDED as the header's status dot reads it — the
+	    screen passes `sessionHealth(...) === "ended"` (review round 2, R2-2 =
+	    U7). Not `projection.ended` alone: a conversation opened from history is
+	    a disk rebuild with no running owner (`pid: 0`, `ended: false`), the dot
+	    calls it Ended, and a send to it is the same wake, so the placeholder
+	    and the failure copy must say the same thing the header does. Defaults
+	    to the projection's own flag for callers without the screen's health. */
+	ended?: boolean;
 }) {
 	const [text, setText] = useDraft(pid);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
@@ -715,15 +711,16 @@ export function Composer({
 	   inference from the streaming flag: a turn that completes also flips
 	   streaming off, and only an aborted turn should offer "resume".
 
-	   AN ENDED SESSION YIELDS TO THE STRIP'S RESUME (UX round 1, U15). `ended`
+	   AN ENDED SESSION YIELDS TO THE HEADER'S RESUME (UX round 1, U15). `ended`
 	   and `stop_reason="aborted"` coexist on the shape the daemon serves after
 	   a mid-turn death (the terminal repaint fills the end from the durable
 	   record), and this button was the SECOND resume path — the prominent one,
 	   in the thumb zone — sending `continue` to a runtime that is gone, over
-	   and over. On an ended session the strip's `resume` is the one action: it
+	   and over. On an ended session the health sheet's `Resume` (also in the ⋮
+	   menu) is the one action: it
 	   is the path that respawns the session, and one act must not read as two
 	   different controls. */
-	const showResume = projection.stop_reason === "aborted" && !projection.ended;
+	const showResume = projection.stop_reason === "aborted" && !ended;
 
 	/* WHICH word, when it does, follows the verdict the notice above it states.
 	   `aborted` covers a deliberate stop and a harness cut-off alike, and the
@@ -1192,8 +1189,18 @@ export function Composer({
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
-				projection.ended
-					? ENDED_CONTINUATION_ERROR
+				ended
+					/* U15's other half (UX round 1, U20; issue #1875): on an ENDED
+					   session `Try again.` is not the whole story. A send to an ended
+					   session is itself resume-then-send (the daemon wakes a host for
+					   a prompt with no live entry), so a send that FAILED here means
+					   that wake failed, and the honest remedies are the two that
+					   exist: send again under the same envelope, or Resume. #3008
+					   review U5: Resume now lives behind the header's "Ended" control
+					   (and the ⋮ menu) — the sessions list never offered it. Keyed,
+					   unlike its neighbours, because it is new copy. (The composer is
+					   NOT disabled for an ended session: sending is a real way back.) */
+					? messageRuntime.t("relay.health.ended_send_failed")
 					: projection.streaming
 						? STEER_ERROR
 						: CONTINUATION_ERROR,
@@ -1493,7 +1500,14 @@ export function Composer({
 								void addFiles(files);
 							}
 						}}
-						placeholder={COMPOSER_PLACEHOLDER}
+						/* SAY IT BEFORE THE TAP (UX round 1, U4; first raised as
+						   U18). The ended band said "a send reopens it in your home
+						   folder" above the field; with the band gone, the empty field
+						   says it where the reader is about to type. Live sessions
+						   keep the plain placeholder. */
+						placeholder={ended
+							? messageRuntime.t("relay.health.ended_placeholder")
+							: COMPOSER_PLACEHOLDER}
 						aria-label={messageRuntime.t("relay.chrome.composer.label")}
 						disabled={disabled}
 						rows={1}

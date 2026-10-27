@@ -424,8 +424,12 @@ export function PendingCard({
 			   320x568 state, card 341px fixed, put the composer's bottom at
 			   664 in a 568 column). The `max-height` above still caps it on
 			   tall columns — the two bounds compose (cap when there is room,
-			   shrink when there is not), which neither bound alone does. */
-			className="mx-2 flex min-h-0 flex-col rounded-lg border-s-[3px] border-accent bg-elevated p-2.5"
+			   shrink when there is not), which neither bound alone does.
+
+			   NO OUTER INSET OF ITS OWN: the session view places this card in the
+			   above-composer stack (`components/above-composer.tsx`), whose one
+			   `px-2` lines its edge up with the composer card's. */
+			className="flex min-h-0 flex-col rounded-lg border-s-[3px] border-accent bg-elevated p-2.5"
 		>
 			{/* PINNED meta row (D2). One line, fixed height, cannot outgrow
 			    anything — so pinning it costs no reachability while keeping the
@@ -557,6 +561,10 @@ export function PendingCard({
 			    control rows carry it — over prose the overlay behaviour is the
 			    app-wide `lo-scroll` idiom and was ruled acceptable, and a gutter
 			    would cost 4px of line length on every card at 360px. */}
+			{/* `data-slot-rest` marks the row that ANSWERS the request (Approve/Deny,
+			    or the ask's answer field and Send): the above-composer slot rests
+			    on it when it is too short to show the card whole (design D6 =
+			    review R2-1). A behaviour handle, like `data-testid` below. */}
 			{pending.kind === "approval" ? (
 				<div className="mt-2 flex shrink-0 flex-col gap-2 pe-1.5">
 					<label className="flex min-h-11 items-center gap-2 text-body-sm text-ink-muted select-none">
@@ -568,7 +576,7 @@ export function PendingCard({
 						/>
 						{messageRuntime.t("relay.asks.pending.remember")}
 					</label>
-					<div className="flex gap-2">
+					<div data-slot-rest="" className="flex gap-2">
 						<button
 							type="button"
 							disabled={busy}
@@ -662,7 +670,7 @@ export function PendingCard({
 							{messageRuntime.t("relay.asks.card.secret_notice")}
 						</p>
 					) : null}
-					<div className="flex gap-2">
+					<div data-slot-rest="" className="flex gap-2">
 						<input
 							/* No per-field remount key needed: the whole card is keyed
 							   on request_id+question_index at the render site, so this

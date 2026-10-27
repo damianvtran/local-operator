@@ -316,11 +316,14 @@ describe("SessionScreen header", () => {
 		render(<SessionScreen sessionId="s1" />);
 		const header = document.querySelector("header") as HTMLElement;
 		expect(header.textContent).toContain("Asks");
+		/* The title block itself is the third button — the status dot's control,
+		   named by its visible words (no `aria-label`), which opens the health
+		   sheet. It adds no control to the row: it IS the title. */
 		expect(
 			Array.from(header.querySelectorAll("button")).map((button) =>
-				button.getAttribute("aria-label"),
+				button.getAttribute("aria-label") ?? `health:${button.getAttribute("data-health")}`,
 			),
-		).toEqual(["Back to conversations", "session menu"]);
+		).toEqual(["Back to conversations", "health:live", "session menu"]);
 		/* The removed controls stay removed: the star pinned, `? N` duplicated the
 		   dock, and `[wide]` was an unlabelled bordered toggle. */
 		expect(screen.queryByRole("button", { name: "wide view" })).toBeNull();

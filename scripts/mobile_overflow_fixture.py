@@ -1705,7 +1705,7 @@ async def main() -> None:
         # chip shares its slot with todos, a roster and an approval card.
         _foreign_ask_projection(),
         _asks_stacked_projection(),
-        # The ENDED conversation (D6/D8): its own sheet carries the ended strip.
+        # The ENDED conversation (D6/D8): its header health sheet carries Resume.
         _ended_ask_projection(),
         # A stopped conversation whose index row is a stale `open` past its
         # deadline (review round 1, R1 / QA Q1): the relay re-derives it.

@@ -88,3 +88,8 @@ catalogues before landing here.
   поверхность» — «рабочее» is dropped because the full term cannot fit the
   57/59-cell tip pool alongside the cite; accepted by the wave-2 audit.
   Revisit only with a budget change.
+- Recorded width exception: `relay.health.ended_placeholder` reads
+  «дом. папке» (standard abbreviation «дом.» = домашний, ruslang.ru normative
+  dictionary), because the full «домашней папке» with a send verb does not fit
+  the 276 px composer field at 16 px on a 320 px phone; `ended_detail` and
+  `ended_hint` keep the full form. Revisit only with a budget change.
