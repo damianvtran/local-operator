@@ -605,10 +605,13 @@ def test_exec_profile_scout_shell_is_sandboxed_or_absent(exec_server, tmp_path, 
         agents = AgentRegistry(root)
         assert install_seed("scout", registry=agents, scope="global") is not None
         row = agents.get_agent_by_name("scout")
+        assert row is not None
         old = "tools:read,glob,grep,list_variables,read_variable,web_search,web_fetch"
         agents.update_agent(
             row.id,
-            AgentEditFields(tags=[old if t.startswith("tools:") else t for t in row.tags]),
+            AgentEditFields.model_validate(
+                {"tags": [old if t.startswith("tools:") else t for t in row.tags]}
+            ),
         )
     result = run("exec", "SCOUT_FIXTURE", "--profile", "scout", "--name", "Scout fixture", stdin="")
     assert result.returncode == 0

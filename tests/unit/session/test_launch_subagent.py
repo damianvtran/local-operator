@@ -3317,11 +3317,12 @@ def _session_with_bash(tmp_path, monkeypatch, *, available: bool, pre_shell_row:
     assert install_seed("coder", registry=agents, scope="global") is not None
     if pre_shell_row:
         row = agents.get_agent_by_name("scout")
+        assert row is not None
         tags = [
             f"tools:{_PRE_SHELL_SCOUT_TOOLS}" if tag.startswith("tools:") else tag
             for tag in row.tags
         ]
-        agents.update_agent(row.id, AgentEditFields(tags=tags))
+        agents.update_agent(row.id, AgentEditFields.model_validate({"tags": tags}))
     ordinary = builtin.build_bash_tool()
     assert ordinary.approval_tier == "exec"
     session = Session(
