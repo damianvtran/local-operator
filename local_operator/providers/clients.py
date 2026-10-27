@@ -4247,6 +4247,23 @@ def _anthropic_cache_diagnosis(
     return kind, missed
 
 
+#: The refusal shapes :func:`_refuses_diagnostics` latches on, matched against
+#: the lower-cased, stripped error message. Either the message opens with the
+#: field name, or a CLAUSE does: a clause starts at the message start or after
+#: ``;``/``,`` plus optional whitespace (``messages: ok, but diagnostics: ...``
+#: has ``but`` in between, so free words up to the name are allowed), and must
+#: not already have named a path of its own (``[^;,:]*`` refuses to cross a
+#: ``:``). That last rule is what keeps quoted request text out: in
+#: ``system.0.text: run diagnostics: please`` the clause already said
+#: ``system.0.text:`` before reaching the word. The reviewer's sketch,
+#: ``(?:^|[\s;,])diagnostics[:.]``, still matched that repro (a space precedes
+#: the word), which is why the clause rule replaced it. Residual, accepted:
+#: quoted text that itself contains ``, diagnostics:`` still latches. The cost
+#: is telemetry only (one resend, diagnostics off until restart) and the API's
+#: validation messages do not normally echo prompt text.
+_DIAGNOSTICS_REFUSAL = re.compile(r"^diagnostics\b|(?:^|[;,])[^;,:]*?(?<![\w.])diagnostics[:.]")
+
+
 async def _refuses_diagnostics(response: httpx.Response) -> bool:
     """Whether an error response is the API rejecting the ``diagnostics`` key.
 
@@ -4257,6 +4274,17 @@ async def _refuses_diagnostics(response: httpx.Response) -> bool:
     surface unchanged. Never on a bare substring either: a 400 about a tool or
     schema path that merely CONTAINS the word (``tools.0.name: run_diagnostics
     ...``) would otherwise switch the feature off for the whole process.
+
+    The second arm requires the name to START a path segment — at a clause
+    boundary (whitespace, ``;`` or ``,``) — not merely to follow some non-word
+    character. A 400 that QUOTES request text (``system.0.text: run
+    diagnostics: please``) has ``diagnostics:`` after a space too, so the
+    boundary alone cannot tell them apart; what can is that the API names a
+    field by its full path, so a refusal of the top-level key is either the
+    whole message or a later clause (``...; diagnostics: Extra inputs``), and
+    quoted text sits after another path's ``: `` (PR #2984 review round 2,
+    r2-n1). Hence the lookbehind on the clause separators and the guard that
+    no ``<path>: `` precedes the match within the same clause.
     """
     if response.status_code != 400:
         return False
@@ -4264,7 +4292,7 @@ async def _refuses_diagnostics(response: httpx.Response) -> bool:
     message = _extract_error_message(response, _error_payload(response)).strip().lower()
     # ``^diagnostics\b`` (not a bare ``startswith``) so ``diagnostics_level: ...``
     # opening a message about some OTHER field cannot latch either.
-    return bool(re.search(r"^diagnostics\b|(?<![\w.])diagnostics[:.]", message))
+    return bool(_DIAGNOSTICS_REFUSAL.search(message))
 
 
 def _overage_account(oauth_access: "OAuthAccess | None") -> str:

@@ -1310,6 +1310,11 @@ class Usage(BaseModel):
     #: :data:`_DECODE_WINDOW_ATTR` — private so it costs the wire nothing, and read
     #: through :func:`decode_window_of` so a future shape change is one function.
     _decode_window: tuple[int, int] | None = PrivateAttr(default=None)
+    #: The Anthropic response id of the DIAGNOSED request this usage belongs
+    #: to, or unset. See :data:`CACHE_DIAGNOSTICS_ID_KEY` — private for the same
+    #: zero-frame-bytes reason as the decode window; the transcript encoder is
+    #: the one writer that puts it on disk.
+    _cache_diagnostics_id: str | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(
@@ -4914,6 +4919,42 @@ StreamEvent = (
     | StreamEndEvent
     | StreamModelEvent
 )
+
+
+#: The key a transcript row's ``usage`` payload carries the diagnosed Anthropic
+#: response id under (PR #2984 QA Q1). The cache-diagnostics chain
+#: (``SessionStreamFn._cache_diagnostics_previous_id``) is per-process state, so
+#: without a durable copy a RESUMED session restarted at ``previous_message_id:
+#: null`` and recorded a prefix break caused by an edited instruction file as
+#: ``baseline``. Persisted on the usage row because that row already IS the
+#: per-call provider record a resume reads (``at_ms`` seeds the provider clock
+#: from the same rows).
+#:
+#: Transcript-only by construction: the in-memory value is a PRIVATE attribute
+#: (:meth:`Usage._cache_diagnostics_id`), so it costs the attach frame, the
+#: ``usage_components`` receipts and job snapshots nothing; and ``Usage`` ignores
+#: unknown keys on validation, so a row carrying it replays on this build and on
+#: older ones alike.
+CACHE_DIAGNOSTICS_ID_KEY = "cache_diagnostics_id"
+
+
+def stamp_cache_diagnostics_id(usage: Any, response_id: str) -> None:
+    """Record on ``usage`` that its request was diagnosed as ``response_id``.
+
+    Best-effort like the decode window: a frozen or foreign usage records
+    nothing, which a resume reads as "no chain to continue" — the pre-fix
+    behaviour, never a raise into the stream.
+    """
+    try:
+        usage._cache_diagnostics_id = response_id
+    except Exception:  # noqa: BLE001 — telemetry must never fail a call
+        pass
+
+
+def cache_diagnostics_id_of(usage: Any) -> str | None:
+    """The diagnosed response id stamped on ``usage``, or ``None``."""
+    value = getattr(usage, "_cache_diagnostics_id", None)
+    return value if isinstance(value, str) and value else None
 
 
 def decode_window_of(usage: Any) -> tuple[int, int] | None:

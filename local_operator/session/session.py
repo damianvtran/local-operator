@@ -2395,20 +2395,56 @@ _WIRE_BUDGET_RATCHET = 0.75
 _WIRE_BUDGET_FLOOR = 4_000_000
 
 
-def _newest_usage_at_ms(transcript: Transcript) -> int:
+def _newest_usage_at_ms(transcript: Transcript, *, now_ms: int | None = None) -> int:
     """Epoch ms of the newest provider usage the transcript recorded, else 0.
 
     Every wire usage carries ``at_ms`` (the call's completion stamp), so the
     newest one is the last time this conversation's prefix was sent. Uncut
     rows on purpose: a compaction invalidates context-SIZE readings, not the
     fact that a request reached the provider at that moment.
+
+    CLAMPED to ``now_ms`` (default: the wall clock). A stamp from the future
+    (clock skew, or a transcript copied from a machine whose clock runs ahead)
+    would make ``now - last`` negative, and the run-start idle flush
+    (``_sweep_before_run``) would then stay off until wall time passed the
+    stamp plus the flush window — a day of skew suppressed a real 2 h gap's
+    shed (PR #3004 agent review round 3, R3-m1). Clamping reads such a stamp
+    as "just now": the first run after the resume keeps its prefix (the safe,
+    no-rewrite direction), and every later gap is measured from a real time.
     """
     newest = 0
     for row in transcript.all_usage_rows():
         stamp = row.get("at_ms")
         if isinstance(stamp, int) and stamp > newest:
             newest = stamp
-    return newest
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    return min(newest, now_ms)
+
+
+def _resumed_cache_diagnostics_id(transcript: Transcript) -> str | None:
+    """The diagnostics chain id a resumed session should continue from, or ``None``.
+
+    The newest id the transcript persisted (``newest_cache_diagnostics_id``),
+    EXCEPT rows a transcript fork copied from its parent: those name the
+    PARENT's requests, and a fork's first turn compared against them would
+    report a meaningless break — the same reason ``SessionStreamFn.fork``
+    starts a subagent at ``None``. "Copied" is decided by time, exactly as
+    ``Session._is_unnamed_fork`` and the wake-schedule restore decide it: a row
+    journalled at or before ``forked_at`` came across in the clone; anything
+    later was written by this fork and may seed its own resume.
+    """
+    from local_operator.fork import fork_instant
+    from local_operator.session.transcript import newest_cache_diagnostics_id
+
+    entries = transcript.entries()
+    try:
+        forked_at = fork_instant(transcript.directory)
+    except Exception:  # noqa: BLE001 — an unreadable marker must not fail construction
+        forked_at = None
+    if forked_at is not None:
+        entries = [entry for entry in entries if entry.ts > forked_at]
+    return newest_cache_diagnostics_id(entries)
 
 
 def _history_captured_browser_views(messages: Sequence[Message]) -> bool:
@@ -4573,6 +4609,7 @@ class Session:
         # review round 2, R2-M1: 0 prune rows where base wrote 5). A transcript
         # without stamped usage (legacy, or never answered) keeps 0.
         self._last_provider_request_ms = _newest_usage_at_ms(transcript)
+        self._seed_cache_diagnostics(transcript)
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
@@ -8766,6 +8803,27 @@ class Session:
         error = task.exception()
         if error is not None:
             logger.debug("conversation name write failed; will retry at dispose", exc_info=error)
+
+    def _seed_cache_diagnostics(self, transcript: Transcript) -> None:
+        """Hand a resumed conversation's diagnostics chain back to its stream.
+
+        The chain (``SessionStreamFn._cache_diagnostics_previous_id``) is
+        per-process, so without this a resume restarted at
+        ``previous_message_id: null`` and a break caused by an edited
+        instruction file was recorded as ``baseline`` (PR #2984 QA Q1).
+        ``getattr`` because test doubles and non-Anthropic stream fns have no
+        such hook; best-effort because telemetry must never stop a session from
+        opening.
+        """
+        seed = getattr(self._stream_fn, "seed_cache_diagnostics", None)
+        if not callable(seed):
+            return
+        try:
+            previous_id = _resumed_cache_diagnostics_id(transcript)
+            if previous_id:
+                seed(previous_id)
+        except Exception:  # noqa: BLE001 — a telemetry seed must never fail construction
+            logger.debug("cache diagnostics resume seed failed", exc_info=True)
 
     def _is_unnamed_fork(self) -> bool:
         """True while this session is a fork still wearing its parent's title.
