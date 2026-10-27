@@ -4768,7 +4768,14 @@ class ServingSessionHandle(SessionHandle):
                     # does not start one more body turn ahead of it. Harness
                     # rows (goal continuations) are not a person and do not
                     # hold it; a session without the seam keeps the plain wait.
-                    waiting = getattr(self._session, "person_prompt_waiting", None)
+                    # Annotated because ``getattr`` on the probe yields ``Any |
+                    # None`` and ``callable()`` narrows that to a callable
+                    # returning ``object``, which a ``with`` cannot enter. The
+                    # seam is ``Session.person_prompt_waiting``, a
+                    # ``contextlib.contextmanager``.
+                    waiting: Callable[[], contextlib.AbstractContextManager[object]] | None = (
+                        getattr(self._session, "person_prompt_waiting", None)
+                    )
                     if callable(waiting) and not command.harness_injected:
                         with waiting():
                             await self._await_turn_lock_free()

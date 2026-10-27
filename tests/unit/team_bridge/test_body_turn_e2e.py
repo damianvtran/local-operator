@@ -31,6 +31,7 @@ import asyncio
 import json
 import sqlite3
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -119,8 +120,18 @@ class CapturingStream:
 def _request_texts(request: ChatRequest) -> list[str]:
     """Every text block the provider would have received, in order."""
 
+    return _message_texts(request.messages)
+
+
+def _message_texts(messages: Iterable[Message]) -> list[str]:
+    """Every text block in ``messages``, in order -- a slice of one request.
+
+    Split from :func:`_request_texts` so the layout helpers can read one
+    message or a tail of a request without dressing it up as a request.
+    """
+
     out: list[str] = []
-    for message in request.messages:
+    for message in messages:
         content = getattr(message, "content", None)
         if isinstance(content, str):
             out.append(content)
@@ -524,7 +535,9 @@ async def test_sequential_user_prompts_each_leave_the_body_to_its_own_turn(tmp_p
         _reserve(store, second, 4, config_dir)
         await session.prompt("second")
         assert _carrying(stream) == [1], "the second user prompt must not carry the body"
-        await session._pending_body_followup_task
+        second_waiter = session._pending_body_followup_task
+        assert second_waiter is not None
+        await second_waiter
     finally:
         await session.dispose()
 
@@ -692,7 +705,7 @@ def _layout(stream: CapturingStream) -> str:
         cells = []
         for message in request.messages:
             role = getattr(message, "role", "?")
-            for text in _request_texts(SimpleNamespace(messages=[message])):
+            for text in _message_texts([message]):
                 tag = "BODY" if BODY in text else text[:28].replace("\n", " ")
                 cells.append(f"{role}:{tag}")
         rows.append(f"{i}: " + " | ".join(cells))
@@ -717,7 +730,7 @@ def _carries_both(stream: CapturingStream, words: str) -> list[int]:
             (j for j, m in enumerate(messages) if getattr(m, "role", None) == "assistant"),
             default=-1,
         )
-        fresh = _request_texts(SimpleNamespace(messages=messages[last_assistant + 1 :]))
+        fresh = _message_texts(messages[last_assistant + 1 :])
         if any(words in text for text in fresh):
             hits.append(i)
     return hits
