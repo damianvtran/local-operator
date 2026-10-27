@@ -10,6 +10,7 @@ without touching the operator's live sessions.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import threading
@@ -2496,3 +2497,86 @@ async def test_an_incremental_view_is_ready_and_complete_while_another_open_is_h
     assert view["index"]["state"] == "ready"
     assert [c["id"] for c in view["checkpoints"]][-2:] == ["u4", "a4"]
     assert len(view["checkpoints"]) == 8
+
+
+# ---------------------------------------------------------------------------
+# Incremental == full for EVERY run field, outcome included
+# ---------------------------------------------------------------------------
+
+
+def _settled_prefix() -> list[dict[str, Any]]:
+    """Three settled runs (error, error, complete) and a fourth still working.
+
+    The shape the real fixture showed: settled runs sit ABOVE the resume window
+    (which backs up only to the start of the run holding the last user row), so
+    an append re-derives only the fourth run and must carry the first three
+    unchanged — outcome and all.
+    """
+    return [
+        start("s1", 1.0, "t1"),
+        user("u1", 1.1, "one"),
+        assistant("a1", 1.2, "working", tool_calls=True),
+        tool_row("x1", 1.3, is_error=True),
+        marker("m1", 1.4, "t1", kind="error"),
+        start("s2", 2.0, "t2"),
+        user("u2", 2.1, "two"),
+        assistant("a2", 2.2, "failed again"),
+        marker("m2", 2.3, "t2", kind="error"),
+        start("s3", 3.0, "t3"),
+        user("u3", 3.1, "three"),
+        assistant("a3", 3.2, "done"),
+        marker("m3", 3.3, "t3"),
+        start("s4", 4.0, "t4"),
+        user("u4", 4.1, "four"),
+        assistant("a4", 4.2, "working", tool_calls=True),
+        tool_row("x4", 4.3),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("label", "appended"),
+    [
+        # (a) one row that neither opens nor closes a run
+        ("one_row", [tool_row("x5", 4.4)]),
+        # (b) the open run's own marker lands: the append CLOSES it
+        ("closes_run", [assistant("a5", 4.4, "finished"), marker("m4", 4.5, "t4")]),
+        # (c) the open run closes and a NEW one opens and starts working
+        (
+            "starts_run",
+            [
+                marker("m4", 4.5, "t4", kind="error"),
+                start("s5", 5.0, "t5"),
+                user("u5", 5.1, "five"),
+                assistant("a6", 5.2, "on it", tool_calls=True),
+            ],
+        ),
+    ],
+)
+def test_incremental_append_equals_a_full_scan_for_every_run_field(
+    tmp_path, monkeypatch, label, appended
+):
+    """THE INCREMENTAL PATH MUST NOT REWRITE A RUN IT DID NOT RE-READ.
+
+    Regression (pre-fix, every append): ``_emit_runs`` recomputed ``outcome`` for
+    the carried-over prior runs from the markers of the re-derived region alone,
+    so runs settled above the window came back ``outcome=None`` — the rail's and
+    the mobile run bar's error/complete marks vanished after any new row until a
+    full rescan. The whole ``RunRecord`` (every field) and every checkpoint must
+    equal what a full scan of the same bytes derives.
+    """
+    write_rows(tmp_path, _settled_prefix())
+    calls = _scanners(monkeypatch)
+    initial = refreshed(tmp_path)
+    assert [run.outcome for run in initial.runs] == ["error", "error", "complete", "open"]
+
+    write_rows(tmp_path, appended)
+    incremental = refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 1}, label
+    full = ti._scan_full(journal_path(tmp_path), None)
+
+    assert [dataclasses.asdict(r) for r in incremental.runs] == [
+        dataclasses.asdict(r) for r in full.runs
+    ]
+    assert [r.outcome for r in incremental.runs][:3] == ["error", "error", "complete"]
+    assert incremental.checkpoints == full.checkpoints
+    assert incremental.messages == full.messages
