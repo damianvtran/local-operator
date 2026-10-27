@@ -8394,9 +8394,7 @@ class Session:
             # Parity with the child prune: a shell that can background keeps
             # the tools that observe and await its jobs, or its own
             # ``background=true`` receipt points at a tool it was not declared.
-            if "bash" in names and _can_background(
-                [tool for tool in tools if tool.name == "bash"]
-            ):
+            if "bash" in names and _can_background([tool for tool in tools if tool.name == "bash"]):
                 names = (*names, *sorted(BACKGROUND_OBSERVER_TOOLS - set(names)))
             self._attached_profile_tools = names
             # Additive, so re-pinning only adds what the floor added.
