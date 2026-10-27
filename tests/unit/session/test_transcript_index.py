@@ -13,8 +13,9 @@ import asyncio
 import json
 import os
 import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -2303,3 +2304,195 @@ async def test_no_hold_means_no_deferral(tmp_path):
     task, _ = ti.start_refresh(tmp_path, SID)
     assert not ti.refresh_deferred(tmp_path, SID)
     assert await asyncio.wait_for(task, 30) is not None
+
+
+# ---------------------------------------------------------------------------
+# Yielding to other opens (conversation-first-paint residual 2): a background
+# scan of one session steps aside while ANOTHER session's first frame is held.
+# Every test here fails (never hangs) under its named mutant; holds are released
+# in ``finally`` so a regression ends the test instead of wedging a worker.
+# ---------------------------------------------------------------------------
+
+OTHER = "aabbccddee02"
+
+
+def _derived(index: ti.TranscriptIndex) -> tuple[Any, ...]:
+    """Everything a refresh derives, minus the per-scan generation uuid."""
+    return (
+        index.checkpoints,
+        index.messages,
+        index.runs,
+        index.journal_rows,
+        index.journal_ranges,
+        index.source_projection_facts,
+        index.coverage,
+        index.scan,
+    )
+
+
+def _three_turns(root: Path) -> None:
+    write_rows(
+        root,
+        [
+            user("u1", 1.0),
+            assistant("a1", 1.1),
+            user("u2", 2.0),
+            assistant("a2", 2.1),
+            user("u3", 3.0),
+            assistant("a3", 3.1),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unpayable_background_refresh_pauses_while_another_open_is_held(tmp_path):
+    """Mutant: pause disabled -> the task finishes under the other hold."""
+    _big_journal(tmp_path)
+    release = ti.hold_paint(tmp_path, OTHER)
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and not ti.refresh_deferred(tmp_path, SID), "another's hold never defers"
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the scan kept the GIL while another first frame was held"
+    finally:
+        release()
+    built = await asyncio.wait_for(task, 30)
+    assert built is not None
+    os.remove(ti.index_path(tmp_path, SID))
+    rebuilt = ti.refresh_index(tmp_path, SID)
+    assert rebuilt is not None
+    assert _derived(built) == _derived(rebuilt), "yielding changed what the scan derived"
+
+
+@pytest.mark.asyncio
+async def test_the_pause_ignores_its_own_hold(tmp_path, monkeypatch):
+    """Mutant: the pause honours its own hold -> it sleeps out the 1 s budget."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 1.0)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        pause = ti._yield_to_other_opens(ti._key(tmp_path, SID), tmp_path, SID)
+        started = time.monotonic()
+        await asyncio.to_thread(pause)
+        assert time.monotonic() - started < 0.5
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_synchronous_refresh_never_pauses(tmp_path, monkeypatch):
+    """The TUI / peer-cycle callers run ``refresh_index`` directly. Mutant: the
+    default ``_YIELD_TO`` pauses -> the refresh sleeps out the 1 s budget."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 1.0)
+    release = ti.hold_paint(tmp_path, OTHER)
+    try:
+        started = time.monotonic()
+        assert await asyncio.to_thread(ti.refresh_index, tmp_path, SID) is not None
+        assert time.monotonic() - started < 0.8
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_other_hold_costs_at_most_the_yield_budget(tmp_path, monkeypatch):
+    """Mutant: no budget -> the wait times out here (and ``finally`` frees the worker)."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 0.1)
+    release = ti.hold_paint(tmp_path, OTHER)  # "leaked": released only after the assert
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert await asyncio.wait_for(task, 5) is not None
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_other_hold_is_not_yielded_to(tmp_path, monkeypatch):
+    """Review round 1 MINOR-2. Mutant: no staleness check -> the refresh sleeps
+    out the 30 s budget and the 3 s wait fails."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 30.0)
+    release = ti.hold_paint(tmp_path, OTHER)
+    ti._PAINT_HOLD_SINCE[ti._key(tmp_path, OTHER)] -= ti._YIELD_HOLD_STALE_S + 1
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert await asyncio.wait_for(task, 3) is not None
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_name_saved_during_a_pause_survives_the_refresh_write(tmp_path):
+    """Review round 1 MAJOR-1: the pre-write pause must sit ABOVE the on-disk
+    naming re-read, so the merge and the write stay adjacent. The other open's
+    hold is taken the moment the scan returns, so the refresh pauses at its
+    pre-write point; a name is bought during that pause. On 85bba77d60f the
+    re-read ran before the pause and the write dropped the name."""
+    _big_journal(tmp_path)
+    loop = asyncio.get_running_loop()
+    releases: list[Callable[[], None]] = []
+    scanned = threading.Event()
+    real_scan = ti._scan_full
+
+    def scan_then_hold(path, raw):
+        index = real_scan(path, raw)
+
+        def take() -> None:
+            releases.append(ti.hold_paint(tmp_path, OTHER))
+            scanned.set()
+
+        loop.call_soon_threadsafe(take)
+        assert scanned.wait(5)
+        return index
+
+    ti._scan_full = scan_then_hold
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        while not scanned.is_set():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        assert not task.done(), "the refresh did not pause before its write"
+        ti.patch_naming(tmp_path, SID, {"u1": {"name": "Bought mid-pause", "summary": "S."}})
+    finally:
+        ti._scan_full = real_scan
+        for release in releases:
+            release()
+    assert await asyncio.wait_for(task, 30) is not None
+    on_disk = ti.read_index(tmp_path, SID)
+    assert on_disk is not None
+    assert on_disk.naming["items"]["u1"]["name"] == "Bought mid-pause"
+
+
+async def _view_while_another_open_is_held(root: Path, hold_s: float) -> dict[str, Any]:
+    release = ti.hold_paint(root, OTHER)
+    asyncio.get_running_loop().call_later(hold_s, release)
+    try:
+        return await ti.checkpoints_view(root, SID)
+    finally:
+        await asyncio.sleep(hold_s)
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_payable_view_is_ready_while_another_open_is_held(tmp_path):
+    """Review round 1 MAJOR-2: the view waits 0.2 s for a refresh it starts; a
+    payable one must never pause, or the answer is ``building`` -- which the rail
+    does not re-read. Fails on 85bba77d60f (``building``)."""
+    _three_turns(tmp_path)
+    view = await _view_while_another_open_is_held(tmp_path, 0.3)
+    assert view["index"]["state"] == "ready"
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1", "u2", "a2", "u3", "a3"]
+
+
+@pytest.mark.asyncio
+async def test_an_incremental_view_is_ready_and_complete_while_another_open_is_held(tmp_path):
+    """The reviewer's stale case: a previous index plus appended rows. Fails on
+    85bba77d60f (``building`` with the six pre-append checkpoints)."""
+    _three_turns(tmp_path)
+    refreshed(tmp_path)
+    write_rows(tmp_path, [user("u4", 4.0), assistant("a4", 4.1)])
+    view = await _view_while_another_open_is_held(tmp_path, 0.3)
+    assert view["index"]["state"] == "ready"
+    assert [c["id"] for c in view["checkpoints"]][-2:] == ["u4", "a4"]
+    assert len(view["checkpoints"]) == 8
