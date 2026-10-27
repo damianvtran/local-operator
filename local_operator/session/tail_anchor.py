@@ -49,10 +49,11 @@ IT IS A HINT, NEVER AN AUTHORITY. Every use is validated against the journal the
 reader has open: same inode, a journal that has not shrunk below the recorded size,
 the same last complete row ending at that size (a digest of it), and a scan of
 everything from the recorded size on that proves the type's spelling absent.
-Anything unproven falls back to the walking reader. The scan's assumption is that
-the format writes compact JSON separators, which
-``transcript.find_row_for_custom_type`` already assumes for its cursor and which
-every writer of this format has emitted since the format was introduced.
+Anything unproven falls back to the walking reader. Every scan — the whole-file
+proof in :func:`build_anchor` and the suffix check in :func:`validate_anchor` —
+searches the compact AND the ``": "`` spelling (``_needles``): ``to_json`` writes
+compact, but a journal re-serialized by another writer would otherwise hide its
+checkpoint row from a compact-only proof (#3001 QA Q1, hence version 4).
 """
 
 from __future__ import annotations
@@ -66,7 +67,9 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.session.transcript import (
+    ABSENCE_SCAN_MAX_BYTES,
     TRANSCRIPT_FILENAME,
+    _custom_type_spellings,
     find_row_for_custom_type,
 )
 
@@ -87,7 +90,19 @@ ANCHOR_FILENAME = "tail-anchor.v1.json"
 #: store that ran it keeps the file forever, because the selector sees a matching
 #: size and never revisits the journal, so the version moves and those records are
 #: ignored rather than reinterpreted.
-ANCHOR_VERSION = 3
+#:
+#: 4 since #3001 round 1 (QA Q1). Versions 2 and 3 proved absence with the
+#: COMPACT spelling only, so a journal whose checkpoint row was written with
+#: ``": "`` (import, sync, a hand edit — any writer but ``to_json``) was published
+#: as checkpoint-absent, and an unchanged-size record is trusted without a scan.
+#: Their ``checkpoint_absent`` claim is therefore read as ``False`` (see
+#: :func:`read_anchor`): the selection evidence they carry stays usable, the
+#: absence claim does not, and prewarm's selector sees the record as not current
+#: and rebuilds it with the pair-aware scan.
+ANCHOR_VERSION = 4
+
+#: Versions whose ``checkpoint_absent`` was proven with today's spelling set.
+_ABSENCE_TRUSTED_VERSIONS = frozenset({ANCHOR_VERSION})
 
 #: The custom type this sidecar answers for. One type, deliberately: it is the one
 #: the cold open requires and cannot bound without.
@@ -98,13 +113,18 @@ ANCHOR_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
 _WINDOW_BYTES = 1 << 20
 
 
-def _needle() -> bytes:
-    """The byte spelling of a checkpoint row's type, as the format writes it.
+def _needles() -> tuple[bytes, ...]:
+    """Every byte spelling a checkpoint row's type can carry.
 
-    Compact separators (no space after the colon) — see the module docstring on
-    why that assumption is the format's own.
+    Compact (first) AND ``": "`` separators, from the ONE spelling set the cold-tail and
+    ``_locate`` absence proofs use (``transcript._custom_type_spellings``). The
+    compact form alone was this module's original assumption; it let a
+    spaced-separator checkpoint be recorded as absent (#3001 QA Q1), and a
+    second, narrower copy of the set is how that happened.
     """
-    return ('"custom_type":"%s"' % ANCHOR_CUSTOM_TYPE).encode("utf-8")
+    spellings = _custom_type_spellings(ANCHOR_CUSTOM_TYPE)
+    assert spellings is not None, "the anchor type has a fixed JSON spelling"
+    return spellings
 
 
 @dataclass(frozen=True)
@@ -162,7 +182,7 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
             raw = json.load(handle)
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict) or raw.get("version") not in (2, ANCHOR_VERSION):
+    if not isinstance(raw, dict) or raw.get("version") not in (2, 3, ANCHOR_VERSION):
         return None
     if raw.get("custom_type") != ANCHOR_CUSTOM_TYPE:
         return None
@@ -179,6 +199,9 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
     )
     if not isinstance(absent, bool):
         return None
+    if raw["version"] not in _ABSENCE_TRUSTED_VERSIONS:
+        # Proven with the compact spelling only: never an absence proof now.
+        absent = False
     if payloads is not None and (
         not isinstance(payloads, list) or not all(isinstance(item, dict) for item in payloads)
     ):
@@ -298,7 +321,21 @@ def build_anchor(directory: str | Path) -> TailAnchor | None:
         stat = os.stat(path)
     except OSError:
         return None
+    # The compact spelling — the one ``to_json`` writes — keeps its PARSE-VERIFIED
+    # search: a candidate that is not a checkpoint row (a torn tail, the spelling
+    # nested in another row's details) does not cost the journal its record. Every
+    # OTHER spelling (``": "``, #3001 QA Q1) only ever comes from a foreign writer,
+    # so a plain byte proof of its absence is enough and errs toward the walk: any
+    # occurrence, or a file past the scan cap, means no record.
     if find_row_for_custom_type(directory, ANCHOR_CUSTOM_TYPE) is not None:
+        return None
+    compact = _needles()[0]
+    foreign = tuple(needle for needle in _needles() if needle != compact)
+    if stat.st_size > ABSENCE_SCAN_MAX_BYTES:
+        return None
+    # ``_needle_absent`` is this module's own overlapped window scan, and it
+    # answers "not proven" on a read error, so an unreadable byte refuses too.
+    if not all(_needle_absent(path, 0, stat.st_size, needle) for needle in foreign):
         return None
     complete = _complete_row_end(path, stat.st_size)
     if complete == 0:
@@ -317,7 +354,7 @@ def build_anchor(directory: str | Path) -> TailAnchor | None:
     )
 
 
-def _needle_absent(path: Path, start: int, end: int, needle: bytes | None = None) -> bool:
+def _needle_absent(path: Path, start: int, end: int, needle: bytes) -> bool:
     """Whether the checkpoint spelling is absent from ``[start, end)``.
 
     The windows OVERLAP by one needle length (review round 1, F2): a marker written
@@ -325,7 +362,6 @@ def _needle_absent(path: Path, start: int, end: int, needle: bytes | None = None
     halves of it, and this scan is the only thing standing between a stale record
     and a reader that skips a real checkpoint row.
     """
-    needle = _needle() if needle is None else needle
     overlap = len(needle) - 1
     position = end
     # ONE handle for the whole scan (review round 2, N3): the loop re-reads a
@@ -384,7 +420,7 @@ def validate_anchor(
         return anchor
     # Start a needle length below the recorded size: a marker written across that
     # offset has its first bytes in the scanned window and the rest after it.
-    for needle in (_needle(),) if needles is None else needles:
+    for needle in _needles() if needles is None else needles:
         start = max(0, anchor.size - (len(needle) - 1))
         if not _needle_absent(path, start, stat.st_size, needle):
             return None
@@ -414,7 +450,7 @@ __all__ = [
 ]
 
 
-_SELECTION_NEEDLES = (b'"custom_type":"selected_model"', _needle())
+_SELECTION_NEEDLES = (b'"custom_type":"selected_model"', *_needles())
 
 
 def read_selection_payloads(directory: str | Path) -> tuple[dict[str, Any], ...] | None:
