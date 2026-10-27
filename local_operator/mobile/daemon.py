@@ -3998,6 +3998,7 @@ class MobileDaemon:
         terminal: bool = False,
         ended: bool = False,
         degraded: bool = False,
+        live_pid: int = 0,
     ) -> SessionProjection | None:
         """Fold ``session_id`` from disk, then capture it for a phone route.
 
@@ -4019,7 +4020,12 @@ class MobileDaemon:
         relay cannot raise. The fold itself has no opinion — a disk rebuild
         alone is not evidence about a process — so the flags ride the repaint
         the caller is building, set before the capture so its summary carries
-        them.
+        them. ``live_pid`` is the same kind of knowledge (agent review round 1,
+        M2): the pid of a LIVE entry whose first payload has not landed yet.
+        The fold's own ``pid`` is 0, and 0 is the header dot's "no running
+        owner" rung, so a phone opening a session it just started would paint
+        it grey with a Resume offer until the dial's welcome arrived. 0 (the
+        default) leaves history and wake rebuilds exactly as they were.
 
         Extra folds are only paid by a fold that actually raced a display write;
         no lock or new cache. Loop-thread only: every caller runs on the loop,
@@ -4036,6 +4042,8 @@ class MobileDaemon:
                 projection.ended = True
             if degraded:
                 projection.degraded = True
+            if live_pid:
+                projection.pid = live_pid
             try:
                 projection = self.capture_subagent_details(
                     projection,
@@ -4689,9 +4697,29 @@ class MobileDaemon:
             if entry is None:
                 entry = SessionEntry(record)
                 self.table.entries[record.pid] = entry
+            # THE OWNER'S PID, restamped on every viewer frame (agent review
+            # round 1, B1). ``AttachClient._pump`` rebuilds each repaint after
+            # the welcome against a placeholder ``pid=0`` record — the attach
+            # screen keys nothing on it — but this callback publishes the frame
+            # as the session's live projection, and the epoch ledger keeps the
+            # later of two same-epoch frames, so the viewer's copy is the one
+            # the phone is served. A ``pid`` of 0 there is the "no running owner"
+            # rung of the header dot (``lib/session-health.ts``) and the pid
+            # the supplement's ``jobLive`` rule reads, so a viewed session
+            # would read as ended while it streams. ``record`` is the one this
+            # client dialled and the identity check above fenced.
+            projection.pid = record.pid
+            captured = self.capture_subagent_details(projection, record=record)
+            # A viewer frame IS the owner answering, exactly as a dial frame is
+            # (``_dial``): clear the verdict and stamp the frame clock (M1).
+            # Left ``None``, the next scan reads ``None -> False`` as a
+            # transition and fans out a full frame every pass while the phone
+            # watches — 4 scans, 4 pushes, measured in review.
+            entry.last_frame_at = time.monotonic()
+            captured.heartbeat_stale = False
             # AttachClient verifies the welcome's durable identity before this
             # callback. Retain that first paint before acknowledging creation.
-            entry.projection = self.capture_subagent_details(projection, record=record)
+            entry.projection = captured
             self.table.notify_list_changed()
             _fan_out(entry, self)
 
@@ -5749,6 +5777,8 @@ def build_app(daemon: MobileDaemon):
                         session_id,
                         ended=ended,
                         degraded=live is not None and bool(live.degraded),
+                        # Live but payload-less: the owner IS running (M2).
+                        live_pid=live.record.pid if live is not None else 0,
                     )
                 loop = asyncio.get_running_loop()
                 sent_at: float | None = None

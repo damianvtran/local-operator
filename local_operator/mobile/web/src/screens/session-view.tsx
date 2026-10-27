@@ -35,7 +35,8 @@ import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
-import { SessionHealthControl } from "../components/session-health";
+import { SessionHealthControl, useResume } from "../components/session-health";
+import { sessionHealth } from "../lib/session-health";
 import { AboveComposerStack } from "../components/above-composer";
 import { Sheet } from "../components/ui/sheet";
 import { Chip } from "../components/ui/chip";
@@ -120,6 +121,13 @@ function Header({
 	setGateOpen: (open: boolean) => void;
 }) {
 	const [menuOpen, setMenuOpen] = useState(false);
+	/* THE HEALTH SHEET AND THE ONE RESUME PATH, held here (UX round 1, U3) so the
+	   ⋮ menu can offer Resume while the session is ended without a second copy
+	   of `useResume`: the menu runs it, then opens the health sheet, which is
+	   where its acceptance line or refusal is painted. */
+	const [healthOpen, setHealthOpen] = useState(false);
+	const ended = sessionHealth(projection, connected) === "ended";
+	const resume = useResume(sessionId, ended);
 	/* The opener the menu's sheet returns focus to. Held here because the ⋮
 	   button lives here and the sheet is the only consumer that needs it. */
 	const menuButtonRef = useRef<HTMLButtonElement>(null);
@@ -233,7 +241,13 @@ function Header({
 				    title block is the control that opens the health sheet, so its
 				    44 px target costs the 56 px header nothing (see
 				    `components/session-health.tsx`). */}
-				<SessionHealthControl sessionId={sessionId} projection={projection} connected={connected}>
+				<SessionHealthControl
+					projection={projection}
+					connected={connected}
+					open={healthOpen}
+					onOpenChange={setHealthOpen}
+					resume={resume}
+				>
 					{/* THE NAME TRUNCATES, THE FACT DOES NOT (operator finding B): a long
 					    conversation title is cut with an ellipsis here, so the whole string
 					    stays recoverable as the element's `title` and the document title
@@ -266,6 +280,11 @@ function Header({
 				pinned={pinned}
 				onTogglePin={() => togglePin()}
 				onOpenApprovals={() => setGateOpen(true)}
+				onResume={ended ? () => {
+					void resume.resume();
+					setHealthOpen(true);
+				} : undefined}
+				resuming={resume.busy}
 				returnFocusRef={menuButtonRef}
 			/>
 			<GateSheet
@@ -519,21 +538,6 @@ export function SessionScreen({
 		if (decision === "open") openAsksByPolicy();
 	});
 	const rootRef = useRef<HTMLDivElement>(null);
-	/* THE RUNG'S HEIGHT, MEASURED BECAUSE IT IS THE OVERLAY'S (round 2,
-	   U23 = D7). The ladder is an overlay (round 1, U19/D4) so the column's
-	   geometry never moves when a rune appears — but an overlay that nothing
-	   compensates for is a strip painted OVER the transcript, and on a
-	   transcript that does not scroll (a short ended session: `scrollHeight ==
-	   clientHeight`) no gesture can reveal what it covers: measured 28 of the
-	   first row's 35px at 390 and 38 of 56px at 320, under a strip whose own
-	   sentence says "its history is kept". The rune's height is handed to the
-	   transcript, which reserves the same amount INSIDE its scroller (see
-	   `topInset` there), so the first row sits under the strip and the strip
-	   alone moves nothing. A callback ref rather than an effect on mount,
-	   because the ladder only exists once a projection does — `[ladderEl]`
-	   attaches the observer exactly when the node arrives. Measured instead
-	   of pinned to a constant: the ended strip wraps (52px at 390, 63px at
-	   320) and its refusal/acceptance lines have heights of their own. */
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
 	/* THE LIST STREAM TOO, so the header's ☆/★ reflects the shared pin
 	   authoritatively rather than optimistically forever (review round 1, MINOR 1).

@@ -169,3 +169,68 @@ describe("everything stacked above the composer shares one slot", () => {
 		}
 	});
 });
+
+describe("the slot never paints over the composer (QA round 1, Q2)", () => {
+	/* QA [redacted] at 320x700 with a 260 px keyboard (column 440) and the
+	   composer's retry alert open: the composer grew to ~340 px, the column's
+	   flex shrink took the deficit out of this slot (`min-h-0`) and out of the
+	   card (`min-h-0`, down to its 20 px padding), and both kept PAINTING their
+	   children past their shrunken boxes — the composer, later in flow, covered
+	   the tray and the card's Approve by 43 px. The slot must own its overflow:
+	   it is the scroller, so a short column scrolls it instead of letting its
+	   items spill; and each item keeps its own height inside it (the card's
+	   column cap still bounds it), so nothing is squeezed below its controls.
+
+	   happy-dom does no layout, so this pins the CONTRACT that makes overlap
+	   impossible; the measured gap (>= 0 at 320x440 with all three present) is
+	   [redacted] in the rendered frame recorded on the PR. */
+	it("is a clipped vertical scroller whose items keep their own height", () => {
+		slot = { projection: projection(), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		const cls = stack().className.split(/\s+/);
+		// The scroller: clips at its own edge instead of spilling onto the composer.
+		expect(cls).toContain("overflow-y-auto");
+		// Never sideways (the column rule, no-sideways-scroll.test.ts).
+		expect(cls).toContain("overflow-x-hidden");
+		// Still yields to the column so the composer keeps its place.
+		expect(cls).toContain("min-h-0");
+		// Each item keeps its height INSIDE the slot: the slot scrolls, the card
+		// is not squeezed under its own pinned controls.
+		expect(cls).toContain("*:shrink-0");
+		// The house scrollbar, but NO mask: the card renders its pairing sheet IN
+		// PLACE (sheets never portal), and a `mask-image` on an ancestor would
+		// clip that fixed-position overlay to this slot's box. `overflow` does
+		// not clip a fixed descendant; a mask does.
+		expect(cls).toContain("lo-scroll");
+		expect(cls.some((c) => c.startsWith("lo-fade"))).toBe(false);
+	});
+
+	it("keeps all three present at 320x440 — card, tray AND the composer's retry alert", () => {
+		/* The state QA hit: a retained envelope mounts the composer with its
+		   retry alert. The card and the tray stay inside the slot, the slot stays
+		   ABOVE the composer in flow (never a sibling painted after it), and the
+		   composer still carries the alert. */
+		localStorage.setItem(
+			"lo-mobile-command:s1",
+			JSON.stringify({
+				version: 1,
+				saved_at: Date.now(),
+				envelope: { command_id: "0f2f1d5e-6c3a-4b7e-9f1a-2b3c4d5e6f70", op: "prompt", text: "hello from QA" },
+			}),
+		);
+		try {
+			slot = { projection: projection(), connected: true };
+			render(<SessionScreen sessionId="s1" />);
+			const composer = document.querySelector(".lo-composer")!;
+			expect(composer.textContent).toContain("Retry earlier instruction");
+			const card = document.querySelector<HTMLElement>('[data-testid="pending-card"]')!;
+			const tray = screen.getByLabelText("Session status");
+			expect(card.parentElement).toBe(stack());
+			expect(tray.parentElement).toBe(stack());
+			expect(stack().compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+			expect(stack().contains(composer)).toBe(false);
+		} finally {
+			localStorage.removeItem("lo-mobile-command:s1");
+		}
+	});
+});

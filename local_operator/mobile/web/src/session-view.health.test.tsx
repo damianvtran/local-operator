@@ -334,9 +334,10 @@ describe("a degraded session (U7)", () => {
 		const control = document.querySelector<HTMLElement>("button[data-health]")!;
 		expect(control.dataset.health).toBe("not_answering");
 		expect(within(control).getByText("Not answering")).toBeTruthy();
-		// The full sentence (sends wait) is one tap away, in the dot's sheet.
+		// What a send does now is one tap away, in the dot's sheet — and it is
+		// the truth (#3008 review U1): refused at once, text kept, no queue.
 		fireEvent.click(control);
-		expect(within(screen.getByRole("dialog")).getByText("Not answering — sends will wait")).toBeTruthy();
+		expect(within(screen.getByRole("dialog")).getByText("Your computer can't reach this session right now and keeps trying. Until it does, a send fails straight away and your text stays in the message box.")).toBeTruthy();
 		// `ended` and `degraded` are different facts; the degraded state must
 		// not drag the resume affordance (and its restart offer) in with it.
 		expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
@@ -360,13 +361,17 @@ describe("the health ladder renders exactly one rung", () => {
 		expect(document.querySelectorAll("[data-health-dot]")).toHaveLength(1);
 	});
 
-	it("prefers degraded over the phone's own link", () => {
+	it("prefers the phone's own link over degraded — its last frame may be stale", () => {
+		/* #3008 copy sign-off: an offline phone cannot vouch for a degraded
+		   reading taken from its last frame; it can only say its own link is
+		   down. Previously the reverse (degraded over the link). */
 		slot = { projection: projection({ degraded: true }), connected: false };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(document.querySelector<HTMLElement>("button[data-health]")!.dataset.health).toBe("not_answering");
-		expect(screen.getByText("Not answering")).toBeTruthy();
-		expect(screen.queryByText("Reconnecting…")).toBeNull();
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("reconnecting");
+		expect(control.textContent).toContain("Reconnecting");
+		expect(screen.queryByText("Not answering")).toBeNull();
 		expect(document.querySelectorAll("[data-health-dot]")).toHaveLength(1);
 	});
 });
@@ -375,14 +380,18 @@ describe("the phone's own dropped link (U11)", () => {
 	it("says reconnecting once a projection is on screen, and nothing while it has none", () => {
 		slot = { projection: projection(), connected: false };
 		const first = render(<SessionScreen sessionId="s1" />);
-		expect(screen.getByText("Reconnecting…")).toBeTruthy();
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("reconnecting");
+		expect(control.textContent).toContain("Reconnecting");
+		// ...and it is announced once, through the health live region (U2).
+		expect(document.querySelector("[data-health-announce]")!.textContent).toBe("Reconnecting");
 		first.unmount();
 
 		// With no data yet the view already says `connecting to session…`;
 		// a second line would be noise about noise.
 		slot = { projection: null, connected: false };
 		render(<SessionScreen sessionId="s1" />);
-		expect(screen.queryByText("Reconnecting…")).toBeNull();
+		expect(screen.queryByText(/Reconnecting/)).toBeNull();
 	});
 });
 

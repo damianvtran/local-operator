@@ -18,13 +18,13 @@ type Facts = {
 };
 
 /** The rule, restated independently of the implementation so the table checks
-    the SPEC (first match wins): ended → degraded/stale → no live owner → the
-    phone's link → live. Streaming never appears: busy is green. */
+    the SPEC (first match wins): ended → the phone's link → degraded/stale → no
+    live owner → live. Streaming never appears: busy is green. */
 function expected(f: Facts): SessionHealth {
 	if (f.ended) return "ended";
+	if (!f.connected) return "reconnecting";
 	if (f.degraded || f.heartbeat_stale === true) return "not_answering";
 	if (f.pid === 0) return "ended";
-	if (!f.connected) return "reconnecting";
 	return "live";
 }
 
@@ -68,5 +68,27 @@ describe("sessionHealth — every combination of the runtime facts", () => {
 		// The SSE route serves a live-but-payload-less entry a disk rebuild
 		// (pid 0) carrying `degraded`; that owner exists, so it is not ended.
 		expect(sessionHealth({ ended: false, degraded: true, pid: 0 }, true)).toBe("not_answering");
+	});
+});
+
+/* EVERY PRECEDENCE PAIR, named (#3008 review round 1 + the copy sign-off's
+   order: ended > the phone's link > degraded > stale > no live owner > live).
+   The exhaustive table above proves the order; these say which fact wins each
+   head-to-head, so a reorder fails on a sentence rather than on a cell dump. */
+describe("sessionHealth — each precedence pair", () => {
+	const owner = { ended: false, degraded: false, pid: 4242 };
+	it.each<[string, Parameters<typeof sessionHealth>[0], boolean, SessionHealth]>([
+		["ended beats the phone's link", { ...owner, ended: true }, false, "ended"],
+		["ended beats degraded", { ...owner, ended: true, degraded: true }, true, "ended"],
+		["ended beats a stale beat", { ...owner, ended: true, heartbeat_stale: true }, true, "ended"],
+		["the phone's link beats degraded", { ...owner, degraded: true }, false, "reconnecting"],
+		["the phone's link beats a stale beat", { ...owner, heartbeat_stale: true }, false, "reconnecting"],
+		["the phone's link beats a disk rebuild", { ...owner, pid: 0 }, false, "reconnecting"],
+		["degraded beats a stale beat (both yellow; the sheet says dropped)", { ...owner, degraded: true, heartbeat_stale: true }, true, "not_answering"],
+		["degraded beats a disk rebuild (an older daemon's live-but-down entry)", { ...owner, degraded: true, pid: 0 }, true, "not_answering"],
+		["a stale beat beats a disk rebuild", { ...owner, heartbeat_stale: true, pid: 0 }, true, "not_answering"],
+		["a disk rebuild beats live", { ...owner, pid: 0 }, true, "ended"],
+	])("%s", (_name, input, connected, want) => {
+		expect(sessionHealth(input, connected)).toBe(want);
 	});
 });

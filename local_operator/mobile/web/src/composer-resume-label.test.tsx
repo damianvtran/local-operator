@@ -144,14 +144,15 @@ describe("the phone's resume button", () => {
 		slot = { projection: projection({ cut_off: true, ended: true }), connected: true };
 		rerender(<SessionScreen sessionId="s1" />);
 
-		fireEvent.change(screen.getByPlaceholderText("Message…"), {
+		fireEvent.change(screen.getByPlaceholderText("Send to reopen in your home folder…"), {
 			target: { value: "are you there?" },
 		});
 		fireEvent.click(screen.getByRole("button", { name: "send" }));
 
 		await waitFor(() =>
 			expect(screen.getByRole("alert").textContent).toContain(
-				"This session has ended and couldn’t be woken just now. Tap “Retry earlier instruction” to send it again, or reopen it from the sessions list.",
+				/* UX U5: points at the header's Resume, never the sessions list. */
+				"This session has ended and couldn't be reopened just now. Try again, or tap “Ended” at the top and choose Resume.",
 			),
 		);
 		expect(screen.queryByText(/Couldn’t continue this conversation/)).toBeNull();

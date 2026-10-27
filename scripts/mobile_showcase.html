@@ -186,7 +186,7 @@ document.querySelector('#reveal').addEventListener('click',()=>{const pre=frame.
 frame.addEventListener('load',setup);document.querySelectorAll('#phone,#theme,#rtl').forEach(el=>el.addEventListener('change',setup));
 </script><script>
 /* THE MATCHED PAIR (fixture-only; header status dot PR). `?grid=1&route=/s/<id>
-   &phone=WxH&theme=dark|light[&kb=PX][&open=health][&state=label]` lays out the
+   &phone=WxH&theme=dark|light[&kb=PX][&open=health][&retry=1][&state=label]` lays out the
    SAME route twice — BEFORE (the frozen base bundle at /baseline, configured by
    LOP_SHOWCASE_BASELINE_DIST) and AFTER (the bundle this checkout built) — so one
    harness-browser screenshot is a matched pair. ONE THEME PER PAGE because each
@@ -215,6 +215,12 @@ document.querySelectorAll('pre').forEach(el=>el.style.display='none');
 const solo=document.querySelector('#phone-relay');solo.setAttribute('src','about:blank');solo.style.display='none';
 const [W,H]=(q.get('phone')||'390x844').split('x').map(Number);const KB=Number(q.get('kb')||0);const h=H-KB;
 const route=q.get('route')||'/';const state=q.get('state')||'grid';
+/* `&retry=1` (QA round 1, Q2): seed a retained continuation envelope for the
+   routed session BEFORE either leg loads, so its composer mounts with the
+   retry alert open — the state where the card, the tray and the alert all
+   compete for a 440 px column. Same origin, so both legs read the one key;
+   the shape is `continuation-command.ts`'s stored v1 envelope. */
+if(q.get('retry')==='1'){const sid=decodeURIComponent(route.replace(/^\/s\//,''));localStorage.setItem(`lo-mobile-command:${sid}`,JSON.stringify({version:1,saved_at:Date.now(),envelope:{command_id:'0f2f1d5e-6c3a-4b7e-9f1a-2b3c4d5e6f70',op:'prompt',text:'hello from QA'}}));}
 const s=Math.min(1,(innerHeight-30)/h,(innerWidth/2-10)/W);
 const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;align-items:flex-start';document.body.appendChild(row);
 const out=document.createElement('pre');out.id='grid-result';out.style.cssText='position:static;display:block;font-size:10px;max-width:none';document.body.appendChild(out);
@@ -233,7 +239,7 @@ function probe(win){const doc=win.document;const comp=doc.querySelector('.lo-com
   if(scroller&&comp){scroller.scrollTop=scroller.scrollHeight;const sr=scroller.getBoundingClientRect();const rows=[...scroller.children].filter(c=>c.getBoundingClientRect().height>0);const last=rows[rows.length-1];
     res.transcript={bottom:Math.round(sr.bottom*10)/10,padding_bottom:parseFloat(win.getComputedStyle(scroller).paddingBottom),last_row_bottom:last?Math.round(last.getBoundingClientRect().bottom*10)/10:null};
     const items=[];let el=scroller.nextElementSibling;while(el&&!el.contains(comp)){const kids=el.hasAttribute('data-above-composer')?[...el.children]:[el];for(const k of kids){const r=k.getBoundingClientRect();if(r.height>0)items.push({tag:k.tagName.toLowerCase(),label:(k.getAttribute('aria-label')||k.getAttribute('data-testid')||k.textContent.trim().slice(0,32)),...R(r),text_left:firstText(doc,k)});}
-      if(el.hasAttribute('data-above-composer'))res.stack_class=el.className;el=el.nextElementSibling;}
+      if(el.hasAttribute('data-above-composer')){res.stack_class=el.className;/* THE SLOT'S OWN BOX (QA round 1, Q2): item boxes inside a scrolling slot extend past what is painted, so overlap is measured on the slot, and `stack_overlap` > 0 means the slot paints over the composer. */const sb=el.getBoundingClientRect();res.stack={...R(sb),scroll_height:el.scrollHeight,client_height:el.clientHeight};res.stack_overlap=Math.round((sb.bottom-res.composer.top)*10)/10;}el=el.nextElementSibling;}
     res.items=items;const gaps=[];for(let i=1;i<items.length;i++)gaps.push(Math.round((items[i].top-items[i-1].bottom)*10)/10);res.gaps_between=gaps;
     res.gap_to_composer=Math.round(((res.composer.top)-(items.length?items[items.length-1].bottom:sr.bottom))*10)/10;
     res.gap_transcript_to_first=items.length?Math.round((items[0].top-sr.bottom)*10)/10:null;
@@ -251,6 +257,8 @@ legs.forEach(([which,base,theme],i)=>{const cell=document.createElement('div');c
        (`ComposerFrame` is present while the session is still connecting). */
     for(let t=0;t<150&&!doc.querySelector('.lo-scroll.lo-fade-y');t++)await new Promise(r=>setTimeout(r,100));
     await new Promise(r=>setTimeout(r,700));
+    /* `&scroll=stack`: scroll the above-composer slot to its end first, to show its last item is reachable. */
+    if(q.get('scroll')==='stack'){const st=doc.querySelector('[data-above-composer]');if(st){st.scrollTop=st.scrollHeight;await new Promise(r=>setTimeout(r,300));}}
     if(q.get('open')==='health'){const b=doc.querySelector('button[data-health]');if(b){b.click();await new Promise(r=>setTimeout(r,500));}}
     const res=probe(win);results[`${which}-${theme}`]=res;out.textContent=JSON.stringify(results);
     try{await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:`${state}-${which}`,metrics:{...res,viewport:[W,h],theme}})});}catch(e){}});

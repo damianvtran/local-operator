@@ -18,9 +18,23 @@
  *  - NO top padding: the transcript scroller's `py-2` already leaves 8 px under
  *    its last line, so the rhythm above the first item is that same 8 px rather
  *    than a doubled 16.
- *  - `min-h-0` keeps the pending card able to yield on a short column (its own
- *    `min-h-0`, "THE CARD YIELDS"); a child that must not shrink, like the
- *    tray, says `shrink-0` itself.
+ *  - THE SLOT SCROLLS; ITS ITEMS DO NOT SHRINK (QA round 1, Q2). On a short
+ *    column the deficit has to come from somewhere. The transcript (`flex-1`,
+ *    basis 0) is already at 0 by then, and the composer keeps its content
+ *    height, so it lands on this slot. With only `min-h-0` here the slot shrank
+ *    below its children and they kept painting past its box: [redacted] at
+ *    320x440 with the card, the tray and the composer's retry alert, the card
+ *    was squeezed to its 20 px padding and the composer covered the tray and
+ *    the card's Approve by 43 px. So the slot is the scroller (`min-h-0` +
+ *    `overflow-y-auto`, clipped at its own edge, never sideways) and every
+ *    item keeps its own height (`*:shrink-0`; the card's column cap still
+ *    bounds it, and its body still scrolls inside that cap). Nothing above the
+ *    composer can then overlap it: the worst case is a slot showing the top of
+ *    its first item, scrollable to the rest.
+ *  - NO MASK (no `lo-fade-*` cue). Sheets render IN PLACE, never portalled
+ *    (`ui/sheet.tsx`), and the card mounts its pairing sheet inside this slot;
+ *    `mask-image` on an ancestor clips even a fixed-position descendant to the
+ *    ancestor's box, where `overflow` does not.
  *
  * Children own their insides, never their outside: no margins and no side
  * padding on an item placed here. Renders nothing when it has nothing, so an
@@ -28,7 +42,8 @@
  */
 import type { ReactNode } from "react";
 
-export const ABOVE_COMPOSER_STACK = "flex min-h-0 flex-col gap-2 px-2 pb-2";
+export const ABOVE_COMPOSER_STACK =
+	"lo-scroll flex min-h-0 flex-col gap-2 overflow-y-auto overflow-x-hidden px-2 pb-2 *:shrink-0";
 
 export function AboveComposerStack({ children }: { children: ReactNode }) {
 	const items = (Array.isArray(children) ? children : [children]).filter(

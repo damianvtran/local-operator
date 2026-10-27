@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import time
+from typing import Any, cast
 
 import pytest
 
@@ -176,3 +177,154 @@ async def test_a_live_frame_clears_the_verdict_through_the_dial_loop() -> None:
             await dial
         server.close()
         await server.wait_closed()
+
+
+# ---------------------------------------------------------------------------
+# The PHONE VIEWER link (agent review round 1, B1/M1). While a phone views a
+# live session the relay holds a second connection to the owner,
+# ``_connect_phone`` -> ``AttachClient``, and that client rebuilds every repaint
+# against a placeholder ``pid=0`` record. Its frames are the ones the phone's
+# SSE queue keeps, so they must carry the owner's pid (or the header dot reads
+# a running session as "Ended") and the answering verdict (or every scan
+# re-publishes a non-transition). Driven against a REAL ``RuntimeServer``.
+# ---------------------------------------------------------------------------
+
+
+class _ViewerHandle:
+    """The smallest owner a real ``RuntimeServer`` will serve a viewer from."""
+
+    def __init__(self, session_id: str) -> None:
+        self._projection = SessionProjection(
+            session_id=session_id,
+            pid=0,
+            kind="tui",
+            conversation_name="viewed",
+            cwd="/tmp",
+            model_label="test/model",
+        )
+
+    @property
+    def session_projection_seed(self) -> SessionProjection:
+        return self._projection
+
+    def subscribe(self, on_projection):  # noqa: ANN001, ANN202
+        # Kept so the test can make the owner REPAINT: the welcome is rebuilt
+        # against the real record, and only the repaints AFTER it travel
+        # through ``AttachClient._pump``'s placeholder ``pid=0`` record.
+        self.repaint = on_projection
+        return lambda: None
+
+    async def refresh(self) -> None:
+        pass
+
+
+async def _live_record() -> SessionRecord:
+    from local_operator.session.runtime import registry
+
+    deadline = asyncio.get_running_loop().time() + 5
+    while asyncio.get_running_loop().time() < deadline:
+        found = registry.scan()
+        if found and found[0][1] == "live":
+            return found[0][0]
+        await asyncio.sleep(0.05)
+    raise AssertionError("no live record")
+
+
+@pytest.mark.asyncio
+async def test_the_phone_viewer_link_serves_the_owner_pid_and_a_fresh_verdict(monkeypatch) -> None:
+    from local_operator.session.runtime.server import RuntimeServer
+
+    handle = _ViewerHandle("5cfeedfacade")
+    # A REDUCED owner on purpose: the viewer path needs only the seed, a
+    # subscription and refresh, and ``RuntimeServer`` probes the rest.
+    registrant = RuntimeServer(cast(Any, handle), kind="tui")
+    registrant.start()
+    daemon = MobileDaemon(port=0, password="pw")
+    try:
+        record = await _live_record()
+        assert record.pid > 0
+        served: list[SessionProjection] = []
+        real_fan_out = daemon_module._fan_out
+
+        def spy(entry, d=None):  # noqa: ANN001, ANN202
+            served.append(entry.projection)
+            real_fan_out(entry, d)
+
+        monkeypatch.setattr(daemon_module, "_fan_out", spy)
+        # A phone is VIEWING (an SSE subscriber), so ``connect`` keeps the
+        # viewer open past the welcome instead of releasing it at once.
+        phone: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        daemon.table.session_subscribers["5cfeedfacade"] = {phone}
+        await daemon._connect_phone(record)
+        assert served, "the viewer link never painted its welcome"
+        # The owner streams: a repaint after the welcome is the frame that
+        # arrives through the pump.
+        welcomes = len(served)
+        handle.repaint()
+        for _ in range(50):
+            if len(served) > welcomes:
+                break
+            await asyncio.sleep(0.05)
+        assert len(served) > welcomes, "the viewer link never relayed a repaint"
+        entry = daemon.table.entries[record.pid]
+        # B1: the phone is served the OWNER's pid, never the attach client's
+        # placeholder 0 — the dot's "no running owner" rung reads it.
+        assert entry.projection is not None
+        assert entry.projection.pid == record.pid
+        assert all(p.pid == record.pid for p in served)
+        # M1: a viewer frame is the owner answering, exactly like a dial frame.
+        assert entry.projection.heartbeat_stale is False
+        assert entry.last_frame_at is not None
+
+        # ...so once steady, scans publish NOTHING: 4 passes, 0 pushes.
+        served.clear()
+        for _ in range(4):
+            daemon_module._sync_heartbeat_stale(entry, daemon)
+        assert served == []
+    finally:
+        daemon.table.session_subscribers.pop("5cfeedfacade", None)
+        daemon.release_phone_view("5cfeedfacade")
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_qa_q1_replay_every_frame_the_phone_receives_keeps_the_live_pid() -> None:
+    """QA round 1, Q1 (= review B1), replayed on the wire the phone reads.
+
+    QA's sequence: a phone opens a LIVE session (its SSE queue subscribes and
+    the relay's viewer link attaches), then the owner keeps painting — idle,
+    busy, a pending approval, a send. 4.4 s in, every frame turned ``pid: 0``
+    and ``heartbeat_stale`` fell off the wire, so the header dot read "Ended".
+    Here the frames are read from the phone's own queue, serialized exactly as
+    ``_fan_out`` puts them, so this asserts what the phone is SENT, not an
+    attribute on a daemon object.
+    """
+    from local_operator.session.runtime.server import RuntimeServer
+
+    handle = _ViewerHandle("5cfacade0001")
+    registrant = RuntimeServer(cast(Any, handle), kind="tui")
+    registrant.start()
+    daemon = MobileDaemon(port=0, password="pw")
+    phone: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    try:
+        record = await _live_record()
+        daemon.table.session_subscribers["5cfacade0001"] = {phone}
+        await daemon._connect_phone(record)
+        # The owner paints repeatedly, as a turn, an approval and a send do.
+        for _ in range(3):
+            handle.repaint()
+            await asyncio.sleep(0.15)
+        frames: list[dict[str, Any]] = []
+        while not phone.empty():
+            frames.append(phone.get_nowait())
+        assert len(frames) >= 2, "the phone was not sent the viewer link's repaints"
+        sent = [frame.get("data", frame) for frame in frames]
+        # Q1's symptom first: the welcome kept the pid, every repaint lost it.
+        assert [data["pid"] for data in sent] == [record.pid] * len(sent)
+        # A frame from the owner IS an answer: the verdict rides every one.
+        assert [data.get("heartbeat_stale") for data in sent] == [False] * len(sent)
+        assert not any(data["ended"] for data in sent)
+    finally:
+        daemon.table.session_subscribers.pop("5cfacade0001", None)
+        daemon.release_phone_view("5cfacade0001")
+        registrant.close()

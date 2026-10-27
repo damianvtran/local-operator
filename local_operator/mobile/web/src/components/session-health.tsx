@@ -20,7 +20,7 @@ import { cn } from "../lib/cn";
 import { resumeRefusalText } from "../lib/refusal";
 import { navigate } from "../router";
 import { messageRuntime } from "../store";
-import { sessionHealth, type SessionHealth } from "../lib/session-health";
+import { type HealthInput, sessionHealth, type SessionHealth } from "../lib/session-health";
 import type { SessionProjection } from "../types";
 import { SessionSubtitle } from "./session-subtitle";
 import { Button } from "./ui/button";
@@ -38,12 +38,17 @@ export const HEALTH_DOT_TONE: Record<SessionHealth, string> = {
 	ended: "bg-ink-dim",
 };
 
-/** The state's own word: the dot's accessible name, its `title`, and the
-    sheet's title. Colour is never the only signal. Every arm but `live` reuses a
-    key that already ships translated (the subtitle's own words), so the two
-    surfaces say the same thing in every locale. */
 export { sessionHealth, type SessionHealth };
 
+/** The state's own word: the control's `title`, the sheet's title, and what
+    the polite live region announces on a transition. Colour is never the only
+    signal. The dot itself is `aria-hidden`; the control is named by its VISIBLE
+    words (the subtitle), plus this word as screen-reader text where the subtitle
+    does not already say it (`live`). `not_answering` and `ended` reuse the
+    subtitle's own translated keys, so the two surfaces cannot disagree;
+    `reconnecting` has its own bare title (`relay.health.reconnecting`), since
+    the link key it once borrowed carries an ellipsis meant for a status line
+    (review round 1, N2/N3). */
 export function healthLabel(health: SessionHealth): string {
 	switch (health) {
 		case "live":
@@ -51,9 +56,40 @@ export function healthLabel(health: SessionHealth): string {
 		case "not_answering":
 			return messageRuntime.t("relay.chrome.session.subtitle.not_answering");
 		case "reconnecting":
-			return messageRuntime.t("relay.chrome.link.reconnecting");
+			return messageRuntime.t("relay.health.reconnecting");
 		case "ended":
 			return messageRuntime.t("relay.chrome.session.subtitle.ended");
+	}
+}
+
+/** The sheet's ONE explanation sentence per state: what is true and what a
+    send does now (review round 1, U1/D2/D4/U6). Each is checked against the
+    daemon, not hoped:
+    - `degraded`: the relay's dial is down, so the entry has no writer;
+      `request()` raises and the command route answers 409 at once, and the
+      composer puts the text back. Nothing queues.
+    - `heartbeat_stale` with the dial up: the frame IS written, the route waits
+      15 s for an ack and answers 504 — the message may still land once the
+      runtime catches up (and a retry under the same `command_id` is deduped by
+      the runtime), so the sentence says check before retrying.
+    - `reconnecting`: the PHONE's link is down; nothing is known about the
+      computer, which may well still be running the session.
+    - `ended`: history kept, and a send or Resume reopens it in the home folder
+      (the daemon wakes a host there for a prompt, issue #1875).
+    `degraded` wins over a stale beat for the same reason it does in
+    `sessionHealth`: a dial that is down is the fact a send meets first. */
+export function healthDetail(health: SessionHealth, projection: HealthInput): string {
+	switch (health) {
+		case "live":
+			return messageRuntime.t("relay.health.live_detail");
+		case "not_answering":
+			return projection.degraded
+				? messageRuntime.t("relay.health.dropped_detail")
+				: messageRuntime.t("relay.health.quiet_detail");
+		case "reconnecting":
+			return messageRuntime.t("relay.health.reconnecting_detail");
+		case "ended":
+			return messageRuntime.t("relay.health.ended_detail");
 	}
 }
 
@@ -144,21 +180,28 @@ export function useResume(sessionId: string, ended: boolean) {
  * the name, the state word over the status line.
  */
 export function SessionHealthControl({
-	sessionId,
 	projection,
 	connected,
+	open,
+	onOpenChange,
+	resume: { busy, error, notice, resume },
 	children,
 }: {
-	sessionId: string;
 	projection: SessionProjection;
 	connected: boolean;
+	/* OWNED BY THE HEADER, with the resume state (UX U3): the ⋮ menu's Resume
+	   runs the same `useResume` and then opens THIS sheet, so its acceptance
+	   line or refusal is seen where the action belongs — never a second copy of
+	   the path, and never a refusal left behind a closed menu. */
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	resume: ReturnType<typeof useResume>;
 	children: ReactNode;
 }) {
 	const health = sessionHealth(projection, connected);
 	const label = healthLabel(health);
-	const [open, setOpen] = useState(false);
 	const buttonRef = useRef<HTMLButtonElement>(null);
-	const { busy, error, notice, resume } = useResume(sessionId, health === "ended");
+	const setOpen = onOpenChange;
 	return (
 		<>
 			<button
@@ -186,37 +229,36 @@ export function SessionHealthControl({
 				</span>
 				</span>
 			</button>
-			{/* The link-down announcement, moved out of the subtitle so it sits
-			    OUTSIDE the button: inside, its words would be read twice as part
-			    of the control's name. Only the transition is announced. */}
-			<span className="sr-only" aria-live="polite">{health === "reconnecting" ? messageRuntime.t("relay.chrome.link.reconnecting") : ""}</span>
+			{/* THE TRANSITION ANNOUNCEMENT (UX round 1, U2). The retired ended and
+			    degraded bands were `role="status"` regions inserted on the change,
+			    so a screen-reader user composing in a session that died or wedged
+			    heard it happen; with the bands gone the dot alone would say it to
+			    sighted readers only. One polite region, OUTSIDE the button (inside,
+			    its words would be read twice as part of the control's name), that
+			    holds the state's own word while not live and is empty while live —
+			    a region only speaks on a CHANGE, so mounting into a state is not
+			    repeated and each move into another state is said once. */}
+			<span className="sr-only" aria-live="polite" data-health-announce="">{health === "live" ? "" : label}</span>
 			<Sheet open={open} onClose={() => setOpen(false)} title={label} returnFocusRef={buttonRef}>
 				<div className="flex flex-col gap-3 p-3">
+					{/* ONE explanation register for every state (design D4): a single
+					    `ink-muted` paragraph that adds what the title does not say. */}
+					<p className="text-body-sm text-ink-muted">{healthDetail(health, projection)}</p>
 					{health === "ended" ? (
 						<>
-							<div className="flex flex-col gap-1">
-								<p className="text-body-sm text-ink">{messageRuntime.t("relay.chrome.session.ended")}</p>
-								{/* WHERE IT REOPENS, AND THAT A SEND DOES IT TOO (UX round 1, U18;
-								    issue #1875). The daemon resumes the transcript in the owner's
-								    home and wakes a host for a prompt to an ended session, so resume
-								    is the way to reopen WITHOUT composing, not a prerequisite. */}
-								<p className="text-meta text-ink-dim">{messageRuntime.t("relay.chrome.session.ended_hint")}</p>
-							</div>
-							<Button disabled={busy} onClick={() => void resume()}>
+							{/* THE SHEET'S MAIN ACTION SPENDS THE ACCENT (design D1). With the
+							    sheet open Resume is the one action and the reason it was
+							    opened; `tonal` measured 1.05:1 (light) / 1.11:1 (dark) against
+							    the sheet and read as a tinted slab. `accent` on `elevated` is
+							    >=4.53:1 in every shipped theme, and the other one-action sheets
+							    (metadata save, project create) already use `primary`. */}
+							<Button variant="primary" disabled={busy} onClick={() => void resume()}>
 								{busy ? messageRuntime.t("relay.chrome.session.resuming") : messageRuntime.t("relay.chrome.session.resume")}
 							</Button>
 							{notice ? <p role="status" className="text-meta text-ink-dim">{notice}</p> : null}
 							{error ? <p role="alert" className="text-meta break-words text-danger">{error}</p> : null}
 						</>
-					) : (
-						<p className="text-body-sm text-ink-muted">
-							{health === "live"
-								? messageRuntime.t("relay.health.live_detail")
-								: health === "not_answering"
-									? messageRuntime.t("relay.chrome.session.degraded")
-									: messageRuntime.t("relay.chrome.drawer.status", { state: "retrying" })}
-						</p>
-					)}
+					) : null}
 				</div>
 			</Sheet>
 		</>
