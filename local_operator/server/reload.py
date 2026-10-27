@@ -696,9 +696,21 @@ def _exec(plan: ReloadPlan) -> None:
         "--listener-fd",
         str(fd),
     ]
+    # THE DESKTOP BEARER CROSSES BY PIPE, NEVER BY ENVIRONMENT (operator ask a-772b). The
+    # serve start-up adopted it out of ``os.environ`` (``desktop.adopt_spawn_bearer``), so
+    # ``dict(os.environ)`` no longer carries it; exporting it here would put it back in the
+    # successor's exec-time block, which same-user ``ps -E`` reads for the process's life.
+    # The successor adopts it from the descriptor, so the app's bearer stays the same across
+    # the reload -- the invariant ``daemon-status.ts`` in the desktop app names.
+    from local_operator.server import desktop
+
+    bearer_env, bearer_fd = desktop.spawn_bearer_handoff()
     try:
-        os.execve(str(plan.interpreter), argv, dict(os.environ))
+        os.execve(str(plan.interpreter), argv, {**os.environ, **bearer_env})
     finally:
+        if bearer_fd is not None:
+            # Reached only on a failed exec: the pipe is this attempt's, and a retry mints its own.
+            os.close(bearer_fd)
         # Reached only when the exec FAILED — a successful one never returns.
         # Both restorations run even if the first raises (serve-reload review round 2, R2-7):
         # a daemon left deaf is worse off than one left with a writable

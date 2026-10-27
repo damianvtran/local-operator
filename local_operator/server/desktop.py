@@ -3,10 +3,15 @@
 **Two sources of truth, in this order** (and only :func:`desktop_posture` reads
 either, so the ordering cannot drift between callers):
 
-1. The **environment** — ``LOCAL_OPERATOR_DESKTOP_TOKEN``, the capability the
-   Electron main process injects into a backend IT started. That is a
-   process-lifetime secret passed beside the spawn and is authoritative for the
-   whole life of the process; a claim is refused while it is set.
+1. The **spawn bearer** — the capability the Electron main process hands a
+   backend IT started. That is a process-lifetime secret passed beside the
+   spawn and is authoritative for the whole life of the process; a claim is
+   refused while it is set. A ``serve`` launch adopts it once at start-up
+   (:func:`adopt_spawn_bearer`) from an inherited descriptor
+   (``LOCAL_OPERATOR_DESKTOP_TOKEN_FD``), or, for an app that predates that
+   channel, from ``LOCAL_OPERATOR_DESKTOP_TOKEN``, which is then removed from
+   the environment. In-process embedders and tests that never call the adopt
+   step still read the environment variable directly.
 2. A **claim** — ``POST /v1/desktop/claim``, the way a daemon that SOMEBODY
    ELSE started (a TUI, a terminal, launchd) hands the plane to the desktop app.
    The key is minted by :mod:`local_operator.server.registry` at startup and
@@ -74,8 +79,12 @@ otherwise have no way to admit the dev-server origin the UI is written against.
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
+import select
+import sys
+import time
 from dataclasses import dataclass
 from typing import NamedTuple, Sequence
 from urllib.parse import urlsplit
@@ -83,6 +92,8 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException, Request
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
+
+logger = logging.getLogger(__name__)
 
 #: The environment variable the desktop app injects into a backend it spawned.
 #: Read HERE and nowhere else — see the module docstring, and the source-grep
@@ -92,6 +103,47 @@ TOKEN_ENV = "LOCAL_OPERATOR_DESKTOP_TOKEN"
 #: The comma-separated origins such a backend trusts. Read here and nowhere
 #: else, for the same reason. A claim ADDS to whatever this names.
 ORIGINS_ENV = "LOCAL_OPERATOR_DESKTOP_ORIGINS"
+
+#: The DESCRIPTOR channel for the same bearer: the number of an inherited, readable
+#: descriptor (a pipe) that carries the token followed by a newline or EOF. The VALUE is a
+#: small integer, never the secret, so it is harmless in ``ps -E``.
+#:
+#: WHY A DESCRIPTOR AND NOT THE ENVIRONMENT (operator ask a-772b, "Yes, fix it before this
+#: ships"). macOS captures a process's environment at exec into the argument area
+#: (``KERN_PROCARGS2``), and ``ps -E`` shows that block to ANY process running as the same
+#: user, for the life of the process. Popping ``os.environ`` -- even ``unsetenv`` -- does not
+#: touch it (measured here: the token is still listed after both). QA's cell 14 showed an
+#: agent's ``bash`` tool child reading the bearer from its daemon ancestor that way and
+#: approving a credential card with no person involved. So the bearer must never be in the
+#: exec-time environment of the daemon at all; the only fixes are a descriptor or a 0600
+#: file unlinked after reading. A descriptor matches how the desktop app already launches
+#: the daemon (``child_process.spawn`` with ``stdio: "pipe"``, ``backend-service.ts``): it
+#: can write the token to the child's stdin, end it, and name ``0`` here. A file would put
+#: the secret on disk for a window and need a cleanup story on every crash path.
+#:
+#: AN APP THAT STILL USES THE ENVIRONMENT is covered without changing it: the serve launch
+#: re-execs itself once onto this channel (``_relaunch_with_bearer_fd``). The app moving to
+#: the descriptor only saves that one interpreter restart and closes the short window
+#: before it -- the pre-exec process lives well under a second.
+#:
+#: The serve reload (``server/reload.py``) execs the successor with the bearer handed over
+#: the SAME way -- a fresh pipe -- so a reload keeps the plane without ever re-exporting it.
+TOKEN_FD_ENV = "LOCAL_OPERATOR_DESKTOP_TOKEN_FD"
+
+#: The longest bearer this reads off the descriptor. The app's tokens are 32-byte urlsafe
+#: base64 (~43 chars); the bound only keeps a misbehaving writer from making boot read
+#: forever.
+_TOKEN_FD_MAX_BYTES = 4096
+
+#: How long boot waits for the writer to deliver the line, on platforms where the wait can
+#: be bounded (POSIX ``select``). A spawner that names a descriptor and never writes is a
+#: bug on its side; the daemon then boots with the plane CLOSED rather than hanging.
+_TOKEN_FD_TIMEOUT_S = 10.0
+
+#: The bearer adopted at serve start-up (descriptor, or the scrubbed environment fallback).
+#: ``None`` until :func:`adopt_spawn_bearer` runs, so in-process embedders and the test
+#: suite keep reading the environment exactly as before.
+_SPAWN_BEARER: str | None = None
 
 
 class DesktopPosture(NamedTuple):
@@ -165,7 +217,7 @@ def desktop_posture() -> DesktopPosture:
     silently installed beside it. Otherwise an accepted claim governs, and the
     env origins (if any) stay in force alongside the claimed origin.
     """
-    env_token = os.environ.get(TOKEN_ENV, "")
+    env_token = _SPAWN_BEARER or os.environ.get(TOKEN_ENV, "")
     env_origins = _parse_origins(os.environ.get(ORIGINS_ENV, ""))
     if env_token:
         return DesktopPosture(token=env_token, origins=env_origins)
@@ -173,6 +225,194 @@ def desktop_posture() -> DesktopPosture:
     if claimed is not None:
         return DesktopPosture(token=claimed.key, origins=env_origins | claimed.origins)
     return DesktopPosture(token="", origins=env_origins)
+
+
+def _read_bearer_fd(fd: int) -> str:
+    """The bearer line off an inherited descriptor, then the descriptor is closed.
+
+    Reads to the first newline or EOF, bounded in size and (on POSIX) in time. Any failure
+    yields ``""``: the plane stays closed, which is the fail-closed direction -- the app then
+    sees 401 and reports the daemon unpaired instead of a daemon answering anyone.
+    """
+    data = b""
+    try:
+        deadline = time.monotonic() + _TOKEN_FD_TIMEOUT_S
+        while b"\n" not in data and len(data) < _TOKEN_FD_MAX_BYTES:
+            if os.name == "posix":
+                left = deadline - time.monotonic()
+                if left <= 0 or not select.select([fd], [], [], left)[0]:
+                    logger.warning("desktop bearer descriptor delivered nothing in time")
+                    return ""
+            chunk = os.read(fd, _TOKEN_FD_MAX_BYTES - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except (OSError, ValueError):  # ValueError: a number select() cannot take
+        logger.warning("desktop bearer descriptor is unreadable", exc_info=True)
+        return ""
+    finally:
+        _retire_descriptor(fd)
+    return data.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+
+
+def _retire_descriptor(fd: int) -> None:
+    """Close a consumed bearer descriptor -- or, for a standard stream, point it at /dev/null.
+
+    The app writes the token to the child's STDIN (``fd 0``). Closing a standard stream would
+    let the next ``open``/``socket`` take that number, and anything that later reads "stdin"
+    or hands it to a child would get an unrelated file; ``/dev/null`` keeps the slot occupied
+    and empty, the same stdin a detached daemon has always had.
+    """
+    try:
+        if fd <= 2:
+            null = os.open(os.devnull, os.O_RDONLY)
+            try:
+                os.dup2(null, fd)
+            finally:
+                os.close(null)
+        else:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def adopt_spawn_bearer() -> None:
+    """Take the spawner's bearer into process memory and out of the environment. Serve only.
+
+    Called once, first thing in a ``serve`` launch, before anything can spawn. Two channels:
+
+    * :data:`TOKEN_FD_ENV` names a descriptor -- the channel that keeps the bearer out of the
+      exec-time environment (see that constant for why only this closes ``ps -E``);
+    * :data:`TOKEN_ENV` is the COMPATIBILITY fallback for a desktop app that still passes the
+      token in the environment (every shipped app up to the one that learns the descriptor).
+      It is popped from ``os.environ`` at once so no child and no reload re-exports it, and
+      then -- because popping cannot touch the exec-time block ``ps -E`` reads -- a real
+      launch REPLACES ITSELF once (:func:`_relaunch_with_bearer_fd`): same pid, same argv,
+      same stdio, the bearer moved onto a pipe. So an app that never changes still gets a
+      daemon whose exec-time environment holds no bearer. Where that re-exec cannot happen
+      (Windows, an in-process embedder, a failed exec) the bearer is still adopted and the
+      residual is stated rather than hidden: the value stays in THIS process's exec-time
+      block until the app moves to the descriptor.
+
+    The descriptor wins when both are set. Both names are removed from ``os.environ`` either
+    way. Idempotent: a second call finds nothing left to adopt and keeps the first bearer.
+    """
+    global _SPAWN_BEARER
+    named_fd = os.environ.pop(TOKEN_FD_ENV, "")
+    env_token = os.environ.pop(TOKEN_ENV, "")
+    if named_fd:
+        try:
+            fd = int(named_fd)
+        except ValueError:
+            logger.warning(
+                "%s is not a descriptor number; desktop plane stays closed", TOKEN_FD_ENV
+            )
+            return
+        token = _read_bearer_fd(fd)
+        if token:
+            _SPAWN_BEARER = token
+        return
+    if env_token:
+        _SPAWN_BEARER = env_token
+        # Never returns when it re-execs; the successor adopts the bearer off the pipe.
+        _relaunch_with_bearer_fd()
+
+
+#: The ``-c`` program the desktop app launches its managed backend with
+#: (``SERVE_ENTRYPOINT`` in the app's ``src/main/backend/owned-serve-launch.ts``). Matched
+#: as a substring so a launcher that adds an import in front still counts.
+_DESKTOP_SERVE_PROGRAM = "from local_operator.cli import main"
+
+
+def _relaunchable_argv() -> list[str] | None:
+    """The argv to re-exec this process with, or ``None`` when a re-exec is not safe.
+
+    WHY A PREDICATE AT ALL: ``cli.main()`` is also called IN-PROCESS -- by the test suite and
+    by rigs -- and an unguarded ``execve`` there replaces pytest itself (the failure
+    ``procname.is_own_launch`` documents). So this re-execs only a process whose OWN launch
+    line is a launch of this product: ``procname.is_own_launch`` (the ``lop`` script or
+    ``-m local_operator.*``), or the desktop app's ``-c`` program, which ``is_own_launch``
+    refuses on purpose (branding would change ``sys.executable``; this re-exec does not --
+    it execs ``sys.executable`` itself, so the app's identity probe still matches).
+
+    POSIX only: ``os.execve`` on Windows starts a NEW process and exits the old one, which
+    would orphan the app's ``ChildProcess`` handle, and the ``ps -E`` exposure it closes is
+    the macOS/BSD ``KERN_PROCARGS2`` / Linux ``/proc/<pid>/environ`` shape.
+    """
+    if os.name != "posix":
+        return None
+    argv = list(getattr(sys, "orig_argv", []) or [])
+    if len(argv) < 2 or not sys.executable:
+        return None
+    from local_operator import procname
+
+    if procname.is_own_launch():
+        return argv
+    for index, item in enumerate(argv[1:-1], start=1):
+        if item == "-c":
+            return argv if _DESKTOP_SERVE_PROGRAM in argv[index + 1] else None
+    return None
+
+
+def _relaunch_with_bearer_fd() -> None:
+    """Re-exec this serve launch with the adopted bearer on a pipe instead of the environment.
+
+    THE ONLY WAY TO EMPTY THE EXEC-TIME BLOCK IS A NEW EXEC. macOS copies the environment
+    into the argument area at ``execve`` and ``ps -E`` reads that copy for the process's
+    whole life; ``os.environ.pop`` and ``unsetenv`` change libc's view only. So the process
+    execs itself once, with an environment that names a descriptor instead of the value.
+
+    WHAT IS PRESERVED, and why the desktop app cannot tell: ``execve`` keeps the pid (the
+    app's ``ChildProcess`` handle and its ``exitCode`` stay this process's), the cwd and
+    every inheritable descriptor -- stdin/stdout/stderr, the app's log pipes -- and argv is
+    the interpreter's own launch line (``sys.orig_argv``), so ``sys.executable`` and the
+    ``-c`` program are byte-identical. It runs before the login-shell probe, the listener and
+    any thread, so nothing is lost but one interpreter start (~0.2-0.4 s, once per daemon).
+
+    LOOP-FREE BY CONSTRUCTION: the successor's environment has no :data:`TOKEN_ENV`, so its
+    :func:`adopt_spawn_bearer` takes the descriptor branch, which never re-execs.
+
+    Returns normally (bearer kept in memory, residual as documented) when the launch is not
+    re-execable or the exec fails -- a daemon that keeps the plane is better than one that
+    cannot start.
+    """
+    argv = _relaunchable_argv()
+    if argv is None or not _SPAWN_BEARER:
+        return
+    bearer_env, bearer_fd = spawn_bearer_handoff()
+    try:
+        os.execve(sys.executable, argv, {**os.environ, **bearer_env})
+    except OSError:
+        logger.warning(
+            "could not re-exec serve to move the desktop bearer off the environment; "
+            "it stays readable in this process's exec-time environment",
+            exc_info=True,
+        )
+    finally:
+        # Reached only on a failed exec: the pipe was this attempt's.
+        if bearer_fd is not None:
+            os.close(bearer_fd)
+
+
+def spawn_bearer_handoff() -> tuple[dict[str, str], int | None]:
+    """Environment additions and an inheritable read descriptor carrying the adopted bearer.
+
+    For an ``execve`` successor of THIS process (the serve reload): a fresh pipe holds the
+    bearer and a newline, its write end is already closed, and the returned mapping names
+    the read end under :data:`TOKEN_FD_ENV`. The caller must close the descriptor if its
+    exec fails. ``({}, None)`` when nothing was adopted (a claimed or standalone daemon,
+    whose bearer lives in the run record, not in the environment).
+    """
+    if not _SPAWN_BEARER:
+        return {}, None
+    read_end, write_end = os.pipe()
+    try:
+        # One write of well under PIPE_BUF: it cannot block or split.
+        os.write(write_end, _SPAWN_BEARER.encode("utf-8") + b"\n")
+    finally:
+        os.close(write_end)
+    os.set_inheritable(read_end, True)
+    return {TOKEN_FD_ENV: str(read_end)}, read_end
 
 
 def _is_non_browser_caller(request: Request) -> bool:

@@ -387,8 +387,52 @@ def _require_anchor(record: Mapping[str, Any], root: Path) -> dict[str, Any]:
     return trio
 
 
+#: The longest approval id an audit row carries as its subject. Minted ids are ``ap_`` +
+#: 13 Crockford characters (``apn_`` + 13 for enrollment); the bound only matters for an id
+#: that did not come from this store, which :func:`_audit_refusal` already declines to write.
+_SUBJECT_MAX_CHARS = 64
+
+
+def _audit_subject(approval_id: str) -> str:
+    """The id as an audit subject: control characters dropped, length bounded.
+
+    The audit writer bounds and cleans DETAIL values but writes ``subject`` verbatim, and on
+    the refusal path the id is whatever the caller put in the URL (#3002 QA r2, Q4: a
+    4003-character subject and an ``\\n``/ESC-bearing one were both stored). Defence in depth
+    beside :func:`_resolvable`: every subject this module writes goes through here.
+    """
+    cleaned = "".join(ch for ch in approval_id if ch.isprintable())
+    return cleaned[:_SUBJECT_MAX_CHARS]
+
+
 def _audit(event: str, approval_id: str, root: Path, detail: dict[str, Any]) -> None:
-    approvals._audit(event, actor="self", subject=approval_id, root=root, detail=detail)
+    approvals._audit(
+        event, actor="self", subject=_audit_subject(approval_id), root=root, detail=detail
+    )
+
+
+def _resolvable(approval_id: str, root: Path) -> bool:
+    """Whether ``approval_id`` names a record that exists in this device's store.
+
+    WHY REFUSALS ARE AUDITED ONLY FOR THESE (#3002 review r2 R2-2, QA r2 Q4): the refusal
+    wrappers run before any rate limit (``_admit`` sits after id validation), so auditing a
+    malformed or non-existent id let 32 junk POSTs write 32 rows with no ceiling, and made
+    refusal-row volume read as attempt volume on real cards. A refusal against a card that
+    exists -- digest mismatch, expiry, in-flight, rate limit, cancelled prompt -- is the trace
+    an incident review needs and is still written; "no such card" is answered 404/409 to the
+    caller and leaves nothing to review.
+    """
+    try:
+        return approvals.record_path(approval_id, root).is_file()
+    except (MeshRefusal, OSError, ValueError):  # a malformed id is not a record
+        return False
+
+
+def _audit_refusal(
+    event: str, approval_id: str, root: Path, detail: dict[str, Any]
+) -> None:
+    if _resolvable(approval_id, root):
+        _audit(event, approval_id, root, detail)
 
 
 def approve(
@@ -407,7 +451,8 @@ def approve(
     flight, rate-limited, cancelled prompt, signer failure, digest/disclosure/operation
     mismatch, expiry, state, anchor, policy -- writes ``credential.desktop_sign_refused``
     with its code. The rate-limit, in-flight and cancel rows are the trace a prompt-bombing
-    loop leaves, which is what an incident review needs to see.
+    loop leaves, which is what an incident review needs to see. An id that resolves to no
+    record writes nothing (:func:`_resolvable`).
     """
     from local_operator.network import enrollment
 
@@ -425,7 +470,7 @@ def approve(
             authority_level = assurance()[1]
         except Exception:  # noqa: BLE001 -- the refusal must reach the caller regardless
             authority_level = ""
-        _audit(
+        _audit_refusal(
             "credential.desktop_sign_refused",
             approval_id,
             root,
@@ -572,7 +617,7 @@ def apply(
     except MeshRefusal as refusal:
         # A signed-but-not-applied card is the state an operator asks about; the refusal
         # code names why (review #3002 round 1, Q1).
-        _audit(
+        _audit_refusal(
             "credential.desktop_apply_refused",
             approval_id,
             root,
