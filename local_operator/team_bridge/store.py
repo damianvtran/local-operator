@@ -2143,6 +2143,28 @@ class Store:
                 ).fetchone()
             )
 
+    def conversation_of_reserved_message(self, owner: OwnerSnapshot, message_id: str) -> str | None:
+        """The ``bcv_`` id an ADMITTED conversation message belongs to, or None.
+
+        WHY: no hub route maps a ``bcmsg_`` id to its conversation (every
+        conversation route needs the id in its path), so this reservation row is
+        the only local answer. The bridge tool's ``reply`` refusal uses it to
+        name the exact ``channel_post`` call. Read-only and generation-fenced
+        like :meth:`body_reservation`; an absent store stays absent.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT conversation_id FROM body_reservations WHERE owner_key = ? "
+                "AND message_id = ? LIMIT 1",
+                (_owner_key(owner), message_id),
+            ).fetchone()
+            return str(row["conversation_id"]) if row is not None else None
+
     def pending_body_reservation_for(
         self,
         owner: OwnerSnapshot,
@@ -4998,6 +5020,29 @@ class Store:
                         ref.request_ref,
                     ),
                 )
+
+    def reply_target(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """Thread and sender ids of one delivery THIS owner received, or None.
+
+        WHY: ``reply`` answers a received message, so its destination comes
+        from the row :meth:`merge_page`/:meth:`merge_refs` wrote after the
+        recipient binding check, never from the model's say-so. Owner-keyed,
+        tenant-matched and generation-fenced, so a drifted runtime or another
+        owner's row resolves nothing. Ids only: no label or body is stored or
+        returned. Read-only: an absent store stays absent.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT thread_id, sender_account_id, sender_endpoint_id FROM deliveries "
+                "WHERE owner_key = ? AND message_id = ? AND tenant_id = ?",
+                (_owner_key(owner), message_id, owner.tenant_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
 
     def list_metadata(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
         """Whitelisted metadata rows for the egress-free consumers (H4 later).
