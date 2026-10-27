@@ -3088,12 +3088,26 @@ def test_an_image_rejection_is_recognised_in_both_the_raised_and_rendered_forms(
         "dimensions exceed max allowed size for many-image requests: 2000 pixels",
         "messages.5.content.1.image.source.base64.data: At least one of the image "
         "dimensions exceed max allowed size: 8000 pixels",
+        # The per-request image COUNT refusal, measured live on
+        # claude-haiku-4-5 with 101 images (PR #3004 QA round 1, C2c).
+        "Too much media: 0 document pages + 101 images > 100",
     ],
 )
 def test_the_wordings_providers_actually_use_are_all_recognised(message: str) -> None:
     """Sampled from the reports this degrade exists for, not invented:
     anthropics/claude-code#12009, #13594, #31142, #50708, #12351, #39185."""
     assert is_image_rejection(ProviderError(400, message))
+
+
+def test_only_the_count_refusal_is_provider_scoped() -> None:
+    """The count refusal names a per-request limit, not a bad block, so it is
+    the one image rejection the session may lift on a provider switch."""
+    from local_operator.providers.failover import is_image_count_rejection
+
+    count = "Too much media: 0 document pages + 101 images > 100"
+    assert is_image_count_rejection(ProviderError(400, count))
+    assert not is_image_count_rejection(ProviderError(400, "Could not process image"))
+    assert not is_image_count_rejection(ProviderError(500, count))
 
 
 def test_the_many_image_refusal_degrades_in_the_rendered_form_too() -> None:
