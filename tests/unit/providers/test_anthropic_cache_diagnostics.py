@@ -253,6 +253,10 @@ async def test_an_unrelated_400_is_not_retried() -> None:
         # PR #2984 review round 2, r2-n1: a 400 QUOTING request text that
         # contains ``diagnostics:`` after a space latched the old matcher.
         "system.0.text: run diagnostics: please",
+        # PR #3018 review round 1, m1: prose ending a comma clause with
+        # ``diagnostics.`` latched while the tail accepted any period.
+        "tools.0.description: checks health, runs diagnostics. returns status",
+        "messages.0.content.0.text: hello, please run diagnostics. thanks",
     ],
 )
 async def test_a_400_that_merely_mentions_diagnostics_does_not_latch(message: str) -> None:
@@ -288,6 +292,10 @@ async def test_a_400_that_merely_mentions_diagnostics_does_not_latch(message: st
         "diagnostics.previous_message_id: String should match pattern '^msg_'",
         "messages.0.content: bad ; diagnostics: Extra inputs are not permitted",
         "diagnostics is not supported for this model",
+        # A real refusal (anthropics/claude-code#68553): the ``\.\w`` tail
+        # must still take a path segment after the period.
+        "diagnostics.previous_message_id: must be the `id` from a prior /v1/messages "
+        "response (starts with `msg_`)",
     ],
 )
 async def test_the_field_refusal_shapes_latch(message: str) -> None:
@@ -420,6 +428,54 @@ async def test_an_undiagnosed_start_does_not_advance_the_chain(tmp_path, monkeyp
         "absent",
         {"previous_message_id": "msg_p_1"},  # skips the undiagnosed msg_p_2
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_undiagnosed_turn_stamps_the_chain_value_not_its_own_id(
+    tmp_path, monkeypatch
+) -> None:
+    """The usage a turn persists carries the CHAIN value — what the next turn
+    would compare against — never the response's own id. On an undiagnosed
+    turn (here: the latch is on, so the API kept no fingerprint for msg_p_2)
+    the two differ, and persisting msg_p_2 would make a resume name an id the
+    comparison can never find (PR #3018 review round 1, m2)."""
+    from local_operator.harness.types import StreamEndEvent, cache_diagnostics_id_of
+
+    bodies: list[dict[str, Any]] = []
+    stream, store = await _mounted(tmp_path, monkeypatch, bodies)
+    try:
+        first = await _collect(stream(_turn(), None))  # msg_p_1, diagnosed
+        clients._ANTHROPIC_DIAGNOSTICS_REFUSED[0] = True
+        second = await _collect(stream(_turn(), None))  # msg_p_2, NOT diagnosed
+    finally:
+        await stream.close()
+        store.close()
+
+    def stamped(events: list[Any]) -> str | None:
+        end = next(e for e in events if isinstance(e, StreamEndEvent))
+        return cache_diagnostics_id_of(end.usage)
+
+    assert _start(second).response_id == "msg_p_2"
+    assert _start(second).cache_miss_type is None, "the second turn must be undiagnosed"
+    assert stamped(first) == "msg_p_1"
+    assert stamped(second) == "msg_p_1", "stamped its own id instead of the chain value"
+
+
+def test_a_resume_seed_never_overwrites_a_live_chain() -> None:
+    """``seed_cache_diagnostics`` fills an EMPTY chain only: a stream that has
+    already diagnosed a turn in this process holds a fresher id than any
+    transcript row (PR #3018 review round 1, m2)."""
+    from unittest.mock import MagicMock
+
+    from local_operator.model.configure import SessionStreamFn
+
+    stream = SessionStreamFn(MagicMock(), {}, "sess-1")
+    stream.seed_cache_diagnostics("msg_persisted")
+    assert stream._cache_diagnostics_previous_id == "msg_persisted"
+
+    stream._cache_diagnostics_previous_id = "msg_live"
+    stream.seed_cache_diagnostics("msg_persisted")
+    assert stream._cache_diagnostics_previous_id == "msg_live"
 
 
 @pytest.mark.asyncio

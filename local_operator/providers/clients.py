@@ -4257,11 +4257,21 @@ def _anthropic_cache_diagnosis(
 #: ``system.0.text: run diagnostics: please`` the clause already said
 #: ``system.0.text:`` before reaching the word. The reviewer's sketch,
 #: ``(?:^|[\s;,])diagnostics[:.]``, still matched that repro (a space precedes
-#: the word), which is why the clause rule replaced it. Residual, accepted:
-#: quoted text that itself contains ``, diagnostics:`` still latches. The cost
-#: is telemetry only (one resend, diagnostics off until restart) and the API's
-#: validation messages do not normally echo prompt text.
-_DIAGNOSTICS_REFUSAL = re.compile(r"^diagnostics\b|(?:^|[;,])[^;,:]*?(?<![\w.])diagnostics[:.]")
+#: the word), which is why the clause rule replaced it.
+#:
+#: The tail is ``(?::|\.\w)``, not ``[:.]``: a period counts only when a path
+#: segment follows it (``diagnostics.previous_message_id``). A bare ``[:.]`` also
+#: took a sentence-ending period after a comma clause, so prose such as
+#: ``tools.0.description: checks health, runs diagnostics. returns status``
+#: latched (PR #3018 review round 1, m1).
+#:
+#: Residual, accepted: quoted text that itself contains ``, diagnostics:`` or
+#: ``, diagnostics.<word>`` still latches. The cost is telemetry only (one
+#: resend, diagnostics off until restart) and the API's validation messages do
+#: not normally echo prompt text.
+_DIAGNOSTICS_REFUSAL = re.compile(
+    r"^diagnostics\b|(?:^|[;,])[^;,:]*?(?<![\w.])diagnostics(?::|\.\w)"
+)
 
 
 async def _refuses_diagnostics(response: httpx.Response) -> bool:

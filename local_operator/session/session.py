@@ -2427,12 +2427,25 @@ def _resumed_cache_diagnostics_id(transcript: Transcript) -> str | None:
 
     The newest id the transcript persisted (``newest_cache_diagnostics_id``),
     EXCEPT rows a transcript fork copied from its parent: those name the
-    PARENT's requests, and a fork's first turn compared against them would
-    report a meaningless break — the same reason ``SessionStreamFn.fork``
-    starts a subagent at ``None``. "Copied" is decided by time, exactly as
+    PARENT's requests. A whole-transcript fork replays a byte-identical prefix
+    (which is why it inherits ``cache_lineage_id``), so comparing against them
+    would be meaningful there; the exclusion exists for the CUT fork
+    (``fork_snapshot`` with ``exclude_entry_ids``), which drops later rows and
+    whose first turn would report a by-design ``messages_changed`` against the
+    parent's newer request (PR #3018 review round 1, n3). One rule for both
+    keeps the fork's chain its own. "Copied" is decided by time, exactly as
     ``Session._is_unnamed_fork`` and the wake-schedule restore decide it: a row
     journalled at or before ``forked_at`` came across in the clone; anything
     later was written by this fork and may seed its own resume.
+
+    Two ``ORIGIN_FORK`` writers stamp no ``forked_at`` — replica recovery
+    (``network/sync.py``) and the move/keep staging copy
+    (``network/mobility.py``) — so ``fork_instant`` is ``None`` there and their
+    copied rows DO seed (review round 1, m3). Accepted rather than widened
+    here: for a move that is the right chain (it is the same conversation);
+    for a keep-copy or a replica the stale id answers
+    ``previous_message_not_found`` or compares against an identical prefix,
+    both telemetry-only outcomes.
     """
     from local_operator.fork import fork_instant
     from local_operator.session.transcript import newest_cache_diagnostics_id

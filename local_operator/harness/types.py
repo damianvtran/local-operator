@@ -4930,11 +4930,15 @@ StreamEvent = (
 #: per-call provider record a resume reads (``at_ms`` seeds the provider clock
 #: from the same rows).
 #:
-#: Transcript-only by construction: the in-memory value is a PRIVATE attribute
-#: (:meth:`Usage._cache_diagnostics_id`), so it costs the attach frame, the
-#: ``usage_components`` receipts and job snapshots nothing; and ``Usage`` ignores
-#: unknown keys on validation, so a row carrying it replays on this build and on
-#: older ones alike.
+#: Never in a ``Usage`` dump; present in served journal rows. The in-memory
+#: value is a PRIVATE attribute (:meth:`Usage._cache_diagnostics_id`), so every
+#: surface built from a ``Usage`` dump — the attach frame, the
+#: ``usage_components`` receipts, job snapshots — pays nothing. Surfaces that
+#: serve journal rows verbatim (desktop history pages, the peer
+#: ``net_session_history``) DO carry the key, ~40 bytes per assistant row; it is
+#: not a secret and their consumers ignore unknown keys (PR #3018 review round
+#: 1, n1). ``Usage`` ignores unknown keys on validation, so a row carrying it
+#: replays on this build and on older ones alike.
 CACHE_DIAGNOSTICS_ID_KEY = "cache_diagnostics_id"
 
 
