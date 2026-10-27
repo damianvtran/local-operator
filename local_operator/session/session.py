@@ -5166,6 +5166,9 @@ class Session:
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
+        # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
+        # below must see the whole inventory it narrows.
+        self._declare_librarian_inventory()
         # The session, not an OperatorApp, owns state that must survive a second
         # frontend joining. Constructed after every durable source above has
         # restored so the first snapshot is already authoritative.
@@ -26683,6 +26686,49 @@ class Session:
             return schedules
 
     # -- librarian engine attachment ----------------------------------------
+
+    def _declare_librarian_inventory(self) -> None:
+        """Bound the Librarian's DUTY session to her role's ``tools:`` list.
+
+        WHY THIS EXISTS. A role's ``tools:`` list is ENFORCED only where a host
+        declares it — ``lop exec --profile``/the SDK (``exec_startup``) and a
+        delegated child (``harness.subagent``). Her duty session is neither: the
+        wake supervisor opens it as a plain runtime and the attachment restore
+        only RECORDS the list (:attr:`attached_profile_tools`). So her seed's
+        empty ``tools:`` meant every tool, and on a headless worker under
+        ``tool_approval_mode: ask`` one write-tier call from an unattended pass
+        parked on an approval nobody could answer — holding the session busy
+        for a day and blocking every mesh update meanwhile.
+
+        THE RULE. On her duty session only (``_librarian_duty``, set from
+        ``librarian/state.json`` — never a session that merely ran ``/agent
+        librarian``), declare her role's list as the inventory. An installed
+        row that declares no list (a row installed before seed 1.1.0, the only
+        shape a pre-allow-list row can have) falls back to the PACKAGED seed's
+        list: an unattended pass must not run with everything because the row
+        predates the boundary. ``unattended=False``: the declaration narrows
+        reach but approves nothing — every tool on her list is read-tier, so a
+        pass has nothing to gate on, and anything an operator adds to her row
+        is still asked about. One-way for the session's life
+        (:meth:`set_tool_inventory`), which is what an unattended scope should
+        be. Best-effort: a failure leaves today's behaviour, never a broken
+        session.
+        """
+        if not getattr(self, "_librarian_duty", False):
+            return
+        if (self._goal_state.agent_name or "").strip().casefold() != "librarian":
+            return
+        try:
+            names: tuple[str, ...] = tuple(self._attached_profile_tools)
+            if not names:
+                from local_operator.agent_profiles import load_seed
+
+                seed = load_seed("librarian")
+                names = tuple(seed.tools or ()) if seed is not None else ()
+            if names:
+                self.set_tool_inventory(list(names), unattended=False)
+        except Exception:  # noqa: BLE001 — never a reason her session fails to open
+            logger.debug("librarian: could not declare her tool inventory", exc_info=True)
 
     def _librarian_is_hers(self) -> bool:
         """Whether THIS session is the one ``librarian/state.json`` names.

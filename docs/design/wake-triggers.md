@@ -97,7 +97,11 @@ imports inside the functions that need them.
    while the entry carries schedules (a rowless entry cannot be stamped —
    `store.write_entry` treats an empty schedule list as "remove the entry").
 6. Her wake-index entry is held (`store.is_held` — `stopped_at`/`held_at`) ⇒
-   no record and no engagement.
+   no record and no engagement. Since 2026-10-27 a stop of Aida's or the
+   Librarian's DUTY session does not stamp `stopped_at`
+   (`runtime/control._engine_owner`): nobody "reopens" a duty session, so a
+   dormant stop switched her recurring pass off for good. The stop receipt says
+   the pass still runs and names the pause lever; `held_at` is the off switch.
 7. Reactive class ⇒ skip (a minimal, fail-closed mirror of
    `action_class.session_action_class`; any doubt reads reactive). The engine
    re-checks authoritatively at consume.

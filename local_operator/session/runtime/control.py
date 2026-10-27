@@ -252,6 +252,10 @@ class StopOutcome:
     line: str
     wakes_dormant: int = 0
     monitors_dormant: int = 0
+    #: Whose recurring pass a stop left ARMED ("the Librarian"), or ``""``.
+    #: Set only for an engine-owned duty session (:func:`_engine_owner`);
+    #: such a stop parks nothing, so ``wakes_dormant`` stays 0 for it.
+    pass_still_runs: str = ""
 
 
 @dataclass
@@ -673,6 +677,41 @@ def _same_uid(record: SessionRecord) -> bool:
         return False
 
 
+def _engine_owner(root: Path, session_id: str) -> str:
+    """Which proactive engine owns ``session_id`` as its duty session, or ``""``.
+
+    THE LIBRARIAN AND AIDA ARE NOT USER SESSIONS. Their recurring pass is
+    re-armed by their own engine (``librarian.proactive``/``aida.proactive``),
+    and the wake supervisor opens them on its own schedule; nobody "reopens"
+    them, so a stop that parked their wakes dormant switched the pass off for
+    good (both engines refuse to re-arm a held entry). That made a graceful
+    stop — the only safe way to clear a pass parked on an approval nobody can
+    answer — cost every future pass. The levers that DO mean "stop the pass"
+    exist and are explicit: ``librarian.cadence.paused``/``aida`` pause, and
+    ``.enabled`` false. So a stop of a duty session ends the runtime and leaves
+    the schedule armed. Identity is read from the engines' own state files
+    (one stat each on every other session); a failed read answers ``""``, i.e.
+    today's dormant behaviour, which is the conservative direction.
+    """
+    if not session_id:
+        return ""
+    try:
+        from local_operator.librarian import state as librarian_state
+
+        if librarian_state.is_librarian_session(root, session_id):
+            return "librarian"
+    except Exception:  # noqa: BLE001 — "cannot tell" keeps the user-session behaviour
+        pass
+    try:
+        from local_operator.aida import state as aida_state
+
+        if aida_state.is_aida_session(root, session_id):
+            return "aida"
+    except Exception:  # noqa: BLE001 — same
+        pass
+    return ""
+
+
 def _mark_wakes_dormant(record: SessionRecord, root: Path) -> int:
     """Park a stopped session's wakes dormant by stamping ``stopped_at``.
 
@@ -692,6 +731,11 @@ def _mark_wakes_dormant(record: SessionRecord, root: Path) -> int:
     """
     from local_operator.wakes import store as wake_store
 
+    if _engine_owner(root, record.session_id):
+        # An engine-owned duty session keeps its recurring pass ARMED across a
+        # stop — see :func:`_engine_owner`. Nothing is parked, so nothing is
+        # counted; the receipt says the pass still runs instead.
+        return 0
     entry = wake_store.read_entry(root, record.session_id)
     if entry is None:
         return 0
@@ -835,7 +879,13 @@ async def _await_pid_exit(pid: int, timeout_s: float) -> bool:
 
 
 def _stopped_line(
-    record: SessionRecord, method: Method, wakes: int, *, forced: bool = False, monitors: int = 0
+    record: SessionRecord,
+    method: Method,
+    wakes: int,
+    *,
+    forced: bool = False,
+    monitors: int = 0,
+    still_runs: str = "",
 ) -> str:
     """The one human receipt line every front end paints for one stop.
 
@@ -865,7 +915,17 @@ def _stopped_line(
     if monitors:
         items.append(f"{monitors} monitor{'s' if monitors != 1 else ''}")
     dormant_part = f" — {' and '.join(items)} dormant until you reopen it" if items else ""
-    return f'{verb} "{name}"{rung}{proof}{dormant_part}'
+    # ``still_runs``: an engine-owned duty session (see ``_engine_owner``) keeps
+    # its recurring pass armed, and the operator must not read a stop as
+    # "switched off" — the receipt names the pass and the real off switch.
+    pass_part = ""
+    if still_runs == "librarian":
+        pass_part = (
+            " — the Librarian's daily pass still runs " "(set librarian.cadence.paused to stop it)"
+        )
+    elif still_runs == "aida":
+        pass_part = " — Aida's scheduled check-ins still run (pause Aida to stop them)"
+    return f'{verb} "{name}"{rung}{proof}{dormant_part}{pass_part}'
 
 
 def _stop_marker_payload(
@@ -1465,6 +1525,7 @@ async def stop_session(
     if await _graceful_stop(record, timeout_s, root, command=_command, sweep_id=_sweep_id):
         wakes = await _park_wakes(record, root)
         monitors = await _park_monitors(record, root)
+        still_runs = _engine_owner(root, record.session_id)
         _recover_record(record, root)
         method: Method = "socket"
         return StopOutcome(
@@ -1472,9 +1533,10 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=_stopped_line(record, method, wakes, monitors=monitors),
+            line=_stopped_line(record, method, wakes, monitors=monitors, still_runs=still_runs),
             wakes_dormant=wakes,
             monitors_dormant=monitors,
+            pass_still_runs=still_runs,
         )
 
     # The pid is gone but the graceful op never acked: it died under us
@@ -1655,6 +1717,7 @@ async def stop_session(
     ):
         wakes = await _park_wakes(record, root)
         monitors = await _park_monitors(record, root)
+        still_runs = _engine_owner(root, record.session_id)
         _recover_record(record, root)
         method = "sigterm"
         return StopOutcome(
@@ -1662,9 +1725,12 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=_stopped_line(record, method, wakes, forced=forced, monitors=monitors),
+            line=_stopped_line(
+                record, method, wakes, forced=forced, monitors=monitors, still_runs=still_runs
+            ),
             wakes_dormant=wakes,
             monitors_dormant=monitors,
+            pass_still_runs=still_runs,
         )
 
     # Rung 3 — SIGKILL. State is orphaned by design; stale-record reaping
@@ -1684,6 +1750,7 @@ async def stop_session(
     await _signal_and_confirm(record, procstate.hard_kill_signal(), SIGKILL_CONFIRM_S)
     wakes = await _park_wakes(record, root)
     monitors = await _park_monitors(record, root)
+    still_runs = _engine_owner(root, record.session_id)
     _recover_record(record, root)
     method = "sigkill"
     return StopOutcome(
@@ -1691,9 +1758,12 @@ async def stop_session(
         session_id=record.session_id,
         name=name,
         method=method,
-        line=_stopped_line(record, method, wakes, forced=forced, monitors=monitors),
+        line=_stopped_line(
+            record, method, wakes, forced=forced, monitors=monitors, still_runs=still_runs
+        ),
         wakes_dormant=wakes,
         monitors_dormant=monitors,
+        pass_still_runs=still_runs,
     )
 
 

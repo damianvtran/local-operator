@@ -244,6 +244,104 @@ async def test_wakes_go_dormant_not_deleted(tmp_path: Path, no_signals) -> None:
         server.close()
 
 
+@pytest.mark.asyncio
+async def test_a_librarian_stop_keeps_her_daily_pass_armed_and_says_so(
+    tmp_path: Path, no_signals
+) -> None:
+    """The duty session's recurring wake survives a graceful stop (D-2b ii).
+
+    A stop is the only safe way to clear her pass when it is parked on an
+    approval nobody can answer; parking her cadence dormant on top of that
+    switched the daily pass off for good, because nobody "reopens" her and her
+    engine refuses to re-arm a held entry. So the entry stays un-held, nothing
+    is counted dormant, and the receipt names the pass and its real off switch.
+    """
+    from local_operator.librarian import state as librarian_state
+    from local_operator.wakes import store as wake_store
+
+    session_id = "l1brarian001"
+    librarian_state.write_state(tmp_path, {"session_id": session_id, "schema_version": 1})
+    wake_store.write_entry(
+        tmp_path,
+        session_id,
+        cwd="/tmp/librarian",
+        schedules=[{"id": "librarian-cadence", "message": "pass", "next_due_at": 1}],
+    )
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    try:
+        target = _record_for(record, session_id=session_id)
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=tmp_path)
+        assert outcome.method == "socket", outcome
+        assert outcome.wakes_dormant == 0 and outcome.pass_still_runs == "librarian", outcome
+        assert "the Librarian's daily pass still runs" in outcome.line, outcome.line
+        assert "dormant" not in outcome.line, outcome.line
+        entry = wake_store.read_entry(tmp_path, session_id)
+        assert entry is not None and not wake_store.is_held(entry), entry
+        assert [row["id"] for row in entry["schedules"]] == ["librarian-cadence"], entry
+    finally:
+        server.close()
+
+
+def test_aida_duty_session_is_engine_owned_too(tmp_path: Path) -> None:
+    """Aida's cadence session takes the same exemption; any other session does not."""
+    from local_operator.aida import state as aida_state
+
+    aida_state.write_state(tmp_path, {"session_id": "a1da00000001", "schema_version": 1})
+    assert control._engine_owner(tmp_path, "a1da00000001") == "aida"
+    assert control._engine_owner(tmp_path, "someone-else") == ""
+    line = control._stopped_line(
+        SessionRecord(
+            pid=1,
+            kind="daemon",
+            session_id="a1da00000001",
+            conversation_name="Aida",
+            cwd="/tmp",
+            model_label="m",
+            control_port=0,
+            control_key="k",
+        ),
+        "socket",
+        0,
+        still_runs="aida",
+    )
+    assert (
+        line == 'stopped "Aida" — Aida\'s scheduled check-ins still run (pause Aida to stop them)'
+    )
+
+
+def test_a_user_session_stop_still_parks_its_wakes_dormant(tmp_path: Path) -> None:
+    """The exemption is keyed on the engines' state files, never on wake ids.
+
+    A user session whose wake happens to be called ``librarian-cadence`` (or
+    any session at all while a Librarian exists) still goes dormant.
+    """
+    from local_operator.librarian import state as librarian_state
+    from local_operator.wakes import store as wake_store
+
+    librarian_state.write_state(tmp_path, {"session_id": "l1brarian001", "schema_version": 1})
+    wake_store.write_entry(
+        tmp_path,
+        "us3r00000001",
+        cwd="/tmp/user",
+        schedules=[{"id": "librarian-cadence", "message": "mine", "next_due_at": 1}],
+    )
+    record = SessionRecord(
+        pid=1,
+        kind="tui",
+        session_id="us3r00000001",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+    )
+    assert control._mark_wakes_dormant(record, tmp_path) == 1
+    entry = wake_store.read_entry(tmp_path, "us3r00000001")
+    assert entry is not None and wake_store.is_held(entry), entry
+
+
 def test_mark_wakes_dormant_no_entry_is_zero(tmp_path: Path) -> None:
     """A session with no wake entry parks nothing and the receipt says none."""
     record = SessionRecord(
