@@ -48,7 +48,10 @@ def owner_of(env_text: str) -> str:
 
 
 def owned_pids(config_dir: Path, *, owner: str) -> list[tuple[int, str, str]]:
-    """(pid, session-id) candidates, for inventory and tests; signals nothing."""
+    """(pid, session-id, environment-text) candidates, for inventory and tests.
+
+    Signals nothing; ``sweep`` re-identifies every pid at signal time.
+    """
     from local_operator.session.runtime import reclaim
 
     found: list[tuple[int, str, str]] = []

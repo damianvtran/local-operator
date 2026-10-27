@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -147,3 +148,142 @@ def test_a_real_owned_process_is_signalled_by_exact_pid(tmp_path: Path, monkeypa
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# #3028 review r3 MAJOR-1: a stop reaches EVERY invocation's runtimes in this
+# root, and nothing without the marker. Real processes, real signals, driven
+# through serve()'s own stop handler (not a direct sweep() call).
+# ---------------------------------------------------------------------------
+
+
+def _spawn_stand_in(root: Path, session_id: str, *, owner: str | None) -> subprocess.Popen[bytes]:
+    """A real process carrying the runtime's argv identity and, optionally, a marker.
+
+    It SLEEPS (never SIGSTOPs — a stopped process holds SIGTERM pending, the
+    shard-0 hang). ``owner=None`` stands in for a `lop serve`-owned or
+    interactive runtime: same root, same argv shape, no supervisor marker.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in (owned_runtimes.OWNER_ENV, "LOP_WAKE_SUPERVISOR_ACTIVE")
+    }
+    env.update(LOCAL_OPERATOR_CONFIG_DIR=str(root), LOP_MOBILE_CHILD_RESUME=session_id)
+    if owner is not None:
+        env[owned_runtimes.OWNER_ENV] = owner
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)", "-m", RUNTIME_MODULE],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _await_probe(children: list[subprocess.Popen[bytes]]) -> None:
+    """Wait until every child's environment is readable through the real probe."""
+    from local_operator.session.runtime import reclaim
+
+    deadline = time.monotonic() + 15
+    pending = {child.pid for child in children}
+    while pending and time.monotonic() < deadline:
+        for pid in list(pending):
+            row = reclaim.process_row(pid)
+            if row is not None and "LOP_MOBILE_CHILD_RESUME=" in row.command:
+                pending.discard(pid)
+        if pending:
+            time.sleep(0.05)
+    assert not pending, f"probe never saw the environment of {sorted(pending)}"
+
+
+def _stop_a_real_serve(root: Path, monkeypatch, children: list[subprocess.Popen[bytes]]) -> None:
+    """Run the real serve() on ``root`` and fire the stop handler it installs."""
+    import asyncio
+
+    from local_operator.session.runtime import reclaim
+    from local_operator.wakes import supervisor
+    from local_operator.wakes.store import write_entry
+
+    monkeypatch.setattr(
+        reclaim,
+        "runtime_processes",
+        lambda: [row for c in children if (row := reclaim.process_row(c.pid)) is not None],
+    )
+    handlers: list[Any] = []
+    monkeypatch.setattr(
+        supervisor,
+        "_install_stop_handlers",
+        lambda loop, on_stop: handlers.append(on_stop) or [],
+    )
+    # A wake an hour out keeps the loop asleep: only the stop ends it.
+    write_entry(
+        root,
+        "stopanchor01",
+        cwd=str(root),
+        schedules=[
+            {
+                "id": "w1",
+                "message": "later",
+                "next_due_at": int(time.time() * 1000) + 3_600_000,
+                "created_at": 1,
+            }
+        ],
+    )
+
+    async def run() -> None:
+        task = asyncio.create_task(supervisor.serve(root))
+        for _ in range(500):
+            if handlers:
+                break
+            await asyncio.sleep(0.01)
+        assert handlers, "serve() never installed its stop handler"
+        handlers[0]()
+        try:
+            await asyncio.wait_for(task, timeout=30)
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run())
+
+
+def _exited(child: subprocess.Popen[bytes], timeout: float = 15.0) -> int | None:
+    try:
+        return child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def test_a_stop_sweeps_an_earlier_invocations_runtime_and_spares_the_unmarked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """(a) an EARLIER invocation's child, same root: SIGTERMed by this stop.
+    (b) a same-root runtime with NO marker (serve-owned / interactive): untouched.
+    (c) a marked runtime in ANOTHER root: untouched.
+
+    Fails on 18a4374e03a for (a): the stop matched only the current
+    invocation's fresh token, so the long-lived runtime a stop exists for —
+    spawned by an earlier invocation and outliving it — survived the unit stop.
+    """
+    monkeypatch.delenv(owned_runtimes.OWNER_ENV, raising=False)
+    monkeypatch.delenv("LOP_WAKE_SUPERVISOR_ACTIVE", raising=False)
+    root, other = tmp_path / "root", tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    earlier = _spawn_stand_in(root, "s3earlier01", owner="token-from-an-earlier-invocation")
+    unmarked = _spawn_stand_in(root, "s3unmarked1", owner=None)
+    foreign = _spawn_stand_in(other, "s3foreign01", owner="token-from-an-earlier-invocation")
+    children = [earlier, unmarked, foreign]
+    try:
+        _await_probe(children)
+        _stop_a_real_serve(root, monkeypatch, children)
+
+        assert _exited(earlier) == -signal.SIGTERM, "(a) earlier invocation's runtime"
+        assert unmarked.poll() is None, "(b) an unmarked same-root runtime was signalled"
+        assert foreign.poll() is None, "(c) another root's marked runtime was signalled"
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)

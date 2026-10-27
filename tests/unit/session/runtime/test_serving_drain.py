@@ -164,6 +164,8 @@ class PredicateHost:
     def __init__(self, *, busy: bool = False, wake_due_ms: int | None = None) -> None:
         self._busy = busy
         self._wake_due_ms = wake_due_ms
+        # ``may_refresh`` reads the signal-drain latch; a real handle starts False.
+        self._draining = False
 
     def is_busy(self) -> bool:
         return self._busy

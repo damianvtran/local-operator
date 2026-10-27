@@ -2632,8 +2632,23 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
         # Do this after engagement seats have shut down, so no new candidate is
         # spawned behind the sweep. Gated on a real stop signal: see the
         # ``stop_requested`` comment above for why a retirement must not sweep.
+        #
+        # ANY INVOCATION'S MARKER, NOT JUST THIS ONE'S (#3028 review r3, MAJOR-1).
+        # Since a retirement stopped sweeping, a runtime outlives the invocation
+        # that spawned it, and the next invocation carries a NEW token — so the
+        # long-lived parked runtime a stop exists for is exactly one this token
+        # never matched. The sweep is keyed on the wake-supervisor marker being
+        # PRESENT (``sweep(any_owner=True)`` skips a process without one) and on
+        # this config root: the `lop serve` daemon's runtimes and interactive or
+        # mesh-created sessions carry no marker and are never signalled, and
+        # another root's runtimes are out of reach. Consequence, deliberate: a
+        # stop also reaches runtimes a CONCURRENT supervisor in the same store
+        # spawned (nothing makes one store's supervisor a singleton). That is the
+        # stop's meaning — "wake delivery for this store is going away" — and
+        # each such runtime drains its turn and denies its parked gate exactly as
+        # on a stop; the surviving supervisor re-engages any wake still due.
         if stop_requested:
-            sweep(config_dir, owner=owner_token)
+            sweep(config_dir, any_owner=True, why="supervisor stop")
         for stop_signal in stop_signals:
             try:
                 loop.remove_signal_handler(stop_signal)

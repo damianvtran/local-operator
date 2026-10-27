@@ -2138,22 +2138,22 @@ async def test_serve_once_is_silent_for_a_fresh_project(
 
 
 @pytest.mark.asyncio
-async def test_a_supervisor_stop_sweeps_only_its_own_runtime_token(
+async def test_a_supervisor_stop_sweeps_every_wake_marked_runtime_of_its_root(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A stop SIGNAL forwards SIGTERM, scoped to this invocation's token.
+    """A stop SIGNAL forwards SIGTERM to every wake-marked runtime of THIS root.
 
-    The handler serve() installs is captured and fired, which is exactly what
-    the event loop does on a unit SIGTERM; the sweep's exact-pid/argv/root
-    guards are exercised with real processes in test_owned_runtimes.py.
+    Any invocation's marker, not only this one's (#3028 review r3, MAJOR-1): a
+    runtime outlives the invocation that spawned it. The handler serve()
+    installs is captured and fired, exactly what the event loop does on a unit
+    SIGTERM; the marker/root guards run against real processes in
+    test_owned_runtimes.py.
     """
     from local_operator.wakes import owned_runtimes, supervisor
 
-    swept: list[tuple[Path, str]] = []
+    swept: list[tuple[Path, dict[str, Any]]] = []
     monkeypatch.setattr(
-        owned_runtimes,
-        "sweep",
-        lambda root, *, owner, why="supervisor stop": swept.append((root, owner)) or [],
+        owned_runtimes, "sweep", lambda root, **kwargs: swept.append((root, kwargs)) or []
     )
     handlers: list[Any] = []
     monkeypatch.setattr(
@@ -2178,8 +2178,9 @@ async def test_a_supervisor_stop_sweeps_only_its_own_runtime_token(
         await asyncio.wait_for(task, timeout=30)
 
     assert len(swept) == 1
-    root, owner = swept[0]
-    assert root == tmp_path and owner
+    root, kwargs = swept[0]
+    assert root == tmp_path
+    assert kwargs.get("any_owner") is True, kwargs
 
 
 @pytest.mark.asyncio
@@ -2198,7 +2199,7 @@ async def test_a_once_pass_never_sweeps_the_runtime_it_just_started(
     monkeypatch.setattr(
         owned_runtimes,
         "sweep",
-        lambda root, *, owner, why="supervisor stop": swept.append(owner) or [],
+        lambda root, **kwargs: swept.append(str(kwargs)) or [],
     )
     write_entry(tmp_path, "sessioncold1", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 5_000)])
 
@@ -2220,7 +2221,7 @@ async def test_an_ordinary_retirement_leaves_its_runtimes_to_their_own_residency
     monkeypatch.setattr(
         owned_runtimes,
         "sweep",
-        lambda root, *, owner, why="supervisor stop": swept.append(owner) or [],
+        lambda root, **kwargs: swept.append(str(kwargs)) or [],
     )
     monkeypatch.setattr(_Sweeper, "sweep", lambda self, *args, **kwargs: 0)
 

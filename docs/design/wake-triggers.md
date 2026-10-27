@@ -140,11 +140,19 @@ imports inside the functions that need them.
   (`supervisors.render_systemd_unit`). An installed unit picks it up on the
   next `install` (the rendered text differs, so it is rewritten and reloaded).
 - THE SUPERVISOR FORWARDS THE STOP, rather than leaving its runtimes behind.
-  `serve()` gives each candidate a unique owner token and records it under
-  `supervisor/owner.json`; its cleanup and the systemd uninstall path call
-  `wakes.owned_runtimes.sweep`. That sweep SIGTERMs only exact pids whose argv,
-  owner token, config root and session still match, with a start-age check for
-  pid recycling. It never signals by process name, never reaches a sibling
+  Each `serve()` invocation mints an owner token and puts it in its own
+  environment (`LOP_WAKE_SUPERVISOR_OWNER`, with `LOP_WAKE_SUPERVISOR_ACTIVE=1`);
+  `launch` passes it only to runtimes that invocation forks and scrubs it from
+  every other spawn. Nothing is written to disk: the marker lives in the
+  runtime's own environment, read back per pid. On a SIGTERM/SIGINT (never on
+  `--once` or an ordinary retirement, which would kill the runtime it just
+  started for a wake), and on uninstall, `wakes.owned_runtimes.sweep` SIGTERMs
+  every runtime in THIS config root that carries the marker, whichever
+  invocation's token it holds: a runtime outlives the invocation that spawned
+  it, so the long-lived parked one is usually an earlier token. A process with
+  no marker (the `lop serve` daemon's runtimes, interactive or mesh-created
+  sessions) is never signalled. The sweep re-checks argv, marker, config root
+  and session at signal time, with a start-age check for pid recycling. It never signals by process name, never reaches a sibling
   root's runtime, and never SIGKILLs. A working runtime drains its turn and a
   parked approval is denied by the runtime's signal path; the supervisor does
   not wait for them, so the unit needs no longer stop timeout. A stopped or
