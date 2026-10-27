@@ -51,6 +51,8 @@ import base64
 import binascii
 import json
 import logging
+import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Literal
 
@@ -66,10 +68,9 @@ logger = logging.getLogger(__name__)
 #: the whole story, so it never presents a capped list as complete.
 MAX_ITEMS = 2000
 
-#: The text a user message row must contain before it is worth a JSON parse. Rows are written
-#: compact (``separators=(",", ":")``) by ``TranscriptEntry.to_json``; the spaced spelling is
-#: what ``json.dumps`` defaults produce, i.e. a hand-built or older-tool journal.
-_USER_NEEDLES = ('"role":"user"', '"role": "user"')
+#: The same cheap user-row probe as session_files/scan.py. Whitespace is not fixed:
+#: hand-built journals and older tools can use either compact or spaced JSON.
+_USER_ROW = re.compile(r'"role"\s*:\s*"user"')
 
 #: Quoted keys, one of which every media block carries. ``"mime_type"`` alone is NOT enough: an
 #: inline PNG whose mime defaulted has no ``mime_type`` key on the durable row at all.
@@ -90,7 +91,7 @@ def _maybe_user_row(line: str) -> bool:
     is the cost this avoids. Both conditions are necessary for a match below, so a ``False``
     here never hides a real attachment.
     """
-    if not any(needle in line for needle in _USER_NEEDLES):
+    if not _USER_ROW.search(line):
         return False
     return any(needle in line for needle in _MEDIA_NEEDLES)
 
@@ -124,12 +125,12 @@ def _block_kind(block: dict[str, Any]) -> Kind | None:
     # The legacy document shape: a filename beside the media keys and no ``type``.
     if block_type is None and isinstance(block.get("filename"), str):
         return "document"
-    # An AttachmentContent (``kind`` image/video/audio) is agent output, never a user upload;
-    # audio blocks are stamped ``type: "audio"`` by the encoder and are recordings, not files.
-    if "kind" in block:
+    # A user-row kind:"image" is a pasted image in model context, which the file index
+    # already owns as a user artifact. Other kind-carrying blocks (audio/video) are not uploads.
+    if "kind" in block and block.get("kind") != "image":
         return None
     if block_type in (None, "image"):
-        mime = block.get("mime_type")
+        mime = block.get("mime_type") or block.get("content_type")
         # An image block whose ``mime_type`` defaulted (``image/png``) has it ABSENT on the
         # durable row; an explicit non-image mime here is some other media and is skipped.
         if mime is None or (isinstance(mime, str) and mime.startswith("image/")):
@@ -148,8 +149,10 @@ def _item(
 ) -> dict[str, Any]:
     digest = _str_or_none(block.get("attachment"))
     data = block.get("data") if isinstance(block.get("data"), str) else None
-    mime = _str_or_none(block.get("mime_type")) or (
-        "image/png" if kind == "image" else "application/octet-stream"
+    mime = (
+        _str_or_none(block.get("mime_type"))
+        or _str_or_none(block.get("content_type"))
+        or ("image/png" if kind == "image" else "application/octet-stream")
     )
     size = _int_or_none(block.get("bytes"))
     if digest is None and data:
@@ -159,9 +162,13 @@ def _item(
             digest = ref.digest
         if size is None:
             size = _decoded_size(data)
-    stored_path = _str_or_none(block.get("stored_path"))
-    if stored_path is None and digest is not None:
-        stored_path = str(store.path_for(digest))
+    # Journal paths are device/config-local. A synced row can name another device's path
+    # while this device's content-addressed store has the bytes, so the digest is authoritative.
+    stored_path = (
+        str(store.path_for(digest))
+        if digest is not None
+        else _str_or_none(block.get("stored_path"))
+    )
     stored = False
     if stored_path is not None:
         try:
@@ -190,7 +197,7 @@ def _item(
         "index": index,
         "kind": kind,
         "attachment": digest,
-        "filename": _str_or_none(block.get("filename")),
+        "filename": _str_or_none(block.get("filename")) or _str_or_none(block.get("name")),
         "mime_type": mime,
         "bytes": size,
         "path": origin,
@@ -234,6 +241,21 @@ def items_from_row(row: Any, store: AttachmentStore) -> list[dict[str, Any]]:
     return found
 
 
+#: Settled-turn re-reads and materialise share this small revision cache. A hit costs one stat;
+#: edits and compression invalidate on the source's physical identity. Nothing is written to disk.
+_CACHE_SIZE = 8
+_INVENTORY_CACHE: OrderedDict[tuple[str, str, int, int, int, int], dict[str, Any]] = OrderedDict()
+
+
+def _inventory_cache_key(directory: Path) -> tuple[str, str, int, int, int, int] | None:
+    path, _codec = compression.transcript_source(directory)
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(directory), str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
 def list_user_attachments(session_dir: Path) -> dict[str, Any]:
     """``{items, truncated}`` for the conversation in ``session_dir``, oldest first.
 
@@ -244,6 +266,22 @@ def list_user_attachments(session_dir: Path) -> dict[str, Any]:
     failure the route maps to an error, never an empty "nothing attached".
     """
     session_dir = Path(session_dir)
+    cache_key = _inventory_cache_key(session_dir)
+    if cache_key is not None:
+        cached = _INVENTORY_CACHE.get(cache_key)
+        if cached is not None:
+            _INVENTORY_CACHE.move_to_end(cache_key)
+            return cached
+    result = _scan_user_attachments(session_dir)
+    if cache_key is not None:
+        _INVENTORY_CACHE[cache_key] = result
+        _INVENTORY_CACHE.move_to_end(cache_key)
+        while len(_INVENTORY_CACHE) > _CACHE_SIZE:
+            _INVENTORY_CACHE.popitem(last=False)
+    return result
+
+
+def _scan_user_attachments(session_dir: Path) -> dict[str, Any]:
     if not compression.has_transcript(session_dir):
         return {"items": [], "truncated": False}
     store = store_for_transcript_dir(session_dir)

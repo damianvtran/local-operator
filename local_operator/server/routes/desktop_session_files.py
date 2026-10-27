@@ -347,7 +347,7 @@ async def materialise_user_attachment(
     WHY: a pasted screenshot has no path at all, and a document whose origin was moved has
     only ``<store>/<digest>.bin`` - a name no OS app opens. "Open", "reveal" and "copy path"
     need a real, correctly named file, which is exactly what the file index's materialise
-    gives an artifact; this is the same copy (``service._copy_artifact``: pinned no-follow
+    gives an artifact; this is the same copy (``service.materialise_bytes``: pinned no-follow
     directory fds, sanitised name with a MIME-derived extension, idempotent, never
     overwrites) over a different membership rule. NOT a byte transport: the response is a
     path, and the bytes stay on the existing digest route.

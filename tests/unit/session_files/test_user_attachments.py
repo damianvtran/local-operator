@@ -87,6 +87,12 @@ def _seed(root: Path) -> tuple[Path, dict[str, Any]]:
                     "attachment": pdf_digest,
                 },
                 {"attachment": shot_digest, "mime_type": "image/png"},
+                {
+                    "kind": "image",
+                    "attachment": shot_digest,
+                    "content_type": "image/png",
+                    "name": "pasted-kind.png",
+                },
             ],
             input_mode="typed",
         ),
@@ -148,12 +154,13 @@ def test_lists_user_documents_and_images_in_send_order(root: Path) -> None:
     assert [(i["message_id"], i["index"], i["kind"]) for i in items] == [
         ("u1", 1, "document"),
         ("u1", 2, "image"),
+        ("u1", 3, "image"),
         ("u2", 0, "document"),
         ("u2", 1, "image"),
         ("u2", 2, "image"),
         ("u2", 4, "document"),
     ]
-    pdf, shot, legacy, inline_kept, inline_lost, malformed = items
+    pdf, shot, kind_image, legacy, inline_kept, inline_lost, malformed = items
     assert pdf["attachment"] == digests["pdf"] and pdf["filename"] == "IP Assignment.pdf"
     assert pdf["bytes"] == 14 and pdf["injection"] == "native" and pdf["stored"] is True
     assert pdf["path"].endswith("IP Assignment.pdf") and pdf["ts"] == 10.0
@@ -162,6 +169,8 @@ def test_lists_user_documents_and_images_in_send_order(root: Path) -> None:
     assert shot["exists"] is None, "a pasted screenshot has no origin to be gone"
     assert shot["attachment"] == digests["shot"] and shot["stored"] is True
     assert shot["filename"] is None and shot["mime_type"] == "image/png"
+    assert kind_image["filename"] == "pasted-kind.png"
+    assert kind_image["attachment"] == digests["shot"] and kind_image["stored"] is True
     # A durable image row records no size; the retained copy's length stands in for it.
     assert shot["bytes"] == len(png(seed=3))
     # Legacy: digest on the row, store copy missing -> stored False, path derived from digest.
@@ -182,6 +191,71 @@ def test_read_path_never_writes_the_store(root: Path) -> None:
     before = sorted(p.name for p in store_dir.iterdir())
     list_user_attachments(directory)
     assert sorted(p.name for p in store_dir.iterdir()) == before
+
+
+def test_store_path_from_another_device_does_not_hide_local_bytes(root: Path) -> None:
+    directory = _session(root)
+    digest, _ = _stored(directory, b"synced bytes", "text/plain")
+    write_journal(
+        directory,
+        [
+            _user(
+                "u1",
+                1.0,
+                [
+                    {
+                        "type": "document",
+                        "filename": "synced.txt",
+                        "attachment": digest,
+                        "stored_path": f"/Users/other/.local-operator/attachments/{digest}.bin",
+                    }
+                ],
+            )
+        ],
+    )
+    item = list_user_attachments(directory)["items"][0]
+    assert item["stored"] is True
+    assert item["stored_path"] == str(store_for_transcript_dir(directory).path_for(digest))
+
+
+def test_user_row_probe_accepts_json_whitespace(root: Path) -> None:
+    directory = _session(root)
+    row = _user(
+        "u1",
+        1.0,
+        [{"filename": "old.txt", "mime_type": "text/plain", "attachment": "0" * 32}],
+    )
+    row["payload"]["content"][0]["path"] = str(directory / "old.txt")
+    # Default json.dumps puts spaces after separators; the probe must accept arbitrary JSON
+    # whitespace around the role field, just as the session-files scanner does.
+    (directory / "transcript.jsonl").write_text(json.dumps(row) + "\n")
+    assert [item["filename"] for item in list_user_attachments(directory)["items"]] == ["old.txt"]
+
+
+def test_inventory_cache_invalidates_when_journal_changes(root: Path) -> None:
+    directory = _session(root)
+    row = _user(
+        "u1",
+        1.0,
+        [{"filename": "old.txt", "mime_type": "text/plain", "attachment": "0" * 32}],
+    )
+    write_journal(directory, [row])
+    assert len(list_user_attachments(directory)["items"]) == 1
+    write_journal(
+        directory,
+        [
+            row,
+            _user(
+                "u2",
+                2.0,
+                [{"filename": "new.txt", "attachment": "1" * 32}],
+            ),
+        ],
+    )
+    assert [item["filename"] for item in list_user_attachments(directory)["items"]] == [
+        "old.txt",
+        "new.txt",
+    ]
 
 
 def test_no_journal_is_an_empty_list(root: Path) -> None:
@@ -267,8 +341,8 @@ async def test_route_undecodable_archive_is_unavailable_not_empty(
 async def test_materialise_copies_a_listed_attachment_and_refuses_others(
     api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The hardened copy needs dir_fd support; CI's Linux has it. This host's interpreter does
-    # not report it, so the platform gate is lifted here exactly as test_route.py does.
+    # Defensive: the hardened copy needs dir_fd support. Lift the platform gate in this unit
+    # fixture exactly as test_route.py does, independent of the host interpreter's feature set.
     monkeypatch.setattr(
         os, "supports_dir_fd", os.supports_dir_fd | {os.open, os.mkdir, os.unlink, os.stat}
     )
