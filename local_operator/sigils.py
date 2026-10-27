@@ -38,7 +38,7 @@ is a rule the other will not make.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from string import ascii_letters, digits
 from typing import NamedTuple
 
@@ -265,6 +265,11 @@ SKILL_BLOCK_PREAMBLE = (
 _ZERO_WIDTH_SPACE = "\u200b"
 _DEFUSED_SKILL_OPEN = SKILL_BLOCK_OPEN.replace("<", "<" + _ZERO_WIDTH_SPACE, 1)
 _DEFUSED_SKILL_CLOSE = SKILL_BLOCK_CLOSE.replace("<", "<" + _ZERO_WIDTH_SPACE, 1)
+#: A body line that spells an element head would otherwise read as an
+#: attachment to :func:`skill_block_names` (and, one day, to the receipt). The
+#: same one-character neutralisation as the block markers, and for the same
+#: reason: the sequence must stop matching without changing what the model reads.
+_DEFUSED_ELEMENT_HEAD = "<" + _ZERO_WIDTH_SPACE + "skill name="
 
 #: The resolver's name class, in one place: an alphanumeric head, then
 #: alphanumerics, dots, underscores and hyphens. Explicitly ASCII, because every
@@ -273,6 +278,7 @@ _DEFUSED_SKILL_CLOSE = SKILL_BLOCK_CLOSE.replace("<", "<" + _ZERO_WIDTH_SPACE, 1
 _SKILL_NAME_HEAD = frozenset(ascii_letters + digits)
 _SKILL_NAME_TAIL = _SKILL_NAME_HEAD | frozenset("._-")
 
+_SKILL_ELEMENT_HEAD = '<skill name="'
 _SKILL_ELEMENT_HEAD_RE = re.compile(r'<skill name="([^"]*)">')
 
 
@@ -341,7 +347,6 @@ def _resolve_mention(
     by_lower: dict[str, str],
     *,
     leading: bool,
-    leading_case_insensitive: bool,
 ) -> tuple[int, str] | None:
     """``(end, discovered name)`` for the run, trimming trailing punctuation.
 
@@ -362,7 +367,7 @@ def _resolve_mention(
         candidate = text[start + 1 : cursor]
         if candidate in exact:
             return cursor, candidate
-        if leading and leading_case_insensitive or any(char.islower() for char in candidate):
+        if leading or any(char.islower() for char in candidate):
             lowered = by_lower.get(candidate.lower())
             if lowered is not None:
                 return cursor, lowered
@@ -376,7 +381,7 @@ def skill_mentions(
     text: str,
     names: Collection[str],
     *,
-    leading_case_insensitive: bool = True,
+    skip_spans: Sequence[tuple[int, int]] = (),
 ) -> list[SkillMention]:
     """Every ``$name`` in ``text`` that resolves to a discovered skill.
 
@@ -395,6 +400,17 @@ def skill_mentions(
     - The vocabulary decides: ``$100``, ``$5/unit`` and an unknown name are
       prose, exactly as before.
 
+    ``skip_spans`` are regions that are already spoken for — a skill body in a
+    block that arrived with the message. A token inside one is ignored BEFORE
+    the dedupe, not after: a body quoting ``$research`` must not suppress a real
+    `$research` later in the same message, and deduping first would let it.
+
+    The leading rule is fixed: a leading token is resolved case-insensitively
+    (the behaviour every pre-inline `$skill` line had), an inline one needs a
+    lowercase letter. There is deliberately no switch — the ink and the submit
+    path must answer with one rule, and a caller that scoped it would be the
+    second rule this module exists to prevent.
+
     ``names`` is a collection of discovered names. Pure and host-free; the
     caller owns what a mention means.
     """
@@ -405,16 +421,10 @@ def skill_mentions(
     mentions: list[SkillMention] = []
     seen: set[str] = set()
     for start, end, _raw in skill_name_spans(text):
+        if any(begin <= start < finish for begin, finish in skip_spans):
+            continue
         leading = not text[:start].strip()
-        resolved = _resolve_mention(
-            text,
-            start,
-            end,
-            exact,
-            by_lower,
-            leading=leading,
-            leading_case_insensitive=leading_case_insensitive,
-        )
+        resolved = _resolve_mention(text, start, end, exact, by_lower, leading=leading)
         if resolved is None:
             continue
         token_end, name = resolved
@@ -443,8 +453,10 @@ def defuse_skill_block(body: str) -> str:
     a reader and stops the literal sequence the scanner matches. Nothing else
     about the body is escaped — the model must read it verbatim.
     """
-    return body.replace(SKILL_BLOCK_CLOSE, _DEFUSED_SKILL_CLOSE).replace(
-        SKILL_BLOCK_OPEN, _DEFUSED_SKILL_OPEN
+    return (
+        body.replace(SKILL_BLOCK_CLOSE, _DEFUSED_SKILL_CLOSE)
+        .replace(SKILL_BLOCK_OPEN, _DEFUSED_SKILL_OPEN)
+        .replace(_SKILL_ELEMENT_HEAD, _DEFUSED_ELEMENT_HEAD)
     )
 
 
@@ -478,13 +490,26 @@ def skill_block_spans(text: str) -> list[tuple[int, int]]:
 def skill_block_names(text: str) -> list[str]:
     """The ``<skill name=…>`` heads inside every complete block, in order.
 
-    Read from the ELEMENT HEADS only, never the bodies: a body quoting a head is
-    the skill documenting this feature, not a second attachment.
+    Read from the TOP-LEVEL element heads only: once an element is open, its
+    body is skipped until the matching ``</skill>``. A body quoting a head is
+    the skill documenting this feature, not a second attachment, and the test
+    for that is structural rather than a docstring promise.
+
+    Bodies are also defused on the way in (:func:`defuse_skill_block`), so a
+    real payload never carries a spellable head inside one; this scan is the
+    reader-side half of the same guarantee, for payloads written before that
+    neutralisation existed.
     """
     names: list[str] = []
     for start, end in skill_block_spans(text):
+        depth = 0
         for line in text[start:end].splitlines():
+            if depth:
+                if line.startswith("</skill>"):
+                    depth -= 1
+                continue
             head = _SKILL_ELEMENT_HEAD_RE.match(line)
             if head is not None:
                 names.append(head.group(1))
+                depth = 1
     return names

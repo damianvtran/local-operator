@@ -242,9 +242,20 @@ def test_the_leading_flag_is_whitespace_only_prefix() -> None:
     assert _mentions("fix $research")[0].leading is False
 
 
-def test_leading_case_insensitivity_can_be_switched_off() -> None:
-    """The flag exists so a caller can scope the legacy rule; the app keeps it."""
-    assert skill_mentions("$RESEARCH", NAMES, leading_case_insensitive=False) == []
+def test_a_skipped_span_is_ignored_before_the_dedupe() -> None:
+    """A quoted name inside a block must not hide a real one after it.
+
+    The spans are the block grammar's, so this is the same rule
+    ``plan_attachments`` uses on a forwarded payload — and the dedupe order is
+    what makes it a fix rather than a suppression.
+    """
+    text = "see $research in the body\n\nand really $research now"
+    start = text.index("$research")
+    end = start + len("$research")
+    assert [m.name for m in skill_mentions(text, NAMES, skip_spans=[(start, end)])] == ["research"]
+    assert [m.start for m in skill_mentions(text, NAMES, skip_spans=[(start, end)])] == [
+        text.rindex("$research")
+    ]
 
 
 # --- the block grammar --------------------------------------------------------
@@ -269,6 +280,26 @@ def test_skill_block_names_reads_heads_not_bodies() -> None:
         + SKILL_BLOCK_CLOSE
     )
     assert skill_block_names(block) == ["research"]
+
+
+def test_block_names_ignore_a_head_quoted_inside_a_body() -> None:
+    """The docstring's promise, tested structurally: depth, not line scanning."""
+    block = (
+        SKILL_BLOCK_OPEN
+        + "\n\n"
+        + SKILL_BLOCK_PREAMBLE
+        + "\n\n"
+        + '<skill name="research">\nbody quoting a head:\n<skill name="zzz">\n'
+        + "</skill>\n\n"
+        + SKILL_BLOCK_CLOSE
+    )
+    assert skill_block_names(block) == ["research"]
+
+
+def test_defusing_neutralises_a_body_s_head() -> None:
+    body = defuse_skill_block('a <skill name="zzz"> b')
+    assert '<skill name="' not in body
+    assert "\u200b" in body
 
 
 def test_defusing_keeps_the_body_marker_out_of_the_scanner() -> None:

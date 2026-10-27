@@ -85,6 +85,19 @@ class TestPlanAttachments:
         payload = "go $research\n\n" + block
         assert plan_attachments(payload, skills) == []
 
+    def test_a_quoted_name_in_a_forwarded_block_does_not_hide_the_real_one(self, skills):
+        """The dedupe must not see a token the block owns.
+
+        Deduping before the in-block filter let a body quoting ``$research``
+        claim the name, so the real ``$research`` after the block attached
+        nothing (round 1, m1).
+        """
+        block = render_skill_block([("other", "this body mentions $research in prose")])
+        payload = "forwarded:\n\n" + block + "\n\nnow please $research"
+        planned = plan_attachments(payload, skills)
+        assert _names(planned) == ["research"]
+        assert planned[0].mention.start > payload.index("</operator-skills>")
+
     def test_a_name_already_in_a_block_is_not_attached_again(self, skills):
         block = render_skill_block([("research", "Read primary sources.")])
         payload = "go $research\n\n" + block + "\n\nand $research again"

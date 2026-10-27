@@ -716,6 +716,34 @@ class TestInlineInvocation:
             assert editor._caret_offset() == len(editor.text)
 
     @pytest.mark.asyncio
+    async def test_a_newline_terminated_accept_keeps_the_caret_on_the_line(self, skill_root):
+        """Q1: the caret must not jump to column 0 of the next line.
+
+        The text is right either way; the caret is where the request continues,
+        and for a token terminated by a newline that is the token's own line.
+        """
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            await pilot.pause()
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.pause()
+            editor.load_text("fix $res\nthe bug")
+            editor.move_cursor(editor._location_at_offset(len("fix $res")))
+            for _ in range(50):
+                await pilot.pause()
+                if editor.picker.is_open():
+                    break
+            assert editor.picker.is_open(), "premise: the token's list is up"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert editor.text == "fix $research\nthe bug"
+            assert editor._caret_offset() == len("fix $research")
+            assert editor.document.get_line(0) == "fix $research"
+
+    @pytest.mark.asyncio
     async def test_a_second_pick_adds_a_second_token(self, skill_root) -> None:
         """Two accepts in one draft: the first token is never disturbed."""
         session = FakeSession()
@@ -1246,14 +1274,18 @@ class TestSkillTokenParser:
         assert result[1] == len("fix this\n$research ")
 
     def test_completion_leaves_existing_separator_alone(self):
-        """When the user already typed whitespace, no second space is added."""
+        """When the user already typed whitespace, no second space is added.
+
+        A NEWLINE terminates the token but is not a parking spot: the caret
+        stays on the token's line, right after the name (Q1, round 1), rather
+        than jumping to column 0 of the next line.
+        """
         text = "fix $re\nthe bug"
         caret = text.index("\n")
         result = completion_for(text, caret, CompletionMode.SKILL, "research", ())
         assert result is not None
         assert result[0] == "fix $research\nthe bug"
-        # The caret sits at the start of the next line, where the request is.
-        assert result[1] == len("fix $research\n")
+        assert result[1] == len("fix $research")
 
     def test_a_leading_token_completion_is_unchanged(self):
         text = "$res fix bug"
@@ -1316,6 +1348,23 @@ class TestInvocationInsideACommandArgument:
         assert "Read primary sources." in sent, sent
         assert "fix the login bug" in sent, sent
         assert 'name="research"' in sent, sent
+
+    @pytest.mark.asyncio
+    async def test_an_UPPERCASE_token_at_the_argument_front_fires(self, skill_root) -> None:
+        """m4's submit half: the argument tail is its own string, so it leads.
+
+        The ink computes the same region, so `/team backend $RESEARCH` is one
+        decision on both surfaces rather than a missing ink over a live attach.
+        """
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team feature-release $RESEARCH fix it")
+            await _await_prompt(pilot, session)
+        sent = session.prompts[0]
+        assert "Read primary sources." in sent, sent
+        assert "$RESEARCH fix it" in sent, sent
 
     @pytest.mark.asyncio
     async def test_team_row_stays_the_typed_argument_not_the_body(self, skill_root) -> None:

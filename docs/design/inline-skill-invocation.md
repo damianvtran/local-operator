@@ -1,8 +1,9 @@
 # Inline `$skill` invocation: decision note
 
-Status: PROPOSED. Author: architect (lopdev). Date: 2026-10-27. Branch `feat/inline-skill-invocation`, base `568868a81`.
+Status: ACCEPTED. Author: architect (lopdev). Date: 2026-10-27. Branch `feat/inline-skill-invocation`, base `568868a81`.
+Implemented on the branch; the accepted deviations from the draft are recorded in D3 (case) and D10 (the ink's surface rule).
 
-Trigger rule is settled by the operator: keep `$`, and any boundary `$name` that matches a discovered skill fires anywhere in the message.
+Trigger rule is settled by the operator: keep `$`, and any boundary `$name` that matches a discovered skill fires anywhere in the message — subject to the surface rule in D10 (a line the submit path never expands attaches nothing, so it inks nothing) and the case rule in D3.
 
 **Record carrier:** no PR or ticket existed when this was written, so this file is the carrier. Copy the "Decisions" block into the PR's `## Decisions` when the branch opens. No prior decision rows existed, so nothing is overturned.
 
@@ -59,11 +60,11 @@ Attach skills as a tail block on the same text content, and strip it on replay w
   - **Boundary:** `is_boundary` (`sigils.py:68`), scanning the whole text, not line by line.
   - **Name class:** `[A-Za-z0-9][A-Za-z0-9._-]*`.
   - **Trailing punctuation:** try the full name first, then the name with trailing `.`, `-` or `_` trimmed. This lets `use $research.` fire while `foo.bar` still works. It also makes a leading `$research.` fire, which it does not today.
-  - **Case:** an exact name match always fires. A case-insensitive match fires only if the token contains a lowercase letter. So `$Research` fires and `$PATH` or `$DEBUG` do not. This is the picker's existing evidence rule (`command_picker.py:1948`, `skill_suggestions`) applied at submit time.
+  - **Case (as implemented):** an exact name match always fires. A case-insensitive match fires when the token is LEADING (the legacy `$skill` rule, preserved: `$RESEARCH` and `$Research` both fire), and INLINE only when the token contains a lowercase letter (`$Research` fires; `$PATH`/`$DEBUG` do not). This keeps every pre-inline invocation valid while closing the environment-variable collision the picker's evidence rule (`command_picker.py`, `skill_suggestions`) already guarded.
   - **Dedupe:** by resolved name, in first-seen order. No `hide` filter, as today.
 - **Escape with no new grammar:** the character before `$` must be whitespace or the start of text. So `$$research`, `` `$research` ``, `($research)` and `"$research"` are all literal.
 - **Rejected:** keeping case-insensitive matching everywhere. It would make `echo $PATH` fire a skill named `path`.
-- **Behaviour changes to flag:** leading `$RESEARCH` stops firing, and leading `$research.` starts firing. If leading behaviour must stay untouched, scope the case rule to non-leading tokens. It is a one-line change.
+- **Behaviour changes to flag:** leading `$research.` starts firing (trailing punctuation is now trimmed at both positions). Leading `$RESEARCH` KEEPS firing — the scoping option below was taken, so the draft's "stops firing" outcome does not apply.
 - **Consequences to tell the user:**
   - A name quoted in prose fires. "How do I use `$research`?" attaches the body.
   - A short paste (not collapsed) containing `$research` fires. The paste collapses into a chip only above 20 rows with at least 4 pasted rows (`editor.py:244, 261`).
@@ -145,6 +146,18 @@ Attach skills as a tail block on the same text content, and strip it on replay w
   - `_skill_body_has_content`.
   - `skill_token_spans`, kept and pin-tested against the new function, or made to delegate to it.
 
+### D10: Which lines the `$` ink may claim (added in review round 1)
+
+- **Taken:** one pure surface rule, `command_picker.skill_scan_region`, returns the cells a submit would scan (or `None`). `Editor._compute_skill_runs` inks only inside that region, and `_submit_command_prompt` passes the same region to the expansion.
+  - **Shell/bang:** a bang-mode buffer, or a recalled `!` line, scans nothing — submit runs it as a command.
+  - **Leading slash command:** only the request tails of `/team`, `/teams`, `/agent`, `/agents` and `/goal` are scanned (the commands whose handlers call `_submit_command_prompt`). `/btw` opens the aside, `/loop` and `/fork` start their own flows, and every other command dispatches; none expands a skill, so none inks.
+  - **The aside:** while the `/btw` card owns the composer, `_allows_skill_expansion` is off and the ink is empty — the aside's submit returns before the expansion.
+  - **The argument tail is its own string:** a `$RESEARCH` opening `/team backend …` is LEADING there, so the legacy case-insensitive rule applies in the ink exactly as it does at submit.
+  - An unrecognised leading `/word` is prose (submit sends it as a prompt), so the whole buffer is scanned.
+- **Reason:** round 1, M1/m4. The draft's mitigation for surprise attachments is "ink is what will be sent"; an ink painted on a line that never expands is a false claim in the other direction, and in shell mode it paints an environment variable as a skill.
+- **Overturned by:** a surface that expands skills but is not covered here — the rule is one function, so extending it is a change in one place.
+- **Owner:** coder.
+
 ## Implementation plan
 
 1. **`local_operator/sigils.py`.**
@@ -195,7 +208,7 @@ The rejected options are listed under each decision. The two I looked at hardest
 - **Files owned:** `sigils.py` owns the trigger. `invoke.py` owns the block grammar. `rows.py` stays the one place that decides what a user row is.
 - **Work ordered, not parallel:** the pure layers first, then app wiring, then composer and transcript, with i18n last. The translations need an independent audit pass.
 - **Hard to reverse:** bodies persisted in the new shape. Reverting later means keeping both readers.
-- **Behaviour change to accept:** leading `$RESEARCH` stops firing, and leading `$research.` starts firing (D3).
+- **Behaviour change to accept:** leading `$research.` starts firing (D3). Leading `$RESEARCH` still fires, by the scoped case rule D3 records.
 
 ## Risks and what would change the answer
 

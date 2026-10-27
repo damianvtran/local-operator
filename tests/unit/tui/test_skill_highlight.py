@@ -10,8 +10,9 @@ are ordinary characters in a sentence, and ``costs$5`` is money, not a skill.
 Two layers are asserted separately because they regress independently:
 
 - the GRAMMAR (:func:`skill_token_spans`): every boundary ``$name`` on a line,
-  with the RESOLVER's extent — pinned against ``skills.invoke._INVOCATION_RE``
-  itself, so the ink cannot claim a token the submit-side parser would read
+  with the resolver's extent — pinned against
+  :func:`local_operator.sigils.skill_name_spans`, the scan the trigger itself
+  trims, so the ink cannot claim a token the submit-side parser would read
   differently;
 - the RENDER PATH (``Editor._skill_runs`` and the strip ``render_line``
   produces): the state gates on the real ``OperatorApp``, read off the finished
@@ -23,6 +24,7 @@ from __future__ import annotations
 import pytest
 
 from local_operator.sigils import skill_mentions, skill_name_spans
+from local_operator.slash_commands import SLASH_COMMANDS
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.command_picker import PickerMode, skill_token_spans
@@ -389,6 +391,113 @@ async def test_an_unresolved_word_dims_once_the_word_stops_matching() -> None:
         editor = await _draft(app, pilot, "$zzz")
         assert not editor.picker.is_open(), "premise: a skill miss closes the list"
         assert _ink_on(_segment_inks(editor), "$zzz") == dim, "the inert ink"
+
+
+def _push_vocabulary(app: OperatorApp, editor: Editor) -> None:
+    """Publish the real command and skill vocabularies, so ink tests are honest.
+
+    `_skill_names is None` suppresses every span, and an empty command
+    vocabulary makes every leading `/word` prose — either would make a
+    "no ink here" test pass for the wrong reason.
+    """
+    editor.set_commands(list(SLASH_COMMANDS))
+    editor.set_skill_names(frozenset(app._discovered_skills()))
+    assert editor._skill_names, "premise: the vocabulary is published"
+    assert "btw" in editor._command_names, "premise: the command list is published"
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!echo $research",
+        "! $research",
+        "! echo $research and more",
+        "/btw $research",
+        "/help $research",
+        "/model $research",
+    ],
+)
+async def test_no_ink_where_submit_never_expands(text: str) -> None:
+    """The ink must not claim a skill fires on a line submit never scans.
+
+    Round 1, M1: bang/shell lines, the `/btw` aside and every leading command
+    whose handler does not expand a skill all painted the resolved ink.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    dim = theme_mod.semantic_color("dim").lower()
+    prose = theme_mod.semantic_color("fg").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, text)
+        _push_vocabulary(app, editor)
+        # Scoped to the TOKEN: a leading command word carries its own slash ink,
+        # which is a different claim and not the one under test.
+        ink = _ink_on(_segment_inks(editor), "$research")
+        assert ink == prose, f"{text!r} inked the token {ink!r}"
+        assert _ink_on(_segment_inks(editor), "$research") != dim
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_shell_MODE_is_not_inked_either() -> None:
+    """`set_shell_mode(True)` with no `!` is still a shell line."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.set_shell_mode(True)
+        editor = await _draft(app, pilot, "echo $research")
+        _push_vocabulary(app, editor)
+        assert signal not in [_ink for _text, _ink in _segment_inks(editor)]
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_an_open_aside_does_not_ink_a_skill() -> None:
+    """The aside borrows the composer but never expands a skill (M1)."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        assert app._open_aside() is not None, "premise: the aside opened"
+        await pilot.pause()
+        editor = await _draft(app, pilot, "what about $research here")
+        _push_vocabulary(app, editor)
+        assert editor._skill_names is not None
+        assert signal not in [_ink for _text, _ink in _segment_inks(editor)]
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_a_command_argument_tail_IS_inked() -> None:
+    """`/team backend $…` reaches `_submit_command_prompt`, so it fires."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "/team backend $research")
+        _push_vocabulary(app, editor)
+        assert _ink_on(_segment_inks(editor), "$research") == signal
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_a_leading_token_IN_THE_ARGUMENT_gets_the_legacy_case_rule() -> None:
+    """`/team backend $RESEARCH` is leading IN THE ARGUMENT, so submit fires it.
+
+    Round 1, m4: the ink scanned the whole line, where the token is not leading,
+    so it painted nothing while submit attached the body.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "/team backend $RESEARCH fix it")
+        _push_vocabulary(app, editor)
+        assert _ink_on(_segment_inks(editor), "$RESEARCH") == signal
 
 
 @pytest.mark.usefixtures("skill_root")

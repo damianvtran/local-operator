@@ -121,15 +121,16 @@ def plan_attachments(text: str, skills: Mapping[str, Skill]) -> list[SkillAttach
     emits one notice per skill and keeps the rest, and that notice text belongs
     to the host.
     """
-    mentions = skill_mentions(text, skills.keys())
+    blocked = skill_block_spans(text)
+    # The spans are handed to the matcher so a token INSIDE a body never enters
+    # its dedupe set: a pasted block quoting ``$research`` must not shadow a
+    # real ``$research`` later in the message.
+    mentions = skill_mentions(text, skills.keys(), skip_spans=blocked)
     if not mentions:
         return []
-    inside = skill_block_spans(text)
     already = set(skill_block_names(text))
     planned: list[SkillAttachment] = []
     for mention in mentions:
-        if any(start <= mention.start < end for start, end in inside):
-            continue
         if mention.name in already:
             continue
         planned.append(SkillAttachment(mention=mention, skill=skills[mention.name]))

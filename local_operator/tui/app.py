@@ -398,7 +398,11 @@ from local_operator.tui.widgets.ask_queue import (
     ask_rows,
 )
 from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.command_picker import CommandPicker
+from local_operator.tui.widgets.command_picker import (
+    CommandPicker,
+    SkillScanRegion,
+    skill_scan_region,
+)
 from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
@@ -20930,7 +20934,12 @@ class OperatorApp(App[None]):
         # expansion lands after — and it puts a human approval gate in a task
         # nothing awaits. If this ever needs TUI-side notices, the fix is making
         # this method async as its own refactor, not a task launched from here.
-        expansion = self._expand_invocation(request, attachments)
+        # The surface's own scan region: the request tail is the whole string
+        # here, and its first token is leading — the ink computes the same
+        # region from the slash line (`skill_scan_region`), so `/team backend
+        # $RESEARCH` inks what submit fires.
+        region = skill_scan_region(request, argument=True)
+        expansion = self._expand_invocation(request, attachments, region=region)
         # `row` mirrors `on_editor_submitted`: the argument with its pastes
         # expanded, whether or not a skill attached. The body rides the payload
         # only, and replay strips the block.
@@ -50978,6 +50987,9 @@ class OperatorApp(App[None]):
         # placeholder: leaving bang-mode restores the resting invitation,
         # which would overwrite `Ask the aside…` if this ran after.
         editor.set_allows_shell(False)
+        # The aside's submit returns before the skill expansion, so a `$name`
+        # in a question is literal text — say so in the ink too.
+        editor.set_allows_skill_expansion(False)
         editor.placeholder = ASIDE_PLACEHOLDER
         # The command list is borrowed too, and returned in `_close_aside`.
         # `on_editor_submitted` routes a slash-shaped line to the aside as a
@@ -51103,6 +51115,7 @@ class OperatorApp(App[None]):
         self._aside_draft_images = {}
         editor = self._editor()
         editor.set_allows_shell(True)
+        editor.set_allows_skill_expansion(True)
         # The stashed draft comes back into the mode it was typed in: a
         # half-typed `!` command returned to a composer that silently left
         # bang-mode would send the command to the model on the next Enter.
@@ -55859,9 +55872,9 @@ class OperatorApp(App[None]):
     def _discovered_skills(self) -> dict[str, Skill]:
         """Discovered skills by name, rescanned only when the tree changed.
 
-        Read on EVERY submit to decide whether a leading ``$`` is an
-        invocation, so a bare rescan here would put a 17-25 ms filesystem walk
-        on the keystroke path. A ``roots_fingerprint`` probe (~0.29 ms) gates
+        Read on EVERY submit to decide whether a ``$name`` is an invocation,
+        so a bare rescan here would put a 17-25 ms filesystem walk on the
+        keystroke path. A ``roots_fingerprint`` probe (~0.29 ms) gates
         it instead: the walk runs only when a ``SKILL.md`` was added or edited.
 
         It used to cache for the whole session, justified by the rule that a
@@ -56002,7 +56015,11 @@ class OperatorApp(App[None]):
         return result.sent
 
     def _expand_invocation(
-        self, text: str, attachments: Mapping[int, Marked] | None = None
+        self,
+        text: str,
+        attachments: Mapping[int, Marked] | None = None,
+        *,
+        region: SkillScanRegion | None = None,
     ) -> _SkillExpansion | None:
         """Attach the skill bodies this message names, or ``None`` for prose.
 
@@ -56033,6 +56050,13 @@ class OperatorApp(App[None]):
         A body is read through the SAME ``skill://`` resolver the ``read`` tool
         uses, so a manual invocation and an agent-initiated read return
         byte-identical content, reference listing included.
+
+        ``region`` is the SURFACE gate computed by
+        :func:`command_picker.skill_scan_region` — the argument tail for a
+        `/team`-style command, the whole text otherwise. The main submit path
+        does not pass one because its own control flow has already established
+        that this is a plain prompt; the argument path passes the region it was
+        handed, so the ink and the expansion read the same slice.
         """
         skills = self._discovered_skills()
         if not skills:
@@ -56046,7 +56070,8 @@ class OperatorApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — send prose rather than nothing
             self._notice(f"could not load skill: {exc}", "warning")
             return None
-        planned = plan_attachments(text, skills)
+        segment = text if region is None else text[region.start : region.end]
+        planned = plan_attachments(segment, skills)
         if not planned:
             return None
         entries: list[tuple[str, str]] = []

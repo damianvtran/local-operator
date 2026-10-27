@@ -25,11 +25,14 @@ from local_operator.slash_commands import SLASH_COMMANDS
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice, ArgumentMode
 from local_operator.tui.widgets.command_picker import (
+    SKILL_SUBMIT_COMMANDS,
     CompletionMode,
     PickerMode,
+    SkillScanRegion,
     _skill_argument_floor,
     completion_for,
     ghost_for,
+    skill_scan_region,
     skill_suggestions,
     skill_token,
 )
@@ -153,6 +156,83 @@ class TestTheFloorDecidesWhereATokenOpens:
         relaxation is opt-in, carried by the vocabularies the composer passes.
         """
         assert skill_token("/team delivery $cte", None, COMMAND_NAMES) is None
+
+
+class TestTheScanRegionIsTheSurfaceRule:
+    """Which cells the ink may scan, mirroring the submit path's own exits."""
+
+    def test_a_plain_message_scans_the_whole_buffer(self):
+        text = "fix $research now"
+        assert skill_scan_region(text, COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS) == (
+            SkillScanRegion(0, len(text), None)
+        )
+
+    def test_an_unknown_leading_slash_is_prose(self):
+        """`/tmp/test` is dispatched by nothing, so submit scans it as a prompt."""
+        text = "/tmp/test $research"
+        region = skill_scan_region(text, COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS)
+        assert region is not None and region.start == 0
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "/btw $research",
+            "/help $research",
+            "/model $research",
+            "/loop $research",
+            "/fork $research",
+        ],
+    )
+    def test_commands_that_never_expand_scan_nothing(self, text: str):
+        assert skill_scan_region(text, COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS) is None, text
+
+    @pytest.mark.parametrize("text", ["!echo $research", "! $research"])
+    def test_a_bang_line_scans_nothing(self, text: str):
+        assert (
+            skill_scan_region(text, COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS, shell=True)
+            is None
+        )
+
+    def test_shell_mode_scans_nothing(self):
+        assert (
+            skill_scan_region(
+                "echo $research", COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS, shell=True
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "/team backend fix $research",
+            "/agent reviewer fix $research",
+            "/goal fix $research",
+        ],
+    )
+    def test_a_skill_bearing_argument_tail_is_the_region(self, text: str):
+        region = skill_scan_region(text, COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS)
+        assert region is not None
+        assert region.start <= text.index("$research")
+        assert region.end == len(text)
+        assert region.command in SKILL_SUBMIT_COMMANDS
+
+    def test_a_team_name_slot_scans_nothing(self):
+        """`/team backend` with no request yet: no argument tail to scan."""
+        assert (
+            skill_scan_region("/team backend", COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS)
+            is None
+        )
+
+    def test_argument_mode_scans_the_whole_string(self):
+        """`_submit_command_prompt` already holds the tail; its first token leads."""
+        text = "fix $RESEARCH"
+        assert skill_scan_region(text, argument=True) == SkillScanRegion(0, len(text), None)
+
+    def test_the_skill_bearing_set_is_a_subset_of_prompt_commands(self):
+        """The ink may only claim command tails whose handler expands a skill."""
+        prompt_names = {name for c in SLASH_COMMANDS if c.consumes_prompt for name in c.names}
+        assert SKILL_SUBMIT_COMMANDS <= prompt_names
+        assert {"btw", "loop", "fork"}.isdisjoint(SKILL_SUBMIT_COMMANDS)
 
 
 class TestTheInlineGateAppliesUnchanged:

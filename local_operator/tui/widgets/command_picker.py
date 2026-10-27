@@ -375,6 +375,84 @@ def _skill_argument_floor(
     return arg_start + len(first) + 1
 
 
+#: The prompt commands whose request tail actually reaches
+#: :meth:`OperatorApp._submit_command_prompt`, and therefore the only leading
+#: slash commands inside which a ``$name`` can attach a skill. Kept here beside
+#: the floor because it is the other half of "which part of this line is free
+#: text": ``/btw`` opens the aside and returns, ``/loop`` and ``/fork`` start
+#: their own flows, and every other command is dispatched — none of them
+#: expands a skill, so the ink must not claim one will.
+SKILL_SUBMIT_COMMANDS = frozenset({"team", "teams", "agent", "agents", "goal"})
+
+
+class SkillScanRegion(NamedTuple):
+    """The cells a submit would scan for ``$name``, and who claims them.
+
+    ``command`` is the leading slash word that owns the region (``None`` for a
+    plain message), so a caller can tell "the whole buffer is prose" from
+    "this is the argument tail of ``/team``" without re-parsing the line.
+    """
+
+    start: int
+    end: int
+    command: str | None
+
+
+def skill_scan_region(
+    text: str,
+    commands: frozenset[str] = frozenset(),
+    prompt_commands: frozenset[str] = frozenset(),
+    name_commands: frozenset[str] = frozenset(),
+    *,
+    shell: bool = False,
+    argument: bool = False,
+) -> SkillScanRegion | None:
+    """The part of ``text`` a submit expands ``$name`` in, or ``None`` for none.
+
+    THE surface rule, in one function so the composer's ink and the submit path
+    cannot disagree about whether a token will fire. It mirrors
+    ``OperatorApp.on_editor_submitted``'s exits:
+
+    - SHELL — bang mode or a recalled ``!`` line — runs a command, never a
+      prompt, so nothing is scannable.
+    - A leading slash word that is not a dispatchable command is prose
+      (``/tmp/test``); the whole buffer is scanned, exactly as submit does.
+    - A leading command is scanned ONLY inside its request tail, and only for
+      the commands whose handler hands that tail to
+      :meth:`OperatorApp._submit_command_prompt` (:data:`SKILL_SUBMIT_COMMANDS`).
+      ``/btw``, ``/loop``, ``/fork`` and every non-prompt command expand no
+      skill, so they return ``None``.
+    - ``argument=True`` means the caller already holds that request tail (the
+      argument path), so the whole string is the region and its first token is
+      leading.
+
+    Pure: reads its arguments and the two rules above, consults no widget.
+    """
+    if shell:
+        return None
+    if argument:
+        return SkillScanRegion(0, len(text), None)
+    stripped = text.lstrip()
+    word = stripped.split(maxsplit=1)[0] if stripped else ""
+    if not word.startswith("/"):
+        return SkillScanRegion(0, len(text), None)
+    command = word[1:].lower()
+    if command not in commands:
+        # `_dispatchable_slash` refuses it, so the line is an ordinary prompt.
+        return SkillScanRegion(0, len(text), None)
+    if command not in SKILL_SUBMIT_COMMANDS:
+        return None
+    claim = len(text) - len(stripped)
+    line = text.split("\n", 1)[0]
+    floor = _skill_argument_floor(line, claim, prompt_commands, name_commands)
+    if floor is None:
+        return None
+    # END is the whole tail, not the line: `/team`'s request is everything after
+    # the name slot, newlines included, and `_submit_command_prompt` receives
+    # exactly that.
+    return SkillScanRegion(floor, len(text), command)
+
+
 def slash_context(
     text: str, cursor: int | None = None, commands: frozenset[str] = frozenset()
 ) -> SlashContext | None:
@@ -855,6 +933,10 @@ def _skill_span_replacement(text: str, token: SlashContext, row_name: str) -> tu
     tail = text[token.end :]
     separator = " " if not tail or not tail[0].isspace() else ""
     completed = f"{text[: token.start]}${row_name}{separator}{tail}"
+    # A NEWLINE terminates the token but is not a place to park the caret: the
+    # request continues on the line the token is on, so stop after the name.
+    if tail[:1] and tail[0] in "\r\n":
+        return completed, token.start + len(row_name) + 1
     return completed, token.start + len(row_name) + 2
 
 
