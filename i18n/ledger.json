@@ -6961,14 +6961,14 @@
         "date": "2026-10-26"
       },
       "auditor": {
-        "agent": null,
-        "model": null,
-        "date": null,
-        "result": "pending",
-        "findings": null
+        "agent": "independent i18n-auditor / reviewer (lopdev, session b4869f40ac63)",
+        "model": "kimi/k3.1-pro (fallback from anthropic/claude-opus-5-5 via anthropic/claude-sonnet-5-5 and openai/gpt-6-astra)",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
       },
-      "status": "pending_audit",
-      "note": "Delta translation for PR #2943 (head bd657f7b164; en 75 keys, source SHA-256 b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224; previous audited source b415bc703840). Changed keys only: NEW hint_mark_all, hint_confirm, hint_cancel; CHANGED confirm_dismiss_session (two plural arguments: count = rows, updates = collapsed revisions). The other 71 values are byte-identical to the bytes the prior independent audit passed (ntt2: i18n/audits/evidence/ru/tui.notifications/ntt2/, auditor translation-auditor (lopdev team, tui-audit-ru), radient/auto, 2026-10-25). Target SHA-256 85b808d1c3baffc6d4c49cdb24c6642bcd194238d9d3c660fed20d2dc4516dec. Independent i18n-auditor has NOT run on this delta: status stays pending_audit, so the carried-namespace gate keeps the locale out of shipped.json until an independent audit replaces auditor/status at these bytes. Widths measured with rich cell_len over count x updates in {0,1,2,5,6,11,21,22,101}, all within maxCells. Translator identity from the session's runtime metadata (provider anthropic, model claude-opus-5-5)."
+      "status": "passed",
+      "note": "Round-2 delta audit on PR #2943 head 897ffb54fef0f6a889bb135a22c80f7eebc3e0e5 (catalogue bytes identical to 0bffa9f447f). Source en SHA-256 b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224 (75 keys), context 1b4fcb28e063b7e646809d801675dfbda00f691ba7cec57edab6a322d0cab4d4. 75/75 keys, order==en, 71 carried values byte-identical to the prior audited target, arguments (count plural, updates plural, source simple) in English order, both plurals carry every CLDR category of this locale with no empty arm, all 72 count x updates sample combinations rendered through local_operator.i18n.runtime.render_message (counts 0,1,2,3,5,6,11,21,22,25,101,1234 x updates 0,1,2,5,6,11), locale number grouping intact, NFC, no bidi controls, trailing LF/no BOM/no CR, re-serialises byte-identically. Widths via rich cell_len: hints within maxCells (hint_mark_all<=12, hint_confirm<=10, hint_cancel<=8); confirm_dismiss_session <=96 for every arm with a 13-cell source. zh-CN/ur/hi nesting of updates inside each count arm accepted: count/updates categories still selected independently and count is printed via {count, number}. ur arrow convention untouched (back still U+2192); the ur sentence painted through the real display_tr isolate path and resolved with fribidi, Latin source and y/n correct. IA2-1 is the fr U+202F typographic regression; fr deliberately left pending_audit. Verdict PASS for this locale only; auditor served kimi/k3.1-pro after the disclosed provider-quota fallback chain; auditor authored none of this delta. Evidence: i18n/audits/evidence/ru/tui.notifications/nd2/ plus PR #2943 comment \"i18n audit - round 2\"."
     },
     {
       "locale": "es",
@@ -7368,25 +7368,6 @@
       },
       "status": "passed",
       "note": "Independent current-byte audit: i18n/audits/evidence/zh-CN/wire.slash.notifications_page/nt25a1/record.json. Input and companion hashes verified. Minor/fit notes retained in report; no native/rendered claim."
-    },
-    {
-      "locale": "ru",
-      "namespace": "tui.notifications",
-      "source_sha256": "b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224",
-      "translator": {
-        "agent": "coder/i18n translator lane (lopdev session ccd1179944f3)",
-        "model": "anthropic/claude-opus-5-5",
-        "date": "2026-10-26"
-      },
-      "auditor": {
-        "agent": "independent i18n-auditor / reviewer (lopdev, session b4869f40ac63)",
-        "model": "kimi/k3.1-pro (fallback from anthropic/claude-opus-5-5 via anthropic/claude-sonnet-5-5 and openai/gpt-6-astra)",
-        "date": "2026-10-26",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "Round-2 delta audit on PR #2943 head 897ffb54fef0f6a889bb135a22c80f7eebc3e0e5 (catalogue bytes identical to 0bffa9f447f). Source en SHA-256 b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224 (75 keys), context 1b4fcb28e063b7e646809d801675dfbda00f691ba7cec57edab6a322d0cab4d4. 75/75 keys, order==en, 71 carried values byte-identical to the prior audited target, arguments (count plural, updates plural, source simple) in English order, both plurals carry every CLDR category of this locale with no empty arm, all 72 count x updates sample combinations rendered through local_operator.i18n.runtime.render_message (counts 0,1,2,3,5,6,11,21,22,25,101,1234 x updates 0,1,2,5,6,11), locale number grouping intact, NFC, no bidi controls, trailing LF/no BOM/no CR, re-serialises byte-identically. Widths via rich cell_len: hints within maxCells (hint_mark_all<=12, hint_confirm<=10, hint_cancel<=8); confirm_dismiss_session <=96 for every arm with a 13-cell source. zh-CN/ur/hi nesting of updates inside each count arm accepted: count/updates categories still selected independently and count is printed via {count, number}. ur arrow convention untouched (back still U+2192); the ur sentence painted through the real display_tr isolate path and resolved with fribidi, Latin source and y/n correct. IA2-1 is the fr U+202F typographic regression; fr deliberately left pending_audit. Verdict PASS for this locale only; auditor served kimi/k3.1-pro after the disclosed provider-quota fallback chain; auditor authored none of this delta. Evidence: i18n/audits/evidence/ru/tui.notifications/nd2/ plus PR #2943 comment \"i18n audit - round 2\"."
     },
     {
       "locale": "es",
