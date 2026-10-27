@@ -82,7 +82,7 @@ able to obtain it. Measured reaches, and what closes each one:
 
 | Reach | Closed by |
 | --- | --- |
-| `bash`, `eval` (Python kernel) and their descendants inherit it from the session runtime's environment | withheld by name from every model child in BOTH `shell_environment` modes (`tools/shell_env.HARNESS_PLANE_CREDENTIALS`) |
+| `bash`, `eval` (Python kernel) and their descendants inherit it from the session runtime's environment | withheld by name from every model child in BOTH `shell_environment` modes (`agent_shell.DAEMON_BEARER_ENVS`, dropped by ``without_daemon_bearer``) |
 | a `PostToolUse` hook command (a model can write a project settings file naming one) and the `network` tool's `lop network` child | spawned with the same name-based withholding (`hook_forwarding.run_hook`, `network/tool.py`) |
 | `ps eww $PPID` (Darwin) or `/proc/$PPID/environ` (Linux) on the session runtime | the runtime is launched without it (`session/runtime/launch.py`, `standby.py`, `mobile/daemon.py`) |
 | `ps eww <daemon pid>` on the `lop serve` daemon | the daemon takes it out of its environment at boot and overwrites the original bytes (`server/desktop.capture_launch_token`); the plane is governed from the captured value |
