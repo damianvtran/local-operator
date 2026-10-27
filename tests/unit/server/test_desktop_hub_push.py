@@ -600,3 +600,195 @@ async def test_a_hub_already_holding_the_proposal_never_records_a_push_that_did_
     assert HubSpy(transport).writes == 0
     # No outbound receipt was minted or advanced: no push is on record.
     assert prov.iter_baselines(root)[0].outbound is None
+
+
+# -- round 5: R4-1 (origin before any request) and R4-2 (a stale intent never wedges) ------
+
+
+class DecoyClient(SkillClient):
+    """A hub at ANOTHER base that serves whatever it is asked, logging every request.
+
+    ``calls`` is the decoy's full request log (every ``get_skill`` it was asked), so
+    "zero requests of any kind, credentialed or not" is one length assertion.
+    """
+
+    api_key = "decoy-would-receive-this-bearer"
+
+    def bearer_headers(self) -> dict[str, str]:
+        return {"Authorization": "Bearer decoy"}
+
+
+async def test_a_repointed_origin_sees_zero_requests_and_changes_no_state(api) -> None:
+    """R4-1: after a timed-out commit, a selector pointed at a decoy base is refused FIRST.
+
+    The decoy serves the stored intent's exact document at a new revision, which is
+    what used to make the reconcile report ``pushed`` and advance the link. It must
+    receive no request at all (the read carries the org bearer), the outbox must stay
+    pending and the outbound receipt must not move.
+    """
+
+    client, root, holder, _ = api
+    link_id, anon = await link_skill(api)
+    transport = arm_transport(api, hang_commit=True)
+    edit_locally(root)
+    receipt = (await preview(client, link_id))["preview"]["preview_receipt"]
+    body = confirm_body(link_id, receipt)
+    first = await client.post("/v1/desktop/hub/updates/push", json=body)
+    assert first.json()["result"]["reports"][0]["outcome"] == "pending-reconciliation"
+    outbound_before = prov.iter_baselines(root)[0].outbound
+
+    decoy = DecoyClient(
+        "https://decoy.example/v1",
+        envelope(manifest(ALIAS, body="Say hello, loudly.\n"), revision='"hub-rev-2"'),
+    )
+    holder["anon"] = decoy
+    holder["client"] = decoy
+    retry = await client.post("/v1/desktop/hub/updates/push", json=body)
+
+    assert retry.status_code == 422, retry.text
+    assert retry.json()["detail"]["code"] == "origin-conflict"
+    assert decoy.calls == []  # the decoy's FULL request log
+    assert len(transport.commit_calls) == 1
+    outbox_files = list((root / "hub" / "outbox").glob("*.json"))
+    assert outbox_files and all(
+        json.loads(p.read_text())["state"] == "pending-reconciliation" for p in outbox_files
+    )
+    assert prov.iter_baselines(root)[0].outbound == outbound_before
+
+
+async def test_a_normal_confirm_never_sends_a_request_to_a_repointed_origin(api) -> None:
+    """R4-1 (2): the pre-existing path had the same ordering leak -- the read ran first.
+
+    No pending intent here. The read for the check used to reach the decoy (with the
+    org bearer) before ``push_transport`` refused; now nothing is sent.
+    """
+
+    client, root, holder, _ = api
+    link_id, _ = await link_skill(api)
+    arm_transport(api)
+    edit_locally(root)
+    receipt = (await preview(client, link_id))["preview"]["preview_receipt"]
+    decoy = DecoyClient("https://decoy.example/v1", envelope(manifest()))
+    holder["anon"] = decoy
+    holder["client"] = decoy
+
+    response = await client.post(
+        "/v1/desktop/hub/updates/push", json=confirm_body(link_id, receipt)
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "origin-conflict"
+    assert decoy.calls == []
+
+
+class CasTransport(FakeTransport):
+    """A hub that enforces If-Match like the real one, so a late old commit 412s."""
+
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.current = '"hub-rev-1"'
+        self.document: dict[str, Any] | None = None
+        self.writes = 0
+
+    async def preview(self, *, document, expected_revision, budget):
+        self.revision = self.current
+        return await super().preview(
+            document=document, expected_revision=expected_revision, budget=budget
+        )
+
+    async def commit(
+        self, *, document, preview_token, accept_unresolved, expected_revision, budget
+    ):
+        from local_operator.hub_sync.push import RemoteRevisionChanged
+
+        if expected_revision != self.current:
+            raise RemoteRevisionChanged()
+        result = await super().commit(
+            document=document,
+            preview_token=preview_token,
+            accept_unresolved=accept_unresolved,
+            expected_revision=expected_revision,
+            budget=budget,
+        )
+        self.writes += 1
+        self.current = f'"hub-rev-{self.writes + 1}"'
+        self.document = dict(document)
+        # A real hub answers with the document it accepted, not a canned one.
+        return {**result, "revision": self.current, "accepted_document": dict(document)}
+
+
+def arm_cas(rig, **kw: Any) -> CasTransport:
+    _, _, _, monkeypatch = rig
+    transport = CasTransport(revision='"hub-rev-1"', accepted=manifest(ALIAS), **kw)
+    monkeypatch.setattr(
+        "local_operator.hub_sync.service.push_transport", lambda _ctx, _rec: (transport, None)
+    )
+    return transport
+
+
+async def test_a_timed_out_commit_that_did_not_land_never_wedges_the_link(api) -> None:
+    """R4-2: E1 times out and does NOT land; the user edits to E2 -- twice over.
+
+    The stored conditional commit is stale. Each fresh preview+confirm must push
+    exactly once, with no 409 loop and no UI-unreachable ``reconciliation-required``.
+    A late-arriving old commit then 412s against the moved revision, so the hub keeps
+    the newer bytes: retiring the intent is never an overwrite.
+    """
+
+    client, root, _, _ = api
+    link_id, anon = await link_skill(api)
+    transport = arm_cas(api, hang_commit=True)
+    edit_locally(root)  # E1
+    first_receipt = (await preview(client, link_id))["preview"]["preview_receipt"]
+    first = await client.post(
+        "/v1/desktop/hub/updates/push", json=confirm_body(link_id, first_receipt)
+    )
+    assert first.json()["result"]["reports"][0]["outcome"] == "pending-reconciliation"
+    old_commit = dict(transport.commit_calls[0])  # the stale intent, as it was sent
+    transport.hang_commit = False
+    assert transport.writes == 0  # it never landed
+
+    for cycle, text in enumerate(("E2 first retry.\n", "E3 second retry.\n"), start=1):
+        edit_locally(root, body=text)
+        pv = (await preview(client, link_id))["preview"]
+        response = await client.post(
+            "/v1/desktop/hub/updates/push", json=confirm_body(link_id, pv["preview_receipt"])
+        )
+        assert response.status_code == 200, (cycle, response.text)
+        assert response.json()["result"]["reports"][0]["outcome"] == "pushed", cycle
+        assert transport.writes == cycle  # exactly one write per cycle
+        assert text.strip() in json.dumps(transport.document)
+        anon.payload = envelope(manifest(ALIAS, body=text), revision=transport.current)
+
+    # The OLD commit is finally delivered: its If-Match is stale, so the hub refuses
+    # it and keeps the newest bytes.
+    from local_operator.hub_sync.push import RemoteRevisionChanged
+
+    kept = dict(transport.document or {})
+    with pytest.raises(RemoteRevisionChanged):
+        await transport.commit(
+            document=old_commit["document"],
+            preview_token="late",
+            accept_unresolved=[],
+            expected_revision=old_commit["expected_revision"],
+            budget=None,
+        )
+    assert transport.document == kept and "E3 second retry" in json.dumps(kept)
+    outbox_files = list((root / "hub" / "outbox").glob("*.json"))
+    assert all(json.loads(p.read_text())["state"] != "pending-reconciliation" for p in outbox_files)
+
+
+async def test_a_landed_earlier_commit_sets_the_push_time_even_when_not_this_proposal(api) -> None:
+    """M1: the status says when the last commit landed, whichever proposal it was."""
+
+    client, root, link_id_unused, anon, transport, _ = await _timeout_then_land(api)
+    edit_locally(root, body="E2 is the new reviewed proposal.\n")
+    transport.hang_commit = False
+    transport.revision = '"hub-rev-2"'
+    pv = (await preview(client, link_id_unused))["preview"]
+    await client.post(
+        "/v1/desktop/hub/updates/push", json=confirm_body(link_id_unused, pv["preview_receipt"])
+    )
+    status = json.loads((root / "hub" / "status.json").read_text())
+    items = list(status["items"].values())
+    assert items and items[0].get("last_pushed_at")

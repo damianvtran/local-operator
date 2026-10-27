@@ -5542,6 +5542,16 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
     if _push_expected_revision(record) != receipt.get("expected_remote_revision"):
         raise changed("the link's recorded revision changed since the preview")
 
+    # ORIGIN BEFORE ANY REQUEST. ``check_items`` below reads the hub with whatever
+    # client the selector returns -- and the real client attaches its bearer to that
+    # read for an org link (``check._fetch_skill`` -> ``RadientClient.get_skill`` ->
+    # ``_get_headers``), so a selector pointed at another base would have sent the
+    # credential there before ``push_transport``'s own proof (which only guards the
+    # WRITE) ever ran. The same proof runs here first, for the client the READ will
+    # use, and the reconcile that follows mutates state only on a read that
+    # provably came from this link's recorded source.
+    _require_link_origin(ctx, identity)
+
     with exclusive(ctx):
         checks = check_items(ctx, kinds=("skill",), only_ids={record.local_id})
         check = next((c for c in checks if c.local_id == record.local_id), None)
@@ -5658,6 +5668,34 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
     return _push_answer(identity, check, outcome)
 
 
+def _require_link_origin(ctx: HubSyncContext, identity: LinkIdentity) -> None:
+    """Refuse ``origin-conflict`` unless the READ client's base is this link's source.
+
+    The same comparison ``push_transport`` makes for the write (normalized base
+    against ``identity.hub_source``), applied to the client ``check_items`` will
+    use, before any request leaves. A selector with no client is left to the check,
+    which reports ``no-credential`` by name without sending anything.
+    """
+
+    from local_operator.hub_sync.identity import normalize_source
+
+    try:
+        client = ctx.client_for_tenant(identity.tenant_id)
+    except Exception:  # noqa: BLE001 - a selector failure is simply no client
+        return
+    if client is None:
+        return
+    try:
+        answering = normalize_source(str(client.base_url).rstrip("/"))
+    except (LinkError, AttributeError):
+        answering = None
+    if answering != identity.hub_source:
+        raise LinkError(
+            "origin-conflict",
+            "the hub client does not point at this link's recorded source; nothing was sent",
+        )
+
+
 def _reconcile_landed_commit(
     ctx: HubSyncContext, check: chk.ItemCheck, operation_id: str, receipt: Mapping[str, Any]
 ) -> tuple[Any, str | None]:
@@ -5673,8 +5711,9 @@ def _reconcile_landed_commit(
       confirm. Otherwise ``(None, <the landed revision>)`` lets the caller push
       the new proposal once on top of it.
 
-    A stored intent that did NOT land and is not this proposal refuses: letting
-    ``push_item`` replay it would send bytes this confirm never reviewed.
+    A stored intent that did NOT land and is not this proposal is retired (see the
+    comment at the branch): ``push_item`` must never replay bytes this confirm did
+    not review, and nothing about it needs the person's attention.
     """
 
     from local_operator.hub_sync.outbox import Outbox
@@ -5702,19 +5741,17 @@ def _reconcile_landed_commit(
     if not landed:
         if is_this_proposal:
             return None, None  # push_item's verbatim replay IS this proposal
-        if check.remote_revision and check.remote_revision != record.intent.get(
-            "expected_revision"
-        ):
-            # The hub moved to something else, so the stored conditional commit can
-            # only ever 412: it is dead. Retire it so it cannot wedge the link; the
-            # revision check that follows decides whether THIS push may proceed.
-            outbox.settle(operation_id, generation=record.generation, error_class="superseded")
-            return None, None
-        raise LinkError(
-            "reconciliation-required",
-            "an earlier publication of different content is still unresolved; "
-            "check the link again before publishing",
-        )
+        # NOT LANDED AND NOT THIS PROPOSAL: the stored commit is stale. Retire it so
+        # it cannot wedge the link (a manual-only link has no tick to clear it).
+        # Safe in both cases: if the hub moved, the old conditional commit can only
+        # 412; if it still serves the intent's ``expected_revision``, the old commit
+        # never landed, and should it arrive late it carries that same ``If-Match``
+        # while this confirm's push moves the revision first -- so it 412s and the
+        # link refuses ``remote-revision-changed``; it can never overwrite. With no
+        # readable revision there is nothing to condition on and the revision check
+        # that follows refuses by name.
+        outbox.settle(operation_id, generation=record.generation, error_class="superseded")
+        return None, None
     assert check.remote_revision is not None and check.remote is not None
     outbox.settle(
         operation_id,
@@ -5733,14 +5770,8 @@ def _reconcile_landed_commit(
         revision=check.remote_revision,
         operation_id=operation_id,
     )
-    if not is_this_proposal:
-        return None, check.remote_revision
-    outcome = PushOutcome(
-        "pushed",
-        operation_id=operation_id,
-        accepted={"accepted_document": dict(check.remote), "operation_id": operation_id},
-        revision=check.remote_revision,
-    )
+    # A commit of this link DID land, whichever proposal it was: the status reads
+    # the same either way.
     key = st.item_key("skill", check.local_id)
 
     def fold(doc: dict[str, Any]) -> None:
@@ -5750,6 +5781,14 @@ def _reconcile_landed_commit(
             st.clear_push_skipped(item)
 
     ctx.store().mutate(fold)
+    if not is_this_proposal:
+        return None, check.remote_revision
+    outcome = PushOutcome(
+        "pushed",
+        operation_id=operation_id,
+        accepted={"accepted_document": dict(check.remote), "operation_id": operation_id},
+        revision=check.remote_revision,
+    )
     return outcome, check.remote_revision
 
 
