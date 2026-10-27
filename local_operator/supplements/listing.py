@@ -13,19 +13,24 @@ and a callout block come to disagree about which files an answer named.
 
 THE CONTRACT is the desktop renderer's Files-panel walker, so the ledger and the renderer's
 transcript links / old-daemon fallback list the same files. It is a PORT, not a shared
-implementation, of local-operator-ui src/renderer/src/features/chat/utils/link-grammar.ts at
-commit c1798b33b0 (PR #1451 round 1): `listingDirectoryIn` :1117, `listedTargetFor` :1165,
-`LISTED_ANNOTATION_SEPARATORS` :1214, `listedEntryFor` :1281, `codeLinesOf` :1371,
-`itemText` :1438, `listedTargetsIn` :1475, and the directory token's scanner `targetsIn`
-:825 with `normalizeCandidate` :395 / `normalizeFileUrl` :487. The renderer is evaluated
-under `MENTION_POLICY` plus an evidence oracle (the panel's known-extension rule; the ledger's
-stat is the oracle). Two deliberate deltas from that commit, both from #1451's round-2 review
-and mirrored ahead of it: an ordered list straight under an introducer must start with the
-LITERAL marker `1.`/`1)` (`01.` is refused), and an item line inside a blockquote is never an
-item. WHAT GUARANTEES PARITY is not this paragraph but the tests:
-tests/unit/session_files/test_dir_listing.py carries the renderer suite's cases (through its
-round-2 PARITY table) and the 13 differential cases review round 1 found against a895cf571b.
-A change in the renderer is a change here, re-checked by running both on the same inputs.
+implementation, of `src/renderer/src/features/chat/utils/link-grammar.ts` in local-operator-ui
+on branch `fix/mentioned-files-dir-listing` (PR #1451): `listingDirectoryIn` :1117,
+`listedTargetFor` :1165, `LISTED_ANNOTATION_SEPARATORS` :1214, `listedEntryFor` :1281,
+`codeLinesOf` :1371, `itemText` :1438, `listedTargetsIn` :1475, and the directory token's
+scanner `targetsIn` :825 with `normalizeCandidate` :395 / `normalizeFileUrl` :487. The
+line numbers and the copied extension set were read at that branch's `c1798b33b0`, which is a
+POINT-IN-TIME reference and not a pin: the branch is unreleased work that has already moved on
+(`12f1e462d0` when this was written), so treat any commit id here as "what I last compared
+against", never as the contract. WHAT GUARANTEES PARITY is the tests, not this paragraph or that
+commit: tests/unit/session_files/test_dir_listing.py carries the renderer suite's cases, its
+round-1 PARITY table, the 13 differential cases review round 1 found against `a895cf571b`, and
+`test_known_extensions_match_the_renderer_source_when_checked_out`, which re-reads the
+renderer's own `file-kind.ts` from a checkout. A renderer change on that branch is a change
+here, re-checked by running both on the same inputs. The renderer is evaluated under
+`MENTION_POLICY` plus an evidence oracle (the panel's known-extension rule; the ledger's stat
+is the oracle). Two deliberate deltas, both from #1451's round-2 review and mirrored ahead of
+it: an ordered list straight under an introducer must start with the LITERAL marker `1.`/`1)`
+(`01.` is refused), and an item line inside a blockquote is never an item.
 
 Why so narrow: a bare name ANYWHERE else in prose is a guess about which directory was meant,
 and a wrong guess is a row pointing at nothing. The introducer (a rooted directory, then ":")
@@ -286,7 +291,12 @@ _CONTENT_INDENT: Final = re.compile(_S + r"*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?"
 _QUOTE_OR_HEADING: Final = re.compile(r"(?:>|#{1,6}(?:[ \t]|\Z))")
 _FENCE_LINE: Final = re.compile(_S + "*(`{3,}|~{3,})(" + _DOT + "*)")
 #: CommonMark lets only an ordered list starting at 1 interrupt a paragraph. The LITERAL
-#: digit, not the value: `01.` straight under an introducer is refused (#1451 round 2).
+#: digit, not the value: `01.` straight under an introducer is refused (#1451 round 2). The
+#: refusal ends the list before any item is recorded, so `01.` first drops EVERY item under
+#: that introducer, not just the one on its own line (`1. a.pdf` after `01. b.pdf` is dropped
+#: with it) - the fail-safe direction: CommonMark lets only a `1` interrupt a paragraph, so the
+#: mdast holds no such list there, and resolving its items anyway would be inventing a list
+#: the renderer never sees.
 _ORDERED_INTERRUPT: Final = re.compile(r"1[.)]")
 _WHOLE_CODE_SPAN: Final = re.compile(r"`([^`]+)`")
 _LEADING_CODE_SPAN: Final = re.compile("`([^`]+)`(" + _DOT + "*)")
