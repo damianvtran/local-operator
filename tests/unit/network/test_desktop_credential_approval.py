@@ -1016,5 +1016,260 @@ def test_cli_approve_on_a_file_only_key_warns_once_and_names_the_apply_step(
     both = captured.err + captured.out
     assert "cannot prove that a person approved" in both
     assert both.count("Recipient key fingerprint") == 1, "the disclosure prints once"
-    assert "approved" in captured.out and "Run: lop network credential share" in captured.out
+    out_lines = captured.out.splitlines()
+    assert "Approved, not applied yet. Run:" in out_lines
+    assert any(line.startswith("lop network credential share ") for line in out_lines)
     assert A.load_record(record["approval_id"], root=rig.root)["state"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Design r2 / UX r2 / QA r3 on #3002: commands copy as one line; the detail read carries the
+# outcome; the 409 says whether a retry can work; the card's words match its state
+# ---------------------------------------------------------------------------
+
+
+class _Stream:
+    """A stdout/stderr stand-in that reports whether it is a terminal."""
+
+    def __init__(self, tty: bool) -> None:
+        self.tty = tty
+        self.parts: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.parts.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return self.tty
+
+    def text(self) -> str:
+        return "".join(self.parts)
+
+
+def _printed(monkeypatch: pytest.MonkeyPatch, *argv: str, cols: int, tty: bool) -> tuple[int, str]:
+    """``lop network …`` at a given terminal width, on a TTY or into a pipe."""
+    import sys
+
+    out, err = _Stream(tty), _Stream(tty)
+    monkeypatch.setenv("COLUMNS", str(cols))
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    code = _lop_network(*argv)
+    return code, out.text() + err.text()
+
+
+def _parses(command: str) -> None:
+    """The printed line is a command the real ``lop`` parser accepts as typed."""
+    import shlex
+
+    from tests.unit.network.test_credentials_real_link import _parser
+
+    argv = shlex.split(command)
+    assert argv[0] == "lop"
+    _parser().parse_args(argv[1:])
+
+
+_WIDTHS = [(80, True), (120, True), (80, False)]
+
+
+@pytest.mark.parametrize(("cols", "tty"), _WIDTHS)
+def test_every_printed_command_is_one_whole_line_at_any_width_and_in_a_pipe(
+    rig: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    cols: int,
+    tty: bool,
+) -> None:
+    """D6 = U7 = Q7: no line break or inserted indent inside a command, ever."""
+
+    # The inheritance card first: once the finite share is withdrawn, inherit requests refuse.
+    inherit = _inherit(rig, monkeypatch, capsys)
+    failed = _policy_moved_failed_card(rig, monkeypatch)
+    expected = _finite_expected(rig)
+    capsys.readouterr()
+    new_request = finite_share._request_command(expected)
+    inherit_apply = inheritance._apply_command(inheritance._parse(inherit), inherit["approval_id"])
+    inherit_revoke = inheritance._revoke_command(inheritance._parse(inherit))
+    checks = [
+        (("approvals", "show", failed), [new_request]),
+        (("approvals", "show", inherit["approval_id"]), [inherit_apply, inherit_revoke]),
+        (
+            (
+                "credential",
+                "share",
+                P,
+                "--with",
+                rig.peer.device_id,
+                "--network",
+                N,
+                "--scope",
+                "session",
+                "--approval",
+                failed,
+            ),
+            [new_request],
+        ),
+    ]
+    for argv, commands in checks:
+        _, text = _printed(monkeypatch, *argv, cols=cols, tty=tty)
+        lines = text.splitlines()
+        for command in commands:
+            assert command in lines, (argv, cols, tty, command, text)
+            _parses(command)
+        if not tty:
+            # A pipe gets the logical lines: nothing is wrapped at all (Q6).
+            assert not any(line.startswith("  ") and line.strip() for line in lines[:3]), text
+
+
+@pytest.mark.parametrize(("cols", "tty"), _WIDTHS)
+def test_run_and_apply_again_commands_are_one_whole_line(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, cols: int, tty: bool
+) -> None:
+    """D6: "Run:" after approve and "Apply again:" after a transient refusal, whole."""
+    import shlex
+
+    fresh = _finite(rig, monkeypatch)
+    _, text = _printed(
+        monkeypatch, "approvals", "approve", fresh["approval_id"], cols=cols, tty=tty
+    )
+    run_line = shlex.join(finite_share._apply_argv(_finite_expected(rig), fresh["approval_id"]))
+    assert "Approved, not applied yet. Run:" in text.splitlines()
+    assert run_line in text.splitlines(), text
+    _parses(run_line)
+    monkeypatch.setattr(
+        finite_share, "_apply", lambda *_a, **_k: (_ for _ in ()).throw(MeshRefusal("busy", "x"))
+    )
+    _, text = _printed(
+        monkeypatch,
+        "credential",
+        "share",
+        P,
+        "--with",
+        rig.peer.device_id,
+        "--network",
+        N,
+        "--scope",
+        "session",
+        "--approval",
+        fresh["approval_id"],
+        cols=cols,
+        tty=tty,
+    )
+    assert "Apply again:" in text.splitlines() and run_line in text.splitlines(), text
+
+
+def test_prose_still_wraps_on_words_on_a_terminal(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3 stays fixed: on a TTY, prose lines fit the width; only command lines may not."""
+    failed = _policy_moved_failed_card(rig, monkeypatch)
+    _, text = _printed(monkeypatch, "approvals", "show", failed, cols=80, tty=True)
+    for line in text.splitlines():
+        if "lop " not in line and not line.lstrip().startswith(("{", "sha256:")):
+            assert len(line) <= 80, line
+
+
+@pytest.mark.asyncio
+async def test_the_detail_read_carries_the_same_outcome_as_the_list_and_show_after_restart(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q5 = U9: list row, detail read and ``approvals show`` agree, before and after restart."""
+    aid = _policy_moved_failed_card(rig, monkeypatch)
+    expected_block = None
+    for _restart in range(2):  # a fresh app + client is a daemon restart over the same store
+        async with _desktop_client(rig, monkeypatch) as client:
+            listed = (await _row(client, aid))["typed_approval"]["apply_outcome"]
+            detail = await client.get(f"/v1/desktop/approvals/{aid}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["result"]["apply_outcome"] == listed
+        assert set(listed) == {"code", "retryable", "reason", "remedy"}
+        assert listed["retryable"] is False and "lop " not in listed["remedy"]
+        expected_block = expected_block or listed
+        assert listed == expected_block
+    capsys.readouterr()
+    monkeypatch.setenv("COLUMNS", "1000")
+    assert _lop_network("approvals", "show", aid) == 0
+    shown = capsys.readouterr().out.splitlines()
+    assert f"Why it stopped: {expected_block['reason']}" in shown
+    assert f"What to do: {expected_block['remedy']}" in shown
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_refusal_after_busy_says_so_on_the_409(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U8b: Try again after ``busy`` that meets a permanent refusal carries the outcome."""
+    record = _finite(rig, monkeypatch)
+    _level(monkeypatch, FILE_ONLY)
+    aid = record["approval_id"]
+    real_apply = finite_share._apply
+    calls = {"n": 0}
+
+    def busy_once(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise MeshRefusal("busy", "held")
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(finite_share, "_apply", busy_once)
+    async with _desktop_client(rig, monkeypatch) as client:
+        row = await _row(client, aid)
+        first = (
+            await client.post(f"/v1/desktop/approvals/{aid}/approve-" "credential", json=_ack(row))
+        ).json()["result"]
+        assert first["applied"]["code"] == "busy" and first["applied"]["retryable"] is True
+        consent.restrict_and_revoke(
+            N, rig.own.device_id, rig.peer.device_id, {"credential_key": "y"}, "moved", rig.root
+        )
+        retry = await client.post(
+            f"/v1/desktop/approvals/{aid}/apply-" "credential", json=_ack(row)
+        )
+    assert retry.status_code == 409
+    body = retry.json()["detail"]
+    assert body["code"] == "consent_conflict"
+    outcome = body["apply_outcome"]
+    assert outcome["retryable"] is False and "a new request is needed" in outcome["remedy"]
+    assert "lop " not in body["text"] and "--" not in body["text"]
+    assert outcome["reason"] in body["text"]
+
+
+def test_a_failed_card_does_not_offer_its_window_and_the_list_says_nothing_is_below(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D7 + D8: the compact card points at nothing below; a failed card's window is closed."""
+    aid = _policy_moved_failed_card(rig, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("COLUMNS", "1000")
+    assert _lop_network("approvals", "show", aid) == 0
+    shown = capsys.readouterr().out
+    assert "can be approved and applied until" not in shown
+    assert "Request window: closed; this card is failed." in shown.splitlines()
+    assert _lop_network("approvals", "list") == 0
+    assert "listed below" not in capsys.readouterr().out
+
+
+def test_the_inheritance_card_names_its_apply_command_once_on_approve(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N3: the disclosure before signing no longer carries the apply step; it prints once."""
+    record = _inherit(rig, monkeypatch, capsys)
+    command = inheritance._apply_command(inheritance._parse(record), record["approval_id"])
+    capsys.readouterr()
+    monkeypatch.setenv("COLUMNS", "1000")
+    assert _lop_network("approvals", "approve", record["approval_id"]) == 0
+    captured = capsys.readouterr()
+    both = captured.err + captured.out
+    assert both.splitlines().count(command) == 1, both
+    assert "Then run:" not in both
+
+
+def test_the_desktop_refusal_does_not_promise_a_time_limited_share() -> None:
+    """U10: the finite card has no automatic expiry, so the copy must not call it time-limited."""
+    from local_operator.network.credentials import approval_copy
+
+    text = approval_copy.inheritance_desktop_refusal(False)
+    assert "time-limited" not in text and "just the current sign-in" in text
+    assert "review the card and approve again" in approval_copy.KEY_DID_NOT_SIGN  # U11

@@ -1078,8 +1078,11 @@ def main(args: argparse.Namespace) -> int:
                 block = getattr(exc, "join_block", None)
                 if isinstance(block, dict):
                     body["join"] = block
+                commands = getattr(exc, "commands", None)
+                if isinstance(commands, list):
+                    body["commands"] = commands
                 print(json.dumps(body))
-            print(f"\033[1;31m{exc.sentence}\033[0m", file=sys.stderr)
+            _print_refusal(exc)
             # 3 IS ITS OWN EXIT CODE (the design's "a human decision is required"), and
             # it is checked BEFORE the generic 1 so a caller can tell "nobody answered
             # in time" from "the network said no" without matching on English.
@@ -2351,6 +2354,7 @@ def _cmd_credential_inherit(args: argparse.Namespace) -> int:
                 *inheritance.details(requested),
                 "Request only; nothing is permitted yet.",
                 f"Approve: lop network approvals approve {requested['approval_id']}",
+                *inheritance.next_lines(requested),
             ],
         )
     result = inheritance.apply(
@@ -8946,9 +8950,14 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
             described = [
                 "A credential-permission request this build cannot describe; do not approve it."
             ]
+        try:
+            following = inheritance.next_lines(dict(record))
+        except MeshRefusal:
+            following = []
         return [
             *described,
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            *following,
             "This records a credential permission only; nothing is installed, joined or "
             "connected.",
         ]
@@ -9120,27 +9129,70 @@ def _emit_wrapped(args: argparse.Namespace, payload: dict[str, Any], lines: list
     exact bytes (their tests pin single-line receipts, and a wrap there is a separate
     design decision, not this PR's).
     """
-    return _emit(args, payload, lines if _json_mode(args) else _wrap_lines(lines))
+    if _json_mode(args):
+        return _emit(args, payload, lines)
+    return _emit(args, payload, _wrap_lines(lines, stream=sys.stdout))
 
 
-def _wrap_lines(lines: list[str], width: int | None = None) -> list[str]:
+def _print_refusal(exc: Any) -> None:
+    """A refusal on stderr: its sentence, then any commands it carries, one per line.
+
+    The finite apply refusal carries its recipe as ``.commands`` (design #3002 r2, D9; UX
+    U8a) rather than inside the sentence, so each command prints whole on its own line and
+    the sentence wraps to the terminal like the card does. Colour honours ``NO_COLOR``
+    (design N4); every other refusal keeps its exact bytes.
+    """
+    import os
+
+    red = not os.environ.get("NO_COLOR")
+    commands = getattr(exc, "commands", None)
+    sentence = [exc.sentence]
+    if isinstance(commands, list):
+        sentence = _wrap_lines(sentence, stream=sys.stderr)
+    for line in sentence:
+        print(f"\033[1;31m{line}\033[0m" if red else line, file=sys.stderr)
+    if isinstance(commands, list) and commands:
+        print(str(getattr(exc, "commands_label", "")), file=sys.stderr)
+        for command in commands:
+            print(command, file=sys.stderr)
+
+
+def _is_command(line: str) -> bool:
+    """Whether a printed line carries a runnable command, which is never wrapped."""
+    return "lop " in line
+
+
+def _wrap_lines(lines: list[str], width: int | None = None, *, stream: Any = None) -> list[str]:
     """Wrap logical lines to the terminal on WORDS, with a hanging indent (design D3).
 
     A long line used to be left to the terminal, which cuts mid-word (``Th|at``,
     ``ma|chine``) and drops the continuation to column 0, where it reads as a new fact.
     ``Label: value`` lines keep the label on the first row and indent the value under it;
     a single token longer than the row (a fingerprint, a JSON tuple) gets its own indented
-    row and is never broken, so it can still be selected and compared whole. Pipes and
-    ``--json`` are unaffected: this runs only for the human half.
+    row and is never broken, so it can still be selected and compared whole.
+
+    TWO THINGS ARE NEVER WRAPPED (design #3002 r2, D6; UX U7; QA Q6/Q7):
+
+    * a line that carries a COMMAND. A hard break inside one turned a pasted command into
+      several broken ones (``argument --with: expected one argument``, then ``command not
+      found`` per row). The renderers print each command on its own line, so the terminal
+      soft-wraps it and copies it back as one line.
+    * anything not written to a TTY. A pipe or a log gets the logical lines, so ``grep``
+      finds a whole command and a script reads what the card says. ``stream`` names the
+      stream the lines go to; without one (a caller that measures the wrap) the width rules.
     """
     import shutil
     import textwrap
 
+    if stream is not None and width is None:
+        isatty = getattr(stream, "isatty", None)
+        if not (callable(isatty) and isatty()):
+            return list(lines)
     width = width or shutil.get_terminal_size((100, 24)).columns
     width = max(40, width)
     out: list[str] = []
     for line in lines:
-        if len(line) <= width:
+        if len(line) <= width or _is_command(line):
             out.append(line)
             continue
         lead = len(line) - len(line.lstrip(" "))
@@ -9158,7 +9210,7 @@ def _wrap_lines(lines: list[str], width: int | None = None) -> list[str]:
 
 
 def _print_wrapped(lines: list[str], stream: Any) -> None:
-    for line in _wrap_lines(lines):
+    for line in _wrap_lines(lines, stream=stream):
         print(line, file=stream)
 
 

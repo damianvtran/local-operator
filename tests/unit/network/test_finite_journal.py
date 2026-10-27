@@ -320,12 +320,16 @@ def test_finite_refusal_keeps_codes_and_exact_recovery_not_onboarding(
     )
     output = capsys.readouterr()
     payload = json.loads(output.out)
-    assert (
-        "--request-approval" in payload["message"]
-        and "approvals approve" in payload["message"]
-        and "--approval" in payload["message"]
-    )
+    # The recipe rides as whole commands beside the sentence since #3002 r2 (UX U8a, design
+    # D9): the sentence is the plain reason + next step every surface shows, with no syntax.
+    request, approve, apply_ = payload["commands"]
+    assert request.endswith("--request-approval") and request.startswith("lop network ")
+    assert approve == "lop network approvals approve <new-approval-id>"
+    assert apply_.endswith("--approval <new-approval-id>")
+    assert "a new request is needed" in payload["message"] and "lop " not in payload["message"]
     assert "new onboarding" not in payload["message"] and "setup" not in payload["message"]
+    # stderr prints each command whole on its own line (design D6).
+    assert all(command in output.err.splitlines() for command in payload["commands"])
 
 
 @pytest.mark.parametrize(

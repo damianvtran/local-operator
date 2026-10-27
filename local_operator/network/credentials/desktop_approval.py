@@ -308,7 +308,7 @@ def _admit(approval_id: str) -> None:
             raise _refuse(
                 "credential_prompt_cancelled",
                 "The last approval prompt for this card was cancelled or did not sign. "
-                "Review the card again before approving.",
+                "Review the card, then approve again.",
             )
         now = time.monotonic()
         while _ATTEMPTS and now - _ATTEMPTS[0] > RATE_WINDOW_S:
@@ -606,7 +606,17 @@ def _apply_checked(
         )
     # The apply's own result (placement entry / provisioned row) stays server-side: the UI
     # needs the record's state, and the disclosure already names what was granted.
-    _MODULES[op].apply(approval_id, _expected(op, record), root)
+    try:
+        _MODULES[op].apply(approval_id, _expected(op, record), root)
+    except MeshRefusal as exc:
+        from local_operator.network.credentials import approval_copy
+
+        # THE APPLY PHASE'S OWN REFUSAL carries the outcome block on the 409 (UX U8b), so a
+        # "Try again" that ends in a permanent refusal tells the UI, in the same response,
+        # that no further retry can work -- the UI never has to infer it from the ``text``.
+        # Pre-apply refusals (digest, state, window) are NOT apply outcomes and carry none.
+        exc.apply_outcome = approval_copy.outcome(exc.code)  # type: ignore[attr-defined]
+        raise
     _audit("credential.desktop_applied", approval_id, root, {"surface": "desktop", "operation": op})
     state = approvals.load_record(approval_id, root=root).get("state")
     return {

@@ -631,13 +631,8 @@ def details(record: dict[str, Any]) -> list[str]:
         if recipient["name"]
         else recipient["device_id"]
     )
-    expires = facts["request_window"]["expires_at"]
-    window = (
-        # The zone is named (design N2): the card is read on other machines of the mesh too.
-        time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(float(expires)))
-        if isinstance(expires, (int, float)) and expires
-        else "its set time"
-    )
+    from local_operator.network.credentials.finite_share import _window_line
+
     return [
         heading,
         f"Provider: {facts['provider']} (a native sign-in on this device; copied, borrowed, "
@@ -650,34 +645,35 @@ def details(record: dict[str, Any]) -> list[str]:
         f"Signing principal: your operator key {facts['signing_principal']} on this machine",
         "Duration: until you revoke it. This permission has no automatic expiry; a sign-in "
         "to the same account later is covered without asking again, a different account is not.",
-        f"Request window: this card can be approved and applied until {window}. That one-hour "
-        "window only limits how long this request stays answerable; it is not the lifetime "
-        "of the permission.",
+        # True for the card's current state (design D8); one wording with the finite card.
+        _window_line(record, facts["request_window"]["expires_at"], "permission"),
         "What the device receives: short-lived access minted here on request. The sign-in "
         "and its refresh token stay on this device; nothing is copied.",
         "Needs, and this does not grant: broker_credential on this device's own member row "
-        f"and on the row for the recipient (lop network member grant {facts['network_id']} "
-        f"{recipient['device_id']} broker_credential).",
-        f"Revoke at any time: {_revoke_command(parsed)}",
-        f"Approving records your decision only. Then run: "
-        f"{_apply_command(parsed, str(record.get('approval_id', '')))}",
+        "and on the row for the recipient. To grant it for the recipient:",
+        # COMMANDS ON THEIR OWN LINES (design #3002 r2, D6; UX U7): the CLI never wraps a
+        # line that carries one, so a copied command pastes as one command.
+        f"lop network member grant {facts['network_id']} {recipient['device_id']} "
+        "broker_credential",
+        "Revoke at any time:",
+        _revoke_command(parsed),
     ]
 
 
 def next_lines(record: dict[str, Any]) -> list[str]:
     """What the operator does next with an inheritance card after a CLI approve (UX U5).
 
-    ``details`` already ends with the apply command for a card still awaiting a decision;
-    this is the same step for the moment right after signing, when the disclosure is not
-    printed again.
+    The apply step lives HERE, not in ``details``, so ``approvals approve`` -- which prints
+    the disclosure before signing and this after -- names the command once (design N3).
     """
-    if intent(record) is None or record.get("state") != approvals.STATE_APPROVED:
+    if intent(record) is None:
         return []
-    parsed = _parse(record)
-    return [
-        "Approved, not applied yet. Run: "
-        + _apply_command(parsed, str(record.get("approval_id", "")))
-    ]
+    command = _apply_command(_parse(record), str(record.get("approval_id", "")))
+    if record.get("state") == approvals.STATE_REQUESTED:
+        return ["Approving records your decision only. Then run:", command]
+    if record.get("state") == approvals.STATE_APPROVED:
+        return ["Approved, not applied yet. Run:", command]
+    return []
 
 
 def list_lines(record: dict[str, Any]) -> list[str]:
@@ -721,8 +717,11 @@ def row_extras(record: dict[str, Any]) -> dict[str, Any] | None:
         # (UX U3). A renderer that knows ``typed_approval`` shows its ``refusal_message``
         # or its Approve instead and should not show this beside it.
         "approve_remedy": (
+            # The sentence ENDS before the command (``harness/test_approval_authority``'s
+            # window-remedy guard: "terminal" and "approvals" in one sentence reads as the
+            # TUI gate's loosen remedy), and the command stands alone after "Run:".
             "This permission can't be approved in this version of the desktop app. Approve "
-            "it in a terminal on this Mac: "
+            "it in a terminal on this Mac instead. Run: "
             f"lop network approvals approve {record.get('approval_id', '')}"
         ),
     }

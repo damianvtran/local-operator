@@ -74,7 +74,15 @@ def _http_refusal(error: MeshRefusal) -> Exception:
     status = 404 if error.code in {"unknown_approval", "approval_missing"} else 409
     if error.code in {"ssh_port_conflict", "invalid_ssh_port", "unexpected_run_body"}:
         status = 422
-    return HTTPException(status, _wd.desktop_refusal(error=str(error)).envelope(code=error.code))
+    body = _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+    outcome = getattr(error, "apply_outcome", None)
+    if isinstance(outcome, dict):
+        # An APPLY-phase refusal says, in this same response, whether a retry can succeed
+        # (UX #3002 r2, U8b): ``{code, retryable, reason, remedy}``, the block the row's
+        # ``typed_approval.apply_outcome`` and the detail read carry. Absent on every other
+        # refusal, so existing clients see the body they always did.
+        body["apply_outcome"] = outcome
+    return HTTPException(status, body)
 
 
 async def _local(request: Request, work: Any) -> Any:

@@ -116,6 +116,15 @@ def outcome(code: str) -> dict[str, Any]:
     }
 
 
+def refusal_sentence(code: str) -> str:
+    """One refusal's words for EVERY surface: the reason, then the next step (UX U8, D9).
+
+    No terminal syntax: the desktop's 409 ``text`` is this sentence verbatim, and the CLI
+    prints its runnable commands on their own lines beside it, never inside it.
+    """
+    return reason_for(code) + " " + remedy(code)
+
+
 def last_failure(record: dict[str, Any]) -> dict[str, Any] | None:
     """The outcome of a ``failed`` card's LAST failed run, read from its durable receipts.
 
@@ -163,7 +172,7 @@ def inheritance_desktop_refusal(upgrade_available: bool) -> str:
     return (
         rule + " Touch ID approvals can't be set up on this install of Local Operator. To "
         "allow it anyway, approve it in a terminal on this Mac, where the same warning is "
-        "shown; or ask for a time-limited share instead."
+        "shown; or ask for a share of just the current sign-in instead."
     )
 
 
@@ -176,5 +185,6 @@ def inheritance_desktop_refusal(upgrade_available: bool) -> str:
 #: up is not sent into setup again. No exception text: it can carry paths and OS jargon.
 KEY_DID_NOT_SIGN = (
     "The operator key did not sign, so nothing was approved. If a prompt appeared and was "
-    "dismissed, approve again; if not, check that this Mac's operator key is still in place."
+    "dismissed, review the card and approve again; if not, check that this Mac's operator key "
+    "is still in place."
 )
