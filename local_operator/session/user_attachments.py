@@ -32,6 +32,10 @@ row; its digest is looked up READ-ONLY in the store (:meth:`AttachmentStore.loca
 ``put``) so a picture whose bytes ARE retained is still reachable through that route, and one
 whose bytes are not is reported with ``attachment: None`` rather than inlined.
 
+ORIGIN vs RETAINED COPY. ``exists`` stats the origin path and ``stored`` the store copy, so a
+surface can name all three outcomes: still at its origin; moved, but a saved copy is kept; and
+both gone.
+
 TOLERANCE. A journal is written by many builds and sometimes edited by hand: a malformed
 line, a non-dict block or a field of the wrong type drops THAT item, never the listing. The
 stored-copy fact (``stored``) is a ``stat`` of the store file, so a surface can tell "origin
@@ -169,6 +173,16 @@ def _item(
                 size = stat.st_size
         except OSError:
             stored = False
+    origin = _str_or_none(block.get("path"))
+    # Whether the ORIGIN is still where the person attached it from. ``None`` when the row
+    # names no origin (a pasted screenshot) - unknown is not "gone". Stat'd here rather than
+    # by the renderer so one listing answers every row without a per-row bridge round trip.
+    exists: bool | None = None
+    if origin is not None:
+        try:
+            exists = Path(origin).is_file()
+        except OSError:
+            exists = None
     injection = block.get("injection")
     return {
         "message_id": message_id,
@@ -179,7 +193,8 @@ def _item(
         "filename": _str_or_none(block.get("filename")),
         "mime_type": mime,
         "bytes": size,
-        "path": _str_or_none(block.get("path")),
+        "path": origin,
+        "exists": exists,
         "stored_path": stored_path,
         "stored": stored,
         "injection": injection if injection in ("native", "extracted", "reference") else None,

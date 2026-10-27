@@ -176,6 +176,8 @@ class UserAttachment(BaseModel):
     mime_type: str = "application/octet-stream"
     bytes: int | None = None
     path: str | None = None
+    #: Whether ``path`` is a file right now; ``None`` when the row names no origin path.
+    exists: bool | None = None
     stored_path: str | None = None
     stored: bool = False
     injection: Literal["native", "extracted", "reference"] | None = None

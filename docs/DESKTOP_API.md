@@ -2409,9 +2409,10 @@ memory when the canvas opens, and listing only the loaded rows would claim "noth
 The route scans the whole journal (`local_operator/session/user_attachments.py`).
 
 Each item: `{message_id, ts, index, kind: document|image, attachment, filename, mime_type,
-bytes, path, stored_path, stored, injection}`. `index` is the block's position in its
+bytes, path, exists, stored_path, stored, injection}`. `index` is the block's position in its
 message's `content`; `attachment` is the store digest (`null` when the row's inline bytes are
-not in the store); `path` is the ORIGIN path (may be gone), `stored_path`/`stored` the retained
+not in the store); `path` is the ORIGIN path and `exists` whether it is still a file (`null` with no origin),
+`stored_path`/`stored` the retained
 store copy and whether it is on disk now. **Metadata only:** bytes stay on
 `…/attachments/{digest}`; there is no second transport. User rows only, and never a
 harness-injected row (`provider_payload.harness_injected`).

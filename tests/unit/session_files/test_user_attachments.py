@@ -157,6 +157,9 @@ def test_lists_user_documents_and_images_in_send_order(root: Path) -> None:
     assert pdf["attachment"] == digests["pdf"] and pdf["filename"] == "IP Assignment.pdf"
     assert pdf["bytes"] == 14 and pdf["injection"] == "native" and pdf["stored"] is True
     assert pdf["path"].endswith("IP Assignment.pdf") and pdf["ts"] == 10.0
+    # The origin was never created on disk: the retained copy is the only one left.
+    assert pdf["exists"] is False
+    assert shot["exists"] is None, "a pasted screenshot has no origin to be gone"
     assert shot["attachment"] == digests["shot"] and shot["stored"] is True
     assert shot["filename"] is None and shot["mime_type"] == "image/png"
     # A durable image row records no size; the retained copy's length stands in for it.
