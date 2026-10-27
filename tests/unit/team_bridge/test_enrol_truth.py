@@ -346,7 +346,12 @@ async def test_status_does_not_claim_can_receive_without_a_local_owner(tmp_path,
 
 
 async def test_status_can_receive_with_this_members_owner(tmp_path, monkeypatch):
+    from tests.unit.team_bridge.test_discipline import _set_local
+
     _commit(tmp_path, account="acc_1", endpoint="bep_1")
+    # The machine an enable or resume leaves behind: the commit writes the switch
+    # too (R1-1/R2-1), so a receiving device has it on.
+    _set_local(tmp_path, enabled=True)
     result = await _route_status(tmp_path, monkeypatch)
     assert result["local"]["enrolled"] is True
     assert result["can_receive"] is True
@@ -623,3 +628,39 @@ async def test_default_on_retry_runs_on_the_next_cached_check_and_is_paced(
     assert int(Store(tmp_path).sync_state(owner)["feed_seq"]) == 0
     assert len(_enrolment_writes(hub)) == 1
     assert sum(1 for r in hub.requests if r.url.path.endswith("/messaging/status")) == statuses
+
+
+async def test_c_resume_on_an_already_owned_machine_turns_the_switch_on(tmp_path: Path):
+    """R2-1: ``already_owned`` is a COMMITTED outcome too (``_local_enrollment``
+    marks both codes committed, ``_LOCAL_ENROLLMENT_COMMITTED``). A config reset,
+    or a restore that keeps the owner store, reaches this with the key absent;
+    gating the switch write on the ``committed`` code alone left that machine
+    deaf while status said it receives."""
+
+    from local_operator.config import read_config_values
+
+    _commit(tmp_path, account="acc_1", endpoint="bep_1")
+    requests: list[httpx.Request] = []
+    client = _client(_hub(_answer(CONSENT_ON_RECORD), requests), tmp_path)
+    result = await client.put_settings(
+        state="active", tenant_id="tnt_1", endpoint={"state": "paused"}, expected_account_id="acc_1"
+    )
+    assert result["local_enrollment"] == {"committed": True, "code": "already_owned"}
+    values = read_config_values(tmp_path) or {}
+    assert values.get("team_bridge", {}).get("enabled") is True
+
+
+async def test_status_does_not_claim_can_receive_with_an_explicit_local_off(tmp_path, monkeypatch):
+    """R2-2: an owner exists, but the local switch is explicitly OFF and every
+    wake fence holds ``bridge_off``. The field named for the claim must not say
+    otherwise, and ``local.enabled`` beside it must agree."""
+
+    from tests.unit.team_bridge.test_discipline import _set_local
+
+    _commit(tmp_path, account="acc_1", endpoint="bep_1")
+    _set_local(tmp_path, enabled=False)
+    result = await _route_status(tmp_path, monkeypatch)
+    assert result["surface_state"] == "C"
+    assert result["local"]["enrolled"] is True
+    assert result["local"]["enabled"] is False
+    assert result["can_receive"] is False

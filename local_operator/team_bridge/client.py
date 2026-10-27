@@ -2000,7 +2000,7 @@ class TeamBridgeClient:
         )
         if not outcome["committed"]:
             logger.warning("team_bridge: local enrolment not committed (%s)", outcome["code"])
-        elif outcome["code"] == "committed" and self._config_dir is not None:
+        elif outcome["committed"] and self._config_dir is not None:
             # The owner exists now, but every receive/wake/authority fence reads
             # ``team_bridge.enabled`` from DISK, and an absent key reads OFF
             # (review R1-1 / QA Q1). A resume on a reinstalled or wiped machine
@@ -2009,6 +2009,13 @@ class TeamBridgeClient:
             # every message ``bridge_off`` while status said it receives. Same
             # rule as default-on: "if unset" only, so an explicit local OFF
             # always wins. Best-effort: the commit already stands.
+            #
+            # BOTH committed outcomes, never the ``committed`` CODE alone (review
+            # R2-1): ``already_owned`` means this machine already holds THIS
+            # endpoint's owner, which a config reset or a restore that keeps the
+            # owner store reaches with the key absent. That is the very
+            # deaf-but-on state, just with an owner present, so gate on the
+            # boolean the marker and the retry path already use.
             try:
                 record_local_enabled_if_unset(self._config_dir)
             except Exception:  # noqa: BLE001 - the fences then still read OFF, loudly
@@ -4095,6 +4102,11 @@ class StatusDiscipline:
         Silent towards the status answer, like default-on itself; the outcome
         is logged by code. ``done`` is written once committed, or once the hub
         proves the record is no longer this default-on consent (no endless GET).
+
+        ONE-SIDED BY DESIGN (review R2-4): the status answer that TRIGGERED a
+        successful commit keeps reporting ``local.enrolled: false`` until the next
+        fresh read, up to the cache TTL. It self-heals, and it is the one window
+        here that understates instead of overstating.
 
         WHEN (QA Q2). On every status check, cached or fresh, paced to one
         attempt per :data:`STATUS_ERROR_TTL_S` per account, so a failed commit

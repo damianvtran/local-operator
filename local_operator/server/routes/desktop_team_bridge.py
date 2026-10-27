@@ -666,6 +666,9 @@ async def status(
     # a committed local owner for that exact endpoint this device never polls,
     # so "can receive" must not be claimed for it.
     enrolled = _locally_enrolled(config_manager, check)
+    #: The COMPOSED switch, computed ONCE so ``can_receive`` below and
+    #: ``local.enabled`` cannot disagree about the same machine (review R2-2).
+    composed_enabled = local.enabled_given(in_force)
     result = {
         # The capability THIS route family advertises (a renderer reads the
         # same number off ``GET /v1/capabilities``; it rides here so one
@@ -695,7 +698,12 @@ async def status(
         "state_note": check.state_note,
         "visibility": projection["visibility"],
         "read_only": projection["read_only"],
-        "can_receive": bool(projection["can_receive"]) and enrolled,
+        #: The claim needs BOTH sides, not just the hub's state (review R2-2):
+        #: a committed owner HERE and the local switch on. An explicit OFF holds
+        #: every message ``bridge_off`` in the wake spine, so an owned device
+        #: with the switch off receives nothing while ``local.enabled`` says so
+        #: right beside this field.
+        "can_receive": bool(projection["can_receive"]) and enrolled and composed_enabled,
         "can_decide": projection["can_decide"],
         "local": {
             #: Whether THIS machine holds the committed owner for the selected
@@ -706,7 +714,7 @@ async def status(
             # The COMPOSED switch (see the module docstring): explicit wins, an
             # absent key follows the served consent. v1-only hubs read exactly
             # ``local.enabled`` as before.
-            "enabled": local.enabled_given(in_force),
+            "enabled": composed_enabled,
             "onboarding": local.onboarding,
             "session": local.session,
         },
