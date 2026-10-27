@@ -3004,11 +3004,15 @@ class ServingSessionHandle(SessionHandle):
         # this class of failure a degraded-but-alive runtime instead of a
         # wedged one.
         try:
-            if _wake_within_window(self) and not self._draining:
+            if _wake_within_window(self) and not getattr(self, "_draining", False):
                 # A committed departure is not residency. An idle signalled
                 # runtime must leave at its boundary, not wait out the 120 s
                 # progress bound merely because a recurring wake is due soon;
                 # the successor owns that delivery (#3028 node control (c)).
+                # Read through getattr like the file's other latch reads: a
+                # direct attribute read raised on a handle without the latch,
+                # and the fail-open except below turned that into "no wake",
+                # silently disabling the warm-window term (#3028 CI shard 2).
                 return "wake due within the warm window"
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             logger.debug("warm-window probe failed; treating as no wake", exc_info=True)

@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from local_operator.session.runtime.reclaim import RUNTIME_MODULE
 from local_operator.wakes import owned_runtimes
 
@@ -109,13 +111,15 @@ def test_a_real_owned_process_is_signalled_by_exact_pid(tmp_path: Path, monkeypa
     # A tiny real ``-m`` module with the runtime's argv shape; the production
     # runtime is exercised by the isolated SIGTERM rig, not by this unit cell.
     child = subprocess.Popen(
-        # ``-m <runtime>`` is only the argv identity; SIGSTOP before the real
-        # runtime boots keeps this cell lightweight and avoids a second model
-        # runtime. The sweep must still identify and signal the exact pid.
+        # ``-m <runtime>`` is only the argv identity: no model runtime boots.
+        # The child SLEEPS rather than SIGSTOPping itself. A stopped process
+        # holds SIGTERM pending until SIGCONT, so whenever the stop landed
+        # before the sweep (Linux CI) the wait below timed out and the cell
+        # hung (#3028 shard 0); whether it landed first was a startup race.
         [
             sys.executable,
             "-c",
-            "import os,signal; os.kill(os.getpid(), signal.SIGSTOP)",
+            "import time; time.sleep(120)",
             "-m",
             RUNTIME_MODULE,
         ],
@@ -134,7 +138,11 @@ def test_a_real_owned_process_is_signalled_by_exact_pid(tmp_path: Path, monkeypa
             if not signalled:
                 time.sleep(0.1)
         assert signalled == [child.pid]
-        assert child.wait(timeout=15) in (-signal.SIGTERM, -signal.SIGSTOP)
+        try:
+            returncode = child.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"pid {child.pid} was signalled but did not exit within 15 s")
+        assert returncode == -signal.SIGTERM
     finally:
         if child.poll() is None:
             child.kill()

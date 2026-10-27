@@ -293,6 +293,16 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # The wake supervisor's per-invocation ownership stamp (#3028,
+    # ``wakes/owned_runtimes.OWNER_ENV``) and the flag that lets ``launch``
+    # propagate it. serve() sets both in its own environment, so a suite run
+    # from a shell (or an agent session) descended from a live supervisor
+    # inherits them, and every runtime a test then spawns would carry the LIVE
+    # supervisor's token: the cells that assert "only this invocation's
+    # children are marked" would pass on inherited state, and a live supervisor's
+    # stop sweep could match a test's child in a shared store.
+    "LOP_WAKE_SUPERVISOR_ACTIVE",
+    "LOP_WAKE_SUPERVISOR_OWNER",
     # The engage claim (``session/runtime/types.ENGAGED_ENV``), written by
     # ``launch._spawn_runtime`` for a warm and read at boot by
     # ``RuntimeServer``, which stamps ``SessionRecord.engaged_at`` from it. This

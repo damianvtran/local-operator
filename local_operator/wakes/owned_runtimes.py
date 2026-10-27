@@ -130,44 +130,6 @@ def sweep(
         )
         signalled.append(pid)
     return signalled
-    for observed_row in reclaim.runtime_processes():
-        observed_env = observed_row.command
-        pid = observed_row.pid
-        observed_owner = owner_of(observed_env)
-        if not observed_owner:
-            continue
-        if (owner and observed_owner != owner) or reclaim.config_root_of(observed_env) != str(
-            config_dir
-        ):
-            continue
-        session_id = reclaim.session_id_of(observed_env)
-        if not session_id:
-            continue
-        row = reclaim.process_row(pid)
-        if row is None or not owner_of(row.command):
-            continue
-        # A pid reused after the census has a YOUNGER process age. Keep the
-        # existing two-second rounding slack; never signal a different process.
-        if row.age_s < observed_row.age_s - 2.0:
-            continue
-        if (
-            owner_of(row.command) != observed_owner
-            or reclaim.config_root_of(row.command) != str(config_dir)
-            or reclaim.session_id_of(row.command) != session_id
-        ):
-            continue
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            continue
-        logger.info(
-            "wake supervisor: %s; SIGTERM to owned runtime %s (session %s)",
-            why,
-            pid,
-            session_id,
-        )
-        signalled.append(pid)
-    return signalled
 
 
 def spawn_token() -> str:

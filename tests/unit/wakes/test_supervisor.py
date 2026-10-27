@@ -2141,14 +2141,13 @@ async def test_serve_once_is_silent_for_a_fresh_project(
 async def test_a_supervisor_stop_sweeps_only_its_own_runtime_token(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The systemd stop boundary forwards SIGTERM through the real serve cleanup.
+    """A stop SIGNAL forwards SIGTERM, scoped to this invocation's token.
 
-    No process is needed for this integration cell: the sweep receives the
-    invocation token recorded by serve(), and its exact-pid/argv/root guards
-    are exercised with real processes in test_owned_runtimes.py.
+    The handler serve() installs is captured and fired, which is exactly what
+    the event loop does on a unit SIGTERM; the sweep's exact-pid/argv/root
+    guards are exercised with real processes in test_owned_runtimes.py.
     """
-    from local_operator.wakes import owned_runtimes
-    from local_operator.wakes.supervisor import _Sweeper
+    from local_operator.wakes import owned_runtimes, supervisor
 
     swept: list[tuple[Path, str]] = []
     monkeypatch.setattr(
@@ -2156,11 +2155,74 @@ async def test_a_supervisor_stop_sweeps_only_its_own_runtime_token(
         "sweep",
         lambda root, *, owner, why="supervisor stop": swept.append((root, owner)) or [],
     )
+    handlers: list[Any] = []
+    monkeypatch.setattr(
+        supervisor,
+        "_install_stop_handlers",
+        lambda loop, on_stop: handlers.append(on_stop) or [],
+    )
+    # A wake due in an hour keeps the loop sleeping, so only the signal ends it.
+    write_entry(
+        tmp_path, "sessionstop1", cwd=str(tmp_path), schedules=[_schedule(NOW_MS + 3_600_000)]
+    )
 
-    # An empty store retires through serve()'s normal finally path; this is
-    # the same cleanup a SIGTERM/cancellation reaches, without a live unit.
-    monkeypatch.setattr(_Sweeper, "sweep", lambda self, *args, **kwargs: 0)
-    assert await serve(tmp_path) == 0
+    task = asyncio.create_task(serve(tmp_path))
+    for _ in range(500):
+        if handlers:
+            break
+        await asyncio.sleep(0.01)
+    assert handlers, "serve() never installed its stop handler"
+    handlers[0]()
+    # The handler cancels serve(); main() maps that cancellation to exit 0.
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=30)
+
     assert len(swept) == 1
     root, owner = swept[0]
     assert root == tmp_path and owner
+
+
+@pytest.mark.asyncio
+async def test_a_once_pass_never_sweeps_the_runtime_it_just_started(
+    tmp_path: Path, engagements, no_live_runtimes, monkeypatch
+) -> None:
+    """A cold wake must outlive the pass that started its runtime (CI tui-e2e, #3028).
+
+    The supervisor STARTS a runtime and leaves the wake to it. Sweeping on the
+    ``--once`` return SIGTERMed that runtime before its overdue wake fired:
+    ``test_cold_wake_e2e`` failed on both platforms with "never ran its turn".
+    """
+    from local_operator.wakes import owned_runtimes
+
+    swept: list[str] = []
+    monkeypatch.setattr(
+        owned_runtimes,
+        "sweep",
+        lambda root, *, owner, why="supervisor stop": swept.append(owner) or [],
+    )
+    write_entry(tmp_path, "sessioncold1", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 5_000)])
+
+    assert await serve(tmp_path, once=True) == 0
+
+    assert [call["session_id"] for call in engagements] == ["sessioncold1"]
+    assert swept == []
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_retirement_leaves_its_runtimes_to_their_own_residency(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Running out of fireable wakes is not a stop: no runtime is signalled."""
+    from local_operator.wakes import owned_runtimes
+    from local_operator.wakes.supervisor import _Sweeper
+
+    swept: list[str] = []
+    monkeypatch.setattr(
+        owned_runtimes,
+        "sweep",
+        lambda root, *, owner, why="supervisor stop": swept.append(owner) or [],
+    )
+    monkeypatch.setattr(_Sweeper, "sweep", lambda self, *args, **kwargs: 0)
+
+    assert await serve(tmp_path) == 0
+    assert swept == []

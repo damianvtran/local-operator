@@ -182,6 +182,17 @@ def test_may_refresh_names_a_wake_inside_the_warm_window() -> None:
     assert PredicateHost(busy=True, wake_due_ms=now_ms).may_refresh() == "busy", "busy wins"
 
 
+def test_a_committed_drain_does_not_hold_for_a_wake_inside_the_warm_window() -> None:
+    """A signalled, idle runtime leaves at its boundary; the successor owns the wake.
+
+    #3028 node control (c): the warm-window hold made an idle runtime wait out
+    the 120 s signal drain because its recurring wake was due soon.
+    """
+    host = PredicateHost(wake_due_ms=int(time.time() * 1000) + 1_000)
+    host._draining = True
+    assert host.may_refresh() == ""
+
+
 def test_may_refresh_fails_open_when_the_warm_window_probe_breaks(monkeypatch) -> None:
     """Q-1: a predicate that cannot be evaluated must NEVER pin the runtime.
 
