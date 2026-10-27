@@ -530,7 +530,8 @@ class FakeClient:
         account_id: str,
         *,
         decision: str,
-        consent_version: str,
+        consent_version: str | None = None,
+        endpoint_id: str | None = None,
         tenant_id=None,
         access=None,
         expected_account_id=None,
@@ -541,7 +542,24 @@ class FakeClient:
             decision,
             consent_version,
         )
+        FakeClient.behavior["last_consent_endpoint"] = endpoint_id
         return self._answer("conversation_consent")
+
+    async def owned_agent_invitations(
+        self,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ):
+        FakeClient.behavior["last_invitations"] = {
+            "expected_account_id": expected_account_id,
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        return self._answer("owned_agent_invitations")
 
     async def conversation_join(
         self, conversation_id: str, *, tenant_id=None, access=None, expected_account_id=None
@@ -3389,3 +3407,127 @@ async def test_an_active_settings_write_without_a_cos_sends_no_name(api):
 
     assert response.status_code == 200
     assert FakeClient.behavior["last_put_kwargs"]["agent_name"] is None
+
+
+# -- owner agent consent: withdraw + owned invitations (agent-server #227) ------
+
+CONSENT = "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/acc_1/consent"
+INVITATIONS = "/v1/desktop/team-bridge/agents/owned/invitations"
+
+
+async def test_withdraw_needs_no_consent_version_and_forwards_the_endpoint_pin(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_consent"] = {"member": {"state": "left"}}
+    response = await client.post(
+        CONSENT, json={"decision": "withdraw", "endpoint_id": "bep_1", "tenant_id": "tnt_1"}
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_consent"] == ("bcv_abc12345", "acc_1", "withdraw", None)
+    assert FakeClient.behavior["last_consent_endpoint"] == "bep_1"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Leaving is not consenting: a version on withdraw is refused, not dropped.
+        {"decision": "withdraw", "consent_version": "bridge_agent_participation_v1"},
+        # The two answers to an invitation still need the served version.
+        {"decision": "accept"},
+        {"decision": "decline"},
+        {"decision": "remove"},
+        {"decision": "withdraw", "endpoint_id": ""},
+    ],
+)
+async def test_consent_version_is_validated_per_decision_before_any_io(api, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.post(CONSENT, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls, "a refused decision reached the transport"
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "details"),
+    [
+        (409, "invalid_transition", {"rule": "not_invited"}),
+        (409, "invalid_transition", {"rule": "not_active"}),
+        (400, "invalid_request", {"field": "endpoint_id", "rule": "ambiguous"}),
+        (409, "outdated_hub", {"hub_status": 400, "hub_code": "invalid_request"}),
+    ],
+)
+async def test_consent_refusals_pass_through_untouched(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_consent"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.post(CONSENT, json={"decision": "withdraw"})
+    assert response.status_code == status
+    assert response.json()["detail"] == {"code": code, "message": "refused", "details": details}
+
+
+async def test_owned_invitations_pass_through_with_no_store_and_the_opaque_cursor(api):
+    client, _root, _d = api
+    page = {
+        "invitations": [{"conversation_id": "bcv_abc12345", "endpoint_id": "bep_1"}],
+        "next_cursor": "opaque+/=",
+        "has_more": True,
+    }
+    FakeClient.behavior["owned_agent_invitations"] = page
+    response = await client.get(
+        INVITATIONS,
+        params={
+            "expected_account_id": "acc_1",
+            "tenant_id": "tnt_1",
+            "limit": "20",
+            "cursor": "opaque+/=",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json()["result"] == page
+    assert FakeClient.behavior["last_invitations"] == {
+        "expected_account_id": "acc_1",
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "cursor": "opaque+/=",
+    }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",  # the captured-owner receipt is required
+        "?tenant_id=tnt_1",
+        "?expected_account_id=acc_1&endpoint_id=bep_1",  # no endpoint parameter
+        "?expected_account_id=acc_1&scope=account",
+        "?expected_account_id=acc_1&expected_account_id=acc_2",
+        "?expected_account_id=acc_1&limit=0",
+        "?expected_account_id=acc_1&limit=ten",
+        "?expected_account_id=../x",
+    ],
+)
+async def test_owned_invitations_refuse_an_open_query_before_any_io(api, query):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(f"{INVITATIONS}{query}")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert FakeClient.calls == calls, "a refused query reached the transport"
+
+
+async def test_owned_invitations_refusals_carry_no_store_and_outdated_hub_passes(api):
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = BridgeRefusal(
+        "outdated_hub", "update", http_status=409, details={"hub_status": 404}
+    )
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "outdated_hub"
+    assert response.headers["cache-control"] == "private, no-store"
+
+
+def test_owner_invitations_capability_is_advertised():
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["team_bridge_owner_invitations"] == 1

@@ -410,6 +410,17 @@ def static_feature_flags() -> dict[str, Any]:
         # in this runtime: feature branches must adopt the same guard before
         # advertising their mutations alongside this capability.
         "team_bridge_conversation_owner_guard": 1,
+        # The owner's agent-invitation surface over agent-server #227: the
+        # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
+        # only, receipt required, `private, no-store`) and `decision=withdraw`
+        # (no consent_version) plus an optional `endpoint_id` pin on the
+        # consent route. Its own key by the `radient_org` rule: a renderer that
+        # does not see it neither mounts the invitations list nor offers
+        # "Remove my agent", because this core would 404 the read and 422 the
+        # decision. It promises the RUNTIME only; a hub that predates #227
+        # answers either with 409 `outdated_hub`, which the renderer shows as
+        # "the server needs an update" rather than probing for it.
+        "team_bridge_owner_invitations": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key

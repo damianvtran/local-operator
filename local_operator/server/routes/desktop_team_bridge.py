@@ -1542,8 +1542,30 @@ class ConversationReadIn(ConversationOwnerIn):
 
 
 class ConversationConsentIn(ConversationOwnerIn):
-    decision: Literal["accept", "decline"]
-    consent_version: str = Field(min_length=1, max_length=128)
+    """The owner's decision about their own agent (agent-server #227).
+
+    ``accept``/``decline`` answer an ``invited`` row and ``withdraw`` takes an
+    ``active`` agent out. Only the two answers to an invitation carry the
+    participation ``consent_version``: leaving is not consenting, so withdraw
+    neither needs nor sends one (a version on it is refused rather than
+    dropped, so a caller cannot believe it recorded consent). ``endpoint_id``
+    pins one of the caller's agent rows, as the invitations read hands it out;
+    it travels in the body, never in a path, so a length bound is enough here
+    and the hub owns the "is this one of yours" rule.
+    """
+
+    decision: Literal["accept", "decline", "withdraw"]
+    consent_version: str | None = Field(default=None, min_length=1, max_length=128)
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _version_per_decision(self) -> "ConversationConsentIn":
+        if self.decision == "withdraw":
+            if self.consent_version is not None:
+                raise ValueError("withdraw carries no consent_version")
+        elif self.consent_version is None:
+            raise ValueError("accept and decline require consent_version")
+        return self
 
 
 class ConversationAdmitIn(ConversationOwnerIn):
@@ -1888,7 +1910,13 @@ async def conversation_consent(
     body: ConversationConsentIn,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Record an agent owner's participation decision (the agent only then becomes active)."""
+    """Record an agent owner's participation decision (accept, decline or withdraw).
+
+    The hub's state refusals (409 ``invalid_transition`` with ``rule``
+    ``not_invited``/``not_active``, 400 ``rule=ambiguous``) pass through
+    verbatim; a hub that predates ``withdraw``/``endpoint_id`` is the client's
+    409 ``outdated_hub``.
+    """
     _require_conversation_id(conversation_id)
     _require_account_id(account_id)
     _refuse_write_scope(request)
@@ -1901,11 +1929,94 @@ async def conversation_consent(
                 account_id,
                 decision=body.decision,
                 consent_version=body.consent_version,
+                endpoint_id=body.endpoint_id,
                 tenant_id=body.tenant_id,
                 expected_account_id=body.expected_account_id,
             )
         )
     )
+
+
+# -- owner's pending agent invitations (agent-server #227) ---------------------
+#
+# `GET /conversations` lists only what the caller's HUMAN identity is in, so an
+# agent invited into a private channel or group its owner is not in was
+# visible to nobody who could accept it. This read is the owner's list of those
+# invitations; each row is answered through the consent route above, naming the
+# row's `endpoint_id`.
+#
+# It sits under the owner-audit gate on the hub (caller + tenant, no endpoint
+# parameter, `private, no-store`), and this route mirrors that gate: a closed,
+# single-valued query, the captured-owner receipt REQUIRED, `private, no-store`
+# on every answer including refusals, and nothing persisted or cached. The rows
+# are metadata only (no body, preview or member list) and pass through as the
+# hub sent them; `cursor` is the hub's opaque `next_cursor`, forwarded verbatim.
+#
+# Availability is the `team_bridge_owner_invitations` capability
+# (server/features.py), never a probe: a hub that predates #227 answers 404 here,
+# which the client surfaces as 409 `outdated_hub`.
+
+OWNER_INVITATIONS_CACHE_CONTROL = "private, no-store"
+_OWNER_INVITATIONS_QUERY = frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
+
+
+@router.get(
+    "/v1/desktop/team-bridge/agents/owned/invitations",
+    response_model=CRUDResponse[Any],
+)
+async def owned_agent_invitations(
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page of the conversations where the signed-in owner's agent is invited.
+
+    Result: ``{invitations: [...], next_cursor?, has_more}``. Unknown or
+    repeated query names are refused before any I/O rather than dropped (the
+    hub refuses ``endpoint_id``/``scope``/``before`` on this read too).
+    """
+
+    response.headers["Cache-Control"] = OWNER_INVITATIONS_CACHE_CONTROL
+    try:
+        names = set(request.query_params)
+        if names - _OWNER_INVITATIONS_QUERY or "expected_account_id" not in names:
+            _raise_read("invalid_request")
+        query: dict[str, str] = {}
+        for name in names:
+            values = request.query_params.getlist(name)
+            if len(values) != 1 or not values[0].strip() or len(values[0]) > 512:
+                _raise_read("invalid_request")
+            query[name] = values[0]
+        if not is_account_id(query["expected_account_id"]):
+            _raise_read("invalid_request")
+        if len(query.get("tenant_id", "")) > 128:
+            _raise_read("invalid_request")
+        limit: int | None = None
+        if "limit" in query:
+            # Parsed, never interpolated; the hub owns the upper bound.
+            try:
+                limit = int(query["limit"])
+            except ValueError:
+                _raise_read("invalid_request")
+            if limit < 1:
+                _raise_read("invalid_request")
+
+        client = _conversation_client(config_manager)
+        return reply(
+            await _conversation_reply(
+                client.owned_agent_invitations(
+                    expected_account_id=query["expected_account_id"],
+                    tenant_id=query.get("tenant_id"),
+                    limit=limit,
+                    cursor=query.get("cursor"),
+                )
+            )
+        )
+    except HTTPException as exc:
+        # A refusal is an answer about the owner's agent too; it must not sit
+        # in a shared cache either (the hub stamps its refusals the same way).
+        exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_INVITATIONS_CACHE_CONTROL}
+        raise
 
 
 @router.post(

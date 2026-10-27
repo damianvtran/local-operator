@@ -1219,3 +1219,143 @@ async def test_conversation_delete_surfaces_the_servers_refusal_unchanged():
     with pytest.raises(BridgeRefusal) as exc:
         await client.conversation_delete("bcv_abc12345")
     assert exc.value.code == "invalid_transition"
+
+
+# ---------------------------------------------------------------------------
+# owner agent consent: withdraw, endpoint pin, owned invitations (agent-server #227)
+# ---------------------------------------------------------------------------
+
+
+async def test_withdraw_sends_no_consent_version_and_an_optional_endpoint_pin():
+    """Leaving is not consenting: the wire carries the decision and the pin only."""
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return _ok({"member": {"state": "left"}})
+
+    client = _make_client(handler)
+    await client.conversation_consent(
+        "bcv_abc12345", "acc_1", decision="withdraw", endpoint_id="bep_1", tenant_id="tnt_1"
+    )
+    await client.conversation_consent(
+        "bcv_abc12345", "acc_1", decision="accept", consent_version="v1"
+    )
+    # The unpinned accept is the pre-#227 wire byte for byte.
+    assert bodies == [
+        {"decision": "withdraw", "endpoint_id": "bep_1", "tenant_id": "tnt_1"},
+        {"decision": "accept", "consent_version": "v1"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "details"),
+    [
+        (409, "invalid_transition", {"rule": "not_invited"}),
+        (409, "invalid_transition", {"rule": "not_active"}),
+        (400, "invalid_request", {"field": "endpoint_id", "rule": "ambiguous"}),
+    ],
+)
+async def test_consent_state_refusals_pass_through_untouched(status, code, details):
+    """#227's refusals are answers about the caller's rows, not an old hub."""
+
+    client = _make_client(lambda request: _err(status, code, details=details))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_consent(
+            "bcv_abc12345", "acc_1", decision="withdraw", endpoint_id="bep_1"
+        )
+    assert (info.value.http_status, info.value.code, info.value.details) == (
+        status,
+        code,
+        details,
+    )
+
+
+@pytest.mark.parametrize(
+    ("response", "kwargs"),
+    [
+        # The pre-#227 service's closed decision set.
+        (
+            _err(400, "invalid_request", details={"field": "decision", "rule": "unknown_value"}),
+            {"decision": "withdraw"},
+        ),
+        # The pre-#227 strict body decoder on an unknown key: an uncoded 400.
+        (httpx.Response(400, json={"error": "invalid request body"}), {"decision": "withdraw"}),
+        (
+            httpx.Response(400, json={"error": "invalid request body"}),
+            {"decision": "decline", "consent_version": "v1", "endpoint_id": "bep_1"},
+        ),
+        # A fronting validator may say 422.
+        (httpx.Response(422, json={"error": "unprocessable"}), {"decision": "withdraw"}),
+    ],
+)
+async def test_an_old_hub_refusing_the_new_wire_is_outdated_hub(response, kwargs):
+    client = _make_client(lambda request: response)
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_consent("bcv_abc12345", "acc_1", **kwargs)
+    assert info.value.code == tb_client.OUTDATED_HUB
+    assert info.value.http_status == 409
+    assert info.value.details["hub_status"] == response.status_code
+
+
+async def test_an_old_wire_refusal_is_never_reclassified_as_outdated_hub():
+    """Accept/decline without a pin is the old wire: its 400 is the hub's own."""
+
+    client = _make_client(lambda request: httpx.Response(400, json={"error": "bad"}))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_consent(
+            "bcv_abc12345", "acc_1", decision="accept", consent_version="v1"
+        )
+    assert info.value.code == "bridge_error"
+    assert info.value.http_status == 400
+
+
+async def test_owned_invitations_reads_the_hub_path_and_forwards_the_cursor_verbatim():
+    seen: list[httpx.Request] = []
+    page = {
+        "invitations": [{"conversation_id": "bcv_abc12345", "endpoint_id": "bep_1"}],
+        "next_cursor": "opaque+/=cursor",
+        "has_more": True,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok(page)
+
+    client = _make_client(handler)
+    result = await client.owned_agent_invitations(
+        expected_account_id="acc_1", tenant_id="tnt_1", limit=20, cursor="opaque+/=cursor"
+    )
+
+    assert result == page
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/v1/messaging/agents/owned/invitations"
+    assert dict(seen[0].url.params) == {
+        "tenant_id": "tnt_1",
+        "limit": "20",
+        "cursor": "opaque+/=cursor",
+    }
+
+
+async def test_owned_invitations_refuses_a_foreign_receipt_before_any_request():
+    requests: list[httpx.Request] = []
+    client = _make_client(lambda request: requests.append(request) or _ok({}))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.owned_agent_invitations(expected_account_id="acc_b")
+    assert info.value.code == "account_mismatch"
+    assert requests == []
+
+
+async def test_owned_invitations_on_an_old_hub_is_outdated_hub_but_a_coded_404_is_not():
+    client = _make_client(lambda request: httpx.Response(404, json={"message": "Not Found"}))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.owned_agent_invitations(expected_account_id="acc_1")
+    assert info.value.code == tb_client.OUTDATED_HUB
+
+    # A coded 404 is the hub speaking about the caller (e.g. no membership).
+    client = _make_client(lambda request: _err(404, "tenant_not_found"))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.owned_agent_invitations(expected_account_id="acc_1")
+    assert info.value.code == "tenant_not_found"
