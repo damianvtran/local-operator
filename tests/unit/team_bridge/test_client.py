@@ -339,7 +339,11 @@ async def test_consent_version_unknown_is_a_refresh_status_signal():
     client = _make_client(handler)
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="bridge_consent_v1", endpoint=None
+            state="active",
+            consent_version="bridge_consent_v1",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
     assert info.value.refreshes_status is True
     assert info.value.advice is None
@@ -405,7 +409,11 @@ async def test_every_field_rule_case_renders_its_client_sentence_or_none(field: 
     client = _make_client(handler)
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="bridge_consent_v1", endpoint=None
+            state="active",
+            consent_version="bridge_consent_v1",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
 
     expected = VALIDATION_SENTENCES.get((field, rule))
@@ -454,7 +462,14 @@ async def test_a_pause_or_opt_out_is_sent_alone(bundled: str):
     assert sent == []
 
     # The name change as its own request is fine (state=active).
-    await client.put_settings(state="active", consent_version="v1", label="My agent", endpoint=None)
+    await client.put_settings(
+        state="active",
+        consent_version="v1",
+        label="My agent",
+        endpoint=None,
+        expected_account_id="acc_1",
+        tenant_id="tnt_1",
+    )
     assert len(sent) == 1
 
 
@@ -481,11 +496,21 @@ async def test_consented_via_is_the_closed_set():
 
     with pytest.raises(ValueError, match="consented_via"):
         await client.put_settings(
-            state="active", consent_version="v1", consented_via="email", endpoint=None
+            state="active",
+            consent_version="v1",
+            consented_via="email",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
 
     await client.put_settings(
-        state="active", consent_version="v1", consented_via="dialog", endpoint=None
+        state="active",
+        consent_version="v1",
+        consented_via="dialog",
+        endpoint=None,
+        expected_account_id="acc_1",
+        tenant_id="tnt_1",
     )
     assert sent[-1]["consented_via"] == "dialog"
 
@@ -494,7 +519,12 @@ async def test_the_body_bound_is_checked_before_the_wire():
     client = _make_client(lambda request: _ok({}))
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="v1", label="x" * 5000, endpoint=None
+            state="active",
+            consent_version="v1",
+            label="x" * 5000,
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
     assert info.value.code == "payload_too_large"
     assert info.value.http_status == 413
@@ -509,7 +539,11 @@ async def test_tenant_id_rides_the_body_when_given():
 
     client = _make_client(handler)
     await client.put_settings(
-        state="active", consent_version="v1", tenant_id="tnt_1", endpoint=None
+        state="active",
+        consent_version="v1",
+        tenant_id="tnt_1",
+        endpoint=None,
+        expected_account_id="acc_1",
     )
     assert sent == [{"state": "active", "tenant_id": "tnt_1", "consent_version": "v1"}]
 

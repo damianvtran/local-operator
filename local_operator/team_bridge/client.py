@@ -90,6 +90,8 @@ from local_operator.team_bridge.settings import (
     DEFAULT_ENROLLMENT_DONE,
     DEFAULT_ON_CONSENT_VERSION,
     TeamBridgeSettings,
+    parse_pending_default_enrollment,
+    pending_default_enrollment,
     record_default_enrollment,
     record_local_enabled,
     record_local_enabled_if_unset,
@@ -730,6 +732,68 @@ ALLOWLIST_MAX_ENTRIES = 200
 
 #: §6.1's wire bound for the allowlist body (largest legitimate body ~30 KiB).
 ALLOWLIST_BODY_MAX_BYTES = 64 * 1024
+
+#: The closed set of ``local_enrollment.code`` values (D1). Before this, a
+#: ``state=active`` 200 said nothing about the LOCAL owner, so a device whose
+#: commit was skipped or failed showed "on" and never polled. Exactly two codes
+#: mean this machine holds the owner for the answered endpoint
+#: (``committed: true``): ``committed`` (just now) and ``already_owned``. The
+#: others are why not — never content, so they are safe to log and to render.
+LOCAL_ENROLLMENT_CODES = (
+    "committed",
+    "already_owned",
+    "other_owner",
+    "no_consent_echo",
+    "no_account_guard",
+    "no_tenant",
+    "tenant_mismatch",
+    "endpoint_not_active",
+    "store_failed",
+    "vetoed",
+)
+_LOCAL_ENROLLMENT_COMMITTED = frozenset({"committed", "already_owned"})
+#: The outcomes after a default-on POST that a COMMIT-ONLY retry may still fix
+#: (a transient store failure, a lost race, the late veto when it was not an
+#: explicit OFF — the retry re-checks that). The rest cannot change without a
+#: new consent, so they never arm the pending marker.
+_RETRYABLE_COMMIT_CODES = frozenset({"store_failed", "vetoed", "other_owner"})
+
+
+def _local_enrollment(code: str) -> dict[str, Any]:
+    """The additive ``local_enrollment`` result block for one closed-set code."""
+
+    if code not in LOCAL_ENROLLMENT_CODES:
+        raise ValueError(f"unknown local_enrollment code: {code}")
+    return {"committed": code in _LOCAL_ENROLLMENT_COMMITTED, "code": code}
+
+
+def _answer_tenant(result: Any) -> str | None:
+    """The tenant a settings answer names (endpoint first, then settings), or None."""
+
+    if not isinstance(result, Mapping):
+        return None
+    for block in (result.get("endpoint"), result.get("settings")):
+        tenant = block.get("tenant_id") if isinstance(block, Mapping) else None
+        if isinstance(tenant, str) and tenant:
+            return tenant
+    return None
+
+
+def _consent_on_record(endpoint: Mapping[str, Any]) -> str | None:
+    """The version of the hub's CURRENT consent record on ``endpoint``, or None.
+
+    The hub answers the endpoint's stored consent (``version``, ``current``);
+    ``current`` is false once it no longer binds (the member was re-added, or
+    the version left the accepted set). Only a version this client knows is
+    returned, so a receipt never names text it could not have shown.
+    """
+
+    consent = endpoint.get("consent")
+    if not isinstance(consent, Mapping) or consent.get("current") is not True:
+        return None
+    version = consent.get("version")
+    return version if version in (CONSENT_VERSION_V1, CONSENT_VERSION_V2) else None
+
 
 VALID_STATES = ("active", "paused", "disabled")
 VALID_CONSENTED_VIA = ("dialog", "settings")
@@ -1601,6 +1665,19 @@ class TeamBridgeClient:
         forbids a status read writing one. The commit is skipped for every
         other answer (pause, disable, missing echo/tenant), so a settings edit
         never invents consent.
+
+        EVERY ``state=active`` ANSWER SAYS WHETHER THIS MACHINE IS ENROLLED (D1).
+        A 200/active from the hub only proves the HUB endpoint; before this the
+        local commit could be skipped or fail silently and the device showed
+        "on" while never polling. The answer now carries the additive
+        ``local_enrollment: {committed, code}`` (``code`` from
+        :data:`LOCAL_ENROLLMENT_CODES`), and a consented enable that could never
+        commit — no captured account, no tenant — is refused with ``ValueError``
+        BEFORE any I/O: a caller bug, not a silent 200. The guard is never
+        filled in from whoever is signed in now (that re-binds consent to
+        another account, the R6/Q1 replay), and the tenant is never taken from
+        the answer after the write (that skips the pre-enable head read and
+        replays a reused endpoint's feed, R2-1).
         """
 
         if state not in VALID_STATES:
@@ -1621,6 +1698,20 @@ class TeamBridgeClient:
                     "state=active from a fresh endpoint or from disabled requires "
                     "consent_version (RFC §5.2)"
                 )
+        if state == "active" and consent_version:
+            # D1 paths (a) and (b): a consented enable missing either of these
+            # can never commit a local owner, so it would answer 200/active for
+            # a device that never receives. Refused before the first byte.
+            if expected_account_id is None:
+                raise ValueError(
+                    "a consented state=active write requires expected_account_id (the "
+                    "captured-account guard): without it no local enrolment can be committed"
+                )
+            if not tenant_id:
+                raise ValueError(
+                    "a consented state=active write requires tenant_id: without it no "
+                    "local enrolment can be committed"
+                )
         body: dict[str, Any] = {"state": state}
         if tenant_id:
             body["tenant_id"] = tenant_id
@@ -1635,9 +1726,12 @@ class TeamBridgeClient:
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
         # R2-1: the seed position is read BEFORE the write (see _pre_enable_head).
+        # Also for a guarded resume WITHOUT an echo (D1 path c): it may commit
+        # from the hub's consent record, and it then needs the same seed. The
+        # read is skipped (no I/O) whenever an owner is already committed.
         head = (
             await self._pre_enable_head(tenant_id=tenant_id, access=access)
-            if state == "active" and consent_version and tenant_id
+            if state == "active" and tenant_id and (consent_version or access is not None)
             else None
         )
         try:
@@ -1652,7 +1746,7 @@ class TeamBridgeClient:
                     refusal.details.get("rule"),
                 )
             raise
-        await self._commit_explicit_enable(
+        local_enrollment = await self._commit_explicit_enable(
             state=state,
             tenant_id=tenant_id,
             consent_version=consent_version,
@@ -1660,6 +1754,8 @@ class TeamBridgeClient:
             access=access,
             head=head,
         )
+        if local_enrollment is not None and isinstance(result, dict):
+            result = {**result, "local_enrollment": local_enrollment}
         if state == "disabled":
             # The one-click Turn off: the hub answered, so make the opt-out
             # sticky on this machine too (see _apply_local_opt_out).
@@ -1720,13 +1816,18 @@ class TeamBridgeClient:
         result = await self._send("POST", "/messaging/enrollment", body=body, access=access)
         endpoint = result.get("endpoint") if isinstance(result, Mapping) else None
         consent = endpoint.get("consent") if isinstance(endpoint, Mapping) else None
-        if (
+        if not (
             isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
             and consent.get("version") == CONSENT_VERSION_V2
-            and (may_commit_local is None or may_commit_local())
         ):
-            await self._commit_explicit_enable(
+            # The hub's no-op: nothing was created here, so there is no local
+            # enrolment to report on either.
+            return result
+        if may_commit_local is not None and not may_commit_local():
+            local_enrollment: dict[str, Any] | None = _local_enrollment("vetoed")
+        else:
+            local_enrollment = await self._commit_explicit_enable(
                 state="active",
                 tenant_id=tenant_id,
                 consent_version=CONSENT_VERSION_V2,
@@ -1734,7 +1835,78 @@ class TeamBridgeClient:
                 access=access,
                 head=head,
             )
+        if local_enrollment is not None and local_enrollment["code"] in _RETRYABLE_COMMIT_CODES:
+            # D1/R3: the endpoint now exists, so the surface reads state C and
+            # default-on never runs again. Record what a commit-only retry needs:
+            # the endpoint THIS POST created and the PRE-POST head (R2-1).
+            endpoint_id = endpoint.get("id") if isinstance(endpoint, Mapping) else None
+            if self._config_dir is not None and isinstance(endpoint_id, str) and endpoint_id:
+                try:
+                    record_default_enrollment(
+                        self._config_dir,
+                        expected_account_id,
+                        pending_default_enrollment(endpoint_id, head),
+                    )
+                except Exception:  # noqa: BLE001 - bookkeeping; the outcome still says so
+                    logger.warning("team_bridge: could not record the pending local commit")
+        if local_enrollment is not None and isinstance(result, dict):
+            result = {**result, "local_enrollment": local_enrollment}
         return result
+
+    async def commit_pending_default_enrollment(
+        self,
+        *,
+        tenant_id: str,
+        endpoint_id: str,
+        head: int,
+        expected_account_id: str,
+        may_commit_local: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Commit-only recovery for a default-on POST whose local commit failed.
+
+        WHY. :meth:`enroll_default_on` created the hub endpoint but the owner
+        commit raised (or lost a race), so the device is "on" for teammates and
+        deaf here; the status discipline cannot re-enter default-on (state C).
+        This NEVER POSTs again: it reads the caller's settings (``GET``, the one
+        answer carrying the endpoint's consent record) and commits the owner
+        only when that record still proves this machine's default-on consent —
+        the SAME endpoint id the marker names, ``default_on`` + v2, current,
+        active. An endpoint consented elsewhere (dialog/settings) never matches,
+        so the consent hold is not widened into state C (R2-6).
+
+        ``head`` is the PRE-POST head the marker stored (0 for a brand-new
+        endpoint), never one read now: the endpoint has been live since the POST,
+        so every message sent meanwhile sits at or below today's head and a seed
+        there would skip it for good (R2-1). Returns the ``local_enrollment``
+        outcome; refusals and transport failures propagate to the caller.
+        """
+
+        access = await self._guarded_access(expected_account_id)
+        answer = await self._send(
+            "GET", "/messaging/settings", params={"tenant_id": tenant_id}, access=access
+        )
+        endpoint = answer.get("endpoint") if isinstance(answer, Mapping) else None
+        consent = endpoint.get("consent") if isinstance(endpoint, Mapping) else None
+        if not (
+            isinstance(endpoint, Mapping)
+            and endpoint.get("id") == endpoint_id
+            and isinstance(consent, Mapping)
+            and consent.get("consented_via") == "default_on"
+            and consent.get("version") == CONSENT_VERSION_V2
+            and consent.get("current") is not False
+        ):
+            return _local_enrollment("no_consent_echo")
+        if not may_commit_local():
+            return _local_enrollment("vetoed")
+        outcome = await self._commit_explicit_enable(
+            state="active",
+            tenant_id=tenant_id,
+            consent_version=CONSENT_VERSION_V2,
+            result=answer,
+            access=access,
+            head=head,
+        )
+        return outcome if outcome is not None else _local_enrollment("endpoint_not_active")
 
     def _apply_local_opt_out(self, account_id: str | None) -> None:
         """The local half of the one-click Turn off, after the hub accepted it.
@@ -1778,7 +1950,7 @@ class TeamBridgeClient:
         result: Mapping[str, Any],
         access: OAuthAccess | None,
         head: int | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Commit the native receipt for THIS user's explicit settings enable.
 
         The settings PUT is the user's action (the surface has just sent the
@@ -1787,55 +1959,119 @@ class TeamBridgeClient:
         reaches here (consent hold, #2712).
 
         NOTHING IS COMMITTED for a pause/disable, an answer that does not prove
-        active state, or a caller that omitted the consent echo or tenant: the
-        server's answer is the source, and a guess is worse than no local
-        authority. Best-effort after the server write: a store failure must not
-        report a failed enable, and a later explicit write retries.
+        active state, or a caller that omitted the tenant: the server's answer
+        is the source, and a guess is worse than no local authority. Best-effort
+        after the server write: a store failure must not report a failed enable,
+        and a later explicit write retries.
+
+        CONSENT ON RECORD (D1 path c). The shipped desktop resume of an existing
+        endpoint sends NO echo, because the hub reports ``consent_required:
+        false`` whenever the member's stored consent still binds. That record is
+        this member's consent (and the hub's answer names its version), so the
+        user's explicit ``state=active`` write commits under it: ``current`` must
+        be true and the version one this client knows. Anything less is reported
+        as ``no_consent_echo`` — never a silent 200.
+
+        Returns ``None`` for a non-active write (nothing to claim) and otherwise
+        the ``local_enrollment`` outcome: whether THIS machine now holds the
+        owner for this endpoint, and a closed-set code. Every non-committed code
+        is logged by code only (content-free: no ids, no exception prose).
         """
 
-        if (
-            state != "active"
-            or not consent_version
-            or not tenant_id
-            or access is None
-            or self._config_dir is None
-        ):
-            return
+        if state != "active":
+            return None
+        outcome = self._local_commit_outcome(
+            tenant_id=tenant_id,
+            consent_version=consent_version,
+            result=result,
+            access=access,
+            head=head,
+        )
+        if not outcome["committed"]:
+            logger.warning("team_bridge: local enrolment not committed (%s)", outcome["code"])
+        return outcome
+
+    def _local_commit_outcome(
+        self,
+        *,
+        tenant_id: str | None,
+        consent_version: str | None,
+        result: Mapping[str, Any],
+        access: OAuthAccess | None,
+        head: int | None,
+    ) -> dict[str, Any]:
+        """The commit itself, each early exit a coded outcome (see the caller)."""
+
         endpoint = result.get("endpoint") if isinstance(result, Mapping) else None
-        if not isinstance(endpoint, Mapping) or endpoint.get("state") != "active":
-            return
-        endpoint_id = endpoint.get("id")
+        endpoint_id = endpoint.get("id") if isinstance(endpoint, Mapping) else None
+        if (
+            not isinstance(endpoint, Mapping)
+            or endpoint.get("state") != "active"
+            or not isinstance(endpoint_id, str)
+            or not endpoint_id
+        ):
+            return _local_enrollment("endpoint_not_active")
+        if self._config_dir is None:
+            return _local_enrollment("store_failed")
         credential_id = getattr(access, "credential_id", None)
         account_id = getattr(access, "account_id", None)
         if (
-            not isinstance(endpoint_id, str)
-            or not endpoint_id
+            access is None
             or not isinstance(credential_id, int)
             or isinstance(credential_id, bool)
             or not isinstance(account_id, str)
             or not account_id
         ):
-            return
-        local = _local_settings_snapshot(self._config_dir)
+            # Never resolve an unguarded access here: that would bind the
+            # consent to whoever is signed in now (R6/Q1).
+            return _local_enrollment("no_account_guard")
+        if not tenant_id:
+            return _local_enrollment("no_tenant")
+        if _answer_tenant(result) not in (None, tenant_id):
+            return _local_enrollment("tenant_mismatch")
+        try:
+            from local_operator.team_bridge.store import Store
+
+            # Read-only: a refusal below must not create the store as a side
+            # effect. This machine already owning THIS endpoint is enrolled,
+            # whatever the write carried (a rename, a resume).
+            owner = Store(self._config_dir).active_owner_readonly()
+        except Exception:  # noqa: BLE001 - unreadable reads as "cannot tell"
+            return _local_enrollment("store_failed")
+        if owner is not None and (owner.account_id, owner.tenant_id, owner.endpoint_id) == (
+            account_id,
+            tenant_id,
+            endpoint_id,
+        ):
+            return _local_enrollment("already_owned")
+        version = consent_version or _consent_on_record(endpoint)
+        if not version:
+            return _local_enrollment("no_consent_echo")
         try:
             from local_operator.team_bridge.connector.enrollment import (
                 commit_settings_enrollment,
             )
 
+            local = _local_settings_snapshot(self._config_dir)
             committed = commit_settings_enrollment(
                 config_dir=self._config_dir,
                 credential_id=credential_id,
                 account_id=account_id,
                 tenant_id=tenant_id,
                 endpoint_id=endpoint_id,
-                consent_version=consent_version,
+                consent_version=version,
                 canonical_base_url=self.base_url,
                 cos_session_id=(local.session or None) if local is not None else None,
             )
         except Exception:  # noqa: BLE001 - the server-side enable already succeeded
-            return
-        if committed and head is not None:
+            return _local_enrollment("store_failed")
+        if not committed:
+            # ``commit_settings_enrollment`` refuses while ANY owner (or an
+            # ambiguous store) is committed: the one-owner model.
+            return _local_enrollment("other_owner")
+        if head is not None:
             self._seed_feed_cursor(head)
+        return _local_enrollment("committed")
 
     async def _pre_enable_head(self, *, tenant_id: str, access: OAuthAccess | None) -> int | None:
         """The hub's feed head for this account, read BEFORE the enable write.
@@ -3537,6 +3773,10 @@ class StatusDiscipline:
             )
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+        # BEFORE default-on, on the answer as read: the boundary whose POST just
+        # failed to commit reads B here, so the commit-only retry starts at the
+        # NEXT boundary (plan R3), never inside the request that created it.
+        await self._retry_pending_commit(check, access=access)
         check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
         check = self._sync_local_designation(check)
         await self._sync_agent_name(check, access)
@@ -3657,7 +3897,12 @@ class StatusDiscipline:
         local = _local_settings_snapshot(config_dir)
         if local is None or (local.enabled_is_set and not local.enabled):
             return check
-        if local.default_enrollment.get(access.account_id) == DEFAULT_ENROLLMENT_DONE:
+        marker = local.default_enrollment.get(access.account_id)
+        if marker == DEFAULT_ENROLLMENT_DONE:
+            return check
+        if parse_pending_default_enrollment(marker) is not None:
+            # This machine already POSTed: never a second enrolment request.
+            # The commit-only recovery runs from state C (_retry_pending_commit).
             return check
         try:
             from local_operator.team_bridge.store import Store
@@ -3710,10 +3955,26 @@ class StatusDiscipline:
             # The hub's no-op (an endpoint already existed): nothing was
             # created here, so nothing is recorded and the answer stands.
             return check
-        try:
-            record_default_enrollment(config_dir, access.account_id)
-        except Exception:  # noqa: BLE001 - the enrolment already succeeded
-            pass
+        local_enrollment = result.get("local_enrollment") if isinstance(result, Mapping) else None
+        if isinstance(local_enrollment, Mapping) and local_enrollment.get("committed") is True:
+            # ``done`` ONLY once the local owner exists (D1/R3). A failed or
+            # vetoed commit left ``pending:<endpoint>:<head>`` (written by
+            # ``enroll_default_on``) for the commit-only retry instead; a ``done``
+            # here would lock the account out of that retry for good.
+            try:
+                record_default_enrollment(config_dir, access.account_id)
+            except Exception:  # noqa: BLE001 - the enrolment already succeeded
+                pass
+        else:
+            now = _local_settings_snapshot(config_dir)
+            if now is not None and now.enabled_is_set and not now.enabled:
+                # An explicit OFF vetoed the commit: that is the member's answer,
+                # not a transient failure, so close the retry (plan: "any explicit
+                # OFF or Turn off clears it to done").
+                try:
+                    record_default_enrollment(config_dir, access.account_id)
+                except Exception:  # noqa: BLE001 - the retry re-checks the OFF anyway
+                    pass
         try:
             from local_operator.team_bridge.store import Store
 
@@ -3734,6 +3995,91 @@ class StatusDiscipline:
         if not isinstance(payload, dict):
             return check
         return self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+
+    async def _retry_pending_commit(self, check: StatusCheck, *, access: OAuthAccess) -> None:
+        """Finish a default-on enrolment whose LOCAL commit failed (D1, R3/R2-1).
+
+        WHY. After :meth:`_default_enroll`'s POST the hub endpoint is active, so
+        the surface reads state C and default-on never runs again; a commit that
+        failed there left the device "on" for teammates and deaf here, with no
+        retry. ``enroll_default_on`` now leaves ``pending:<endpoint>:<head>``
+        instead of ``done``, and this retries ONLY the local commit
+        (:meth:`TeamBridgeClient.commit_pending_default_enrollment`: no POST).
+
+        NOT A WIDENING OF DEFAULT-ON INTO STATE C (R2-6). Every gate must hold:
+        a pending marker for THIS account (proof this machine's POST created the
+        endpoint), the selected endpoint's id equal to the marker's, the local
+        key not an explicit OFF, zero committed owners; the client then requires
+        the hub's record to still be ``default_on`` + v2 for that endpoint, and
+        the late veto re-reads the local key before the commit. An endpoint
+        consented anywhere else never carries this machine's marker.
+
+        Silent towards the status answer, like default-on itself; the outcome
+        is logged by code. ``done`` is written once committed, or once the hub
+        proves the record is no longer this default-on consent (no endless GET).
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None or _surface_state(check) != "C" or not access.account_id:
+            return
+        if check.account_id != access.account_id:
+            return
+        local = _local_settings_snapshot(config_dir)
+        if local is None or (local.enabled_is_set and not local.enabled):
+            return
+        pending = parse_pending_default_enrollment(local.default_enrollment.get(access.account_id))
+        if pending is None:
+            return
+        endpoint_id, head = pending
+        selected = select_tenant(check.payload)
+        tenant_id = selected_tenant_id(check.payload)
+        endpoint = selected.get("endpoint") if isinstance(selected, Mapping) else None
+        if tenant_id is None or not isinstance(endpoint, Mapping):
+            return
+        if endpoint.get("id") != endpoint_id:
+            return
+        try:
+            from local_operator.team_bridge.store import Store
+
+            if Store(config_dir).committed_owner_count() != 0:
+                return
+        except Exception:  # noqa: BLE001 - unreadable store: cannot commit
+            return
+        account_id = access.account_id
+        marker = local.default_enrollment.get(account_id)
+
+        def _still_pending() -> bool:
+            # Re-read right before the commit: a Turn off (``done``) or an
+            # explicit OFF may have landed during the awaited settings read.
+            now = _local_settings_snapshot(config_dir)
+            return (
+                now is not None
+                and not (now.enabled_is_set and not now.enabled)
+                and now.default_enrollment.get(account_id) == marker
+            )
+
+        try:
+            outcome = await self._client.commit_pending_default_enrollment(
+                tenant_id=tenant_id,
+                endpoint_id=endpoint_id,
+                head=head,
+                expected_account_id=account_id,
+                may_commit_local=_still_pending,
+            )
+        except (BridgeRefusal, BridgeSignInRequired, ValueError) as exc:
+            logger.warning("team_bridge: pending local enrolment deferred (%s)", type(exc).__name__)
+            return
+        code = outcome.get("code")
+        if outcome.get("committed") is True or code == "no_consent_echo":
+            try:
+                record_default_enrollment(config_dir, account_id)
+            except Exception:  # noqa: BLE001 - bookkeeping only
+                pass
+        if outcome.get("committed") is True:
+            try:
+                record_local_enabled_if_unset(config_dir)
+            except Exception:  # noqa: BLE001 - no local authority beats a loud failure
+                pass
 
     def _sync_designation(self, store: Any, owner: Any, session: str) -> None:
         """Apply the current ``team_bridge.session`` to the native record.

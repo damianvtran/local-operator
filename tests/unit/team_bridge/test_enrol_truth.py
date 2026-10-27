@@ -138,10 +138,13 @@ async def test_b_the_route_maps_the_tenant_refusal_to_a_422(tmp_path: Path, monk
     )
     monkeypatch.setattr(route, "_refuse_write_scope", lambda request: None)
     with pytest.raises(HTTPException) as info:
-        await route.put_settings(body=body, request=None, config_manager=_CM())  # type: ignore[arg-type]
+        await route.put_settings(
+            body=body, request=None, config_manager=_CM()  # type: ignore[arg-type]
+        )
     assert info.value.status_code == 422
-    assert info.value.detail["code"] == "invalid_request"
-    assert "tenant_id" in info.value.detail["message"]
+    detail: Any = info.value.detail
+    assert detail["code"] == "invalid_request"
+    assert "tenant_id" in detail["message"]
     assert requests == []
 
 
@@ -329,7 +332,9 @@ async def _route_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
     class _CM:
         config_dir = tmp_path
 
-    response = await route.status(boundary="app_start", config_manager=_CM())  # type: ignore[arg-type]
+    response = await route.status(
+        boundary="app_start", config_manager=_CM()  # type: ignore[arg-type]
+    )
     return response.result  # type: ignore[attr-defined]
 
 
@@ -357,36 +362,29 @@ async def test_status_another_endpoints_owner_is_not_this_enrolment(tmp_path, mo
 # -- default-on: a failed local commit is recovered, commit-only ----------------
 
 
-class _HeadAdvancingHub:
-    """Wrap the default-on ``Hub``: ``/messaging/events`` is refused before the
-    endpoint exists (brand-new endpoint, F2: head ``None`` -> cursor 0) and
-    answers a NON-ZERO head afterwards, i.e. messages arrived while the device
-    could not receive them (R2-1). ``GET /messaging/settings`` answers the full
-    endpoint (with its consent record), as the real hub does."""
+def _head_advancing_hub(**kwargs: Any):
+    """The default-on ``Hub`` with two extra routes: ``/messaging/events`` is
+    refused before the endpoint exists (brand-new endpoint, F2: head ``None``
+    -> cursor 0) and answers a NON-ZERO head afterwards, i.e. messages arrived
+    while the device could not receive them (R2-1); ``GET /messaging/settings``
+    answers the full endpoint (with its consent record), as the real hub does."""
 
-    def __init__(self, hub) -> None:
-        self.hub = hub
-        self.requests = hub.requests
+    from tests.unit.team_bridge.test_default_on import Hub
 
-    @property
-    def endpoint(self):
-        return self.hub.endpoint
+    class _HeadAdvancingHub(Hub):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path.endswith("/messaging/events"):
+                self.requests.append(request)
+                if self.endpoint is None:
+                    return httpx.Response(403, json={"error": "no", "code": "bridge_not_available"})
+                return _ok({"events": [], "cursor": 57})
+            if request.method == "GET" and path.endswith("/messaging/settings"):
+                self.requests.append(request)
+                return _ok({"endpoint": self.endpoint, "settings": {"tenant_id": "tnt_1"}})
+            return super().__call__(request)
 
-    @property
-    def writes(self):
-        return self.hub.writes
-
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path.endswith("/messaging/events"):
-            self.hub.requests.append(request)
-            if self.hub.endpoint is None:
-                return httpx.Response(403, json={"error": "no", "code": "bridge_not_available"})
-            return _ok({"events": [], "cursor": 57})
-        if request.method == "GET" and path.endswith("/messaging/settings"):
-            self.hub.requests.append(request)
-            return _ok({"endpoint": self.hub.endpoint, "settings": {"tenant_id": "tnt_1"}})
-        return self.hub(request)
+    return _HeadAdvancingHub(**kwargs)
 
 
 def _flaky_commit(monkeypatch: pytest.MonkeyPatch, *, failures: int = 1) -> dict[str, int]:
@@ -409,11 +407,11 @@ async def test_default_on_recovers_a_failed_commit_without_a_second_post(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     from local_operator.team_bridge.client import Boundary
-    from tests.unit.team_bridge.test_default_on import Hub, _discipline, _enrolment_writes
+    from tests.unit.team_bridge.test_default_on import _discipline, _enrolment_writes
     from tests.unit.team_bridge.test_discipline import _local
 
     _flaky_commit(monkeypatch)
-    hub = _HeadAdvancingHub(Hub())
+    hub = _head_advancing_hub()
     discipline = _discipline(hub, tmp_path)
     await discipline.check(Boundary.APP_START)
     assert hub.endpoint is not None and hub.endpoint["state"] == "active"
@@ -444,13 +442,14 @@ async def test_default_on_retry_never_binds_an_endpoint_it_did_not_create(
     is never bound by the retry."""
 
     from local_operator.team_bridge.client import Boundary
-    from tests.unit.team_bridge.test_default_on import Hub, _discipline
+    from tests.unit.team_bridge.test_default_on import _discipline
 
     _flaky_commit(monkeypatch)
-    hub = _HeadAdvancingHub(Hub())
+    hub = _head_advancing_hub()
     discipline = _discipline(hub, tmp_path)
     await discipline.check(Boundary.APP_START)
-    hub.hub.endpoint = {**hub.hub.endpoint, "id": "bep_2"}
+    assert hub.endpoint is not None
+    hub.endpoint = {**hub.endpoint, "id": "bep_2"}
     discipline.invalidate()
     await discipline.check(Boundary.SURFACE_OPEN)
     assert Store(tmp_path).committed_owner_count() == 0
@@ -460,11 +459,11 @@ async def test_default_on_retry_respects_an_explicit_local_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     from local_operator.team_bridge.client import Boundary
-    from tests.unit.team_bridge.test_default_on import Hub, _discipline
+    from tests.unit.team_bridge.test_default_on import _discipline
     from tests.unit.team_bridge.test_discipline import _set_local
 
     _flaky_commit(monkeypatch)
-    hub = _HeadAdvancingHub(Hub())
+    hub = _head_advancing_hub()
     discipline = _discipline(hub, tmp_path)
     await discipline.check(Boundary.APP_START)
     _set_local(tmp_path, enabled=False)
@@ -483,13 +482,13 @@ async def test_default_on_retry_never_trusts_a_non_default_on_record(
     the default-on retry is not the consent for it, so nothing commits."""
 
     from local_operator.team_bridge.client import Boundary
-    from tests.unit.team_bridge.test_default_on import Hub, _default_on_endpoint, _discipline
+    from tests.unit.team_bridge.test_default_on import _default_on_endpoint, _discipline
 
     _flaky_commit(monkeypatch)
-    hub = _HeadAdvancingHub(Hub())
+    hub = _head_advancing_hub()
     discipline = _discipline(hub, tmp_path)
     await discipline.check(Boundary.APP_START)
-    hub.hub.endpoint = _default_on_endpoint("active", "dialog")
+    hub.endpoint = _default_on_endpoint("active", "dialog")
     discipline.invalidate()
     await discipline.check(Boundary.SURFACE_OPEN)
     assert Store(tmp_path).committed_owner_count() == 0
@@ -501,7 +500,11 @@ async def test_guard_default_on_is_never_widened_into_state_c(tmp_path: Path):
     nothing and writes nothing here."""
 
     from local_operator.team_bridge.client import Boundary
-    from tests.unit.team_bridge.test_default_on import Hub, _default_on_endpoint, _discipline
+    from tests.unit.team_bridge.test_default_on import (
+        Hub,
+        _default_on_endpoint,
+        _discipline,
+    )
 
     hub = Hub(endpoint=_default_on_endpoint("active", "default_on"))
     await _discipline(hub, tmp_path).check(Boundary.APP_START)

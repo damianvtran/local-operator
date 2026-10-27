@@ -657,6 +657,10 @@ async def status(
     # re-deriving it. The onboarding row also needs the LOCAL dismissal flag:
     # "once" in state B is decided by ``team_bridge.onboarding``.
     projection = surface_projection(check, onboarding_seen=local.onboarding == "seen")
+    # D1: the hub's ACTIVE endpoint (state C) proves only the hub side. Without
+    # a committed local owner for that exact endpoint this device never polls,
+    # so "can receive" must not be claimed for it.
+    enrolled = _locally_enrolled(config_manager, check)
     result = {
         # The capability THIS route family advertises (a renderer reads the
         # same number off ``GET /v1/capabilities``; it rides here so one
@@ -686,9 +690,14 @@ async def status(
         "state_note": check.state_note,
         "visibility": projection["visibility"],
         "read_only": projection["read_only"],
-        "can_receive": projection["can_receive"],
+        "can_receive": bool(projection["can_receive"]) and enrolled,
         "can_decide": projection["can_decide"],
         "local": {
+            #: Whether THIS machine holds the committed owner for the selected
+            #: account, tenant and endpoint (D1). False with an active hub
+            #: endpoint is "on elsewhere, not on this device": the surface's cue
+            #: to offer enabling here instead of showing "on".
+            "enrolled": enrolled,
             # The COMPOSED switch (see the module docstring): explicit wins, an
             # absent key follows the served consent. v1-only hubs read exactly
             # ``local.enabled`` as before.
@@ -737,6 +746,35 @@ async def status(
         "delivery_hold": _delivery_hold(config_manager),
     }
     return reply(result)
+
+
+def _locally_enrolled(config_manager: ConfigManager, check: Any) -> bool:
+    """Whether the committed local owner IS the selected account/tenant/endpoint.
+
+    Read-only (an absent store stays absent) and local, no network. Any store
+    failure, zero or several owners, or an owner for another endpoint reads as
+    False: the claim is "this device receives", and doubt must not assert it.
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.client import select_tenant
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    selected = select_tenant(check.payload)
+    endpoint = selected.get("endpoint") if selected is not None else None
+    endpoint_id = endpoint.get("id") if isinstance(endpoint, dict) else None
+    if not isinstance(endpoint_id, str) or not endpoint_id or not check.account_id:
+        return False
+    try:
+        owner = Store(config_manager.config_dir).active_owner_readonly()
+    except (StoreRefused, sqlite3.Error):
+        return False
+    return owner is not None and (owner.account_id, owner.tenant_id, owner.endpoint_id) == (
+        check.account_id,
+        selected.get("tenant_id") if selected is not None else None,
+        endpoint_id,
+    )
 
 
 def _delivery_hold(config_manager: ConfigManager) -> dict[str, Any] | None:
