@@ -199,12 +199,42 @@ def test_a_write_during_replay_is_not_published_as_current(tmp_path, monkeypatch
 
 
 def test_cached_messages_are_not_shared_with_history_consumers(tmp_path):
-    """History annotation on one visit must not mutate the cached preview."""
+    """A hit must be an independent copy, nested content included.
+
+    A shallow copy passes a top-level assignment test while still sharing the
+    ``Message`` objects and their content lists, so the mutation here is NESTED
+    and the later read must not observe it.
+    """
     journal(tmp_path, [message("one", "original")])
     first = read_saved_preview(tmp_path)
-    first.messages[0].provider_payload = {"consumer": "annotation"}
+    assert first.messages[0].text == "original"
+    first.messages[0].content[0].text = "consumer annotation"
 
-    assert read_saved_preview(tmp_path).messages[0].text == "original"
+    later = read_saved_preview(tmp_path)
+    assert later.messages[0].text == "original"
+    assert later.messages[0] is not first.messages[0]
+    assert later.messages is not first.messages
+
+
+def test_a_preview_too_large_for_the_budget_is_not_admitted(tmp_path, monkeypatch):
+    """The LRU is bounded in bytes, so an oversized preview must stay uncached."""
+    journal(tmp_path, [message("one", "held")])
+    from local_operator.session import saved_preview
+
+    original = saved_preview.replay_entries
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(saved_preview, "replay_entries", counted)
+    monkeypatch.setattr(saved_preview, "_PREVIEW_CACHE_ENTRY_BYTES", 0)
+
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["held"]
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["held"]
+    assert calls == 2, "an over-budget preview was admitted to the cache"
 
 
 def test_preview_walks_by_rows_not_a_byte_window(tmp_path, monkeypatch):

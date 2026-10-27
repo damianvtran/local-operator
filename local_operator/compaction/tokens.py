@@ -104,9 +104,11 @@ this module is held across a fetch.
 from __future__ import annotations
 
 import base64
+import hashlib
 import itertools
 import json
 import logging
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -430,7 +432,7 @@ def reset_tokenizer_state() -> None:
     land *between* them, which is the window that used to re-arm the latch.
     """
     global _ENCODING, _ENCODING_FAILED, _ENCODING_FAILURES, _ENCODING_RETRY_AT
-    global _ENCODING_EPOCH
+    global _ENCODING_EPOCH, _TEXT_LENGTH_CACHE_USED
     with _STATE_LOCK:
         _ENCODING = None
         _ENCODING_FAILED = False
@@ -439,6 +441,14 @@ def reset_tokenizer_state() -> None:
         _ENCODING_EPOCH += 1
         _MODEL_ENCODINGS.clear()
         _STATE_CHANGED.notify_all()
+    # OUTSIDE ``_STATE_LOCK`` and under the lock the memo's bookkeeping actually
+    # uses: old-epoch keys are unreachable, but they would keep holding their
+    # accounted bytes until the LRU turned over. This order (state, then cache)
+    # is the only nesting, and ``_encode_len`` never holds ``_CACHE_LOCK`` across
+    # ``_get_encoding``, so the two cannot deadlock.
+    with _CACHE_LOCK:
+        _TEXT_LENGTH_CACHE.clear()
+        _TEXT_LENGTH_CACHE_USED = 0
 
 
 def warm_tokenizer() -> None:
@@ -531,16 +541,37 @@ def _warm_tokenizer_in_background() -> threading.Thread | None:
 #: measured rather than sent as a control token.
 _DISALLOWED_SPECIAL: tuple[str, ...] = ()
 
-# Preserved user turns are immutable journal content replayed on every open.
-# Memoize their exact lengths by tokenizer epoch: the epoch keeps a reset or a
-# recovered encoding from inheriting counts produced by a different ruler. The
-# text itself is the key (not a turn id), so identical copies also share a count.
-_TEXT_LENGTH_CACHE: OrderedDict[tuple[int, str], int] = OrderedDict()
-_TEXT_LENGTH_CACHE_MAX = 4096
+#: Preserved user turns are immutable journal content replayed on every open, so
+#: their exact token lengths are worth remembering. THE MEMO IS OPT-IN, and only
+#: ``cap_preserved_user_turns`` asks for it. That is not a micro-optimization: the
+#: same encoder is the text ruler under :func:`estimate_tokens`, which deliberately
+#: never caches an unsettled streaming assistant (RC-20). Memoizing the ruler there
+#: pinned every growing prefix of a delta stream (1000 deltas of 50 chars retained
+#: 25.3 MB of prefixes), held a second copy of any pasted or summarized text alive,
+#: and then evicted the preserved turns it existed for — so a long session
+#: re-encoded them anyway.
+#:
+#: THE KEY IS A DIGEST, NEVER THE TEXT: sha256 of the content plus its length, so an
+#: entry costs a fixed handful of bytes and never holds a second copy of a 32 MiB
+#: paste. The epoch leads the key so a reset, or a recovered encoding after a
+#: failure, cannot inherit counts produced by a different ruler. The fallback
+#: (chars/4) ruler is never memoized at all.
+_TEXT_LENGTH_CACHE: OrderedDict[tuple[int, bytes, int], int] = OrderedDict()
+
+#: The bound is in BYTES because digest keys make an entry count a poor proxy: an
+#: entry costs its tuple plus its int, whatever text it described. Cleared by
+#: :func:`reset_tokenizer_state` in step with the epoch it is keyed by.
+_TEXT_LENGTH_CACHE_BYTES = 256 * 1024
+_TEXT_LENGTH_CACHE_USED = 0
 
 
-def _encode_len(text: str) -> int:
-    """Token count of ``text`` via cl100k_base, or the chars/4 fallback."""
+def _encode_len(text: str, *, memo: bool = False) -> int:
+    """Token count of ``text`` via cl100k_base, or the chars/4 fallback.
+
+    ``memo`` opts into :data:`_TEXT_LENGTH_CACHE`. Only the preserved-turn cap
+    asks for it: everything provisional (streaming deltas, a one-shot summary)
+    must not, for the reasons in that cache's comment.
+    """
     if not text:
         return 0
     encoding = _get_encoding()
@@ -548,20 +579,39 @@ def _encode_len(text: str) -> int:
         # A transient failure must not be cached: the next call may recover the
         # real encoding, and chars/4 is deliberately a different ruler.
         return len(text) // _CHARS_PER_TOKEN_FALLBACK
-    key = (_ENCODING_EPOCH, text)
-    with _CACHE_LOCK:
-        cached = _TEXT_LENGTH_CACHE.get(key)
-        if cached is not None:
-            _TEXT_LENGTH_CACHE.move_to_end(key)
-            return cached
+    key = (
+        (_ENCODING_EPOCH, hashlib.sha256(text.encode("utf-8")).digest(), len(text))
+        if memo
+        else None
+    )
+    if key is not None:
+        with _CACHE_LOCK:
+            known = _TEXT_LENGTH_CACHE.get(key)
+            if known is not None:
+                _TEXT_LENGTH_CACHE.move_to_end(key)
+                return known
     encode = encoding.encode  # type: ignore[attr-defined]
     count = len(encode(text, disallowed_special=_DISALLOWED_SPECIAL))
-    with _CACHE_LOCK:
-        _TEXT_LENGTH_CACHE[key] = count
-        _TEXT_LENGTH_CACHE.move_to_end(key)
-        while len(_TEXT_LENGTH_CACHE) > _TEXT_LENGTH_CACHE_MAX:
-            _TEXT_LENGTH_CACHE.popitem(last=False)
+    if key is not None:
+        _remember_text_length(key, count)
     return count
+
+
+def _remember_text_length(key: tuple[int, bytes, int], count: int) -> None:
+    """Admit one exact length, evicting oldest first until it fits the budget."""
+    global _TEXT_LENGTH_CACHE_USED
+    cost = sys.getsizeof(key) + sys.getsizeof(count)
+    if cost > _TEXT_LENGTH_CACHE_BYTES:
+        return
+    with _CACHE_LOCK:
+        previous = _TEXT_LENGTH_CACHE.pop(key, None)
+        if previous is not None:
+            _TEXT_LENGTH_CACHE_USED -= sys.getsizeof(key) + sys.getsizeof(previous)
+        while _TEXT_LENGTH_CACHE and _TEXT_LENGTH_CACHE_USED + cost > _TEXT_LENGTH_CACHE_BYTES:
+            old_key, old_value = _TEXT_LENGTH_CACHE.popitem(last=False)
+            _TEXT_LENGTH_CACHE_USED -= sys.getsizeof(old_key) + sys.getsizeof(old_value)
+        _TEXT_LENGTH_CACHE[key] = count
+        _TEXT_LENGTH_CACHE_USED += cost
 
 
 #: Per-model encodings, resolved lazily and cached. Separate from the compaction

@@ -29,6 +29,8 @@ constraint still survives a pass verbatim.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
@@ -509,7 +511,9 @@ def test_repeated_preserved_text_reuses_its_exact_token_length(monkeypatch):
     """Reopening a compaction must not encode the same immutable turn again."""
     from local_operator.compaction import tokens
 
-    encoding = tokens._get_encoding()
+    # ``_get_encoding`` is deliberately untyped (``object | None``) because
+    # tiktoken is optional; the concrete encoding is only known at run time.
+    encoding: Any = tokens._get_encoding()
     if encoding is None:
         pytest.skip("tiktoken is an optional dependency")
     calls = 0
@@ -1125,3 +1129,51 @@ def test_the_incremental_fold_agrees_with_the_full_rebuild_on_a_legacy_marker():
 
     assert block(state.history) == block(full)
     assert not any(STATE_TEXT in text for text in block(state.history))
+
+
+def test_preserved_turn_counts_survive_a_full_fixture_estimate(monkeypatch):
+    """A whole-history estimate must not evict the preserved-turn memo.
+
+    The estimate pass is the case that used to fill the memo with provisional
+    text: with a text-keyed, entry-capped cache, 4,200 estimator inserts pushed
+    out the preserved turns inserted first, so the next compaction re-encoded
+    them. The memo is now opt-in and byte-bounded, so the pass must leave it
+    untouched and the second cap must cost zero encodes.
+    """
+    from local_operator.compaction import tokens as tokens_mod
+
+    encoding: Any = tokens_mod._get_encoding()
+    if encoding is None:
+        pytest.skip("tiktoken is an optional dependency")
+    calls = 0
+    original = encoding.encode
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(encoding, "encode", counted)
+    turns = [
+        {"id": f"preserved-{index}", "text": f"operator constraint {index} " * 40}
+        for index in range(12)
+    ]
+    first = cap_preserved_user_turns(turns, cap=1_000_000)
+    assert calls == len(turns), "every preserved turn is encoded on a cold memo"
+
+    calls = 0
+    messages = [
+        Message(
+            role="user",
+            content=[TextContent(type="text", text=f"fixture message {index} " * 60)],
+            id=f"fixture-{index}",
+        )
+        for index in range(4200)
+    ]
+    tokens_mod.estimate_messages_tokens(messages)
+
+    calls = 0
+    second = cap_preserved_user_turns(turns, cap=1_000_000)
+
+    assert second == first
+    assert calls == 0, "the estimate pass evicted the preserved-turn memo"
