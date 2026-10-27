@@ -3018,26 +3018,27 @@ class Editor(TextArea):
         self.placeholder = SHELL_PLACEHOLDER if active else self.resting_placeholder
         self.post_message(ShellModeChanged(active))
 
-    def set_allows_shell(self, allowed: bool) -> None:
-        """Whether bang-mode may be entered from this composer.
+    def set_aside_owns(self, owns: bool) -> None:
+        """Borrow the composer for the ``/btw`` aside, or give it back.
 
-        The aside turns this off; leaving bang-mode first so a mode that
-        started in the main chat cannot survive the card taking the field.
+        ONE call for both affordances the aside withdraws. Bang-mode and
+        `$skill` expansion are the same fact — "this text is a question to the
+        aside, not a chat turn" — and as two separate setters the sidebar's
+        park/restore path kept one and lost the other: a restored source with
+        no parked aside was left with expansion off in the main chat, and a
+        restored aside inked tokens whose submit never expands them (review
+        round 2, M2). The pair cannot drift when there is only one.
+
+        Returning does NOT restore bang-mode: the caller restores that from the
+        source's own draft, because "allowed" and "active" are different
+        questions.
         """
-        if not allowed:
+        if owns:
             self.set_shell_mode(False)
-        self._allows_shell = allowed
-
-    def set_allows_skill_expansion(self, allowed: bool) -> None:
-        """Whether a `$name` in this composer can attach a skill.
-
-        The aside turns this off for as long as it owns the field, because its
-        submit never reaches the expansion. The `$` ink reads it, so a token in
-        an aside question stays plain text on screen as well as on the wire.
-        """
-        if self._allows_skill_expansion == allowed:
+        self._allows_shell = not owns
+        if self._allows_skill_expansion == (not owns):
             return
-        self._allows_skill_expansion = allowed
+        self._allows_skill_expansion = not owns
         self._skill_runs_cache = None
         self.refresh()
 
@@ -4994,6 +4995,12 @@ class Editor(TextArea):
             self._picker.mode,
             self._picker.is_open(),
             self._picker.is_pending(),
+            # Shell is an input the computation reads through the surface rule,
+            # and it changes without the text changing (Esc leaves bang mode
+            # with the line kept). Left out of the key, the stale empty runs
+            # survived until the next keystroke although the same text would
+            # now send as a prompt that attaches the skill (review round 2, m2).
+            self._submits_as_shell(),
         )
         cached = self._skill_runs_cache
         if cached is not None and cached[0] == key:

@@ -456,6 +456,44 @@ async def test_shell_MODE_is_not_inked_either() -> None:
 
 @pytest.mark.usefixtures("skill_root")
 @pytest.mark.asyncio
+async def test_leaving_bang_mode_recomputes_the_ink_for_the_kept_line() -> None:
+    """Esc out of bang mode keeps the text, and the same text now attaches.
+
+    The memo key read every input except the shell state, so the empty runs
+    computed under `!` survived the mode change until the next keystroke: the
+    ink still said "prose" for a line Enter would now send as a prompt that
+    expands (review round 2, m2). Both directions are asserted, so a key that
+    merely forgot to clear cannot pass.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "echo $research")
+        _push_vocabulary(app, editor)
+        await pilot.pause()
+        assert _ink_on(_segment_inks(editor), "$research") == signal, "premise: prose inks"
+        editor.set_shell_mode(True)
+        await pilot.pause()
+        assert _ink_on(_segment_inks(editor), "$research") != signal, "shell mode inks nothing"
+        editor.set_shell_mode(False)
+        await pilot.pause()
+        assert _ink_on(_segment_inks(editor), "$research") == signal, "the kept line inks again"
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_a_draft_opening_with_a_blank_line_inks_its_command_tail() -> None:
+    """The claim is read from its own line, not line 0 (review round 2, n1)."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "\n/team backend fix $research")
+        _push_vocabulary(app, editor)
+        assert _ink_on(_segment_inks(editor, 1), "$research") == signal
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
 async def test_an_open_aside_does_not_ink_a_skill() -> None:
     """The aside borrows the composer but never expands a skill (M1)."""
     app = OperatorApp(lambda: _factory(FakeSession()))

@@ -382,7 +382,12 @@ def _skill_argument_floor(
 #: text": ``/btw`` opens the aside and returns, ``/loop`` and ``/fork`` start
 #: their own flows, and every other command is dispatched — none of them
 #: expands a skill, so the ink must not claim one will.
-SKILL_SUBMIT_COMMANDS = frozenset({"team", "teams", "agent", "agents", "goal"})
+#:
+#: ``aida`` is here because its request is a real user turn through the same
+#: submit (``_cmd_aida`` forwards to ``_submit_command_prompt``). Its reserved
+#: words (``pause``/``resume``/``status``/``rename``) are parsed from the whole
+#: argument, so a request that happens to contain a ``$name`` still expands.
+SKILL_SUBMIT_COMMANDS = frozenset({"team", "teams", "agent", "agents", "goal", "aida"})
 
 
 class SkillScanRegion(NamedTuple):
@@ -443,14 +448,20 @@ def skill_scan_region(
     if command not in SKILL_SUBMIT_COMMANDS:
         return None
     claim = len(text) - len(stripped)
-    line = text.split("\n", 1)[0]
-    floor = _skill_argument_floor(line, claim, prompt_commands, name_commands)
+    # The line the claim sits on, not line 0: a draft may open with blank lines
+    # (`"\n/goal fix $research"`), and submit dispatches that command all the
+    # same. Reading line 0 made the ink answer "no region" for a message that
+    # expands (review round 2, n1).
+    line_start = text.rfind("\n", 0, claim) + 1
+    line_end = text.find("\n", claim)
+    line = text[line_start : line_end if line_end != -1 else len(text)]
+    floor = _skill_argument_floor(line, claim - line_start, prompt_commands, name_commands)
     if floor is None:
         return None
     # END is the whole tail, not the line: `/team`'s request is everything after
     # the name slot, newlines included, and `_submit_command_prompt` receives
     # exactly that.
-    return SkillScanRegion(floor, len(text), command)
+    return SkillScanRegion(line_start + floor, len(text), command)
 
 
 def slash_context(

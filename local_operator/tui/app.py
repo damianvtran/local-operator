@@ -9824,7 +9824,7 @@ class OperatorApp(App[None]):
         if isinstance(snapshot, AsideSnapshot) and panel is not None:
             source.aside_open = True
             source.aside_generation = snapshot.generation
-            editor.set_allows_shell(False)
+            editor.set_aside_owns(True)
             editor.placeholder = ASIDE_PLACEHOLDER
             editor.set_commands([])
             editor.set_records_history(False)
@@ -9834,7 +9834,7 @@ class OperatorApp(App[None]):
             self._sync_aside_fork_hint()
         else:
             source.aside_open = False
-            editor.set_allows_shell(True)
+            editor.set_aside_owns(False)
             editor.set_shell_mode(source.draft.shell_mode)
             editor.placeholder = self._composer_placeholder_for(editor)
             editor.set_commands(self._offered_commands())
@@ -50986,10 +50986,10 @@ class OperatorApp(App[None]):
         # the character. Returned in `_close_aside`. BEFORE the aside
         # placeholder: leaving bang-mode restores the resting invitation,
         # which would overwrite `Ask the aside…` if this ran after.
-        editor.set_allows_shell(False)
-        # The aside's submit returns before the skill expansion, so a `$name`
-        # in a question is literal text — say so in the ink too.
-        editor.set_allows_skill_expansion(False)
+        # Bang-mode AND the skill expansion go off together: the aside's
+        # submit returns before both, so a `$name` in a question is literal
+        # text — say so in the ink too.
+        editor.set_aside_owns(True)
         editor.placeholder = ASIDE_PLACEHOLDER
         # The command list is borrowed too, and returned in `_close_aside`.
         # `on_editor_submitted` routes a slash-shaped line to the aside as a
@@ -51114,8 +51114,7 @@ class OperatorApp(App[None]):
         self._aside_draft = None
         self._aside_draft_images = {}
         editor = self._editor()
-        editor.set_allows_shell(True)
-        editor.set_allows_skill_expansion(True)
+        editor.set_aside_owns(False)
         # The stashed draft comes back into the mode it was typed in: a
         # half-typed `!` command returned to a composer that silently left
         # bang-mode would send the command to the model on the next Enter.

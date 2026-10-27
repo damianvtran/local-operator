@@ -207,6 +207,7 @@ class TestTheScanRegionIsTheSurfaceRule:
             "/team backend fix $research",
             "/agent reviewer fix $research",
             "/goal fix $research",
+            "/aida use $research",
         ],
     )
     def test_a_skill_bearing_argument_tail_is_the_region(self, text: str):
@@ -228,11 +229,31 @@ class TestTheScanRegionIsTheSurfaceRule:
         text = "fix $RESEARCH"
         assert skill_scan_region(text, argument=True) == SkillScanRegion(0, len(text), None)
 
+    def test_a_draft_that_opens_with_a_blank_line_still_finds_its_command(self):
+        """The claim is read from the line it sits on, not from line 0.
+
+        A leading newline used to make the region `None` while submit still
+        dispatched `/goal` and expanded the tail — an under-claim, but one the
+        ink rule exists to avoid (review round 2, n1).
+        """
+        text = "\n/goal fix $research"
+        region = skill_scan_region(text, COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS)
+        assert region is not None
+        assert region.start == text.index("fix")
+        assert region.end == len(text)
+        assert region.command == "goal"
+
     def test_the_skill_bearing_set_is_a_subset_of_prompt_commands(self):
-        """The ink may only claim command tails whose handler expands a skill."""
+        """The ink may only claim command tails whose handler expands a skill.
+
+        `/aida` reaches `_submit_command_prompt` through `_cmd_aida`, so it is
+        IN the set; the three prompt-consuming commands that start their own
+        flow are out (review round 2, m1).
+        """
         prompt_names = {name for c in SLASH_COMMANDS if c.consumes_prompt for name in c.names}
         assert SKILL_SUBMIT_COMMANDS <= prompt_names
         assert {"btw", "loop", "fork"}.isdisjoint(SKILL_SUBMIT_COMMANDS)
+        assert "aida" in SKILL_SUBMIT_COMMANDS
 
 
 class TestTheInlineGateAppliesUnchanged:
