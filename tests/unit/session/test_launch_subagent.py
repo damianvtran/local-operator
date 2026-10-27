@@ -1897,6 +1897,10 @@ async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatc
     names = {tool.name for tool in child._tools}
     # hub survives the allowlist: it is the child's ONLY way to answer a
     # parent question, and it cannot edit, write or execute anything.
+    # ``bash`` is there only when write-confined (kernel sandbox, see
+    # ``test_a_scout_child_gets_a_write_confined_shell``), and ``jobs``/``wait``
+    # ride along because that bash can background (the existing invariant:
+    # ``jobs`` survives IFF bash can background); none of them can delegate.
     assert names <= {
         "read",
         "glob",
@@ -1906,10 +1910,15 @@ async def test_scout_child_is_read_only_and_cannot_delegate(tmp_path, monkeypatc
         "web_search",
         "web_fetch",
         "hub",
+        "bash",
+        "jobs",
+        "wait",
     }
     assert "hub" in names
     assert {"web_search", "web_fetch"} <= names
-    assert {"bash", "edit", "write", "task", "wait", "jobs", "wake"}.isdisjoint(names)
+    assert {"edit", "write", "task", "wake", "eval", "browser"}.isdisjoint(names)
+    if "bash" in names:
+        assert child._shell_write_root is not None
     assert (
         "scout mode" in getattr(child._context.messages[0], "text", "")
         if child._context.messages
@@ -2019,7 +2028,9 @@ async def test_a_stale_role_allowlist_still_gets_the_network_floor(tmp_path, mon
     assert {"web_search", "web_fetch"} <= names
     # A FLOOR, not a widening: every write/execution denial the stale row drew
     # is still in force, which is what keeps a reviewer unable to edit its diff.
-    assert {"edit", "write", "bash", "eval", "browser", "task"}.isdisjoint(names)
+    # (A scout's ``bash`` is the separate, write-confined floor -- pinned by
+    # the shell-floor tests below -- so it is not part of this assertion.)
+    assert {"edit", "write", "eval", "browser", "task"}.isdisjoint(names)
     await child.dispose()
     await parent.dispose()
 
@@ -3046,3 +3057,509 @@ async def test_an_undeclared_parent_leaves_its_child_untouched(tmp_path, monkeyp
     assert {"read", "bash", "write", "edit", "eval"} <= names
     await child.dispose()
     await parent.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The scout's write-confined shell (harness.subagent._with_readonly_shell_floor)
+# ---------------------------------------------------------------------------
+
+
+def _sandbox(monkeypatch, *, available: bool) -> None:
+    """Pin the host's answer, so these tests mean the same thing on Linux CI
+    and on a Mac. The real-sandbox behaviour lives in
+    ``tests/unit/tools/test_shell_write_confinement.py``."""
+    from local_operator.tools import confinement as confinement_module
+
+    reason = None if available else "sandbox-exec missing (test)"
+    monkeypatch.setattr(confinement_module, "shell_sandbox_unavailable_reason", lambda: reason)
+
+
+def _bash_of(session):
+    return next((tool for tool in session._tools if tool.name == "bash"), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_profile", [True, False])
+async def test_a_scout_child_gets_a_write_confined_shell(tmp_path, monkeypatch, with_profile):
+    """Both launch paths: a resolved scout profile, and the no-profile
+    fallback (a stripped install). The root is the CHILD's own scratchpad, on
+    the construction context (schema, tier) AND the per-turn context (the
+    executor), so the read-tier schema and the wrapping executor agree."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    _sandbox(monkeypatch, available=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    profile = (
+        AgentProfile(
+            name="scout", tools=("read", "glob", "grep", "bash", "web_search", "web_fetch")
+        )
+        if with_profile
+        else None
+    )
+    child = await subagent_mod._build_child_session(
+        label="research",
+        prompt="p",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-scout-shell",
+        agent="scout",
+        profile=profile,
+    )
+    bash = _bash_of(child)
+    assert bash is not None
+    assert bash.approval_tier == "read"
+    assert "SANDBOXED" in bash.description
+    expected = str(child.transcript.directory / "scratchpad")
+    assert child._shell_write_root == expected
+    assert child._build_tool_context().shell_write_root == expected
+    assert {"edit", "write", "eval", "browser", "task"}.isdisjoint(t.name for t in child._tools)
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_installed_scout_row_without_bash_gets_the_floor(tmp_path, monkeypatch):
+    """The installed row is frozen in a registry tag (seed sync holds tool
+    changes back), so the 1.2.0 list -- no bash -- is what most machines
+    resolve. Spelled as the literal old tag so it cannot track the seed."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    _sandbox(monkeypatch, available=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    old = AgentProfile(
+        name="scout",
+        tools=(
+            "read",
+            "glob",
+            "grep",
+            "list_variables",
+            "read_variable",
+            "web_search",
+            "web_fetch",
+        ),
+    )
+    child = await subagent_mod._build_child_session(
+        label="research",
+        prompt="p",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-old-row",
+        agent="scout",
+        profile=old,
+    )
+    bash = _bash_of(child)
+    assert bash is not None and bash.approval_tier == "read"
+    assert child._build_tool_context().shell_write_root
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_lists_bash", [True, False])
+async def test_no_sandbox_means_a_scout_has_no_shell(tmp_path, monkeypatch, row_lists_bash):
+    """FAIL CLOSED: on a host that cannot sandbox (Linux today, or a Mac where
+    sandbox-exec cannot apply a profile) a scout has NO bash -- even when its
+    row names one -- never an unconfined one."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    _sandbox(monkeypatch, available=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    tools = ("read", "grep", "bash") if row_lists_bash else ("read", "grep")
+    child = await subagent_mod._build_child_session(
+        label="research",
+        prompt="p",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-no-sbx",
+        agent="scout",
+        profile=AgentProfile(name="scout", tools=tools),
+    )
+    assert _bash_of(child) is None
+    assert child._build_tool_context().shell_write_root is None
+    # A no-profile scout fails closed the same way.
+    fallback = await build_child(parent, agent="scout", job_id="job-no-sbx-2")
+    assert _bash_of(fallback) is None
+    await fallback.dispose()
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_other_roles_keep_their_ordinary_shell(tmp_path, monkeypatch):
+    """Regression neighbours: reviewer/architect/qa-tester need the network
+    and write test caches, so their bash stays an ordinary ``exec`` shell with
+    no write root -- this change must not reach them."""
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    _sandbox(monkeypatch, available=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    for role in ("reviewer", "architect", "qa-tester"):
+        child = await subagent_mod._build_child_session(
+            label=role,
+            prompt="p",
+            parent_session=parent,
+            model_spec=None,
+            job_id=f"job-{role}",
+            agent=role,
+            profile=AgentProfile(name=role, tools=("read", "grep", "bash")),
+        )
+        bash = _bash_of(child)
+        assert bash is not None and bash.approval_tier == "exec", role
+        assert "SANDBOXED" not in bash.description, role
+        assert child._shell_write_root is None, role
+        assert child._build_tool_context().shell_write_root is None, role
+        await child.dispose()
+    plain = await build_child(parent, agent="task", job_id="job-plain")
+    plain_bash = _bash_of(plain)
+    assert plain_bash is not None and plain_bash.approval_tier == "exec"
+    assert plain._shell_write_root is None
+    await plain.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_write_confinement_is_sticky_for_descendants(tmp_path, monkeypatch):
+    """A descendant of a write-confined session is write-confined too, into
+    ITS OWN scratchpad -- the same sticky-downward rule ``confinement_root``
+    follows. Scouts drop ``task`` today, so this is belt and braces against a
+    later change that lets one delegate."""
+    from local_operator.harness import subagent as subagent_mod
+
+    _sandbox(monkeypatch, available=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    scout = await build_child(parent, agent="scout", job_id="job-scout")
+    assert scout._shell_write_root
+    grandchild = await subagent_mod._build_child_session(
+        label="g",
+        prompt="p",
+        parent_session=scout,
+        model_spec=None,
+        job_id="job-g",
+        agent="task",
+        profile=None,
+    )
+    assert grandchild._shell_write_root == str(grandchild.transcript.directory / "scratchpad")
+    assert grandchild._shell_write_root != scout._shell_write_root
+    bash = _bash_of(grandchild)
+    assert bash is not None and bash.approval_tier == "read"
+    await grandchild.dispose()
+    await scout.dispose()
+    await parent.dispose()
+
+
+def test_the_shell_floor_itself_adds_or_strips_bash() -> None:
+    """The floor on its own, because the child builder ALSO never builds a
+    ``bash`` it is about to strip (``allowed_names`` drops it first) -- two
+    layers, and the end-to-end tests above cannot tell which one held. A
+    regression in either must fail somewhere."""
+    from local_operator.harness.subagent import _with_readonly_shell_floor
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import create_tools
+
+    inventory = create_tools(ToolContext(), enabled=["read", "bash", "grep"])
+    without_bash = [tool for tool in inventory if tool.name != "bash"]
+    stripped = _with_readonly_shell_floor(inventory, inventory, shell_root=None)
+    assert "bash" not in {tool.name for tool in stripped}
+    added = _with_readonly_shell_floor(without_bash, inventory, shell_root="/x/scratchpad")
+    assert [tool.name for tool in added].count("bash") == 1
+    kept = _with_readonly_shell_floor(inventory, inventory, shell_root="/x/scratchpad")
+    assert [tool.name for tool in kept].count("bash") == 1
+
+
+# ---------------------------------------------------------------------------
+# A scout profile ATTACHED to an existing session (review round 1 R1, #2987)
+# ---------------------------------------------------------------------------
+#
+# Every top-level path that turns a session into a scout ends in
+# ``Session.attach_agent_profile``: ``lop exec --profile`` (and, through it, the
+# ``sessions`` tool's spawn and mesh ``--profile``, which both build that argv
+# -- ``test_sessions_tool`` pins the argv), the SDK's ``SessionSpec.profile``,
+# ``/agent`` in the TUI and the routed runtime, and a resume restoring the
+# attachment. A team whose manager is a scout goes through ``attach_team``.
+# The real-CLI repro is ``tests/e2e/test_exec_startup_e2e.py::
+# test_exec_profile_scout_shell_is_sandboxed_or_absent``.
+
+
+#: The scout row as installed BEFORE the seed had a shell (seed 1.2.0), spelled
+#: as the literal tag so it cannot track the seed. Seed sync holds tool changes
+#: back, so this is what an installed machine still resolves.
+_PRE_SHELL_SCOUT_TOOLS = "read,glob,grep,list_variables,read_variable,web_search,web_fetch"
+
+
+def _session_with_bash(
+    tmp_path,
+    monkeypatch,
+    *,
+    available: bool,
+    pre_shell_row: bool = False,
+    holds_bash: bool = True,
+):
+    """A real Session over a real session-store directory, holding the
+    ordinary ``exec``-tier ``bash`` -- the shape ``lop exec`` builds before
+    the profile is attached. ``pre_shell_row`` rewrites the installed scout
+    row's tool tag to :data:`_PRE_SHELL_SCOUT_TOOLS`; ``holds_bash=False``
+    builds the session without ``bash`` (a host or config that disabled it)."""
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.tools import builtin
+    from local_operator.tools import confinement as confinement_module
+
+    monkeypatch.setattr(
+        confinement_module,
+        "shell_sandbox_known_unavailable_reason",
+        lambda: None if available else "sandbox-exec missing (test)",
+    )
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    agents = AgentRegistry(config)
+    assert install_seed("scout", registry=agents, scope="global") is not None
+    assert install_seed("coder", registry=agents, scope="global") is not None
+    if pre_shell_row:
+        row = agents.get_agent_by_name("scout")
+        assert row is not None
+        tags = [
+            f"tools:{_PRE_SHELL_SCOUT_TOOLS}" if tag.startswith("tools:") else tag
+            for tag in row.tags
+        ]
+        agents.update_agent(row.id, AgentEditFields.model_validate({"tags": tags}))
+    ordinary = builtin.build_bash_tool()
+    assert ordinary.approval_tier == "exec"
+    session = Session(
+        model=MODEL,
+        stream_fn=OneShotStream(),
+        tools=[ordinary, builtin.build_read_tool()] if holds_bash else [builtin.build_read_tool()],
+        transcript=Transcript(config / "sessions" / "scout-top-level"),
+        system_blocks_provider=lambda: [],
+        agent_registry=agents,
+    )
+    return session
+
+
+@pytest.mark.asyncio
+async def test_attaching_the_scout_profile_sandboxes_the_sessions_shell(tmp_path, monkeypatch):
+    """The ``lop exec --profile scout`` / SDK / ``/agent scout`` path: the
+    shell root is set to the session's OWN scratchpad, ``bash`` is rebuilt as
+    the sandboxed ``read``-tier tool, and the per-turn context carries the
+    root the executor wraps on -- all BEFORE the caller declares the role's
+    inventory, which unattended is the approval."""
+    session = _session_with_bash(tmp_path, monkeypatch, available=True)
+    assert session._build_tool_context().shell_write_root is None
+    assert session.attach_agent_profile("scout")
+    expected = session._scratchpad_dir()
+    assert expected and session._shell_write_root == expected
+    assert session._build_tool_context().shell_write_root == expected
+    bash = _bash_of(session)
+    assert bash is not None and bash.approval_tier == "read"
+    assert "SANDBOXED" in bash.description
+    # The declaration ``exec_startup`` makes next keeps the sandboxed shell.
+    session.set_tool_inventory(session.attached_profile_tools, unattended=True)
+    bash = _bash_of(session)
+    assert bash is not None and bash.approval_tier == "read"
+    assert session._build_tool_context().shell_write_root == expected
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_attaching_the_scout_profile_without_a_sandbox_strips_bash(tmp_path, monkeypatch):
+    """No enforceable sandbox: no shell at all, and it stays gone through a
+    later inventory write (an MCP refresh hands the full list back)."""
+    session = _session_with_bash(tmp_path, monkeypatch, available=False)
+    assert session.attach_agent_profile("scout")
+    assert session._shell_write_root is None
+    assert _bash_of(session) is None
+    from local_operator.tools import builtin
+
+    session.refresh_tools([builtin.build_bash_tool(), *session._tools])
+    assert _bash_of(session) is None
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_scout_confinement_is_one_way(tmp_path, monkeypatch):
+    """Within this process, switching to another role or detaching does not
+    hand the host shell back: a model that ran as a scout may have been steered
+    by what it read. Not persisted across a reopen, where the profile attached
+    at restore decides (see the resume test below)."""
+    session = _session_with_bash(tmp_path, monkeypatch, available=True)
+    assert session.attach_agent_profile("scout")
+    root = session._shell_write_root
+    assert session.attach_agent_profile("coder")
+    assert session._shell_write_root == root
+    session.clear_agent_profile()
+    assert session._shell_write_root == root
+    assert session._build_tool_context().shell_write_root == root
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_another_role_leaves_the_shell_untouched(tmp_path, monkeypatch):
+    """Keyed by ROLE: a non-scout profile that lists ``bash`` keeps the
+    ordinary ``exec`` tier and no root (reviewer/qa-tester need network)."""
+    session = _session_with_bash(tmp_path, monkeypatch, available=True)
+    assert session.attach_agent_profile("coder")
+    assert session._shell_write_root is None
+    bash = _bash_of(session)
+    assert bash is not None and bash.approval_tier == "exec"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_scout_attachment_is_confined_again(tmp_path, monkeypatch):
+    """The resume path: the stored ``agent`` is re-attached through
+    ``attach_agent_profile`` at construction, so the reopened session is a
+    sandboxed scout too, never a scout with the host shell."""
+    first = _session_with_bash(tmp_path, monkeypatch, available=True)
+    assert first.attach_agent_profile("scout")
+    root = first._shell_write_root
+    await first.dispose()
+    reopened = _session_with_bash(tmp_path, monkeypatch, available=True)
+    assert reopened.active_agent == "scout"
+    assert reopened._shell_write_root == root
+    bash = _bash_of(reopened)
+    assert bash is not None and bash.approval_tier == "read"
+    await reopened.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_team_whose_manager_is_the_scout_is_confined(tmp_path, monkeypatch):
+    """``attach_team`` claims the agent slot for the manager without going
+    through ``attach_agent_profile``, so it applies the same confinement."""
+    from datetime import datetime, timezone
+
+    from local_operator.teams import Team
+
+    session = _session_with_bash(tmp_path, monkeypatch, available=True)
+    session.attach_team(
+        Team(
+            id="t-scout",
+            name="research",
+            manager="scout",
+            created_date=datetime.now(timezone.utc),
+        )
+    )
+    assert session._shell_write_root == session._scratchpad_dir()
+    bash = _bash_of(session)
+    assert bash is not None and bash.approval_tier == "read"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_child_of_an_attached_scout_is_confined(tmp_path, monkeypatch):
+    """Sticky downward from a TOP-LEVEL scout too (it holds no ``task`` in
+    the seed, so this is belt and braces): the child gets its own root."""
+    from local_operator.harness import subagent as subagent_mod
+
+    _sandbox(monkeypatch, available=True)
+    parent = _session_with_bash(tmp_path, monkeypatch, available=False)
+    assert parent.attach_agent_profile("scout")
+    assert parent._shell_write_root is None and parent._readonly_shell
+    child = await subagent_mod._build_child_session(
+        label="nested",
+        prompt="p",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-nested-scout",
+        agent="coder",
+        profile=None,
+    )
+    assert child._shell_write_root == str(child.transcript.directory / "scratchpad")
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_shell_scout_row_attached_top_level_gets_the_sandboxed_shell(
+    tmp_path, monkeypatch
+):
+    """The gap after #2987: ``lop exec --profile scout`` on a machine whose
+    installed row predates the shell declared the raw row, so the top-level
+    scout had NO ``bash`` while the same row delegated got one. The attached
+    names are now floored like the child's, ``bash`` stays the sandboxed
+    ``read``-tier tool through the unattended declaration, and ``jobs``/
+    ``wait`` ride along because that shell can background (child parity)."""
+    from argparse import Namespace
+
+    from local_operator.exec_startup import declared_tool_inventory
+
+    session = _session_with_bash(tmp_path, monkeypatch, available=True, pre_shell_row=True)
+    assert session.attach_agent_profile("scout")
+    names = session.attached_profile_tools
+    assert "bash" in names and {"jobs", "wait"} <= set(names)
+    assert {"write", "edit", "eval", "task"}.isdisjoint(names)
+    assert {"bash", "jobs", "wait"} <= session._deferral_pins
+    # The real declaration ``exec_startup.apply_startup`` makes, non-tty.
+    declared = declared_tool_inventory(session, Namespace(tools=None))
+    assert declared == names
+    session.set_tool_inventory(declared, unattended=True)
+    bash = _bash_of(session)
+    assert bash is not None and bash.approval_tier == "read"
+    assert "SANDBOXED" in bash.description
+    assert session._build_tool_context().shell_write_root == session._scratchpad_dir()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pre_shell_row", [True, False])
+async def test_a_top_level_scout_without_a_sandbox_declares_no_shell(
+    tmp_path, monkeypatch, pre_shell_row
+):
+    """No root: the floor adds nothing to an old row and REMOVES ``bash``
+    from a current one, so the declaration never names a shell the session
+    cannot have -- and with no shell there is nothing for ``jobs``/``wait``
+    to observe, so they are not added either."""
+    from argparse import Namespace
+
+    from local_operator.exec_startup import declared_tool_inventory
+
+    session = _session_with_bash(
+        tmp_path, monkeypatch, available=False, pre_shell_row=pre_shell_row
+    )
+    assert session.attach_agent_profile("scout")
+    names = session.attached_profile_tools
+    assert "bash" not in names and not {"jobs", "wait"} & set(names)
+    session.set_tool_inventory(
+        declared_tool_inventory(session, Namespace(tools=None)), unattended=True
+    )
+    assert _bash_of(session) is None
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_top_level_scout_whose_session_holds_no_bash_declares_none(tmp_path, monkeypatch):
+    """A root but no ``bash`` in the inventory (a host or config disabled
+    it): the floor admits the shell, never fabricates it, like the child
+    floor's ``available`` -- so the declaration names no ``bash`` (which
+    would resolve to nothing and be reported unresolved at run end) and no
+    ``jobs``/``wait`` to observe it."""
+    session = _session_with_bash(
+        tmp_path, monkeypatch, available=True, pre_shell_row=True, holds_bash=False
+    )
+    assert session.attach_agent_profile("scout")
+    assert session._shell_write_root is not None
+    names = session.attached_profile_tools
+    assert "bash" not in names and not {"jobs", "wait"} & set(names)
+    await session.dispose()
+
+
+def test_the_shell_floor_names_rule() -> None:
+    """THE name-level rule both paths share, on its own: add with a root,
+    strip without one, never duplicate, keep order."""
+    from local_operator.harness.subagent import readonly_shell_floor_names
+
+    assert readonly_shell_floor_names(("read", "grep"), shell_root="/x") == ("read", "grep", "bash")
+    assert readonly_shell_floor_names(("read", "bash", "grep"), shell_root="/x") == (
+        "read",
+        "bash",
+        "grep",
+    )
+    assert readonly_shell_floor_names(("read", "bash", "grep"), shell_root=None) == ("read", "grep")
+    assert readonly_shell_floor_names(("read",), shell_root=None) == ("read",)

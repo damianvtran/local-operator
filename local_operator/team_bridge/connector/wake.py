@@ -408,13 +408,63 @@ async def screen_item(
     # OAuth row, re-verified before and after the await. It is built per call
     # so it always binds THIS owner snapshot; nothing here can mint authority
     # — the cycle still refuses anything but a sealed ``VerifiedStatus``.
-    return await _scheduler.run_screening_cycle(
-        config_dir=config_dir,
-        owner=owner,
-        items=[item],
-        auth_store=auth_store,
-        settings=settings,
-        status_fetcher=_scheduler.default_status_fetcher(config_dir=config_dir, owner=owner),
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.screening import ScreenResult
+
+    try:
+        return await _scheduler.run_screening_cycle(
+            config_dir=config_dir,
+            owner=owner,
+            items=[item],
+            auth_store=auth_store,
+            settings=settings,
+            status_fetcher=_scheduler.default_status_fetcher(
+                config_dir=config_dir, owner=owner, auth_store=auth_store
+            ),
+        )
+    except (BridgeRefusal, BridgeSignInRequired) as failure:
+        # A LOCAL identity/sign-in refusal (the signed-in row is not the
+        # enrolled owner, moved mid-read, or there is no usable sign-in). It
+        # needs no hub round trip to decide and re-driving it every minute
+        # cost two hub GETs per ref, so it is held with backoff as a typed
+        # ``policy_stale`` HOLD (the code ``_verify_live_identity`` gives
+        # these conditions on the reuse path), which the loop turns into a
+        # ``screening_holds`` row. A failed refresh can be transient; the
+        # backoff then simply re-checks it later. Hub-side refusals (rate
+        # limits, outages, destination) keep propagating to the loop's own
+        # backoff.
+        local = isinstance(failure, BridgeSignInRequired) or failure.code in {
+            "bridge_owner_mismatch",
+            "bridge_owner_moved",
+        }
+        if not local:
+            raise
+        logger.warning(
+            "bridge: screening held code=policy_stale cause=%s",
+            (
+                "bridge_sign_in_required"
+                if isinstance(failure, BridgeSignInRequired)
+                else failure.code
+            ),
+        )
+        return ScreenResult("hold", hold_code="policy_stale")
+
+
+def _owner_wire(owner: Any, config_dir: Path, auth_store: Any) -> Any:
+    """A hub client bound to this owner's hub and pinned credential row.
+
+    Shares the connector's own ``auth_store`` so a per-message client never
+    opens a private SQLite connection (see ``TeamBridgeClient._auth_store`` for
+    the descriptor exhaustion that cost).
+    """
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+
+    return TeamBridgeClient(
+        config_dir,
+        base_url=owner.canonical_base_url,
+        credential_id=owner.credential_id,
+        store=auth_store,
     )
 
 
@@ -435,14 +485,7 @@ async def fetch_item(
     projection without changing this seam's contract.
     """
 
-    from local_operator.team_bridge.client import TeamBridgeClient
-
-    wire = TeamBridgeClient(
-        config_dir,
-        base_url=owner.canonical_base_url,
-        credential_id=owner.credential_id,
-        store=auth_store,
-    )
+    wire = _owner_wire(owner, config_dir, auth_store)
     result = await wire.message(message_id, tenant_id=owner.tenant_id, access=access)
     item = result.get("result", result) if isinstance(result, Mapping) else None
     if not isinstance(item, Mapping) or not isinstance(item.get("message"), Mapping):
@@ -608,7 +651,13 @@ async def handle_message_available(
             return {"action": "hold", "message_id": message_id, "code": engage_code}
         from local_operator.team_bridge import pull as _pull
 
-        ref = await _pull.message(owner, message_id, config_dir=config_dir, access=access)
+        ref = await _pull.message(
+            owner,
+            message_id,
+            config_dir=config_dir,
+            access=access,
+            client=_owner_wire(owner, config_dir, auth_store) if auth_store is not None else None,
+        )
         if ref.message_id != message_id:
             # The validation read must answer about THIS message; a mismatch
             # is a hold, never a screen of the wrong bytes.

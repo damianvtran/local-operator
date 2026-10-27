@@ -382,13 +382,14 @@ async def test_a_glob_with_an_unknown_argument_is_refused_through_the_session(
             id="m1",
             name="g",
             tool="glob",
-            arguments={"pattern": "*.py", "path": "/tmp"},
+            # ``root``: glob declares ``path`` since PR #2982, so it is no longer unknown.
+            arguments={"pattern": "*.py", "root": "/tmp"},
             every_ms=60_000,
             created_at=NOW,
         )
         reason = session._validate_monitor_call("glob", spec.arguments)
         assert reason == (
-            'monitor can\'t watch "glob": unknown argument(s) "path" — glob accepts: pattern.'
+            'monitor can\'t watch "glob": unknown argument(s) "root" — glob accepts: path, pattern.'
         )
         # A tick re-validates too, so a monitor armed before this build (or one
         # whose tool changed shape) fails with the same sentence rather than a

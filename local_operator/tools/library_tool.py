@@ -18,15 +18,21 @@ user file, so the tool as a whole is read-tier. That is the design's §5.1
 disposition, not an accident: the Librarian runs unattended and a nightly run
 must not block on an approval dialog to rename an asset.
 
-PROVENANCE. A write through this tool is recorded as ``librarian`` with the
-supplied confidence; the explicit ``actor`` parameter exists for a future
-user-initiated surface, and defaults to the Librarian because that is the
-caller the design expects. Effective-name precedence lives in the SQLite store:
-a user/librarian value is never overwritten by a later derived refresh.
+PROVENANCE. A write through this tool is recorded under the actor DERIVED
+from the caller's identity: the session ``librarian/state.json`` names records
+``librarian``, every other session records ``agent``. The explicit ``actor``
+parameter stays for a write the caller knows is user-initiated; ``librarian`` is
+reserved, and asking for it from any other session is an error rather than a
+record. Derivation rather than a seed-supplied parameter, because a caller that
+must remember to pass it forgets: the Librarian's own ``tool()`` lines did for
+four days, and every write of hers was recorded as an ordinary agent's.
+Effective-name precedence lives in the SQLite store: a user/librarian value is
+never overwritten by a later derived refresh.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -85,11 +91,11 @@ class LibraryParams(BaseModel):
     confidence: float | None = Field(
         default=None, ge=0.0, le=1.0, description="update/tags: the Librarian's confidence."
     )
-    # Default `agent`, not `librarian`: an ordinary agent naming its own
-    # deliverable must not be recorded as the Librarian. The Librarian seed is
-    # the one caller that passes `actor="librarian"` explicitly.
-    actor: Literal["agent", "librarian", "user"] = Field(
-        default="agent", description="The provenance recorded on a write."
+    # No default: the actor is DERIVED from the caller's identity below, so an
+    # ordinary agent naming its own deliverable is never recorded as the
+    # Librarian and the Librarian never has to remember to claim her rank.
+    actor: Literal["agent", "librarian", "user"] | None = Field(
+        default=None, description="The provenance recorded on a write."
     )
     # -- tags ------------------------------------------------------------------
     action: Literal["list", "create", "rename", "delete", "merge", "set", "clear"] | None = Field(
@@ -113,6 +119,30 @@ class LibraryParams(BaseModel):
 
 def _metadata_store() -> MetadataStore:
     return MetadataStore(config_dir())
+
+
+logger = logging.getLogger(__name__)
+
+
+def _is_librarian(context: ToolContext | None) -> bool:
+    """Whether the calling session is the one ``librarian/state.json`` names.
+
+    The identity check, deliberately not a parameter: the seed's own ``tool()``
+    lines cannot be relied on to pass ``actor``, and a model that forgets it
+    records her work as an agent's with no error anywhere. Imported lazily for
+    the reason every other caller does — the package pulls the cadence engine,
+    and this module rides the tool registry at every boot. A lookup that fails
+    answers ``agent``: no caller gets her rank by accident.
+    """
+    if context is None or not context.session_id:
+        return False
+    try:
+        from local_operator.librarian.state import is_librarian_session
+
+        return is_librarian_session(config_dir(), context.session_id)
+    except Exception:  # noqa: BLE001 — identity is a lookup, never a call dependency
+        logger.debug("library: could not resolve the caller's identity", exc_info=True)
+        return False
 
 
 def _compact(row: dict[str, Any]) -> dict[str, Any]:
@@ -162,8 +192,18 @@ async def execute_library(
         params = LibraryParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "library", exc)
+    is_librarian = _is_librarian(context)
+    if params.actor == "librarian" and not is_librarian:
+        return _error(
+            tool_call_id,
+            "library",
+            "actor 'librarian' is reserved for the Librarian session.",
+        )
+    # Resolved ONCE, here, and passed down as a value: the write sites cannot
+    # disagree about who wrote, and none of them reads the unresolved field.
+    actor = params.actor or ("librarian" if is_librarian else "agent")
     try:
-        return await _dispatch(tool_call_id, params)
+        return await _dispatch(tool_call_id, params, actor)
     except MetadataUnavailable:
         return _error(
             tool_call_id,
@@ -178,7 +218,7 @@ async def execute_library(
         return _error(tool_call_id, "library", f"that page cursor is not valid: {exc}")
 
 
-async def _dispatch(tool_call_id: str, params: LibraryParams) -> ToolResult:
+async def _dispatch(tool_call_id: str, params: LibraryParams, actor: str) -> ToolResult:
     op = params.op
     if op == "stats":
         answer = _stats()
@@ -242,17 +282,17 @@ async def _dispatch(tool_call_id: str, params: LibraryParams) -> ToolResult:
             config_dir(),
             params.asset_id,
             fields,
-            actor=params.actor,
+            actor=actor,
             # An ordinary agent's write is stored under its own provenance,
             # which joins user/librarian as a value derived refreshes never
             # overwrite. Only the Librarian's edits mark a row organized.
-            source=params.actor,
+            source=actor,
             confidence=params.confidence,
         )
         return _text(tool_call_id, "library", _render(_compact(row)))
 
     if op == "tags":
-        return _tags(tool_call_id, params)
+        return _tags(tool_call_id, params, actor)
 
     # conventions
     store = _metadata_store()
@@ -263,14 +303,14 @@ async def _dispatch(tool_call_id: str, params: LibraryParams) -> ToolResult:
             params.convention_id or params.kind_name,
             params.kind_name,
             params.body,
-            actor=params.actor,
+            actor=actor,
         )
         return _text(tool_call_id, "library", _render(row))
     rows = store.conventions()
     return _text(tool_call_id, "library", _render({"conventions": rows}))
 
 
-def _tags(tool_call_id: str, params: LibraryParams) -> ToolResult:
+def _tags(tool_call_id: str, params: LibraryParams, actor: str) -> ToolResult:
     store = _metadata_store()
     action = params.action or "list"
     if action == "list":
@@ -280,7 +320,7 @@ def _tags(tool_call_id: str, params: LibraryParams) -> ToolResult:
             return _error(tool_call_id, "library", "tags create needs tag_name.")
         if params.tag_category not in TAG_CATEGORIES:
             return _error(tool_call_id, "library", "unknown tag category.")
-        tag = store.create_tag(params.tag_name, params.tag_category, actor=params.actor)
+        tag = store.create_tag(params.tag_name, params.tag_category, actor=actor)
         return _text(tool_call_id, "library", _render(tag))
     if action in ("rename", "delete", "merge"):
         if not params.tag_id:
@@ -300,14 +340,14 @@ def _tags(tool_call_id: str, params: LibraryParams) -> ToolResult:
     if not params.asset_id:
         return _error(tool_call_id, "library", f"tags {action} needs asset_id.")
     if action == "clear":
-        row = service.set_tags(config_dir(), params.asset_id, [], None, actor=params.actor)
+        row = service.set_tags(config_dir(), params.asset_id, [], None, actor=actor)
         return _text(tool_call_id, "library", _render(_compact(row)))
     row = service.set_tags(
         config_dir(),
         params.asset_id,
         params.tags or [],
         params.primary,
-        actor=params.actor,
+        actor=actor,
         confidence=params.confidence,
     )
     return _text(tool_call_id, "library", _render(_compact(row)))

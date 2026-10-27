@@ -983,3 +983,29 @@ def test_the_capture_repair_cannot_loop_when_the_refetch_keeps_failing(tmp_path)
                 thread.join(timeout=5.0)
 
     assert len(attempts) == 1, "REVALIDATE_BACKOFF_S bounds the repair to one attempt"
+
+
+def test_a_swallowed_price_leg_fault_is_reported_to_the_metadata_memo(
+    tmp_path, openrouter, monkeypatch
+) -> None:
+    """A fault inside ``price_catalogue_row`` must reach ``collect_unavailable``.
+
+    PR #2992 review round 2: the function swallows a parse/refetch/write fault
+    and returns ``None``, which ``configure`` used to read as "no row" and memoise
+    for the day without prices or limits. Each internal ``except`` now reports it;
+    a genuine miss on a readable document still reports nothing.
+    """
+
+    def broken(*_args, **_kwargs):
+        raise ValueError("unparseable models.dev document")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(prices, "_models_dev_providers", broken)
+        with catalogue.collect_unavailable() as unavailable:
+            prices.price_catalogue_row("anthropic", "claude-fable-5-1", cache_dir=tmp_path)
+    assert "models.dev catalogue" in unavailable
+
+    _plant(tmp_path, project(_MODELS_DEV_BODY, _ETAG))
+    with catalogue.collect_unavailable() as healthy:
+        prices.price_catalogue_row("anthropic", "claude-fable-5-1", cache_dir=tmp_path)
+    assert healthy == []

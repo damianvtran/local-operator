@@ -127,7 +127,7 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Mapping
 
 from local_operator.agent_profiles import (
     READ_ONLY_NETWORK_TOOLS,
@@ -996,6 +996,162 @@ def _with_network_floor(
     return allowed + list(floored.values())
 
 
+#: Roles whose children get a WRITE-CONFINED ``bash``: reads open, writes only
+#: to the child's own scratchpad, no network -- enforced by the kernel sandbox
+#: in :class:`~local_operator.tools.confinement.ShellWriteConfinement`, never
+#: by the command's text. A role here is a READ-ONLY role that still needs to
+#: run things: two scout jobs failed because they could not run ``strings`` on
+#: a binary or unpack an ``.asar`` into scratch, and fell back to an edited
+#: copy of the source on GitHub. Keyed by ROLE rather than by ``bash`` being
+#: in the allowlist, so a row that later syncs ``bash`` in is still wrapped;
+#: and :data:`READ_ONLY_TOOLS` is left without ``bash``, so no other role
+#: inherits a shell through that list. ``reviewer``/``architect``/
+#: ``qa-tester`` are NOT here: they need network and write test caches.
+READ_ONLY_SHELL_ROLES = frozenset({"scout"})
+
+
+def is_readonly_shell_role(*names: "str | None") -> bool:
+    """Whether any of ``names`` is a :data:`READ_ONLY_SHELL_ROLES` role.
+
+    THE one predicate for "this session is a scout", read by BOTH places a
+    scout can come into being: a delegated child (:func:`_readonly_shell_root`)
+    and a profile attached to a session that already exists
+    (``Session._apply_readonly_shell_role``, reached from ``lop exec
+    --profile``, the ``sessions`` tool's spawn, mesh ``--profile``, the SDK and
+    ``/agent``). Round 1 of PR #2987 found the second path missing: a
+    top-level ``lop exec --profile scout`` got the seed's ``bash`` UNWRAPPED
+    and, unattended, auto-approved. One predicate so the two cannot drift.
+    """
+
+    return any(name in READ_ONLY_SHELL_ROLES for name in names if name)
+
+
+def readonly_shell_write_root(
+    scratchpad: "Path | str | None", *, unavailable: "str | None"
+) -> "str | None":
+    """The write root a confined session's shell gets, or ``None`` for NO shell.
+
+    ``scratchpad`` is the session's own ``scratchpad://`` root and
+    ``unavailable`` the host's sandbox answer (whichever spelling the caller
+    can afford: the awaited probe on the async child path, the known-so-far
+    answer on the synchronous attach path). No scratchpad (an agent
+    directory) or no sandbox means no shell: a read-only role's shell runs
+    sandboxed or not at all.
+    """
+
+    if scratchpad is None or unavailable is not None:
+        return None
+    return str(scratchpad)
+
+
+async def _readonly_shell_root(
+    *,
+    agent: str,
+    profile: "AgentProfile | None",
+    parent_session: "Session",
+    session_dir: "Path",
+) -> "tuple[bool, str | None]":
+    """Whether this child is write-confined, and its shell root if it may HAVE one.
+
+    Returns ``(confined, root)``. ``confined`` is True for a
+    :data:`READ_ONLY_SHELL_ROLES` child -- by launch name (the no-profile
+    fallback), by resolved profile name (a ``team:`` launch carries
+    ``team:<name>`` as ``agent``) -- and for ANY descendant of a write-confined
+    session, which is the sticky-downward rule ``confinement_root`` follows:
+    a child that was not confined would be the bypass. The parent may be a
+    top-level session a scout profile was ATTACHED to, which carries
+    ``_readonly_shell`` even when it got no shell root (no scratchpad, no
+    sandbox). Scouts drop ``task`` today, so the descendant arm is belt and
+    braces.
+
+    ``root`` is the child's own scratchpad when the host can enforce the
+    sandbox, else ``None`` -- and ``confined`` with ``root=None`` means the
+    child gets NO shell (see :func:`_with_readonly_shell_floor`). Never the
+    parent's scratchpad: a descendant writes into its own, as ``bash``'s
+    scratchpad export already guarantees for ordinary children. ASYNC because
+    the host's first sandbox probe is a spawn, run off the event loop
+    (review round 1 R4).
+    """
+    from local_operator.scratchpad import scratchpad_root
+    from local_operator.tools.confinement import shell_sandbox_unavailable_reason_async
+
+    confined = (
+        is_readonly_shell_role(agent, profile.name if profile is not None else None)
+        or bool(getattr(parent_session, "_shell_write_root", None))
+        or bool(getattr(parent_session, "_readonly_shell", False))
+    )
+    if not confined:
+        return False, None
+    root = readonly_shell_write_root(
+        scratchpad_root(session_dir), unavailable=await shell_sandbox_unavailable_reason_async()
+    )
+    return True, root
+
+
+def readonly_shell_floor_names(
+    names: "Iterable[str]", *, shell_root: str | None
+) -> tuple[str, ...]:
+    """``names`` with the write-confined shell floor applied: THE one rule.
+
+    With a ``shell_root`` (the host can enforce the sandbox) ``bash`` is
+    ensured; without one it is removed, even when ``names`` lists it. Order is
+    kept and ``bash`` is appended last when added.
+
+    One rule for every place a confined session's tool NAMES are decided, so
+    they cannot drift: the delegated child's allowlist (:func:`run_subagent`
+    builds and pins from it), the child's built inventory
+    (:func:`_with_readonly_shell_floor`), and a profile ATTACHED top-level
+    (``Session._apply_readonly_shell_role``), whose names become the unattended
+    ``lop exec --profile`` declaration. That last one is why this is a
+    name-level function: before it existed the top-level declaration was the
+    raw stored row, so a scout installed before the shell got no ``bash`` at
+    top level while the same row delegated got one.
+    """
+    floored = tuple(name for name in names if name != "bash" or shell_root is not None)
+    if shell_root is not None and "bash" not in floored:
+        floored = (*floored, "bash")
+    return floored
+
+
+def _with_readonly_shell_floor(
+    allowed: "list[AgentTool]", available: "list[AgentTool]", *, shell_root: str | None
+) -> "list[AgentTool]":
+    """Add or STRIP ``bash`` for a write-confined child; fail closed.
+
+    Applied only to children :func:`_readonly_shell_root` marks confined, on
+    BOTH the profile path and the no-profile scout fallback, modelled on
+    :func:`_with_network_floor` and for the same reason: an installed scout's
+    tool list is frozen in its registry tag and seed sync holds tool changes
+    back on purpose, so a floor computed per launch is how this reaches
+    machines that installed the scout before it had a shell.
+
+    With a root (the host can enforce the sandbox): ``bash`` is added from
+    ``available`` if the allowlist did not name it. Without one: ``bash`` is
+    REMOVED even when the stored row lists it -- a read-only role's shell can
+    run sandboxed or not at all, and ``execute_bash`` would refuse every call
+    anyway; withholding the schema saves the model discovering that one
+    refused command at a time. The decision is
+    :func:`readonly_shell_floor_names`'s; this only maps it onto tool objects.
+    """
+    if "bash" not in readonly_shell_floor_names(
+        (tool.name for tool in allowed), shell_root=shell_root
+    ):
+        return [tool for tool in allowed if tool.name != "bash"]
+    if any(tool.name == "bash" for tool in allowed):
+        return allowed
+    bash = next((tool for tool in available if tool.name == "bash"), None)
+    return allowed + [bash] if bash is not None else allowed
+
+
+#: The tools that OBSERVE or await a background job and spawn nothing. Kept for
+#: any session whose ``bash`` can background (:func:`_can_background`): the
+#: ``background=true`` receipt tells the model to follow up with them, so a
+#: shell that can background without them strands its own jobs. Read by both
+#: the delegated child's prune (:func:`run_subagent`) and a top-level scout's
+#: floored declaration (``Session._apply_readonly_shell_role``).
+BACKGROUND_OBSERVER_TOOLS = frozenset({"jobs", "wait"})
+
+
 def _can_background(tools: "list[AgentTool]") -> bool:
     """Whether this toolset can PRODUCE a background job.
 
@@ -1019,8 +1175,10 @@ def _can_background(tools: "list[AgentTool]") -> bool:
 SCOUT_PREAMBLE = (
     "[scout mode: you are a READ-ONLY research agent. Investigate, read, "
     "search the workspace and the web, and report findings with evidence "
-    "(file:line locally, a URL remotely); you cannot edit, write, or run "
-    "anything. Your final message is the deliverable.]\n\n"
+    "(file:line locally, a URL remotely); you cannot edit or write files. If "
+    "you have `bash`, it is sandboxed: it reads anywhere but writes only to "
+    "your scratchpad and has no network. Your final message is the "
+    "deliverable.]\n\n"
 )
 
 
@@ -3819,6 +3977,13 @@ async def _construct_child_session(
     # (BEN-7-D5, rebuilt after the prune below). If ``job_id`` ever stopped
     # reaching that context, a child would silently be handed its parent's
     # UNSCOPED tool.
+    # Decided BEFORE the construction context, because ``build_bash_tool``
+    # reads ``shell_write_root`` there to describe the sandbox and set the
+    # ``read`` approval tier, and the child ``Session`` below must carry the
+    # SAME root so the executor wraps what the schema promised.
+    readonly_shell, shell_write_root = await _readonly_shell_root(
+        agent=agent, profile=profile, parent_session=parent_session, session_dir=session_dir
+    )
     tool_context = ToolContext(
         team_id=target.team_lineage[-1] if target and target.team_lineage else "",
         memory_config_dir=str(parent_session._config_dir),
@@ -3855,6 +4020,7 @@ async def _construct_child_session(
         project_registry=getattr(parent_session, "project_registry", None),
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
         web_fetch_settings=ConfigManager(config_dir()).get_config_value("web_fetch", None),
+        shell_write_root=shell_write_root,
     )
     # ``restricted`` also carries a sticky MCP-activation denial inherited by
     # plain descendants; that is not a role allowlist and must not shrink their
@@ -3879,6 +4045,12 @@ async def _construct_child_session(
         allowed_names = set(profile.tools or ()) if profile is not None else set()
         if agent == "scout" and (profile is None or not profile.tools):
             allowed_names.update(SCOUT_TOOL_ALLOWLIST)
+        if readonly_shell:
+            # Build (and pin) ``bash`` only when the floor below will keep it;
+            # never build it for a confined child that may not have a shell.
+            allowed_names = set(
+                readonly_shell_floor_names(allowed_names, shell_root=shell_write_root)
+            )
         allowlist_names = frozenset(allowed_names)
         builtin_names = [name for name in DEFAULT_TOOL_NAMES if name in allowed_names]
         for name in DEFAULT_TOOL_NAMES:
@@ -3907,12 +4079,17 @@ async def _construct_child_session(
     # or execute anything the allowlist denies, so sparing it weakens no
     # boundary.
     hub_tool = next((tool for tool in tools if tool.name == "hub"), None)
+    available_tools = tools
     if profile is not None and profile.tools:
         tools = _with_network_floor(filter_tools(tools, profile), tools)
     elif agent == "scout":
         # Fallback for a scout with no resolvable profile — the read-only
         # promise must not depend on a seed file being present.
         tools = [tool for tool in tools if tool.name in SCOUT_TOOL_ALLOWLIST]
+    if readonly_shell:
+        # After the allowlist, on both paths above: adds the sandboxed shell an
+        # old installed row omits, or strips one the host cannot sandbox.
+        tools = _with_readonly_shell_floor(tools, available_tools, shell_root=shell_write_root)
     if restricted and hub_tool is not None and not any(tool.name == "hub" for tool in tools):
         tools = list(tools) + [hub_tool]
     # A restricted role receives the MCP tools its PARENT had already enabled
@@ -4113,6 +4290,10 @@ async def _construct_child_session(
         # default surface). Copied at construction because the child rebuilds
         # its tool context per turn and never re-reads the parent.
         confinement_root=getattr(parent_session, "_confinement_root", None),
+        # The write-confined shell root (scout, and sticky for its
+        # descendants): the same value the construction context above carried,
+        # so the executor wraps every command the ``read``-tier schema admitted.
+        shell_write_root=shell_write_root,
         request_approval=request_approval,
         # Which job the child's approvals belong to, so a host can scope a
         # denial to the work that provoked it. Reaches the executor through
@@ -4298,7 +4479,7 @@ async def _construct_child_session(
     # ``wake`` stays pruned: a child's session ends after one prompt, so a wake
     # it armed would be silently lost.
     if _can_background(tools):
-        drop = drop - {"jobs", "wait"}
+        drop = drop - BACKGROUND_OBSERVER_TOOLS
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
     if any(tool.name == "task" for tool in child._tools):
         # A child that KEPT ``task`` (a pod lead) rebuilds ``hub`` now that its
@@ -4349,6 +4530,12 @@ async def _construct_child_session(
     # the stamp depend on whether MCP happened to be wired here would let the
     # boundary evaporate on exactly the path that reintroduces the surface.
     setattr(child, MCP_DENIED_ATTR, restricted)
+    if readonly_shell:
+        # A confined child with NO shell root (no sandbox here) is still a
+        # read-only shell session: marked so its own later inventory writes
+        # keep ``bash`` out (``Session._filter_declared``) and its descendants
+        # stay confined (:func:`_readonly_shell_root`'s sticky arm).
+        child._readonly_shell = True
     if target is not None:
         # Stamped facts, beside the denial and for the same reason: they are
         # properties of the LINEAGE that the child's own role cannot express,

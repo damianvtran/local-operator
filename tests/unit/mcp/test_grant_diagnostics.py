@@ -260,6 +260,8 @@ async def test_snapshot_is_one_lookup_material_free_and_readiness_offers_are_tru
         assert item["auth_diagnostics"]["identity_verified"] is False
         assert set(item["auth_diagnostics"]) == {
             "has_row",
+            # Value-free boolean: the runtime's own "would it use this row" answer.
+            "usable_grant",
             "provenance",
             "identity_verified",
             "identity_state",
@@ -439,6 +441,7 @@ def test_unreadable_registration_only_and_unknown_expiry_do_not_invent_evidence(
 
     unknown = auth.mcp_grant_diagnostics(URL, Unreadable())
     assert unknown["has_row"] is None and unknown["access_state"] == "unknown"
+    assert unknown["usable_grant"] is None
     assert unknown["refresh_presence"] == "unknown"
     assert unknown["identity_verified"] is False
 
@@ -454,5 +457,7 @@ def test_unreadable_registration_only_and_unknown_expiry_do_not_invent_evidence(
 
     registration = auth.mcp_grant_diagnostics(URL, RowStore())
     assert registration["has_row"] is True
+    # A row, but not a grant the runtime would use (F-READY-1).
+    assert registration["usable_grant"] is False
     assert registration["sharing_mode"] == "unavailable"
     assert registration["expiry_known"] is False

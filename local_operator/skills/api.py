@@ -62,6 +62,7 @@ __all__ = [
     "default_backend_from_env",
     "default_skill_roots",
     "diagnose_missing_skill",
+    "ecosystem_skill_roots",
     "discover_skills",
     "is_plain_skill_name",
     "make_skill_resolver",
@@ -124,6 +125,18 @@ def _ecosystem_roots(home: Path) -> list[Path]:
     else:
         candidates = [Path(part).expanduser() for part in raw.split(":") if part.strip()]
     return [candidate for candidate in candidates if candidate.is_dir()]
+
+
+def ecosystem_skill_roots(home: Path | None = None) -> list[Path]:
+    """The existing ecosystem roots (``~/.omp``, ``~/.claude``, ``~/.codex``, ``~/.agents``).
+
+    Public because a catalogue that LABELS where a skill came from must ask the
+    same question discovery asks, including the ``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS``
+    override, rather than restate the directory names and drift from them.
+    ``home`` defaults to the process home, resolved exactly as
+    :func:`default_skill_roots` resolves it.
+    """
+    return _ecosystem_roots((home or Path.home()).resolve())
 
 
 def default_skill_roots(cwd: Path | None = None, *, boundary: Path | None = None) -> list[Path]:

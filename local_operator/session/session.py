@@ -2395,6 +2395,71 @@ _WIRE_BUDGET_RATCHET = 0.75
 _WIRE_BUDGET_FLOOR = 4_000_000
 
 
+def _newest_usage_at_ms(transcript: Transcript, *, now_ms: int | None = None) -> int:
+    """Epoch ms of the newest provider usage the transcript recorded, else 0.
+
+    Every wire usage carries ``at_ms`` (the call's completion stamp), so the
+    newest one is the last time this conversation's prefix was sent. Uncut
+    rows on purpose: a compaction invalidates context-SIZE readings, not the
+    fact that a request reached the provider at that moment.
+
+    CLAMPED to ``now_ms`` (default: the wall clock). A stamp from the future
+    (clock skew, or a transcript copied from a machine whose clock runs ahead)
+    would make ``now - last`` negative, and the run-start idle flush
+    (``_sweep_before_run``) would then stay off until wall time passed the
+    stamp plus the flush window — a day of skew suppressed a real 2 h gap's
+    shed (PR #3004 agent review round 3, R3-m1). Clamping reads such a stamp
+    as "just now": the first run after the resume keeps its prefix (the safe,
+    no-rewrite direction), and every later gap is measured from a real time.
+    """
+    newest = 0
+    for row in transcript.all_usage_rows():
+        stamp = row.get("at_ms")
+        if isinstance(stamp, int) and stamp > newest:
+            newest = stamp
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    return min(newest, now_ms)
+
+
+def _resumed_cache_diagnostics_id(transcript: Transcript) -> str | None:
+    """The diagnostics chain id a resumed session should continue from, or ``None``.
+
+    The newest id the transcript persisted (``newest_cache_diagnostics_id``),
+    EXCEPT rows a transcript fork copied from its parent: those name the
+    PARENT's requests. A whole-transcript fork replays a byte-identical prefix
+    (which is why it inherits ``cache_lineage_id``), so comparing against them
+    would be meaningful there; the exclusion exists for the CUT fork
+    (``fork_snapshot`` with ``exclude_entry_ids``), which drops later rows and
+    whose first turn would report a by-design ``messages_changed`` against the
+    parent's newer request (PR #3018 review round 1, n3). One rule for both
+    keeps the fork's chain its own. "Copied" is decided by time, exactly as
+    ``Session._is_unnamed_fork`` and the wake-schedule restore decide it: a row
+    journalled at or before ``forked_at`` came across in the clone; anything
+    later was written by this fork and may seed its own resume.
+
+    Two ``ORIGIN_FORK`` writers stamp no ``forked_at`` — replica recovery
+    (``network/sync.py``) and the move/keep staging copy
+    (``network/mobility.py``) — so ``fork_instant`` is ``None`` there and their
+    copied rows DO seed (review round 1, m3). Accepted rather than widened
+    here: for a move that is the right chain (it is the same conversation);
+    for a keep-copy or a replica the stale id answers
+    ``previous_message_not_found`` or compares against an identical prefix,
+    both telemetry-only outcomes.
+    """
+    from local_operator.fork import fork_instant
+    from local_operator.session.transcript import newest_cache_diagnostics_id
+
+    entries = transcript.entries()
+    try:
+        forked_at = fork_instant(transcript.directory)
+    except Exception:  # noqa: BLE001 — an unreadable marker must not fail construction
+        forked_at = None
+    if forked_at is not None:
+        entries = [entry for entry in entries if entry.ts > forked_at]
+    return newest_cache_diagnostics_id(entries)
+
+
 def _history_captured_browser_views(messages: Sequence[Message]) -> bool:
     """Whether this rendered history shows the session capturing browser views.
 
@@ -3223,6 +3288,15 @@ class Session:
         #: construction (``harness.subagent``): a setter-only value installed
         #: on a parent after construction would otherwise never reach a child.
         confinement_root: str | None = None,
+        #: The only directory this session's SHELL may write to, or ``None``.
+        #: Set by ``harness.subagent`` for a ``scout`` child (its own
+        #: scratchpad) and never by a host: reads stay open, writes and the
+        #: network are refused by the kernel sandbox in
+        #: ``local_operator.tools.confinement.ShellWriteConfinement``.
+        #: There is no way to LIFT it: the only other writer is
+        #: :meth:`_apply_readonly_shell_role` (a scout profile attached to an
+        #: existing session), which only ever sets it.
+        shell_write_root: str | None = None,
         #: The short name this session was DELEGATED under, set only on a
         #: subagent (``zoom-scroll-fix``, ``bridge-qa``). A child never
         #: generates a conversation title — naming runs in the TUI host and the
@@ -3663,6 +3737,29 @@ class Session:
         #: read by ``_build_tool_context`` on every turn, which is what makes
         #: it reach both the createIf checks and the executors.
         self._confinement_root = confinement_root
+        #: The write-confined shell root (see the ``shell_write_root``
+        #: parameter). Stored as given, like ``confinement_root``:
+        #: ``ShellWriteConfinement.at`` resolves it at the enforcement point, so
+        #: the sandbox profile always names the real path. Read by
+        #: ``_build_tool_context`` and by ``harness.subagent`` to keep the
+        #: confinement sticky downward.
+        self._shell_write_root = shell_write_root or None
+        #: Whether this session is a READ-ONLY shell role (``scout``): set by a
+        #: delegating parent (``shell_write_root`` given) or by attaching the
+        #: role's profile (:meth:`_apply_readonly_shell_role`). Held for the
+        #: life of this PROCESS, like a declared inventory: a later ``/agent``
+        #: switch or detach in the same process does not give the shell its host
+        #: reach back, because a model that ran as a scout may have been steered
+        #: by what it read. It is deliberately NOT persisted: a reopened session
+        #: takes the confinement of the profile attached at restore. Switching a
+        #: scout to ``coder`` is the operator choosing a coder's shell, so a
+        #: restore that finds ``coder`` attached gives exactly that, while a
+        #: scout restored as scout is confined again by the same
+        #: :meth:`attach_agent_profile` path
+        #: (``test_a_resumed_scout_attachment_is_confined_again``).
+        #: When set with no root (no scratchpad, or no sandbox on this host),
+        #: ``bash`` is withheld at :meth:`_filter_declared`.
+        self._readonly_shell = self._shell_write_root is not None
         #: Settled model-owned jobs whose results are durably journaled but have
         #: not yet committed into this turn's model context, in settle order.
         #: Safe aside boundaries offer the SAME canonical rows to the running
@@ -3938,7 +4035,9 @@ class Session:
         #: exactly like ``_wire_budget_override`` beside it. Kept as a separate
         #: bit rather than a tri-state so every existing read of
         #: ``_images_rejected`` keeps its meaning unchanged (agent review
-        #: round 2, R8).
+        #: round 2, R8). An image-COUNT refusal ("too much media") is the
+        #: same kind of evidence (THIS provider's per-request limit) and sets
+        #: it too (PR #3004 review round 2, R2-m2).
         self._images_rejected_for_size = False
         #: Latch for the text-only-model omission announcement (see
         #: :meth:`_render_history`). The omission itself is not sticky — it
@@ -4513,7 +4612,17 @@ class Session:
         # _last_activity_ms: the idle-flush pruning must measure provider-cache
         # age, and stamping turn bookkeeping right before the check made the
         # 90-minute flush dead code.
-        self._last_provider_request_ms = 0
+        #
+        # SEEDED from the transcript, not 0: the newest recorded usage's
+        # ``at_ms`` is when this conversation last reached the provider, which
+        # is exactly what the cache's age depends on, whichever process sent
+        # it. With 0, ``_sweep_before_run`` had nothing to judge on a resume
+        # and every later sweep read the fresh per-call stamp as warm, so a
+        # session reopened hours later never shed its stale outputs (agent
+        # review round 2, R2-M1: 0 prune rows where base wrote 5). A transcript
+        # without stamped usage (legacy, or never answered) keeps 0.
+        self._last_provider_request_ms = _newest_usage_at_ms(transcript)
+        self._seed_cache_diagnostics(transcript)
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
@@ -5876,10 +5985,19 @@ class Session:
         # composition root and docs/REWRITE.md forbids module-level provider
         # imports, because they are what makes importing a session expensive
         # (and, done at the top of this file, cyclic).
-        from local_operator.providers.failover import is_image_rejection
+        from local_operator.providers.failover import (
+            is_image_count_rejection,
+            is_image_rejection,
+        )
 
         if not is_image_rejection(error):
             return
+        # A COUNT refusal ("Too much media: ... 101 images > 100") poisons no
+        # block: the request crossed this provider's per-request limit. The
+        # strip is still what lets the next turn succeed, but it is
+        # provider-scoped like the size strip, so ``set_model`` to a provider
+        # with a higher limit lifts it (agent review round 2, R2-m2).
+        count_only = is_image_count_rejection(error)
         if self._images_rejected:
             # Already stripping, so there is nothing more to do to the render —
             # but a GENUINE refusal permanently downgrades the strip's scope.
@@ -5887,9 +6005,11 @@ class Session:
             # stays marked provider-scoped, and the next `/model` switch lifts
             # it and re-admits a block the provider actually refused (QA round
             # 3, Q6). Idempotent: clearing a flag that is already clear is free.
-            self._images_rejected_for_size = False
+            if not count_only:
+                self._images_rejected_for_size = False
             return
         self._images_rejected = True
+        self._images_rejected_for_size = count_only
         logger.warning(
             "provider rejected an image; dropping images from this session's context (%s)",
             self._image_drop_diagnostic(),
@@ -7621,6 +7741,9 @@ class Session:
         # The team takes the agent slot (issue #2014), AFTER the brief so the
         # claim can only ever describe a team that is fully attached.
         self._claim_agent_slot_for_team()
+        # A team whose MANAGER is a read-only shell role makes this session
+        # that role: the same confinement ``attach_agent_profile`` applies.
+        self._apply_readonly_shell_role(self._team_manager_name())
         # Journal the NAME so a resume can rebuild this tail. On change only:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
@@ -8217,6 +8340,11 @@ class Session:
             # A role that NAMES a tool keeps its schema published (see
             # ``tools/deferral.py``); the lopdev manager names ``project``.
             self.set_tool_deferral(pins=self._attached_profile_tools)
+            # BEFORE the caller declares the role's inventory (``lop exec
+            # --profile`` declares it right after this returns, and unattended
+            # that declaration IS the approval): the scout's ``bash`` must be
+            # the sandboxed one, or absent, by the time anything can call it.
+            self._apply_readonly_shell_role(profile.name)
             return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
         if kind == "specialist":
             # A specialist carries instructions only — the registry row has no
@@ -8228,6 +8356,105 @@ class Session:
             body = f"[agent: {display_name}]\n{specialist_prompt}" if specialist_prompt else ""
             return self._stamp_agent_brief(body, display_name)
         return None
+
+    def _apply_readonly_shell_role(self, role: str) -> None:
+        """Confine this session's shell when ``role`` is a read-only shell role.
+
+        WHY HERE. ``harness.subagent`` confines a DELEGATED scout, but a scout
+        profile can also be attached to a session that already exists, and
+        every such path ends in :meth:`attach_agent_profile`: ``lop exec
+        --profile`` (and through it the ``sessions`` tool's spawn and mesh
+        ``--profile``), the SDK's profile, ``/agent`` in the TUI and the routed
+        runtime, and a resume restoring the attachment. Round 1 of PR #2987
+        measured the gap: ``lop exec --profile scout`` offered the seed's
+        ``bash`` unwrapped, auto-approved by the unattended declaration, and
+        ``echo PWNED > <outside path>`` wrote the file. The role test is the
+        same predicate the subagent path reads
+        (``harness.subagent.is_readonly_shell_role``), keyed by ROLE, not by
+        ``bash`` being in the allow-list.
+
+        The shell root is this session's own scratchpad when the host can
+        enforce the sandbox. The synchronous check reads only what is known
+        without a spawn (this runs on the event loop); if the probe has not
+        run yet the root is set optimistically, which is safe because
+        ``execute_bash`` awaits the full answer before every spawn and refuses
+        rather than run unwrapped. With no root, ``bash`` is withheld at
+        :meth:`_filter_declared`, the point every inventory writer passes.
+
+        The attached role's NAMES are floored too (see the end of this method),
+        because for ``lop exec --profile`` they are the unattended declaration:
+        filtering and rebuilding the inventory alone left a scout whose stored
+        row predates the shell with no ``bash`` at top level, while the same row
+        delegated got one through the child path's floor.
+        """
+        from local_operator.harness.subagent import (
+            BACKGROUND_OBSERVER_TOOLS,
+            _can_background,
+            is_readonly_shell_role,
+            readonly_shell_floor_names,
+            readonly_shell_write_root,
+        )
+
+        if not is_readonly_shell_role(role):
+            return
+        self._readonly_shell = True
+        if self._shell_write_root is None:
+            from local_operator.tools.confinement import (
+                shell_sandbox_known_unavailable_reason,
+            )
+
+            self._shell_write_root = readonly_shell_write_root(
+                self._scratchpad_dir(), unavailable=shell_sandbox_known_unavailable_reason()
+            )
+        # Re-run the inventory through the filter (which strips a root-less
+        # shell) and rebuild a present ``bash`` against the new context, so the
+        # schema says SANDBOXED and carries the ``read`` tier the executor's
+        # wrap makes honest. The executor reads the per-turn context, so even an
+        # old ``bash`` object would wrap; the rebuild keeps the schema truthful.
+        tools = list(self._tools)
+        if self._shell_write_root is not None and any(tool.name == "bash" for tool in tools):
+            try:
+                from local_operator.tools.registry import create_tools
+
+                # A MINIMAL context, not ``_build_tool_context()``: this also
+                # runs from ``__init__`` (a resume restoring the attachment),
+                # before the session's full context can be built, and the
+                # ``bash`` builder reads only ``shell_write_root``
+                # (``build_bash_tool``). The executor reads the full per-turn
+                # context, which carries the same root.
+                context = ToolContext(shell_write_root=self._shell_write_root)
+                rebuilt = {tool.name: tool for tool in create_tools(context, enabled=["bash"])}
+                tools = [rebuilt.get(tool.name, tool) for tool in tools]
+            except Exception:  # noqa: BLE001 — fail closed: drop the shell, never keep it open
+                logger.warning("could not rebuild the scout's sandboxed bash", exc_info=True)
+                self._shell_write_root = None
+        if self._attached_profile_tools:
+            # The SAME floor the delegated child gets
+            # (``harness.subagent.readonly_shell_floor_names``), applied to the
+            # names ``exec_startup.declared_tool_inventory`` turns into the
+            # declaration: an installed row frozen before the scout had a shell
+            # (seed sync holds tool changes back) still gets the sandboxed one,
+            # and a root-less session's declaration stops naming one it cannot
+            # have. AFTER the rebuild, whose failure clears the root. Only names:
+            # ``bash`` is admitted from the inventory the session already holds,
+            # never fabricated, like the child floor's ``available`` -- so the
+            # root is offered only when that inventory HAS a ``bash`` (a host or
+            # config that disabled it would otherwise declare a tool resolving
+            # to nothing, and the run would end reporting it unresolved).
+            holds_bash = any(tool.name == "bash" for tool in tools)
+            names = readonly_shell_floor_names(
+                self._attached_profile_tools,
+                shell_root=self._shell_write_root if holds_bash else None,
+            )
+            # Parity with the child prune: a shell that can background keeps
+            # the tools that observe and await its jobs, or its own
+            # ``background=true`` receipt points at a tool it was not declared.
+            if "bash" in names and _can_background([tool for tool in tools if tool.name == "bash"]):
+                names = (*names, *sorted(BACKGROUND_OBSERVER_TOOLS - set(names)))
+            self._attached_profile_tools = names
+            # Additive, so re-pinning only adds what the floor added.
+            self.set_tool_deferral(pins=names)
+        self.refresh_tools(tools)
 
     def clear_agent_profile(self) -> None:
         """Detach any active ``/agent`` profile (the ``/agent clear`` verb).
@@ -8624,6 +8851,27 @@ class Session:
         error = task.exception()
         if error is not None:
             logger.debug("conversation name write failed; will retry at dispose", exc_info=error)
+
+    def _seed_cache_diagnostics(self, transcript: Transcript) -> None:
+        """Hand a resumed conversation's diagnostics chain back to its stream.
+
+        The chain (``SessionStreamFn._cache_diagnostics_previous_id``) is
+        per-process, so without this a resume restarted at
+        ``previous_message_id: null`` and a break caused by an edited
+        instruction file was recorded as ``baseline`` (PR #2984 QA Q1).
+        ``getattr`` because test doubles and non-Anthropic stream fns have no
+        such hook; best-effort because telemetry must never stop a session from
+        opening.
+        """
+        seed = getattr(self._stream_fn, "seed_cache_diagnostics", None)
+        if not callable(seed):
+            return
+        try:
+            previous_id = _resumed_cache_diagnostics_id(transcript)
+            if previous_id:
+                seed(previous_id)
+        except Exception:  # noqa: BLE001 — a telemetry seed must never fail construction
+            logger.debug("cache diagnostics resume seed failed", exc_info=True)
 
     def _is_unnamed_fork(self) -> bool:
         """True while this session is a fork still wearing its parent's title.
@@ -13154,6 +13402,12 @@ class Session:
         :meth:`_scope_declared_ops`; this method is where every inventory writer
         passes, so this is where the two cannot be applied apart.
         """
+        if self._readonly_shell and self._shell_write_root is None:
+            # A read-only shell role with no enforceable sandbox gets NO shell
+            # (see :meth:`_apply_readonly_shell_role`). Here, not at the attach,
+            # because every later writer (an MCP refresh, a capability merge)
+            # passes through this method and must not hand ``bash`` back.
+            tools = [tool for tool in tools if getattr(tool, "name", None) != "bash"]
         if self._declared_tools is None:
             return list(tools)
         allowed = self._declared_tools
@@ -13633,6 +13887,10 @@ class Session:
     @property
     def attached_profile_tools(self) -> tuple[str, ...]:
         """The ``tools:`` allow-list the attached role declares, or ``()``.
+
+        For a read-only shell role this is the list AFTER the shell floor
+        (see :meth:`_apply_readonly_shell_role`), since it is what an unattended
+        ``lop exec --profile`` declares.
 
         ``()`` means "the role declares none", NOT "declare an empty
         inventory"; a caller deciding whether to bound itself on this must treat
@@ -16719,6 +16977,22 @@ class Session:
         # runs (idempotent: it re-adopts the newest usage it scans).
         if isinstance(event, MessageEndEvent):
             self._note_usage([event.message])
+            # The provider-cache clock the prune sweeps read
+            # (``_plan_compaction``) advances on EVERY completed provider
+            # call, not only when a run ends. A subagent usually lives inside
+            # one long run, so with the run-end stamp alone this read 0 for its
+            # whole life. Every boundary sweep then saw a 90-minute "idle" gap
+            # and blanked already-cached frames and reads mid-run, which is the
+            # prefix-break mechanism described in ``compaction/pruning.py``.
+            #
+            # Read against this stamp, a sweep measures the gap BEFORE the
+            # request it precedes: the mid-turn sweep runs after the tool batch
+            # and before the next call, so a 90-minute tool still flushes. The
+            # one gap no post-call sweep can see is the user's wait between
+            # runs; ``_sweep_before_run`` covers that, before the first request
+            # (agent review round 1, M2).
+            if isinstance(event.message, Message) and event.message.usage is not None:
+                self._last_provider_request_ms = int(time.time() * 1000)
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
         #
@@ -17854,6 +18128,9 @@ class Session:
             signal.abort("interrupted")
         try:
             await self._ensure_selected_model()
+            # Before anything is sent: the one point that can see the user's
+            # wait since the last call (see the method).
+            await self._sweep_before_run()
             # Imported HERE, once per real turn, rather than at module scope:
             # `harness.rows` gathers the chrome prompts from
             # `session.goal_loop`/`session.session` behind a function precisely
@@ -19195,6 +19472,11 @@ class Session:
             # tool's enforcement point reads this single answer (see
             # ``local_operator.tools.confinement``).
             confinement_root=self._confinement_root,
+            # The scout's write-confined shell root, when it has one: the bash
+            # executor wraps every command in the write-confining sandbox (or
+            # refuses) whenever this is set. Dropped here, a scout's shell
+            # would run UNWRAPPED -- see ``test_tool_context_parity``.
+            shell_write_root=self._shell_write_root,
             # Derived, never configured: see :meth:`_scratchpad_dir`.
             scratchpad_dir=self._scratchpad_dir(),
             # The session's OWN directory: where the eval tool records its
@@ -22502,6 +22784,15 @@ class Session:
             # token side depends on is untouched; a figure that over-states
             # this render can at worst fall through to a plan gate that
             # re-derives its own and returns ``below_threshold``.
+            #
+            # The batch-flush ceiling is judged at EVERY tool boundary, before
+            # the pre-gate below can return. Asked only inside
+            # ``_plan_compaction``, it was reached only once a compaction might
+            # be due, which on a 200k window means ~133 images or 16 MB, past
+            # the 100-image limit it exists to stay under: QA round 2 (Q5)
+            # measured 2 sweeps in 142 boundaries and requests of 112 images.
+            # Before the render below, so the bound reads the flushed history.
+            await self._flush_stale_if_due(compaction_api, settings)
             rendered = self._render_history(messages)
             current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
@@ -23024,6 +23315,135 @@ class Session:
         rest = args[1:]
         return await asyncio.to_thread(lambda: func(snapshot, *rest))
 
+    async def _sweep_stale_outputs(
+        self,
+        compaction_api: Any,
+        settings: Any,
+        llm_history: list[Message],
+        *,
+        only_if_due: bool = False,
+    ) -> bool:
+        """Run the in-place prune sweeps over ``llm_history`` and journal them.
+
+        (a) Superseded/useless tool outputs, then (b) stale frames, behind a
+        session gate: only a session that has CAPTURED browser views can own
+        frames a newer view of a surface supersedes, so every other session
+        type is left byte-identical (the gate's own comment draws the line).
+        Both take the sent-prefix and idle-flush guards: a blank of anything
+        already sent rewrites the prompt cache from that point on.
+
+        The idle flush compares against the last completed PROVIDER call
+        (``_last_provider_request_ms``), which every post-call sweep reads as
+        "the gap before the NEXT request": a 90-minute tool flushes. It is
+        deliberately not the stamp from before the call that just completed: if
+        that gap was idle, that call already rewrote the cache, and blanking now
+        would buy a SECOND rewrite on the next one (QA round 1, C4, where main
+        did exactly that). The user's wait between runs is judged once, before
+        the run's first request, by :meth:`_sweep_before_run`.
+
+        When the retained stale set (stale frames AND superseded reads, so a
+        text-only session is bounded too) crosses a batch-flush ceiling
+        (``stale_flush_due``) both sweeps run with ``flush=True``: everything
+        stale leaves in ONE batch, one prefix break instead of one per item.
+        The stale set is computed ONCE and handed to both the ceiling and the
+        frame sweep (agent review round 2, R2-m3).
+
+        ``only_if_due`` is the mid-turn ceiling check (:meth:`_flush_stale_if_due`):
+        sweep only when a flush is due, and otherwise leave the history alone.
+        Returns whether a batch flush was due.
+        """
+        now_ms = int(time.time() * 1000)
+        last_ms = self._last_provider_request_ms
+        frames = _history_captured_browser_views(llm_history)
+        flush = False
+        stale: Any = None
+        compute: Any = getattr(compaction_api, "stale_set", None)
+        due: Any = getattr(compaction_api, "stale_flush_due", None)
+        if callable(compute) and callable(due):
+            stale = compute(llm_history, frames=frames)
+            flush = bool(
+                due(
+                    llm_history,
+                    context_window=self.effective_model.context_window,
+                    wire_bytes_trigger=self._wire_trigger_bytes(compaction_api, settings) or 0,
+                    stale=stale,
+                )
+            )
+        if only_if_due and not flush:
+            return False
+        pruned_before = _pruned_ids(llm_history)
+        # ``flush`` and ``victims`` are passed only when set, so a duck-typed
+        # hook that predates the parameters (the suite has several) keeps its
+        # old signature.
+        extra: dict[str, Any] = {"flush": True} if flush else {}
+        try:
+            compaction_api.prune_tool_outputs(llm_history, now_ms, last_ms, **extra)
+        except (ImportError, AttributeError):
+            pass  # optional pruning hook absent; degrade to no pruning
+        if frames:
+            frame_extra = dict(extra)
+            if stale is not None:
+                frame_extra["victims"] = stale.frames
+            try:
+                compaction_api.prune_stale_frames_in_place(
+                    llm_history, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
+                )
+            except (ImportError, AttributeError):
+                pass  # optional frame sweep absent; degrade to no sweep
+        await self._journal_prunes(llm_history, pruned_before)
+        return flush
+
+    async def _flush_stale_if_due(self, compaction_api: Any, settings: Any) -> None:
+        """Batch-flush stale outputs at a tool boundary when a ceiling is crossed.
+
+        The mid-turn half of the batch flush: the boundary sweep inside
+        ``_plan_compaction`` sits behind the compaction pre-gate, so a long
+        run under every compaction trigger never reached the ceiling (QA
+        round 2, Q5). This judges the ceiling on the persisted render the
+        sweep uses, and sweeps (journalled, like every other sweep) only
+        when a flush is due: below the ceiling the history stays
+        byte-identical and the cached prefix intact. Best-effort: an
+        optimisation must never fail the run.
+        """
+        try:
+            llm_history = self._render_for_compaction()
+            await self._sweep_stale_outputs(compaction_api, settings, llm_history, only_if_due=True)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("mid-turn stale flush failed", exc_info=True)
+
+    async def _sweep_before_run(self) -> None:
+        """Flush stale outputs before a run's first request, when the cache is cold.
+
+        Every other sweep runs right after a provider call, so none of them can
+        see the gap a user leaves between runs. Without this, the per-call
+        clock made the cross-run idle flush unreachable (agent review round 1,
+        M2; QA Q2): stale frames and superseded reads then left only by
+        compaction, and a resumed session carried every copy (QA Q1).
+
+        Here, before anything is sent, a gap of ``idle_flush_ms`` or more since
+        the last provider call proves the cache cold, so blanking costs nothing
+        the first request would not pay anyway. Best-effort: a sweep that fails
+        must never stop the run.
+        """
+        last_ms = self._last_provider_request_ms
+        if last_ms <= 0:
+            return  # nothing sent yet in this process: nothing to judge
+        try:
+            from local_operator.compaction import api as compaction_api
+        except ImportError:
+            return
+        settings = self._compaction_settings or compaction_api.CompactionSettings()
+        if not getattr(settings, "enabled", True):
+            return
+        idle_flush_ms = int(getattr(compaction_api, "IDLE_FLUSH_MS", 5_400_000))
+        if int(time.time() * 1000) - last_ms < idle_flush_ms:
+            return
+        try:
+            llm_history = self._render_for_compaction()
+            await self._sweep_stale_outputs(compaction_api, settings, llm_history)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("pre-run idle sweep failed", exc_info=True)
+
     async def _plan_compaction(
         self, *, respect_threshold: bool
     ) -> _CompactionPlan | CompactionOutcome:
@@ -23076,30 +23496,7 @@ class Session:
 
         # (1) Prune before deciding: blanked outputs shrink the estimate and
         # may avoid a compaction pass entirely. Mutates messages in place.
-        # The idle flush compares against the last PROVIDER request, not turn
-        # bookkeeping, so a genuinely idle session reclaims the warm region.
-        now_ms = int(time.time() * 1000)
-        pruned_before = _pruned_ids(llm_history)
-        try:
-            compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_provider_request_ms)
-        except (ImportError, AttributeError):
-            pass  # optional pruning hook absent; degrade to no pruning
-        # (1b) Stale frames ride the same boundary, behind a session gate:
-        # only a session that has CAPTURED browser views can own frames a
-        # newer view of a surface supersedes, so every other session type is
-        # left byte-identical (the gate's own comment draws the line). The
-        # frame blank writes bytes the prompt cache may still hold, so the
-        # sweep takes the same warm-suffix/idle-flush guards (1) takes.
-        if _history_captured_browser_views(llm_history):
-            try:
-                compaction_api.prune_stale_frames_in_place(
-                    llm_history,
-                    now_ms=now_ms,
-                    last_activity_ms=self._last_provider_request_ms,
-                )
-            except (ImportError, AttributeError):
-                pass  # optional frame sweep absent; degrade to no sweep
-        await self._journal_prunes(llm_history, pruned_before)
+        await self._sweep_stale_outputs(compaction_api, settings, llm_history)
 
         # (2) Trigger math: prefer the provider's ground-truth context size.
         provider_reported = (
@@ -25096,9 +25493,12 @@ class Session:
             # ahead of the last request the turn actually sent.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL: the session stamps its
+            # Same prefix as the turn, so the same size: the session stamps its
             # own hint here because the shared stream fn holds none (a child
             # would overwrite it — see ``ChatRequest.context_tokens_hint``).
+            # On Anthropic the hint no longer picks the TTL: an aside is an
+            # auxiliary errand and goes out at 5m, and a 5m-marked request still
+            # reads the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
@@ -25227,8 +25627,10 @@ class Session:
             # would change position 0 and force a full re-process.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL — the session stamps its
-            # own hint because the shared stream fn holds none.
+            # Same prefix as the turn, so the same size — the session stamps its
+            # own hint because the shared stream fn holds none. On Anthropic a
+            # clearance is an auxiliary errand at 5m regardless, and still reads
+            # the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
             # Nothing here reaches a screen until the whole answer is parsed, so
             # a stalled read may be discarded and retried whole (the advisor's

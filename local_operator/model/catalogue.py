@@ -52,6 +52,8 @@ without either overwriting the other.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import fnmatch
 import json
@@ -61,6 +63,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
 
@@ -348,6 +351,61 @@ _LISTING_LEASE_S = 60.0
 _LISTING_LEASE_WAIT_S = 2.0
 
 
+def _holder_proven_dead(holder: str) -> bool:
+    """Whether a lease's ``<pid>:<nonce>`` holder is a process PROVEN gone.
+
+    WHY (PR #2992, QA round 2 Q-2): a daemon SIGTERMed while its boot warm held
+    a lease left the file standing for its full :data:`_LISTING_LEASE_S`, and
+    the next process's first cold read sat in :meth:`await_peer_briefly` for
+    ``_LISTING_LEASE_WAIT_S`` (measured 2209.5 ms) waiting on a document nobody
+    would write. A holder that is provably not running can be stolen from at once.
+
+    Only a definite "no such process" counts (``procstate.pid_liveness`` is
+    three-valued): doubt, an unparsable holder, or a pid on ANOTHER host sharing
+    the cache dir all keep the lease's normal expiry, which is the conservative
+    direction — a live peer called dead costs a duplicate fetch, never a wrong
+    answer, but the lease exists to avoid exactly that. Pid reuse can only make a
+    dead holder read live, i.e. fall back to today's expiry.
+    """
+    from local_operator.procstate import pid_liveness
+
+    pid_text, _, _nonce = holder.partition(":")
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    if pid == os.getpid():
+        # Our own pid: a lease this process still holds is alive by definition,
+        # and one it forgot (released elsewhere) is not this function's call.
+        return False
+    return pid_liveness(pid) is False
+
+
+#: Leases THIS process currently holds, so teardown can drop them (Q-2 half a).
+_held_leases: "set[_ListingFetchLease]" = set()
+_held_leases_lock = threading.Lock()
+
+
+def release_held_leases() -> int:
+    """Release every fetch lease this process holds; returns how many.
+
+    For daemon teardown: a fetch cancelled mid-flight (the boot warm, a request
+    abandoned at shutdown) would otherwise leave its lease standing for the next
+    process to wait on. Each release is a read and an unlink of a small file in
+    the cache dir — no network, no waiting — and never raises.
+    """
+    with _held_leases_lock:
+        leases = list(_held_leases)
+    released = 0
+    for lease in leases:
+        try:
+            lease.release()
+            released += 1
+        except Exception:  # noqa: BLE001 — teardown must never be the failure
+            logger.debug("listing lease release failed", exc_info=True)
+    return released
+
+
 class _ListingFetchLease:
     """A best-effort cross-process lock on one catalogue document.
 
@@ -378,10 +436,12 @@ class _ListingFetchLease:
             # same O_EXCL race decides the single winner among the stealers.
             try:
                 raw = self._path.read_text(encoding="utf-8", errors="replace")
-                expires = float(json.loads(raw).get("expires_at", 0.0))
-            except (OSError, ValueError):
-                expires = 0.0
-            if expires > time.time():
+                standing = json.loads(raw)
+                expires = float(standing.get("expires_at", 0.0))
+                holder = str(standing.get("holder", ""))
+            except (OSError, ValueError, AttributeError):
+                expires, holder = 0.0, ""
+            if expires > time.time() and not _holder_proven_dead(holder):
                 return False
             try:
                 self._path.unlink()
@@ -400,6 +460,8 @@ class _ListingFetchLease:
         finally:
             os.close(fd)
         self._held = True
+        with _held_leases_lock:
+            _held_leases.add(self)
         return True
 
     def await_peer_briefly(self) -> None:
@@ -426,6 +488,8 @@ class _ListingFetchLease:
         if not self._held:
             return
         self._held = False
+        with _held_leases_lock:
+            _held_leases.discard(self)
         try:
             raw = self._path.read_text(encoding="utf-8", errors="replace")
             if json.loads(raw).get("holder") == self._token:
@@ -433,6 +497,57 @@ class _ListingFetchLease:
         except (OSError, ValueError):
             # Already gone or unreadable: nothing to free.
             pass
+
+
+#: The reads that ended with NO usable document on the current resolution, or
+#: ``None`` when nobody is collecting. See :func:`collect_unavailable`.
+_unavailable: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "listing_unavailable", default=None
+)
+
+
+def note_unavailable(what: str) -> None:
+    """Record that a metadata leg ended WITHOUT an answer, for :func:`collect_unavailable`.
+
+    Called by :func:`read_listing` itself (a failed or backed-off fetch with no
+    document to fall back on) and by the resolution legs in
+    ``model.configure`` whose own ``except`` swallows an error before any read.
+    A no-op when nobody is collecting.
+    """
+    sink = _unavailable.get()
+    if sink is not None:
+        sink.append(what)
+
+
+@contextlib.contextmanager
+def collect_unavailable() -> Iterator[list[str]]:
+    """Collect every :func:`note_unavailable` inside the block into one list.
+
+    WHY (PR #2992, review MAJOR-1). Every listing leg degrades to its fallback
+    without raising, so a 401, DNS failure, 5xx or timeout was indistinguishable
+    from "the listing has nothing" by the time ``configure``'s day-bucket memo
+    stored the answer, and that degraded answer was then served for up to 24 h
+    after the network recovered. This is how the legs report "I could not
+    answer" to the memo without changing any of their return types.
+
+    A ContextVar, so collection is per calling thread/task: the legs run
+    synchronously inside one resolution, and a background revalidation thread
+    (which starts with an empty context) never reports into a caller's list.
+    A STALE document served after a failed refresh is NOT reported: its numbers
+    are real, and pinning them for the bucket is the memo's documented staleness.
+    """
+    outer = _unavailable.get()
+    sink: list[str] = []
+    token = _unavailable.set(sink)
+    try:
+        yield sink
+    finally:
+        _unavailable.reset(token)
+        # NESTED collectors both hear it: the metadata memo collects around one
+        # resolution, and a caller around it (the boot warm) asks the same
+        # question of the whole call.
+        if outer is not None:
+            outer.extend(sink)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -793,6 +908,8 @@ def read_listing(
             key,
             LISTING_FAILURE_BACKOFF_S,
         )
+        if payload is None:
+            note_unavailable(key)
         return Listing(payload=payload, age_s=age, failed=True)
 
     # CROSS-PROCESS FETCH LEASE (see the class docstring): the winner fetches
@@ -834,6 +951,7 @@ def read_listing(
             logger.debug("using stale %s catalogue (%.0fs old): %s", key, age, exc)
             return Listing(payload=payload, age_s=age, failed=True)
         logger.debug("no %s catalogue available: %s", key, exc)
+        note_unavailable(key)
         return Listing(payload=None, age_s=float("inf"), failed=True)
 
     _write_cache(path, fresh)

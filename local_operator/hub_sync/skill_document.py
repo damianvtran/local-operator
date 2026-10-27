@@ -32,6 +32,19 @@ MAX_CONTENT_BYTES = 1024 * 1024
 MAX_WIRE_BYTES = 2 * 1024 * 1024
 MAX_PATH_BYTES = 240
 MAX_PATH_SEGMENTS = 5
+#: What the HUB accepts per published skill, by visibility: ``(bytes per file,
+#: bytes summed over every file)``. These are NOT the local limits above (200 KiB
+#: / 1 MiB): the local ones bound what this machine will store, these bound what
+#: a push can succeed with, so an editor must warn against these before a push is
+#: refused. Mirrored by hand from the agent-server, the source of truth:
+#: ``internal/requests/skills.go`` -- ``SkillFileMaxBytes`` /
+#: ``SkillFilesSumMaxBytes`` (public, 20 KiB each) and ``SkillFileMaxBytesOrg`` /
+#: ``SkillFilesSumMaxBytesOrg`` (organisation, 256 KiB each). Re-read that file
+#: when the hub changes its caps; nothing in core can detect the drift.
+HUB_PUBLISH_BUDGETS: Mapping[str, tuple[int, int]] = {
+    "public": (20 * 1024, 20 * 1024),
+    "org": (256 * 1024, 256 * 1024),
+}
 MAX_NAME_CHARS = 64
 MAX_DESCRIPTION_CHARS = 1024
 _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")

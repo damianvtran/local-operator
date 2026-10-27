@@ -182,7 +182,8 @@ def test_a_shape_refusal_from_the_real_validator_is_not_malformed() -> None:
     from local_operator.monitors.readonly import external_monitor_verdict
 
     outcome = monitor_spec.build_monitor_spec(
-        {"tool": "glob", "arguments": {"pattern": "*.py", "path": "/tmp"}},
+        # ``root``: glob declares ``path`` since PR #2982, so it is no longer unknown.
+        {"tool": "glob", "arguments": {"pattern": "*.py", "root": "/tmp"}},
         monitor_id="m1",
         now_ms=1,
         settings=settings(),
@@ -191,4 +192,4 @@ def test_a_shape_refusal_from_the_real_validator_is_not_malformed() -> None:
     )
     failed = _error_of(outcome)
     assert failed["malformed"] is False
-    assert 'unknown argument(s) "path"' in failed["error"]
+    assert 'unknown argument(s) "root"' in failed["error"]

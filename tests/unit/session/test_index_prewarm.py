@@ -525,3 +525,227 @@ async def test_a_reader_joining_an_in_flight_preheat_does_not_parse_twice(tmp_pa
     await asyncio.gather(preheat, open_read())
     assert builds["count"] == 1, f"the journal was parsed {builds['count']} times"
     assert replay_cache.cached_replay(key) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_resolves_the_newest_journals_newest_first(tmp_path, monkeypatch):
+    """The model warm runs the open's own resolution over the journals opened next.
+
+    The resolution itself is stubbed: what is pinned here is WHICH journals reach
+    it and in what order, plus the bound. That the resolution is the open's own
+    call is pinned by the next test.
+    """
+    root = tmp_path
+    for index in range(5):
+        journal(root, f"s{index}", mtime=1_000.0 + index)
+    seen: list[str] = []
+
+    def resolve(_root, sid):
+        seen.append(sid)
+        return True
+
+    monkeypatch.setattr(prewarm, "_resolve_model", resolve)
+
+    assert await prewarm.warm_model_metadata(root, limit=3) == 3
+    assert seen == ["s4", "s3", "s2"]
+
+
+def test_the_model_warm_runs_the_cold_opens_resolution(tmp_path, monkeypatch):
+    """``_resolve_model`` is ``resolve_conversation_model`` on the session's directory.
+
+    The same call ``cold_model.synthesise_cold_state`` makes, so the memo entries
+    the warm leaves behind are the ones the first open looks up.
+    """
+    from local_operator.model import catalogue
+    from local_operator.session import cold_model
+
+    calls: list[tuple[Path, Path | None]] = []
+    monkeypatch.setattr(
+        cold_model,
+        "resolve_conversation_model",
+        lambda config_dir, session_dir=None, **_kw: calls.append((config_dir, session_dir)),
+    )
+    assert prewarm._resolve_model(tmp_path, "s1") is True
+    assert calls == [(tmp_path, tmp_path / "sessions" / "s1")]
+    # A leg that reports it could not answer makes the resolution report False.
+    monkeypatch.setattr(
+        cold_model,
+        "resolve_conversation_model",
+        lambda *_a, **_k: catalogue.note_unavailable("radient.listing"),
+    )
+    assert prewarm._resolve_model(tmp_path, "s1") is False
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_honours_the_guards_and_survives_a_failure(tmp_path, monkeypatch):
+    """Disk refuses it outright, load drops the rest, and one failure skips one journal."""
+    root = tmp_path
+    for index in range(3):
+        journal(root, f"s{index}", mtime=1_000.0 + index)
+
+    def boom(_root, sid):
+        if sid == "s2":
+            raise RuntimeError("listing exploded")
+        return True
+
+    monkeypatch.setattr(prewarm, "_resolve_model", boom)
+    # The newest journal fails; the warm carries on and counts only what resolved.
+    assert await prewarm.warm_model_metadata(root, limit=3) == 2
+
+    monkeypatch.setattr(prewarm, "load_per_cpu", lambda: 5.0)
+    # Busy host: the first journal is still allowed, the rest are dropped.
+    monkeypatch.setattr(prewarm, "_resolve_model", lambda *_a: True)
+    assert await prewarm.warm_model_metadata(root, limit=3) == 1
+
+    monkeypatch.setattr(
+        prewarm, "free_bytes", lambda _root=None: prewarm.PREWARM_MIN_FREE_BYTES - 1
+    )
+    assert await prewarm.warm_model_metadata(root, limit=3) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_startup_prewarm_also_starts_the_model_warm(tmp_path, monkeypatch):
+    """The daemon's one startup call schedules the model warm as its OWN task.
+
+    Its own task rather than a step of the index queue: queued behind the index
+    and replay passes, a first click seconds after boot would still pay the fetch.
+    """
+    root = tmp_path
+    journal(root, "s1", mtime=1_000.0)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def held_index(_root):
+        await release.wait()
+        return 0
+
+    async def model_warm(_root):
+        started.set()
+        return 1
+
+    monkeypatch.setattr(prewarm, "warm_index_cache", held_index)
+    monkeypatch.setattr(prewarm, "warm_model_metadata", model_warm)
+    task = prewarm.start_index_prewarm(root)
+    assert task is not None
+    # The index pass is still parked, and the model warm has already run.
+    await asyncio.wait_for(started.wait(), 1)
+    assert not task.done()
+    release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_skips_the_daemons_own_and_non_user_sessions(tmp_path, monkeypatch):
+    """QA round 1, Q-1: the boot sessions are newest by mtime and must not win the slot.
+
+    Aida and the Librarian are named by their own ``state.json`` (neither has an
+    ``origin.json``); a subagent is named by its origin marker. The user's own
+    conversation — and a fork, which IS a user origin — remain candidates.
+    """
+    from local_operator.aida import state as aida_state
+    from local_operator.librarian import state as librarian_state
+    from local_operator.resume import ORIGIN_FORK, ORIGIN_SUBAGENT, mark_session_origin
+
+    root = tmp_path
+    journal(root, "user-old", mtime=1_000.0)
+    journal(root, "forked", mtime=1_500.0)
+    journal(root, "child", mtime=2_000.0)
+    journal(root, "aida-sid", mtime=3_000.0)
+    journal(root, "librarian-sid", mtime=4_000.0)
+    mark_session_origin(root / "sessions" / "child", ORIGIN_SUBAGENT)
+    mark_session_origin(root / "sessions" / "forked", ORIGIN_FORK, parent="user-old")
+    aida_state.write_state(root, {"session_id": "aida-sid"})
+    librarian_state.write_state(root, {"session_id": "librarian-sid"})
+
+    assert prewarm._newest_journals(root, limit=8) == ["forked", "user-old"]
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_stops_on_the_first_unavailable_listing(tmp_path, monkeypatch):
+    """Offline at boot: one attempt, not eight (review MINOR-1)."""
+    root = tmp_path
+    for index in range(4):
+        journal(root, f"s{index}", mtime=1_000.0 + index)
+    seen: list[str] = []
+
+    def offline(_root, sid):
+        seen.append(sid)
+        return False
+
+    monkeypatch.setattr(prewarm, "_resolve_model", offline)
+    assert await prewarm.warm_model_metadata(root, limit=4) == 1
+    assert seen == ["s3"]
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_stops_when_its_budget_is_spent(tmp_path, monkeypatch):
+    """A total deadline across the pass, checked between journals (review MINOR-1)."""
+    root = tmp_path
+    for index in range(4):
+        journal(root, f"s{index}", mtime=1_000.0 + index)
+    clock = [100.0]
+    monkeypatch.setattr(prewarm.time, "monotonic", lambda: clock[0])
+
+    def slow(_root, _sid):
+        clock[0] += 6.0
+        return True
+
+    monkeypatch.setattr(prewarm, "_resolve_model", slow)
+    # 6 s per journal against a 10 s budget: two run, the third is refused.
+    assert await prewarm.warm_model_metadata(root, limit=4, budget_s=10.0) == 2
+
+
+@pytest.mark.asyncio
+async def test_teardown_cancels_a_warm_parked_in_a_request(tmp_path, monkeypatch):
+    """``cancel_prewarm`` ends a pass whose worker is stuck, without waiting for it.
+
+    The worker is a DAEMON thread, so the stuck call cannot hold interpreter exit
+    either; the awaiting task is what is cancelled here.
+    """
+    import threading
+
+    root = tmp_path
+    journal(root, "s1", mtime=1_000.0)
+    parked = threading.Event()
+    release = threading.Event()
+
+    def stuck(_root, _sid):
+        parked.set()
+        release.wait(5)
+        return True
+
+    monkeypatch.setattr(prewarm, "_resolve_model", stuck)
+    monkeypatch.setattr(prewarm, "warm_index_cache", lambda _root: asyncio.sleep(0, 0))
+    task = prewarm.start_index_prewarm(root)
+    assert task is not None
+    await asyncio.to_thread(parked.wait, 5)
+    began = time.perf_counter()
+    await prewarm.cancel_prewarm()
+    assert time.perf_counter() - began < 1.0
+    assert not prewarm._TASKS
+    workers = [t for t in threading.enumerate() if t.name == "lop-model-prewarm"]
+    assert workers and all(t.daemon for t in workers)
+    release.set()
+
+
+@pytest.mark.asyncio
+async def test_the_model_warm_never_selects_an_archived_journal(tmp_path, monkeypatch):
+    """An archived conversation stays out of the warm: it must not be decompressed.
+
+    Selection goes through ``compression.transcript_source`` (the archive-aware
+    resolver), so an archive is seen as an archive rather than as "no journal"
+    by a plain-name stat, and skipped.
+    """
+    from local_operator.session import compression
+
+    monkeypatch.setattr(compression, "_free_bytes", lambda _path: 10**12)
+    root = tmp_path
+    journal(root, "plain", mtime=1_000.0)
+    journal(root, "archived", mtime=2_000.0)
+    archived = root / "sessions" / "archived"
+    old = time.time() - 30 * 86400
+    os.utime(archived / "transcript.jsonl", (old, old))
+    assert compression.compress_session(archived).status == "compressed"
+    assert compression.archive_path(archived) is not None
+
+    assert prewarm._newest_journals(root, limit=8) == ["plain"]

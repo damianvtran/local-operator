@@ -166,7 +166,9 @@ def fg_style() -> Style:
 #: with a slash and is not a path, and treating it as one truncated away the
 #: binary (`run: …od --force`) and rewrote `$HOME` inside a command string —
 #: a prompt showing a command that is not the command that will run.
-PATH_VERBS = frozenset({"write", "edit", "read", "grep", "append"})
+#: `glob` joined once it took an absolute base (`glob: /Applications/…/node_modules`):
+#: kept off this list, the prompt cropped the basename that names what is listed.
+PATH_VERBS = frozenset({"write", "edit", "read", "grep", "glob", "append"})
 
 
 def fit_target(text: str, width: int, *, is_path: bool) -> str:

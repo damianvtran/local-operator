@@ -700,16 +700,46 @@ async def _read_skills(
         return discovered, warnings, digest.hexdigest()[:16]
 
     discovered, warnings, version = await asyncio.to_thread(read)
+    by_name = {item.name: item for item in discovered}
+
+    def project() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        # ``skill_library:1``: the additive per-row fields. Classification needs
+        # the config dir (the managed root and the link store both live under it,
+        # and ``LOCAL_OPERATOR_CONFIG_DIR`` may move them); a caller that supplied
+        # none gets the historical two-key rows.
+        if config_dir is None:
+            return [{"name": item.name, "description": item.description} for item in discovered], {}
+        from local_operator.server.utils import desktop_skills
+        from local_operator.skills.api import ecosystem_skill_roots
+
+        links = desktop_skills.link_index(config_dir)
+        classifier = desktop_skills.SourceClassifier(config_dir, ecosystem_skill_roots(), links)
+        return desktop_skills.build_rows(discovered, classifier, links), links
+
+    rows, links = await asyncio.to_thread(project)
     detail = None
+    skill_detail = None
     if name is not None:
-        by_name = {item.name: item for item in discovered}
-        if name not in by_name:
+        row = next((item for item in rows if item["name"] == name), None)
+        if row is None:
             raise HTTPException(404, _wd.skill_not_found().envelope())
-        detail = await asyncio.to_thread(resolve_skill_url, "skill://" + name, by_name)
+        if name in by_name:
+            detail = await asyncio.to_thread(resolve_skill_url, "skill://" + name, by_name)
+        if config_dir is not None:
+            from local_operator.server.utils import desktop_skills
+
+            skill_detail = await asyncio.to_thread(
+                desktop_skills.build_detail,
+                row,
+                by_name.get(name),
+                links.get(name),
+                detail,
+            )
     return {
-        "skills": [{"name": item.name, "description": item.description} for item in discovered],
+        "skills": rows,
         "scope": "discoverable",
         "detail": detail,
+        "skill_detail": skill_detail,
         "warning_count": len(warnings),
         "version": version,
     }
