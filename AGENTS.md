@@ -1427,15 +1427,18 @@ it landed.
    pushed commit is the one checked out, the declared version parses as PEP
    440, and the i18n `generate.py --check` and `check.py` pass) and `Build and
    start the release artifact` on Python 3.12, 3.13 and 3.14
-   (`scripts/smoke_wheel.py` against the built wheel). That split is the point: the gate shows the bump
-   branch's head builds, installs and starts on every declared interpreter,
-   which is what a version bump can break, while the suite is skipped because
-   the diff is version-line-only (a dependency or metadata edit to
-   `pyproject.toml` is not a release bump and keeps the whole matrix). Those
-   rows cover the branch head as pushed, not the tag target: the bump's merge
-   commit on `main` is a different SHA, and the combined-target proof below
-   (the invariants re-run at the exact bump merge SHA before tagging, and
-   `publish.yml` repeating them at the event SHA) is what speaks for it.
+   (`scripts/smoke_wheel.py` against the built wheel). That split is the
+   point: the gate shows the bump branch's head builds, installs and starts
+   on every declared interpreter, which is what a version bump can break,
+   while the suite is skipped because the diff is version-line-only (a
+   dependency or metadata edit to `pyproject.toml` is not a release bump and
+   keeps the whole matrix). Those rows cover the branch head as pushed, not
+   the tag target: the bump's merge commit on `main` is a different SHA. At
+   that SHA the combined-target proof below re-runs the release invariants
+   only (before tagging, and `publish.yml` repeats them at the event SHA);
+   the built wheel there is covered by the push-to-`main` Release Gate run
+   on the merge commit and by `publish.yml`'s `wheel-smoke`, which
+   `pypi-publish` waits on.
    **Six checks appear only when the bump is pushed from a `release-next*`
    branch.** A bump PR showing just `changes` and `version-bump-guard` means
    the artifact gate never ran: push from the mandated branch name rather

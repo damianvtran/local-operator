@@ -3145,7 +3145,14 @@ def test_an_explicit_root_is_authoritative_for_base_resolution(tmp_path: Path) -
     )
 
 
-_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}
+# Through twelve so a correct doc update past seven reads as a match, not as an
+# unknown word that fails with "says 'eight'; the workflows give 8".
+_COUNT_WORDS = {
+    word: n
+    for n, word in enumerate(
+        "one two three four five six seven eight nine ten eleven twelve".split(), start=1
+    )
+}
 
 
 def test_agents_doc_names_every_job_a_local_run_skips() -> None:
@@ -3195,8 +3202,14 @@ def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
     job times its Python matrix (that file has no `if:`, so each leg reports
     on a push to the bump branch).
 
+    NOT covered, deliberately: only the `python-version` matrix axis is
+    counted, and trigger `paths:` filters are not checked. A second axis,
+    `include:` legs or a path filter that stops the gate firing on a bump
+    would pass unnoticed; neither exists today, so guarding them is
+    speculative.
+
     Mutation that must fail this: add a job or interpreter to the release
-    gate, or ungate a `ci.yml` job, without updating the number word.
+    gate, or ungate a `ci.yml` job, without updating every number word.
     """
     scope = _scope()
     bump = scope.classify(["pyproject.toml"], VERSION_BUMP_DIFF)
@@ -3213,11 +3226,19 @@ def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
 
     expected = len(ci_rows) + gate_rows
     doc = (REPO / "AGENTS.md").read_text()
-    for pattern in (r"release\s+bump runs (\w+) checks", r"\*\*Expect (\w+) checks on this PR"):
+    # Every place the release sections state the count, including the
+    # round-1 remediation's own sentences: a stale one is the same M1 drift.
+    for pattern in (
+        r"release\s+bump runs (\w+) checks",
+        r"\*\*Expect (\w+) checks on this PR",
+        r"\*\*(\w+)\s+checks\s+appear\s+only\s+when\s+the\s+bump",
+        r"read\s+the\s+(\w+)-check\s+list",
+    ):
         found = re.search(pattern, doc)
         assert found, f"the sentence matching {pattern!r} changed shape; re-point this guard"
         word = found.group(1).lower()
-        assert _COUNT_WORDS.get(word) == expected, (
+        assert word in _COUNT_WORDS, f"teach _COUNT_WORDS the word {word!r}"
+        assert _COUNT_WORDS[word] == expected, (
             f"AGENTS.md says a release-bump PR runs {word!r} checks; the workflows "
             f"give {expected}: ci.yml {sorted(ci_rows)} + {gate_rows} release-gate rows"
         )
