@@ -49,6 +49,20 @@ logger = logging.getLogger(__name__)
 #: The exact tombstone suffix unpull mints: ``uuid.uuid4().hex``.
 _UNPULL_OPERATION = re.compile(r"^[a-f0-9]{32}$")
 
+#: The journal ``basis`` of an edit authored on this machine (``author``). It is
+#: the ONE basis whose ``_finalize`` is a no-op: an integration (``apply``) moves
+#: the link baseline and policy to the bytes it wrote, while a local edit must
+#: leave both exactly where they were -- the gap between the baseline and the
+#: folder IS the "local change" the link engine reports as ``local-only`` /
+#: ``both-changed`` and merges outbound, so advancing the baseline would erase it.
+LOCAL_EDIT_BASIS = "local-edit"
+
+#: Where an unlinked skill's journal record points. A journal record must carry a
+#: structurally valid link identity, and a purely local skill has none; this
+#: reserved, non-routable origin names "no hub" without inventing a real one. It
+#: is never written to a baseline and never reaches a network client.
+_LOCAL_EDIT_SOURCE = "https://local-edit.invalid"
+
 #: A staged file with no local predecessor lands owner-readable and never
 #: executable: the document carrier has no mode on the wire, so a fresh install
 #: (or a path the remote just added) has no local choice to preserve and must
@@ -106,6 +120,24 @@ def _staged_file_mode(source: Path) -> int:
     if not stat.S_ISREG(info.st_mode):
         return _DEFAULT_FILE_MODE
     return _sanitise_staged_mode(info.st_mode)
+
+
+@dataclass(frozen=True)
+class AuthoredSkill:
+    """What :meth:`ManagedSkillStorage.author` committed (or found already true).
+
+    ``baseline_fingerprint`` is the link baseline's fingerprint AFTER the write
+    (``None`` for an unlinked skill). It is returned so a caller -- and a test --
+    can see that an edit left it exactly where it was.
+    """
+
+    alias: str
+    local_id: str
+    before_fingerprint: str | None
+    fingerprint: str
+    baseline_fingerprint: str | None
+    linked: bool
+    changed: bool
 
 
 @dataclass(frozen=True)
@@ -189,7 +221,13 @@ class ManagedSkillStorage:
                 raise LinkError("local-concurrent-edit", "managed skill is missing locally")
             return SkillSnapshot(local_id, record.local_alias, document, document.fingerprint)
 
-    def _stage(self, record: LocalTransaction, document: SkillDocument) -> Path:
+    def _stage(
+        self,
+        record: LocalTransaction,
+        document: SkillDocument,
+        *,
+        mode_source: Path | None = None,
+    ) -> Path:
         hub = self.config_dir / "hub"
         staging = hub / "staging"
         operation = staging / record.operation_id
@@ -201,7 +239,12 @@ class ManagedSkillStorage:
         # The PREVIOUS local copy is the source of each file's mode. Validate the
         # payload value on the same boundary the commit uses (Any -> checked
         # kebab-case name) and let ``path`` keep its own symlink refusal.
+        # ``mode_source`` names another folder to inherit modes from when this
+        # alias has no predecessor yet (a copy of a read-only skill keeps its
+        # executable ``scripts/`` rather than silently defaulting them to 0644).
         previous = self.path(validate_name(record.payload.get("local_alias")))
+        if mode_source is not None and not previous.exists():
+            previous = mode_source
         for file in document.files:
             target = content / file.path
             parent = content
@@ -260,6 +303,11 @@ class ManagedSkillStorage:
         return ConfigManager(self.config_dir)
 
     def _finalize(self, transaction: LocalTransaction) -> None:
+        if transaction.basis == LOCAL_EDIT_BASIS:
+            # A local edit has no baseline or policy to settle (see
+            # ``LOCAL_EDIT_BASIS``); completing the journal record is all of it.
+            self.journal.transition(transaction, "complete")
+            return
         value = transaction.payload.get("baseline")
         if not isinstance(value, Mapping):
             raise TransactionError("baseline-unknown", "skill integration baseline is missing")
@@ -289,6 +337,51 @@ class ManagedSkillStorage:
         write_baseline(self.config_dir, restored)
         materialize_policy(manager, identity, legacy_subscribe_hint=restored.legacy_subscribe_hint)
         self.journal.transition(transaction, "complete")
+
+    def _swap(
+        self,
+        transaction: LocalTransaction,
+        destination: Path,
+        staged: Path,
+        backup: Path,
+        before: str | None,
+        document: SkillDocument,
+        notify: Callable[[str], None],
+    ) -> None:
+        """The two-rename directory swap, shared by ``apply`` and ``author``.
+
+        Caller holds ``config_write_lock`` and has already compared ``before`` with
+        the live bytes; a mismatch found INSIDE the swap (an external editor, which
+        ignores advisory locks) restores the original and blocks the record.
+        """
+        self.root.mkdir(mode=0o700, exist_ok=True)
+        backup.parent.mkdir(mode=0o700, exist_ok=True)
+        # A rename is durable only in the directory whose entries changed.
+        # The backup/staging PARENT entries (and any ancestor created this
+        # call) are fsynced exactly once before the swap, so a power loss
+        # cannot leave the newly-created hubs undurable; no blanket fsync of
+        # unrelated tree members (reviewer R4).
+        _sync_ancestors(backup.parent, self.config_dir / "hub")
+        _sync_ancestors(staged.parent, self.config_dir / "hub")
+        if before != document.fingerprint:
+            if destination.exists():
+                os.replace(destination, backup)
+                _sync_directory(self.root)
+                notify("old-renamed")
+                # Catch an external edit between precondition read and the
+                # old directory rename; the backup contains those real bytes.
+                if self._fingerprint_path(backup) != before:
+                    os.replace(backup, destination)
+                    self.journal.transition(
+                        transaction, "blocked", error_class="local-concurrent-edit"
+                    )
+                    raise LinkError("local-concurrent-edit", "managed skill changed during commit")
+            os.replace(staged, destination)
+            _sync_directory(self.root)
+            notify("new-renamed")
+        if self._fingerprint_path(destination) != document.fingerprint:
+            self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+            raise LinkError("local-concurrent-edit", "managed skill changed after commit")
 
     def apply(
         self,
@@ -423,38 +516,7 @@ class ManagedSkillStorage:
                     raise LinkError(
                         "local-concurrent-edit", "managed staging changed before commit"
                     )
-                self.root.mkdir(mode=0o700, exist_ok=True)
-                backup.parent.mkdir(mode=0o700, exist_ok=True)
-                # A rename is durable only in the directory whose entries changed.
-                # The backup/staging PARENT entries (and any ancestor created this
-                # call) are fsynced exactly once before the swap, so a power loss
-                # cannot leave the newly-created hubs undurable; no blanket fsync of
-                # unrelated tree members (reviewer R4).
-                _sync_ancestors(backup.parent, self.config_dir / "hub")
-                _sync_ancestors(staged.parent, self.config_dir / "hub")
-                if before != document.fingerprint:
-                    if destination.exists():
-                        os.replace(destination, backup)
-                        _sync_directory(self.root)
-                        notify("old-renamed")
-                        # Catch an external edit between precondition read and the
-                        # old directory rename; the backup contains those real bytes.
-                        if self._fingerprint_path(backup) != before:
-                            os.replace(backup, destination)
-                            self.journal.transition(
-                                transaction, "blocked", error_class="local-concurrent-edit"
-                            )
-                            raise LinkError(
-                                "local-concurrent-edit", "managed skill changed during commit"
-                            )
-                    os.replace(staged, destination)
-                    _sync_directory(self.root)
-                    notify("new-renamed")
-                if self._fingerprint_path(destination) != document.fingerprint:
-                    self.journal.transition(
-                        transaction, "blocked", error_class="local-concurrent-edit"
-                    )
-                    raise LinkError("local-concurrent-edit", "managed skill changed after commit")
+                self._swap(transaction, destination, staged, backup, before, document, notify)
                 transaction = self.journal.transition(transaction, "content-committed")
                 notify("content-committed")
                 self._finalize(transaction)
@@ -463,6 +525,201 @@ class ManagedSkillStorage:
 
         finally:
             lease.__exit__(None, None, None)
+
+    # -- authoring: a LOCAL edit, never an integration -----------------------------------
+
+    def _edit_subject(self, alias: str) -> tuple[str, BaselineRecord | None]:
+        """``(journal local id, link baseline or None)`` for an edit of ``alias``.
+
+        Ownership is read from the durable baselines (``alias_owner``), not from
+        the directory, so an alias whose link is mid-crash is still its link's.
+        Whatever crashed for that id is settled FIRST -- a half-finished unpull or
+        pull must be resolved before the edit reads "the current bytes".
+        """
+        owner = alias_owner(self.config_dir, "skill", alias)
+        local_id = owner if owner is not None else f"local-{alias}"
+        self.recover(local_id=local_id)
+        if owner is not None:
+            self._recover_unpull_locked(local_id=owner)
+        record = read_baseline(self.config_dir, "skill", owner) if owner is not None else None
+        if owner is not None and record is None:
+            raise LinkError("baseline-unknown", "the skill's link baseline is unreadable")
+        return local_id, record
+
+    def _refuse_live_transaction(self, local_id: str) -> None:
+        # After ``recover`` the only unsettled records left are (a) blocked ones --
+        # recovery already declared them dead, ``apply`` ignores them too, and
+        # refusing on them would lock a skill forever -- and (b) one whose lease a
+        # LIVE writer still holds. Racing (b) would swap a directory it is staging.
+        for record in self.journal.pending(kind="skill", local_id=local_id):
+            if record.phase != "blocked" and record.payload.get("adapter") == "managed-skill":
+                raise TransactionError(
+                    "local-concurrent-edit", "skill transaction is already active"
+                )
+
+    def author(
+        self,
+        alias: str,
+        document: SkillDocument,
+        expected_fingerprint: str | None,
+        *,
+        mode_source: Path | None = None,
+        checkpoint: Callable[[str], None] | None = None,
+    ) -> AuthoredSkill:
+        """Commit bytes the USER (or an editor acting for them) authored locally.
+
+        WHY THIS IS NOT ``apply``. ``apply`` integrates REMOTE bytes: it advances
+        the link baseline to what it wrote and settles the policy. A local edit is
+        the opposite fact -- the folder now differs from the baseline -- and that
+        difference is exactly what the link check reports as ``local-only`` /
+        ``both-changed`` and the outbound path merges. Advancing the baseline
+        here would erase the signal that the change is local and unpublished. So
+        this reuses the staging and the two-rename swap but journals
+        ``basis="local-edit"``, whose ``_finalize`` touches neither baseline nor
+        policy, and crash recovery (``_recover_one``) settles it by bytes alone.
+
+        ``expected_fingerprint`` is a compare-and-swap on the CURRENT folder:
+        ``None`` means "create, and the name must be free" (an existing folder or
+        a link that owns the alias is ``alias-occupied``); a string means "update
+        the folder that fingerprints to this", and anything else is
+        ``local-concurrent-edit`` with the disk untouched. An update whose result
+        is already on disk is a no-op success, so a retry after a lost response
+        does not 409 against its own first effect.
+
+        Linked and unlinked skills share this path and the same root lock, so a
+        reader (``managed_skill_read``) never sees the half-swapped directory.
+        Bundle-form links and unpulled (absent) links are not editable here.
+        """
+        validate_name(alias)
+        if document.name != alias:
+            raise LinkError("skill-validation", "managed skill name must match its local alias")
+        notify = checkpoint or (lambda _phase: None)
+        with config_write_lock(self.config_dir):
+            local_id, record = self._edit_subject(alias)
+            # A create names a FREE alias; a link that owns it (even unpulled or a
+            # bundle) makes the name occupied, which is the answer the caller can
+            # act on. "Not editable" is only the answer for an UPDATE.
+            if record is not None and expected_fingerprint is not None:
+                if "bundle" in (record.fields or {}) or record.content_state == "absent":
+                    raise LinkError(
+                        "skill-not-editable", "this skill's link has no editable text copy here"
+                    )
+            self._refuse_live_transaction(local_id)
+            destination = self.path(alias)
+            if expected_fingerprint is None:
+                if record is not None or destination.exists():
+                    raise LinkError(
+                        "alias-occupied",
+                        f"a skill named {alias!r} already exists on this machine",
+                    )
+                before: str | None = None
+            else:
+                current = self._document(alias)
+                if current is None:
+                    raise LinkError("skill-not-found", "no such skill in the managed skills folder")
+                before = current.fingerprint
+                if before == document.fingerprint:
+                    return AuthoredSkill(
+                        alias,
+                        local_id,
+                        before,
+                        before,
+                        record.fingerprint if record is not None else None,
+                        record is not None,
+                        False,
+                    )
+                if before != expected_fingerprint:
+                    raise LinkError(
+                        "local-concurrent-edit", "the skill changed since it was read"
+                    )
+            transaction = self.journal.prepare(
+                LinkIdentity(
+                    "skill", local_id, _LOCAL_EDIT_SOURCE, "public", None, "local-edit"
+                ),
+                "pull",
+                before_fingerprint=before,
+                after_fingerprint=document.fingerprint,
+                payload={"adapter": "managed-skill", "local_alias": alias},
+                basis=LOCAL_EDIT_BASIS,
+            )
+            lease = self.journal.claim(transaction.operation_id)
+            if not lease.__enter__():
+                lease.__exit__(None, None, None)
+                raise TransactionError(
+                    "local-concurrent-edit", "skill transaction is already active"
+                )
+        try:
+            # Slow fsync staging happens outside the short root lock; the bytes
+            # are compared again under it before anything is renamed.
+            staged = self._stage(transaction, document, mode_source=mode_source)
+            notify("staged")
+            with config_write_lock(self.config_dir):
+                destination, _staged, backup = self._locations(transaction)
+                if self._fingerprint_path(destination) != before:
+                    self.journal.transition(
+                        transaction, "blocked", error_class="local-concurrent-edit"
+                    )
+                    raise LinkError(
+                        "local-concurrent-edit", "managed skill changed during preparation"
+                    )
+                if self._fingerprint_path(staged) != document.fingerprint:
+                    self.journal.transition(
+                        transaction, "blocked", error_class="local-concurrent-edit"
+                    )
+                    raise LinkError(
+                        "local-concurrent-edit", "managed staging changed before commit"
+                    )
+                self._swap(transaction, destination, staged, backup, before, document, notify)
+                transaction = self.journal.transition(transaction, "content-committed")
+                notify("content-committed")
+                self._finalize(transaction)
+                notify("complete")
+                settled = read_baseline(self.config_dir, "skill", local_id) if record else None
+                return AuthoredSkill(
+                    alias,
+                    local_id,
+                    before,
+                    document.fingerprint,
+                    settled.fingerprint if settled is not None else None,
+                    record is not None,
+                    True,
+                )
+        finally:
+            lease.__exit__(None, None, None)
+
+    def remove_local(self, alias: str) -> Path:
+        """Take an UNLINKED skill out of the skills folder, KEEPING its bytes.
+
+        A single same-filesystem rename into ``hub/backups/skill-local-<alias>-<op>``:
+        atomic (a reader sees the skill or not, never half), recoverable by hand,
+        and never an ``rmtree`` -- the user's authored text is not ours to destroy.
+        A linked alias is refused: removing one is :meth:`unpull`, which keeps the
+        link. No journal is needed because there is no second step to crash between.
+        """
+        validate_name(alias)
+        with config_write_lock(self.config_dir):
+            if alias_owner(self.config_dir, "skill", alias) is not None:
+                raise LinkError("origin-conflict", "a linked skill is removed by unpulling it")
+            self.recover(local_id=f"local-{alias}")
+            self._refuse_live_transaction(f"local-{alias}")
+            source = self.path(alias)
+            if not source.exists():
+                raise LinkError("skill-not-found", "no such skill in the managed skills folder")
+            if not source.is_dir():
+                raise LinkError(
+                    "alias-occupied",
+                    f"a file named {alias!r} is in the skills folder, not a skill",
+                )
+            backup = self.config_dir / "hub" / "backups" / f"skill-local-{alias}-{uuid.uuid4().hex}"
+            for directory in (self.config_dir / "hub", backup.parent):
+                if directory.is_symlink():
+                    raise LinkError("skill-validation", "managed skill backup path is unsafe")
+            backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _sync_ancestors(backup.parent, self.config_dir / "hub")
+            os.replace(source, backup)
+            _sync_directory(self.root)
+            _sync_directory(backup.parent)
+            return backup
 
     def recover(self, *, local_id: str | None = None) -> None:
         """Recover only skill commits; never lock/recover an agent from a reader."""

@@ -146,8 +146,10 @@ def static_feature_flags() -> dict[str, Any]:
         # `name` arm adds `skill_detail` (body, files, fingerprint, publish budget).
         # Its OWN key rather than a bump of `hub_skills` or `skill_catalogue`: a
         # renderer gated on those keeps the plain name/description list and never
-        # draws a card from a field this backend does not send. Read-only in this
-        # version; writes will advertise their own key.
+        # draws a card from a field this backend does not send. The same key also
+        # covers the write routes (`POST /v1/desktop/skills`, `PUT|DELETE
+        # /v1/desktop/skills/{name}`): one capability, so a renderer that draws the
+        # cards can also offer create/edit/remove without a second negotiation.
         "skill_library": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.

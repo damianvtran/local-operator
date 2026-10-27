@@ -810,6 +810,202 @@ async def skills(
         )
 
 
+# -- skill library writes (``skill_library:1``) ------------------------------------------
+#
+# Create/update/remove of a skill in the managed root, ``<config_dir>/skills`` and
+# nowhere else. The rules (one destination, read-only builtin/external/project,
+# baseline untouched by a local edit, kept backup on remove) live in
+# ``server/utils/desktop_skill_writes`` and ``ManagedSkillStorage.author``; these
+# handlers translate HTTP and refusals. Each mutation is receipted by
+# ``request_id`` exactly like the ``hub/skills/*`` writes, so a lost response is
+# replayed rather than applied twice.
+
+
+class SkillFileIn(Input):
+    path: str = Field(min_length=1, max_length=240)
+    #: Bounded BEFORE the storage layer measures bytes, so an absurd body is
+    #: refused at parse time instead of being fully decoded first. The real limit
+    #: (200 KiB per file, 1 MiB per skill, in BYTES) is enforced by SkillDocument.
+    content: str = Field(max_length=1024 * 1024)
+
+
+class SkillCreate(Input):
+    request_id: RequestID
+    name: str = Field(min_length=1, max_length=128)
+    #: The full file set (``SKILL.md`` required). Exactly one of ``files`` or
+    #: ``copy_from`` -- "Copy to my skills" of a read-only skill is a create whose
+    #: bytes come from the named skill.
+    files: list[SkillFileIn] | None = Field(default=None, max_length=64)
+    copy_from: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class SkillUpdate(Input):
+    request_id: RequestID
+    #: The fingerprint of the folder this edit was made against (``fingerprint`` on
+    #: the row / detail). A different current fingerprint is a 409 and the disk is
+    #: untouched -- the editor reloads rather than overwrites.
+    expected_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    files: list[SkillFileIn] = Field(min_length=1, max_length=64)
+
+
+class SkillRemove(Input):
+    request_id: RequestID
+    #: A hub-linked skill's removal deletes its only copy of unpublished edits;
+    #: refused (409) unless the caller says so.
+    discard_local_changes: bool = False
+
+
+def _skill_write_refusal(error: Exception) -> HTTPException:
+    """The typed refusal for a skill-write failure; the code is the client's contract."""
+    code = getattr(error, "code", "") or ""
+    # (status, message, WIRE code). The wire code is the renderer's contract and is
+    # not always the storage code spelled with underscores: a stale fingerprint
+    # reaches storage as ``local-concurrent-edit`` but the client keys on
+    # ``skill_stale``, a name that says what happened to the SKILL.
+    typed: dict[str, tuple[int, Any, str]] = {
+        "skill-not-editable": (409, _wd.skill_not_editable, "skill_not_editable"),
+        "alias-occupied": (409, _wd.skill_alias_occupied, "skill_alias_occupied"),
+        "skill-local-changes-unpublished": (
+            409,
+            _wd.skill_local_changes_unpublished,
+            "skill_local_changes_unpublished",
+        ),
+        # Stale CAS, or another writer holds the skill right now: both mean "what
+        # you edited is not what is on disk", and the remedy is the same -- reload.
+        "local-concurrent-edit": (409, _wd.skill_stale, "skill_stale"),
+    }
+    if code in typed:
+        status, message, wire = typed[code]
+        return HTTPException(status, message().envelope(code=wire))
+    if code == "skill-not-found":
+        return HTTPException(404, _wd.skill_not_found().envelope(code="skill_not_found"))
+    # Validation failures carry the hub vocabulary's own sentence (they name the
+    # constraint, never file bytes); anything else the storage names is a state
+    # refusal of a well-formed request.
+    status = 422 if code in ("skill-validation", "skill-too-large") else 409
+    return HTTPException(
+        status, _wd.desktop_refusal(error=str(error)).envelope(code=code.replace("-", "_") or None)
+    )
+
+
+async def _skill_write(
+    request: Request, key: str, body: Input, work: Any
+) -> CRUDResponse[Any]:
+    """Run ``work(config_dir)`` off the loop, receipted, with refusals typed."""
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.skill_document import SkillValidationError
+    from local_operator.hub_sync.transactions import TransactionError
+
+    config_dir = pathlib.Path(request.app.state.config_manager.config_dir)
+
+    async def mutate() -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            try:
+                return work(config_dir)
+            except (LinkError, SkillValidationError, TransactionError) as error:
+                raise _skill_write_refusal(error) from None
+
+        return await asyncio.to_thread(run)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                key + body.request_id,  # type: ignore[attr-defined]
+                body.model_dump(),
+                mutate,
+                retry_safe=True,
+            )
+        )
+
+
+@router.post("/v1/desktop/skills", response_model=CRUDResponse)
+async def skill_create(body: SkillCreate, request: Request):
+    """``skills.create``: a new skill in ``<config_dir>/skills`` (or a copy of a read-only one).
+
+    409 ``skill_alias_occupied`` when the name is taken (by a folder or by a hub
+    link that owns it); 404 when ``copy_from`` names nothing; 422 for any
+    invalid name, path, size or SKILL.md.
+    """
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    if (body.files is None) == (body.copy_from is None):
+        raise HTTPException(
+            422,
+            _wd.desktop_refusal(error="send exactly one of files or copy_from").envelope(
+                code="skill_invalid"
+            ),
+        )
+
+    def work(config_dir: pathlib.Path) -> dict[str, Any]:
+        return writes.create(
+            config_dir,
+            body.name,
+            files=[item.model_dump() for item in body.files or ()],
+            copy_from=body.copy_from,
+        )
+
+    return await _skill_write(request, "skill-create:", body, work)
+
+
+@router.put("/v1/desktop/skills/{name}", response_model=CRUDResponse)
+async def skill_update(name: str, body: SkillUpdate, request: Request):
+    """``skills.update``: replace a managed skill's file set, guarded by its fingerprint.
+
+    A linked skill's baseline and policy are NOT touched (the edit is a local
+    change the hub link then reports and merges); the answer carries the
+    unchanged ``baseline_fingerprint`` and, for a linked skill, ``publish_budget``.
+    409 ``skill_stale`` on a stale fingerprint; 409 ``skill_not_editable`` for a
+    builtin / external / project skill.
+    """
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    def work(config_dir: pathlib.Path) -> dict[str, Any]:
+        return writes.update(
+            config_dir, name, [item.model_dump() for item in body.files], body.expected_fingerprint
+        )
+
+    return await _skill_write(request, f"skill-update:{name}:", body, work)
+
+
+@router.delete("/v1/desktop/skills/{name}", response_model=CRUDResponse)
+async def skill_remove(name: str, body: SkillRemove, request: Request):
+    """``skills.remove``: take a managed skill out of use WITHOUT destroying its bytes.
+
+    An unlinked skill is MOVED to ``hub/backups/skill-local-<name>-<op>``. A
+    hub-linked skill is unpulled (the link stays, so it can be pulled again); its
+    folder is refused with 409 ``skill_local_changes_unpublished`` when it differs
+    from the baseline, unless ``discard_local_changes`` is true.
+    """
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    def work(config_dir: pathlib.Path) -> dict[str, Any]:
+        from local_operator.hub_sync import service as svc
+        from local_operator.hub_sync.skill_document import validate_name
+
+        validate_name(name)
+        owner = prov.alias_owner(config_dir, "skill", name)
+        if owner is None:
+            return writes.remove_local(config_dir, name)
+        record = prov.read_baseline(config_dir, "skill", owner)
+        if record is None or record.identity is None:
+            raise LinkError("baseline-unknown", "the skill's link baseline is unreadable")
+        ctx = svc.HubSyncContext(
+            config_dir=config_dir,
+            config_manager=request.app.state.config_manager,
+            client_for_tenant=lambda _tenant: None,
+        )
+        try:
+            return writes.remove_linked(
+                ctx, record, discard_local_changes=body.discard_local_changes
+            )
+        except svc.HubBusy as busy:
+            raise LinkError("hub-busy", str(busy)) from None
+
+    return await _skill_write(request, f"skill-remove:{name}:", body, work)
+
+
 @router.get("/v1/desktop/sessions/{session_id}/failovers", response_model=CRUDResponse[Report])
 async def failovers(session_id: str, request: Request):
     # READ: the selected/effective pair is a canonical FACADE field, and a cold
