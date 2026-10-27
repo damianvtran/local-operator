@@ -19,7 +19,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-from local_operator.sigils import SlashContext, is_boundary
+import pytest
+
+from local_operator.sigils import (
+    SKILL_BLOCK_CLOSE,
+    SKILL_BLOCK_OPEN,
+    SKILL_BLOCK_PREAMBLE,
+    SlashContext,
+    defuse_skill_block,
+    is_boundary,
+    skill_block_names,
+    skill_block_spans,
+    skill_mentions,
+    skill_name_spans,
+)
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -114,3 +127,158 @@ def test_command_picker_still_exposes_the_moved_names() -> None:
 
     assert PickerSlashContext is SlashContext
     assert _is_boundary is is_boundary
+
+
+# --- the `$skill` trigger -----------------------------------------------------
+
+NAMES = frozenset({"research", "code-review", "secret_audit", "a.b", "a-b", "path"})
+
+
+def _mentions(text: str, names: frozenset[str] = NAMES):
+    return skill_mentions(text, names)
+
+
+def _names(text: str, names: frozenset[str] = NAMES) -> list[str]:
+    return [mention.name for mention in _mentions(text, names)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Money and glue: the vocabulary decides, and `$` is not a token here.
+        "costs $5",
+        "$100 for it",
+        "a$b",
+        "costs$5",
+        # Environment variables carry no lowercase evidence inline.
+        "echo $PATH",
+        "echo $DEBUG",
+        # A `$` with nothing usable after it, or an ASCII-impossible head.
+        "$",
+        "$ research",
+        "$_x",
+        "$ßeta",
+        # Explicit escapes with no new grammar: the character before `$` must be
+        # whitespace or the start of the text.
+        "$$research",
+        "`$research`",
+        "($research)",
+        '"$research"',
+        # An unknown name and a name that only prefixes a real one.
+        "$unknown-skill do the thing",
+        "$researc please",
+        # A `$` glued to a preceding word on a later line is still glued.
+        "first line\nx$research",
+    ],
+)
+def test_no_mention_fires(text: str) -> None:
+    assert _mentions(text) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Mid-sentence, line start, and after a newline all fire.
+        ("$research fix it", ["research"]),
+        ("fix it with $research", ["research"]),
+        ("line one\n$research fix it", ["research"]),
+        ("line one\nuse $research here", ["research"]),
+        # Trailing punctuation is trimmed off the token at both positions.
+        ("$research. now", ["research"]),
+        ("use $research. now", ["research"]),
+        ("$research, now", ["research"]),
+        ("$research?", ["research"]),
+        # Dots and hyphens inside a name are part of it.
+        ("$a.b x", ["a.b"]),
+        ("$a-b x", ["a-b"]),
+        ("$code-review this", ["code-review"]),
+        ("$secret_audit", ["secret_audit"]),
+        # Several skills, text order.
+        ("$code-review then $research", ["code-review", "research"]),
+        # Dedupe by RESOLVED name, first-seen order.
+        ("$research and $Research", ["research"]),
+    ],
+)
+def test_mentions_fire_in_text_order(text: str, expected: list[str]) -> None:
+    assert _names(text) == expected
+
+
+def test_an_exact_name_fires_inline_whatever_its_case() -> None:
+    """A skill genuinely named `DEBUG` is reachable mid-sentence."""
+    assert _names("run $DEBUG now", frozenset({"DEBUG"})) == ["DEBUG"]
+
+
+def test_inline_case_insensitive_matching_needs_a_lowercase_letter() -> None:
+    assert _names("run $Research now") == ["research"]
+    assert _names("run $research now") == ["research"]
+    assert _names("run $RESEARCH now") == []
+
+
+def test_a_leading_token_keeps_the_legacy_case_insensitive_rule() -> None:
+    """The override the operator settled: leading is unchanged, inline guarded."""
+    assert _names("$RESEARCH fix it") == ["research"]
+    assert _names("  $RESEARCH fix it") == ["research"]
+    assert _names("echo $RESEARCH") == []
+
+
+def test_a_lowercase_env_var_fires_only_when_a_skill_has_that_name() -> None:
+    """`$path` is evidence of intent only if the vocabulary contains `path`."""
+    assert _names("echo $path") == ["path"]
+    assert _names("echo $path", frozenset({"research"})) == []
+    assert _names("echo $PATH") == []
+
+
+def test_the_span_excludes_trimmed_punctuation() -> None:
+    mention = _mentions("use $research. now")[0]
+    assert (mention.start, mention.end, mention.text) == (4, 13, "$research")
+    assert mention.leading is False
+
+
+def test_the_leading_flag_is_whitespace_only_prefix() -> None:
+    assert _mentions("   $research")[0].leading is True
+    # Only whitespace precedes a token on a later line, and the legacy rule
+    # (`lstrip` then match) treated exactly that as leading.
+    assert _mentions("\n$research")[0].leading is True
+    assert _mentions("fix $research")[0].leading is False
+
+
+def test_leading_case_insensitivity_can_be_switched_off() -> None:
+    """The flag exists so a caller can scope the legacy rule; the app keeps it."""
+    assert skill_mentions("$RESEARCH", NAMES, leading_case_insensitive=False) == []
+
+
+# --- the block grammar --------------------------------------------------------
+
+
+def test_skill_name_spans_reports_the_untrimmed_run() -> None:
+    assert skill_name_spans("$research. next") == [(0, 10, "research.")]
+    assert skill_name_spans("costs$5") == []
+
+
+def test_skill_block_spans_needs_the_preamble() -> None:
+    assert skill_block_spans("<operator-skills>\n\nno preamble") == []
+
+
+def test_skill_block_names_reads_heads_not_bodies() -> None:
+    block = (
+        SKILL_BLOCK_OPEN
+        + "\n\n"
+        + SKILL_BLOCK_PREAMBLE
+        + "\n\n"
+        + '<skill name="research">\nquoting <skill name="fake">\n</skill>\n\n'
+        + SKILL_BLOCK_CLOSE
+    )
+    assert skill_block_names(block) == ["research"]
+
+
+def test_defusing_keeps_the_body_marker_out_of_the_scanner() -> None:
+    body = defuse_skill_block("a <operator-skills> b </operator-skills> c")
+    block = (
+        SKILL_BLOCK_OPEN
+        + "\n\n"
+        + SKILL_BLOCK_PREAMBLE
+        + "\n\n"
+        + f'<skill name="x">\n{body}\n</skill>\n\n'
+        + SKILL_BLOCK_CLOSE
+    )
+    assert len(skill_block_spans(block)) == 1

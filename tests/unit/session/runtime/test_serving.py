@@ -40,6 +40,7 @@ from local_operator.session.runtime.serving import (
     AskUnavailableError,
     ServingSessionHandle,
 )
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 
 
 class FakeSession:
@@ -305,28 +306,12 @@ def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeS
 
 
 def _skill_payload(typed: str) -> str:
-    """The persisted form of a ``$skill`` invocation: what a CLIENT sent.
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    Built from the REAL ``Skill`` and the REAL renderer, the way the fold-parity
-    test does it: a hand-spelled tag would pin a payload shape the product never
-    produces, and it is the payload's own ``invocation`` attribute that the fix
-    reads back. Expansion is the client's duty (a desktop renders it in
-    ``local-operator-ui``'s ``skill-invocation.ts``), which is why the harness is
-    handed this and never the typed line.
+    Old transcripts never migrate, so the reader stays and this pins its input;
+    ``legacy_skill_payload`` reproduces the deleted writer's escaping.
     """
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
-
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    return legacy_skill_payload(typed)
 
 
 def test_default_conversation_name_is_empty_not_a_placeholder() -> None:

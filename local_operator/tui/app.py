@@ -1532,6 +1532,26 @@ def _skill_body_has_content(body: str | None) -> TypeGuard[str]:
     return bool(text.strip())
 
 
+class _SkillExpansion(NamedTuple):
+    """What an inline `$skill` submit sends, split so the ROW stays the user's.
+
+    ``text`` is the message verbatim with collapsed pastes expanded, and it is
+    BOTH the row and the prefix of the payload. ``block`` is the tail block
+    carrying one body per name in ``skills`` (text order), or ``""`` when
+    nothing attached. ``payload`` is what the model receives, and the row is
+    recovered from it by stripping the block — which is what makes the live and
+    replayed rows agree by construction rather than by two branches agreeing.
+    """
+
+    text: str
+    skills: tuple[str, ...]
+    block: str
+
+    @property
+    def payload(self) -> str:
+        return f"{self.text}\n\n{self.block}" if self.block else self.text
+
+
 #: Transport wording that means THE RUNTIME IS GONE, as opposed to a refusal
 #: the session itself produced. Matched on the transport's own phrases rather
 #: than on the exception type: `ConnectionError` also carries the graceful
@@ -20882,15 +20902,14 @@ class OperatorApp(App[None]):
         ``resolve_markers`` orders images by where the citation sits and a
         payload spliced in ahead of one would move it.
 
-        A ``$skill`` LEADING the argument expands here, through the same
-        ``_expand_invocation`` the bare-prompt path uses. The argument is its
-        OWN string, whose offset 0 is exactly where the user's ``$`` sits, so
-        the anchored parser needs no change to serve ``/team backend $research
-        fix the login bug`` — and the money/shell guards it gets from anchoring
-        (``$100``, a non-leading ``$research``) keep holding here unaltered.
-        Calling that method rather than re-resolving a body locally is what
-        keeps ONE answer to "what does an invocation expand to": the paste
-        splice into the request alone, the empty-body warning and the
+        A ``$skill`` ANYWHERE in the argument expands here, through the same
+        ``_expand_invocation`` the bare-prompt path uses: ``/team backend
+        $research fix the login bug`` and ``/team backend fix it $research`` are
+        the same gesture the composer already honours. The argument is its OWN
+        string, so the trigger scans exactly the text the user addressed to the
+        model and nothing before it. Calling that method rather than
+        re-resolving a body locally keeps ONE answer to "what does an invocation
+        expand to": the paste splice, the per-skill notices and the
         never-raises contract all live inside it.
         """
         images = resolve_markers(request, attachments or {})
@@ -20911,11 +20930,12 @@ class OperatorApp(App[None]):
         # expansion lands after — and it puts a human approval gate in a task
         # nothing awaits. If this ever needs TUI-side notices, the fix is making
         # this method async as its own refactor, not a task launched from here.
-        sent = self._expand_invocation(request, attachments)
-        # `row` mirrors `on_editor_submitted`: an invocation keeps the TYPED
-        # argument as its row (the body belongs in the payload, never the
-        # ledger), everything else shows the paste-expanded text.
-        row = request if sent is not None else expand_pastes(request, attachments or {})
+        expansion = self._expand_invocation(request, attachments)
+        # `row` mirrors `on_editor_submitted`: the argument with its pastes
+        # expanded, whether or not a skill attached. The body rides the payload
+        # only, and replay strips the block.
+        row = expansion.text if expansion is not None else expand_pastes(request, attachments or {})
+        sent = expansion.payload if expansion is not None else None
         # `typed=` keeps the naming split: the chip line names the thread, the
         # payload is what the model is sent.
         self._submit_prompt(row, images, attachments, sent=sent, typed=request)
@@ -25601,27 +25621,16 @@ class OperatorApp(App[None]):
         # fix, if it is ever wanted, is moving this expansion into a worker —
         # which disturbs the submit ORDERING this docstring calls load-bearing
         # and so deserves its own change, not a line in this one.
-        sent = self._expand_invocation(text, message.attachments)
-        # An INVOCATION keeps the typed line as its row; everything else shows
-        # the expanded text (design §2.5).
-        #
-        # §2.5's `text == sent` rule bought replay consistency for ordinary
-        # prompts, and it does not reach this path: `$skill` already has a
-        # display/sent split — `sent` is the rendered body, the row is the typed
-        # line, and `harness.rows.typed_line_of` exists to keep a resumed row
-        # from becoming
-        # the whole SKILL.md. Expanding the row here made live and REPLAY
-        # disagree for the paste case alone, because `render_invocation` records
-        # the typed line in the payload's `invocation=` attribute and replay
-        # repaints from that (review round 2, MAJOR-2).
-        #
-        # The attribute is deliberately NOT expanded to close it from the other
-        # side: it travels inside the payload the model receives, so a payload
-        # carrying the paste in both the request and the attribute would send it
-        # TWICE, on every turn of that message's life, to fix a transcript row.
-        # Showing the typed line instead makes paste and non-paste `$skill`
-        # behave identically and makes the two rows agree by construction.
-        row = text if sent is not None else expand_pastes(text, message.attachments)
+        expansion = self._expand_invocation(text, message.attachments)
+        # ONE row for both paths: the message with its collapsed pastes
+        # expanded. An attached skill adds a tail block to the PAYLOAD only, and
+        # `harness.rows.user_row_text` strips that block on replay — so live and
+        # resumed rows agree by construction, and the old `row = text if sent`
+        # branch (which existed only to keep an invocation's row off its body)
+        # is gone. The `typed=` split stays for the paste case: image labels and
+        # a failed-send hand-back must read the chip line, not the expanded log.
+        row = expansion.text if expansion is not None else expand_pastes(text, message.attachments)
+        sent = expansion.payload if expansion is not None else None
         source = self._interaction
         source.turn.submitted_draft = SessionDraft(
             text=message.text, attachments=dict(message.attachments)
@@ -34472,10 +34481,10 @@ class OperatorApp(App[None]):
 
         ``sent`` splits what the transcript SHOWS from what the model RECEIVES,
         for the one case where they legitimately differ: a ``$skill`` manual
-        invocation, whose row must stay the short line the user typed while the
-        model gets that line with the SKILL.md body prepended. ``None`` — every
-        other caller — means the two are the same string, which is the property
-        the echo registry depends on everywhere else.
+        invocation, whose row is the line the user typed while the model gets
+        that line with the skill bodies appended in an ``<operator-skills>`` tail
+        block. ``None`` — every other caller — means the two are the same string,
+        which is the property the echo registry depends on everywhere else.
 
         Everything DOWNSTREAM of the row takes ``sent``: the steer queue, the
         compaction hold, and the turn itself, because those are the paths whose
@@ -55994,79 +56003,78 @@ class OperatorApp(App[None]):
 
     def _expand_invocation(
         self, text: str, attachments: Mapping[int, Marked] | None = None
-    ) -> str | None:
-        """Expand a leading ``$skill``, splicing pastes into the REQUEST only.
+    ) -> _SkillExpansion | None:
+        """Attach the skill bodies this message names, or ``None`` for prose.
 
-        ``None`` means "not an invocation, send the text unchanged" — the
-        answer for ordinary prose, for ``$100``, and for any ``$word`` that is
-        not a discovered skill name. The body is read through the SAME
-        ``skill://`` resolver the ``read`` tool uses, so a manual invocation
-        and an agent-initiated read return byte-identical content, reference
-        listing included.
+        ``None`` means "nothing fired, send the text unchanged" — the answer for
+        ordinary prose, for ``$100``, and for any ``$name`` that is not a
+        discovered skill. The trigger itself is
+        :func:`local_operator.sigils.skill_mentions`, called through
+        :func:`local_operator.skills.invoke.plan_attachments`, so this method and
+        the composer's ink cannot disagree about which token fires.
 
-        A body that cannot be read is not a silent failure: the notice says so
-        and the raw text goes through untouched, because swallowing the user's
-        request would be the worse half of the trade.
+        **The scan reads the TYPED text**, with collapsed pastes still chips;
+        the payloads are spliced into the whole message afterwards. Both halves
+        matter:
 
-        **The ORDER is the whole point** (design §2.6). ``parse_invocation``
-        reads the TYPED text — the chip line, pastes still collapsed — and the
-        payloads go in afterwards, into ``invocation.request`` alone. Two
-        consequences, both wanted:
+        - A collapsed paste stays inert. Expanding first would let a pasted
+          document that merely quotes ``$research`` attach a skill nobody asked
+          for — the reason the old parser read the typed line too.
+        - Expansion never reaches a SKILL.md body, because the bodies are read
+          after the splice and appended as their own block.
 
-        - A draft that STARTS with ``[Paste #1, …]`` is not an invocation, and
-          must not become one. Expanding first and parsing after would let a
-          pasted document whose first line reads ``$research …`` fire a skill
-          nobody asked for.
-        - Expansion never reaches the SKILL.md body. That is the mirror of the
-          image defect ``on_compaction_ended`` records (a ``[Image #N]`` inside
-          a body shifted the citation positions and sent the attachments in the
-          wrong order): scoping the splice to the request closes the same hole
-          by construction rather than by hoping bodies never contain
-          ``[Paste #N]``.
+        THE NOTICES ARE PER SKILL and the message always sends. An empty body or
+        an unreadable one is named, and the remaining skills still attach; when
+        none attach the text goes as written. Swallowing the request would be the
+        worse half of the trade (``_expand_references`` strikes the same
+        bargain). Both sentences are the ones this method has always used,
+        unchanged, now that a message can carry more than one skill.
 
-        ``SkillInvocation`` is a ``NamedTuple``, so the request is swapped with
-        ``_replace`` and every other field — ``typed`` above all, which is what
-        replay repaints the user's row from — rides through untouched. The
-        ``invocation=`` attribute ``typed`` feeds therefore keeps the CHIP, and
-        must: it travels INSIDE the payload the model receives, so expanding it
-        would send the paste twice on every turn of that message's life, to fix
-        a transcript row (review round 2, MAJOR-2). The live row is put back on
-        the typed line instead, which is what makes it agree with replay.
-
-        ``attachments`` is optional because a caller with no composer map behind
-        it still has a well-defined answer: nothing resolves, and the text goes
-        through as written.
+        A body is read through the SAME ``skill://`` resolver the ``read`` tool
+        uses, so a manual invocation and an agent-initiated read return
+        byte-identical content, reference listing included.
         """
         skills = self._discovered_skills()
         if not skills:
             return None
         try:
-            from local_operator.skills.invoke import parse_invocation, render_invocation
-            from local_operator.skills.protocol import resolve_skill_url
-
-            invocation = parse_invocation(text, skills)
-            if invocation is None:
-                return None
-            invocation = invocation._replace(
-                request=expand_pastes(invocation.request, attachments or {})
+            from local_operator.skills.invoke import (
+                plan_attachments,
+                render_skill_block,
             )
-            body = resolve_skill_url(f"skill://{invocation.skill.name}", skills)
-            if not _skill_body_has_content(body):
-                # NOT a silent fall-through. Returning None here sends the raw
-                # `$research fix it` line as prose while the row on screen
-                # still reads like an invocation, so the user believes the
-                # skill fired and the model never saw it. An empty SKILL.md is
-                # the realistic cause (a stub someone has not written yet).
-                self._notice(
-                    f"skill `{invocation.skill.name}` has an empty body — sending your "
-                    "message as written",
-                    "warning",
-                )
-                return None
-            return render_invocation(invocation, body)
-        except Exception as exc:
+            from local_operator.skills.protocol import resolve_skill_url
+        except Exception as exc:  # noqa: BLE001 — send prose rather than nothing
             self._notice(f"could not load skill: {exc}", "warning")
             return None
+        planned = plan_attachments(text, skills)
+        if not planned:
+            return None
+        entries: list[tuple[str, str]] = []
+        for attachment in planned:
+            name = attachment.skill.name
+            try:
+                body = resolve_skill_url(f"skill://{name}", skills)
+            except Exception as exc:  # noqa: BLE001 — one skill, not the message
+                self._notice(f"could not load skill: {exc}", "warning")
+                continue
+            if not _skill_body_has_content(body):
+                # NOT a silent fall-through. Skipping this body while sending
+                # the rest is right; skipping it in silence is not, because the
+                # row on screen reads like an invocation and the user would
+                # believe the skill fired.
+                self._notice(
+                    f"skill `{name}` has an empty body — sending your message as written",
+                    "warning",
+                )
+                continue
+            entries.append((name, body))
+        if not entries:
+            return None
+        return _SkillExpansion(
+            text=expand_pastes(text, attachments or {}),
+            skills=tuple(name for name, _ in entries),
+            block=render_skill_block(entries),
+        )
 
     def _skills_block(self) -> RichBlock | None:
         """Graceful introspection of the skills stream (exception-safe).

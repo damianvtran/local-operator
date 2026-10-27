@@ -28,7 +28,6 @@ from local_operator.tui.widgets.command_picker import (
     CompletionMode,
     PickerMode,
     _skill_argument_floor,
-    _skill_argument_region,
     completion_for,
     ghost_for,
     skill_suggestions,
@@ -190,63 +189,50 @@ class TestTheInlineGateAppliesUnchanged:
         assert "cte-explainer" in self._rows("/team delivery $ct")
 
 
-class TestAcceptingARowRewritesTheArgument:
-    """An accepted row becomes the ARGUMENT's prefix, never the buffer's.
+class TestAcceptingARowReplacesOnlyTheToken:
+    """An accepted row edits the token in place, wherever it sits.
 
-    The submit-side parser is anchored at offset 0 of the argument string, so a
-    reassembly to the buffer start would produce `$gitlab /team delivery …` —
-    a line neither the dispatcher nor the skill parser can read.
+    The submit-side trigger scans the whole argument, so there is nothing to
+    move: the command word, its name slot and every other character survive
+    byte-for-byte, and only `$<query>` becomes `$<name>` plus the terminating
+    space when the next character is not whitespace.
     """
 
-    def test_completion_moves_skill_to_argument_front(self):
-        assert _complete("/team delivery explain this $git", "gitlab") == (
-            "/team delivery $gitlab explain this ",
-            23,
+    @staticmethod
+    def _expected(text: str, name: str = "gitlab") -> tuple[str, int]:
+        start = text.index("$")
+        tail = text[text.index(" ", start) :] if " " in text[start:] else ""
+        return f"{text[:start]}${name} {tail}" if not tail else f"{text[:start]}${name}{tail}", (
+            start + len(name) + 2
         )
 
-    def test_completion_preserves_tail_when_skill_leads_argument(self):
-        """No trailing space here: the separator before the request already exists.
+    def test_completion_mid_argument_keeps_every_earlier_word(self):
+        text = "/team delivery explain this $git"
+        assert _complete(text, "gitlab") == self._expected(text)
 
-        The token already leads the region, so the plain span replacement is the
-        whole answer and a space appended after the user's own sentence would be
-        a stray character no other completion in this codebase adds.
-        """
-        assert _complete("/team delivery $gi fix this", "gitlab", caret=18) == (
+    def test_completion_preserves_tail_when_skill_leads_argument(self):
+        """A request already after the token survives with its separator."""
+        text = "/team delivery $gi fix this"
+        assert _complete(text, "gitlab", caret=18) == (
             "/team delivery $gitlab fix this",
             23,
         )
 
     def test_completion_in_goal_argument(self):
-        """The case that could not work while the region came from `ArgumentMode`."""
-        assert _complete("/goal ship it $git", "gitlab") == ("/goal $gitlab ship it ", 14)
+        text = "/goal ship it $git"
+        assert _complete(text, "gitlab") == self._expected(text)
 
-    @pytest.mark.parametrize(
-        "text,expected,caret",
-        [
-            ("/btw ask it $git", "/btw $gitlab ask it ", 13),
-            ("/loop drive it $git", "/loop $gitlab drive it ", 14),
-            ("/fork start on $git", "/fork $gitlab start on ", 14),
-        ],
-    )
-    def test_completion_in_btw_loop_fork_arguments(self, text: str, expected: str, caret: int):
-        """The three remaining no-name-slot prompt commands rebuild in place."""
-        assert _complete(text, "gitlab") == (expected, caret)
+    def test_completion_in_btw_loop_fork_arguments(self):
+        for text in ("/btw ask it $git", "/loop drive it $git", "/fork start on $git"):
+            assert _complete(text, "gitlab") == self._expected(text), text
 
-    def test_completion_outside_command_still_reassembles_buffer(self):
-        """The pre-existing whole-buffer path, unregressed."""
-        assert _complete("fix this $git", "gitlab") == ("$gitlab fix this ", 17)
+    def test_completion_outside_command_is_the_same_edit(self):
+        text = "fix this $git"
+        assert _complete(text, "gitlab") == self._expected(text)
 
-    def test_dollar_on_second_line_of_goal_draft_is_unchanged(self):
-        """LOCKED AS UNCHANGED, not as desirable.
-
-        Line 2 carries no claiming `/`, so the floor is never consulted and the
-        token takes the whole-buffer path from 92fe6402. The result is odd, and
-        it is odd on origin/main too; fixing it is out of this slice's scope.
-        """
-        assert _complete("/goal ship it\nfix the $git", "gitlab") == (
-            "$gitlab /goal ship it\nfix the ",
-            30,
-        )
+    def test_dollar_on_second_line_keeps_the_line_break(self):
+        text = "/goal ship it\nfix the $git"
+        assert _complete(text, "gitlab") == self._expected(text)
 
     @pytest.mark.parametrize(
         "text,caret",
@@ -260,30 +246,24 @@ class TestAcceptingARowRewritesTheArgument:
             ("/team delivery $gi fix this", 18),
         ],
     )
-    def test_argument_reassembly_never_precedes_the_command_word(
-        self, text: str, caret: int | None
-    ):
-        """The command word stays at index 0 in every rebuild case."""
+    def test_the_edit_never_moves_the_command_word(self, text: str, caret: int | None):
         completed = _complete(text, "gitlab", caret=caret)
         assert completed is not None, text
         new_text, _ = completed
         assert new_text.startswith("/")
-        assert new_text.index("$") > new_text.index(" ")
+        assert new_text[: text.index("$")] == text[: text.index("$")]
 
     def test_completion_after_agent_name(self):
-        assert _complete("/agent reviewer look at this $git", "gitlab") == (
-            "/agent reviewer $gitlab look at this ",
-            24,
-        )
+        text = "/agent reviewer look at this $git"
+        assert _complete(text, "gitlab") == self._expected(text)
 
-    def test_ghost_withheld_for_argument_reassembly(self):
-        """The result is not an append, so `ghost_for`'s startswith rule withholds it."""
+    def test_ghost_previews_the_span_replacement(self):
         text = "/team delivery explain this $git"
-        assert ghost_for(_complete(text, "gitlab"), text) == ""
+        assert ghost_for(_complete(text, "gitlab"), text) == "lab "
 
 
-class TestTheRegionCannotDriftFromTheFloor:
-    """One helper answers "where does the argument start", for gate and edit alike."""
+class TestTheFloorDecidesWhereTheArgumentStarts:
+    """One helper answers "where may a `$` open inside a claim"."""
 
     @pytest.mark.parametrize(
         "text",
@@ -296,16 +276,10 @@ class TestTheRegionCannotDriftFromTheFloor:
             "/fork start on $git",
         ],
     )
-    def test_region_start_equals_floor(self, text: str):
-        region = _skill_argument_region(
-            text, len(text), COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS
-        )
-        assert region is not None
+    def test_floor_is_at_or_before_the_token(self, text: str):
         floor = _skill_argument_floor(text, 0, PROMPT_COMMANDS, NAME_COMMANDS)
         assert floor is not None
-        # Single-line buffers, so line_start is 0 and the two are directly comparable.
-        assert region[0] == floor
-        assert region[1] == len(text)
+        assert floor <= text.index("$")
 
 
 class TestPhaseDisjointness:
@@ -400,13 +374,10 @@ class TestPhaseDisjointness:
             caret = editor._caret_offset()
             token = _token(buffer, caret)
             if token is not None:
-                # A token that opened must own the phase outright...
+                # A token that opened must own the phase outright. The floor's
+                # own half (never inside the name slot) is pinned by
+                # `TestTheFloorDecidesWhereATokenOpens`.
                 assert phase == "skill", (buffer, phase)
-                # ...and must sit at or past the floor, never in the name slot.
-                region = _skill_argument_region(
-                    buffer, caret, COMMAND_NAMES, PROMPT_COMMANDS, NAME_COMMANDS
-                )
-                assert region is None or region[0] <= token.start, (buffer, region)
 
     def test_name_prompt_commands_match_name_argument_commands(self):
         """The registry-derived set must equal the hand-written one it describes.
