@@ -4323,6 +4323,11 @@ class Session:
         # The body turn whose answer was already seen at a terminal step, so
         # it is never cut afterwards (``_body_turn_cut_for_person``).
         self._body_answered_turn: Any | None = None
+        # The live context's tail as the body turn's loop opened (``None`` on
+        # an empty context). A terminal tail counts as the body's answer only
+        # once it is NOT this object: before the turn produces a step, the
+        # tail is the previous turn's answer (MAJOR-R4-1).
+        self._body_turn_opening_tail: Any | None = None
         # One tracked waiter coalesces admitted arrivals behind the current
         # turn. The reservation, not this task or the card text, owes the work.
         self._pending_body_followup_task: asyncio.Task[Any] | None = None
@@ -15558,17 +15563,48 @@ class Session:
         requests still carry no person words: ``_drain_steering`` keeps
         holding them. The same latch lets a loop recovery after a terminal
         tail (the wordless-stop re-ask, a truncated-answer continuation) run
-        uncut: the person waits one bounded call longer, held, never folded in.
+        uncut, AND any tool chain that recovered reply starts: the latch holds
+        for the rest of the turn, not one call (code review round 4,
+        MINOR-R4-1). Deliberate: clearing it on a later non-terminal step
+        would cut a turn whose body was already answered, re-serving it and
+        repeating its earlier tools (outbound bridge replies), the harm the
+        latch exists to prevent. The cost is bounded by the loop's own
+        continuation and recovery budgets: the person waits, held and never
+        folded in, and their held steer may skip interruptible tools.
+        ``_body_turn_answered`` scopes the latch to THIS turn's steps.
         """
         turn = self._pending_body_turn
         if turn is None or self._body_answered_turn is turn:
             return False
         # Latched before the steer check: the answer may land with no person
         # waiting and the steer only during the re-entered call after it.
-        if self._context_tail_is_terminal():
+        if self._body_turn_answered():
             self._body_answered_turn = turn
             return False
         return self._person_steer_queued()
+
+    def _body_turn_answered(self) -> bool:
+        """Whether THIS body turn has produced its terminal step.
+
+        Not merely "the context ends terminal": a body-only turn opens with no
+        new messages and its body rides the request transform, never the
+        context, so until the turn's first step lands the tail is the
+        PREVIOUS turn's answer (or quiet ``no_reply``). Reading that latched
+        "answered" before the body was even sent, and a person steering
+        mid-work then waited through the whole tool chain while their held
+        steer cancelled every interruptible tool (PR #2999 code review round
+        4, MAJOR-R4-1; every cell then started from an empty context).
+
+        Identity, not an index: a mid-turn compaction replaces the context
+        list (``on_turn_end``), which would move an index but keeps the
+        surviving messages' objects, and a step this turn produces is always
+        a new object on the tail.
+        """
+        if not self._context.messages:
+            return False
+        if self._context.messages[-1] is self._body_turn_opening_tail:
+            return False
+        return self._context_tail_is_terminal()
 
     def _context_tail_is_terminal(self) -> bool:
         """Whether the live context ends on a step after which the loop stops."""
@@ -17995,6 +18031,7 @@ class Session:
             self._pending_body_turn = None
             self._pending_body_verdict = None
             self._body_answered_turn = None
+            self._body_turn_opening_tail = None
 
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
@@ -18332,6 +18369,14 @@ class Session:
                 if not opened_body.binding_intact():
                     return
                 self._pending_body_turn = opened_body
+            # Taken HERE, after every pre-loop append (journal flush, carried
+            # cards) and before the loop adds this turn's own input or steps,
+            # so "tail is not this object" means "this turn produced it".
+            self._body_turn_opening_tail = (
+                self._context.messages[-1]
+                if self._pending_body_turn is not None and self._context.messages
+                else None
+            )
             config = LoopConfig(
                 # The conversation BODY goes in HERE and nowhere else: the loop
                 # calls this once per PHYSICAL request, so a turn that makes

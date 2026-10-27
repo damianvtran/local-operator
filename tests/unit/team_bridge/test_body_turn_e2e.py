@@ -697,6 +697,48 @@ def _hook_tool(on_run) -> AgentTool:
     return AgentTool(name="hook", description="a tool", execute=execute)
 
 
+# -- history-prefixed variants (MAJOR-R4-1) ------------------------------------
+#
+# A body-only turn opens with no new messages and the body rides the request
+# transform, not the context, so the live tail at its first boundaries is
+# whatever the session already held. Real sessions almost always hold history;
+# a fresh context hid a latch that fired on the PREVIOUS turn's answer.
+
+HISTORY = ["fresh", "after_answer", "after_no_reply"]
+
+
+def _seed_history(session: Session, history: str) -> None:
+    """Give the session a prior exchange ending the way ``history`` names."""
+
+    from local_operator.harness.types import QUIET_TURN_KEY, ToolCall
+
+    if history == "fresh":
+        return
+    prior: list[Any] = [Message.user("PRIOR-HELLO")]
+    if history == "after_answer":
+        prior.append(Message(role="assistant", content=[TextContent(text="PRIOR-HI")]))
+    else:
+        prior.append(
+            Message(
+                role="assistant",
+                content=[],
+                tool_calls=[ToolCall(id="prior-q", name="no_reply", arguments={})],
+            )
+        )
+        prior.append(
+            Message.tool_result(
+                ToolResult(
+                    tool_call_id="prior-q",
+                    tool_name="no_reply",
+                    content=[TextContent(text="Quiet.")],
+                    details={QUIET_TURN_KEY: True},
+                )
+            )
+        )
+    session._context.messages.extend(prior)
+    assert session._context_tail_is_terminal(), "the seeded history must end terminal"
+
+
 def _layout(stream: CapturingStream) -> str:
     """One line per request: role and a short tag per text block, the body masked."""
 
@@ -766,9 +808,12 @@ def _steer_spooled(session: Session) -> None:
     )
 
 
+@pytest.mark.parametrize("history", HISTORY)
 @pytest.mark.parametrize("steer", [_steer_typed, _steer_spooled], ids=["tui_steer", "spooled"])
 @pytest.mark.asyncio
-async def test_a_person_steering_into_a_body_turn_gets_their_own_turn(tmp_path, steer) -> None:
+async def test_a_person_steering_into_a_body_turn_gets_their_own_turn(
+    tmp_path, steer, history
+) -> None:
     """MAJOR-1(b): a person's steer is never folded in after the frame.
 
     The body turn ends at its next boundary (aborted, so ``settle`` releases the
@@ -797,6 +842,7 @@ async def test_a_person_steering_into_a_body_turn_gets_their_own_turn(tmp_path, 
 
     session = _session(tmp_path, stream, _runtime(config_dir, client), tools=[_hook_tool(on_run)])
     holder["session"] = session
+    _seed_history(session, history)
     try:
         await _serve_body_turn(session)
         await _settle(session)
@@ -1229,9 +1275,10 @@ def _record_settles(monkeypatch) -> list[tuple[dict[str, Any], str]]:
     return seen
 
 
+@pytest.mark.parametrize("history", HISTORY)
 @pytest.mark.asyncio
 async def test_a_steer_during_the_final_answer_does_not_re_serve_the_body(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, history
 ) -> None:
     """MAJOR-R2-1, probe C: the body was answered, so the turn ends normally.
 
@@ -1256,6 +1303,7 @@ async def test_a_steer_during_the_final_answer_does_not_re_serve_the_body(
     )
     session = _session(tmp_path, stream, _runtime(config_dir, client))
     holder["session"] = session
+    _seed_history(session, history)
     try:
         await _serve_body_turn(session)
         await _settle(session)
@@ -1358,9 +1406,10 @@ def _steer_spooled_c(session: Session) -> None:
     [lambda session: session.steer("PERSON-C", []), _steer_spooled_c],
     ids=["R3b_tui_steer", "R3d_spooled"],
 )
+@pytest.mark.parametrize("history", HISTORY)
 @pytest.mark.asyncio
 async def test_a_body_turn_ending_on_no_reply_is_not_re_served_for_a_queued_person(
-    tmp_path, monkeypatch, steer
+    tmp_path, monkeypatch, steer, history
 ) -> None:
     """Q-R3-1 (R3b, R3d): ``no_reply`` ends the body turn; the person goes next."""
 
@@ -1380,6 +1429,7 @@ async def test_a_body_turn_ending_on_no_reply_is_not_re_served_for_a_queued_pers
     )
     session = _session(tmp_path, stream, _runtime(config_dir, client))
     holder["session"] = session
+    _seed_history(session, history)
     _assert_no_reply_mounted(session)
     try:
         await _serve_body_turn(session)
@@ -1398,9 +1448,10 @@ async def test_a_body_turn_ending_on_no_reply_is_not_re_served_for_a_queued_pers
         assert REFUSAL not in "\n".join(stream.texts(index)), _layout(stream)
 
 
+@pytest.mark.parametrize("history", HISTORY)
 @pytest.mark.asyncio
 async def test_a_body_turn_ending_on_no_reply_never_repeats_an_earlier_side_effect(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, history
 ) -> None:
     """Q-R3-1 (R3e): a side-effecting tool, then ``no_reply`` with a typed steer queued."""
 
@@ -1433,6 +1484,7 @@ async def test_a_body_turn_ending_on_no_reply_never_repeats_an_earlier_side_effe
         tools=[_hook_tool(lambda: effects.append("reply sent"))],
     )
     holder["session"] = session
+    _seed_history(session, history)
     _assert_no_reply_mounted(session)
     try:
         await _serve_body_turn(session)
@@ -1552,3 +1604,56 @@ async def test_an_answered_body_is_not_cut_by_a_later_yield_edge_re_entry(
     assert settles[0][0]["aborted"] is False and settles[0][1] == "completed", settles
     assert any("HUB-ASIDE" in "\n".join(stream.texts(i)) for i in range(len(stream.requests)))
     assert _carries_both(stream, "PERSON-C") == [], _layout(stream)
+
+
+@pytest.mark.asyncio
+async def test_a_body_turn_after_a_real_prior_turn_still_yields_mid_work(tmp_path) -> None:
+    """MAJOR-R4-1, the reviewer's probe: real history, then a mid-work steer.
+
+    A real ``prompt`` turn answers first (its answer is the context's tail
+    when the body turn opens), then the body turn runs two tool calls and the
+    person steers in the first. The body turn must be cut after that first
+    tool, not run its whole chain with the person held.
+    """
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    client = FakeBridgeClient()
+    answer: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+    stream = CapturingStream(
+        [
+            [StreamTextDelta(delta="PRIOR-HI"), StreamEndEvent(stop_reason="stop")],
+            _tool_call("call-1", "hook"),
+            _tool_call("call-2", "hook"),
+            answer,
+        ]
+    )
+    holder: dict[str, Session] = {}
+    runs: list[int] = []
+
+    def on_run() -> None:
+        runs.append(1)
+        if len(runs) == 1:
+            _steer_typed(holder["session"])
+
+    session = _session(tmp_path, stream, _runtime(config_dir, client), tools=[_hook_tool(on_run)])
+    holder["session"] = session
+    try:
+        await session.prompt("PRIOR-HELLO")
+        await _settle(session)
+        assert len(stream.requests) == 1
+        _reserve(store, config_dir=config_dir)
+        await _serve_body_turn(session)
+        await _settle(session)
+    finally:
+        await session.dispose()
+
+    words = "typed mid-body words"
+    assert _carries_both(stream, words) == [], _layout(stream)
+    person = [i for i in range(len(stream.requests)) if words in "\n".join(stream.texts(i))]
+    # Request 1 is the body turn's first call; it runs call-1, the person
+    # steers there, and the cut makes request 2 the person's own turn.
+    assert person and person[0] == 2, _layout(stream)
+    assert 2 not in _carrying(stream), _layout(stream)
+    assert _row(config_dir)["state"] == "completed", "the yielded body is re-served"
