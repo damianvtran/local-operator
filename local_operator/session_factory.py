@@ -152,6 +152,34 @@ _OVERLAP_MIN_CHARS = 200
 #: here — imported lazily by the factory or by something it calls, and never at
 #: module scope (see ``test_import_graph.py``, which pins that importing this
 #: module stays off these stacks).
+#:
+#: ``teams`` is the OPEN's cost rather than the factory's, and it is named here
+#: deliberately instead of relying on the closure that happens to pull it today:
+#: a cold open of a team-bound conversation resolves the manager's identity from
+#: the registry (``AttachedSession._cold_team_manager`` -> ``team_registry``),
+#: and ``import local_operator.teams`` measured 148.3 ms cold, 0.2 ms once
+#: resident (2026-10-27, a fresh interpreter, a loaded 10-core box). It is
+#: covered transitively by ``local_operator.tools.registry`` below — via
+#: ``tools/team_tool.py``'s module-scope import — which is exactly why it must
+#: ALSO be named: otherwise the open of a conversation that has no tools in play
+#: depends on another entry's incidental closure, and the first tool module that
+#: drops its team import silently re-opens the stall.
+#:
+#: THE REST OF THE OPEN-PATH GROUP below is the same shape of finding, measured
+#: the same way: a real cold open (``AttachedSession.cold`` over a 10,376-row
+#: transcript whose checkpoint names an active team) imports these modules for
+#: the first time — the prices and monitors tables, the mesh identity/placement
+#: a peer row is rendered from, and the tail anchor the page joins on — and each
+#: cost 5-10 ms cold against 0.0 ms warm. They qualify for this list by the rule
+#: the docstring states: no module-scope side effect (checked with an AST scan
+#: of every one), no heavy dependency chain, and no path that imports them at
+#: module scope (``test_import_graph.py``'s guards stay green).
+#:
+#: DELIBERATELY NOT warmed, and the reason is the rule rather than the cost: the
+#: cold open's ``local_operator.secrets.*`` group (~44 ms including the crypto
+#: stack), and the reveal path's `local_operator.tunnels.gateway` + ``jwt``
+#: (~500 ms cumulative). Both are heavy chains, and the tunnels one is a layering
+#: defect worth fixing where it is imported rather than paying for at every boot.
 _WARM_IMPORTS: tuple[str, ...] = (
     "mcp",
     "httpx",
@@ -162,9 +190,15 @@ _WARM_IMPORTS: tuple[str, ...] = (
     "local_operator.mcp.manager",
     "local_operator.model.configure",
     "local_operator.model.discovery",
+    "local_operator.model.prices",
+    "local_operator.monitors.store",
+    "local_operator.network.credentials.placement",
+    "local_operator.network.identity",
     "local_operator.providers.auth_store",
     "local_operator.session.session",
+    "local_operator.session.tail_anchor",
     "local_operator.skills.discovery",
+    "local_operator.teams",
     "local_operator.tools.registry",
 )
 
