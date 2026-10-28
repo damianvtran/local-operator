@@ -618,3 +618,39 @@ def test_a_redelivered_op_must_sit_behind_the_receivers_cursor(tmp_path):
     with pytest.raises(MemoryError, match="not behind this peer's cursor"):
         net.receive(server, "d_aaaaaaaa", payload, ["global"], {"d_aaaaaaaa"})
     assert not MemoryStore(tmp_path / "r", MemoryIdentity("s")).search("Mira", "global")
+
+
+# --- Round 2 remediation ----------------------------------------------------------
+
+
+def test_a_single_line_text_at_exactly_the_limit_is_stored(tmp_path):
+    """QA Q4: empty title/subject parts no longer add separator tokens."""
+    text = " ".join(f"w{n}" for n in range(2000))
+    while count_text_tokens(text) > memory.ITEM_TOKENS:
+        text = text.rsplit(" ", 1)[0]
+    while count_text_tokens(text) < memory.ITEM_TOKENS:
+        text += " z"
+    assert count_text_tokens(text) == memory.ITEM_TOKENS
+    stored, raw = _call({"op": "store", "text": text}, _ctx(tmp_path))
+    assert not stored.is_error, raw
+
+
+def test_only_a_session_store_over_the_legacy_bound_carries_the_note(tmp_path):
+    """QA Q5: the note appears where an old importer would refuse, nowhere else."""
+    context = _ctx(tmp_path)
+    big = json.loads(_call({"op": "store", "text": "alpha beta " * 160}, context)[1])
+    assert "exceed the item limit of builds before memory-item-512" in big["compatibility"]
+    small = json.loads(_call({"op": "store", "text": "Kestrel goal: ship the proxy"}, context)[1])
+    assert "compatibility" not in small
+    personal = json.loads(
+        _call({"op": "store", "scope": "global", "text": "Elara likes tea " * 40}, context)[1]
+    )
+    assert "compatibility" not in personal
+
+
+def test_an_overflowed_peer_reports_overflow_not_zero(tmp_path):
+    """QA Q6: ``pending`` must not read as nothing owed while the list overflowed."""
+    from local_operator.network import memory as net
+
+    assert net._owed({"ids": [], "overflow": True}) == "overflow"
+    assert net._owed({"ids": ["a", "b"], "overflow": False}) == 2

@@ -105,7 +105,7 @@ def legacy_log_note(count: int) -> str:
     """
     return (
         f"Note: {count} fact(s) here exceed the item limit of builds before "
-        "memory-item-512. A device still on such a build refuses the destination "
+        "memory-item-512. A device still on such a build refuses that "
         "session's memory log (it reports an item over 256 tokens); run lop-update there."
     )
 
@@ -891,9 +891,10 @@ def validate_fact(raw: Any) -> dict[str, Any]:
     # from the first line) adds no content, so it is not charged a second time:
     # otherwise a single-line store paid ~27 tokens for its own first 100 characters.
     title = "" if fact["body"].lstrip().startswith(fact["title"].strip()) else fact["title"]
-    content = count_text_tokens(
-        "\n".join([title, fact["body"], fact["subject"], *fact["tags"], *fact["aliases"]])
-    )
+    # Empty parts are dropped before joining: each would add a separator token,
+    # and a text measured at exactly the limit must not be refused at limit + 2.
+    parts = [title, fact["body"], fact["subject"], *fact["tags"], *fact["aliases"]]
+    content = count_text_tokens("\n".join(part for part in parts if part))
     if content > ITEM_TOKENS:
         raise MemoryError(
             f"Memory item is {content} content tokens; the limit is {ITEM_TOKENS} "
@@ -1814,6 +1815,15 @@ class MemoryStore:
         }
         if warning:
             result["warning"] = warning
+        # Only for a session write that is over the OLD item bound: that is the one
+        # row an un-updated build importing this session's portable log refuses.
+        # Every other store stays quiet, so the note is never noise.
+        if (
+            scope == "session"
+            and clean is not None
+            and count_text_tokens(_dump(clean)) > LEGACY_ITEM_WIRE_TOKENS
+        ):
+            result["compatibility"] = legacy_log_note(1)
         return result
 
     def forget_many(self, scope: str, expected: dict[str, str]) -> dict[str, Any]:

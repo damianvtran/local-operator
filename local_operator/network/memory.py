@@ -248,6 +248,12 @@ def legacy_pending(memory: MemoryStore, peer: str) -> dict[str, Any]:
     return {"ids": list(value.get("ids", [])), "overflow": bool(value.get("overflow"))}
 
 
+def _owed(pending: dict[str, Any]) -> int | str:
+    """The receipt's ``pending`` value: a count, or ``"overflow"`` when more were
+    owed than the list remembers (a ``0`` there would read as nothing owed)."""
+    return "overflow" if pending["overflow"] else len(pending["ids"])
+
+
 def _save_legacy_pending(memory: MemoryStore, peer: str, ids: list[str], overflow: bool) -> None:
     ids = list(dict.fromkeys(ids))
     if len(ids) > LEGACY_WITHHELD_CAP:
@@ -545,9 +551,12 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
     legacy = wire.MEMORY_ITEM_512 not in link.capabilities
     pending = legacy_pending(memory, device_id)
     if not legacy and pending["overflow"]:
-        # Too many withheld ids to remember: re-baseline instead. A new stream
-        # generation makes every peer's cursor for us start empty, so the next pass
-        # is a full idempotent resend that includes every skipped op.
+        # Too many withheld ids to remember (or a redelivery was refused): re-baseline
+        # instead. A new stream generation makes every peer's cursor for us start
+        # empty, so the next pass is a full idempotent resend that includes every
+        # skipped op. The generation is DEVICE-WIDE, so up-to-date peers resend too:
+        # correct (apply is idempotent) and rare, the price of not tracking cursors
+        # per peer here. This push itself sends nothing; the next one does the resend.
         with memory.connection() as db:
             db.execute(
                 "INSERT OR REPLACE INTO meta VALUES ('stream-generation',?)",
@@ -558,8 +567,8 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
         return {"ok": True, "code": "catching_up", "batches": batches, "withheld": withheld}
     elif not legacy and pending["ids"]:
         # The peer now accepts 512-content facts: redeliver what its legacy cap
-        # made us skip. They are behind its cursor, so they travel in the
-        # ``redeliver`` list the receiver applies without contiguity accounting.
+        # made us skip, in the ``redeliver`` list the receiver applies without
+        # contiguity accounting.
         with memory.connection() as db:
             ops = []
             for op_id in pending["ids"]:
@@ -567,7 +576,17 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                 op = json.loads(row[0]) if row else None
                 # Gone (compacted away as superseded) or redacted under a tombstone:
                 # the stream already carried what replaced it, so nothing is owed.
-                if op is not None and op["fact"] is not None and op["scope"] in scopes:
+                if op is None or op["fact"] is None or op["scope"] not in scopes:
+                    continue
+                # ONLY ops behind the peer's cursor (from its ``state`` reply for
+                # this generation) are redeliverable; the receiver refuses anything
+                # else. An id can legitimately be ahead of it: the stream generation
+                # moved (gap fill, another peer's re-baseline) so the cursor reset, or
+                # the push that would have advanced past it failed. Such an op is
+                # dropped from the owed list, NOT retried: the ordinary stream now
+                # carries it unwithheld (the peer has the capability). Retrying it
+                # here was review round 2's M4, a refusal that stalled every scope.
+                if op["seq"] <= vector.get(op["origin_device"], 0):
                     ops.append(op)
         remaining = [op["op_id"] for op in ops]
         for start in range(0, len(ops), _REDELIVER_OPS):
@@ -585,24 +604,28 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                     "redeliver": chunk,
                 },
             )
-            if (
-                not isinstance(answer, dict)
-                or answer.get("op") == "error"
-                or answer.get("ok") is False
+            if isinstance(answer, dict) and (
+                answer.get("op") == "error" or answer.get("ok") is False
             ):
-                _save_legacy_pending(memory, device_id, remaining, False)
+                # The peer REFUSED this redelivery. Whatever the reason, retrying the
+                # same ops would refuse again and block every later push, so this
+                # chunk is dropped from the owed list and the peer is re-baselined
+                # (``overflow``): the next push opens a new stream generation whose
+                # full resend carries these ops through the ordinary, validated path.
+                # One refusal therefore costs one resend, never a permanent stall.
+                remaining = remaining[len(chunk) :]
+                _save_legacy_pending(memory, device_id, remaining, True)
                 return {
                     "ok": False,
-                    "code": (
-                        _peer_code(answer.get("code"), "refused")
-                        if isinstance(answer, dict)
-                        else "push_failed"
-                    ),
-                    "message": (
-                        _peer_message(answer.get("message")) if isinstance(answer, dict) else ""
-                    ),
+                    "code": _peer_code(answer.get("code"), "refused"),
+                    "message": _peer_message(answer.get("message")),
                     "batches": batches,
                 }
+            if not isinstance(answer, dict):
+                # No answer (the peer went away mid-push): nothing was refused, and
+                # every remaining op is still behind its cursor, so keep them owed.
+                _save_legacy_pending(memory, device_id, remaining, False)
+                return {"ok": False, "code": "push_failed", "message": "", "batches": batches}
             remaining = remaining[len(chunk) :]
             batches += 1
         _save_legacy_pending(memory, device_id, remaining, False)
@@ -642,7 +665,7 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                 ),
                 "batches": batches,
                 "withheld": withheld,
-                "pending": len(pending["ids"]),
+                "pending": _owed(pending),
             }
         answer = request("push", payload=payload)
         if not isinstance(answer, dict) or answer.get("op") == "error" or answer.get("ok") is False:
@@ -667,7 +690,7 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
         "code": "withheld" if withheld else "withheld_pending" if owed else "catching_up",
         "batches": batches,
         "withheld": withheld,
-        "pending": len(pending["ids"]),
+        "pending": _owed(pending),
     }
 
 
