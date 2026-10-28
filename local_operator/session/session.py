@@ -14762,10 +14762,15 @@ class Session:
         # raw entries are re-read at most once per ``_CHANNEL_PENDING_MIN_S``;
         # the fold exclusion below still runs every call, so a marker the fold
         # has absorbed retires immediately.
+        # A throttled answer arms ONE trailing re-read at the end of the floor
+        # (``_schedule_channel_pending_recheck``) so a marker written just after
+        # a read still reaches the band within the floor when the session goes
+        # quiet, rather than at the next unrelated tick (review round 1, R1-2).
         now = time.monotonic()
         cached = getattr(self, "_channel_pending_cache", None)
         if cached is not None and now - cached[0] < _CHANNEL_PENDING_MIN_S:
             entries = cached[1]
+            self._schedule_channel_pending_recheck(_CHANNEL_PENDING_MIN_S - (now - cached[0]))
         else:
             try:
                 directory = getattr(self._transcript, "directory", None)
@@ -14781,6 +14786,40 @@ class Session:
             for entry in entries
             if not self.channels.has(str(entry.get("record_id", "") or ""))
         ]
+
+    def _schedule_channel_pending_recheck(self, delay: float) -> None:
+        """Arm one trailing sidecar re-read ``delay`` from now; coalesced."""
+        if getattr(self, "_channel_pending_recheck_scheduled", False):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop (a synchronous caller or test host): the next tick re-reads.
+            return
+        self._channel_pending_recheck_scheduled = True
+        loop.call_later(max(delay, 0.0), self._flush_channel_pending_recheck)
+
+    def _flush_channel_pending_recheck(self) -> None:
+        """Re-read the sidecar; publish the spend band only if it changed.
+
+        Publishing only on a difference keeps the trailing edge free when
+        nothing moved — the common case, a burst of ticks over an unchanged
+        (usually absent) sidecar — so the throttle's saving is kept.
+        """
+        self._channel_pending_recheck_scheduled = False
+        before = getattr(self, "_channel_pending_cache", None)
+        self._channel_pending_cache = None
+        self.pending_channel_records()
+        after = getattr(self, "_channel_pending_cache", None)
+        if before is not None and after is not None and before[1] == after[1]:
+            return
+        store = getattr(self, "_frontend_state_store", None)
+        publish = getattr(store, "refresh_spend_channels", None) if store is not None else None
+        if callable(publish):
+            try:
+                publish(self)
+            except Exception:  # noqa: BLE001 — a publish must never break the loop
+                logger.debug("trailing channel spend publish failed", exc_info=True)
 
     def rebuild_channels_if_needed(self) -> None:
         """The adopt seam for channel history: the legacy backfill.

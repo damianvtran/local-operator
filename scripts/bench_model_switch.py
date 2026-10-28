@@ -400,6 +400,23 @@ async def _child_main(args: argparse.Namespace) -> None:
     os._exit(0)
 
 
+def _gated_child_env() -> dict[str, str]:
+    """The runtime child's environment, REFUSED unless it carries the gate.
+
+    The child is a real runtime finishing real turns, so an ungated child can
+    put a mock reply on the operator's lock screen. ``bench_send_admission``'s
+    builder sets ``NO_NOTIFY_ENV`` today; checking it here (fail-closed) keeps
+    this script safe if that builder ever changes, and is what the textual
+    isolation sweep (``tests/unit/test_notification_isolation.py``) looks for.
+    """
+    from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+
+    env = base._child_env()
+    if env.get(ENV_DISABLE) != ENV_DISABLE_VALUE:
+        raise SystemExit("bench child env lacks NO_NOTIFY_ENV; refusing to spawn")
+    return env
+
+
 async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
     from local_operator.session.attached import AttachedSession
 
@@ -423,7 +440,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        env=base._child_env(),
+        env=_gated_child_env(),
     )
     rows: list[dict[str, Any]] = []
     try:

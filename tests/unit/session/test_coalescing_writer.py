@@ -164,13 +164,13 @@ def test_wip_note_step_defers_the_receipt_and_clear_is_final(tmp_path: Path, mon
     child.mkdir()
     cp = WipCheckpointer(tmp_path, child, "job-w", "coder")
     writers: list[int] = []
-    real = cp._store
+    real = cp._write_payload
 
     def recording(payload: dict[str, object]) -> None:
         writers.append(threading.get_ident())
         real(payload)
 
-    monkeypatch.setattr(cp, "_store", recording)
+    monkeypatch.setattr(cp, "_write_payload", recording)
     monkeypatch.setattr(cp, "_git", lambda *a, **k: "")
 
     cp.note_step("bash", "Writing", 100.0)
@@ -280,3 +280,147 @@ def test_the_channel_sidecar_is_read_at_most_once_per_floor_on_the_tick_path(
     host._publish_channel_spend()  # no store: only the cache drop matters here
     host.pending_channel_records()
     assert len(reads) == 2, "a money edge did not read the sidecar fresh"
+
+
+def test_clear_is_final_even_against_an_op_already_dequeued(tmp_path: Path, monkeypatch) -> None:
+    """Review round 1, R1-1: hold the writer BETWEEN dequeue and execution.
+
+    The writer used to pop the op under the state lock and take the I/O lock
+    only afterwards; ``clear()`` arriving in that gap found nothing pending,
+    unlinked, and the popped step write then re-created the receipt. The gap
+    is held open deliberately here: the writer parks right after the pop until
+    ``clear`` has had every chance to run.
+    """
+    child = tmp_path / "child"
+    child.mkdir()
+    cp = WipCheckpointer(tmp_path, child, "job-gap", "coder")
+    monkeypatch.setattr(cp, "_git", lambda *a, **k: "")
+    cp.note_step("bash", "First", 100.0)
+    assert EVIDENCE_WRITER.flush(timeout=5.0)
+    assert cp.path.exists()
+
+    popped = threading.Event()
+    release = threading.Event()
+    real_take = EVIDENCE_WRITER._take
+
+    def take_then_park():
+        op = real_take()
+        if op is not None and not popped.is_set():
+            popped.set()
+            release.wait(5)
+        return op
+
+    monkeypatch.setattr(EVIDENCE_WRITER, "_take", take_then_park)
+    cp.last_receipt = 0.0
+    cp.note_step("bash", "step before settle", 101.0)
+    assert popped.wait(5), "the writer never dequeued the step"
+    clearing = threading.Thread(target=cp.clear)
+    clearing.start()
+    time.sleep(0.05)  # give an unguarded clear() time to unlink inside the gap
+    release.set()
+    clearing.join(5)
+    assert EVIDENCE_WRITER.flush(timeout=5.0)
+
+    assert not cp.path.exists(), "a step dequeued before clear() resurrected the receipt"
+
+
+def test_a_throttled_ask_read_still_lands_when_the_session_goes_quiet(monkeypatch) -> None:
+    """Review round 1, R1-2 / QA Q1 (``rig.py tail``), reproduced on a real loop.
+
+    An event reads the fold; ANOTHER process then appends an ask; one more
+    event arrives inside the floor (skipped) and the session goes quiet. The
+    ask must reach the fold — and a republish must go out — within about one
+    floor, not wait for an unrelated event that may never come.
+    """
+    import asyncio
+
+    from local_operator.session import frontend_state
+    from local_operator.session.runtime import serving
+
+    disk: list[dict[str, object]] = []
+    installed: list[object] = []
+    notified: list[int] = []
+
+    monkeypatch.setattr(frontend_state, "ask_wire", lambda session: (list(disk), len(disk)))
+    monkeypatch.setattr(serving, "_ASK_REFRESH_MIN_S", 0.2)
+
+    class _Fold:
+        def set_asks(self, rows: object, count: object) -> None:
+            installed.append((rows, count))
+
+    async def scenario() -> None:
+        handle = serving.ServingSessionHandle.__new__(serving.ServingSessionHandle)
+        handle._session = object()  # type: ignore[attr-defined]
+        handle._fold = _Fold()  # type: ignore[attr-defined]
+        handle._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        handle._disposing = False  # type: ignore[attr-defined]
+
+        def notify() -> None:
+            # ``_notify``'s ask leg: ``_publish_pending_gate`` refreshes the fold.
+            notified.append(1)
+            handle._refresh_ask_projection()
+
+        handle._notify = notify  # type: ignore[method-assign]
+
+        handle._refresh_ask_projection()  # an event stamps the fold
+        disk.append({"ask_id": "from-another-process", "state": "queued"})
+        await asyncio.sleep(0.02)
+        handle._refresh_ask_projection()  # trailing event, inside the floor: skipped
+        handle._refresh_ask_projection()  # a burst still arms ONE re-check
+        assert installed[-1] == ([], 0)
+        await asyncio.sleep(0.5)  # quiet: no further events
+
+    asyncio.run(scenario())
+    assert installed[-1] == (
+        [{"ask_id": "from-another-process", "state": "queued"}],
+        1,
+    ), "an external ask change skipped by the throttle never reached the fold"
+    assert len(notified) == 1, "the trailing re-check did not coalesce to one republish"
+
+
+def test_a_throttled_sidecar_read_still_lands_when_the_session_goes_quiet(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """R1-2 for the voice-spend sidecar: a marker written by another process
+    just after a read is published within one floor even with no later tick;
+    an unchanged sidecar publishes nothing extra."""
+    import asyncio
+
+    from local_operator.session import session as session_module
+
+    disk: list[dict[str, object]] = []
+    published: list[list[dict[str, object]]] = []
+    monkeypatch.setattr(session_module, "read_pending_records", lambda directory: list(disk))
+    monkeypatch.setattr(session_module, "_CHANNEL_PENDING_MIN_S", 0.2)
+
+    class _Transcript:
+        directory = tmp_path
+
+    class _Channels:
+        def has(self, record_id: str) -> bool:
+            return False
+
+    host = session_module.Session.__new__(session_module.Session)
+    host._transcript = _Transcript()  # type: ignore[attr-defined]
+    host.channels = _Channels()  # type: ignore[attr-defined]
+
+    class _Store:
+        def refresh_spend_channels(self, session: object) -> None:
+            published.append(host.pending_channel_records())
+
+    host._frontend_state_store = _Store()  # type: ignore[attr-defined]
+
+    async def scenario() -> None:
+        assert host.pending_channel_records() == []  # a tick reads
+        host.pending_channel_records()  # inside the floor, unchanged: arms a re-check
+        await asyncio.sleep(0.5)
+        assert published == [], "an unchanged sidecar published on the trailing edge"
+        host.pending_channel_records()  # floor elapsed: reads
+        disk.append({"record_id": "voice-1"})  # another process writes just after
+        host.pending_channel_records()  # inside the floor: cached, arms a re-check
+        await asyncio.sleep(0.5)  # quiet
+
+    asyncio.run(scenario())
+    assert published and published[0] == [
+        {"record_id": "voice-1"}
+    ], "a sidecar marker skipped by the throttle never reached the band"

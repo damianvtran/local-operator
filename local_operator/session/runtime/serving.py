@@ -1007,6 +1007,9 @@ class ServingSessionHandle(SessionHandle):
         #: ``time.monotonic()`` of the last ask-fold install; ``-inf`` so the
         #: first ``_refresh_ask_projection`` always reads.
         self._ask_fold_installed_at = float("-inf")
+        #: One trailing re-read armed for a throttled ``_refresh_ask_projection``
+        #: (see ``_schedule_ask_refresh``).
+        self._ask_refresh_scheduled = False
         #: The broker registration that authorizes THIS process's descendants to
         #: retrieve secrets, or ``None`` (§6). Held so teardown can deregister
         #: promptly rather than waiting for the process's socket to close: a
@@ -7306,12 +7309,18 @@ class ServingSessionHandle(SessionHandle):
         # ask changes do not depend on it: ``_ask_state_changed`` installs the
         # fresh fold immediately and stamps it. What the re-read catches is a
         # change made by ANOTHER process, which was only ever noticed when an
-        # unrelated event happened to arrive — so bounding it to one read per
-        # ``_ASK_REFRESH_MIN_S`` delays that by at most the bound.
+        # unrelated event happened to arrive. A skipped read arms ONE trailing
+        # re-check at the end of the floor (``_schedule_ask_refresh``), so the
+        # bound is a true "at most ``_ASK_REFRESH_MIN_S`` late" even when the
+        # session goes quiet right after the skip (review round 1, R1-2/Q1:
+        # without it a skipped change stayed off the phone fold and the
+        # mirrored card until the next unrelated event, however long).
         now = time.monotonic()
         # ``getattr``: a handle built without ``__init__`` (a test double)
         # has no stamp, and reads as never installed.
-        if now - getattr(self, "_ask_fold_installed_at", float("-inf")) < _ASK_REFRESH_MIN_S:
+        elapsed = now - getattr(self, "_ask_fold_installed_at", float("-inf"))
+        if elapsed < _ASK_REFRESH_MIN_S:
+            self._schedule_ask_refresh(_ASK_REFRESH_MIN_S - elapsed)
             return
         try:
             rows, outstanding_count = ask_wire(self._session)
@@ -10987,6 +10996,40 @@ class ServingSessionHandle(SessionHandle):
         if running is self._loop:
             return
         raise RuntimeError("this session cannot accept that op right now")
+
+    def _schedule_ask_refresh(self, delay: float) -> None:
+        """Arm one trailing ask re-read ``delay`` from now; coalesced.
+
+        A burst of skipped reads arms a single timer (the flag), mirroring
+        ``_schedule_roster_refresh``. When it fires it republishes through
+        ``_notify``, whose ``_publish_pending_gate`` re-runs
+        ``_refresh_ask_projection`` with the floor elapsed — so the read, the
+        mirrored card and the viewer push happen together. If a fresh install
+        (``_ask_state_changed``) re-stamps the fold meanwhile, that call skips
+        once more and re-arms for the remainder: at most one read per floor.
+        """
+        if getattr(self, "_ask_refresh_scheduled", False):
+            return
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            # A handle built without ``__init__`` (a test double) has no loop
+            # to defer onto; the next ``_notify`` still re-checks.
+            return
+        self._ask_refresh_scheduled = True
+        try:
+            loop.call_later(max(delay, 0.0), self._flush_ask_refresh)
+        except RuntimeError:
+            # A closing loop: nothing left to publish to.
+            self._ask_refresh_scheduled = False
+
+    def _flush_ask_refresh(self) -> None:
+        self._ask_refresh_scheduled = False
+        if getattr(self, "_disposing", False):
+            return
+        try:
+            self._notify()
+        except Exception:  # noqa: BLE001 — a card refresh never fails the loop
+            logger.debug("deferred ask refresh failed", exc_info=True)
 
     def _schedule_roster_refresh(self) -> None:
         """Republish the child roster once per :data:`_ROSTER_REFRESH_COALESCE_S`.

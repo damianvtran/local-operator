@@ -137,9 +137,9 @@ class WipCheckpointer:
         dropped rather than allowed to land after it with an older ``result``.
         """
         with EVIDENCE_WRITER.exclusive(self.path):
-            self._store(self._payload())
+            self._write_payload(self._payload())
 
-    def _store(self, payload: dict[str, Any]) -> None:
+    def _write_payload(self, payload: dict[str, Any]) -> None:
         fd, name = tempfile.mkstemp(dir=self.child_dir, prefix=f".{self.path.name}.")
         try:
             with os.fdopen(fd, "w") as handle:
@@ -270,7 +270,7 @@ class WipCheckpointer:
 
             def write() -> None:
                 try:
-                    self._store(payload)
+                    self._write_payload(payload)
                 except OSError:
                     logger.warning("Could not write WIP step", exc_info=True)
 

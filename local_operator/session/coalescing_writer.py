@@ -24,9 +24,16 @@ WHAT IT GUARANTEES, and the strength of each:
   serialised by one I/O lock. That is what keeps a deferred step write from
   RESURRECTING a receipt that a settle or ``clear()`` has just unlinked: the
   unlinker takes :meth:`exclusive`, which drops the key's pending op and waits
-  out any op already running before the unlink happens.
+  out any op already running before the unlink happens. "Running" starts at
+  the POP, not at the call: the writer takes the I/O lock BEFORE it dequeues,
+  so there is no instant where an op has left the queue (invisible to
+  ``exclusive``'s drop) but does not yet hold the lock (review round 1, R1-1:
+  a WIP step write popped in that gap re-created a receipt ``clear()`` had
+  just unlinked).
 * **Process-durable on a clean exit.** ``atexit`` flushes the queue (bounded),
-  so a normal shutdown does not lose the last step. A HARD death can lose the
+  so a normal shutdown does not lose the last step; ``reexec.replace_self``
+  flushes explicitly (bounded) because ``execvpe``/``os._exit`` skip
+  ``atexit``. A HARD death can lose the
   ops still queued — at most one per key, and these are the "last completed
   step" breadcrumbs the writers already throttle to 5 s, so the loss window is
   the same order as the throttle that was always there. Launch receipts and stop
@@ -94,12 +101,6 @@ class CoalescingWriter:
                 self._pending.pop(key, None)
             yield
 
-    @contextlib.contextmanager
-    def serialized(self) -> Iterator[None]:
-        """Hold the I/O lock WITHOUT dropping anything (a fresher sync write)."""
-        with self._io:
-            yield
-
     def flush(self, timeout: float = 5.0) -> bool:
         """Wait until nothing is pending or running; ``False`` on timeout."""
         deadline = time.monotonic() + timeout
@@ -133,6 +134,8 @@ class CoalescingWriter:
         self._thread = thread
 
     def _take(self) -> Op | None:
+        # Caller holds ``_io`` (see ``_execute_next``); lock order is always
+        # ``_io`` then ``_state``, the same as ``exclusive``.
         with self._state:
             if not self._pending:
                 return None
@@ -140,29 +143,39 @@ class CoalescingWriter:
             self._running = True
             return self._pending.pop(key)
 
-    def _execute(self, op: Op) -> None:
-        try:
-            with self._io:
+    def _execute_next(self) -> bool:
+        """Pop and run one op, ``False`` when the queue was empty.
+
+        The I/O lock is taken BEFORE the pop so that dequeue and execution are
+        one critical section with respect to :meth:`exclusive`: an op is either
+        still pending (and ``exclusive`` drops it) or already holds the lock
+        (and ``exclusive`` waits it out). Popping first and locking second left
+        a window where neither was true (R1-1).
+        """
+        with self._io:
+            op = self._take()
+            if op is None:
+                return False
+            try:
                 op()
-        except Exception:  # noqa: BLE001 — evidence must never kill the writer
-            logger.warning("evidence write failed", exc_info=True)
-        finally:
-            with self._state:
-                self._running = False
-                self._state.notify_all()
+            except Exception:  # noqa: BLE001 — evidence must never kill the writer
+                logger.warning("evidence write failed", exc_info=True)
+            finally:
+                with self._state:
+                    self._running = False
+                    self._state.notify_all()
+        return True
 
     def _drain_inline(self) -> None:
-        while (op := self._take()) is not None:
-            self._execute(op)
+        while self._execute_next():
+            pass
 
     def _run(self) -> None:
         while True:
             with self._state:
                 while not self._pending:
                     self._state.wait()
-            op = self._take()
-            if op is not None:
-                self._execute(op)
+            self._execute_next()
 
 
 #: The process-wide instance. One thread for every evidence file: these writes
