@@ -169,6 +169,10 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
                 raise MemoryError("Related inspection accepts related=true only.")
             store.import_session()
             value = store.show(scope, entity, version=query.get("version"))
+            if value.get("fact") is not None:
+                # B5: the AGENT read a fact. Recorded here, not inside ``show``,
+                # which also serves the human CLI (see ``note_recall``).
+                store.note_recall([entity])
             if query.get("related") == "true":
                 value["related"] = store.related(scope, entity)
             elif "related" in query:
@@ -187,6 +191,7 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
                 tokens=budget,
                 limit=int(query.get("limit", 10)),
             )
+            store.note_recall([item["id"] for item in value])
         else:
             if (
                 set(query) - {"tokens", "limit", "cursor"}

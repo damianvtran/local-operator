@@ -56,9 +56,11 @@ from local_operator.harness.types import (
 )
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
+from .cutpoint import is_rendered_injection
 from .mine import (
     CARRY_FRESH_TOKEN_ALLOWANCE,
     CARRY_TOKEN_BUDGET,
+    INJECTED_HEADER,
     carry_digest_lines,
     merge_carry,
     mine_carry,
@@ -579,7 +581,17 @@ def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
         if message.role == "user":
             text = _content_text(message)
             if text.strip():
-                blocks.append(f"[User]\n{text}")
+                # PROVENANCE, not wording. By the time history reaches this
+                # serializer the renderer has turned every harness aside (peer,
+                # hub/subagent, job result, wake, monitor, session-state …) into a
+                # plain user ``Message``; only its ``harness_injected`` stamp still
+                # says the operator did not type it. Under ``[User]`` the carry
+                # miner attributed those bodies to the operator: on a real
+                # transcript 66 of 72 captured asks were injected text. A distinct
+                # header keeps them readable in the archive while ``mine_carry``
+                # maps it to a role that mines no asks.
+                header = INJECTED_HEADER if is_rendered_injection(message) else "[User]"
+                blocks.append(f"{header}\n{text}")
         elif message.role == "assistant":
             parts: list[str] = []
             text = _content_text(message)

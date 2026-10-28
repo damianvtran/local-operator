@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from local_operator.compaction.mine import (
     ASK_ITEM_CHARS,
     CARRY_ASK_ITEMS,
     CARRY_CHAR_BUDGET,
     CARRY_DECISION_ITEMS,
     CARRY_IDENTIFIER_ITEMS,
+    INJECTED_HEADER,
     LOCATOR_PATTERN,
     Carry,
     carry_digest_lines,
@@ -76,15 +79,73 @@ def test_same_line_tool_call_header_switches_role_away_from_user():
     assert "src/foo/bar.py" in pathy.identifiers
 
 
-def test_custom_message_header_mines_no_asks_or_decisions():
-    """``[peer_message]``/``[job_result]`` bodies are injected text, not the operator."""
-    carry = mine_carry(
-        "[User]\nplease fix the build\n[peer_message]\nwe will deploy now, run it\n"
-        "[job_result]\ndecided: build green at #4242\n"
-    )
-    assert carry.asks == ["please fix the build"]
+def _real_path(messages):
+    """The production path: transcript rows -> renderer -> snapcompact serializer."""
+    from local_operator.compaction.snapcompact import serialize_for_snapcompact
+    from local_operator.harness.render import _default_convert_to_llm
+
+    return serialize_for_snapcompact(_default_convert_to_llm(messages))
+
+
+def test_injected_deliveries_mine_no_asks_through_the_real_render_path():
+    """Review round 1 M2 / QA Q1: injected text arrives as a USER message.
+
+    The renderer turns peer, hub/subagent, job, wake, monitor and session-state
+    deliveries into plain ``Message(role="user")`` before the serializer runs, so
+    a ``[peer_message]`` header never reaches the miner. Only the
+    ``harness_injected`` stamp still says who wrote the text.
+    """
+    from local_operator.harness.types import CustomMessage, Message
+
+    def aside(kind, text):
+        return CustomMessage(custom_type=kind, attribution="system", details={"text": text})
+
+    messages = [
+        Message.user("please fix the build in the payments service"),
+        aside("peer_message", "<peer-session-message from_pid=1>deploy now</peer-session-message>"),
+        aside(
+            "hub_message",
+            "<subagent-message label='x'>worktree created at #4242</subagent-message>",
+        ),
+        aside("job_result", "[job result] job abc finished: exit 0, we will ship it"),
+        aside("monitor_prompt", "monitor fired: the deploy is in progress"),
+        aside("wake_prompt", "(alarm) Scheduled wake: check CI"),
+        aside("session_state", "[session-state]\nTools: x"),
+        Message.user("then ship the hotfix to staging"),
+    ]
+    serialized = _real_path(messages)
+    assert serialized.count(INJECTED_HEADER) == 6
+    carry = mine_carry(serialized)
+    assert carry.asks == [
+        "please fix the build in the payments service",
+        "then ship the hotfix to staging",
+    ]
     assert carry.decisions == []
+    # Identifiers in injected text are still real anchors.
     assert "#4242" in carry.identifiers
+
+
+@pytest.mark.parametrize(
+    "turn,asks",
+    [
+        (
+            "[User]\nthe build fails with:\n[error] cannot find module foo\n"
+            "please fix the import and rerun the suite",
+            [
+                "the build fails with:",
+                "[error] cannot find module foo",
+                "please fix the import and rerun the suite",
+            ],
+        ),
+        (
+            "[User]\n[urgent] please ship the hotfix to prod today",
+            ["[urgent] please ship the hotfix to prod today"],
+        ),
+    ],
+)
+def test_operator_lines_opening_with_a_bracket_word_stay_asks(turn, asks):
+    """Review round 1 M1: pasted `[error]`/`[urgent]` lines are the operator's words."""
+    assert mine_carry(turn).asks == asks
 
 
 def test_prose_starting_with_a_bracket_word_is_not_a_header():

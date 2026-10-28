@@ -1280,7 +1280,10 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
     # Restart: a fresh store handle over the same disk state still retrieves.
     reopened = MemoryStore(root, MemoryIdentity(f"chain-{strategy}", "", "main"), directory)
     assert reopened.show("session", explicit["id"])["fact"]["body"] == "Decision: ship Friday"
-    assert reopened.search("chain0")
+    # The CURRENT progress line is what survives: `Progress` is a state tag, one head
+    # per session revised in place (memory round B2 rule 3), so pass 0's
+    # `chain0` line is superseded by pass 2's rather than kept beside it.
+    assert reopened.search("chain2")
     assert before >= 9
     print("CHAIN", strategy, "markers", len(markers), "captured", len(reopened.search("docs")))
 

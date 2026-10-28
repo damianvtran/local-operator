@@ -65,6 +65,7 @@ __all__ = [
     "ASK_ITEM_CHARS",
     "DECISION_ITEM_CHARS",
     "CARRY_TAGS",
+    "INJECTED_HEADER",
     "LOCATOR_PATTERN",
     "Carry",
     "carry_digest_lines",
@@ -155,6 +156,13 @@ _DECISION_CUE = re.compile(
     re.IGNORECASE,
 )
 
+#: Header ``serialize_for_snapcompact`` writes for a user-role message the
+#: renderer minted from a harness aside (stamped ``harness_injected``): peer,
+#: hub/subagent, job result, wake, monitor and session-state deliveries. They are
+#: user ``Message``s by the time they are serialized, so provenance is the only
+#: thing that separates them from the operator's words — see the serializer.
+INJECTED_HEADER = "[Injected]"
+
 #: Serialized role headers written by ``snapcompact.serialize_for_snapcompact``
 #: and ``api.serialize_conversation``. Matched as a line PREFIX, not a whole
 #: line: both serializers emit ``[Assistant tool calls] bash(...)`` with the
@@ -162,33 +170,29 @@ _DECISION_CUE = re.compile(
 #: that form, so the role stayed ``user`` after an operator turn and every tool
 #: call (with its multi-line arguments) was mined as an operator ask — measured
 #: on the live store, only 22% of captured ``ask`` rows matched operator text.
-#: ``(?![^\s])`` (header ends at whitespace or end of line) keeps a prose line
-#: that merely begins ``[User]x`` from switching role.
+#: ``(?!\S)`` (header ends at whitespace or end of line) keeps a prose line that
+#: merely begins ``[User]x`` from switching role.
+#:
+#: ONLY the exact names the harness writes switch role. A generic
+#: ``[lowercase-word]`` rule was tried and refused: an operator turn that pastes
+#: ``[error] cannot find module foo`` or opens ``[urgent] …`` lost the rest of its
+#: words to it (review round 1, M1). Injected text is attributed by its provenance
+#: stamp instead (``[Injected]``), never guessed from its wording.
 _ROLE_HEADER = re.compile(
-    r"^\[(User|Assistant|Assistant tool calls|Tool result:[^\]]*|Tool ERROR:[^\]]*)\](?!\S)"
+    r"^\[(User|Injected|Assistant|Assistant tool calls|Tool result:[^\]]*|Tool ERROR:[^\]]*)\]"
+    r"(?!\S)"
 )
-
-#: Any OTHER bracketed lowercase header: ``api.serialize_conversation`` renders a
-#: ``CustomMessage`` as ``[{custom_type}]`` (``peer_message``, ``job_result``,
-#: ``system_prefix`` ...). Those bodies are injected text, not the operator's
-#: words, yet with no header match they inherited the previous role and 65% of
-#: sampled captured asks were exactly such injected messages. They become role
-#: ``other``, which mines identifiers but never asks or decisions. Hyphens too:
-#: the harness's own ``[session-state]`` notice is minted that way. Two or more
-#: characters, so a ``[x] done`` checklist line typed by the operator stays prose.
-_CUSTOM_HEADER = re.compile(r"^\[[a-z][a-z_-]+\](?!\S)")
 
 
 def is_role_header(line: str) -> bool:
-    """True when ``line`` opens with a serializer role or custom-message header.
+    """True when ``line`` opens with one of the serializers' exact role headers.
 
     Shared with ``memory_capture``'s debris filter so a memory candidate that IS
-    a serialized transcript line (``[Assistant tool calls] bash(...)``, a
-    ``[peer_message]`` echo) is refused by the same grammar that attributes
-    roles here; two copies would drift exactly the way the anchor did.
+    a serialized transcript line (``[Assistant tool calls] bash(...)``) is refused
+    by the same grammar that attributes roles here; two copies would drift
+    exactly the way the anchor did.
     """
-    stripped = line.strip()
-    return bool(_ROLE_HEADER.match(stripped) or _CUSTOM_HEADER.match(stripped))
+    return bool(_ROLE_HEADER.match(line.strip()))
 
 
 #: Longest prefix of any single line the locator scan examines. A tool result
@@ -277,6 +281,10 @@ def mine_carry(text: str) -> Carry:
             # too: its same-line remainder is a rendered call, never a decision.
             if title == "User":
                 role = "user"
+            elif title == "Injected":
+                # Harness-delivered text: identifiers only, never an ask or a
+                # decision the operator or the assistant made.
+                role = "other"
             elif title.startswith("Tool") or title == "Assistant tool calls":
                 role = "tool"
             else:
@@ -289,10 +297,6 @@ def mine_carry(text: str) -> Carry:
             # identifiers — a path in ``read(path=...)`` is a real anchor — so it
             # falls through to the scan under the role just set.
             raw = remainder
-        elif _CUSTOM_HEADER.match(raw.strip()):
-            role = "other"
-            in_carry = False
-            continue
         line = raw.strip()
         if not line:
             continue

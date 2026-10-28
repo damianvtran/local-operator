@@ -1463,6 +1463,13 @@ class MemoryStore:
         db.execute("DELETE FROM current WHERE entity_id=?", (entity,))
         db.execute("DELETE FROM associations WHERE entity=?", (entity,))
         if any(op["kind"] == "tombstone" for op in ops):
+            # Recall telemetry for a dead id is noise. A LOCAL delete (the side
+            # table is never journalled); absent on a store that never recorded a
+            # read, which SQLite reports as an error that aborts nothing here.
+            try:
+                db.execute("DELETE FROM recall_stats WHERE entity=?", (entity,))
+            except sqlite3.OperationalError:
+                pass
             # Forgotten IDs are permanently dead. Bodies in old puts are removed
             # too; keeping their hash and ancestry still permits convergence.
             for op in ops:
@@ -3312,8 +3319,6 @@ class MemoryStore:
                 if not selected or tombs:
                     raise MemoryError("Revision unavailable or forgotten in this scope.")
                 heads = selected + [op for op in heads if op["op_id"] != version]
-            if not tombs:
-                self.note_recall([entity], db=db)
             return {
                 "id": entity,
                 "version": heads[0]["op_id"],
@@ -3833,12 +3838,6 @@ class MemoryStore:
                         used += cost
                 if len(result) >= min(limit, 3 if suggest else limit):
                     break
-            # An agent search counts as a recall here. A SUGGESTION does not: what
-            # ``search(suggest=True)`` admits is a candidate list, and the tail may
-            # still drop a line, so the tail records exactly the entities it rendered
-            # (``memory_capture._session_tail`` -> :meth:`note_recall`).
-            if not suggest:
-                self.note_recall([item["id"] for item in result], db=db)
             return result
 
     #: Recall-telemetry dedup window. Several reads of one fact inside one turn are
@@ -3850,8 +3849,17 @@ class MemoryStore:
     #: Each key keeps its last ``_RECALL_TURNS_KEPT`` turns rather than one,
     #: because agent reads (keyed by the tool turn) and suggestion renders (keyed by
     #: the user entry) interleave inside one turn and must not reset each other.
+    #: At most ``_RECALL_KEYS_KEPT`` (database, session) keys are held, oldest
+    #: dropped first, so a long-lived host process does not grow one per session.
     _recall_turns: dict[tuple[str, str], dict[str, set[str]]] = {}
     _RECALL_TURNS_KEPT = 4
+    _RECALL_KEYS_KEPT = 256
+    #: Lock wait for the telemetry write, in milliseconds. The write is best-effort
+    #: and runs on the agent's read path, so it must never queue behind a writer:
+    #: under ``busy_timeout=5000`` a held write lock (a capture pass's eviction
+    #: drain, sync apply, journal compaction) stalled a plain ``show`` for 5.17 s
+    #: (review round 1, M4). A lost bump is acceptable; a stalled read is not.
+    _RECALL_BUSY_MS = 25
 
     def begin_recall_turn(self, turn: str) -> None:
         """Name the turn the next :meth:`note_recall` calls on THIS instance belong to.
@@ -3863,9 +3871,12 @@ class MemoryStore:
         self._recall_turn = turn
 
     def _recall_window(self) -> set[str]:
-        windows = MemoryStore._recall_turns.setdefault(
-            (str(self.path), self.identity.session_id), {}
-        )
+        key = (str(self.path), self.identity.session_id)
+        windows = MemoryStore._recall_turns.pop(key, {})
+        # Re-inserted so dict order is recency order for the key bound below.
+        MemoryStore._recall_turns[key] = windows
+        while len(MemoryStore._recall_turns) > self._RECALL_KEYS_KEPT:
+            MemoryStore._recall_turns.pop(next(iter(MemoryStore._recall_turns)))
         turn = getattr(self, "_recall_turn", "")
         if turn not in windows:
             windows[turn] = set()
@@ -3873,49 +3884,55 @@ class MemoryStore:
                 windows.pop(next(iter(windows)))
         return windows[turn]
 
-    def note_recall(self, entities: Iterable[str], *, db: sqlite3.Connection | None = None) -> None:
+    def note_recall(self, entities: Iterable[str]) -> None:
         """B5 recall telemetry: bump ``recall_stats(entity, last_at, n)``, once per turn.
 
         WHY: there is no recall signal today, so the design measured "was this fact
         ever used" from a transcript grep (212 of 7,883 captured IDs). The next round
         ranks and expires candidates on real reads, which needs this table first.
 
+        WHO calls it: the AGENT read tool and the rendered suggestion block only —
+        never ``show``/``search`` themselves, which also serve ``lop memory`` and the
+        CLI edit path. A human inspecting memory is not the agent recalling it, and
+        counting those reads would bias the "never recalled" signal (review m1).
+
         Constraints: LOCAL ONLY — a plain side table never written to ``ops``, never
         exported to a session log and never synced, so it is no protocol change and
-        carries no fact content (an entity id, a timestamp and a counter). It is
-        best-effort: a read must never fail because its telemetry could not be
-        written (a locked or full store), so every error here is swallowed.
+        carries no fact content (an entity id, a timestamp and a counter). NEVER
+        BLOCKING: a dedicated connection waits at most ``_RECALL_BUSY_MS`` for the
+        write lock and otherwise drops the bump. The entities are marked seen either
+        way, so a turn that lost its bump does not retry (and wait) on every read.
         """
         seen = self._recall_window()
         fresh = [e for e in dict.fromkeys(entities) if e not in seen]
         if not fresh:
             return
-        try:
-            if db is None:
-                if not self.path.exists():
-                    return
-                with self.connection() as own:
-                    self._write_recall(own, fresh)
-                    own.commit()
-            else:
-                # Inside a read connection: commit just this upsert. ``show`` and
-                # ``search`` hold no transaction of their own, so this cannot commit
-                # anybody else's work.
-                self._write_recall(db, fresh)
-                db.commit()
-        except (sqlite3.Error, MemoryError, OSError):
-            return
         seen.update(fresh)
-
-    @staticmethod
-    def _write_recall(db: sqlite3.Connection, entities: list[str]) -> None:
-        db.execute(_RECALL_STATS_SCHEMA)
-        now = time.time()
-        db.executemany(
-            "INSERT INTO recall_stats VALUES (?,?,1) ON CONFLICT(entity) DO UPDATE SET "
-            "last_at=excluded.last_at, n=recall_stats.n+1",
-            [(entity, now) for entity in entities],
-        )
+        if not self.path.exists():
+            return
+        try:
+            # Not ``connection()``: that one waits up to 5 s for a lock and re-runs
+            # the whole schema script. The page cap is restated here because it is
+            # a per-connection pragma, and this connection must honour it too.
+            db = sqlite3.connect(self.path, timeout=self._RECALL_BUSY_MS / 1000)
+        except sqlite3.Error:
+            return
+        try:
+            db.execute(f"PRAGMA busy_timeout={self._RECALL_BUSY_MS}")
+            db.execute(f"PRAGMA max_page_count={MAX_DB_BYTES // CAP_PAGE_SIZE}")
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(_RECALL_STATS_SCHEMA)
+            now = time.time()
+            db.executemany(
+                "INSERT INTO recall_stats VALUES (?,?,1) ON CONFLICT(entity) DO UPDATE SET "
+                "last_at=excluded.last_at, n=recall_stats.n+1",
+                [(entity, now) for entity in fresh],
+            )
+            db.commit()
+        except sqlite3.Error:
+            return
+        finally:
+            db.close()
 
     def recall_summary(self) -> dict[str, Any]:
         """Aggregate recall telemetry for ``lop memory status --json``; never per-fact rows.
@@ -3937,7 +3954,7 @@ class MemoryStore:
             row = db.execute(
                 "SELECT count(*), count(r.entity), coalesce(sum(r.n),0), "
                 "coalesce(sum(r.entity IS NOT NULL AND "
-                "json_extract(c.fact,'$.status')='candidate'),0) "
+                "json_extract(c.fact,'$.source.author')='deterministic-capture'),0) "
                 "FROM current c LEFT JOIN recall_stats r ON r.entity=c.entity_id"
             ).fetchone()
         return {

@@ -60,8 +60,7 @@ def _visible(store: MemoryStore, query: str) -> list[dict[str, Any]]:
     [
         '[Assistant tool calls] bash(command="make check", i="Running the gate now")',
         "[Tool result: bash] the gate is running and will finish in a few minutes",
-        "[peer_message] the release window has an owner and we should hand over",
-        "[session-state] the operator detached from the session some minutes ago",
+        "[Injected] the release window has an owner and we should hand over",
         "the gate output was long [... 367 more characters truncated] and then ended",
     ],
 )
@@ -164,13 +163,106 @@ def test_a_full_state_chain_rolls_over_with_replaces_not_a_freeze(store, monkeyp
     assert MAX_REVISIONS > 3  # the store's own cap was not touched
 
 
+def test_eviction_never_kills_a_live_state_head(store, monkeypatch):
+    """Review round 1 M3: a goal not restated by later passes is still live.
+
+    It keeps its old ``source_time``, so it is the OLDEST captured candidate and
+    was the first one evicted; the chain then resolved to the tombstoned entity
+    and every later Goal section was skipped for the rest of the session.
+    """
+    monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 600)
+    goal = "Ship the capture efficiency slice to production this week"
+    persist(store, "m0", extract("", f"## Goal\n- {goal}"), "ok", committed_at=1.0)
+    for n in range(6):
+        persist(store, f"d{n}", _bulky(n), "ok", committed_at=10.0 + n)
+    assert capture_status(store)["evicted"] > 0
+    assert [f["body"] for f in _live(store, "goal")] == [goal]
+    newer = "Ship the capture slice after the QA round passes"
+    persist(store, "m1", extract("", f"## Goal\n- {newer}"), "ok", committed_at=100.0)
+    assert [f["body"] for f in _live(store, "goal")] == [newer]
+
+
+def test_a_forgotten_state_chain_starts_a_fresh_generation(store):
+    """A forget stays a forget, and the tag keeps recording current state."""
+    persist(store, "m0", extract("", "## Goal\n- Ship the first goal of the week"), "ok")
+    [item] = store.search("first goal", "session")
+    store.put("session", None, entity=item["id"], expected_version=item["version"], forget=True)
+    assert _live(store, "goal") == []
+    persist(store, "m1", extract("", "## Goal\n- Ship the second goal of the week"), "ok")
+    [live] = store.search("second goal", "session")
+    assert live["id"] != item["id"]
+    assert store.show("session", item["id"])["status"] == "forgotten"
+
+
+def test_a_restated_previous_section_never_joins_the_current_revision(store):
+    """QA round 1 Q3: one section per state tag, the last one wins, never `4; 3`."""
+    summary = (
+        "## Goal\n- Ship the capture slice, revision 4\n"
+        "## Key Decisions\n- Keep provenance per session\n"
+        "## Goal\n- Ship the capture slice, revision 3\n"
+    )
+    persist(store, "m", extract("", summary), "ok")
+    assert [f["body"] for f in _live(store, "goal")] == ["Ship the capture slice, revision 3"]
+
+
+@pytest.mark.asyncio
+async def test_the_summary_state_beats_the_transcripts_restated_state(store):
+    """``finish``: raw history holds the previous pass's Goal; the summary's wins."""
+    import asyncio
+
+    async def scan():
+        return extract("## Goal\n- Ship the capture slice, revision 3 (old)\n")
+
+    await memory_capture.finish(
+        store,
+        "arms",
+        asyncio.create_task(scan()),
+        "## Goal\n- Ship the capture slice, revision 4 (current)\n",
+    )
+    assert [f["body"] for f in _live(store, "goal")] == [
+        "Ship the capture slice, revision 4 (current)"
+    ]
+
+
+def test_a_shorter_bullet_contained_in_an_earlier_one_is_kept(store):
+    """Review m4: per-bullet comparison, not substring containment."""
+    summary = "## Progress\n- Tests pass for step 3 of the rollout\n- Tests pass\n"
+    persist(store, "m", extract("", summary), "ok")
+    assert [f["body"] for f in _live(store, "progress")] == [
+        "Tests pass for step 3 of the rollout; Tests pass"
+    ]
+
+
+def test_an_unenforceable_budget_is_reported_not_silent(store, monkeypatch):
+    """Review m2: at the tombstone floor the budget stops binding — say so."""
+    monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 200)
+    monkeypatch.setattr(memory_capture, "MAX_TOMBSTONES", 2)
+    for n in range(4):
+        persist(store, f"f{n}", _bulky(n), "ok", committed_at=1.0 + n)
+    assert capture_status(store)["unenforced_sessions"] == 1
+    assert "can no longer forget older candidates" in hint(store, "f3")
+
+
 # --- normalised dedup ------------------------------------------------------
 
 
 def test_case_and_whitespace_variants_refresh_one_fact(store):
     persist(store, "a", extract("", "## Key Decisions\n- Keep the  Stable prefix"), "ok")
-    persist(store, "b", extract("", "## Key Decisions\n- keep the stable   PREFIX"), "ok")
+    persist(store, "b", extract("", "## Key Decisions\n- keep the stable   prefix"), "ok")
     assert len(_live(store, "decision")) == 1
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        ("Proof lives in src/Widget/Proof.py now", "Proof lives in src/widget/proof.py now"),
+        ("Set the env var DEBUG_MODE before the run", "Set the env var debug_mode before the run"),
+    ],
+)
+def test_identifiers_differing_only_in_case_stay_two_facts(store, first, second):
+    """Review m3 / QA Q5: paths and env vars are case-sensitive here."""
+    persist(store, "a", extract("", f"## Key Decisions\n- {first}\n- {second}"), "ok")
+    assert sorted(f["body"] for f in _live(store, "decision")) == sorted([first, second])
 
 
 def test_dedup_never_merges_across_sessions(tmp_path):
@@ -288,18 +380,73 @@ def test_recall_stats_costs_no_pages_until_a_read_is_recorded(store):
     assert store.recall_summary() == {"live": 1, "recalled": 0, "reads": 0, "captured_recalled": 0}
 
 
-def test_search_and_show_bump_once_per_turn(store):
+def _tool_read(store: MemoryStore, path: str, turn: str) -> Any:
+    """One agent ``read`` through the real tool executor, as the model issues it."""
+    import asyncio
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.memory_tools import execute_memory
+
+    context = ToolContext(
+        session_id=store.identity.session_id,
+        memory_config_dir=str(store.root.parent),
+        send_turn_id=turn,
+    )
+    result = asyncio.run(execute_memory("call", "read", {"path": path}, context))
+    assert not result.is_error, result
+    return result
+
+
+def test_agent_reads_bump_once_per_turn(store):
     fact = store.put("session", {"title": "Launch rule", "body": "Launch windows close at noon."})
-    store.begin_recall_turn("turn-1")
-    store.search("launch windows", "session")
-    store.show("session", fact["id"])
-    store.search("launch windows", "session")
+    _tool_read(store, "memory://session?q=launch%20windows", "turn-1")
+    _tool_read(store, f"memory://session/{fact['id']}", "turn-1")
+    _tool_read(store, "memory://session?q=launch%20windows", "turn-1")
     assert _stats(store) == {fact["id"]: 1}
-    store.begin_recall_turn("turn-2")
-    store.show("session", fact["id"])
+    _tool_read(store, f"memory://session/{fact['id']}", "turn-2")
     assert _stats(store) == {fact["id"]: 2}
     summary = store.recall_summary()
     assert (summary["live"], summary["recalled"], summary["reads"]) == (1, 1, 2)
+
+
+def test_human_store_reads_are_not_recalls(store):
+    """Review m1 / QA Q6: ``show``/``search`` also serve `lop memory`; only callers count."""
+    fact = store.put("session", {"title": "Launch rule", "body": "Launch windows close at noon."})
+    store.show("session", fact["id"])
+    store.search("launch windows", "session")
+    assert _stats(store) == {}
+
+
+def test_a_recall_write_never_waits_on_a_held_write_lock(store):
+    """Review round 1 M4: telemetry must not stall a read behind a writer."""
+    import sqlite3
+    import time
+
+    fact = store.put("session", {"title": "Launch rule", "body": "Launch windows close at noon."})
+    holder = sqlite3.connect(store.path, timeout=0)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.perf_counter()
+        _tool_read(store, f"memory://session/{fact['id']}", "locked-turn")
+        elapsed = time.perf_counter() - started
+        # The same entity read again in the same turn does not retry the write.
+        started = time.perf_counter()
+        _tool_read(store, f"memory://session/{fact['id']}", "locked-turn")
+        again = time.perf_counter() - started
+    finally:
+        holder.rollback()
+        holder.close()
+    print(f"locked read {elapsed * 1000:.1f} ms, repeat {again * 1000:.1f} ms")
+    assert elapsed < 0.1 and again < 0.1
+    assert _stats(store) == {}  # the bump was dropped, not queued
+
+
+def test_a_forgotten_fact_leaves_no_recall_row(store):
+    fact = store.put("session", {"title": "Launch rule", "body": "Launch windows close at noon."})
+    _tool_read(store, f"memory://session/{fact['id']}", "t")
+    assert _stats(store) == {fact["id"]: 1}
+    store.put("session", None, entity=fact["id"], expected_version=fact["version"], forget=True)
+    assert _stats(store) == {}
 
 
 def test_a_suggestion_candidate_is_not_a_recall_until_rendered(store):
@@ -313,7 +460,7 @@ def test_recall_stats_is_never_journalled(store):
     fact = store.put("session", {"title": "Launch rule", "body": "Launch windows close at noon."})
     with store.connection() as db:
         before = db.execute("SELECT count(*) FROM ops").fetchone()[0]
-    store.begin_recall_turn("t")
-    store.show("session", fact["id"])
+    _tool_read(store, f"memory://session/{fact['id']}", "t")
+    assert _stats(store) == {fact["id"]: 1}
     with store.connection() as db:
         assert db.execute("SELECT count(*) FROM ops").fetchone()[0] == before

@@ -1115,19 +1115,46 @@ def capture_evicted(store: MemoryStore, marker_id: str) -> int:
     return _meta_record(record[0])[3] if record is not None else 0
 
 
+def _capture_floored(store: MemoryStore, marker_id: str) -> bool:
+    """Whether one pass hit the eviction tombstone floor while still over budget."""
+    if not store.path.exists():
+        return False
+    with store.connection() as db:
+        record = db.execute(
+            "SELECT value FROM meta WHERE key=?", (_capture_key(store, marker_id),)
+        ).fetchone()
+    try:
+        parsed = json.loads(record[0]) if record is not None else None
+    except (TypeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and parsed.get("floored") is True
+
+
 def watermark(store: MemoryStore, compaction_id: str) -> tuple[str, int] | None:
     detail = capture_detail(store, compaction_id)
     return None if detail is None else (detail.status, detail.n)
 
 
 def _normalized(body: str) -> str:
-    """The dedup form of a body: casefold + whitespace collapse.
+    """The dedup form of a body: whitespace collapse, casefold on PROSE words only.
 
-    Deliberately the SAME rule as ``memory._suggestion_key`` (case/whitespace only,
-    never fuzzy): a fuzzy match would merge genuinely distinct facts, which is worse
-    than keeping two.
+    The ``_suggestion_key`` rule (case/whitespace only, never fuzzy — a fuzzy match
+    would merge genuinely distinct facts) with one narrowing: a word is casefolded
+    only when it is plain alphabetic prose (all lowercase or Titlecase). Paths, env
+    vars, identifiers, ACRONYMS and camelCase keep their exact case, because here
+    they are case-sensitive: ``src/Widget/Proof.py`` vs ``src/widget/proof.py`` and
+    ``DEBUG_MODE`` vs ``debug_mode`` are two facts, not one (review m3, QA Q5).
     """
-    return " ".join(body.casefold().split())
+    words = []
+    for token in body.split():
+        core = token.strip(_TOKEN_PUNCTUATION)
+        prose = core.isalpha() and (core.islower() or core.istitle())
+        words.append(token.casefold() if prose else token)
+    return " ".join(words)
+
+
+#: Punctuation stripped from a token before deciding whether it is prose.
+_TOKEN_PUNCTUATION = "()[]{}<>,;:!?\"'`."
 
 
 def _fact_entity(store: MemoryStore, db: Any, key: str, fact: dict[str, Any]) -> str:
@@ -1154,7 +1181,10 @@ def _merge_state(prior: dict[str, Any], fact: dict[str, Any]) -> dict[str, Any]:
     out rather than refused: the snapshot keeps its LEADING bullets, which is the
     order the summary wrote them in, and the next pass restates the section anyway.
     """
-    if _normalized(fact["body"]) in _normalized(prior["body"]):
+    # Per BULLET, never a substring test: `Tests pass` is not already present in
+    # `Tests pass for step 3` (review m4).
+    bullets = {_normalized(part) for part in prior["body"].split(_STATE_JOINER)}
+    if _normalized(fact["body"]) in bullets:
         return prior
     try:
         return validate_fact(dict(prior, body=prior["body"] + _STATE_JOINER + fact["body"]))
@@ -1178,9 +1208,13 @@ def _state_entity(store: MemoryStore, db: Any, tag: str) -> tuple[str, tuple[str
     compaction collects the full entity's non-head revisions, and an op-count test
     would then write to the replaced (hidden) entity again.
 
-    A forgotten or human-corrected live entity is returned as-is so the write loop
-    skips it: a forget is never resurrected and a correction never overwritten, for a
-    state chain exactly as for any other captured fact.
+    A FORGOTTEN live entity rolls to a fresh generation with no link to it: the
+    forgotten revision stays dead (its entity is never written again), but the
+    session keeps a place to record its CURRENT goal/progress/next step. Before
+    this, one tombstone on the live generation — an eviction or a forget — made
+    every later pass skip the tag for the rest of the session (review round 1, M3).
+    A human-CORRECTED live entity is returned as-is, so the write loop skips it and
+    the correction is never overwritten.
     """
     session = store.identity.session_id
 
@@ -1196,7 +1230,9 @@ def _state_entity(store: MemoryStore, db: Any, tag: str) -> tuple[str, tuple[str
         generation += 1
         ops = following
     entity = entity_for(generation)
-    if len(ops) < MAX_REVISIONS or any(op["kind"] == "tombstone" for op in ops):
+    if any(op["kind"] == "tombstone" for op in ops):
+        return entity_for(generation + 1), None
+    if len(ops) < MAX_REVISIONS:
         return entity, None
     heads = store._heads(ops)
     if (
@@ -1217,6 +1253,24 @@ def _state_entity(store: MemoryStore, db: Any, tag: str) -> tuple[str, tuple[str
 _EVICTION_TOMBSTONE_SHARE = 0.5
 
 
+def _state_heads(store: MemoryStore, db: Any) -> set[str]:
+    """Every entity currently serving as a state-chain head for this session.
+
+    Evicting one of these would delete the session's live goal/progress/next step,
+    so :func:`_evict` never may — whether or not this pass restated the tag. A tag
+    the newest pass left out keeps its old ``source_time``, drifts to the oldest
+    and was evicted first (review round 1, M3). Both the generation a pass would
+    write and, at rollover, the full one it replaces are included.
+    """
+    heads: set[str] = set()
+    for tag in _STATE_TAGS:
+        entity, replaced = _state_entity(store, db, tag)
+        heads.add(entity)
+        if replaced is not None:
+            heads.add(replaced[0])
+    return heads
+
+
 def _evict(
     store: MemoryStore,
     db: Any,
@@ -1224,7 +1278,7 @@ def _evict(
     clock: int,
     protected: set[str],
     marker_id: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, bool]:
     """Forget the session's OLDEST captured candidates until capture fits its budget.
 
     Operator decision D3. Only rows that are still exactly what capture wrote are
@@ -1237,7 +1291,10 @@ def _evict(
 
     Each eviction is an ordinary TOMBSTONE op, so it replicates and converges like
     any forget. The op id is derived from (entity, marker) so a replayed pass is
-    idempotent. Returns ``(evicted, clock)``.
+    idempotent. Returns ``(evicted, clock, floored)``; ``floored`` is True when the
+    tombstone floor stopped eviction with capture still over budget — the one state
+    in which the budget no longer binds, so it is reported rather than silent
+    (review m2).
     """
     session = store.identity.session_id
     rows = db.execute(
@@ -1251,7 +1308,7 @@ def _evict(
     ).fetchall()
     used = sum(int(row[2]) for row in rows)
     if used <= CAPTURE_SESSION_TOKENS:
-        return 0, clock
+        return 0, clock, False
     tombs = db.execute(
         "SELECT count(*) FROM ops WHERE scope='session' AND owner=? AND kind='tombstone'",
         (session,),
@@ -1291,19 +1348,35 @@ def _evict(
         used -= int(tokens)
         tombs += 1
         evicted += 1
-    return evicted, clock
+    return evicted, clock, bool(used > CAPTURE_SESSION_TOKENS and tombs >= floor)
 
 
 def capture_status(store: MemoryStore) -> dict[str, Any]:
     """Aggregate capture-budget counts for ``lop memory status --json``; value-free."""
-    view: dict[str, Any] = {"session_budget_tokens": CAPTURE_SESSION_TOKENS, "evicted": 0}
+    view: dict[str, Any] = {
+        "session_budget_tokens": CAPTURE_SESSION_TOKENS,
+        "evicted": 0,
+        "unenforced_sessions": 0,
+    }
     if not store.path.exists():
         return view
+    floor = int(MAX_TOMBSTONES * _EVICTION_TOMBSTONE_SHARE)
     with store.connection() as db:
         rows = db.execute(
             "SELECT value FROM meta WHERE substr(key,1,?)=?", (len(_EVICTED_KEY), _EVICTED_KEY)
         ).fetchall()
+        # Derived, not stored: sessions whose captured candidates exceed the budget
+        # while their tombstones already sit at the eviction floor, i.e. where the
+        # budget has stopped binding (review m2).
+        unenforced = db.execute(
+            "SELECT count(*) FROM (SELECT owner FROM current WHERE scope='session' "
+            "AND json_extract(fact,'$.source.author')='deterministic-capture' "
+            "GROUP BY owner HAVING sum(tokens)>?) c WHERE (SELECT count(*) FROM ops o "
+            "WHERE o.scope='session' AND o.owner=c.owner AND o.kind='tombstone')>=?",
+            (CAPTURE_SESSION_TOKENS, floor),
+        ).fetchone()[0]
     view["evicted"] = sum(int(row[0]) for row in rows if str(row[0]).isdigit())
+    view["unenforced_sessions"] = int(unenforced)
     return view
 
 
@@ -1348,6 +1421,9 @@ def persist(
     timestamp = time.time() if committed_at is None else committed_at
     facts: dict[str, dict[str, Any]] = {}
     state: dict[str, dict[str, Any]] = {}
+    # The tag of the previous admitted row: a state tag's bullets fold only while
+    # they are CONTIGUOUS (one section). See the state branch below.
+    previous_tag: str | None = None
     refused = 0
     for row in rows:
         try:
@@ -1378,11 +1454,18 @@ def persist(
             continue
         tag = fact["tags"][0] if len(fact["tags"]) == 1 else None
         if tag in _STATE_TAGS:
-            # One revision per state tag per pass: the section's bullets fold into a
-            # single snapshot (see :func:`_merge_state`).
+            # One revision per state tag per pass, built from ONE section: the
+            # contiguous bullets fold into a snapshot (see :func:`_merge_state`), and
+            # a later section of the same tag REPLACES it rather than appending. A
+            # context-full summary restates the previous goal, and folding every
+            # section gave `revision 4; revision 3` (QA round 1, Q3). ``finish``
+            # orders the arms so the section that survives is the current one.
             prior = state.get(tag)
-            state[tag] = fact if prior is None else _merge_state(prior, fact)
+            continuing = prior is not None and previous_tag == tag
+            state[tag] = _merge_state(prior, fact) if continuing and prior else fact
+            previous_tag = tag
             continue
+        previous_tag = tag
         # NORMALISED key (casefold + whitespace collapse, the ``_suggestion_key``
         # rule) so a re-capture differing only in case/spacing refreshes the same
         # entity instead of minting a near-duplicate. Same session only: provenance
@@ -1515,7 +1598,9 @@ def persist(
             written.add(entity)
         # D3: keep the session's captured candidates inside CAPTURE_SESSION_TOKENS by
         # forgetting the OLDEST ones, never this pass's rows or a live state head.
-        evicted, clock = _evict(store, db, origin, clock, written | chains, marker_id)
+        evicted, clock, floored = _evict(
+            store, db, origin, clock, written | chains | _state_heads(store, db), marker_id
+        )
         if evicted:
             # Cumulative, outside the per-pass records that are pruned to 32.
             db.execute(
@@ -1556,10 +1641,12 @@ def persist(
         # the previous release's positional INSERT working for sessions still running
         # old code during rollout. This attribution row is written only when there is
         # something to attribute; the cohort stamp above is not per-pass attribution.
-        if reason is not None or refused or skipped or evicted:
+        if reason is not None or refused or skipped or evicted or floored:
             record = {"reason": reason, "refused": refused, "skipped": skipped}
             if evicted:
                 record["evicted"] = evicted
+            if floored:
+                record["floored"] = True
             db.execute(
                 "INSERT OR REPLACE INTO meta VALUES (?,?)",
                 (_capture_key(store, marker_id), _dump(record)),
@@ -1622,7 +1709,13 @@ async def finish(
         # the 52-row persist cap below truncates from the END: a transcript scan
         # that filled its own 40-row cap would otherwise push every curated
         # summary fact out of the pass. Within each arm the same 40-row cap applies.
-        rows = semantic_rows + scan_rows
+        # A state tag (goal/progress/next-step) the curated summary states is taken
+        # from the summary ONLY. The transcript scan reads raw history, which holds
+        # the PREVIOUS pass's restated sections, and ``persist`` keeps the last
+        # section of a tag it sees — so the scan must not be allowed to supply one
+        # the summary already did (QA round 1, Q3).
+        summary_state = {row["tags"][0] for row in semantic_rows if row["tags"][0] in _STATE_TAGS}
+        rows = semantic_rows + [row for row in scan_rows if not set(row["tags"]) & summary_state]
         carry_arm = carry_rows(carry, locators=locators) if carry else CaptureRows()
         skipped += carry_arm.skipped
         # The carry is the pass's MARQUEE retention, so it gets its own bounded
@@ -1938,5 +2031,10 @@ def hint(store: MemoryStore, marker_id: str) -> str:
         text += (
             f" {evicted} older captured candidates were forgotten to keep automatic "
             "capture within its per-session budget; stated facts are never evicted."
+        )
+    if _capture_floored(store, marker_id):
+        text += (
+            " Automatic capture is over its per-session budget and can no longer "
+            "forget older candidates (tombstone limit); consolidate session memory."
         )
     return f'<memory_hint compaction="{marker_id}">\n{text}\n</memory_hint>'
