@@ -138,6 +138,15 @@ HOLD_STALE_CLAIM = "stale_claim"
 #: retires it on a terminal outcome by this code. In ``screening.HOLD_CODES``.
 STALE_CLAIM_REDRIVE_CODE = "stale_claim_retry"
 
+#: Re-drive outcomes after which nothing is owed for the row: the message was
+#: handed off (``delivered``), refused for good (``bounce``/``rejected``), is
+#: gone from its conversation (``skipped``), or the conversation reservation
+#: witness proves a card was already admitted for it (``duplicate``; its
+#: residual — a crash between the reservation and the card — is the claiming
+#: slice's, see ``conversation.py``). ``retry_due_holds`` deletes the row on
+#: each of these (PR #3063 review B1/M2).
+_TERMINAL_REDRIVE_ACTIONS = frozenset({"delivered", "bounce", "rejected", "skipped", "duplicate"})
+
 #: Slack past the lease expiry before the parked message comes due, so the
 #: re-drive's claim lands strictly after ``expires_at`` (``claim`` refuses a
 #: row whose expiry is still ``> now``).
@@ -340,12 +349,14 @@ async def retry_due_holds(
     spine (``handle_message_available``), whose fetch performs the single
     documented message-bytes re-read per due item. Outcomes:
 
-    * delivered / bounced — the receipt commit deletes the hold row; the
-      in-process attempt counter resets;
+    * terminal (``_TERMINAL_REDRIVE_ACTIONS``: delivered, bounce, rejected,
+      skipped, duplicate) — the pass deletes the row by its own key (a cache
+      hit commits no receipt to do it); the attempt counter resets;
     * held AGAIN — ``retry_at`` advances by a bounded doubling gap (60 s →
       3600 s cap; counter capped at RETRY_MAX_ATTEMPTS);
-    * ``badge_only`` / ``claimed_elsewhere`` — the row is left for the next
-      due window or the other claimant;
+    * any other outcome (``badge_only``, ``claimed_elsewhere``) — the row and
+      its code stay, and ``retry_at`` advances on the same bounded doubling
+      gap as a hold, so no row is ever due on every pass;
     * a ``stale_claim`` park — re-driven only when its connector claim is
       held past expiry (the holder died); ``wait`` re-arms it at the current
       expiry, ``retire`` deletes it (see ``HOLD_STALE_CLAIM``);
@@ -463,23 +474,35 @@ async def retry_due_holds(
         except Exception:  # noqa: BLE001 — one row never stops the connector
             outcome = {"action": "hold", "message_id": message_id, "code": "retry_failed"}
         action = outcome.get("action")
-        if action in ("delivered", "bounce", "rejected", "skipped"):
-            # A pre-upgrade conversation hold may still use the seven-part
-            # label-bearing key. The spine clears the canonical locator; retire
-            # the exact consumed row too, rather than replaying it forever.
-            # A re-driven stale-claim row is retired here too: a replayed
-            # admission commits no new receipt, so nothing else deletes it,
-            # and a ``stale_claim_retry`` left behind would deliver again.
-            if (parsed is not None and message_id != parsed.encode()) or row["hold_code"] in (
-                HOLD_STALE_CLAIM,
-                STALE_CLAIM_REDRIVE_CODE,
-            ):
-                try:
-                    store.delete_hold(owner, message_id)
-                except StoreRefused:
-                    pass
+        if action in _TERMINAL_REDRIVE_ACTIONS:
+            # The pass retires the row it re-drove, by its OWN key, whatever
+            # its code (PR #3063 review B1). "The receipt commit deletes the
+            # hold" holds only for a FRESH screen: a re-drive served from the
+            # screening cache commits no receipt, so a hold written after the
+            # commit (``delivery_failed``, a fence such as ``bridge_off`` that
+            # closed after screening, ``phase_refused:*``) stayed due and —
+            # now that the confirmed ACK replays — woke the session on every
+            # pass. The same delete also retires a pre-upgrade conversation
+            # row under its seven-part key, which the spine never clears.
+            try:
+                store.delete_hold(owner, message_id)
+            except StoreRefused:
+                pass
             _RETRY_ATTEMPTS.pop(message_id, None)
-        elif action == "hold":
+        elif action != "hold":
+            # Neither terminal nor a hold (``badge_only``, ``claimed_elsewhere``
+            # or anything a spine adds later): the reason is real but outside
+            # this row, so it waits on the SAME bounded doubling backoff a hold
+            # gets. Leaving ``retry_at`` alone kept the row due on every pass
+            # (PR #3063 review M2: 141 re-drives in 200 s). The code is kept.
+            attempts = _RETRY_ATTEMPTS.get(message_id, 0)
+            gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
+            try:
+                store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
+            except StoreRefused:
+                pass  # fenced owner: the next live pass owns the row
+            _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
+        if action == "hold":
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
             new_code = str(outcome.get("code") or "")[:64]
@@ -704,8 +727,11 @@ async def run_iteration(
     # TB-01: ONCE-ONLY consumption — the drained refs were just handled
     # (deliveries) or are state hints the drain itself consumes; deleting them
     # here is what stops the quadratic re-wake/ACK growth across polls and
-    # restarts. A crash before this point replays the batch (at-least-once);
-    # the receiver's own dedupe absorbs the replay.
+    # restarts. A crash before this point replays the batch (at-least-once).
+    # Only the CONVERSATION lane absorbs that replay (its body reservation is
+    # the dedupe witness); a replayed PAIR wake mints a fresh peer-message id
+    # (and a fresh ``dref_`` for a request), so it is a second card and a
+    # second turn — the window is one batch wide (PR #3063 review m5).
     # Retire only outcomes actually handled. Failed refs stay durable, while
     # successful neighbours do not repeat merely because a later ref failed.
     # One attempt per ref per iteration; re-raising preserves run_forever's

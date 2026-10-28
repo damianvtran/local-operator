@@ -1191,6 +1191,127 @@ def test_a_stop_after_the_read_ack_still_delivers_once(tmp_path, monkeypatch, de
     assert store.drain_feed_refs(owner, 3) == []
 
 
+def _real_ack_access(monkeypatch: Any, owner: OwnerSnapshot) -> tuple[_AckWire, OAuthAccess]:
+    """Wire the PRODUCTION ack seam (intent ledger + stored ``client_ref``)."""
+
+    wire = _AckWire()
+    monkeypatch.setattr(pull_mod, "_client_for", lambda config_dir, client: wire)
+    monkeypatch.setattr(wake_mod, "ack_read", _PRODUCTION_ACK_READ)
+    access = OAuthAccess(
+        access_token="tok",
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        org_id=owner.tenant_id,
+    )
+    return wire, access
+
+
+@pytest.mark.parametrize("first_code", ["delivery_failed", "bridge_off"])
+def test_a_redriven_hold_wakes_once_across_many_passes(tmp_path, monkeypatch, first_code) -> None:
+    """PR #3063 review B1: a hold written AFTER the receipt commit (a failed
+    handoff, a fence that closed after screening) re-drives through a cache
+    hit, which commits no new receipt — so nothing deleted the row. With the
+    stored ACK ref replaying, every later pass reached the handoff again and
+    woke the session on EVERY pass. The pass must retire the row by its own
+    key on a terminal outcome, whatever its code."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    wire, access = _real_ack_access(monkeypatch, owner)
+    delivered_fake = wake_mod.deliver_wake
+    if first_code == "delivery_failed":
+
+        async def fails_once(*args: Any, **kwargs: Any) -> str:
+            raise RuntimeError("handoff refused")
+
+        monkeypatch.setattr(wake_mod, "deliver_wake", fails_once)
+        _one_pending_ref(store, owner)
+        _iterate(owner, tmp_path, access)  # screened, acked, then held
+        monkeypatch.setattr(wake_mod, "deliver_wake", delivered_fake)
+    else:
+        # Screened and acked, then the feature fence closed before handoff.
+        assert (
+            asyncio.run(
+                wake_mod.handle_message_available(
+                    owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=access
+                )
+            )["action"]
+            == "delivered"
+        )
+        record["delivered"].clear()
+        store.persist_hold(owner, "bmsg_1", first_code, retry_at=clock.now)
+    hold = store.screening_hold(owner, "bmsg_1")
+    assert hold is not None and hold["hold_code"] == first_code
+    assert record["delivered"] == []
+    for _ in range(12):
+        clock.now += loop_mod.RETRY_MAX_S
+        _iterate(owner, tmp_path, access)
+    assert len(record["delivered"]) == 1
+    assert store.screening_hold(owner, "bmsg_1") is None
+    assert len(set(wire.refs)) == 1
+
+
+def test_a_stale_claim_retry_redrive_is_bounded(tmp_path, monkeypatch) -> None:
+    """PR #3063 review M2: a ``stale_claim_retry`` re-drive whose outcome is
+    neither terminal nor a hold (``duplicate`` from the conversation
+    reservation witness, ``badge_only``, ``claimed_elsewhere``) left the row
+    due with ``retry_at`` frozen, so it was re-driven on EVERY pass. Over 200
+    one-second passes it must be re-driven a bounded number of times."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    _enable_bridge(tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    calls: list[str] = []
+
+    async def duplicate_spine(owner_, message_id, **kwargs):
+        calls.append(message_id)
+        return {"action": "duplicate", "message_id": message_id}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", duplicate_spine)
+    store.persist_hold(owner, "bmsg_1", loop_mod.STALE_CLAIM_REDRIVE_CODE, retry_at=clock.now - 1)
+    for _ in range(200):
+        clock.now += 1.0
+        _iterate(owner, tmp_path)
+    assert 1 <= len(calls) <= 2
+    assert store.screening_hold(owner, "bmsg_1") is None
+
+
+@pytest.mark.parametrize("action", ["badge_only", "claimed_elsewhere"])
+def test_a_non_terminal_redrive_outcome_backs_off(tmp_path, monkeypatch, action) -> None:
+    """M2's other arm: an outcome that is neither terminal nor a hold keeps
+    the row (badge-only owners and live claimants are real waits) but on the
+    SAME bounded doubling backoff as a hold, never due on every pass."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    _enable_bridge(tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    calls: list[str] = []
+
+    async def waiting_spine(owner_, message_id, **kwargs):
+        calls.append(message_id)
+        return {"action": action, "message_id": message_id, "code": "claimed"}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", waiting_spine)
+    store.persist_hold(owner, "bmsg_1", loop_mod.STALE_CLAIM_REDRIVE_CODE, retry_at=clock.now - 1)
+    for _ in range(200):
+        clock.now += 1.0
+        _iterate(owner, tmp_path)
+    # 60 s, then 120 s: two re-drives inside 200 s, not 200.
+    assert 1 <= len(calls) <= 3
+    hold = store.screening_hold(owner, "bmsg_1")
+    assert hold is not None and hold["retry_at"] > clock.now
+
+
 def test_a_session_claim_is_never_parked_for_redelivery(tmp_path, monkeypatch) -> None:
     """A session's own ``ack working`` claim proves the message already reached
     a session: the ref is consumed as before, with no parked retry."""
