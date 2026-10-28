@@ -723,11 +723,13 @@ def render_binding_notice_repeat(text: str, *, seen: int, accounts: int = 1) -> 
     subagent misattributed to its parent — so ``seen`` is a volume fact, and
     ``accounts`` is the disclosure of what that volume contained.
 
-    WHY THIS SPELLING: at 100 columns a notice row has ~90 cells of text and this
-    sentence is already 76 of them, so the marker has ~12 to spend. ``· 2
-    accounts`` costs 12; ``alternating between 2 accounts`` costs 31 and pushes
-    the row onto a second line for no extra truth. Measured in the rendered
-    100x30 frame, not estimated.
+    WHY THIS SPELLING, MEASURED: in the 100x30 frame this sentence is 76 cells and
+    a notice row offers ~90, so the marker has ~12 to spend. ``×20 · 2 accounts``
+    costs 16 and wraps onto a SECOND line ("×20 · 2" / "accounts" measured in the
+    after-frame); the wordier ``×20, alternating between 2 accounts`` costs 31 and
+    would spend roughly two more rows saying the same thing. The compact form is
+    therefore the narrower of the two at this width, which is all it claims: it does
+    not fit on one line, and this sentence is close to the widest a notice gets.
 
     It lives HERE, beside the sentence it annotates, because this module is the
     credential copy home; the fold in ``tui/session_presentation.py`` calls it
