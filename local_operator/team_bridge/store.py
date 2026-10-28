@@ -2687,8 +2687,13 @@ class Store:
                     # The message names the rule, not the caller: a different
                     # owner needs an explicit re-enrolment, and an AMBIGUOUS
                     # store must never receive a third row.
+                    # NOT ``already_owned``: that is #3027's CLIENT outcome
+                    # meaning "this machine holds THIS endpoint", and reusing
+                    # the name at the store invites forwarding this refusal as
+                    # that code, which would report another owner's row as ours
+                    # (review R3 M1).
                     raise StoreRefused(
-                        "already_owned",
+                        "owner_present",
                         "this machine already holds a committed owner",
                     )
             existing = conn.execute(

@@ -280,7 +280,11 @@ async def test_a_slow_launchctl_never_blocks_the_event_loop(service, monkeypatch
         _client(_active, root).put_settings(state="disabled", expected_account_id="acc_1")
     )
     ticking = asyncio.create_task(ticker())
-    await asyncio.sleep(0.3)
+    # 0.4 s of an operation that sleeps at least 0.8 s per launchctl call, so
+    # the window sits well inside it. The threshold is deliberately LOOSE (2 of
+    # ~8 possible ticks): the defect is a COMPLETELY blocked loop, i.e. zero
+    # ticks, and a tight bound only adds flakiness on a loaded machine.
+    await asyncio.sleep(0.4)
     in_flight = not write.done()
     landed = len(ticks)
     await asyncio.gather(write, ticking)
@@ -289,9 +293,9 @@ async def test_a_slow_launchctl_never_blocks_the_event_loop(service, monkeypatch
     # on the inline code the whole write finished first, so ``in_flight`` was
     # already false by the time this line ran. Ordered so the message names the
     # defect rather than the setup.
-    assert landed >= 3, (
+    assert landed >= 2, (
         f"the event loop was blocked by launchctl: only {landed} ticks landed in "
-        "0.3 s while the write was in flight"
+        "0.4 s while the write was in flight"
     )
     assert in_flight, "the write finished inside the window; the fake was not slow enough"
     assert not install.plist_path().exists()
@@ -414,3 +418,103 @@ async def test_a_string_app_start_boundary_reaches_the_catch_up(tmp_path, monkey
     discipline.invalidate()
     await discipline.check("surface_open")
     assert len(seen) == 1, "a surface-open read must not install anything"
+
+
+async def test_a_turn_off_during_the_catch_ups_install_ends_removed(service, monkeypatch) -> None:
+    """R3-1: the "absent" short cut must not race an install that holds the lock.
+
+    The reviewer's ordering, made deterministic: the catch-up is inside
+    ``_install`` (holding the lock, past its decision) when the user turns the
+    feature off, so the off event's sync runs while the plist is still being
+    written. Answering ``absent`` from a pre-lock check — which the R2-5 short
+    cut did for any not-wanted machine — lets the catch-up finish and leaves an
+    opted-out machine running a loaded KeepAlive connector with nothing to heal
+    it. The short cut is now limited to machines with NO store at all, so this
+    off event waits for the lock and then removes what the catch-up installed.
+    """
+
+    import threading
+
+    fake, home, root = service
+    _commit(root)
+    inside_install = threading.Event()
+    release = threading.Event()
+    real_load = launchd.load
+
+    def hold_the_install(path):
+        inside_install.set()
+        # The off event runs while we are here, i.e. mid-install under the lock.
+        release.wait(10)
+        return real_load(path)
+
+    monkeypatch.setattr(launchd, "load", hold_the_install)
+    outcomes: dict[str, str] = {}
+
+    def catch_up() -> None:
+        outcomes["catch_up"] = install.sync_connector_service(root).code
+
+    def turn_off() -> None:
+        _set_local(root, enabled=False)
+        outcomes["turn_off"] = install.sync_connector_service(root).code
+
+    first = threading.Thread(target=catch_up)
+    first.start()
+    assert inside_install.wait(10), "the catch-up never reached the install"
+    second = threading.Thread(target=turn_off)
+    second.start()
+    # Give the off event every chance to take the short cut it must no longer
+    # take; then let the install finish.
+    second.join(0.4)
+    release.set()
+    first.join(15)
+    second.join(15)
+
+    assert not install.plist_path().exists(), outcomes
+    assert not fake.loaded, outcomes
+    assert outcomes["turn_off"] in (install.CODE_REMOVED, install.CODE_ABSENT), outcomes
+
+
+def test_a_same_endpoint_double_enable_reports_already_owned(tmp_path, monkeypatch) -> None:
+    """R3-2: the convergence put an await between the read-only check and the commit.
+
+    #3027's ``_local_commit_outcome`` asks ``active_owner_readonly()`` whether
+    this machine already holds THIS endpoint before committing. That check and
+    the commit were atomic only because the whole function was synchronous; it
+    is now ``async`` (the commit runs in a worker thread, R1-1), so a double
+    submit can pass the check twice. One commits; the loser hits the store's
+    in-transaction refusal. Reporting that as ``other_owner`` would be wrong —
+    this machine DOES hold this endpoint — and it costs the caller the
+    ``team_bridge.enabled`` write (and arms a pointless default-on retry), so
+    the outcome must be ``already_owned`` with ``committed: true``.
+    """
+
+    import asyncio
+    import concurrent.futures
+
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+    # The store exists before either enable in the real sequence — the status
+    # read and the pre-enable head read both open it — and two connections
+    # bootstrapping a brand-new database race on ``schema_meta``, which is a
+    # separate, pre-existing concern. What this cell pins is the owner outcome.
+    Store(tmp_path).committed_owner_count()
+
+    def enable() -> dict[str, Any]:
+        return asyncio.run(
+            _client(_active, tmp_path).put_settings(
+                state="active",
+                tenant_id="tnt_1",
+                consent_version="bridge_consent_v1",
+                consented_via="settings",
+                endpoint=None,
+                expected_account_id="acc_1",
+            )
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: enable(), (0, 1)))
+
+    outcomes = [result["local_enrollment"] for result in results]
+    assert Store(tmp_path).committed_owner_count() == 1
+    assert all(outcome["committed"] is True for outcome in outcomes), outcomes
+    codes = sorted(outcome["code"] for outcome in outcomes)
+    assert codes == ["already_owned", "committed"], outcomes

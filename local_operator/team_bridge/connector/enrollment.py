@@ -131,7 +131,7 @@ def commit_settings_enrollment(
             require_no_owner=True,
         )
     except StoreRefused as refusal:
-        if refusal.code == "already_owned":
+        if refusal.code == "owner_present":
             # NOT an error: the answer to "may this machine own another
             # endpoint" was no. Ambiguity is included — a store with two rows
             # must never receive a third.

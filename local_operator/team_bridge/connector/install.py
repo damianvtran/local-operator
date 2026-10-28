@@ -438,6 +438,19 @@ def _remove() -> ServiceOutcome:
     return ServiceOutcome(CODE_REMOVED)
 
 
+def _store_exists(config_dir: Path) -> bool:
+    """Whether this store was ever initialised — never creates it.
+
+    The one fact that decides whether :func:`sync_connector_service` may answer
+    ``absent`` without the lock (review R3-1): a store that exists means
+    enrolment happened, so an in-flight install may be racing this call.
+    """
+
+    from local_operator.team_bridge.store import state_db_path
+
+    return state_db_path(config_dir).exists()
+
+
 def sync_connector_service(config_dir: Path) -> ServiceOutcome:
     """Make the connector's LaunchAgent match what ``config_dir`` wants.
 
@@ -464,16 +477,23 @@ def sync_connector_service(config_dir: Path) -> ServiceOutcome:
         if refusal is not None:
             logger.info("bridge connector: %s", refusal)
             return ServiceOutcome(CODE_ISOLATED, refusal)
-        # CHEAP PRE-CHECK, deliberately OUTSIDE the lock and side-effect free:
-        # a machine that never enrolled has nothing to install and nothing to
-        # remove, and taking the lock would mkdir ``<config>/team_bridge`` and
-        # leave a ``connector-service.lock`` there (review R2-5). One read-only
-        # owner read plus one ``exists()`` is the whole cost of an app start on
-        # such a machine.
+        # CHEAP PRE-CHECK, deliberately OUTSIDE the lock and side-effect free.
+        # WHICH MACHINES MAY TAKE THIS SHORT CUT, and why it is exactly those
+        # (review R3-1): the lock is what makes "absent" a CONSISTENT answer, so
+        # skipping it is only sound when there is nothing in flight to race — a
+        # store that does not exist yet, i.e. a machine that never enrolled.
+        # Returning ``absent`` on a merely-not-wanted machine was wrong: a Turn
+        # off could answer ``absent`` while a catch-up held the lock mid-install
+        # and then wrote the plist, leaving an opted-out machine running a
+        # connector. An ENROLLED machine therefore always takes the lock, even
+        # when the answer is "remove it"; only a machine with no store at all
+        # skips it, which is also what keeps R2-5's property (no
+        # ``<config>/team_bridge`` directory and no lock file on a machine that
+        # has neither) — the check below creates nothing.
         wanted = _wanted(Path(config_dir))
         if wanted is None:
             return ServiceOutcome(CODE_UNKNOWN, "enrolment or settings unreadable; left as is")
-        if not wanted and not plist_path().exists():
+        if not wanted and not plist_path().exists() and not _store_exists(Path(config_dir)):
             return ServiceOutcome(CODE_ABSENT)
         with _sync_exclusive(Path(config_dir)):
             # DECIDE AGAIN, INSIDE THE LOCK (review R2-1). The pre-check above
