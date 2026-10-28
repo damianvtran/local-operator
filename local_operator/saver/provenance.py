@@ -7,8 +7,8 @@ UNITS, and each unit has its own rule:
   one emitted line per source line (a whole line, or any non-overlapping piece
   of at least ``MIN_CUT`` characters of it);
 - POOL (I1) is a disclosure line whose tokens are identifiers extracted from
-  the span and each used once — it is paid for by the content the epoch
-  deleted, not by being a line of the source;
+  the span — EXACTLY, never a fragment, prefix or slice — each spent once by
+  identity, and charged in characters against what the epoch deleted;
 - PREVIEW (O5) is a disclosure line that must BE the reducer's own preview of
   the record it replaces, so its length is the record's, not its own;
 - MARKER/NOTE are the closed §3.3 template grammar.
@@ -27,13 +27,20 @@ WHAT THAT BUYS, BY CONSTRUCTION RATHER THAN BY MORE CAPS.
   into one emitted line per character (round 3 S-15/R3-2, round 4 R4-1). Only a
   whole line, or a prefix/suffix of at least ``MIN_CUT`` characters, may match;
   shorter pieces are the re-segmentation primitive the reviewer measured at 9.2x.
-- Token boundedness WITHOUT a tokenizer: emitted content is a subset of the
-  span's own lines, fragments of them, each used once. Tokens(epoch content)
-  <= tokens(span content) follows from that injectivity, not from a byte
-  budget — which is why this check no longer charges separators in bytes. A
-  byte budget cannot bound a token cost: span bytes-per-token is unbounded
-  above (a repeated-character span tokenizes at ~10 B/token), and round 3's
-  18.35x and 2.65x counter-examples were both reached under one.
+- Disclosure is bounded by the material it discloses: a pool token is an exact
+  span identifier spent once, and the pool's characters are charged against the
+  epoch's deletions. (Round 5's security review measured the earlier looser
+  rules: one count-budget unit bought up to 2,400 characters, and repeating one
+  long identifier in pool records was accepted at 3.00x-7.43x the span.)
+- NOT established: the TOKEN cost of an emitted CONTENT fragment. The mapping
+  bounds which characters and how many lines, never what a substring costs, and
+  BPE is not monotone under substring — dropping characters can raise the count
+  by destroying a merge boundary (`ABCDEFGHIJKLMNOPQRSTUVWXYZ` 1 token, its
+  24-character interior 8). Security measured 5.42x-5.49x accepted through this
+  gate on fragments of that shape, so the claim that token boundedness follows
+  "by construction" is withdrawn rather than restated: bounding that needs a
+  real token comparison, which is an open finding (S-18) and not a byte or a
+  substring rule. A later round must not build on the withdrawn claim.
 - Total lines strictly fewer: the epoch's total line count must be STRICTLY less
   than the span's, and disclosure lines (markers, the reducer's own notes) count.
   Each marker and note is therefore paid for by real deletions elsewhere in the
@@ -363,20 +370,23 @@ class _Pool:
     """The epoch's identifier pool (I1): a disclosure line, not content.
 
     A pooled token must be one of the span's own identifiers as
-    :mod:`local_operator.saver.provenance_ids` extracts them, and every
-    identifier may be spent ONCE. Both halves are required and neither is
-    decoration:
+    :mod:`local_operator.saver.provenance_ids` extracts them — EXACTLY, not a
+    fragment of one, not a prefix and not a slice — and each identifier may be
+    spent ONCE, by identity. Round 5's security review measured what the looser
+    rules bought: with prefix and slice admission one unit of the count budget
+    purchased up to 2,400 characters, so repeating a single long identifier in
+    pool records was ACCEPTED at 3.00x, 4.73x, 7.25x and 7.43x the span.
 
-    - membership alone is the S-17 bypass. The pool was exempt from the line
-      matcher and matched by substring, so a record could list any fragment of
-      any source word: security reproduced 68 -> 92 o200k tokens (1.35x) on a
-      span with no reduction left to pay for it.
-    - "one use per identifier" alone would admit arbitrary source text.
+    Two bounds, and neither is a constant someone can raise:
 
-    The BUDGET is a unit count — one use per distinct identifier the span
-    holds — not a byte or token budget: the pool can then never list more
-    tokens than the span has identifier tokens, so its cost is bounded by the
-    material it discloses rather than by a constant someone could raise.
+    - IDENTITY. ``spent`` is a set of the identifiers used, so a repeat is a
+      refusal rather than a second unit. With exact membership this alone
+      bounds the pool by the span's own identifier material.
+    - CHARACTERS. The pool is charged against what the epoch deleted
+      (``char_budget``), the same way content is charged against the span. A
+      count bound cannot supply this: a span may hold thousands of identifiers
+      and listing the LONG ones is where a count leaks. A pool line can
+      therefore never buy more characters than the deletions pay for.
     """
 
     def __init__(self, parts: Sequence[str]) -> None:
@@ -391,21 +401,13 @@ class _Pool:
                 tokens.update(identifiers(chunk))
             tokens.update(_b64_note_digests(part))
         self.tokens = frozenset(tokens)
-        # The text the slice-shaped fallback searches, and its budget: a slice
-        # token has to be looked up by substring, so the number of such lookups
-        # is bounded rather than left to the response's size.
-        self.text = "\n".join(parts)
-        self.scans = _POOL_SCANS
-        self.reversed = sorted(token[::-1] for token in tokens)
-        self.sorted = sorted(tokens)
-        # ONE use per identifier. The previous 2N+64 allowance is exactly the
-        # S-17 channel: it let a pool cost twice the span's identifiers plus a
-        # constant, with no deletion left to pay for either half.
-        self.budget = len(self.tokens)
-        self.spent = 0
+        self.spent: set[str] = set()
+        self.chars = 0
+        #: Set by :func:`check_records` once the epoch's content is known.
+        self.char_budget = 0
 
     def consume(self, text: str) -> None:
-        """Consume a pool payload, one identifier per use.
+        """Consume a pool payload, one identifier per use, by identity.
 
         Identifiers are re-emitted with their own inner spaces (`issue #1875`,
         `git status`), so a token that is not itself pooled is tried joined
@@ -417,66 +419,19 @@ class _Pool:
         index = 0
         while index < len(tokens):
             token = tokens[index]
-            if self.has(token):
+            index += 1
+            if token not in self.tokens:
+                pair = token + " " + tokens[index] if index < len(tokens) else ""
+                if not pair or pair not in self.tokens:
+                    raise SaverRejected("provenance")
+                token = pair
                 index += 1
-                self._spend(1)
-                continue
-            pair = token + " " + tokens[index + 1] if index + 1 < len(tokens) else ""
-            if pair and self.has(pair):
-                index += 2
-                self._spend(1)
-                continue
-            raise SaverRejected("provenance")
-
-    def _spend(self, count: int) -> None:
-        from local_operator.saver.validate import SaverRejected
-
-        self.spent += count
-        if self.spent > self.budget:
-            raise SaverRejected("provenance")
-
-    def has(self, token: str) -> bool:
-        if token in self.tokens:
-            return True
-        reversed_token = token[::-1]
-        position = bisect.bisect_left(self.reversed, reversed_token)
-        if position < len(self.reversed) and self.reversed[position].startswith(reversed_token):
-            return True
-        # A slice can also leave a PREFIX of the whole identifier, which the
-        # reversed sort cannot see; a forward sort answers it without ever
-        # admitting a token the extractors did not produce.
-        position = bisect.bisect_left(self.sorted, token)
-        if position < len(self.sorted) and self.sorted[position].startswith(token):
-            return True
-        return self._slice_token(token)
-
-    def _slice_token(self, token: str) -> bool:
-        """A token the reducer extracted from a CUT line, not from whole text.
-
-        `_call_summary` pools `first[len(cut) - 1:]` — the tail of a command line
-        cut at 160 characters — and the extractors then see a tail that begins
-        mid-token, so an honest pool can hold `/en/relay.health.context.json`
-        where no extractor of the whole text would ever say that (the full path
-        is `local_operator/i18n/catalogues/en/relay.health.context.json`, and the
-        path regex stops at `.health`). Such a token is still a piece of the
-        span's own bytes that ends on an identifier boundary, and nothing else.
-
-        The lookup is a substring search, so it is BUDGETED: a response cannot
-        buy one span scan per pooled token.
-        """
-        if len(token) < _SLICE_MIN:
-            return False
-        start = self.text.find(token)
-        while start >= 0:
-            self.scans -= 1
-            if self.scans < 0:
-                return False
-            end = start + len(token)
-            follower = self.text[end : end + 1]
-            if not follower or not _IDENT_CHAR.match(follower):
-                return True
-            start = self.text.find(token, start + 1)
-        return False
+            if token in self.spent:
+                raise SaverRejected("provenance")
+            self.spent.add(token)
+            self.chars += len(token)
+            if self.chars > self.char_budget:
+                raise SaverRejected("provenance")
 
 
 _TEMPLATE_WORDS = frozenset("""
@@ -503,16 +458,6 @@ _NOTE_WORDS = frozenset({"chars", "heredoc", "more", "redacted", "list"})
 _SIZE_TOKEN = re.compile(r"\d+(?:\.\d)?k?")
 #: Candidate source records a single epoch record may be compared against.
 _CANDIDATE_TRIES = 32
-#: A pooled token admitted as a SLICE of the span (see `_Pool._slice_token`)
-#: must be at least this long: shorter strings are words, not references.
-_SLICE_MIN = 8
-#: Substring lookups a slice-shaped pool may spend per epoch. Honest output
-#: needs one per such token (a handful); the cap keeps a hostile pool from
-#: turning into one span scan per token.
-_POOL_SCANS = 128
-#: An identifier's characters: a token that ends at one of these does not end
-#: where an identifier could end.
-_IDENT_CHAR = re.compile(r"[\w.@+-]")
 #: reduce_v2's ``DEEP_IDS_CHARS``: the reducer's own bound on one epoch's
 #: identifier pool. Encoded here because a payload past it is not a rendering of
 #: anything the reducer documents, so it is refused rather than measured.
@@ -1133,22 +1078,29 @@ def check_records(
     # proved by their own rule below, so they are not counted twice here.
     units = []
     emitted = 0
+    content_chars = 0
+    disclosures: list[str] = []
     for label, body in records:
         if deadline is not None and time.monotonic() > deadline:
             raise SaverRejected("busy")
         elements = _elements(body)
         pieces, pools, previews = _units(elements)
-        for payload in pools:
-            # THE DISCLOSURE CHANNEL, and it is charged on both sides: every
-            # pooled token must be a source-derived identifier and every
-            # identifier is spendable once, so the pool can never carry more
-            # than the span's own identifier material (S-17 was the exemption
-            # that made this uncounted: 68 -> 92 o200k tokens on a span with
-            # nothing deleted to pay for it).
-            _check_pool(payload, pool)
+        disclosures.extend(pools)
         emitted += len(pieces)
+        content_chars += sum(len(piece) for piece in pieces)
         units.append((label, elements, pieces, pools, previews))
     _check_line_budget(emitted, span_lines)
+    # THE DISCLOSURE CHANNEL, charged on BOTH sides and only once the epoch's
+    # content is known: every pooled token must be an exact source identifier
+    # spent once, and the pool's characters are charged against what the epoch
+    # deleted — the same accounting content is charged under. A count alone
+    # leaked: one unit bought up to 2,400 characters, so repeating a long
+    # identifier in pool records was accepted at 3.00x-7.43x the span (S-17's
+    # uncounted exemption measured 68 -> 92 o200k tokens on a span with
+    # nothing deleted to pay for it).
+    pool.char_budget = max(span_chars - content_chars, 0)
+    for payload in disclosures:
+        _check_pool(payload, pool)
     for label, elements, pieces, pools, previews in units:
         if deadline is not None and time.monotonic() > deadline:
             raise SaverRejected("busy")

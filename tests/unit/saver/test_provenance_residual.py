@@ -147,12 +147,103 @@ def test_s17_a_pool_line_may_not_cost_more_than_its_span() -> None:
     record = "user: [radient:ids mentioned in this part] " + " ".join(
         ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"] * 12
     )
+    with pytest.raises(SaverRejected, match="provenance"):
+        check_provenance(HEADER + "\n" + record, rows)
+    # The GUARD above runs everywhere; this only attests that the fixture is the
+    # amplification it claims to be. The reference tokenizer is not a repo
+    # dependency, so gating the guard on it would leave the rule unpinned in CI
+    # (round-5 security review, S-20).
     tokenizer = pytest.importorskip(
-        "radient_context_reduction.tokenize", reason="reference tokenizer not on PYTHONPATH"
+        "radient_context_reduction.tokenize", reason="ratio attestation only"
     )
     assert tokenizer.token_count_text(record) > tokenizer.token_count_text(words), (
         "fixture must amplify: it is the 1.35x shape, not a rounding difference"
     )
+
+
+def test_a_pool_token_may_not_be_spent_twice() -> None:
+    """The one-use rule, BY IDENTITY, isolated from the character budget.
+
+    `src/app/views.py` is 16 characters and the span deletes more than twice
+    that, so listing it twice fits the character budget; only the identity set
+    refuses the second use. A COUNTER was the round-5 blocker: it let one long
+    identifier be re-listed up to the budget, which is how a pool bought 2,400
+    characters per unit.
+    """
+    from local_operator.saver.validate import check_provenance
+
+    rows = _pool_span("the deployment finished and the log looks stable\nsrc/app/views.py")
+    with pytest.raises(SaverRejected, match="provenance"):
+        check_provenance(
+            HEADER
+            + "\nuser: [radient:ids mentioned in this part]"
+            " src/app/views.py src/app/views.py",
+            rows,
+        )
+
+
+def test_a_pool_line_may_not_buy_more_characters_than_the_span_deletes() -> None:
+    """The pool is charged in CHARACTERS against what the epoch deleted.
+
+    Content keeps two of the three rows, so the epoch deletes only the third
+    (~7 characters) while the pool discloses a 300-character identifier that is
+    also inside the kept content. The token is an exact identifier spent once,
+    so only the character budget refuses it — and without it the epoch emits
+    more characters than its span holds (1.47x).
+    """
+    from local_operator.saver.validate import check_provenance
+
+    # Under `identifiers()`'s 120-character truncation, so the token is an EXACT
+    # identifier: only the character budget can refuse it.
+    path = "src/app/views/very_long_module_name_for_the_budget.py"
+    assert 8 < len(path) < 120
+    rows = [
+        {"role": "user", "content": [{"type": "text", "text": "alpha " + path}]},
+        {"role": "user", "content": [{"type": "text", "text": "bravo " + path}]},
+        {"role": "user", "content": [{"type": "text", "text": "charlie"}]},
+    ]
+    kept = "user: alpha " + path + "\nuser: bravo " + path
+    with pytest.raises(SaverRejected, match="provenance"):
+        check_provenance(
+            HEADER + "\n" + kept + "\nuser: [radient:ids mentioned in this part] " + path, rows
+        )
+
+
+def _blob() -> str:
+    """One long path identifier, the shape the round-5 blocker repeated."""
+    return "/Users/damian/local-operator/.worktrees/saver-lo1/" + "/".join(
+        f"segment_{n:04d}" for n in range(190)
+    ) + "/module.py"
+
+
+@pytest.mark.parametrize("rows_count", [200, 400, 1000, 4000])
+def test_pool_records_may_not_repeat_one_long_identifier(rows_count: int) -> None:
+    """R5-B1: the pool amplification, refused at all four measured sizes.
+
+    The attacker's pool token is an EXACT identifier — the span's long path,
+    truncated the way `identifiers()` itself truncates it — so membership alone
+    cannot stop it. What stops it is that one identifier is spendable ONCE: with
+    a counter, N pool records each listing it fitted a budget of N+1 units, and
+    at the previous head this fixture is ACCEPTED at 4.49x, 5.47x, 6.30x and
+    6.81x its span (200/400/1000/4000 rows; security measured the same class at
+    3.00x-7.43x). With identity consumption the second record is refused, and
+    the character budget refuses it a second way.
+    """
+    from local_operator.saver.provenance_ids import identifiers
+    from local_operator.saver.validate import check_provenance
+
+    blob = _blob()
+    # Under `_POOL_CHARS` on purpose: the fixture must be refused by the pool's
+    # ACCOUNTING, not by the reducer's per-payload size cap.
+    assert len(blob) > 240
+    token = blob[:120].rstrip() + "\u2026"
+    assert token in identifiers(blob), "the fixture's token must be an exact identifier"
+    rows = [{"role": "user", "content": [{"type": "text", "text": blob}]}] + [
+        {"role": "user", "content": [{"type": "text", "text": f"FILLER_IDENTIFIER_{n:05d}"}]}
+        for n in range(rows_count)
+    ]
+    pool_record = "user: [radient:ids mentioned in this part] " + token
+    record = "\n".join([pool_record] * rows_count)
     with pytest.raises(SaverRejected, match="provenance"):
         check_provenance(HEADER + "\n" + record, rows)
 

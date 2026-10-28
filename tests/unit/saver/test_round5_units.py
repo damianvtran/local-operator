@@ -35,11 +35,17 @@ def test_the_content_line_budget_refuses_a_reemitted_span() -> None:
     """M1: a record may not reproduce its span line for line.
 
     The line cursor already stops one record going past its source's lines, so
-    the only thing left for the budget is the STRICT half: three rows emitted as
-    three records is a re-rendering, not a reduction. No filler here — the span
-    is three lines on purpose, so the budget is the only guard that can fire.
+    the only thing left for the budget is the STRICT half: three DISTINCT rows
+    emitted as three records is a re-rendering, not a reduction. The rows are
+    distinct on purpose — one row holding three lines let the per-record
+    `consumed` set refuse records 2 and 3 first, so the budget was never
+    reached and deleting it left the suite green (round-5 review, S-20).
     """
-    rows = [{"role": "user", "content": [{"type": "text", "text": "alpha\nbravo\ncharlie"}]}]
+    rows = [
+        {"role": "user", "content": [{"type": "text", "text": "alpha"}]},
+        {"role": "user", "content": [{"type": "text", "text": "bravo"}]},
+        {"role": "user", "content": [{"type": "text", "text": "charlie"}]},
+    ]
     _reject(rows, "user: alpha\nuser: bravo\nuser: charlie")
 
 
@@ -56,15 +62,22 @@ def test_a_one_character_fragment_must_be_a_whole_word() -> None:
 
 
 def test_a_pool_token_must_be_a_span_identifier() -> None:
-    """M4: source-derived membership, isolated from the one-use budget.
+    """M4: EXACT source-derived membership, isolated from the one-use budget.
 
-    The span holds one identifier and the payload lists one token, so the budget
-    cannot refuse it; the token is simply not a substring of the span, and no
-    extractor of the span would ever produce it.
+    The span holds one identifier and each payload lists one token, so neither
+    the count nor the character budget can refuse it; the token is either absent
+    from the span or only a FRAGMENT of an identifier it holds.
     """
     _reject(
         _rows("the deployment finished\nsrc/app/views.py"),
         "user: [radient:ids mentioned in this part] invented_identifier",
+    )
+    # A FRAGMENT of a real identifier is refused too, and that is the round-5
+    # blocker: prefix, suffix and slice admission let one unit of a count budget
+    # buy up to 2,400 characters of a path it did not delete.
+    _reject(
+        _rows("local_operator/mobile/daemon.py"),
+        "user: [radient:ids mentioned in this part] /daemon.py",
     )
 
 
