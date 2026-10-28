@@ -1606,6 +1606,43 @@ class AskQueue:
             "details": {"ask_id": ask_id, "reason": reason},
         }
 
+    def clock_ms(self) -> int:
+        """This queue's clock (epoch ms) — the one ``created_at`` was stamped by."""
+        return int(self._now())
+
+    def add_context(
+        self,
+        ask_id: str,
+        *,
+        title: str,
+        body: str,
+        source: str,
+        item_id: str = "",
+    ) -> bool:
+        """Fold a same-topic update's text into an ask (``asks/dedupe.py``).
+
+        An append-only ``context`` row, never a status change: the ask settles
+        when it settles, and the text settles with it. Refreshes the index so
+        the inbox, the desktop and the phone (which read rows, not sessions)
+        show it at once. ``False`` when the log could not be written, so the
+        caller can fall back to delivering the update rather than lose it.
+        """
+        event: dict[str, Any] = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_CONTEXT,
+            "at": self._now(),
+            "ask_id": str(ask_id),
+            "title": str(title or ""),
+            "body": str(body or "")[: store.CONTEXT_BODY_MAX],
+            "source": source,
+        }
+        if item_id:
+            event["item_id"] = item_id
+        if not store.append_event(self.session_dir, event):
+            return False
+        self._refresh()
+        return True
+
     def _settled(self, ask_id: str) -> None:
         """Post-write bookkeeping common to every terminal transition.
 

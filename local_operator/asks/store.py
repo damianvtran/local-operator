@@ -115,6 +115,23 @@ EVENT_WITHDRAWN = "withdrawn"
 EVENT_RELAYED = "relayed"
 EVENT_RELAY_SURFACED = "relay-surfaced"
 
+#: FOLDED CONTEXT (``asks/dedupe.py``): a same-topic ``notify`` update that was
+#: NOT posted as its own inbox item because this ask already notifies the
+#: operator — its title and body ride the ask instead, so the operator reads
+#: them with the question. Not a status event: it never changes the fold's
+#: status, so the update settles exactly when the ask settles, and an older
+#: fold that does not know the kind ignores it (the additive contract above).
+#: Carries ``title``, ``body`` and ``source`` (``notify`` for a suppressed
+#: call, ``merged`` for an earlier update folded on ask) plus ``item_id`` for
+#: the merged case.
+EVENT_CONTEXT = "context"
+
+#: Caps on folded context, so a chatty agent cannot grow one ask's row on every
+#: surface without bound: the newest entries win, each body truncated to the
+#: notify store's own body cap.
+CONTEXT_MAX_ENTRIES = 5
+CONTEXT_BODY_MAX = 4000
+
 #: Every status a folded ask can hold (design §2.2, §4).
 STATUS_OPEN = "open"
 STATUS_ANSWERED = "answered"
@@ -598,7 +615,18 @@ def fold(
     # grow with the number of relays a session has ever seen. Keyed by the
     # ORIGIN ask id, which is the id those rows carry.
     surfaced_by_ask: dict[str, list[dict[str, Any]]] = {}
+    context_by_ask: dict[str, list[dict[str, Any]]] = {}
     for event in events:
+        if event.get("kind") == EVENT_CONTEXT:
+            context_by_ask.setdefault(str(event.get("ask_id") or ""), []).append(
+                {
+                    "title": str(event.get("title") or ""),
+                    "body": str(event.get("body") or "")[:CONTEXT_BODY_MAX],
+                    "source": str(event.get("source") or "notify"),
+                    "at": int(event.get("at") or 0),
+                }
+            )
+            continue
         if event.get("kind") != EVENT_RELAY_SURFACED:
             continue
         by = event.get("by")
@@ -746,6 +774,11 @@ def fold(
                 and now <= window_end
                 and not record["delivered"]
             )
+        folded = context_by_ask.get(ask_id)
+        if folded:
+            # ABSENT, never empty (the ``surfaced_in`` rule): an ask with no
+            # folded update keeps the exact record shape older builds wrote.
+            record["context"] = folded[-CONTEXT_MAX_ENTRIES:]
         surfaced = surfaced_by_ask.get(ask_id)
         if surfaced:
             # ABSENT, never empty (the ``attachments`` rule below): an ordinary
@@ -1053,6 +1086,12 @@ def pending_row(
     surfaced = record.get("surfaced_in")
     if surfaced:
         row["surfaced_in"] = [dict(item) for item in surfaced]
+    folded = record.get("context")
+    if folded:
+        # Folded update text (``EVENT_CONTEXT``). Added, never defaulted, so the
+        # frozen wire stays byte-identical for every ask without it and older
+        # readers (``extra="allow"`` / unknown-key-tolerant) ignore it.
+        row["context"] = [dict(item) for item in folded]
     by = record.get("answered_by")
     if by:
         row["answered_by"] = dict(by)

@@ -23,6 +23,9 @@ from rich.text import Text
 
 from local_operator.i18n import keys as i18n_keys
 from local_operator.notifications.items import first_question as inbox_first_question
+from local_operator.notifications.items import (
+    folded_context_md as inbox_folded_context_md,
+)
 from local_operator.resume import format_age
 from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
@@ -499,7 +502,14 @@ def detail_text(
     # that question — and dropped the context the row already knows. The body is
     # the update's prose; an ask's context is its expiry (in the meta line) and
     # its related projects below.
-    body = str(item.get("body_md") or "") if not is_ask else ""
+    # The one body an ask DOES carry is folded update text (``asks/dedupe.py``):
+    # a same-topic ``notify`` that rides the ask instead of being a second item.
+    # Agent-authored prose like an update's body, so it needs no copy of its own.
+    body = (
+        str(item.get("body_md") or "")
+        if not is_ask
+        else str(item.get("body_md") or "") or inbox_folded_context_md(item)
+    )
     if body.strip():
         # DT9: a wrapped paragraph lost its inset on every continuation line,
         # because the widget folded the text with no hanging indent. Wrapping

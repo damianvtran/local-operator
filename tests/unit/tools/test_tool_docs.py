@@ -286,7 +286,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
     # the same -1 for its twin field; the same printed table measured both.
     "agent": 1364,
-    "ask": 1079,
+    # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
+    # restraint now says "decide, never for FYI" and "asking notifies: never
+    # also `notify` it"; trims elsewhere in the same paragraph pay for it so
+    # the tail is net negative. Same reading on both ask arms (the doc renders
+    # the shared restraint plus each arm's tail; only the restraint moved).
+    "ask": 1078,
     "ask_withdraw": 452,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
@@ -465,7 +470,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``notify`` doc — its description plus the five-field schema rendered by
     # this file's own renderer. Re-measured via this test's print; it is the
     # ONLY entry that moved, every other count is byte-identical.
-    "notify": 242,
+    # RE-MEASURED (ask/notify dedupe): 242 -> 241 — "FYI ... never a question
+    # (`ask` notifies)", worded to cost less than the text it replaced.
+    "notify": 241,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
