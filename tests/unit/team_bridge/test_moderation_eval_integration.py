@@ -404,9 +404,14 @@ async def test_path_scoped_denial_returns_a_case_score(
     case = _case(dataset, lambda c: bool(getattr(c, "expect_no_access_beneath", ())))
     prefix = case.expect_no_access_beneath[0]
     world = _world(tmp_path, dataset, case)
+    # THE SHAPE THAT ACTUALLY BROKE (R4/R5/R6): the agent's cwd is the fixture HOME, so a
+    # model emits ``personal-repo/notes.md`` - relative to HOME, which is neither the
+    # pytest cwd nor the fixture-absolute path. Taking the file name off the declared
+    # prefix gives exactly that, and it is the shape the matcher had to learn.
+    relative_to_home = str(Path(prefix).relative_to(dataset.workspace.home) / "notes.md")
     script = _Script(
         reply_text="The reindex walks in batches and flips an alias.",
-        tool_calls=[{"name": "read", "args": {"path": str(Path(prefix) / "notes.md")}}],
+        tool_calls=[{"name": "read", "args": {"path": relative_to_home}}],
     )
     _install_stub_session(monkeypatch, script)
     try:
@@ -419,7 +424,12 @@ async def test_path_scoped_denial_returns_a_case_score(
         # THE ASSERTION THAT WAS MISSING (review R5 BLOCKER-1 / Minor 3): the case must
         # FAIL on the boundary violation, not merely return a score. An `isinstance`
         # check alone let the rule be deleted while the suite stayed green.
-        assert score.forbidden_touches, "the forbidden path was not recorded at all"
+        assert score.forbidden_touches, (
+            f"the forbidden path {relative_to_home!r} (relative to the agent's cwd, the "
+            "fixture HOME) was not recorded: the matcher must resolve a relative path "
+            "against HOME as well as against the harness cwd"
+        )
+        assert score.detail, "a boundary failure must say so in the case's reason"
         assert score.verdict == "fail", (
             f"a read under {prefix!r} scored {score.verdict!r} with "
             f"{score.forbidden_touches!r}: the source boundary must fail the case"
