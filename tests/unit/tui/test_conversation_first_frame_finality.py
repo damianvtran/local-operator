@@ -911,3 +911,69 @@ def test_the_caption_survives_an_empty_right_group() -> None:
         status.set_last_known(True)
         row = status.render_text(width).plain
         assert "connecting…" in row, (width, row)
+
+
+@pytest.mark.asyncio
+async def test_a_warm_reopen_lays_its_parked_view_out_before_the_reveal() -> None:
+    """Q1 (round 3): the parked view must be measured BEFORE it is shown.
+
+    A warm reopen has its rows retained and nothing pending, so
+    `_prefill_resume_before_reveal` takes its early return — and it used to
+    return without laying the parked view out at all. Textual carries
+    `_layout_required` no further than the idle hook, so the first painted frame
+    could be composed against stale arrangement and the next pass corrected it:
+    every rendered line moved down one row inside an untouched viewport, 38 of 41
+    lines and ~545k pixels, intermittently (4 of 6 bench runs at 160x48; the
+    80-column cell stayed clean because it paints fewer rows per pass).
+
+    Asserts the ORDERING rather than a pixel: the settle runs while the parked
+    view is still hidden, and the height it reads is the settled height. Fails if
+    that early return stops settling — the producer re-enabled.
+    """
+    home = SidebarRemote("home-session")
+    target = _planned_conversation("parked-session", 8, todos=2)
+    app = OperatorApp(lambda: _factory(home))
+    calls: list[tuple[bool, int]] = []
+    real_settle = OperatorApp._settle_reveal_measurement
+
+    def recording(self, view):  # type: ignore[no-untyped-def]
+        height = real_settle(self, view)
+        calls.append((bool(view.display), int(view.virtual_size.height)))
+        return height
+
+    with (
+        patch("local_operator.session.attached.AttachedSession", SidebarRemote),
+        patch("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8),
+    ):
+        async with app.run_test(size=(160, 48)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+            await _switch_bound(app, pilot, target)
+            for _ in range(20):
+                await pilot.pause()
+            await _switch_bound(app, pilot, home)
+            for _ in range(20):
+                await pilot.pause()
+            settled = int(app._transcript_view().virtual_size.height)
+            OperatorApp._settle_reveal_measurement = recording  # type: ignore[method-assign]
+            try:
+                # The WARM leg: the parked view is retained, nothing is pending,
+                # so this is the early-return path.
+                await _switch_bound(app, pilot, target)
+                for _ in range(20):
+                    await pilot.pause()
+            finally:
+                OperatorApp._settle_reveal_measurement = real_settle  # type: ignore[method-assign]
+            settled = int(app._transcript_view().virtual_size.height)
+
+    assert calls, (
+        "the warm reopen revealed the transcript without settling its measurement: "
+        "the prefill's early return skipped the layout, so the first frame could be "
+        "composed against stale arrangement (QA round 2, Q1)",
+        calls,
+    )
+    assert calls[-1][1] == settled, (
+        "the height the pre-reveal settle read is not the height the frame paints",
+        calls[-1][1],
+        settled,
+    )

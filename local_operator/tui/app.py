@@ -15042,6 +15042,24 @@ class OperatorApp(App[None]):
             # Hidden, nothing locally pending, or a fetch already owns the gate.
             # The scheduled fill below still runs and reaches the same goal — or
             # stands down and remembers the view — by the ordinary route.
+            #
+            # STILL SETTLE THE MEASUREMENT, and this is the whole of QA round 2's
+            # Q1. `_settle_reveal_measurement` used to run only on the paths that
+            # mount pages, so a WARM reopen — every row already retained, nothing
+            # pending, nothing to fill — returned here and revealed the parked
+            # view UNMEASURED. Textual then painted one frame against the stale
+            # arrangement (`_layout_required` only reaches the idle hook) and the
+            # next layout pass re-decided the gaps: every rendered line moved down
+            # one row and row 0 went blank, with the viewport, `scroll_y` and the
+            # block count all unchanged — 38 of 41 lines, 544k-546k pixels,
+            # intermittent precisely because it needs that pre-layout frame to be
+            # painted at all (4 of 6 runs at 160x48; the 80-column variant paints
+            # fewer rows per pass and stayed clean). Measured first paint 62-82 ms
+            # and the shift 50 ms later on the runs that showed it.
+            #
+            # Paint-suppressed and pre-reveal, exactly like the in-loop call: no
+            # frame is added and no layout is forced after paint.
+            self._settle_reveal_measurement(view)
             self._start_resume_fill()
             return
         # READ THE REAL VIEWPORT BEFORE THE FIRST CHECK — every burst, not only
