@@ -95,13 +95,18 @@ let capabilities: Capabilities | null = null;
    never painted as 0). Replaced, never merged, so a frame that drops a number
    cannot leave the previous frame's value standing in for it. */
 let notificationsBlock: NotificationsBlock | undefined = undefined;
-/* Backend preference and actual UI copy language are different facts. Until
-   C bundles own copy, the SPA remains English/LTR under every backend frame.
-   No OS/device/storage guess is allowed to impersonate backend authority. */
+/* Backend preference and actual UI copy language are different facts. The
+   generated package may carry audited non-English bundles; an incomplete owned
+   surface still selects English/LTR as a whole. No OS/device/storage guess is
+   allowed to impersonate backend authority. */
 let localeSnapshot: LocaleSnapshot = Object.freeze({
 	backendLocale: null, uiLocale: "en", direction: "ltr", revision: 0,
 });
-export const messageRuntime = createMessageRuntime(() => localeSnapshot, () => publishLocaleSnapshot());
+export const messageRuntime = createMessageRuntime(
+	() => localeSnapshot,
+	() => publishLocaleSnapshot(),
+	Object.keys(BUNDLED_OWNED),
+);
 export const wireCatalogueLoader = createWireLoader({
 	context: () => ({ origin: typeof location === "object" ? location.origin : "", locale: localeSnapshot.backendLocale }),
 	capabilities: () => capabilities,
@@ -169,23 +174,28 @@ function emitStream() {
 }
 
 
-/* THE SPA'S OWN ENGLISH COPY, registered before any consumer renders the relay
+/* THE BUNDLED RELAY COPY, registered before any consumer renders the relay
    (the RFC's "bundle a bootstrap set", §2.1/§3.3). This is what makes the
-   owned-copy language an ACTUAL rendered fact rather than a claim: `uiLocaleFor`
-   only returns a non-English UI locale when SOME bundle carries the WHOLE
-   English key set plus the resolved locale, so with English-only copy the SPA
-   stays EN/LTR under every backend frame — `lang`/`dir` describe the copy on
-   screen, not the backend preference (that stays on `useLanguage`). The bundle
-   is generated from the explicit owned namespaces (§ bundled.gen.ts); no wire
-   prose is bundled, so this cannot smuggle a served namespace into the client.
+   owned-copy language an ACTUAL rendered fact rather than a claim: the bundle
+   carries every SHIPPED locale for each owned namespace (§ bundled.gen.ts, from
+   the generator's shipped set), and `uiLocaleFor` selects a non-English UI
+   locale only when EVERY owned namespace carries the WHOLE English key set plus
+   that locale. A locale with one absent or partial owned namespace therefore
+   paints the whole surface EN/LTR — never a per-key mix — and `lang`/`dir`
+   describe the copy on screen, not the backend preference (that stays on
+   `useLanguage`). The generator emits the explicit owned namespaces only; no
+   wire prose is bundled, so this cannot smuggle a served namespace into the
+   client.
    Registration runs through the ONE store channel — `registerBundle` ->
    `changed()` -> `publishLocaleSnapshot` — so it repaints and re-labels the
    document instead of creating a second locale truth. Placed AFTER the
    listener set is declared: an init-time registration notifies that set, so
    registering above it would emit into a `listeners` binding still in its
    temporal dead zone and abort module evaluation. */
-for (const [namespace, messages] of Object.entries(BUNDLED_OWNED)) {
-	messageRuntime.registerBundle(namespace, "en", { ...messages });
+for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
+	for (const [locale, messages] of Object.entries(locales)) {
+		messageRuntime.registerBundle(namespace, locale, { ...messages });
+	}
 }
 
 function emit() {
@@ -726,6 +736,69 @@ export function retainConfigStream(): () => void {
 			configStreamCancel = null;
 		}
 	};
+}
+
+/* THE FIRST CONTENT PAINT'S LANGUAGE (i18n review round 1, QA Q-2 / design D3).
+
+   The config stream's FIRST frame is the baseline (the daemon's own no-replay
+   contract), but it only arrives AFTER the SPA has mounted — so a cold deep
+   link painted English copy under whatever metadata the page started with, and
+   the flip to Urdu landed after the reader was already looking at it. Resolving
+   it BEFORE `main.tsx` renders removes the flip: `lang`/`dir` and the copy they
+   describe come from one snapshot on the first frame that has any content.
+
+   One-shot on purpose: this reads exactly the first frame of the SAME route the
+   live subscription uses, then cancels the request (the daemon detaches on
+   client close), so there is one authority and no extra stream left open. An
+   older daemon (404), a dead network or a stream that never speaks before the
+   budget leaves the English default in place — the same failure mode the live
+   subscription has, and never a blank first paint. */
+const LOCALE_BOOTSTRAP_BUDGET_MS = 1500;
+
+export async function resolveInitialLocale(): Promise<void> {
+	if (localeSnapshot.backendLocale !== null) return;
+	if (typeof fetch !== "function" || typeof AbortController !== "function") return;
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), LOCALE_BOOTSTRAP_BUDGET_MS);
+	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+	try {
+		const response = await fetch(CONFIG_STREAM_PATH, {
+			headers: { Accept: "text/event-stream" },
+			signal: controller.signal,
+		});
+		if (!response.ok || !response.body) return;
+		reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffered = "";
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) return;
+			buffered += decoder.decode(value, { stream: true });
+			const end = buffered.indexOf("\n\n");
+			if (end === -1) continue;
+			// A comment/keep-alive block before the baseline is not the baseline:
+			// keep reading until a block actually carries a `data:` line, bounded
+			// by the same abort budget.
+			let applied = false;
+			for (const line of buffered.slice(0, end).split("\n")) {
+				if (!line.startsWith("data:")) continue;
+				applyConfigFrame(line.slice(5).trim());
+				applied = true;
+			}
+			buffered = buffered.slice(end + 2);
+			if (applied) return;
+		}
+	} catch {
+		/* English stays: an absent or stalled stream is not a paint failure. */
+	} finally {
+		clearTimeout(timer);
+		try {
+			await reader?.cancel();
+		} catch {
+			/* the request may already be gone */
+		}
+		controller.abort();
+	}
 }
 
 /* ------------------------------------------------------------------ */

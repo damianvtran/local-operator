@@ -49,7 +49,7 @@ function DiffBlock({ diff }: { diff: string | string[] }) {
 	   spans gives the same monospace, per-line-tinted result legally.
 	   toLines accepts the fold's list-of-lines form AND a pre-joined string. */
 	return (
-		<div className="lo-scroll max-h-64 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap">
+		<div dir="ltr" className="lo-scroll max-h-64 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm leading-snug whitespace-pre-wrap">
 			{toLines(diff).map((line, i) => (
 				<span
 					key={i}
@@ -166,7 +166,7 @@ export function ToolRow({
 				 * reader the number is short (design round 1 D1). ``min-w-0 truncate``
 				 * lets the name share the squeeze and ellipsize honestly; the clock
 				 * span below keeps ``shrink-0``, so it always fits. */}
-				<span className="min-w-0 shrink truncate text-body-sm text-ink-muted">
+				<span dir="ltr" className="min-w-0 shrink truncate text-body-sm text-ink-muted">
 					{entry.tool_name}
 				</span>
 				<span className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">
@@ -192,7 +192,7 @@ export function ToolRow({
 					</span>
 				) : null}
 				{hasDetails ? (
-					<span className="shrink-0 text-ink-dim" aria-hidden>
+					<span className="lo-directional shrink-0 text-ink-dim" aria-hidden>
 						{open ? "▾" : "▸"}
 					</span>
 				) : null}
@@ -219,7 +219,7 @@ export function ToolRow({
 						   TUI expands these to the diff alone). max-h + scroll:
 						   an UNBOUNDED args block renders its full height and
 						   fills the screen with the sunken ground. */
-						<div className="lo-scroll max-h-40 overflow-y-auto rounded-sm bg-sunken p-2">
+						<div dir="ltr" className="lo-scroll max-h-40 overflow-y-auto rounded-sm bg-sunken p-2">
 							{toLines(entry.details.args).map((line, i) => {
 								const sep = line.indexOf(":");
 								return (
@@ -250,7 +250,7 @@ export function ToolRow({
 						<DiffBlock diff={entry.details.diff} />
 					) : null}
 					{entry.details.output ? (
-						<pre className="lo-scroll max-h-48 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm whitespace-pre-wrap text-ink-muted">
+						<pre dir="ltr" className="lo-scroll max-h-48 overflow-auto rounded-sm bg-sunken p-2 font-mono text-mono-sm whitespace-pre-wrap text-ink-muted">
 							{toLines(entry.details.output).join("\n")}
 						</pre>
 					) : null}

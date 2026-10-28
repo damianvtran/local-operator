@@ -38,6 +38,7 @@ import { UsageSheet } from "./usage-sheet";
 import { SessionStatus, meterFacts } from "./session-status";
 import { WorkingDirectoryChip } from "./directory-sheet";
 import { cn } from "../lib/cn";
+import { textDirection } from "../lib/bidi";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
 import type { PromptImage, SessionProjection, SlashCommand } from "../types";
 
@@ -263,7 +264,7 @@ function SlashSheet({
 						}}
 						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
-						<span className="shrink-0 font-mono text-mono-sm text-ink">
+						<span dir="ltr" className="shrink-0 font-mono text-mono-sm text-ink">
 							/{c.name}
 							{c.arguments === "required" ? (
 								<span className="text-ink-dim"> …</span>
@@ -390,6 +391,11 @@ const SENDING_HINT = `${CONNECTING_STATUS} — send again when this one lands.`;
    system-ui — 4.5px over — this one measures 77.8px, which survives narrower
    viewports and font fallbacks too. The product name is carried by the app
    shell (document title, header mark). */
+/* English until the composer's own copy is extracted (QA Q-3). The field's
+   DIRECTION is what keeps this readable: an empty draft resolves LTR (the
+   placeholder's own language), so the RTL document cannot move its trailing
+   ellipsis to the visual start ("…Message", QA Q-6), and the field follows the
+   draft's own first strong character once the reader types. */
 const COMPOSER_PLACEHOLDER = "Message…";
 
 /* THE CLUSTER'S BOX, IN ONE PLACE. The composer is the biggest thing on this
@@ -521,7 +527,7 @@ function PaperclipGlyph() {
 export function ComposerFrame() {
 	return <div className={COMPOSER_SHELL} aria-hidden>
 		<div className={COMPOSER_INPUT_ROW}>
-			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={COMPOSER_PLACEHOLDER} className={COMPOSER_FIELD} /></div>
+			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={COMPOSER_PLACEHOLDER} dir="ltr" className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
 			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
 			<div className={COMPOSER_ACTION_CLUSTER}>
@@ -1536,6 +1542,7 @@ export function Composer({
 							? messageRuntime.t("relay.health.ended_placeholder")
 							: COMPOSER_PLACEHOLDER}
 						aria-label={messageRuntime.t("relay.chrome.composer.label")}
+						dir={textDirection(text)}
 						disabled={disabled}
 						rows={1}
 						enterKeyHint="send"
