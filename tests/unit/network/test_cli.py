@@ -3199,3 +3199,26 @@ def test_set_name_reaches_its_handler_with_the_parsed_value(
     net_cli._guard_identity_subcommand(bare)  # noqa: SLF001
     capsys.readouterr()
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize("no_color", [None, "1"])
+def test_a_refusal_is_red_unless_no_color_is_set(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], no_color: str | None
+) -> None:
+    """#3002 review r3 N1: ``_print_refusal`` honours ``NO_COLOR`` (design N4).
+
+    The sentence carries the ANSI wrapper only when ``NO_COLOR`` is absent; the commands
+    a finite refusal carries are never coloured either way.
+    """
+    if no_color is None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+    else:
+        monkeypatch.setenv("NO_COLOR", no_color)
+    refusal = types.MeshRefusal("busy", "Another change was in progress.")
+    refusal.commands_label = "Apply again:"  # type: ignore[attr-defined]
+    refusal.commands = ["lop network approvals apply ap_x"]  # type: ignore[attr-defined]
+    net_cli._print_refusal(refusal)  # noqa: SLF001
+    err = capsys.readouterr().err
+    assert "Another change was in progress." in err
+    assert ("\033[" in err) is (no_color is None)
+    assert "\nlop network approvals apply ap_x\n" in err

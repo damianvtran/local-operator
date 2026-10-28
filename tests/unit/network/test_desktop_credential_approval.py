@@ -791,6 +791,31 @@ async def test_an_apply_refusal_is_audited(rig: Any, monkeypatch: pytest.MonkeyP
     assert [e["detail"]["code"] for e in refused] == ["approval_not_approved"]
 
 
+@pytest.mark.asyncio
+async def test_an_id_that_resolves_to_no_card_writes_no_audit_row(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3002 review r2 R2-2 / QA r2 Q4: junk ids are refused without growing the log."""
+    record = _finite(rig, monkeypatch)
+    _level(monkeypatch, FILE_ONLY)
+    async with _desktop_client(rig, monkeypatch) as client:
+        row = await _row(client, record["approval_id"])
+        before = len(_events(rig))
+        for junk in ("ap_" + "z" * 4000, "ap_x%0Aforged%1B%5B31m", "ap_doesnotexist0"):
+            for verb in ("approve-" "credential", "apply-credential"):
+                response = await client.post(f"/v1/desktop/approvals/{junk}/{verb}", json=_ack(row))
+                assert response.status_code in (404, 409), response.text
+    assert len(_events(rig)) == before
+
+
+def test_an_audit_subject_is_printable_and_bounded() -> None:
+    """Defence in depth beside the resolvable-only rule: the writer stores ``subject`` raw."""
+    subject = desktop_approval._audit_subject("ap_x\nforged\x1b[31m" + "z" * 4000)
+    assert "\n" not in subject and "\x1b" not in subject
+    assert subject.startswith("ap_xforged[31m")
+    assert len(subject) == desktop_approval._SUBJECT_MAX_CHARS
+
+
 def test_a_finite_card_names_its_recipient(rig: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Q2: the member's display name is recorded on the card and disclosed."""
     network = store.load(N, rig.root)
@@ -966,6 +991,87 @@ def test_a_transient_refusal_is_the_only_kind_marked_retryable() -> None:
     assert "again in a moment" in approval_copy.outcome("busy")["remedy"]
     for code in ("consent_conflict", "finite_denial_mismatch", "approval_expired", "x_new"):
         assert approval_copy.outcome(code)["retryable"] is False, code
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        # ``approvals.py``'s supersede receipt stores this sentence as the detail.
+        "the run was superseded: it stopped reporting and a new run replaced it",
+        # ``finite_share._release_run`` falls back to the exception's class name.
+        "OSError",
+        "KeyError",
+    ],
+)
+def test_a_detail_that_is_not_a_refusal_code_keeps_its_own_words_and_is_retryable(
+    detail: str,
+) -> None:
+    """#3002 review r3 M1: prose or an exception name is not mislabelled permanent."""
+    from local_operator.network.credentials import approval_copy
+
+    outcome = approval_copy.outcome(detail)
+    assert outcome["code"] == detail
+    assert outcome["reason"] == detail
+    assert outcome["retryable"] is True
+    assert outcome["remedy"] == approval_copy.TRY_AGAIN
+    # ...and the stored receipt reads the same way after a reload.
+    record = {"state": "failed", "receipts": [{"ok": False, "detail": detail}]}
+    assert approval_copy.last_failure(record) == outcome
+
+
+@pytest.mark.parametrize("code", ["expired", "declined", "busy2", "approval_expired", "x_new"])
+def test_a_one_word_or_unlisted_code_is_still_a_code(code: str) -> None:
+    """#3039 review m-3: ``expired`` is a code that lost its prefix, never "Try again" prose."""
+    from local_operator.network.credentials import approval_copy
+
+    assert approval_copy.is_refusal_code(code)
+    outcome = approval_copy.outcome(code)
+    assert outcome["retryable"] is False
+    assert outcome["remedy"] == approval_copy.NEW_REQUEST_NEEDED
+
+
+def test_a_raw_reason_is_printable_path_free_and_bounded() -> None:
+    from local_operator.network.credentials import approval_copy
+
+    reason = approval_copy.outcome("Failed\n/Users/someone/.lo/key.pem\x1b[31m " + "z" * 900)[
+        "reason"
+    ]
+    assert "/Users" not in reason and "\n" not in reason and "\x1b" not in reason
+    assert reason.startswith("Failed [path] [31m")
+    assert len(reason) <= 300
+
+
+def test_every_refusal_code_is_known() -> None:
+    """The whitelist cannot rot: every refusal literal the credential path raises is listed.
+
+    A code missing from ``approval_copy.KNOWN_CODES`` still reads as permanent through the
+    code-shape backstop, but listing it is what lets a reviewer see the vocabulary.
+    """
+    import ast
+    from pathlib import Path
+
+    import local_operator
+    from local_operator.network.credentials import approval_copy
+
+    package = Path(local_operator.__file__).parent / "network"
+    files = sorted((package / "credentials").glob("*.py")) + [package / "approvals.py"]
+    raised: set[str] = set()
+    for path in files:
+        for node in ast.walk(ast.parse(path.read_text())):
+            name = getattr(getattr(node, "func", None), "id", None) or getattr(
+                getattr(node, "func", None), "attr", None
+            )
+            if (
+                isinstance(node, ast.Call)
+                and name in {"MeshRefusal", "_refuse", "refuse"}
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                raised.add(node.args[0].value)
+    assert raised, "the walk found no refusal literals: the probe is dead"
+    assert sorted(raised - approval_copy.KNOWN_CODES) == []
+    assert all(approval_copy.is_refusal_code(code) for code in approval_copy.KNOWN_CODES)
 
 
 @pytest.mark.asyncio
