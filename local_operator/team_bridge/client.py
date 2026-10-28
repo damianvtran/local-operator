@@ -4126,10 +4126,18 @@ class StatusDiscipline:
         base_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         store: Any = None,
+        credential_id: int | None = None,
+        read_only: bool = False,
     ) -> None:
         self._config_dir = config_dir
+        # Consent preview must share text acceptance and account fences without
+        # silently enrolling a default-on account or changing its designation.
+        # OAuth refresh and in-memory observations remain permitted; no bridge
+        # mutation or connector placement belongs to a read-only discipline.
+        self._read_only = read_only
         self._client = TeamBridgeClient(
-            config_dir, base_url=base_url, transport=transport, store=store
+            config_dir, base_url=base_url, transport=transport, store=store,
+            credential_id=credential_id,
         )
         self._states: dict[str, _AccountState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -4192,7 +4200,7 @@ class StatusDiscipline:
         # enum silently never fired for the one caller that matters (QA round 2,
         # out-of-scope note; the lifespan task hid it). Parse is lenient by its
         # own contract and preserves the boundary recorded later in ``_check``.
-        if Boundary.parse(boundary) is Boundary.APP_START:
+        if not self._read_only and Boundary.parse(boundary) is Boundary.APP_START:
             # CATCH-UP for machines enrolled before D2a existed: an app-start
             # boundary is an existing, event-driven moment with no new poller.
             # A machine with no committed owner answers absent without creating
@@ -4289,7 +4297,8 @@ class StatusDiscipline:
             # A pending local commit must not wait out the status cache (QA Q2):
             # the cached answer already proves state C for the marker's endpoint,
             # and the retry paces itself. Local gates only, unless one is pending.
-            await self._retry_pending_commit(cached, access=access)
+            if not self._read_only:
+                await self._retry_pending_commit(cached, access=access)
             return cached
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
@@ -4350,10 +4359,11 @@ class StatusDiscipline:
         # BEFORE default-on, on the answer as read: the boundary whose POST just
         # failed to commit reads B here, so the commit-only retry starts at the
         # NEXT boundary (plan R3), never inside the request that created it.
-        await self._retry_pending_commit(check, access=access)
-        check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
-        check = self._sync_local_designation(check)
-        await self._sync_agent_name(check, access)
+        if not self._read_only:
+            await self._retry_pending_commit(check, access=access)
+            check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
+            check = self._sync_local_designation(check)
+            await self._sync_agent_name(check, access)
         self._states[key] = _AccountState(
             last_attempt=time.monotonic(), check=check, texts=texts, identity_revision=revision
         )
@@ -4686,6 +4696,17 @@ class StatusDiscipline:
                 store.update_designated_session(owner, desired)
         except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
             return
+
+    def reconcile_designation(self, check: StatusCheck) -> StatusCheck:
+        """Apply an explicit surface's persisted selection to its committed owner.
+
+        This does not read status or enroll: backend-only setup calls it only
+        after its guarded consent PUT succeeds and the selected session is
+        persisted through the shared settings writer. Keeping the same native
+        generation fence avoids a second designation authority in the CLI.
+        """
+
+        return self._sync_local_designation(check)
 
     def _sync_local_designation(self, check: StatusCheck) -> StatusCheck:
         """Keep the wake designation in step with ``team_bridge.session``.

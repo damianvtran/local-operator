@@ -214,13 +214,23 @@ async def test_a_source_checkout_cannot_repoint_the_users_agent(service, monkeyp
     assert fake.calls == []
 
 
-async def test_linux_is_a_noop_with_a_status_code(
+async def test_a_host_with_no_supervisor_is_a_noop_with_a_status_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.SYSTEMCTL)
+    """No launchctl, no systemctl, no schtasks: nothing is touched, honestly.
+
+    This used to be the LINUX cell ("unsupported"); Linux now installs
+    (``test_connector_platforms.py``). What stays a no-op is a host with no user
+    service supervisor at all, and its answer names the foreground command
+    rather than the old catch-all ``unsupported``.
+    """
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: None)
     _commit(tmp_path)
-    assert install.sync_connector_service(tmp_path).code == install.CODE_UNSUPPORTED
-    assert install.connector_state(tmp_path) == install.CODE_UNSUPPORTED
+    outcome = install.sync_connector_service(tmp_path)
+    assert outcome.code == install.CODE_NO_SUPERVISOR
+    assert "python -m local_operator.team_bridge.connector --config-dir" in outcome.detail
+    assert install.connector_state(tmp_path) == install.CODE_NO_SUPERVISOR
     assert not install.plist_path().exists()
 
 

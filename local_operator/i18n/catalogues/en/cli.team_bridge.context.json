@@ -1,0 +1,217 @@
+{
+  "cli.team_bridge.help.group": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.help.receiver": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.help.install": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.help.remove": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.help.logs": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.help.lines": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.help.json": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.status.supervisor": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.status.state": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. select over the service state codes; translate each branch's words, keep the branch keys."
+  },
+  "cli.team_bridge.status.enrolment": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. select over on/off/not_enrolled; translate each branch."
+  },
+  "cli.team_bridge.status.config_dir": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.status.log": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.status.journal": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.status.last_check": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.status.last_check_never": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.status.linger": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. select yes/other; {command} is a shell command (loginctl enable-linger <user>), keep verbatim."
+  },
+  "cli.team_bridge.status.isolated_note": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Shown by status for a non-default configuration folder. {command} is a shell command, keep verbatim."
+  },
+  "cli.team_bridge.status.no_supervisor_note": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.installed": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.current": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.registered": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.removed": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.absent": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.not_wanted": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.not_wanted_hint": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Remedy after install on a machine without enrolment. Keep commands verbatim; user must preview and explicitly accept consent."
+  },
+  "cli.team_bridge.outcome.remove_hint": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.no_supervisor": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. {detail} is an English technical sentence from the installer, inserted verbatim."
+  },
+  "cli.team_bridge.outcome.no_user_manager": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. {detail} is an English technical sentence from the installer, inserted verbatim."
+  },
+  "cli.team_bridge.outcome.isolated": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Install/remove refusal for a non-default configuration folder. {path} and {default} are folder paths, {command} a shell command; keep all three verbatim."
+  },
+  "cli.team_bridge.outcome.source_checkout": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.not_addressable": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.unknown": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.failed": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim. {detail} is an English technical sentence from the installer, inserted verbatim."
+  },
+  "cli.team_bridge.logs.none": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.logs.header": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Agent messages is the product name of Team Bridge; 'receiver' is the background process that delivers messages. Commands, flags, file paths and config keys stay verbatim."
+  },
+  "cli.team_bridge.outcome.note": {
+    "role": "lop team-bridge CLI output",
+    "tone": "terse, plain English, operator-facing",
+    "note": "A follow-up line after a successful install. {detail} is an English technical sentence from the installer (for example whether systemd lingering is on), inserted verbatim."
+  },
+  "cli.team_bridge.help.setup": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
+  },
+  "cli.team_bridge.setup.credential": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
+  },
+  "cli.team_bridge.setup.account": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
+  },
+  "cli.team_bridge.setup.tenant": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
+  },
+  "cli.team_bridge.setup.consent": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
+  },
+  "cli.team_bridge.setup.session": {
+    "role": "lop CLI help text",
+    "tone": "terse, plain English, operator-facing",
+    "note": "Backend-only setup argument help. Commands and argument names stay verbatim."
+  }
+}

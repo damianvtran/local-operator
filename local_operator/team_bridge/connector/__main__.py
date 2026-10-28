@@ -160,8 +160,11 @@ async def _main_async(args: argparse.Namespace) -> int:
     try:
         lock.acquire()
     except ConnectorLockBusy as busy:
-        print(str(busy))
-        return 0
+        logger.warning("bridge connector waiting for singleton: %s", busy)
+        # Task Scheduler retries failures, not clean exits. A foreground owner
+        # may relinquish this lock later; exit nonzero so the logon receiver
+        # cannot remain permanently stopped after losing that race.
+        return 75
 
     # F4 (live E2E): the store the screener reads its provider key from. The
     # explicit ``db_path`` is load-bearing — ``config_dir`` alone feeds only
@@ -202,8 +205,47 @@ async def _main_async(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_windows_stop() -> bool:
+    """Windows: turn ``SIGBREAK`` into the same clean stop ``SIGINT`` already gets.
+
+    ``loop.add_signal_handler`` does not exist on the Windows Proactor loop
+    (``procstate.supports_loop_signals``), so a POSIX-style handler cannot be
+    installed there. ``SIGINT`` (Ctrl+C) already surfaces as
+    ``KeyboardInterrupt`` through ``asyncio.run``, which cancels the main task,
+    so ``_main_async``'s ``finally`` releases the machine lock and closes the
+    credential store. ``SIGBREAK`` (Ctrl+Break, and what a console-group stop
+    sends) has no handler by default and terminates the process without any of
+    that. Raising ``KeyboardInterrupt`` from a ``signal.signal`` handler puts it
+    on the SAME path. A Task Scheduler ``/End`` terminates the process outright
+    and runs no handler at all; the kernel drops the lock on exit, which is why
+    the lock design never depends on a clean stop.
+
+    Deliberately ADDITIVE and Windows-only: the POSIX SIGTERM/SIGHUP stop
+    sequence belongs to ``main``'s caller path and is not touched here. Returns
+    whether a handler was installed.
+    """
+
+    import os
+    import signal
+
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if os.name != "nt" or sigbreak is None:
+        return False
+
+    def _stop(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(sigbreak, _stop)
+    except (OSError, RuntimeError, ValueError):
+        # Not the main thread, or a host that refuses it: Ctrl+C still works.
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    _install_windows_stop()
     try:
         return asyncio.run(_main_async(args))
     except KeyboardInterrupt:
