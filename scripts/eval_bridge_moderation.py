@@ -550,8 +550,12 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
           f"{len(registry.data()['egress_tools'])} egress tool(s), "
           f"{len(registry.data()['non_egress'])} non-egress, "
           f"{len(registry.data()['mcp_prefixes'])} MCP prefix(es)")
-    print(f"  dataset balance: {balance['answer']} answer vs {balance['refuse']} refuse "
-          f"({'OK' if balance['balanced'] else 'UNBALANCED - a run on this corpus cannot be a clean full pass'})")
+    print(
+        f"  dataset balance: {balance['answer']} answer vs {balance['refuse']} refuse "
+        f"(refuse:answer {balance['ratio']}:1; "
+        f"design 7.2 answer>=refuse: {'MET' if balance['balanced'] else 'not met'}; "
+        f"operator 2:1 target: {'MET' if balance['target_met'] else 'not met'})"
+    )
     print("no model call was made and no fixture was written")
     return EXIT_OK
 

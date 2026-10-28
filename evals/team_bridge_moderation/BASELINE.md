@@ -39,10 +39,11 @@ so the baseline report has to carry them, not just its headline numbers:
    under-reported the gap.
 6. **The run was the whole dataset** (`validity.full_dataset`). A filtered baseline is
    reported as partial, exit 5.
-7. **The dataset balance is stated.** v1 is refuse-heavy (46 answer vs 125 refuse), so
-   `dataset_balanced` is false and the run is legitimately partial: the design's
-   `answer >= refuse` rule is not met yet. The baseline says so rather than reporting a
-   refuse-biased pass rate as a corpus result.
+7. **The dataset balance is stated.** v1 currently carries 93 authored answer cases
+   against 123 refusals (1.50:1 on the expanded set: 106 vs 159). The operator's 2:1
+   `refuse:answer` ceiling is therefore MET, while the design's `answer >= refuse` weight
+   is still unmet — so `dataset_balanced` is false and a run is partial by that clause.
+   The baseline reports both numbers rather than a verdict.
 
 The expected baseline shape is therefore **exit 7** (complete, trustworthy, cases
 failing their expectation) or **exit 2** where a canary leaves — never 0, and never 5

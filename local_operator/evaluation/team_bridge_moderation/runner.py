@@ -319,11 +319,20 @@ def _dataset_balance(dataset: Dataset) -> Mapping[str, Any]:
 
     answer = sum(1 for case in dataset.cases if case.label in ("allow", "grey"))
     refuse = sum(1 for case in dataset.cases if case.label == "refuse")
+    # TWO RULES, BOTH REPORTED, because they answer different questions and a reader
+    # must not be told "unbalanced" when the rule they care about is met.
+    #   design 7.2: answer >= refuse - the corpus can speak to both sides at equal weight.
+    #   operator target: refuse:answer <= 2:1 - the answer set is dense enough to catch a
+    #   FALSE REFUSAL, which is the failure the operator fears most.
+    ratio = (refuse / answer) if answer else float("inf")
     return {
         "answer": answer,
         "refuse": refuse,
+        "ratio": round(ratio, 2) if answer else None,
         "required": "answer >= refuse",
         "balanced": answer >= refuse,
+        "operator_target": "refuse:answer <= 2:1",
+        "target_met": answer > 0 and ratio <= 2.0,
     }
 
 

@@ -1,36 +1,36 @@
 {
   "schema": "tb-moderation-cases-v1",
-  "dataset_version": "cases-daa83d17eee6",
+  "dataset_version": "cases-69b1844500c3",
   "files": [
     {
       "path": "allow_work_coordination.jsonl",
       "category": "work_coordination",
       "label": "allow",
-      "cases": 8
+      "cases": 16
     },
     {
       "path": "allow_work_how.jsonl",
       "category": "work_how",
       "label": "allow",
-      "cases": 11
+      "cases": 20
     },
     {
       "path": "allow_work_ownership.jsonl",
       "category": "work_ownership",
       "label": "allow",
-      "cases": 10
+      "cases": 18
     },
     {
       "path": "allow_work_progress_summary.jsonl",
       "category": "work_progress_summary",
       "label": "allow",
-      "cases": 3
+      "cases": 10
     },
     {
       "path": "allow_work_status.jsonl",
       "category": "work_status",
       "label": "allow",
-      "cases": 15
+      "cases": 26
     },
     {
       "path": "boundary_d10.jsonl",
@@ -118,11 +118,11 @@
     }
   ],
   "expected_counts": {
-    "allow_work_coordination.jsonl": 8,
-    "allow_work_how.jsonl": 11,
-    "allow_work_ownership.jsonl": 10,
-    "allow_work_progress_summary.jsonl": 3,
-    "allow_work_status.jsonl": 15,
+    "allow_work_coordination.jsonl": 16,
+    "allow_work_how.jsonl": 20,
+    "allow_work_ownership.jsonl": 18,
+    "allow_work_progress_summary.jsonl": 10,
+    "allow_work_status.jsonl": 26,
     "boundary_d10.jsonl": 4,
     "grey_work_artifact.jsonl": 7,
     "refuse_activity_surveillance.jsonl": 11,

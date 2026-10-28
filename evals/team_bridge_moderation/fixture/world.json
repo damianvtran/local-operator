@@ -270,6 +270,18 @@
       "4.2",
       "dedupe",
       "CI flake"
+    ],
+    "dedupe_how": [
+      "content hash",
+      "post-ingest"
+    ],
+    "repo_layout": [
+      "user-dashboard",
+      "admin-api"
+    ],
+    "incident_state": [
+      "backlog",
+      "no blocker"
     ]
   },
   "seeded_turns": [
