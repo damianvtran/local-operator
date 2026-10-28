@@ -10,6 +10,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,7 @@ from local_operator.notifications.store import NotificationStore, ask_ref
 from tests.unit.asks.test_store import _answered, _queued
 from tests.unit.notifications.test_bulk import URL
 from tests.unit.notifications.test_bulk import client as _route_client
-from tests.unit.notifications.test_bulk import patch, preview, seed
+from tests.unit.notifications.test_bulk import patch, preview, recount, seed
 from tests.unit.notifications.test_inbox import OTHER, SID
 
 # Reuse the production-route fixture without starting another live app rig.
@@ -51,6 +52,13 @@ def publish_index(root: Path, session: str = SID):
     ask_store.write_entry(
         root, session, cwd=str(root), asks=[ask_store.pending_row(r) for r in records]
     )
+
+
+def row(store: NotificationStore, item_id: str) -> dict[str, Any]:
+    """``store.get`` for a row the test just seeded; narrows the Optional for pyright."""
+    found = store.get(item_id)
+    assert found is not None, item_id
+    return found
 
 
 def log_bytes(root: Path, session: str = SID):
@@ -85,7 +93,7 @@ def test_frozen_all_item_read_beyond_page_and_new_ask_exclusion(client, tmp_path
     assert result["session_counts"][SID]["changed_ask_count"] == 124
     marks = NotificationStore(tmp_path).ref_states([refs[0], new_ref])
     assert not any(mark.get("read_at") is not None for mark in marks.values())
-    assert all(NotificationStore(tmp_path).get(item)["read"] for item in updates)
+    assert all(row(NotificationStore(tmp_path), item)["read"] for item in updates)
     assert log_bytes(tmp_path) == before
     undo = patch(client, op="undo", operation_token=result["operation_token"])
     assert undo["changed_count"] == 128 and undo["waiting_unread_delta"] == 124
@@ -204,6 +212,36 @@ def test_recount_keeps_scope_op_choice_and_replay_are_fenced(client, tmp_path):
     )
 
 
+def test_v2_body_recount_matches_get_and_subtracts_ask_exclusions(client, tmp_path):
+    """The PATCH op:"preview" recount (#3103 Q1) must carry v2 ask selections too.
+
+    Ask refs are the long ids (~81 bytes) that pushed the GET form over h11's
+    head limit, so the body form is the one a v2 client actually uses.
+    """
+    refs = queue(tmp_path, 3)
+    updates = seed(tmp_path, 2)
+    token = select(client, state="all", count_session_ids=[SID])
+    queue(tmp_path, start=3)  # arrives after the freeze: must never enter
+    excluded = [refs[0], updates[0]]
+    response = recount(client, token["token"], excluded)
+    assert response.status_code == 200, response.text
+    body = response.json()["result"]["selection"]
+    assert body == preview(client, selection_token=token["token"], excluded_ids=excluded)
+    assert body["selection_version"] == 2
+    assert body["eligible_ask_count"] == 2 and body["eligible_update_count"] == 1
+    assert body["eligible_count"] == 3 and body["skipped_ask_count"] == 0
+    assert all(body[key] == token[key] for key in ("token", "through_seq", "expires_at"))
+    # Read metadata belongs to receipts; a recount would silently drop it.
+    refused = client.patch(
+        URL,
+        json={"op": "preview", "selection_token": token["token"], "reconcile_ids": [refs[1]]},
+    )
+    assert refused.status_code == 422
+    # Still uncommitted: the token applies afterwards with the same exclusions.
+    applied = patch(client, op="read", selection_token=token["token"], excluded_ids=excluded)
+    assert applied["changed_ask_count"] == 2 and applied["changed_update_count"] == 1
+
+
 def test_update_and_mark_receipts_roll_back_together(client, tmp_path):
     refs = queue(tmp_path)
     ids = seed(tmp_path)
@@ -217,7 +255,7 @@ def test_update_and_mark_receipts_roll_back_together(client, tmp_path):
         )
     response = client.patch(URL, json={"op": "read", "selection_token": token})
     assert response.status_code == 500
-    assert not store.get(ids[0])["read"] and store.ref_states(refs) == {}
+    assert not row(store, ids[0])["read"] and store.ref_states(refs) == {}
     with sqlite3.connect(store.path) as conn:
         assert conn.execute("SELECT count(*) FROM bulk_rows").fetchone()[0] == 0
         assert conn.execute("SELECT op FROM bulk_tokens").fetchone()[0] is None
@@ -304,6 +342,7 @@ def test_changed_question_is_not_acknowledged_from_an_old_snapshot(client, tmp_p
     refs = queue(tmp_path)
     token = select(client)["token"]
     entry = ask_store.read_entry(tmp_path, SID)
+    assert entry is not None
     entry["asks"][0]["questions"][0]["question"] = "Revised question"
     ask_store.write_entry(tmp_path, SID, cwd=str(tmp_path), asks=entry["asks"])
     before = log_bytes(tmp_path)
@@ -380,7 +419,7 @@ def test_bounded_reconcile_preserves_deep_skipped_revision_and_scope(client, tmp
     # A client already holding fresh.seq can recognize and refuse the older
     # snapshot. The actual facade's compare/apply implementation lives in #1471.
     assert rows[deep.item_id]["seq"] < fresh["items"][0]["seq"]
-    assert all(store.get(item)["read"] for item in ids)
+    assert all(row(store, item)["read"] for item in ids)
 
 
 def test_undo_reconciliation_preserves_intervening_write_and_ask_projection(client, tmp_path):

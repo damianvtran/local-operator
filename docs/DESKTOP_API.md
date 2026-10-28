@@ -2756,8 +2756,13 @@ Pending asks remain selectable in Unread even after read acknowledgement, just
 like the existing list. `kind=asks`, `kind=updates`, priority and From filters
 retain their current list meaning; Dismissed has no live asks.
 
-Recount uses the **same** `preview=true&selection_token=...&excluded_ids=...`
-query as v1. No `include_ask_reads` or other filters may be added to a recount.
+Recount uses the **same** body form as v1:
+`PATCH {"op":"preview","selection_token":"<token>","excluded_ids":[...]}`.
+V2 exclusions are mostly ask refs (up to 81 bytes each), so 500 of them in the
+GET query is ~50 KB of URL that h11 refuses with `400`. The GET
+`preview=true&selection_token=...` form answers identically for no or a few
+exclusions. No `include_ask_reads` or other filters may be added to a recount,
+and `reconcile_ids` is refused (`422`): a recount mints no receipt.
 It revalidates only captured refs; new asks/updates never enter, and neither
 watermark nor expiry advances. Exclusions subtract both kinds of identity.
 
