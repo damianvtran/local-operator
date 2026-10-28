@@ -728,3 +728,47 @@ def test_a_conflicted_capture_does_not_take_a_slot_in_the_expiry_cap(
     _peer_correction(store, rows["AAA conflicted capture text"], first)
     assert mm.run_pass(tmp_path)["expired"] == 1
     assert "ZZZ clean capture text" not in _facts(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: M1-r3 (retention-reaped sessions) and m1 (clock skew)
+# ---------------------------------------------------------------------------
+
+
+def test_a_capture_this_host_wrote_expires_after_retention_reaps_its_session(
+    tmp_path: Path,
+) -> None:
+    """M1-r3: retention removes the directory and leaves memory to the TTL, so
+    the writing host must still expire the capture once the directory is gone."""
+    import shutil
+
+    session = "a" * 12
+    # Production-shaped: no ``origin=`` override, so the origin is the install's
+    # minted device id persisted in ``meta``, exactly what the pass compares.
+    store = MemoryStore(tmp_path, MemoryIdentity(session), tmp_path / "sessions" / session)
+    _capture(store, "m1", "Captured goal of a reaped delegated run", time.time() - 15 * DAY)
+    directory = tmp_path / "sessions" / session
+    assert directory.is_dir()
+    shutil.rmtree(directory)  # what delegated_max_age's remove_session_dir does
+    report = mm.run_pass(tmp_path)
+    assert report["expired"] == 1
+    assert _facts(tmp_path) == {}
+
+
+def test_a_peer_that_neither_holds_the_session_nor_wrote_the_capture_never_expires_it(
+    tmp_path: Path,
+) -> None:
+    """M1-r3 control: the origin rule widens expiry only to the WRITER."""
+    _, host_b = _two_hosts(tmp_path, b_has_session_dir=False)
+    report = mm.run_pass(tmp_path / "b")
+    assert report["expired"] == 0
+    assert "Standing goal of the long lane" in _facts(tmp_path / "b")
+
+
+def test_a_future_dated_attempt_stamp_does_not_hold_passes_in_backoff(
+    tmp_path: Path, low_threshold: None
+) -> None:
+    """Review round 3, m1: a clock stepped back must not freeze maintenance."""
+    _churn(_store(tmp_path))
+    (tmp_path / "memory" / mm.ATTEMPT_NAME).write_text(f"{time.time() + 3 * DAY}\n")
+    assert mm.run_pass(tmp_path)["status"] == "ran"

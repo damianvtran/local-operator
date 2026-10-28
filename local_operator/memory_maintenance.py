@@ -301,29 +301,44 @@ def _vacuum_allowed(store: Any) -> tuple[bool, int]:
 def _expirable(store: Any, db: sqlite3.Connection, now: float) -> list[tuple[str, str, str]]:
     """Expired captures THIS host may tombstone, at most :data:`EXPIRE_LIMIT`.
 
-    ONLY SESSIONS WHOSE DIRECTORY IS ON THIS HOST (review round 2, M3-r2).
-    ``expires_at`` replicates with the fact, so without this every peer that
+    ONLY CAPTURES THIS HOST IS RESPONSIBLE FOR (review rounds 2 and 3).
+    ``expires_at`` replicates with the fact, so without a rule every peer that
     syncs session scope would expire the same capture on the same deadline,
-    racing the capturing host. The host holding the session directory is the
-    one that captures, resumes and deletes it, so it alone decides; peers
-    receive its tombstone. A session moved here brings its directory, and with
-    it the decision.
+    racing the capturing host (M3-r2). Responsible means EITHER:
+
+    * the session directory is on this host — it captures, resumes and deletes
+      that session, and a session moved here brings the decision with it; OR
+    * this host WROTE the capture head (``origin_device`` is this store's
+      origin). Without this the automatic retention reaps (``delegated_max_age``
+      and friends, which remove the directory and leave memory to the TTL)
+      made those captures immortal on every host (M1-r3: 1,025 captures across
+      66 reaped sessions on the operator's store). The writer keeps the
+      decision after its directory is gone; a peer that neither holds the
+      directory nor wrote the head still never expires it.
+
+    Both hosts may expire one capture only in the rare case where each passes
+    one test (a session moved away with no capture since); the derived expiry
+    id makes that harmless — both tombstones are recognised as expiry.
 
     ONE HEAD ONLY, checked here before the row takes a slot (QA round 2, Q6):
     a conflicted capture is never forgotten (``forget_many`` re-checks inside
     its transaction), so selecting it would only cost every pass one slot of the
     cap for as long as the conflict stands.
     """
+    row = db.execute("SELECT value FROM meta WHERE key='origin'").fetchone()
+    origin = row[0] if row else None
     local: dict[str, bool] = {}
     out: list[tuple[str, str, str]] = []
     for entity, owner, op_id in db.execute(_EXPIRED_SQL, (CAPTURE_AUTHOR, CAPTURE_TTL_S, now)):
-        if owner not in local:
-            local[owner] = store._session_directory(owner, db) is not None
-        if not local[owner]:
-            continue
         ops = store._ops(db, entity)
-        if any(op["kind"] == "tombstone" for op in ops) or len(store._heads(ops)) != 1:
+        heads = store._heads(ops)
+        if any(op["kind"] == "tombstone" for op in ops) or len(heads) != 1:
             continue
+        if heads[0]["origin_device"] != origin:
+            if owner not in local:
+                local[owner] = store._session_directory(owner, db) is not None
+            if not local[owner]:
+                continue
         out.append((entity, owner, op_id))
         if len(out) >= EXPIRE_LIMIT:
             break
@@ -413,7 +428,9 @@ def run_pass(
                 report["last_pass"] = last
                 return
             attempted = _last_attempt(root)
-            if clock - attempted < ATTEMPT_BACKOFF_S:
+            # A FUTURE-dated attempt (the clock stepped back) is stale, not a
+            # reason to hold every pass in backoff for the size of the step.
+            if 0 <= clock - attempted < ATTEMPT_BACKOFF_S:
                 # A heavy attempt started recently and never finished (it would
                 # have written the 6 h stamp): its host was cut off. Back off
                 # rather than re-pay the plan on every start.

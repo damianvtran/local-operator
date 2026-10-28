@@ -2064,11 +2064,16 @@ def _forget_session_captures(config_dir: Path, session_id: str) -> None:
     candidate) are KEPT, listable with ``lop memory list --session ID`` and
     movable, because someone chose to write them.
 
-    Only the EXPLICIT delete calls this. The automatic retention sweep does not:
-    its contract is reclaiming disk, and captured rows there expire on their own
-    14-day deadline anyway. Best-effort like the wake/monitor pruning beside it —
-    the directory is already gone, so a store error must not turn a completed
-    delete into a reported failure; the captures then expire on schedule.
+    Only the EXPLICIT delete calls this. The automatic retention sweeps do not:
+    their contract is reclaiming disk, a sweep can reap hundreds of sessions in
+    one run (each forget re-exports and checkpoints the store), and their
+    captures still expire on their own 14-day deadline — the maintenance pass
+    expires a capture this host WROTE even after its directory is gone
+    (``memory_maintenance._expirable``; PR #3057 review round 3, M1-r3).
+
+    Best-effort like the wake/monitor pruning beside it — the directory is
+    already gone, so a store error must not turn a completed delete into a
+    reported failure; the captures then expire on schedule.
     """
     try:
         from local_operator.memory_maintenance import forget_session_captures
