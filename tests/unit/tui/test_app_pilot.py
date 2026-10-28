@@ -850,9 +850,7 @@ def _renderable_plain(renderable) -> str:
         # wide enough that no row wraps: these callers assert about ROW text,
         # and wrapping would split one row into several.
         buffer = io.StringIO()
-        Console(width=200, file=buffer, color_system=None, force_terminal=False).print(
-            renderable
-        )
+        Console(width=200, file=buffer, color_system=None, force_terminal=False).print(renderable)
         # Trailing cells are the TABLE's padding to its widest row, not content:
         # callers measure a row's painted width against the 74-cell wrap ceiling,
         # and a Text row never carried them.
@@ -10384,9 +10382,7 @@ async def test_help_wrapped_descriptions_hang_under_the_description_column() -> 
     from local_operator.i18n.text import set_active_locale
 
     app = OperatorApp(lambda: _factory(FakeSession()))
-    labels = [
-        ", ".join(f"/{name}" for name in command.names) for command in SLASH_COMMANDS
-    ]
+    labels = [", ".join(f"/{name}" for name in command.names) for command in SLASH_COMMANDS]
     name_width = max(len(label) for label in labels) + 2
     # `RichBlock` wraps its block in `Padding(renderable, (0, 2))`, and the
     # block's own measured ceiling is 74 content cells at 80 columns, so a
