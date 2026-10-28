@@ -1950,14 +1950,23 @@ async def conversation_consent(
 #
 # It sits under the owner-audit gate on the hub (caller + tenant, no endpoint
 # parameter, `private, no-store`), and this route mirrors that gate: a closed,
-# single-valued query, the captured-owner receipt REQUIRED, `private, no-store`
-# on every answer including refusals, and nothing persisted or cached. The rows
+# single-valued query, the captured-owner receipt REQUIRED, an uncacheable
+# answer every time including refusals (served as `no-store`; see below), and
+# nothing persisted or cached. The rows
 # are metadata only (no body, preview or member list) and pass through as the
 # hub sent them; `cursor` is the hub's opaque `next_cursor`, forwarded verbatim.
 #
 # Availability is the `team_bridge_owner_invitations` capability
 # (server/features.py), never a probe: a hub that predates #227 answers 404 here,
 # which the client surfaces as 409 `outdated_hub`.
+#
+# SERVED vs SET Cache-Control. The route sets `private, no-store` so it carries
+# the hub's contract wherever the router is mounted, but the running core's
+# app-wide `managed_desktop_boundary` (server/app.py) rewrites EVERY
+# `/v1/desktop/` answer to plain `no-store`, as it already does for the avatar
+# and attachment routes. That is no weaker -- `no-store` keeps the page out of
+# every cache, shared or private -- so the served header is `no-store`; the
+# value below is what a router-only mount (the unit fixture) sees.
 
 OWNER_INVITATIONS_CACHE_CONTROL = "private, no-store"
 _OWNER_INVITATIONS_QUERY = frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})

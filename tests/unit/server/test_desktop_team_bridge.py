@@ -3416,6 +3416,12 @@ async def test_an_active_settings_write_without_a_cos_sends_no_name(api):
 
 CONSENT = "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/acc_1/consent"
 INVITATIONS = "/v1/desktop/team-bridge/agents/owned/invitations"
+#: What the ROUTE sets. The `api` fixture mounts the router alone, so these cells
+#: see it verbatim; the running core's `managed_desktop_boundary` rewrites every
+#: `/v1/desktop/` answer to plain `no-store` (pre-existing, app-wide), and that
+#: SERVED value is pinned separately by
+#: `test_an_old_hub_through_the_mounted_boundary_is_409_outdated_hub_on_both_arms`.
+ROUTE_SET_CACHE_CONTROL = desktop_team_bridge.OWNER_INVITATIONS_CACHE_CONTROL
 
 
 async def test_withdraw_needs_no_consent_version_and_forwards_the_endpoint_pin(api):
@@ -3507,7 +3513,7 @@ async def test_owned_invitations_pass_through_with_no_store_and_the_opaque_curso
         },
     )
     assert response.status_code == 200, response.text
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
     assert response.json()["result"] == page
     assert FakeClient.behavior["last_invitations"] == {
         "expected_account_id": "acc_1",
@@ -3542,7 +3548,7 @@ async def test_a_page_this_build_cannot_read_is_malformed_page(api, page):
     response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
     assert response.status_code == 502, response.text
     assert response.json()["detail"]["code"] == "malformed_page"
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
 
 
 @pytest.mark.parametrize("tenant", ["../tnt_1", "tnt_1!", "TNT_1", "x" * 200])
@@ -3606,7 +3612,7 @@ async def test_an_enrolled_machine_requires_the_tenant_rather_than_letting_the_h
     omitted = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
     assert omitted.status_code == 422, omitted.text
     assert omitted.json()["detail"]["code"] == "invalid_request"
-    assert omitted.headers["cache-control"] == "private, no-store"
+    assert omitted.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
     assert FakeClient.calls == calls, "an omitted tenant reached the transport"
 
     FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
@@ -3680,7 +3686,7 @@ async def test_owned_invitations_refuse_an_open_query_before_any_io(api, query):
     response = await client.get(f"{INVITATIONS}{query}")
     assert response.status_code == 422, response.text
     assert response.json()["detail"]["code"] == "invalid_request"
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
     assert FakeClient.calls == calls, "a refused query reached the transport"
 
 
@@ -3692,7 +3698,7 @@ async def test_owned_invitations_refusals_carry_no_store_and_outdated_hub_passes
     response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "outdated_hub"
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
 
 
 def test_owner_invitations_capability_is_advertised():
@@ -3770,5 +3776,108 @@ async def test_the_composed_seam_an_old_hub_becomes_an_update_prompt_not_a_retry
     detail = response.json()["detail"]
     assert detail["code"] == "outdated_hub"
     assert detail["details"] == {"hub_status": 404, "hub_code": "bridge_error"}
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
     assert [r.url.path for r in seen] == ["/v1/messaging/agents/owned/invitations"]
+
+
+async def test_an_old_hub_through_the_mounted_boundary_is_409_outdated_hub_on_both_arms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """QA r1 item 1: the old-hub answer as the RUNNING core serves it.
+
+    QA's daemon runs against the old hub answered `conversation_not_found` and
+    an invitation row. A pre-#227 hub can produce neither: its `consent()`
+    refuses `withdraw` on the decision check BEFORE any conversation lookup, and
+    it serves no invitations route. Those answers came from a #227 hub, so the
+    daemon was still addressing one (a rig artefact). Reproduced end to end
+    (the core's real app + a loopback hub answering the pre-#227 bytes), both
+    arms answer this 409 on every repeat and every call reaches the hub, so the
+    core neither caches nor re-routes. This cell pins that seam with
+    the app-wide `managed_desktop_boundary` middleware mounted, which the `api`
+    fixture omits: the hub bytes are agent-server `c082e1b0^1`'s -- the coded
+    `decision`/`unknown_value` refusal of `withdraw`, and echo's uncoded router
+    404 for the invitations path.
+
+    It also pins the SERVED Cache-Control (QA r1 Q1): the middleware rewrites
+    every `/v1/desktop/` answer to `no-store`, so the route's own
+    `private, no-store` is what a router-only app sees, never what ships.
+    """
+
+    import httpx as httpx_mod
+
+    from local_operator.server.app import managed_desktop_boundary
+
+    seen: list[str] = []
+
+    def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.url.path.endswith("/consent"):
+            return httpx_mod.Response(
+                400,
+                json={
+                    "error": "invalid request",
+                    "code": "invalid_request",
+                    "details": {"field": "decision", "rule": "unknown_value"},
+                },
+            )
+        return httpx_mod.Response(404, json={"message": "Not Found"})
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / ".local-operator"))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+    # The real client over MockTransport, built under the same tripwire allowance
+    # as the composed-seam cell above: no socket is opened.
+    saved_init = _REAL_TEAM_BRIDGE_CLIENT.__init__
+    _REAL_TEAM_BRIDGE_CLIENT.__init__ = _REAL_CLIENT_INIT
+    try:
+        wire = _REAL_TEAM_BRIDGE_CLIENT(
+            None,
+            base_url="https://hub.example/v1",
+            store=_CredentialStore(),
+            transport=httpx_mod.MockTransport(handler),
+        )
+    finally:
+        _REAL_TEAM_BRIDGE_CLIENT.__init__ = saved_init
+    monkeypatch.setattr(desktop_team_bridge, "_conversation_client", lambda cm: wire)
+
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path / ".local-operator")
+    app.include_router(desktop_team_bridge.router)
+    app.middleware("http")(managed_desktop_boundary)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
+    ) as client:
+        for _ in range(2):  # a repeat must be the same answer, not a cached one
+            withdraw = await client.post(
+                CONSENT,
+                json={
+                    "decision": "withdraw",
+                    "expected_account_id": "acc_1",
+                    "tenant_id": "tnt_1",
+                },
+            )
+            assert withdraw.status_code == 409, withdraw.text
+            assert withdraw.json()["detail"]["code"] == "outdated_hub"
+            assert withdraw.json()["detail"]["details"] == {
+                "hub_status": 400,
+                "hub_code": "invalid_request",
+            }
+
+            page = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+            assert page.status_code == 409, page.text
+            assert page.json()["detail"]["code"] == "outdated_hub"
+            assert page.json()["detail"]["details"] == {
+                "hub_status": 404,
+                "hub_code": "bridge_error",
+            }
+            for answer in (withdraw, page):
+                assert answer.headers["cache-control"] == "no-store"
+    assert (
+        seen
+        == [
+            "POST /v1/messaging/conversations/bcv_abc12345/members/acc_1/consent",
+            "GET /v1/messaging/agents/owned/invitations",
+        ]
+        * 2
+    )
