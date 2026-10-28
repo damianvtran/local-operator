@@ -24,8 +24,8 @@ START-UP ORDER (each step exists because getting it wrong is a real failure):
    then process env). Starting with none held every message as
    ``provider_error`` before any screen (live E2E F4).
 
-This entry point does NOT install services and does NOT touch the operator's
-launchd/systemd/schtasks (see connector/install.py's contract).
+This entry point does NOT install services; that is connector/install.py's
+separate, guarded lifecycle (D2a), never a connector's own start path.
 """
 
 from __future__ import annotations

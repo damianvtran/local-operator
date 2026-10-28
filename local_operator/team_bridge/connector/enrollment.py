@@ -60,6 +60,7 @@ def commit_consent_and_designation(
     # An empty designation is a legitimate commit: consent without a session
     # (badge-only arrivals, §5.6) — NOT a missing receipt.
     Store(config_dir).commit_enrollment(owner, receipt, cos_session_id=cos_session_id or None)
+    _connector_after_commit(config_dir)
 
 
 def commit_settings_enrollment(
@@ -109,10 +110,6 @@ def commit_settings_enrollment(
     """
 
     store = Store(config_dir)
-    # NOT ``active_owner() is not None``: None means zero OR ambiguous, and an
-    # ambiguous store must never receive a third row from any write path.
-    if store.committed_owner_count() != 0:
-        return False
     owner = OwnerSnapshot(
         credential_id=credential_id,
         account_id=account_id,
@@ -121,12 +118,42 @@ def commit_settings_enrollment(
         canonical_base_url=canonical_base_url,
         enrollment_generation=1,
     ).validated()
-    store.commit_enrollment(
-        owner,
-        OwnerReceipt(consent_version=consent_version, consent_ref=endpoint_id),
-        cos_session_id=cos_session_id or None,
-    )
+    try:
+        # The one-owner rule is enforced INSIDE the store's immediate
+        # transaction (review R2-2), never by a count taken out here: the two
+        # steps were atomic only while both ran on the event loop, and two
+        # concurrent enables from worker threads produced a two-owner store
+        # (3/40) that reads as "no owner" for ever.
+        store.commit_enrollment(
+            owner,
+            OwnerReceipt(consent_version=consent_version, consent_ref=endpoint_id),
+            cos_session_id=cos_session_id or None,
+            require_no_owner=True,
+        )
+    except StoreRefused as refusal:
+        if refusal.code == "owner_present":
+            # NOT an error: the answer to "may this machine own another
+            # endpoint" was no. Ambiguity is included — a store with two rows
+            # must never receive a third.
+            return False
+        raise
+    _connector_after_commit(config_dir)
     return True
+
+
+def _connector_after_commit(config_dir: Path) -> None:
+    """Install/start the connector after a successful LOCAL commit (D2a).
+
+    A successful commit is the earliest honest event: before it there is no
+    local authority to receive for. Called AFTER the store transaction, so a
+    service failure can never undo or mask the commit; ``sync_connector_service``
+    itself never raises. Both native entry points share this hook, including
+    the consent-surface commit that bypasses the HTTP client.
+    """
+
+    from local_operator.team_bridge.connector.install import sync_connector_service
+
+    sync_connector_service(config_dir)
 
 
 def designation(owner: Any, *, config_dir: Path) -> str | None:

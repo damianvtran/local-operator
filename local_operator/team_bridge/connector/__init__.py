@@ -15,10 +15,12 @@ idle holds no model/session modules at all.
 LIFECYCLE. One connector per account per machine, enforced by a machine-wide
 singleton lock (:mod:`local_operator.team_bridge.connector.lock` — same
 refuse-never-degrade semantics as ``wakes/lock.py``). The service unit is a
-NEW dedicated label rendered by :mod:`local_operator.team_bridge.connector.install`
+NEW dedicated label in :mod:`local_operator.team_bridge.connector.install`,
 REUSING the wake supervisor's install mechanics; the wake supervisor's own
-plist/label is never touched. Rendering is pure — nothing in this package
-installs, bootstraps or otherwise touches the operator's machine.
+plist/label is never touched. D2a adds lifecycle: the unit is installed at an
+enrolment commit, caught up at app start and removed on Turn off, only for the
+real user's default store and never from a redirected home. See the install
+module's docstring for the guards.
 """
 
 from local_operator.team_bridge.connector.lock import ConnectorLock, ConnectorLockBusy

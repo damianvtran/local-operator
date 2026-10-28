@@ -1812,6 +1812,36 @@ class TeamBridgeClient:
             # sticky on this machine too (see _apply_local_opt_out).
             opted_account = getattr(access, "account_id", None) or expected_account_id
             self._apply_local_opt_out(opted_account)
+        if state == "disabled" and self._config_dir is not None:
+            # THE OFF EVENT, and the only reconcile this method owns. An
+            # ENABLE is covered by the commit hook (``_commit_explicit_enable``
+            # -> ``commit_settings_enrollment`` -> the connector sync), so
+            # reconciling again here was a second launchctl round trip for one
+            # click (code review R1-1 / QA Q-1 measured 5 subprocesses across
+            # the two).
+            #
+            # WHAT A RESUME THEREFORE RELIES ON (review R2-4). A PUT that
+            # resumes an existing endpoint commits no owner, so it makes no
+            # launchctl call of its own — and after a Turn off the unit was
+            # REMOVED, so nothing is in place at that instant. The install is
+            # the surface's follow-up ``team_bridge.enabled = true`` write,
+            # which every shipped enable path sends (the desktop UI's
+            # ``enable()`` and its consent dialog both do, and that route
+            # reconciles), with the app-start catch-up as the backstop for a
+            # machine whose surface never wrote the key. Adding a second sync
+            # here instead would restore the double round trip this comment
+            # exists to explain.
+            #
+            # OFF THE EVENT LOOP: this runs launchctl, whose budget is a 15 s
+            # subprocess timeout plus the shared reload's release and bootstrap
+            # deadlines. Inline it stalled every route, the SSE fan-out and
+            # agent turns — measured at 0.97 s on one disable — at the moment
+            # this surface was waiting for its 200.
+            from local_operator.team_bridge.connector.install import (
+                sync_connector_service,
+            )
+
+            await asyncio.to_thread(sync_connector_service, self._config_dir)
         return result
 
     async def enroll_default_on(
@@ -2042,7 +2072,7 @@ class TeamBridgeClient:
 
         if state != "active":
             return None
-        outcome = self._local_commit_outcome(
+        outcome = await self._local_commit_outcome(
             tenant_id=tenant_id,
             consent_version=consent_version,
             result=result,
@@ -2073,7 +2103,7 @@ class TeamBridgeClient:
                 logger.warning("team_bridge: could not persist the local switch")
         return outcome
 
-    def _local_commit_outcome(
+    async def _local_commit_outcome(
         self,
         *,
         tenant_id: str | None,
@@ -2082,7 +2112,14 @@ class TeamBridgeClient:
         access: OAuthAccess | None,
         head: int | None,
     ) -> dict[str, Any]:
-        """The commit itself, each early exit a coded outcome (see the caller)."""
+        """The commit itself, each early exit a coded outcome (see the caller).
+
+        ASYNC, and the reason is load-bearing (review R3-2): the commit runs in
+        a worker thread so a first connector install cannot freeze the event
+        loop (R1-1). That await breaks the atomicity the same-endpoint
+        read-only check above used to have against the commit itself, so a
+        double submit can now pass the check twice — see the re-read below.
+        """
 
         endpoint = result.get("endpoint") if isinstance(result, Mapping) else None
         endpoint_id = endpoint.get("id") if isinstance(endpoint, Mapping) else None
@@ -2134,8 +2171,13 @@ class TeamBridgeClient:
                 commit_settings_enrollment,
             )
 
+            # IN A THREAD (review R1-1): the commit itself is a fast SQLite
+            # transaction, but it fires the D2a connector hook, which runs
+            # launchctl. Off the loop a first install costs one worker thread;
+            # on it, it would freeze every route for the length of a bootstrap.
             local = _local_settings_snapshot(self._config_dir)
-            committed = commit_settings_enrollment(
+            committed = await asyncio.to_thread(
+                commit_settings_enrollment,
                 config_dir=self._config_dir,
                 credential_id=credential_id,
                 account_id=account_id,
@@ -2149,7 +2191,30 @@ class TeamBridgeClient:
             return _local_enrollment("store_failed")
         if not committed:
             # ``commit_settings_enrollment`` refuses while ANY owner (or an
-            # ambiguous store) is committed: the one-owner model.
+            # ambiguous store) is committed — an IN-TRANSACTION one-owner rule
+            # (review R2-2), so this is the loss of a race, not a caller bug.
+            #
+            # A DOUBLE SUBMIT FOR THE SAME ENDPOINT MUST NOT READ AS SOMEBODY
+            # ELSE'S OWNER (review R3-2). The check above is read-only and now
+            # sits across an await, so two concurrent explicit enables for this
+            # endpoint can both pass it; one commits and the loser lands here.
+            # Re-reading the owner answers the only question that matters —
+            # does THIS machine hold THIS endpoint — and that is ``already_owned``
+            # (a committed outcome), never ``other_owner``: the caller writes
+            # ``team_bridge.enabled`` only for a committed outcome, and
+            # ``other_owner`` on the default-on path arms a pointless retry.
+            try:
+                from local_operator.team_bridge.store import Store
+
+                held = Store(self._config_dir).active_owner_readonly()
+            except Exception:  # noqa: BLE001 - unreadable reads as "cannot tell"
+                return _local_enrollment("other_owner")
+            if held is not None and (held.account_id, held.tenant_id, held.endpoint_id) == (
+                account_id,
+                tenant_id,
+                endpoint_id,
+            ):
+                return _local_enrollment("already_owned")
             return _local_enrollment("other_owner")
         if head is not None:
             self._seed_feed_cursor(head)
@@ -3839,6 +3904,25 @@ class StatusDiscipline:
         so a timeout must not blank a surface the user can still reach.
         """
 
+        # ``Boundary.parse`` FIRST, and it is not a formality: the desktop route
+        # takes ``boundary`` from the query string, so it arrives as
+        # ``"app_start"``, never as the enum member — an ``is`` test against the
+        # enum silently never fired for the one caller that matters (QA round 2,
+        # out-of-scope note; the lifespan task hid it). Parse is lenient by its
+        # own contract and preserves the boundary recorded later in ``_check``.
+        if Boundary.parse(boundary) is Boundary.APP_START:
+            # CATCH-UP for machines enrolled before D2a existed: an app-start
+            # boundary is an existing, event-driven moment with no new poller.
+            # A machine with no committed owner answers absent without creating
+            # the store; a committed owner with no LaunchAgent is installed.
+            # Off the event loop: this may run launchctl, which must never hold
+            # up the status read. ``sync_connector_service`` never raises.
+            if self._config_dir is not None:
+                from local_operator.team_bridge.connector.install import (
+                    sync_connector_service,
+                )
+
+                await asyncio.to_thread(sync_connector_service, self._config_dir)
         return self._observe(await self._check(boundary))
 
     async def reconcile_identity_mutation(self) -> StatusCheck:

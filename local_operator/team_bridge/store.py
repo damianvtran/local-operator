@@ -2653,12 +2653,24 @@ class Store:
         receipt: OwnerReceipt,
         *,
         cos_session_id: str | None = None,
+        require_no_owner: bool = False,
     ) -> None:
         """Atomically commit authority: exact owner + server consent receipt.
 
         This is H2's SEAM. H4 calls it only after the real captured-owner
         consent flow succeeded; a generic ``{enabled, session}`` preference
         has no path here, and a failed consent flow cannot produce a receipt.
+
+        ``require_no_owner`` is the one-owner rule the settings commit needs,
+        enforced INSIDE this transaction rather than by a caller that counts
+        first and inserts afterwards. That caller-side shape was atomic only
+        while both steps ran on the event loop; once the commit moved to a
+        worker thread, two enables on a fresh store could both see zero owners
+        and both insert — a two-row store answers ``active_owner() is None``
+        forever, which is a dark bridge that never heals (review R2-2, measured
+        3/40). Under ``BEGIN IMMEDIATE`` the count and the insert cannot
+        interleave, and it closes the cross-process case too (a second `lop`
+        process), which no in-process lock could have.
         """
 
         owner.validated()
@@ -2667,6 +2679,23 @@ class Store:
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
+            if require_no_owner:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM enrollments WHERE state = 'committed'"
+                ).fetchone()
+                if row is not None and int(row["n"]) != 0:
+                    # The message names the rule, not the caller: a different
+                    # owner needs an explicit re-enrolment, and an AMBIGUOUS
+                    # store must never receive a third row.
+                    # NOT ``already_owned``: that is #3027's CLIENT outcome
+                    # meaning "this machine holds THIS endpoint", and reusing
+                    # the name at the store invites forwarding this refusal as
+                    # that code, which would report another owner's row as ours
+                    # (review R3 M1).
+                    raise StoreRefused(
+                        "owner_present",
+                        "this machine already holds a committed owner",
+                    )
             existing = conn.execute(
                 "SELECT enrollment_generation, state FROM enrollments WHERE owner_key = ?",
                 (_owner_key(owner),),
