@@ -15,7 +15,10 @@ import pytest
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
-from local_operator.team_bridge.authority import authority_fence, outbound_authority_fence
+from local_operator.team_bridge.authority import (
+    authority_fence,
+    outbound_authority_fence,
+)
 from local_operator.team_bridge.host import (
     admit_bridge_runtime,
     admit_soon,

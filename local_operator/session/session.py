@@ -11584,7 +11584,20 @@ class Session:
             return self._standing_grants
         from local_operator.team_bridge import ask_issuance as ledger_mod
         from local_operator.team_bridge.authority import authority_fence
+        from local_operator.team_bridge.host import owner_fence_refusal
         from local_operator.team_bridge.store import Store
+
+        # THE STRICT FENCE RUNS ONCE, BEFORE THE LOOP (review round 1 MAJOR 1).
+        # The bridge runtime now exists on every writer session, so presence is no
+        # longer "this is the inbox reader". A non-designated session must return
+        # EMPTY here — never walk the ledger — because the walk's per-row fence
+        # miss calls `ledger.mark_held(...)`, which would let an ordinary turn in
+        # a task session overwrite every real hold reason for the owner
+        # (`standing_no_envelope`, `standing_uncertain`, ...) with
+        # `standing_fence`. The authority contract says a fence miss performs NO
+        # mutation; that has to be true at the entry, not only per row.
+        if owner_fence_refusal(runtime) is not None:
+            return self._standing_grants
 
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
         stale = [

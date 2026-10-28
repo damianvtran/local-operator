@@ -21,7 +21,9 @@ WHAT IT CHECKS (all persisted, no network):
   tenant, endpoint, credential row, enrollment generation;
 - tenant consistency (``runtime.tenant_id`` == the committed owner's tenant);
 - the runtime's session is non-empty and, except for explicitly outbound
-  operations/admission, still the NATIVE designated session.
+  operations/admission, still the NATIVE designated session (a mismatch there is
+  `not_designated`, not `owner_changed`: the binding is intact, the session is
+  simply not the inbox reader).
 ANY miss returns a typed refusal (``feature_off`` / ``owner_changed`` /
 ``consent_revoked``) and the caller performs NO fetch, NO mutation, NO POST.
 
@@ -52,6 +54,24 @@ __all__ = [
 
 def _refusal(code: str, error: str) -> dict[str, str]:
     return {"code": code, "error": error}
+
+
+def _not_designated() -> dict[str, str]:
+    """A live binding, but this session is not the account's inbox reader.
+
+    A DISTINCT code (review round 1 MAJOR 2): `owner_changed` says the Radient
+    binding drifted and invites a re-link, which is false and alarming for an
+    ordinary task session that simply asked a mailbox/owner-shared op. Those ops
+    belong to the designated chief-of-staff session; nothing is wrong with this
+    one.
+    """
+
+    return _refusal(
+        "not_designated",
+        "this session is not the account's chief-of-staff session, so the mailbox and "
+        "owner-shared conversations belong to that session; use directory/dm/channel_post "
+        "to collaborate from here",
+    )
 
 
 def _owner_changed() -> dict[str, str]:
@@ -125,10 +145,10 @@ def _authority_fence(runtime: Any, *, require_designation: bool) -> dict[str, st
         if str(getattr(runtime, "tenant_id", "")) != str(owner.tenant_id):
             return _owner_changed()
         session_id = str(getattr(runtime, "session_id", "") or "")
-        if not session_id or (
-            require_designation and store.designated_session_for(owner) != session_id
-        ):
+        if not session_id:
             return _owner_changed()
+        if require_designation and store.designated_session_for(owner) != session_id:
+            return _not_designated()
         return None
     except (StoreRefused, sqlite3.Error, OSError, UnicodeDecodeError):
         # TB-12: a decode error is store/config damage in the fence's terms —

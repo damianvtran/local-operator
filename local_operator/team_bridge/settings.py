@@ -388,9 +388,15 @@ def record_local_session_if_unset(config_dir: "Path") -> bool:
 
     THE RULE. Write ``team_bridge.session`` = that session id when the key is
     ABSENT, under the config write lock, and never over an explicit choice: a
-    person who picked a session in Settings keeps it, and clearing it again is
-    still "badge only". It writes the SETTING, not the store, because the status
-    read's ``_sync_designation`` mirrors the setting into the native record and
+    person who picked a session in Settings keeps it. A person who CLEARED it is
+    also an explicit choice, and that is why the key is stored empty rather than
+    deleted (``settings_io``'s ``empty_unsets=False``): "absent" can only then
+    mean "never touched", so a withdrawn wake consent is never re-granted by a
+    later enable. A key deleted by an older build (before that change) is
+    indistinguishable from one never set; the next enable defaults it once, which
+    is the same default a fresh machine gets. It writes the SETTING, not the
+    store, because the status read's ``_sync_designation`` mirrors the setting
+    into the native record and
     would clear a store-only value on the next read. No Aida session on this
     machine → nothing is written (badge only, as before). Returns whether it
     wrote; best-effort at the call sites, like its siblings.

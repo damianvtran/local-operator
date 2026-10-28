@@ -67,10 +67,23 @@ for unknown ops, malformed ``channel_id``, bad history bounds/limits, and
 invalid member shapes; ``no_agent_endpoint`` when a channel op has no owner
 endpoint; ``*_failed`` when the transport does not confirm.
 
-THE RUNTIME BUNDLE is declared on ``ToolContext`` (``bridge_runtime``): a
-session that has no bridge runtime — unsigned, disabled, or not the designated
-session — never advertises this tool at all (the same createIf shape ``wake``
-uses). No probing, no second gating convention.
+THE RUNTIME IS BUILD-TIME GATED: a session with no bridge runtime — unsigned,
+disabled, or with no live enrollment generation — never advertises this tool at
+all (the same createIf shape ``wake`` uses). No probing, no second gating
+convention. EVERY writer session of the enrolled owner now carries the tool: the
+collaboration ops act on that owner's live binding, and the mailbox /
+owner-shared reads are gated per call by the strict authority fence
+(`not_designated` / conversation-level refusals), which is why runtime presence
+is NOT a test for "this is the chief-of-staff session" (review round 1).
+
+WHICH SESSIONS MAY ACT, and what the designation no longer gates, is
+`OUTBOUND_OPS`: every bridge-connected writer session of the enrolled owner may
+`directory`/`dm`/`channel_create`/`channel_post`, and read or react in a room its
+own AGENT is a member of (`channel_history`, `channel_thread`, `react` are
+endpoint-addressed, so the hub gates them on the agent's membership, never the
+owner's). Kept behind the strict fence: the inbound mailbox (take_up / ack /
+send / reply), the owner's human conversation list (`channels`), and the
+owner-shared reads (`shared_*`).
 """
 
 from __future__ import annotations
@@ -134,7 +147,22 @@ BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", "directory", *
 #: exactly as it shipped: widening the inbox would change authority that was
 #: reviewed without anyone asking for it, and a session that may not read the
 #: owner's rooms must not gain that by posting in one.
-OUTBOUND_OPS: tuple[str, ...] = ("directory", "dm", "channel_create", "channel_post")
+OUTBOUND_OPS: tuple[str, ...] = (
+    "directory",
+    "dm",
+    "channel_create",
+    "channel_post",
+    # READS OF A ROOM THE AGENT IS IN. All three are ENDPOINT-addressed, so the
+    # hub gates them on this agent's own membership — never on the owner's human
+    # membership — which is what lets a task session READ the reply to the DM it
+    # opened (review round 1 MAJOR 2: without these, `dm` was write-only and the
+    # reply could only be read from the designated session). `channels` stays
+    # OUT on purpose: that list is the owner's human conversation list, and a
+    # task session has no business enumerating the owner's rooms.
+    "channel_history",
+    "channel_thread",
+    "react",
+)
 #: The fetch-shaped ops: admitted while paused/read-only, and approval tier
 #: ``read``. ONE list so the admission gate and the approval tier agree.
 READ_OPS: tuple[str, ...] = (
@@ -482,7 +510,11 @@ async def _directory(runtime: "BridgeRuntime", params: "BridgeToolParams") -> di
         return _error(f"directory limit must be 1..{CONVERSATION_PAGE_MAX}")
     start = 0
     if params.cursor:
-        if not params.cursor.isdigit():
+        # ``str.isdigit`` is true for characters ``int()`` rejects (superscripts,
+        # circled digits), so the bounds check and the conversion must agree —
+        # otherwise a malformed cursor escapes as an exception instead of the
+        # typed refusal every neighbouring arm returns (review round 1 MINOR 5).
+        if not params.cursor.isdecimal():
             return _error("directory cursor is the next_cursor a previous page returned")
         start = int(params.cursor)
     try:
@@ -987,7 +1019,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # credential-row binding / tenant consistency / native designation. It runs
     # BEFORE anything may be scheduled: a drifted or disabled runtime performs
     # NO status fetch (no admit_soon), NO op and NO mutation — typed refusal.
-    from .host import admission_refusal, admit_soon, outbound_tool_fence, owner_fence_refusal
+    from .host import (
+        admission_refusal,
+        admit_soon,
+        outbound_tool_fence,
+        owner_fence_refusal,
+    )
 
     # WHICH FENCE — see OUTBOUND_OPS. The collaboration ops take the relaxed
     # fence; the mailbox ops and the owner-shared reads keep the strict one, so
