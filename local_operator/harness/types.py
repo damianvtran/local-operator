@@ -3896,6 +3896,20 @@ class ModelSpec(BaseModel):
     max_output_tokens: int = 8_192
     supports_tools: bool = True
     supports_images: bool = True
+    # Whether ``supports_images`` above was STATED by a source (a shipped row,
+    # a listing's modalities, a caller building the spec by hand) or merely
+    # DEFAULTED because nothing described the model. The two must stay apart:
+    # sending an undescribed model images is right (a text-only endpoint
+    # refuses, and the session's refusal degrade strips them from then on),
+    # but a decision that cannot be undone by that degrade must not bet on a
+    # default. Snapcompact is the one that matters: it archives history AS
+    # image frames, so an undescribed text-only model that compacted that way
+    # lost the archived middle of its conversation for good (PR #3071 QA Q2).
+    # Readers that need a positive answer gate on ``supports_images and
+    # supports_images_stated``. Default ``True`` so a spec written out by hand
+    # (tests, a bare ``ModelSpec(provider, model_id)``) keeps its meaning;
+    # only ``configure.build_model_spec`` knows when the value was a default.
+    supports_images_stated: bool = True
     # Whether the model takes AUDIO input on its wire (a recorded block, not a
     # transcription call). DEFAULT FALSE ON PURPOSE, and the asymmetry with
     # ``supports_images`` above is the whole argument: a wrong ``True`` sends a

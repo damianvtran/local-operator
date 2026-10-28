@@ -932,6 +932,10 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # to fall back to) rather than as a live default anywhere.
     max_output = 0
     supports_images = True
+    # Recorded beside the default rather than folded into it: ``True`` above is
+    # the right thing to SEND an undescribed model, not a fact about it. See
+    # ``ModelSpec.supports_images_stated`` for the decisions that need the fact.
+    supports_images_stated = False
     # The mirror of ``supports_images`` with the OPPOSITE default, and the
     # asymmetry is deliberate (see ``ModelSpec.supports_audio_input``): a wrong
     # ``True`` spends a paid turn the model refuses, so only a stated capability
@@ -950,6 +954,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             max_output = info.max_tokens
         if info.supports_images is not None:
             supports_images = info.supports_images
+            supports_images_stated = True
         stated_audio = getattr(info, "supports_audio_input", None)
         if stated_audio is not None:
             supports_audio_input = bool(stated_audio)
@@ -1268,6 +1273,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             else True
         ),
         supports_images=supports_images,
+        supports_images_stated=supports_images_stated,
         supports_audio_input=supports_audio_input,
         supports_prompt_cache=supports_cache,
         supports_responses_api=supports_responses_api,
@@ -2670,6 +2676,24 @@ def _resolve_model_info_body(provider: str, model_id: str, _base: Path | None) -
                 )
             )
         )
+    if info.supports_images is None or not _has_real_window(info):
+        # Every source was silent on something the session acts on, so it will
+        # run on the placeholder's defaults for it. Logged per UNCACHED
+        # resolution — a degraded answer is memoised only briefly
+        # (``DEGRADED_MEMO_TTL_S``), so a cold start may log it a few times; at
+        # INFO that is cheap, and silence was the defect: an OSWorld
+        # session ran a vision model as text-only for its whole life on a cold
+        # listing cache and nothing in its log said the metadata was a stand-in
+        # (PR #3071). A log line, not a user notice — the defaults are usually
+        # right, and the provider's own refusal is what the user needs to see.
+        logger.info(
+            "%s/%s: no metadata source described this model (image input %s, "
+            "context window %s); using placeholder defaults",
+            canonical,
+            model_id,
+            "unknown" if info.supports_images is None else "stated",
+            "unknown" if not _has_real_window(info) else "known",
+        )
     return info
 
 
@@ -3418,6 +3442,9 @@ def context_spec_for_access(
             value = getattr(info, field, None)
             if value is not None:
                 update[field] = value
+        if getattr(info, "supports_images", None) is not None:
+            # The account's own statement replaces whatever the spec defaulted.
+            update["supports_images_stated"] = True
         return spec.model_copy(update=update)
     return spec.model_copy(
         update={

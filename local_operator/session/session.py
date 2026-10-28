@@ -6077,6 +6077,7 @@ class Session:
         # (and, done at the top of this file, cyclic).
         from local_operator.providers.failover import (
             is_image_count_rejection,
+            is_image_modality_rejection,
             is_image_rejection,
         )
 
@@ -6087,7 +6088,13 @@ class Session:
         # strip is still what lets the next turn succeed, but it is
         # provider-scoped like the size strip, so ``set_model`` to a provider
         # with a higher limit lifts it (agent review round 2, R2-m2).
-        count_only = is_image_count_rejection(error)
+        #
+        # A MODALITY refusal ("No endpoints found that support image input")
+        # poisons no block either: it says the MODEL takes no images, which is
+        # how a text-only model nothing described is discovered now that an
+        # undescribed model is sent images (PR #3071, M1). Same lifetime for the
+        # same reason — a switch onto a vision model must see the images again.
+        count_only = is_image_count_rejection(error) or is_image_modality_rejection(error)
         if self._images_rejected:
             # Already stripping, so there is nothing more to do to the render —
             # but a GENUINE refusal permanently downgrades the strip's scope.
@@ -25660,6 +25667,14 @@ class Session:
         explicit = getattr(settings, "strategy", "auto")
         if explicit in ("context-full", "snapcompact", "off"):
             return str(explicit)
+        if self._images_rejected:
+            # The provider has refused images in this session, so every frame
+            # an image archive produced would be stripped on the way out and
+            # the archived turns would reach the model as nothing at all.
+            # context-full keeps them as a text summary (PR #3071 review m1).
+            # Read live rather than latched: a provider-scoped strip lifts on a
+            # switch, and the next compaction may then use frames again.
+            return "context-full"
         try:
             from local_operator.compaction import thresholds as _thresholds
 
