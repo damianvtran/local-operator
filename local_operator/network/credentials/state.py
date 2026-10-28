@@ -224,6 +224,7 @@ class PlacementState:
         block_scope: str,
         until: float,
         label: str = "",
+        rested_at: float | None = None,
     ) -> None:
         """Remember that the owner's row ``credential_id`` answered a usage limit.
 
@@ -243,6 +244,13 @@ class PlacementState:
         local row follows — so the two cannot drift. ``label`` is the account's
         non-secret identity label (email or account id), kept so the refusal can
         name WHICH account is resting; it is never a token.
+
+        ``rested_at`` is when the rest began: ``None`` means now, ``0.0`` unknown (a
+        row an older build wrote). It exists for the listing (review round 1, m2): a
+        grant recorded AFTER every rest began was lent from a sibling row — the
+        rested ones travel as exclusions — so the key is only partly rate-limited,
+        and without the start time "a sibling serves" and "the only account just hit
+        its limit" read the same. Routing never reads it.
         """
         from local_operator.providers.auth_store import MAX_CREDENTIAL_BLOCK_MS
 
@@ -260,12 +268,13 @@ class PlacementState:
             "block_scope": block_scope,
             "until": float(until),
             "label": label,
+            "rested_at": now if rested_at is None else float(rested_at),
         }
 
     def cooldowns(
         self,
         key: str,
-        model_id: str | None = "",
+        model_id: str = "",
         *,
         owner_device: str,
         now: float | None = None,
@@ -280,13 +289,6 @@ class PlacementState:
         The scope test is ``auth_store.block_scope_gates`` — the predicate the
         local store's ``is_blocked_for_model`` applies — so an account-wide
         cooldown gates every model and a ``model:<family>`` one only that family.
-
-        ``model_id=None`` SKIPS THE SCOPE TEST, and only a reader with no model in
-        hand may pass it: ``lop network credentials`` lists a key, not a request,
-        so it must show a ``model:<family>`` rest too — with ``""`` the shared
-        predicate gates only account-wide rows and a family-scoped rest would read
-        as nothing at all. A routing caller always has a model and keeps ``""``
-        semantics.
         """
         from local_operator.providers.auth_store import block_scope_gates
 
@@ -297,7 +299,30 @@ class PlacementState:
             if row_key == key
             and row_owner == owner_device
             and float(row.get("until") or 0.0) > stamp
-            and (model_id is None or block_scope_gates(str(row.get("block_scope") or ""), model_id))
+            and block_scope_gates(str(row.get("block_scope") or ""), model_id)
+        ]
+        return sorted(live, key=lambda row: float(row["until"]))
+
+    def resting_any_scope(
+        self, key: str, *, owner_device: str, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Every live rest ``owner_device`` holds for ``key``, whatever its scope. DISPLAY ONLY.
+
+        ``lop network credentials`` lists a key, not a request, so it has no model to
+        test a ``model:<family>`` scope against — and :meth:`cooldowns` with ``""``
+        would show only account-wide rests. A SEPARATE METHOD rather than a nullable
+        ``model_id`` on :meth:`cooldowns` (review round 1, m3): that signature feeds the
+        grant frame's ``exclude_credential_ids``, and a routing caller that passed
+        ``None`` by accident would hide every rested row for every model. Nothing that
+        routes may call this. Owner-scoped for the same reason :meth:`cooldowns` is.
+        """
+        stamp = time.time() if now is None else now
+        live = [
+            dict(row)
+            for (row_key, row_owner, _id), row in self._cooldowns.items()
+            if row_key == key
+            and row_owner == owner_device
+            and float(row.get("until") or 0.0) > stamp
         ]
         return sorted(live, key=lambda row: float(row["until"]))
 
@@ -366,6 +391,7 @@ class PlacementState:
                     block_scope=str(row.get("block_scope") or ""),
                     until=float(row["until"]),
                     label=str(row.get("label") or ""),
+                    rested_at=float(row.get("rested_at") or 0.0),
                 )
             except (KeyError, TypeError, ValueError):
                 continue

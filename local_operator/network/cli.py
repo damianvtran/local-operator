@@ -1761,8 +1761,36 @@ def _peer_label(text: str) -> str:
     return " ".join(strip_control_sequences(str(text)).split())
 
 
+#: Live observations that do NOT outrank a recorded rest (review round 1, M2). A rest
+#: is only the right thing to say when waiting is the remedy: over a grant that
+#: worked, over the owner's own ``quota_blocked``, or over nothing at all. Every other
+#: live refusal (``revoked``, ``not_a_holder``, ``epoch_stale``, a dead login…) still
+#: fails after the rest ends, so the rest is IGNORED for display while one stands.
+_REST_OUTRANKS: frozenset[str] = frozenset({"", "active", "quota_blocked"})
+
+#: The longest account label a rate-limited line shows, and how many it names before
+#: ``+N more`` (review round 1, m1): one rest is kept per owner row, so a long-lived
+#: owner with many logins would otherwise print one unbounded line. ``--json`` keeps
+#: every label.
+_REST_LABEL_MAX_CHARS = 40
+_REST_LABELS_SHOWN = 3
+
+#: The longest refusal token ``--json`` carries back. The token is the OWNER's string
+#: (``BrokerError.code`` off the wire, persisted by the borrower), so it is bounded
+#: like any other peer field.
+_REFUSAL_MAX_CHARS = 64
+
+
 def _borrow_view(
-    state: Any, key: str, *, owner_device: str, holder: bool, now: float | None = None
+    state: Any,
+    key: str,
+    *,
+    owner_device: str,
+    holder: bool,
+    copy_class: bool = False,
+    applied: Mapping[str, Any] | None = None,
+    evidence: Mapping[str, Any] | None = None,
+    now: float | None = None,
 ) -> dict[str, Any]:
     """This device's borrow state for one key it does not own, as ``--json`` carries it.
 
@@ -1775,75 +1803,267 @@ def _borrow_view(
     the listing already loaded, so the listing still never dials and never reads a
     store. No value is in reach here: the state file has no field for one.
 
-    ``state`` vocabulary, first match wins: ``not_shared`` (this device is not a
-    holder), ``sign_in_needed`` (live ``interactive_required``), ``resting`` (a live
-    borrower-side cooldown — #3066 Q6, which otherwise read ``active`` through an
-    all-resting window), ``refused`` (any other live refusal, its token in
-    ``refusal``), ``active`` (a live grant), ``idle`` (a grant that is no longer
-    live), ``never_borrowed``. Additive to the row: ``observation`` is unchanged for
-    scripts that read it. Field names avoid the tool digest's scrub markers
-    (``network/tool.py`` ``_SECRET_KEY_MARKERS``) so the digest cannot eat them.
+    ``state`` vocabulary, first match wins:
+
+    * ``not_shared`` — this device is not a holder.
+    * ``sign_in_needed`` / ``refused`` — a live refusal other than
+      ``quota_blocked``. These OUTRANK a rest (review round 1, M2): waiting does not
+      fix a revoked share or a dead login, so the line must not say "wait".
+      ``refusal`` is the owner's token, control-stripped and bounded; a token that is
+      not shaped like a refusal code (``approval_copy.is_refusal_code``) is
+      ``refusal_recognised: false`` and is never put on the terminal.
+    * ``resting`` — a live borrower-side rest (#3066 Q6, which otherwise read
+      ``active`` through an all-resting window). ``partly_resting`` when a grant was
+      recorded after every rest began: the rested rows travel as exclusions, so that
+      grant came from a sibling account and the key is still serving (review round 1,
+      m2).
+    * ``refused`` with ``quota_blocked`` — the owner said rate-limited and this
+      device recorded no rest of its own.
+    * ``active`` — a live grant.
+    * ``sign_in_needed`` / ``refused`` FROM THE DURABLE EVIDENCE (``mcp_auth.json``,
+      ``credentials/mcp_state.py``), with ``last_asked_at`` (QA round 1, Q4). The
+      observation above lives a few minutes; the evidence lives until a success
+      replaces it with ``synced``. Only when it is newer than the last grant and the
+      last copy: an older failure was already answered by a later success.
+    * ``copied`` — a COPY-CLASS key (``sync.COPY_KINDS``: api keys, store secrets)
+      with a local copy, its ``gen`` and ``synced_at`` from ``sync.json`` (QA round 1,
+      Q3). Such a key is never granted — a session reads the copy — so it records
+      no ``last_grant_at``, and without this every api-key share read "never
+      borrowed" while it was in use. ``not_copied`` when no copy has landed yet.
+    * ``idle`` (a grant no longer live), else ``never_borrowed``.
+
+    Additive to the row: ``observation`` is unchanged for scripts that read it. Field
+    names avoid the tool digest's scrub markers (``network/tool.py``
+    ``_SECRET_KEY_MARKERS``) so the digest cannot eat them.
     """
+    from local_operator.network.credentials.approval_copy import is_refusal_code
+
     if not holder:
         return {"state": "not_shared", "last_grant_at": None}
     stamp = time.time() if now is None else now
     status = state.status(key, now=stamp)
     last = state.last_grant_at(key)
     view: dict[str, Any] = {"state": "never_borrowed", "last_grant_at": last}
-    # ``model_id=None``: a listing has no model in hand, so a ``model:<family>`` rest
-    # must count too. Owner-scoped (#3066 M2): a rest recorded against a previous
+    if status not in _REST_OUTRANKS:
+        if status == "interactive_required":
+            view["state"] = "sign_in_needed"
+            return view
+        view["state"] = "refused"
+        view["refusal"] = _peer_label(status)[:_REFUSAL_MAX_CHARS]
+        view["refusal_recognised"] = is_refusal_code(status)
+        return view
+    # The durable failure outranks a rest for the same reason a live one does (M2):
+    # the refusal observation expires in minutes while a rest lasts up to an hour, so
+    # without this a revoked key decayed back to "rate-limited — tries again at".
+    if not status and _durable_refusal(
+        view, copy_class=copy_class, applied=applied, evidence=evidence
+    ):
+        return view
+    # Display-only and owner-scoped (#3066 M2): a rest recorded against a previous
     # owner names a row id in THAT owner's store and means nothing here.
-    rests = state.cooldowns(key, None, owner_device=owner_device, now=stamp)
-    if status == "interactive_required":
-        view["state"] = "sign_in_needed"
-    elif rests:
-        view["state"] = "resting"
-        # The earliest end: that is when this device next asks the owner for the key.
+    rests = state.resting_any_scope(key, owner_device=owner_device, now=stamp)
+    if rests:
+        began = [float(rest.get("rested_at") or 0.0) for rest in rests]
+        # An unknown start (a rest an older build wrote) never counts as "before":
+        # the cautious reading of a rest is that it applies.
+        partly = bool(last) and all(0.0 < at < float(last) for at in began)
+        view["state"] = "partly_resting" if partly else "resting"
+        # The earliest end: that is when this device next asks the owner for that row.
         view["resting_until"] = float(rests[0]["until"])
         view["resting_labels"] = [str(r["label"]) for r in rests if r.get("label")]
-    elif status and status != "active":
+    elif status == "quota_blocked":
         view["state"] = "refused"
         view["refusal"] = status
+        view["refusal_recognised"] = True
     elif status == "active":
         view["state"] = "active"
-    elif last:
-        view["state"] = "idle"
+    else:
+        _settled_view(view, copy_class=copy_class, applied=applied)
     return view
 
 
-def _borrow_words(view: Mapping[str, Any], owner: str, *, now: float | None = None) -> str:
+def _durable_refusal(
+    view: dict[str, Any],
+    *,
+    copy_class: bool,
+    applied: Mapping[str, Any] | None,
+    evidence: Mapping[str, Any] | None,
+) -> bool:
+    """Set ``view`` from the durable failure record when it is the newest fact.
+
+    ``mcp_auth.json`` (``credentials/mcp_state.py``) keeps the last failure until a
+    success replaces it with ``synced`` (``client._remember_grant``); the refusal
+    observation is gone after its TTL (QA round 1, Q4). It decides only when newer
+    than the last grant AND the last copy, because a copy apply may not rewrite the
+    record and an older failure was already answered by a later success. A local copy
+    keeps working while its owner is away, so for a copied key ``unavailable`` (owner
+    unreachable at the last pull) is not a reason the key cannot be used.
+    """
+    from local_operator.network.credentials.approval_copy import is_refusal_code
+
+    record = evidence or {}
+    last = float(view.get("last_grant_at") or 0.0)
+    copied_at = float((applied or {}).get("at") or 0.0) if copy_class else 0.0
+    ignorable = {"synced", "unavailable"} if copied_at else {"synced"}
+    if not record or str(record.get("state") or "") in ignorable:
+        return False
+    failed_at = float(record.get("at") or 0.0)
+    if not failed_at or failed_at <= max(last, copied_at):
+        return False
+    code = str(record.get("code") or record.get("state") or "")
+    view["last_asked_at"] = failed_at
+    if code == "interactive_required":
+        view["state"] = "sign_in_needed"
+        return True
+    view["state"] = "refused"
+    view["refusal"] = _peer_label(code)[:_REFUSAL_MAX_CHARS]
+    view["refusal_recognised"] = is_refusal_code(code)
+    return True
+
+
+def _settled_view(
+    view: dict[str, Any], *, copy_class: bool, applied: Mapping[str, Any] | None
+) -> None:
+    """Fill ``view`` once nothing live and no newer failure is recorded.
+
+    A COPY-CLASS key is never granted — a session reads the local copy — so its
+    evidence of use is the copy itself (``sync.json`` ``applied``), not a grant
+    (QA round 1, Q3).
+    """
+    if copy_class:
+        if applied:
+            view["state"] = "copied"
+            view["gen"] = int(applied.get("gen") or 0)
+            view["synced_at"] = float(applied.get("at") or 0.0) or None
+        else:
+            view["state"] = "not_copied"
+        return
+    if view.get("last_grant_at"):
+        view["state"] = "idle"
+
+
+def _rest_accounts(labels: Sequence[str]) -> str:
+    """At most :data:`_REST_LABELS_SHOWN` sanitised, clipped labels, then ``+N more``."""
+    unique = list(dict.fromkeys(_peer_label(text) for text in labels if _peer_label(text)))
+    shown = [
+        text if len(text) <= _REST_LABEL_MAX_CHARS else text[: _REST_LABEL_MAX_CHARS - 1] + "…"
+        for text in unique[:_REST_LABELS_SHOWN]
+    ]
+    more = len(unique) - len(shown)
+    return ", ".join(shown) + (f" +{more} more" if more > 0 else "")
+
+
+def _refusal_words(code: str, owner: str) -> str:
+    """A live refusal said in plain words with its remedy (design round 1, D5).
+
+    Short forms of the sentences ``credentials/messages.py`` composes for the same
+    codes, sized for one listing line; the raw token stays in ``--json``
+    ``refusal``. An unmapped but well-shaped code is shown in parentheses after
+    "refused by <owner>", the one place a token is still worth printing.
+    """
+    if code in ("owner_offline", "owner_unreachable", "unavailable"):
+        return f"{owner} is offline — reconnect it"
+    if code in ("revoked", "not_a_member", "consent_withdrawn"):
+        return f"access was revoked — ask {owner} for a new share"
+    if code in ("not_a_holder", "not_owner"):
+        return f"{owner} no longer shares it with this device — ask {owner} to share it again"
+    if code in ("scope_mismatch", "scope_unknown"):
+        return f"sharing changed on {owner} — ask {owner} for a new share"
+    if code == "epoch_stale":
+        return f"out of sync with {owner} — reconnect and try again"
+    if code == "grant_invalid":
+        return f"the provider refused {owner}'s login — sign in again on {owner}"
+    if code == "no_local_credential":
+        return f"{owner} has no login for this — sign in on {owner}"
+    if code == "refresh_failed":
+        return f"{owner} could not refresh the login — try again shortly"
+    if code == "rate_limited":
+        return f"{owner} is busy — try again shortly"
+    if code == "quota_blocked":
+        return f"rate-limited on {owner} — try again later"
+    if code == "device_bound":
+        return f"this login cannot leave {owner}"
+    if code == "not_authorised":
+        return f"{owner} does not let this device ask for it"
+    return f"refused by {owner} ({code})"
+
+
+def _borrow_words(
+    view: Mapping[str, Any],
+    owner: str,
+    *,
+    key: str,
+    self_name: str,
+    now: float | None = None,
+) -> str:
     """The human register of :func:`_borrow_view` — one segment after ``borrow:``.
 
-    ``owner`` arrives already sanitised (the row's own owner column). The rest's
-    clock reads ``HH:MM`` local, the convention ``sync_segment`` uses: a rest is
-    capped at an hour (``MAX_CREDENTIAL_BLOCK_MS``), so a date never adds anything.
-    The age is the CLI's single-unit ``45s/12m/3h/2d`` ladder, NOT the resume list's
-    "just now": ``idle`` begins 30 s after a grant, and "idle (last grant just now)"
-    contradicts itself exactly where the operator is checking whether a borrow took.
+    THE ORDER RULE (design round 1, D7): every line LEADS WITH USABILITY — what
+    the reader can do with the key from this device, or the one thing that stops
+    them — and the remedy follows after an em dash. A new state must keep that
+    order; a line that opens with a reason or an internal word makes the reader
+    decode it before they know whether anything is wrong.
+
+    The text never says ``active``/``idle`` (D3): the split is the 30 s observation
+    TTL, nothing the reader cares about, and ``--json`` keeps it. "last worked" is a
+    fact about the last grant, not a live probe. Ages are the CLI's single-unit
+    ``45s/12m/3h/2d`` ladder, never "just now". A rest's clock reads ``HH:MM`` local
+    (``sync_segment``'s convention; a rest is capped at an hour, so a date never adds
+    anything) plus the remainder, because the node's clock may not be the reader's.
+
+    ``owner``, ``key`` and every label are peer-authored: the caller passes ``owner``
+    and ``key`` already through :func:`_peer_label`, labels are stripped here, and an
+    unrecognised refusal token is never printed (review round 1, M1).
     """
+    from local_operator.network.credentials.messages import repair_command
     from local_operator.wakes.display import format_age
 
     stamp = time.time() if now is None else now
     last = view.get("last_grant_at")
-    grant = f"last grant {format_age(max(0.0, stamp - float(last)))} ago" if last else ""
+    worked = f"last worked {format_age(max(0.0, stamp - float(last)))} ago" if last else ""
     state = view.get("state")
     if state == "not_shared":
-        return "not shared with this device"
-    if state == "sign_in_needed":
-        return f"sign-in needed on {owner}"
-    if state == "resting":
-        until = time.strftime("%H:%M", time.localtime(float(view["resting_until"])))
-        labels = ", ".join(
-            dict.fromkeys(_peer_label(text) for text in view.get("resting_labels") or [])
+        me = self_name or "<this device>"
+        return (
+            f"not shared with this device — on {owner} run: "
+            f"lop network credential share {key} --with {me}"
         )
-        why = f"rate-limited: {labels}" if labels else "rate-limited"
-        tail = f"; {grant}" if grant else ""
-        return f"resting until {until} ({why}){tail}"
+    # When the last word on a key is a durable failure rather than a live one, its age
+    # says how old that word is (QA round 1, Q4): "sign in again" six minutes after the
+    # refusal is still true until a success clears it, but the reader should see when.
+    asked = view.get("last_asked_at")
+    asked_tail = f"last asked {format_age(max(0.0, stamp - float(asked)))} ago" if asked else ""
+    if state == "sign_in_needed":
+        text = f"sign in again on {owner} (there: {repair_command(key)})"
+        return f"{text}; {asked_tail}" if asked_tail else text
+    if state == "copied":
+        synced = view.get("synced_at")
+        if synced:
+            return f"copied here (synced {format_age(max(0.0, stamp - float(synced)))} ago)"
+        return "copied here"
+    if state == "not_copied":
+        return "shared, not copied here yet"
+    if state in ("resting", "partly_resting"):
+        accounts = _rest_accounts(view.get("resting_labels") or [])
+        who = f" ({accounts})" if accounts else ""
+        if state == "partly_resting":
+            head = f"partly rate-limited{who} — other accounts serving"
+        else:
+            until = float(view["resting_until"])
+            clock = time.strftime("%H:%M", time.localtime(until))
+            left = format_age(max(0.0, until - stamp))
+            head = f"rate-limited{who} — tries again at {clock} (in {left})"
+        return f"{head}; {worked}" if worked else head
     if state == "refused":
-        return f"{view.get('refusal')} ({grant})" if grant else str(view.get("refusal"))
-    if state in ("active", "idle"):
-        return f"{state} ({grant})" if grant else str(state)
-    return "never borrowed"
+        if view.get("refusal_recognised"):
+            text = _refusal_words(str(view.get("refusal") or ""), owner)
+        else:
+            text = "refused (unrecognised code)"
+        tail = asked_tail or worked
+        return f"{text} ({tail})" if tail else text
+    if worked:
+        return worked
+    return "shared, not borrowed yet"
 
 
 def _cmd_credentials(args: argparse.Namespace) -> int:
@@ -1862,8 +2082,13 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     shared — the up-front answer to "which of my logins can travel", which the share
     verb's refusal used to be the first word of. Read-only, like everything else here.
     """
+    from local_operator.network.credentials import mcp_state
     from local_operator.network.credentials.state import PlacementState
-    from local_operator.network.credentials.sync import SyncState, sync_segment
+    from local_operator.network.credentials.sync import (
+        COPY_KINDS,
+        SyncState,
+        sync_segment,
+    )
     from local_operator.network.identity import load as load_identity
 
     pulled = _relay_call("credential_placement", timeout=_listing_timeout(), allow_no_answer=True)
@@ -1883,6 +2108,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         network_name = record.name if record is not None else document.network_id
         state = PlacementState.load(document.network_id)
         sync_state = SyncState.load(document.network_id)
+        # The durable failure record (QA round 1, Q4); one small read per network, and
+        # ``load`` answers ``{}`` for anything it cannot read.
+        evidence = mcp_state.load(document.network_id)
         keys: list[dict[str, Any]] = []
         if not document.entries:
             continue
@@ -1919,7 +2147,13 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 if holder:
                     row["observation"] = state.status(key) or "not_asked"
                 row["borrow"] = _borrow_view(
-                    state, key, owner_device=entry.owner_device, holder=holder
+                    state,
+                    key,
+                    owner_device=entry.owner_device,
+                    holder=holder,
+                    copy_class=entry.kind in COPY_KINDS,
+                    applied=sync_state.applied_for(key),
+                    evidence=evidence.get(key),
                 )
             if row["owned_here"]:
                 # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
@@ -1972,7 +2206,13 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                         f"({holder['scope']}){sync_tail}"
                     )
                 if row.get("borrow"):
-                    lines.append(f"      borrow: {_borrow_words(row['borrow'], owner)}")
+                    words = _borrow_words(
+                        row["borrow"],
+                        owner,
+                        key=_peer_label(row["credential_name"]),
+                        self_name=_peer_label(self_name),
+                    )
+                    lines.append(f"      borrow: {words}")
         networks.append(
             {
                 "network_id": document.network_id,

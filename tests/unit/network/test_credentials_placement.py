@@ -1504,7 +1504,7 @@ def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
     assert network_cli.main(args) == 0
     out = capsys.readouterr().out
     assert "owner: damian-mbp (damian@example.test)" in out
-    assert "borrow: owner_offline" in out
+    assert "borrow: damian-mbp is offline — reconnect it" in out
     # The owner's own row is not a share, and this device is the reader.
     assert "shared with" not in out.split("owner:")[1].split("\n")[0]
 
@@ -1528,16 +1528,49 @@ def _borrow_listing_fixture(
     identity = mint(root, name="borrower-laptop")
     me = identity.device_id
     document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
-    for key in ("anthropic", "datadog", "openai", "secret:SLACK", "xai", "zhipu"):
+    for key in (
+        "anthropic",
+        "datadog",
+        "evil",
+        "groq",
+        "mistral",
+        "many",
+        "offline",
+        "openai",
+        "secret:SLACK",
+        "xai",
+        "zhipu",
+        "cohere",
+        "together",
+        "linear",
+        "kept",
+    ):
         document.declare(
             key,
             owner_device=OWNER,
             # A hostile owner name: the escape must not reach the terminal.
             owner_device_name="damian-mbp\x1b[2J",
             provider=key,
+            # Copy class (QA round 1, Q3): an api key is copied, never granted.
+            kind="api-key-static" if key in ("cohere", "together") else "oauth-rotating",
             by=OWNER,
         )
-    for key in ("anthropic", "datadog", "openai", "xai", "zhipu"):
+    for key in (
+        "anthropic",
+        "datadog",
+        "evil",
+        "groq",
+        "mistral",
+        "many",
+        "offline",
+        "openai",
+        "xai",
+        "zhipu",
+        "cohere",
+        "together",
+        "linear",
+        "kept",
+    ):
         document.grant(key, me, scope="session", by=OWNER)
     document.save()
     state = PlacementState(NETWORK, root=root)
@@ -1549,7 +1582,8 @@ def _borrow_listing_fixture(
     state.note_grant("xai", "g-2", owner_device=OWNER)
     state._observations["xai"]["observed_at"] = now - 5  # noqa: SLF001
     state._observations["xai"]["last_grant_at"] = now - 5  # noqa: SLF001
-    # resting (#3066 Q6): an active grant AND a family-scoped rest. The rest wins.
+    # resting (#3066 Q6): the all-resting window — the grant came first, then its only
+    # account hit its limit, so no later grant proves a sibling is serving.
     state.note_grant("anthropic", "g-3", owner_device=OWNER)
     state.cool_down(
         "anthropic",
@@ -1562,7 +1596,62 @@ def _borrow_listing_fixture(
     # A rest recorded against a PREVIOUS owner: it names a row in another store.
     state.cool_down("zhipu", owner_device=OTHER, credential_id=3, block_scope="", until=now + 1800)
     state.observe("datadog", "interactive_required", owner_device=OWNER, retry_after_ms=300_000)
+    # partly resting (review round 1, m2): one account rested, THEN a grant was served,
+    # which can only have come from a sibling (rested rows travel as exclusions).
+    state.cool_down(
+        "groq",
+        owner_device=OWNER,
+        credential_id=4,
+        block_scope="model:fable",
+        until=now + 1800,
+        label="a@example.test",
+        rested_at=now - 60,
+    )
+    state.note_grant("groq", "g-4", owner_device=OWNER)
+    # A hard refusal outranks a rest (review round 1, M2): waiting will not fix it.
+    state.cool_down(
+        "mistral", owner_device=OWNER, credential_id=5, block_scope="", until=now + 1800
+    )
+    state.observe("mistral", "revoked", owner_device=OWNER, retry_after_ms=300_000)
+    # The owner's refusal token is ITS string (review round 1, M1): an escape and a
+    # newline must not reach the terminal, and an unrecognised shape is never printed.
+    state.observe(
+        "evil", "owner_offline\x1b[2J\nFORGED ROW", owner_device=OWNER, retry_after_ms=300_000
+    )
+    state.observe("offline", "owner_offline", owner_device=OWNER, retry_after_ms=300_000)
+    # Bounded (review round 1, m1): five rests with long labels.
+    for row_id in range(1, 6):
+        state.cool_down(
+            "many",
+            owner_device=OWNER,
+            credential_id=row_id,
+            block_scope="",
+            until=now + 1800,
+            label=f"account-{row_id}-" + "x" * 70 + "@example.test",
+        )
     state.save()
+    # cohere: a copy landed four minutes ago and a session has been reading it since.
+    # together: shared, copy not landed yet.
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.sync import mutate as sync_mutate
+
+    with sync_mutate(NETWORK, root) as sync_doc:
+        sync_doc.record_applied(
+            "cohere", gen=3, digest="d", owner_device=OWNER, row_id=9, at=now - 240
+        )
+    # linear: asked six minutes ago, the owner said sign in again; the 300 s
+    # observation is long gone but the durable record stays (QA round 1, Q4).
+    mcp_state.record(NETWORK, "linear", state="expired", code="interactive_required", root=root)
+    # kept: rested, then revoked; the 60 s refusal observation has expired but the rest
+    # has not. The durable record must still outrank the rest (review round 1, M2).
+    rests = PlacementState.load(NETWORK, root)
+    rests.cool_down("kept", owner_device=OWNER, credential_id=6, block_scope="", until=now + 1800)
+    rests.save()
+    mcp_state.record(NETWORK, "kept", state="revoked", code="not_a_holder", root=root)
+    # Back-dated after the last ``record``: each write re-reads and rewrites the file.
+    payload = json.loads(mcp_state.mcp_auth_path(NETWORK, root).read_text())
+    payload["entries"]["linear"]["at"] = now - 360
+    mcp_state.mcp_auth_path(NETWORK, root).write_text(json.dumps(payload))
     return root, me
 
 
@@ -1588,18 +1677,44 @@ def test_the_credentials_listing_shows_every_borrow_state(
             blocks[current] += "\n" + line
         else:
             current = ""
-    assert "borrow: idle (last grant 10m ago)" in blocks["openai"], out
+    # Every line leads with usability (design round 1, D7); active/idle is --json only (D3).
+    assert "borrow: last worked 10m ago" in blocks["openai"], out
     # Seconds, never "just now": the age is the CLI ladder. Matched by shape so a slow
     # runner a second late is not a failure.
-    assert re.search(r"borrow: active \(last grant [0-9]+s ago\)", blocks["xai"]), out
+    assert re.search(r"borrow: last worked [0-9]+s ago$", blocks["xai"]), out
     until = time.strftime("%H:%M", time.localtime(now + 1800))
-    assert (
-        f"borrow: resting until {until} (rate-limited: ops@example.test)" in blocks["anthropic"]
+    assert re.search(
+        rf"borrow: rate-limited \(ops@example.test\) — tries again at {until} \(in (29|30)m\);"
+        r" last worked [0-9]+s ago",
+        blocks["anthropic"],
     ), out
-    assert "borrow: sign-in needed on damian-mbp" in blocks["datadog"], out
-    assert "borrow: not shared with this device" in blocks["secret:SLACK"], out
+    assert "borrow: partly rate-limited (a@example.test) — other accounts serving" in blocks["groq"]
+    assert "borrow: access was revoked — ask damian-mbp for a new share" in blocks["mistral"], out
+    assert "rate-limited" not in blocks["mistral"], out
+    assert "borrow: refused (unrecognised code)" in blocks["evil"], out
+    assert "FORGED" not in out, out
+    assert "borrow: damian-mbp is offline — reconnect it" in blocks["offline"], out
+    many = blocks["many"].splitlines()[1]
+    # Three accounts, each clipped to 40 characters, then the count of the rest.
+    assert "account-1-" + "x" * 29 + "…, account-2-" in many, many
+    assert "account-4" not in many and " +2 more) — tries again at " in many, many
+    assert "borrow: sign in again on damian-mbp (there: /login datadog)" in blocks["datadog"], out
+    assert (
+        "borrow: not shared with this device — on damian-mbp run: "
+        "lop network credential share secret:SLACK --with borrower-laptop"
+    ) in blocks["secret:SLACK"], out
     # The previous owner's rest is not this owner's: zhipu was simply never borrowed.
-    assert "borrow: never borrowed" in blocks["zhipu"], out
+    assert "borrow: shared, not borrowed yet" in blocks["zhipu"], out
+    assert "borrow: copied here (synced 4m ago)" in blocks["cohere"], out
+    assert "borrow: shared, not copied here yet" in blocks["together"], out
+    assert (
+        "borrow: sign in again on damian-mbp (there: /login linear); last asked 6m ago"
+        in blocks["linear"]
+    ), out
+    assert (
+        "borrow: damian-mbp no longer shares it with this device — ask damian-mbp to share it"
+        " again (last asked 0s ago)" in blocks["kept"]
+    ), out
 
 
 def test_the_credentials_json_adds_borrow_without_changing_observation(
@@ -1621,11 +1736,30 @@ def test_the_credentials_json_adds_borrow_without_changing_observation(
     assert states == {
         "anthropic": "resting",
         "datadog": "sign_in_needed",
+        "evil": "refused",
+        "groq": "partly_resting",
+        "mistral": "refused",
+        "many": "resting",
+        "offline": "refused",
         "openai": "idle",
         "secret:SLACK": "not_shared",
         "xai": "active",
         "zhipu": "never_borrowed",
+        "cohere": "copied",
+        "together": "not_copied",
+        "linear": "sign_in_needed",
+        "kept": "refused",
     }
+    assert rows["cohere"]["borrow"]["gen"] == 3
+    assert rows["cohere"]["borrow"]["synced_at"] == pytest.approx(now - 240)
+    assert rows["linear"]["borrow"]["last_asked_at"] == pytest.approx(now - 360)
+    assert rows["mistral"]["borrow"]["refusal"] == "revoked"
+    assert rows["offline"]["borrow"]["refusal_recognised"] is True
+    # The hostile token: stripped and flattened in --json, and flagged unrecognised.
+    assert rows["evil"]["borrow"]["refusal_recognised"] is False
+    assert "\x1b" not in rows["evil"]["borrow"]["refusal"]
+    assert "\n" not in rows["evil"]["borrow"]["refusal"]
+    assert len(rows["many"]["borrow"]["resting_labels"]) == 5
     assert rows["openai"]["borrow"]["last_grant_at"] == pytest.approx(now - 600)
     assert rows["anthropic"]["borrow"]["resting_until"] == pytest.approx(now + 1800)
     assert rows["anthropic"]["borrow"]["resting_labels"] == ["ops@example.test\x1b]0;x\x07"]
