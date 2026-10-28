@@ -32123,10 +32123,10 @@ def _ask_report(
 #: it would let the two modes drift into disagreeing about what warrants asking,
 #: which is the one thing about this tool that must not vary.
 _ASK_DESCRIPTION_RESTRAINT = (
-    "Ask the user to decide, never for FYI. LAST RESORT, not a checkpoint: "
-    "research, run or delegate it, decide, and report what you chose. "
+    "Ask the user to decide, never for FYI. LAST RESORT, not a checkpoint: research, "
+    "run or delegate it to a subagent and decide yourself, then report the choice. "
     "Ask only when: the action is destructive or irreversible and the user has not "
-    "EXPLICITLY approved it; the REQUEST ITSELF has two plausible readings "
+    "EXPLICITLY approved that action; the REQUEST ITSELF has two plausible readings "
     "and no evidence picks between them; you need something only the user has (a "
     "credential, access); or the answer is genuinely theirs to state. "
     "Two technical approaches is not ambiguity. Work the user already asked for is "

@@ -291,7 +291,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
     # the tail is net negative. Same reading on both ask arms (the doc renders
     # the shared restraint plus each arm's tail; only the restraint moved).
-    "ask": 1078,
+    # 1078 -> 1083 (CI remediation, #3094): the rewrite had dropped "decide
+    # yourself", "subagent" and "approved that action", which test_ask_tool.py
+    # pins as the last-resort and irreversible-trigger contract; restoring them
+    # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
+    "ask": 1083,
     "ask_withdraw": 452,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the

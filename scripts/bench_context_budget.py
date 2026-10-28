@@ -1760,7 +1760,16 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #   child (no ask/notify)      30,355 -> 30,355 billed, unchanged
 # The ceiling follows the measured -25 so the headroom this file keeps does not
 # silently grow into room for the next edit.
-BUDGET_BILLED_TOKENS = 34_316
+#
+# 34,316 -> 34,327 (CI remediation, #3094): the reword had dropped phrases
+# test_ask_tool.py pins ("decide yourself", "subagent", "approved that
+# action" — the last-resort and irreversible-trigger contract). Restoring them
+# measured +11 billed on BOTH arms, same script, isolated HOME:
+#   queued   95,186 -> 95,218 chars / 34,240 -> 34,251 billed
+#   blocking 93,604 -> 93,636 chars / 33,671 -> 33,682 billed
+#   child    30,355, unchanged
+# Net of the whole PR the queued head is still -14 against main (34,265).
+BUDGET_BILLED_TOKENS = 34_327
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
