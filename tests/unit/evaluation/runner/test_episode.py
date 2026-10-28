@@ -3997,7 +3997,7 @@ async def test_scoring_details_publish_own_path_but_refuse_real_secret(
 
 
 # A route whose provider id is long enough to be canaried (``RedactionSet``
-# ignores values under 8 bytes), shaped like the OSWorld rig's: an aggregator
+# ignores values under ``_MIN_CANARY_BYTES``), shaped like the OSWorld rig's: an aggregator
 # provider and a folded vendor/model id.
 _IDENTITY_ROUTE = RouteIdentity(
     provider_id="example-router",

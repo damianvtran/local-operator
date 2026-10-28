@@ -640,22 +640,26 @@ def _canary_values_outside_own_identity(
     with a different provider passed the same observation untouched, which is
     why the refusal looked route-dependent.
 
-    WHY DROPPING IS NOT A WEAKENING. The route identity is the operator's own
-    run configuration, and the bundle publishes it by construction: the
-    manifest seals ``requested_route`` (unscanned -- the writer canaries
-    events and artifacts, not the manifest), and every request and response
-    event repeats it. A value that is a substring of it is therefore already in
-    the bundle before the first event, so as a canary it protects nothing and
-    can only refuse the run's own bookkeeping. The test is the same plaintext
-    substring rule ``RedactionSet.assert_clear`` applies, so exactly the values
-    that would trip on the route are dropped.
+    WHAT THIS GIVES UP, AND WHY THAT IS SOUND. A dropped value is no longer a
+    canary ANYWHERE in the bundle, not only in the route fields: whatever ref it
+    came from -- a configuration word or a credential that happens to equal or
+    sit inside the route identity -- an artifact or event carrying it is no
+    longer refused. That is no new exposure. The manifest seals
+    ``requested_route`` unscanned (the writer canaries events and artifacts,
+    never the manifest) when the bundle is created, BEFORE the first event, so
+    such a value was already in the bundle in plaintext before this rule
+    existed; a canary for it could only refuse the run's own bookkeeping, never
+    keep the value out. The match is the same plaintext substring test
+    ``RedactionSet.assert_clear`` applies, so the drop is limited to exactly the
+    values the identity itself carries.
 
     THE RULE, SCOPED. Only a value CONTAINED IN an identity string is dropped.
     A value that merely contains one (an API key prefixed with the provider
-    name, say) stays a canary, as does every value unrelated to the route, so a
-    genuine credential still refuses any evidence that carries it.
+    name, say) stays a canary, as does every value unrelated to the route; those
+    are the credentials this rule leaves fully protected.
     """
 
+    # ASSUMES served == requested route (fallback_policy=forbid); enabling fallback must revisit.
     own = tuple(item for item in identity if item)
     if not own:
         return tuple(values)
