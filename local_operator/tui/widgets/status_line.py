@@ -316,9 +316,12 @@ NAME_CELLS_FLOOR = 18
 #: name's trade, and the three suites that assert the name and its siblings keep
 #: every spare cell). So the fit is computed ONCE, identically for both frames,
 #: and the caption is painted only into gap the bound frame was not going to use
-#: — `_compose`'s condition. Where the row is too full for it (`< 80` columns with
-#: a title), the hollow model glyph and the `muted` ink still say "stored, not
-#: live"; where there is room, the sentence is there in full.
+#: — `_compose`'s condition, which is arithmetic rather than a column threshold:
+#: the caption paints when the gap between the groups exceeds its own width plus
+#: two cells of air, and the gap is NOT monotonic in width because the ladder
+#: admits and sheds right-group members (measured on the fixture: present at
+#: 56-57, 76-78, 103, 137, 151-260 columns with a title). Where it does not fit,
+#: the hollow model glyph and the `muted` ink still say "stored, not live".
 _LIVENESS_SLOT_CELLS = 13
 
 #: The model glyph while the row is LAST-KNOWN: the hollow twin of
@@ -2189,7 +2192,11 @@ class StatusLine:
         # reappear here either. What remains is the spinner and (while a park
         # stands) the alarm, which are not composer segments.
         if label and "model" not in hidden:
-            tail.append(f"{ICON_MODEL} ", style=dim)
+            # The hollow marker rides this path too: it is the only signal left
+            # on a row too narrow for the ladder, so leaving it out made the two
+            # frames byte-identical below 21 columns (review R2-4).
+            icon = ICON_MODEL_LAST_KNOWN if getattr(self, "_last_known", False) else ICON_MODEL
+            tail.append(f"{icon} ", style=dim)
             tail.append(
                 truncate_cells(label, max(1, width - cell_len(tail.plain))),
                 style=Style(color=theme_mod.semantic_color("fg")),
@@ -2865,6 +2872,20 @@ class StatusLine:
         :data:`NAME_CELLS`'s comment prices that trade.
         """
         if not right.plain:
+            # An EMPTY right group still leaves the slot its gap: a stored row
+            # with no title, no context reading and no spend has nothing to align
+            # against, and returning `left` alone dropped the caption at every
+            # width on a visibly half-empty row (review R2-3).
+            if (
+                slot is not None
+                and slot.plain
+                and cell_len(left.plain) + 2 + cell_len(slot.plain) <= width
+            ):
+                row = Text()
+                row.append_text(left)
+                row.append(" " * 2, style=dim)
+                row.append_text(slot)
+                return row
             return left
         gap = max(_MIN_GROUP_GAP, width - cell_len(left.plain) - cell_len(right.plain))
         if slot is not None and slot.plain and gap > cell_len(slot.plain) + 2:

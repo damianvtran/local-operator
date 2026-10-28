@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from rich.cells import cell_len
 from unittest.mock import patch
@@ -39,6 +40,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import DEFAULT_PLACEHOLDER, Editor
+from local_operator.tui.widgets.status_line import StatusLine
 from tests.unit.tui.test_app_pilot import _factory
 from tests.unit.tui.test_band_panels import _fake_jobs, _Job
 from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote, _message
@@ -794,3 +796,118 @@ async def test_an_anchored_view_takes_older_rows_instead_of_reprojecting() -> No
             app._resume_pending_head = []
             app._resume_pending_tail = []
             assert app._reconcile_retained_history([*older, *history]) is False
+
+
+# -- round 2: the no-checkpoint path, the fork roster, and the empty right group ------
+
+
+async def _saved_facade(tmp_path: Path, session_id: str, *, checkpoint: bool) -> Any:
+    """A REAL `saved_preview` facade over a journal with or without a checkpoint.
+
+    Real, not a stub, because the defect these tests pin lives in the placeholder
+    that `saved_preview` itself installs: `FrontendModelSpec(provider="",
+    model_id="")`, which is a truthy object.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    directory = tmp_path / "config" / "sessions" / session_id
+    if checkpoint:
+        _journal_with_checkpoint(directory, session_id, title="A stored title")
+    else:
+        directory.mkdir(parents=True)
+        (directory / "transcript.jsonl").write_text(
+            '{"id":"m1","ts":1.0,"type":"message","payload":{"kind":"message","role":"user",'
+            '"content":[{"text":"hi"}]}}\n'
+        )
+
+    async def no_takeover() -> None:
+        raise RuntimeError("a test facade never takes over")
+
+    return await AttachedSession.saved_preview(
+        session_id,
+        config_dir=tmp_path / "config",
+        cwd=str(tmp_path),
+        takeover_factory=no_takeover,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint,expect_last_known", [(False, False), (True, True)])
+async def test_only_a_row_with_a_model_identity_enters_last_known_mode(
+    tmp_path, checkpoint: bool, expect_last_known: bool
+) -> None:
+    """R2-1 / design D6: the guard must test identity, not truthiness.
+
+    The empty placeholder is truthy, so the "install never ran" branch was dead
+    and a checkpoint-less journal painted a last-known row over an EMPTY fact set
+    (`⌂ ~/Users/tester/work`) where base painted `Saved excerpt · Connecting…`.
+    Asserted on the consequence — the band's mode and the painted row — on the
+    real facade, in both directions.
+    """
+    from local_operator.tui.session_interaction import SessionInteraction
+
+    from local_operator.tui.app import _read_stored_frontend_state
+
+    app = OperatorApp(lambda: _factory(SidebarRemote("home-session")))
+    facade = await _saved_facade(tmp_path, "saved-facts-session", checkpoint=checkpoint)
+    # The lease's own two steps (`_lease_sidebar_source`), so the facade holds
+    # exactly what production hands the band: nothing when the journal has no
+    # checkpoint, the stored facts when it does.
+    stored = _read_stored_frontend_state(
+        tmp_path / "config" / "sessions" / "saved-facts-session", "saved-facts-session"
+    )
+    if stored is not None:
+        facade.install_saved_facts(stored)
+    source = SessionInteraction(facade)
+    source.display_only = True
+    async with app.run_test(size=(160, 48)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        app._status.update(connection="Saved excerpt · Connecting…")
+        app._paint_last_known_band(source, connecting=True)
+        assert app._status._last_known is expect_last_known
+        row = app._status.render_text(160).plain
+    if expect_last_known:
+        assert "connecting…" in row and "Saved excerpt" not in row, row
+        assert row.startswith("◇ ") or "◇" in row, row
+    else:
+        assert row.startswith("Saved excerpt · Connecting…"), (
+            "a journal with no checkpoint lost the whole-row connecting sentence",
+            row,
+        )
+
+
+def test_a_fork_inherits_no_children() -> None:
+    """R2-2: the fixups must land AFTER the settled-roster filter.
+
+    `_inherited_identity_fixups` clears `jobs` for a row naming a different
+    session; applying it first let the following assignment restore the parent's
+    children, so a fork's saved row listed a child it cannot address.
+    """
+    from local_operator.session.attached import _saved_facts_only
+
+    parent_state = _authority_rich_state("parent-session")
+    update = _saved_facts_only(parent_state, "fork-session")
+    assert update["session_id"] == "fork-session"
+    assert update["jobs"] == [], update["jobs"]
+
+
+def test_the_caption_survives_an_empty_right_group() -> None:
+    """R2-3: a fact-less row still says it is connecting, at every width.
+
+    With no title, no context reading and no spend the right group is empty, and
+    `_compose` returned the left group alone before the slot was considered — the
+    caption vanished on a row with 200 columns of room.
+    """
+    from textual.widgets import Static
+    from typing import cast as _cast
+
+    from tests.unit.tui.test_status_line import FakeDock
+
+    for width in (80, 120, 200):
+        status = StatusLine(_cast(Static, FakeDock(width)))
+        status.update(model_label="openrouter/deepseek/deepseek-v4.1-flash", cost=None)
+        status.update(connection="Saved excerpt · Connecting…")
+        status.set_last_known(True)
+        row = status.render_text(width).plain
+        assert "connecting…" in row, (width, row)

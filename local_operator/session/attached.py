@@ -1132,8 +1132,11 @@ _SAVED_FACT_FIELDS = frozenset(
 
 #: Job states a stored row may carry. A child the previous runtime left RUNNING is
 #: not evidence that anything runs now, and ``paused``/``queued`` are that
-#: runtime's live scheduling facts, so only settled rows cross.
-_SAVED_JOB_STATES = frozenset({"completed", "failed", "cancelled", "interrupted", "restored"})
+#: runtime's live scheduling facts, so only settled rows cross. ``restored`` is
+#: deliberately NOT here: it is a boolean ROW field meaning "live again"
+#: (``harness/jobs.py``, ``session/restored_rows.py``), never a ``status`` value,
+#: so listing it read as if a live-again child would cross (review R2-6).
+_SAVED_JOB_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 
 def _saved_facts_only(state: Any, session_id: str) -> dict[str, Any]:
@@ -1165,12 +1168,17 @@ def _saved_facts_only(state: Any, session_id: str) -> dict[str, Any]:
             # never restored, which is the whole point of them.
             continue
         update[name] = field.get_default(call_default_factory=True)
-    update.update(_inherited_identity_fixups(state, session_id))
     update["jobs"] = [
         job
         for job in getattr(state, "jobs", [])
         if str(getattr(job, "status", "")) in _SAVED_JOB_STATES
     ]
+    # LAST, not first: `_inherited_identity_fixups` clears `jobs` for a row that
+    # names a DIFFERENT session (a fork's inherited roster belongs to the parent),
+    # so applying it before the assignment above silently restored the parent's
+    # children — `('settled-child','completed')` survived for the fork's id
+    # (review R2-2).
+    update.update(_inherited_identity_fixups(state, session_id))
     return update
 
 

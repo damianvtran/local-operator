@@ -10991,11 +10991,20 @@ class OperatorApp(App[None]):
         stored = None
         if connecting and source.display_only and not source.connection_error:
             stored = getattr(source.session, "frontend_state", None)
-            if stored is not None and not getattr(stored, "effective_model", None):
+            if stored is not None and not _has_model_identity(stored):
                 # No model in the row means the install never ran (a journal with
                 # no checkpoint, or one the byte scan cannot spell): the facade
                 # still holds its empty placeholder, so the whole-row connecting
-                # sentence is the honest frame.
+                # sentence is the honest frame — and the row it paints is the one
+                # base painted, not a last-known row over an empty fact set.
+                #
+                # IDENTITY, NOT TRUTHINESS. The placeholder `saved_preview`
+                # installs is a `FrontendModelSpec(provider="", model_id="")`,
+                # and a Pydantic model is truthy however empty its fields are, so
+                # `not getattr(stored, "effective_model", None)` was dead code for
+                # the exact case it named (review R2-1 and design D6, reproduced:
+                # the row read `⌂ ~/Users/tester/work` where base read
+                # `Saved excerpt · Connecting…`).
                 stored = None
         if stored is None:
             self._status.set_last_known(False)
@@ -63685,6 +63694,24 @@ def _fast_status_line(label: str, enabled: bool) -> str:
     if enabled:
         return f"fast mode: on for {label} — faster output at premium pricing"
     return f"fast mode: off for {label} — /fast turns it on at premium pricing"
+
+
+def _has_model_identity(state: Any) -> bool:
+    """Whether a frontend state names a model at all.
+
+    The one test for "did the durable-facts install actually run". A saved
+    preview's placeholder is a `FrontendModelSpec` with an EMPTY provider and
+    model id, so an object test cannot answer this — see
+    `_paint_last_known_band`'s call site. Read through `effective_model` first
+    (that is what the band paints) and fall back to the selected spec, the same
+    order `_effective_spec` uses.
+    """
+    spec = getattr(state, "effective_model", None) or getattr(state, "selected_model", None)
+    if spec is None:
+        return False
+    return bool(
+        str(getattr(spec, "provider", "") or "") or str(getattr(spec, "model_id", "") or "")
+    )
 
 
 def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:
