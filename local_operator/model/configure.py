@@ -7104,17 +7104,26 @@ class SessionStreamFn:
             )
         if request.purpose == "turn" and not request.same_route_retry:
             await self.preflight_usage(request.model)
-        if (
-            request.cache_diagnostics_previous_id is not None
+        current_credential_id = (
+            self._auth_store.session_credential_id(request.model.provider, self._session_id)
+            if request.cache_diagnostics_previous_id is not None
             and self._cache_diagnostics_credential_id is not None
-            and self._auth_store.session_credential_id(request.model.provider, self._session_id)
-            != self._cache_diagnostics_credential_id
+            else None
+        )
+        if (
+            current_credential_id is not None
+            and current_credential_id != self._cache_diagnostics_credential_id
         ):
             # Checked AFTER the preflight, which is what may have moved the
             # session to another account. The previous response lives in the
             # old account's fingerprint store, so comparing against it can only
             # answer ``previous_message_not_found``; restart the chain so this
             # call records ``baseline``, which is what it is.
+            #
+            # An UNSET sticky (``None``: a released pin, a rotation that cleared
+            # it) is "unknown", not "switched": the next resolve usually lands
+            # on the same account, and dropping a live chain there loses a real
+            # comparison, so only a known different credential resets it.
             self._cache_diagnostics_previous_id = None
             self._cache_diagnostics_credential_id = None
             request = request.model_copy(update={"cache_diagnostics_previous_id": None})
@@ -7515,7 +7524,11 @@ class SessionStreamFn:
                 # Request start to stream end, the clock the ledger records, and
                 # the one that matters: the 5m TTL was refreshed at the start, so
                 # this is how long the prefix has already been ageing. Completed
-                # turns only; the policy reads it for subagents alone.
+                # turns only; the policy reads it for subagents alone. The span
+                # also covers failed failover attempts and their backoff before
+                # the serving one; that is accepted because it can only arm
+                # early (paying the 1h premium, never losing a cache), and the
+                # prefix's write already started ageing at the first attempt.
                 self._had_long_call = True
             self._record_usage(
                 request,

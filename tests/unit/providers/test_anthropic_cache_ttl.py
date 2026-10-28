@@ -475,9 +475,17 @@ class _Clock:
 
 
 async def _run_calls(
-    stream: Any, request: ChatRequest, durations: list[float], monkeypatch: Any
+    stream: Any,
+    request: ChatRequest,
+    durations: list[float],
+    monkeypatch: Any,
+    endings: list[str] | None = None,
 ) -> list[ChatRequest]:
-    """Drive one completed call per duration and capture what reached failover.
+    """Drive one call per duration and capture what reached failover.
+
+    ``endings`` picks how each call ends: ``"stop"`` (completed, the default),
+    ``"error"`` (a terminal ``stop_reason="error"`` frame) or ``"raise"`` (the
+    provider stream raises after the time has passed).
 
     Each fake call advances the stream's clock by its duration while it is
     streaming, so ``_record_stream`` measures exactly that request-start to
@@ -490,17 +498,24 @@ async def _run_calls(
     monkeypatch.setattr(configure, "time", clock)
     captured: list[ChatRequest] = []
     pending = list(durations)
+    ends = list(endings or ["stop"] * len(durations))
 
     async def fake_failover(req: ChatRequest, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
         captured.append(req)
         clock.offset += pending.pop(0)
-        yield StreamEndEvent(stop_reason="stop")
+        ending = ends.pop(0)
+        if ending == "raise":
+            raise RuntimeError("synthetic provider failure")
+        yield StreamEndEvent(stop_reason=ending)
 
     import local_operator.providers.failover as failover
 
     monkeypatch.setattr(failover, "stream_with_failover", fake_failover)
     for _ in durations:
-        async for _ in stream(request, None):
+        try:
+            async for _ in stream(request, None):
+                pass
+        except RuntimeError:
             pass
     return captured
 
@@ -579,3 +594,39 @@ async def test_main_thread_after_a_long_call_is_unchanged(monkeypatch) -> None:
     assert _ttls(client._build_body(after, oauth=False)) == _ttls(
         client._build_body(after.model_copy(update={"cache_after_long_call": False}), oauth=False)
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["error", "raise"])
+async def test_a_failed_300s_subagent_call_does_not_arm(monkeypatch, ending: str) -> None:
+    """Only a COMPLETED turn arms the rule: a 300 s stream that ends in an
+    error frame or raises says nothing reliable about a later turn's length,
+    and its failed attempt is not the prefix a next request would re-read."""
+    parent = _session_stream()
+    child = parent.fork("s-child")
+    try:
+        _, after = await _run_calls(
+            child, _request(), [300.0, 5.0], monkeypatch, endings=[ending, "stop"]
+        )
+    finally:
+        await child.close()
+        await parent.close()
+    assert not after.cache_after_long_call
+    assert _wire_ttls(after) == {None}
+
+
+@pytest.mark.asyncio
+async def test_a_long_isolated_turn_does_not_arm(monkeypatch) -> None:
+    """Isolated decoration (a title, a supplement) shares ``purpose="turn"``
+    with the conversation but is a one-shot beside it; its duration must not
+    arm the conversation's TTL rule."""
+    parent = _session_stream()
+    child = parent.fork("s-child")
+    try:
+        await _run_calls(child, _request(isolated=True), [300.0], monkeypatch)
+        (after,) = await _run_calls(child, _request(), [5.0], monkeypatch)
+    finally:
+        await child.close()
+        await parent.close()
+    assert not after.cache_after_long_call
+    assert _wire_ttls(after) == {None}

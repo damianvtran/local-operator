@@ -73,17 +73,29 @@ _OVERAGE_SERVING = frozenset({"allowed", "allowed_warning"})
 #: Why a duration and not a size: the 5m TTL is refreshed when a request STARTS
 #: (the prefix is read/written then), so a call that streams for more than five
 #: minutes (30-70k output tokens) lets its own prefix expire before the next
-#: request goes out. On the ledger since v0.90.18 (scout analysis, 2026-10-28)
-#: all 19 ``unchanged``-diagnosed subagent breaks — misses with no prefix
-#: divergence, i.e. pure expiry — had start-to-start gaps of 315-684 s.
+#: request goes out, and that next request rewrites the whole prefix.
 #:
-#: Why "after the first one" is a usable predictor: long calls cluster. Once a
-#: session has had one call >= 240 s, 5.0% of its later calls are long, against
-#: 0.1% in sessions that never had one. Replaying the rule "after a subagent
-#: session's first call >= 240 s, send its later requests at 1h" avoided 4.58M
-#: of 4.78M rewrite tokens and paid the 1h premium on 2.94M writes: about
-#: +3.3M base-equivalent tokens/day net. 240 s rather than 300 s leaves headroom
-#: for the gap between one call's end and the next one's start.
+#: Reproducible replay (PR #3072 review round 1; read-only ``analytics.db``,
+#: 2026-10-27 04:34 to 2026-10-28 03:18 local, 0.948 days; Anthropic
+#: ``purpose='turn'`` subagent rows billed ``subscription_api_equivalent``:
+#: 49,796 calls, 665 sessions). A BREAK is a row with ``cache_miss_type =
+#: 'unchanged'`` (compared, no prefix divergence, so pure expiry) whose cache
+#: read is under 50% of the previous call's read+write, with the previous
+#: context >= 20k and this write >= 20k: 167 breaks, 21.67M rewrite tokens. 42
+#: of them (5.70M) follow a call >= 240 s, 37 of those at start-to-start gaps of
+#: 315-684 s; the other 125 are ordinary idle expiry this rule does not target.
+#: Simulating "after a subagent session's first ok call >= 240 s, send every
+#: later write at 1h", weighting 5m write 1.25x, 1h write 2.0x and read 0.1x
+#: base: 46 breaks (6.49M) avoided against 6.56M premium writes, net +2.54M,
+#: i.e. about +2.68M base-equivalent tokens/day. A 300 s threshold nets only
+#: +2.15M/day (17 sessions armed vs 27), so 240 s is kept: it also leaves
+#: headroom for the gap between one call's end and the next one's start.
+#: Caveats: under one day of data, and an avoided break's incremental write is
+#: approximated as 0.
+#:
+#: Why "after the first one" is a usable predictor: long calls cluster (scout
+#: analysis on the ledger since v0.90.18: once a session has had one call
+#: >= 240 s, 5.0% of its later calls are long, against 0.1% otherwise).
 #:
 #: A module constant, not a config key: it is a measured property of the
 #: workload, not an operator preference, and the kill switch already exists
@@ -111,12 +123,14 @@ def decide_cache_ttl(
     """``"1h"`` or None (the 5m default) for one request.
 
     ``main_min_context_tokens`` is ``providers.anthropic.cache_ttl_1h_min_context_tokens``:
-    the API-key / overage main-thread size threshold. Its ``0`` turns every
-    MAIN-THREAD 1h TTL off, the subscription one included, so an operator who
-    set it before this policy existed does not start paying 2x writes; the
-    subagent key is an independent opt-in. ``subagent_min_context_tokens`` is
-    ``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`` (0 =
-    never). ``context_size`` is called only when a size gate applies.
+    the API-key / overage main-thread size threshold. Its ``0`` is the global
+    "no 1h" switch: it turns the subscription main thread's 1h off AND the
+    subagent after-long-call rule below, so an operator who set it before
+    either existed does not start paying 2x writes. ``subagent_min_context_tokens``
+    is ``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens``, the
+    subagent SIZE gate only (0 = no size opt-in; it does not switch off the
+    after-long-call rule). ``context_size`` is called only when a size gate
+    applies.
 
     ``after_long_call`` is ``ChatRequest.cache_after_long_call``: this
     conversation already had a turn of at least

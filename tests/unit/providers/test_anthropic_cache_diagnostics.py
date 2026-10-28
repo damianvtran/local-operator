@@ -730,3 +730,26 @@ async def test_a_mid_session_account_switch_restarts_the_chain(tmp_path, monkeyp
         {"previous_message_id": None},
         {"previous_message_id": "msg_p_3"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_released_sticky_on_the_same_account_keeps_the_chain(tmp_path, monkeypatch) -> None:
+    """An UNSET sticky is unknown, not switched: after the pin is released the
+    next resolve lands on the same credential, so the chain must continue
+    rather than open a spurious ``baseline`` (review #3072 m2)."""
+    bodies: list[dict[str, Any]] = []
+    stream, store = await _mounted(tmp_path, monkeypatch, bodies)
+    try:
+        await _collect(stream(_turn(), None))  # msg_p_1
+        first = store.session_credential_id("anthropic", "p")
+        store.release_session_credential("anthropic", "p")
+        await _collect(stream(_turn(), None))
+        assert store.session_credential_id("anthropic", "p") == first
+    finally:
+        await stream.close()
+        store.close()
+    diag = [body.get("diagnostics", "absent") for body in bodies]
+    assert diag == [
+        {"previous_message_id": None},
+        {"previous_message_id": "msg_p_1"},
+    ]

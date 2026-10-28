@@ -157,7 +157,7 @@
     "tone": "plain"
   },
   "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": {
-    "note": "Explains the threshold for delegated (subagent) requests only. '5 minutes' and '1-hour' are Anthropic's two prompt-cache lifetimes; keep both durations. 0 is the default and means never.",
+    "note": "Explains the threshold for delegated (subagent) requests only. '5 minutes' and '1-hour' are Anthropic's two prompt-cache lifetimes; keep both durations. 0 is the default and means no SIZE rule only: the separate after-a-4-minute-call rule stays on unless the main 1-hour setting is 0. '4 minutes' is the fixed 240-second threshold; keep the number.",
     "role": "settings help text",
     "tone": "plain, precise"
   },

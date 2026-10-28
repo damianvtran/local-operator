@@ -816,15 +816,21 @@ DEFAULT_CONFIG = Config(
             # subscription within plan limits sends its main thread at 1h at
             # ANY size, as Claude Code does: over 7 days (2026-10-26, 59k calls)
             # that was ~75M base-equivalent cheaper than 5m above 150k and still
-            # ~0.8M cheaper below it. 0 disables every main-thread 1h TTL,
-            # the subscription one included; subagents follow their own key.
+            # ~0.8M cheaper below it. 0 is the global "no 1h" switch: it
+            # disables every main-thread 1h TTL, the subscription one included,
+            # AND the subagent after-long-call rule (a subscription subagent
+            # moves to 1h after one of its turns streamed >= 240 s, because
+            # that call outlived its own 5m prefix; see
+            # `SUBAGENT_LONG_CALL_1H_THRESHOLD_S`).
             #
             # `providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`:
             # the same size gate for DELEGATED turns (subagents), on any
-            # credential. 0 = never: on the same ledger a subagent's 1h writes
-            # cost more than the expiries they avoid at every size (~15M worse
-            # above 150k, ~57M worse below). Compaction, naming and other
-            # one-shots are always 5m.
+            # credential, and nothing more. 0 = no size opt-in: on the same
+            # ledger a subagent's 1h writes by size alone cost more than the
+            # expiries they avoid at every size (~15M worse above 150k, ~57M
+            # worse below). It does NOT turn off the after-long-call rule above;
+            # the main key's 0 does. Compaction, naming and other one-shots are
+            # always 5m.
             # `providers.openrouter.*`: the chat-completions `provider` routing
             # object (see `settings_io.py` for the per-key semantics). Every
             # default below is "no opinion" — the resolver emits NO `provider`
