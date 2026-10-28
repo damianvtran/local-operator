@@ -3171,3 +3171,125 @@ def test_recovery_matrix_request_across_a_policy_republish(tmp_path, monkeypatch
     assert out["refused_deliveries"] == 0 and out["refused_hold"] is not None, out
     assert out["deliveries"] == 1 and out["hub_reads"] == 1 and out["conflicts"] == 0, out
     assert out["request_model_calls"] == 1 and out["hold"] is None, out
+
+
+def _revocation_rig(tmp_path: Path, monkeypatch: Any) -> tuple[Any, ...]:
+    """The matrix's production pieces (real cycle, cache, ledger, ``pull.ack``,
+    loop) on the server-faithful hub, with the model reply scripted per case."""
+
+    from local_operator.team_bridge import model_boundary as boundary_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, _body = _wire_spine(monkeypatch, tmp_path)
+    _matrix_config(tmp_path, "gpt-5.4")
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    hub = _MatrixHub("server")
+    monkeypatch.setattr(pull_mod, "_client_for", lambda config_dir, client: hub)
+    monkeypatch.setattr(wake_mod, "ack_read", _PRODUCTION_ACK_READ)
+    monkeypatch.setattr(wake_mod, "screen_item", _PRODUCTION_SCREEN_ITEM)
+    _hub_status(monkeypatch, owner)
+    reply = {"text": "VERDICT: deliver\nREASON: ordinary."}
+    model_calls: list[str] = []
+
+    def scripted_runner(**kwargs: Any) -> Any:
+        def runner(prompt: str, *, default_model: str, **_: Any) -> tuple[str, str]:
+            model_calls.append(default_model)
+            return reply["text"], default_model
+
+        return runner
+
+    monkeypatch.setattr(boundary_mod, "make_screening_runner", scripted_runner)
+    access = OAuthAccess(
+        access_token="tok",
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        org_id=owner.tenant_id,
+    )
+    return clock, store, owner, record, hub, access, reply, model_calls
+
+
+def _passes_under_revocation(owner, tmp_path, access, clock) -> list[Any]:
+    """Three loop passes, each past the retry backoff; a pass that RAISES is
+    recorded, not swallowed — that is the whole-loop failure M10 measured."""
+
+    outcomes: list[Any] = []
+    for _ in range(3):
+        try:
+            out = _iterate(owner, tmp_path, access)
+            outcomes.append([h.get("action") for h in out["handled"]])
+        except Exception as failure:  # noqa: BLE001 - the regression under test
+            outcomes.append(("raised", getattr(failure, "code", type(failure).__name__)))
+        clock.now += _ACROSS_A_LEASE_S
+    return outcomes
+
+
+def test_a_confirmed_blocked_ack_retires_under_a_revoked_sender(tmp_path, monkeypatch) -> None:
+    """PR #3063 review r8 M10: the hub CONFIRMED a ``blocked`` ACK, the
+    connector stopped before consuming the feed ref, and the owner revoked
+    the sender while it was down. Re-driving the rejected message re-POSTed
+    the terminal ACK, the hub answered 403 ``recipient_unavailable`` (it
+    checks standing before even a same-state repeat), and the refusal escaped
+    the spine: the ref stayed, no hold was written, and EVERY later pass
+    raised into the connector's whole-loop backoff. A confirmed blocked ACK
+    is terminal and hands nothing off; it must retire without asking."""
+
+    clock, store, owner, record, hub, access, reply, _calls = _revocation_rig(tmp_path, monkeypatch)
+    reply["text"] = "VERDICT: bounce\nREASON: prompt_injection attempt."
+    _one_pending_ref(store, owner)
+    first = _iterate(owner, tmp_path, access)
+    assert [h.get("action") for h in first["handled"]] == ["bounce"], first
+    assert (store.recorded_intent(owner, "bmsg_1", "blocked") or {}).get("state") == "confirmed"
+    posts_before = len(hub.applied)
+
+    # The crash window: the hub has the blocked state, the ref was not consumed.
+    store.record_feed_batch(
+        owner, feed_seq(7), ["message_available:message_id=bmsg_1"], resync_required=False
+    )
+    hub.revoked = True
+    outcomes = _passes_under_revocation(owner, tmp_path, access, clock)
+
+    assert outcomes == [["bounce"], [], []], outcomes  # terminal once, never a raise
+    assert store.drain_feed_refs(owner, 10) == []
+    assert store.screening_hold(owner, "bmsg_1") is None
+    assert record["delivered"] == []
+    assert len(hub.applied) == posts_before  # the terminal ACK was not re-sent
+
+
+def test_a_confirmed_read_ack_under_a_revoked_sender_holds_then_recovers(
+    tmp_path, monkeypatch
+) -> None:
+    """The other side of M10: a confirmed READ is about to be handed off, so
+    the standing re-check stays. While the sender is revoked the message is a
+    visible hold with no hand-off; once standing is restored it is delivered
+    exactly once, on its recorded verdict (no second model call)."""
+
+    clock, store, owner, record, hub, access, _reply, model_calls = _revocation_rig(
+        tmp_path, monkeypatch
+    )
+    delivered_fake = wake_mod.deliver_wake
+
+    async def stopped_at_the_handoff(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(wake_mod, "deliver_wake", stopped_at_the_handoff)
+    _one_pending_ref(store, owner)
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(owner, tmp_path, access)
+    monkeypatch.setattr(wake_mod, "deliver_wake", delivered_fake)
+    assert (store.recorded_intent(owner, "bmsg_1", "read") or {}).get("state") == "confirmed"
+
+    hub.revoked = True
+    outcomes = _passes_under_revocation(owner, tmp_path, access, clock)
+    assert all(not isinstance(o, tuple) for o in outcomes), outcomes  # no pass raised
+    assert record["delivered"] == []
+    hold = store.screening_hold(owner, "bmsg_1")
+    assert hold is not None and hold["hold_code"] == "ack_refused:recipient_unavailable"
+
+    hub.revoked = False
+    _passes_under_revocation(owner, tmp_path, access, clock)
+    assert len(record["delivered"]) == 1
+    assert store.screening_hold(owner, "bmsg_1") is None
+    assert len(model_calls) == 1 and hub.applied.count("bmsg_1") == 1

@@ -341,12 +341,17 @@ async def ack(
     hand-off on this recorded verdict proves it is about the same message
     (PR #3063 reviews M7, r7 M8). It never travels to the hub.
 
-    An intent the hub already CONFIRMED is re-sent as a same-state repeat
-    (see :func:`_recheck_confirmed`), ALWAYS — keyed on the intent's state,
-    never on which branch of the caller produced the verdict (review r7 M9):
-    a confirmed intent here means the message is being re-driven, and the
-    hub's per-ack sender check is the only place a revocation while the
-    device was off is enforced.
+    A CONFIRMED ``read`` intent is re-sent as a same-state repeat (see
+    :func:`_recheck_confirmed`), always — keyed on the intent's state, never
+    on which branch of the caller produced the verdict (review r7 M9): a
+    confirmed read here means the message is about to be HANDED OFF again,
+    and the hub's per-ack sender check is the only place a revocation while
+    the device was off is enforced.
+
+    A confirmed ``blocked`` intent is NOT re-sent (review r8 M10): it hands
+    nothing to anyone, so there is no standing to re-check, and it is
+    already the hub's terminal state. Re-asking only gave a revoked sender's
+    403 a way to keep a rejected message from ever retiring.
 
     The intent is durable BEFORE dispatch; :func:`flush_ack` maps outcomes
     without ever overwriting the write-once verdict: a definite 409 refusal
@@ -373,7 +378,7 @@ async def ack(
         config_dir=config_dir,
         access=access,
         client=client,
-        recheck_confirmed=True,
+        recheck_confirmed=target == "read",
     )
 
 
