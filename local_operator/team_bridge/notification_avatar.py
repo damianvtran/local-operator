@@ -45,7 +45,7 @@ import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from PIL.Image import Image
@@ -121,8 +121,11 @@ _AGENT_STYLE = {
 _RENDER_SLOTS = threading.BoundedSemaphore(2)
 #: One lock per in-flight cache key, so identical concurrent requests render
 #: once and the rest read the stored entry (dedupe, not just a global bound).
-_IN_FLIGHT: dict[tuple[object, ...], threading.Lock] = {}
+_IN_FLIGHT: dict[tuple[object, ...], tuple[threading.Lock, int]] = {}
 _IN_FLIGHT_GUARD = threading.Lock()
+# Bound queued work as well as active decodes; a flood must not retain arbitrary
+# image bytes in executor closures. Overload is a normal app-icon fallback.
+_PENDING = threading.BoundedSemaphore(8)
 
 
 class AvatarImageRejected(ValueError):
@@ -147,9 +150,7 @@ def valid_initials(value: str) -> bool:
     """
 
     text = unicodedata.normalize("NFC", value)
-    return len(text) <= 2 and all(
-        unicodedata.category(ch)[0] in ("L", "N") for ch in text
-    )
+    return len(text) <= 2 and all(unicodedata.category(ch)[0] in ("L", "N") for ch in text)
 
 
 def palette_colour(origin: str, account_id: str, theme: Theme) -> tuple[int, int, int]:
@@ -169,6 +170,8 @@ def decode_source(data: bytes) -> Image:
     from PIL import Image as PILImage
     from PIL import UnidentifiedImageError
 
+    if not data or len(data) > 1024 * 1024:
+        raise AvatarImageRejected("source byte limit")
     try:
         image = PILImage.open(io.BytesIO(data), formats=list(SOURCE_FORMATS))
     # DecompressionBombError subclasses neither OSError nor ValueError, and
@@ -182,6 +185,7 @@ def decode_source(data: bytes) -> Image:
         or width > MAX_SOURCE_SIDE
         or height > MAX_SOURCE_SIDE
         or width * height > MAX_SOURCE_PIXELS
+        or width * height * 4 > max(len(data), 1) * 4096
         or getattr(image, "n_frames", 1) != 1
     ):
         raise AvatarImageRejected("image dimensions out of bounds")
@@ -329,8 +333,16 @@ def _agent_marker(side: int, theme: Theme) -> Image:
     draw.ellipse((0, 0, big_side - 1, big_side - 1), fill=fill)
     c, r, w = big_side / 2, big_side * 0.32, big_side * 0.09
     draw.polygon(
-        [(c, c - r), (c + w, c - w), (c + r, c), (c + w, c + w),
-         (c, c + r), (c - w, c + w), (c - r, c), (c - w, c - w)],
+        [
+            (c, c - r),
+            (c + w, c - w),
+            (c + r, c),
+            (c + w, c + w),
+            (c, c + r),
+            (c - w, c + w),
+            (c - r, c),
+            (c - w, c - w),
+        ],
         fill=ink,
     )
     return big.resize((side, side), PILImage.Resampling.LANCZOS)
@@ -403,6 +415,8 @@ async def render(
     account_id: str,
     photo: bytes | None,
     cache_key: tuple[object, ...],
+    retain: bool = True,
+    check_owner: Callable[[], None] = lambda: None,
 ) -> bytes:
     """Cached, concurrency-bounded :func:`compose` off the event loop.
 
@@ -413,26 +427,40 @@ async def render(
     from local_operator.team_bridge import avatar_cache
     from local_operator.team_bridge.avatar_cache import Entity
 
+    if not retain:
+        avatar_cache.COMPOSITE_CACHE.discard(cache_key)
     cached = avatar_cache.COMPOSITE_CACHE.get(cache_key)
     if cached is not None:
+        check_owner()
         return cached.body
+    if not _PENDING.acquire(blocking=False):
+        raise AvatarImageRejected("renderer busy")
 
     def work() -> bytes:
         with _IN_FLIGHT_GUARD:
-            lock = _IN_FLIGHT.setdefault(cache_key, threading.Lock())
+            lock, users = _IN_FLIGHT.get(cache_key, (threading.Lock(), 0))
+            _IN_FLIGHT[cache_key] = (lock, users + 1)
         try:
             with lock, _RENDER_SLOTS:
-                hit = avatar_cache.COMPOSITE_CACHE.get(cache_key)
+                check_owner()
+                hit = avatar_cache.COMPOSITE_CACHE.get(cache_key) if retain else None
                 if hit is not None:
                     return hit.body
                 data = compose(variant, origin=origin, account_id=account_id, photo=photo)
-                avatar_cache.COMPOSITE_CACHE.put(cache_key, Entity(data, "image/png", ""))
+                check_owner()
+                if retain:
+                    avatar_cache.COMPOSITE_CACHE.put(cache_key, Entity(data, "image/png", ""))
                 return data
         finally:
             with _IN_FLIGHT_GUARD:
-                # Last one out removes the lock; a waiter re-creating it
-                # finds the cached entry, so the race costs nothing.
-                if _IN_FLIGHT.get(cache_key) is lock and not lock.locked():
+                lock, users = _IN_FLIGHT[cache_key]
+                if users == 1:
                     del _IN_FLIGHT[cache_key]
+                else:
+                    _IN_FLIGHT[cache_key] = (lock, users - 1)
+            _PENDING.release()
 
-    return await asyncio.to_thread(work)
+    # Shield ensures a cancelled HTTP request cannot cancel a queued worker
+    # before it releases its pending slot; its authority check still fences
+    # any result after signout. No detached notification or network is emitted.
+    return await asyncio.shield(asyncio.to_thread(work))

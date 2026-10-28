@@ -87,7 +87,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -2581,7 +2581,7 @@ async def get_account_avatar(
 
 
 _NOTIFICATION_AVATAR_REQUIRED = frozenset(
-    {"kind", "theme", "size", "initials", "expected_account_id"}
+    {"tenant_id", "kind", "theme", "size", "initials", "expected_account_id"}
 )
 _NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
 
@@ -2600,7 +2600,9 @@ async def get_notification_avatar(
 
     Closed query, every name single-valued:
 
-    * ``kind`` ``person|person_agent``; ``theme`` ``light|dark``; ``size``
+    * ``tenant_id`` the directory/event tenant (isolates retention, never
+      overrides hub authorization); ``kind`` ``person|person_agent``;
+      ``theme`` ``light|dark``; ``size``
       ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
       ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
     * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
@@ -2628,6 +2630,8 @@ async def get_notification_avatar(
     if (
         not is_account_id(target_account_id)
         or not is_account_id(query["expected_account_id"])
+        or not query["tenant_id"].strip()
+        or len(query["tenant_id"]) > 128
         or query["kind"] not in na.KINDS
         or query["theme"] not in na.THEMES
         or query["size"] not in {"64", "256"}
@@ -2640,8 +2644,9 @@ async def get_notification_avatar(
         data = await _conversation_reply(
             _conversation_client(config_manager).notification_avatar(
                 target_account_id,
-                kind=query["kind"],
-                theme=query["theme"],
+                tenant_id=query["tenant_id"],
+                kind=cast(Literal["person", "person_agent"], query["kind"]),
+                theme=cast(Literal["light", "dark"], query["theme"]),
                 size=int(query["size"]),
                 initials=query["initials"],
                 v=query["v"] if photo_names else None,

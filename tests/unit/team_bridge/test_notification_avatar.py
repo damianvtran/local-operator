@@ -133,7 +133,9 @@ def test_output_strips_source_metadata():
     info.add_text("Comment", "secret-location")
     Image.new("RGB", (64, 64), (1, 2, 3)).save(out, format="PNG", pnginfo=info)
     data = na.compose(
-        na.Variant("person", "light", 64, ""), origin=ORIGIN, account_id="acc_ben",
+        na.Variant("person", "light", 64, ""),
+        origin=ORIGIN,
+        account_id="acc_ben",
         photo=out.getvalue(),
     )
     assert b"secret-location" not in data
@@ -161,3 +163,75 @@ def test_render_caches_per_key_and_renders_once(monkeypatch):
     # An auth transition on that scope purges the composite with the raw cache.
     avatar_cache.admit(("root", ORIGIN), None)
     assert avatar_cache.COMPOSITE_CACHE.get(key) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cache_control,etag,retained",
+    [("private", '"one"', True), ("no-store", '"one"', False), ("private", None, False)],
+)
+async def test_derivative_retention_never_exceeds_upstream(
+    tmp_path, monkeypatch, cache_control, etag, retained
+):
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from tests.unit.team_bridge.test_avatar import AvatarStore
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    monkeypatch.setattr(avatar_cache, "COMPOSITE_CACHE", avatar_cache.AvatarCache())
+    headers = {"content-type": "image/jpeg", "cache-control": cache_control}
+    if etag:
+        headers["etag"] = etag
+    client = TeamBridgeClient(
+        tmp_path,
+        store=AvatarStore(),
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=_jpeg(), headers=headers)
+        ),
+    )
+    result = await client.notification_avatar(
+        "acc_2",
+        tenant_id="tenant_a",
+        kind="person",
+        theme="light",
+        size=64,
+        initials="BT",
+        v="0123456789abcdef",
+        expected_account_id="acc_1",
+    )
+    assert result.startswith(b"\x89PNG")
+    assert bool(avatar_cache.COMPOSITE_CACHE._entries) is retained
+
+
+@pytest.mark.asyncio
+async def test_auth_transition_during_render_cannot_store_or_return_old_composite(
+    tmp_path, monkeypatch
+):
+    from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
+    from tests.unit.team_bridge.test_avatar import AvatarStore
+
+    monkeypatch.setattr(avatar_cache, "COMPOSITE_CACHE", avatar_cache.AvatarCache())
+    store = AvatarStore()
+    real = na.compose
+
+    def switch(*args, **kwargs):
+        result = real(*args, **kwargs)
+        store.incarnation = "login-a-again"
+        return result
+
+    monkeypatch.setattr(na, "compose", switch)
+    client = TeamBridgeClient(tmp_path, store=store)
+    with pytest.raises(BridgeRefusal) as failure:
+        await client.notification_avatar(
+            "acc_2",
+            tenant_id="tenant_a",
+            kind="person",
+            theme="light",
+            size=64,
+            initials="BT",
+            v=None,
+            expected_account_id="acc_1",
+        )
+    assert failure.value.http_status == 409
+    assert not avatar_cache.COMPOSITE_CACHE._entries

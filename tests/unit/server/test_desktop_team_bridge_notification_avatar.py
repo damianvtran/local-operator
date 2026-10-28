@@ -32,7 +32,7 @@ def _jpeg() -> bytes:
 
 
 URL = "/v1/desktop/team-bridge/accounts/acc_2/notification-avatar"
-BASE_Q = "kind=person&theme=light&size=64&initials=BT&expected_account_id=acc_1"
+BASE_Q = "tenant_id=tenant_a&kind=person&theme=light&size=64&initials=BT&expected_account_id=acc_1"
 PHOTO_Q = BASE_Q + "&v=0123456789abcdef&avatar_account_id=acc_2"
 
 
