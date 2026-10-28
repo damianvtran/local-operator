@@ -7,6 +7,7 @@ No test invokes the reader against operator/product catalogue content.
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -24,6 +25,18 @@ from tests.unit.secrets.test_public_copy_boundaries import (
 )
 
 
+def _details(result: Any) -> dict[str, Any]:
+    """The tool result's ``details``, narrowed for the type checker.
+
+    ``ToolResult.details`` is Optional because most results carry none; every
+    call site here reads a result the reader built, which always has them. The
+    assert turns a fixture that stopped carrying details into a clear failure
+    instead of a TypeError inside a subscript.
+    """
+    assert result.details is not None, result.text
+    return result.details
+
+
 @pytest.mark.asyncio
 async def test_explicit_root_reads_committed_copy_without_moving_session(tmp_path):
     root = _ui_repo(tmp_path)
@@ -32,11 +45,11 @@ async def test_explicit_root_reads_committed_copy_without_moving_session(tmp_pat
     result = await execute_read_public_copy("read1", params.model_dump(), context=context)
     assert not result.is_error, result.text
     assert context.cwd == str(tmp_path)
-    assert result.details["repository_root"] == str(root.resolve())
-    assert len(result.details["commit"]) == 40
-    audit = json.loads(Path(result.details["audit_log"]).read_text().splitlines()[-1])
+    assert _details(result)["repository_root"] == str(root.resolve())
+    assert len(_details(result)["commit"]) == 40
+    audit = json.loads(Path(_details(result)["audit_log"]).read_text().splitlines()[-1])
     assert audit["repository_root"] == str(root.resolve())
-    assert audit["commit"] == result.details["commit"]
+    assert audit["commit"] == _details(result)["commit"]
     assert audit["repository"] == "damianvtran/local-operator-ui"
 
 
@@ -58,7 +71,7 @@ async def test_core_and_linked_worktree_from_home_context(tmp_path):
             context=context,
         )
         assert not result.is_error, result.text
-        assert result.details["repository"] == "damianvtran/local-operator"
+        assert _details(result)["repository"] == "damianvtran/local-operator"
         assert context.cwd == str(tmp_path)
 
 
@@ -206,8 +219,8 @@ async def test_head_race_keeps_content_and_audit_on_pinned_commit(tmp_path, monk
     )
     assert not result.is_error, result.text
     assert "second synthetic version" not in result.text
-    assert result.details["commit"] == first
-    audit = json.loads(Path(result.details["audit_log"]).read_text().splitlines()[-1])
+    assert _details(result)["commit"] == first
+    audit = json.loads(Path(_details(result)["audit_log"]).read_text().splitlines()[-1])
     assert audit["commit"] == first
 
 
@@ -265,18 +278,23 @@ async def test_registered_tool_loop_honors_inventory_and_records_audit(tmp_path,
     if available:
         result = next(event.result for event in events if isinstance(event, ToolExecutionEndEvent))
         assert not result.is_error
-        audit = json.loads(Path(result.details["audit_log"]).read_text().splitlines()[-1])
+        audit = json.loads(Path(_details(result)["audit_log"]).read_text().splitlines()[-1])
         assert audit["repository_root"] == str(root.resolve())
         assert audit["session"] == "abc123"
-        assert audit["sha256"] == result.details["sha256"]
-        assert audit["commit"] == result.details["commit"]
+        assert audit["sha256"] == _details(result)["sha256"]
+        assert audit["commit"] == _details(result)["commit"]
         assert json.loads(result.text)["wire.slash.credential"].startswith("Type or paste")
     else:
         from local_operator.paths import config_dir
 
+        # The final loop event carries the conversation on the subclass that
+        # finishes the loop; ``AgentEvent`` itself declares no ``messages``, so
+        # read it defensively and fail loudly if the event shape changed.
+        final_messages = getattr(events[-1], "messages", None)
+        assert final_messages is not None, type(events[-1]).__name__
         failure = next(
             message
-            for message in events[-1].messages
+            for message in final_messages
             if isinstance(message, Message) and message.role == "tool"
         )
         assert failure.is_error and "Tool not found" in failure.text
@@ -348,7 +366,7 @@ async def test_git_environment_cannot_redirect_explicit_root(tmp_path, monkeypat
         "yes", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
     )
     assert not result.is_error, result.text
-    assert result.details["repository"] == "damianvtran/local-operator-ui"
+    assert _details(result)["repository"] == "damianvtran/local-operator-ui"
 
 
 @pytest.mark.asyncio
@@ -486,8 +504,12 @@ async def test_linked_metadata_in_per_user_temp_is_refused(user_temp_dir, tmp_pa
     common = (root / ".git").resolve()
     # CONTROL: the sandbox alone would have served this. Without it a green
     # result could be an unrelated refusal, which is how the gap was missed.
+    # ``wrap`` answers None on a host that cannot confine; the probe is only
+    # meaningful where it can, and this test's premise needs it to.
+    probe_argv = ToolConfinement.at(jail).wrap(["/bin/cat", str(common / "HEAD")])
+    assert probe_argv is not None, "the sandbox probe needs a host that can confine"
     probe = subprocess.run(
-        ToolConfinement.at(jail).wrap(["/bin/cat", str(common / "HEAD")]),
+        probe_argv,
         capture_output=True,
         check=False,
     )
@@ -498,8 +520,8 @@ async def test_linked_metadata_in_per_user_temp_is_refused(user_temp_dir, tmp_pa
         "no", {"path": UI_CATALOGUE, "repo_root": str(linked)}, context=context
     )
     assert result.is_error
-    assert result.details["refusal"]["code"] == "public_copy_git_metadata_outside_confinement"
-    assert result.details["refusal"]["reason"] == "git_dir_outside_root"
+    assert _details(result)["refusal"]["code"] == "public_copy_git_metadata_outside_confinement"
+    assert _details(result)["refusal"]["reason"] == "git_dir_outside_root"
     assert "Type or paste" not in result.text
 
 
@@ -516,16 +538,32 @@ async def test_alternates_outside_confinement_are_refused(user_temp_dir, tmp_pat
         "no", {"path": UI_CATALOGUE, "repo_root": str(clone)}, context=context
     )
     assert result.is_error
-    assert result.details["refusal"]["reason"] == "alternates_outside_root"
+    assert _details(result)["refusal"]["reason"] == "alternates_outside_root"
 
 
 @pytest.mark.asyncio
 async def test_a_self_contained_confined_checkout_still_reads(tmp_path):
+    """Inside the root, a confined read is served — where the host can confine.
+
+    WHERE IT CANNOT, THE CONTRACT IS THE REFUSAL. The reader runs Git under the
+    kernel sandbox or refuses; on a platform with no sandbox implementation
+    (CI's linux shard) it cannot confine the child, so success would mean
+    running Git unwrapped. This test therefore pins BOTH branches instead of
+    assuming the macOS one, which is what made it red on linux only.
+    """
+    from local_operator.tools.confinement import sandbox_unavailable_reason
+
     root = _ui_repo(tmp_path)
     context = _context(root, tmp_path).model_copy(update={"confinement_root": str(root)})
     result = await execute_read_public_copy(
         "ok", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=context
     )
+    unavailable = sandbox_unavailable_reason()
+    if unavailable is not None:
+        assert result.is_error, result.text
+        assert "cannot enforce that boundary" in result.text, result.text
+        assert unavailable in result.text, result.text
+        return
     assert not result.is_error, result.text
 
 
@@ -545,7 +583,7 @@ async def test_unconfined_linked_worktree_is_unaffected(user_temp_dir, tmp_path)
 def _refusal_body(result):
     """The structured repair fields a refusal returns: ``details`` AND the text line."""
     assert result.is_error
-    body = result.details["refusal"]
+    body = _details(result)["refusal"]
     first, _, rest = result.text.partition("\n")
     assert first.startswith("refused: ")
     # providers never see ``details``: the same object must be in the text.
@@ -669,9 +707,9 @@ async def test_loose_default_origin_is_not_recorded_as_verified(tmp_path):
         "x", {"path": UI_CATALOGUE}, context=_context(root, tmp_path)
     )
     assert not result.is_error, result.text
-    assert result.details["repository"] is None
-    assert result.details["repository_verified"] is False
-    audit = json.loads(Path(result.details["audit_log"]).read_text().splitlines()[-1])
+    assert _details(result)["repository"] is None
+    assert _details(result)["repository_verified"] is False
+    audit = json.loads(Path(_details(result)["audit_log"]).read_text().splitlines()[-1])
     assert audit["repository"] is None and audit["repository_verified"] is False
 
 
@@ -685,8 +723,8 @@ async def test_no_origin_is_null_not_an_empty_string(tmp_path):
         context=_context(core, tmp_path),
     )
     assert not result.is_error, result.text
-    assert result.details["repository"] is None
-    assert result.details["repository_verified"] is False
+    assert _details(result)["repository"] is None
+    assert _details(result)["repository_verified"] is False
 
 
 @pytest.mark.asyncio
@@ -695,8 +733,8 @@ async def test_verified_explicit_root_records_the_identity(tmp_path):
     result = await execute_read_public_copy(
         "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
     )
-    assert result.details["repository"] == "damianvtran/local-operator-ui"
-    assert result.details["repository_verified"] is True
+    assert _details(result)["repository"] == "damianvtran/local-operator-ui"
+    assert _details(result)["repository_verified"] is True
 
 
 @pytest.mark.asyncio

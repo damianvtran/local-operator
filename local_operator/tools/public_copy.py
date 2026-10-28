@@ -167,10 +167,8 @@ class ReadPublicCopyParams(BaseModel):
     repo_root: str | None = Field(
         default=None,
         description=(
-            "Exact root of a git checkout or linked worktree whose GitHub origin is "
-            "damianvtran/local-operator or damianvtran/local-operator-ui; omit to use the "
-            "session cwd. Selects where to read only: it does not move the session or grant "
-            "access. A refusal returns a code and a fields object naming the fix."
+            "Exact checkout or worktree root; GitHub origin is damianvtran/local-operator "
+            "or damianvtran/local-operator-ui; default cwd. Read-only; grants no access."
         ),
     )
     key: str | None = Field(
