@@ -1230,3 +1230,53 @@ def test_a_fresh_device_with_no_networks_remembers_nothing_to_report(
     assert rc == 0
     assert payload["checks"] == [] or all(row.get("ok") for row in payload["checks"])
     assert payload["identity_present"] is True
+
+
+def test_a_hostile_serve_fact_over_a_real_link_costs_only_its_own_row(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#3075 QA round 1, Q1 over the wire: a peer whose ``serve_daemons`` carries a
+    non-string cgroup (and an escape-laden version) crashed A's control thread at
+    ``serve_supervision`` and blanked EVERY row for that peer. Now the serve row is
+    ``unknown`` and the build/git rows still arrive from the peer."""
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+    original = server_b._handlers["net_readiness"]  # noqa: SLF001 — the slice's seat
+
+    def hostile(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        facts = original(link, frame)
+        assert isinstance(facts, dict), "the real readiness handler must return facts"
+        facts["serve_daemons"] = {
+            "platform": "linux",
+            "install": {"version": "0.90.19", "source_ref": ""},
+            "daemons": [
+                {
+                    "pid": 1,
+                    "state": "live",
+                    "identity": "proven",
+                    "version": "\x1b[2J\x1b]0;pwned\x07",
+                    "source_ref": "",
+                    "reloadable": True,
+                    "cgroup": 12345,
+                }
+            ],
+        }
+        return facts
+
+    monkeypatch.setitem(server_b._handlers, "net_readiness", hostile)  # noqa: SLF001
+    _rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    serve = _capability(payload, readiness.CAPABILITY_SERVE_DAEMON)
+    assert serve["code"] == readiness.CODE_UNKNOWN and serve["ok"] is False, serve
+    assert "\x1b" not in json.dumps(payload, ensure_ascii=False)
+    git = _capability(payload, readiness.CAPABILITY_GIT)
+    assert git["source"] == readiness.SOURCE_PEER and git["code"] != readiness.CODE_NOT_ASKED
+    assert _capability(payload, readiness.CAPABILITY_BUILD)["ok"] is True
+    server_b.stop()
