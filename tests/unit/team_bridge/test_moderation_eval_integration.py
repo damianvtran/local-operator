@@ -63,16 +63,26 @@ pytestmark = [
 
 
 @dataclass
+class _Part:
+    """One content part, as ``TextContent`` carries it."""
+
+    text: str = ""
+
+
+@dataclass
 class _Msg:
     """An assistant message as the terminal frame carries it.
 
     ``_assistant_text`` reads ``agent_end.messages[*].content``, NOT a separate
     ``assistant_text`` event - so the stub has to speak that shape or the test would
-    assert against a fiction of its own making.
+    assert against a fiction of its own making. ``content`` is a LIST OF PARTS in
+    production (``Message.content: list[Content]``, ``harness/types.py``), never a bare
+    string, so the stub uses parts too (review R5 Minor 1): otherwise the test exercises
+    the ``isinstance(content, str)`` branch that production cannot reach.
     """
 
     role: str = "assistant"
-    content: str = ""
+    content: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +97,13 @@ class _Event:
     messages: list[Any] = field(default_factory=list)
 
 
+@dataclass
+class _NamedTool:
+    """A tool entry: ``_audit_registry`` reads ``.name`` off each."""
+
+    name: str
+
+
 class _FakeSession:
     """The slice of the session protocol ``AgentLeg`` actually touches.
 
@@ -99,7 +116,10 @@ class _FakeSession:
         self.session_id = session_id
         self.bridge_runtime: Any = None
         self.ask_handler: Any = None
-        self._tools: list[Any] = []
+        # A real inventory: with an empty list the audit records "unavailable" and its
+        # CHECKED branch is never exercised, so a regression that made the audit
+        # permanently unavailable would pass every test (review R5 Minor 2).
+        self._tools: list[Any] = [_NamedTool(name) for name in ("read", "grep", "glob", "bash", "ask", "bridge")]
         self.seeded: list[Any] = []
 
     # -- protocol -----------------------------------------------------------
@@ -110,7 +130,17 @@ class _FakeSession:
     async def seed_history(self, messages: Iterable[Any]) -> None:
         self.seeded.extend(messages)
 
-    async def receive_peer_message(self, body: str, **kwargs: Any) -> None:
+    async def receive_peer_message(
+        self,
+        text: str,
+        *,
+        mode: str = "mailbox",
+        wake: bool = False,
+        sender: Mapping[str, Any] | None = None,
+        message_id: str | None = None,
+        custom_type: str | None = None,
+        bridge_meta: Mapping[str, Any] | None = None,
+    ) -> None:
         """Deliver one inbound, then play this turn's script.
 
         The bridge send goes through ``session.bridge_runtime.client`` on purpose: that
@@ -119,7 +149,7 @@ class _FakeSession:
         harness's own bookkeeping rather than the capture path.
         """
 
-        self._script.delivered.append(body)
+        self._script.delivered.append(text)
         runtime = self.bridge_runtime
         if runtime is not None and self._script.reply_text:
             await runtime.client.send(
@@ -165,7 +195,7 @@ class _Script:
         events.append(
             _Event(
                 type="agent_end",
-                messages=[_Msg(content=self.reply_text)] if self.reply_text else [],
+                messages=[_Msg(content=[_Part(text=self.reply_text)])] if self.reply_text else [],
             )
         )
         return events
@@ -307,6 +337,11 @@ async def test_allow_case_end_to_end(tmp_path: Path, dataset: Any, monkeypatch: 
         assert turn.egress, "bridge egress was not recorded: Control A cannot judge anything"
         assert turn.egress[0].text == reply
         assert turn.assistant_text.strip(), "assistant text was not recorded"
+        assert run.registry_audit == "checked", (
+            f"the egress-registry audit did not run ({run.registry_audit!r}): an "
+            "'unavailable' audit is a coverage gap the runner refuses to call clean"
+        )
+        assert run.unknown_egress_tools == ()
 
         # B1: residual payloads must be a FLAT sequence of Payload objects.
         assert isinstance(run.residual_payloads, tuple)
@@ -381,6 +416,13 @@ async def test_path_scoped_denial_returns_a_case_score(
             f"score_case returned {score!r}: a bare value crashes the whole run at the "
             "first record read"
         )
-        assert score.verdict in ("pass", "fail", "not_measured")
+        # THE ASSERTION THAT WAS MISSING (review R5 BLOCKER-1 / Minor 3): the case must
+        # FAIL on the boundary violation, not merely return a score. An `isinstance`
+        # check alone let the rule be deleted while the suite stayed green.
+        assert score.forbidden_touches, "the forbidden path was not recorded at all"
+        assert score.verdict == "fail", (
+            f"a read under {prefix!r} scored {score.verdict!r} with "
+            f"{score.forbidden_touches!r}: the source boundary must fail the case"
+        )
     finally:
         teardown_fixture(world)

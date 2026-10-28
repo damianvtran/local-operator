@@ -269,7 +269,7 @@
     "work_progress_summary": [
       "4.2",
       "dedupe",
-      "CI flake"
+      "flak"
     ],
     "dedupe_how": [
       "content hash",
@@ -301,7 +301,7 @@
       "dedupe"
     ],
     "work_progress_challenge": [
-      "flake"
+      "flak"
     ],
     "migration_state": [
       "merged"
