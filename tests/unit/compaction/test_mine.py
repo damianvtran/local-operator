@@ -369,6 +369,54 @@ def test_a_giant_source_line_keeps_the_policy_replay_gate():
     assert estimate_archive_tokens(archive) > 0
 
 
+def test_a_rendered_compaction_marker_is_not_mined_as_operator_history():
+    """QA round 5 Q16: archive replay is already folded through ``previous_text``;
+    its hard-wrapped text pages must not become new operator asks or duplicate
+    the archive. The real marker renderer supplies the provenance stamp."""
+    from local_operator.compaction.marker import (
+        build_compaction_marker,
+        render_compaction_marker,
+    )
+    from local_operator.compaction.snapcompact import serialize_for_snapcompact
+    from local_operator.harness.types import Message
+
+    replay = "first line\n" + "criminal keywords, and the rest of a wrapped archive line"
+    marker = render_compaction_marker(build_compaction_marker(replay))
+    serialized = serialize_for_snapcompact(
+        [marker, Message.user("please preserve the actual operator request")]
+    )
+    assert serialized.startswith("[Injected]\n")
+    assert serialized.count("criminal keywords") == 1
+    assert mine_carry(serialized).asks == ["please preserve the actual operator request"]
+
+
+@pytest.mark.parametrize(
+    "provider,model_id", [("anthropic", "claude-opus-4-8"), ("openai", "gpt-5.5")]
+)
+def test_partial_kept_lines_preserve_the_actual_rendered_pages(provider, model_id):
+    """QA round 5 Q15: the gate compares re-derived pages with the original page
+    digests. Sweep offsets that put the first kept page inside a source line."""
+    from local_operator.compaction.snapcompact import (
+        _middle_pages,
+        _page_digest,
+        _policy_pages,
+        compact_to_archive,
+    )
+    from local_operator.harness.types import Message
+
+    for offset in range(16):
+        archive = compact_to_archive(
+            [Message.user("start " + "a" * (480_000 + offset))],
+            provider,
+            model_id,
+            max_frames=3,
+            context_window=400_000,
+        )
+        assert _policy_pages(archive) is not None
+        assert [_page_digest(page) for page in _middle_pages(archive)] == archive.page_digests
+        assert len(_middle_pages(archive)) == len(archive.frames)
+
+
 def test_a_long_operator_ask_on_a_dropped_page_is_mined_whole():
     """QA round 3 Q11: pages are hard-wrapped at the frame width; the carry must be
     mined from the unwrapped source, or one long ask becomes mid-word fragments.

@@ -57,6 +57,7 @@ from local_operator.harness.types import (
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from .cutpoint import OPERATOR_ANSWER_KEY, is_rendered_injection
+from .marker import marker_details
 from .mine import (
     CARRY_FRESH_TOKEN_ALLOWANCE,
     CARRY_TOKEN_BUDGET,
@@ -590,7 +591,13 @@ def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
                 # transcript 66 of 72 captured asks were injected text. A distinct
                 # header keeps them readable in the archive while ``mine_carry``
                 # maps it to a role that mines no asks.
-                if not is_rendered_injection(message):
+                # A rendered compaction marker is ARCHIVE replay, not an operator
+                # turn. Its text-kind pages are hard-wrapped and its archive is
+                # already folded through ``previous_text``; serializing it as
+                # [User] re-mined wrap pieces and double-folded the archive
+                # (QA round 5, Q16). Provenance is the renderer's marker stamp,
+                # never the message's text shape.
+                if not is_rendered_injection(message) and marker_details(message) is None:
                     blocks.append(f"[User]\n{text}")
                     continue
                 blocks.append(f"{INJECTED_HEADER}\n{text}")
