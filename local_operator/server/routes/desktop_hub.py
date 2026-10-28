@@ -51,16 +51,56 @@ Kind = Literal["agent", "team", "skill"]
 T = TypeVar("T")
 
 
+#: ADDRESSING ONE ITEM. ``name`` is the original addressing and stays exactly as
+#: it was for the CLI, the TUI and released renderers -- but a display name is
+#: not an identity: ``create_agent`` refuses only an EXACT duplicate and a rename
+#: checks nothing, while the hub checks match names case-insensitively, so
+#: ``name: "coder"`` selects both ``Coder`` and ``coder`` and one Apply would
+#: merge into two agents. ``local_id`` (the registry id / skill link id the
+#: ``/hub/links`` rows carry) addresses exactly one row of exactly ``kind``;
+#: renderers gate on the ``hub_items_by_id`` capability before sending it.
+#: ``pattern`` refuses a whitespace-only id as a 422, like the empty string: no
+#: registry or skill link id is blank, so the request is malformed rather than an
+#: unknown item. ``name`` is deliberately left alone: its whitespace-only form has
+#: always been a 404 (its lookup strips), and released callers keep that answer.
+LocalId = Field(default=None, min_length=1, max_length=128, pattern=r"\S")
+
+
+def _one_address(
+    kind: str | None, name: str | None, local_id: str | None, *, required: bool
+) -> None:
+    """Refuse an ambiguous address: never both arms, and ``local_id`` needs its kind.
+
+    ``required`` is the apply/retry rule (exactly one arm); check may name
+    neither (check everything). An id without a kind is refused rather than
+    searched across kinds, so an id can never land on a row of another kind.
+    """
+
+    if name is not None and local_id is not None:
+        raise ValueError("pass either name or local_id, not both")
+    if required and name is None and local_id is None:
+        raise ValueError("pass name or local_id")
+    if local_id is not None and kind is None:
+        raise ValueError("local_id needs kind")
+
+
 class HubCheck(Input):
     request_id: RequestID
     kind: Kind | None = None
     name: str | None = Field(default=None, min_length=1, max_length=128)
+    local_id: str | None = LocalId
+
+    @model_validator(mode="after")
+    def _addressed(self) -> "HubCheck":
+        _one_address(self.kind, self.name, self.local_id, required=False)
+        return self
 
 
 class HubApply(Input):
     request_id: RequestID
     kind: Kind
-    name: str = Field(min_length=1, max_length=128)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    local_id: str | None = LocalId
     prefer: Literal["local", "remote"] | None = None
     acknowledge_unknown_baseline: bool = False
     #: ``replace`` discards one side wholesale and is the ONLY such operation; it
@@ -77,6 +117,16 @@ class HubApply(Input):
     visibility: Literal["public", "org"] | None = None
     tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
 
+    @model_validator(mode="after")
+    def _addressed(self) -> "HubApply":
+        _one_address(self.kind, self.name, self.local_id, required=True)
+        if self.resolve_source and self.local_id is not None:
+            # The resolve arm looks its row up by name in the registry
+            # (``service.resolve_source``); an id there would be silently
+            # ignored, so it is refused rather than half-honoured.
+            raise ValueError("resolve_source addresses its item by name")
+        return self
+
 
 class HubApplyAll(Input):
     request_id: RequestID
@@ -86,7 +136,36 @@ class HubApplyAll(Input):
 class HubRetry(Input):
     request_id: RequestID
     kind: Kind
-    name: str = Field(min_length=1, max_length=128)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    local_id: str | None = LocalId
+
+    @model_validator(mode="after")
+    def _addressed(self) -> "HubRetry":
+        _one_address(self.kind, self.name, self.local_id, required=True)
+        return self
+
+
+def _addressed_checks(svc: Any, ctx: Any, kinds: tuple[str, ...], body: Any) -> list[Any]:
+    """Check exactly the item(s) ``body`` addresses, refusing an unmatched address 404.
+
+    The id arm narrows through ``only_ids`` (already honoured per kind by every
+    checker) with ``names=None``; the name arm is byte-for-byte the call these
+    routes made before ``local_id`` existed. Apply and retry hand the result to
+    ``apply_items(checks=...)``, which acts on exactly those checks, so narrowing
+    HERE is what makes the merge touch one row. The 404 wording is shared so an
+    unknown id and an unknown name are indistinguishable in shape.
+    """
+
+    if body.local_id is not None:
+        checks = svc.check_items(ctx, kinds=kinds, only_ids={body.local_id})
+        if not checks:
+            raise _refusal(404, f"no linked {body.kind} with id {body.local_id!r}")
+        return checks
+    names = [body.name] if body.name else None
+    checks = svc.check_items(ctx, kinds=kinds, names=names)
+    if body.name and not checks:
+        raise _refusal(404, f"no linked {body.kind or 'item'} named {body.name!r}")
+    return checks
 
 
 class SkillPull(Input):
@@ -363,10 +442,7 @@ async def check(
 
     def work(ctx: Any) -> dict[str, Any]:
         kinds = (body.kind,) if body.kind else ("agent", "team", "skill")
-        names = [body.name] if body.name else None
-        checks = svc.check_items(ctx, kinds=kinds, names=names)
-        if body.name and not checks:
-            raise _refusal(404, f"no linked {body.kind or 'item'} named {body.name!r}")
+        checks = _addressed_checks(svc, ctx, kinds, body)
         return {
             "reports": [svc.check_report(c).to_json() for c in checks],
             "status": svc.status_snapshot(ctx),
@@ -410,6 +486,12 @@ async def apply(
         # are exactly the values the runtime checks above vouched for.
         requested_source: str = body.hub_source
         requested_visibility: Visibility = body.visibility
+        # The model validator refuses resolve_source with local_id and requires
+        # one address, so the name is present; this guard narrows it for pyright
+        # and keeps a future validator edit from passing None into the lookup.
+        if body.name is None:
+            raise _refusal(422, "resolve_source addresses its item by name")
+        requested_name: str = body.name
 
         def resolve_work(ctx: Any) -> dict[str, Any]:
             from local_operator.hub_sync.identity import LinkError as _IdentityError
@@ -431,7 +513,7 @@ async def apply(
                 record = svc.resolve_source(
                     ctx,
                     kind=body.kind,
-                    name=body.name,
+                    name=requested_name,
                     hub_source=source,
                     visibility=requested_visibility,
                     tenant_id=body.tenant_id,
@@ -484,9 +566,7 @@ async def apply(
         raise _refusal(422, "pass either prefer or replace, not both")
 
     def work(ctx: Any) -> dict[str, Any]:
-        checks = svc.check_items(ctx, kinds=(body.kind,), names=[body.name])
-        if not checks:
-            raise _refusal(404, f"no linked {body.kind} named {body.name!r}")
+        checks = _addressed_checks(svc, ctx, (body.kind,), body)
         report = svc.apply_items(
             ctx,
             kind=body.kind,
@@ -693,17 +773,15 @@ async def retry(
     from local_operator.hub_sync import service as svc
 
     def work(ctx: Any) -> dict[str, Any]:
-        svc.clear_retry(ctx, body.kind, body.name)
-        checks = svc.check_items(ctx, kinds=(body.kind,), names=[body.name])
-        if not checks:
-            raise _refusal(404, f"no linked {body.kind} named {body.name!r}")
+        svc.clear_retry(ctx, body.kind, body.name, local_id=body.local_id)
+        checks = _addressed_checks(svc, ctx, (body.kind,), body)
         auto = ctx.settings().auto_for(body.kind)
         report = svc.apply_items(ctx, kind=body.kind, checks=checks, auto=True, dry_run=not auto)
         _raise_for(report.reports)
         if any(r.outcome == "would-merge" for r in report.reports):
             # Manual mode: the retry only PROVED the update computes. Retire the stale
             # failure so the row offers the update rather than another retry (U10).
-            svc.clear_failure(ctx, body.kind, body.name)
+            svc.clear_failure(ctx, body.kind, body.name, local_id=body.local_id)
         return {
             "reports": [r.to_json() for r in report.reports],
             "status": svc.status_snapshot(ctx),
