@@ -67,8 +67,10 @@ STOP_GRACE_S = 5.0
 #: How long the cancelled work gets to unwind before the process exits
 #: regardless. GRACE + CANCEL stays well inside launchd's default
 #: ``ExitTimeOut`` (20 s), after which launchd SIGKILLs — the very state the
-#: handler exists to avoid. A claim still held at that point is the loop's
-#: ``stale_claim`` park to recover, never a dropped message.
+#: handler exists to avoid. Both are asyncio timers, so the real bound is
+#: GRACE + CANCEL plus the longest SYNCHRONOUS step running on the loop thread
+#: when they fire (a SQLite busy wait, ≤ 2 s); every such step is bounded. A
+#: claim still held at exit is the loop's ``stale_claim`` park to recover.
 STOP_CANCEL_S = 5.0
 #: The stop signals: SIGTERM (launchd/systemd stop, reboot) and SIGHUP (the
 #: controlling terminal went away). SIGINT keeps Python's KeyboardInterrupt.
@@ -239,7 +241,7 @@ def _install_stop_handlers(loop: asyncio.AbstractEventLoop, stop: asyncio.Event)
     arbitrary frame the way a ``signal.signal`` handler would), so setting an
     ``asyncio.Event`` from it is safe. It is UNIX-only: a platform that refuses
     it keeps the old default behaviour, which the ``stale_claim`` park still
-    makes lossless — just slower (one claim lease).
+    recovers — one claim lease later, and at-least-once (see loop.py).
     """
 
     installed: list[int] = []
@@ -280,10 +282,11 @@ async def _supervise(args: argparse.Namespace) -> int:
             work.cancel()
             await asyncio.wait({work}, timeout=STOP_CANCEL_S)
         if not work.done():
-            # Something swallowed the cancellation (a blocking call in a
-            # thread cannot be interrupted). Waiting longer only ends in
-            # launchd's SIGKILL; leave now — the kernel drops the flock and
-            # the loop's stale-claim park recovers any claim still held.
+            # The cancellation never landed: something is awaiting outside
+            # the task's reach (an executor future, or a callee swallowing
+            # ``CancelledError``). Waiting longer only ends in launchd's
+            # SIGKILL; leave now — the kernel drops the flock and the loop's
+            # stale-claim park recovers any claim still held.
             logger.warning("bridge connector stopping: stage=stop code=unwind_timeout")
             logging.shutdown()
             os._exit(0)

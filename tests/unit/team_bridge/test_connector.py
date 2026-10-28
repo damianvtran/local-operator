@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.providers.auth_store import OAuthAccess
 from local_operator.team_bridge import pull as pull_mod
 from local_operator.team_bridge import store as store_mod
 from local_operator.team_bridge.connector import install as install_mod
@@ -961,21 +962,22 @@ async def _quiet_events(*args: Any, **kwargs: Any) -> None:
     return None  # 204: no new traffic; only the committed ref is drained
 
 
-def _iterate(owner: OwnerSnapshot, tmp_path: Path) -> dict[str, Any]:
+def _iterate(owner: OwnerSnapshot, tmp_path: Path, access: Any = None) -> dict[str, Any]:
     return asyncio.run(
-        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+        loop_mod.run_iteration(
+            owner, config_dir=tmp_path, access=access or _access(owner), auth_store=None
+        )
     )
 
 
-def test_dead_connector_claim_is_redriven_after_the_lease_exactly_once(
-    tmp_path, monkeypatch
-) -> None:
+def test_dead_connector_claim_is_redriven_once_after_the_lease(tmp_path, monkeypatch) -> None:
     """PR #3038 review R2-3: a connector killed mid-spine leaves its claim
     ``held`` (its ``finally`` never ran). The restarted connector's spine is
     refused ``claimed_elsewhere``; the loop used to consume the ref with no
     hold, so after the lease lapsed nothing referenced the message and it was
     never delivered. It must now park a hold due at the lease expiry, then
-    deliver exactly once."""
+    deliver once. (At-least-once in general: a holder killed between the
+    handoff and its release is woken twice — see loop.HOLD_STALE_CLAIM.)"""
 
     clock = _FakeClock()
     monkeypatch.setattr(time, "time", clock)
@@ -1060,6 +1062,133 @@ def test_live_second_holder_is_never_double_delivered(tmp_path, monkeypatch) -> 
     clock.now += wake_mod.CLAIM_TTL_S
     _iterate(owner, tmp_path)
     assert len(record["delivered"]) == 1
+
+
+def test_a_stop_during_the_stale_claim_redrive_never_loses_the_message(
+    tmp_path, monkeypatch
+) -> None:
+    """PR #3063 review M1: the clean stop CANCELS a re-drive, and the spine's
+    ``finally`` then releases its OWN fresh claim with no outcome. A
+    ``stale_claim`` park read "released" as "the holder's outcome stands",
+    retired itself on the restart, and the message (whose ref was consumed
+    long before) was never delivered. The interrupted re-drive must leave an
+    ordinary retry behind, which delivers once on the restart."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    store.claim(
+        owner, "bmsg_1", "sess_cos", "connector:dead-owner", expiry=clock.now + wake_mod.CLAIM_TTL_S
+    )
+    _one_pending_ref(store, owner)
+    _iterate(owner, tmp_path)  # parks the stale claim; the ref is consumed
+    real_screen = wake_mod.screen_item
+
+    async def stopped_mid_screen(*args: Any, **kwargs: Any) -> Any:
+        raise asyncio.CancelledError  # what ``_supervise``'s cancel delivers
+
+    monkeypatch.setattr(wake_mod, "screen_item", stopped_mid_screen)
+    clock.now += wake_mod.CLAIM_TTL_S + loop_mod.STALE_CLAIM_MARGIN_S + 1
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(owner, tmp_path)
+    released = store.claim_status(owner, "bmsg_1")
+    assert released is not None and released["state"] == "released"
+    hold = store.screening_hold(owner, "bmsg_1")
+    assert hold is not None and hold["hold_code"] != loop_mod.HOLD_STALE_CLAIM
+
+    # The restarted connector: screening works again.
+    monkeypatch.setattr(wake_mod, "screen_item", real_screen)
+    for _ in range(4):
+        clock.now += wake_mod.CLAIM_TTL_S
+        _iterate(owner, tmp_path)
+    assert len(record["delivered"]) == 1
+    assert store.screening_hold(owner, "bmsg_1") is None
+
+
+#: Captured at import, before any case's monkeypatch replaces the seam.
+_PRODUCTION_ACK_READ = wake_mod.ack_read
+
+
+class _AckWire:
+    """The hub's ack endpoint, faked at the wire seam so the REAL ``pull.ack``
+    (intent ledger, ``client_ref``, replay) runs. The hub treats a repeated
+    ``client_ref`` as a replay and a new one for a read message as a conflict.
+    """
+
+    base_url = OWNER.canonical_base_url  # the destination guard's evidence
+
+    def __init__(self) -> None:
+        self.refs: list[str] = []
+
+    async def ack(self, message_id: str, **kwargs: Any) -> dict[str, Any]:
+        ref = str(kwargs["client_ref"])
+        if self.refs and ref != self.refs[0]:
+            raise pull_mod.PullRefused("intent_conflict", "a different client_ref")
+        self.refs.append(ref)
+        return {"delivery": {"state": kwargs["state"], "state_at": "t"}}
+
+
+@pytest.mark.parametrize("death", ["stop", "kill"])
+def test_a_stop_after_the_read_ack_still_delivers_once(tmp_path, monkeypatch, death) -> None:
+    """PR #3063 QA Q-1: a connector stopped (claim released, ref kept) or
+    killed (claim held, ``stale_claim`` park) AFTER the confirmed read ACK but
+    BEFORE the session handoff. The replay minted a fresh ``client_ref``, the
+    ledger refused it as ``intent_conflict``, and the message was never
+    handed off. The replay must reuse the stored ref and reach the handoff."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    wire = _AckWire()
+    monkeypatch.setattr(pull_mod, "_client_for", lambda config_dir, client: wire)
+    # The real ``pull.ack`` guards the owner on a REAL pinned OAuth access.
+    access = OAuthAccess(
+        access_token="tok",
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        org_id=owner.tenant_id,
+    )
+    # The PRODUCTION seam, not the fixture's fake: it is what mints the ref.
+    monkeypatch.setattr(wake_mod, "ack_read", _PRODUCTION_ACK_READ)
+    delivered_fake = wake_mod.deliver_wake
+
+    async def dies_at_handoff(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError  # the stop lands after the ACK
+
+    monkeypatch.setattr(wake_mod, "deliver_wake", dies_at_handoff)
+    _one_pending_ref(store, owner)
+    if death == "stop":
+        with pytest.raises(asyncio.CancelledError):
+            _iterate(owner, tmp_path, access)
+        assert store.drain_feed_refs(owner, 3)  # the ref survived the stop
+    else:
+        # SIGKILL: the spine's ``finally`` never runs, so do what it leaves —
+        # ack confirmed, claim held, then the restart parks the stale claim.
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                wake_mod.handle_message_available(
+                    owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=access
+                )
+            )
+        store.claim(
+            owner, "bmsg_1", "sess_cos", "connector:killed", expiry=clock.now + wake_mod.CLAIM_TTL_S
+        )
+    assert len(wire.refs) == 1 and record["delivered"] == []
+
+    monkeypatch.setattr(wake_mod, "deliver_wake", delivered_fake)
+    for _ in range(4):  # the restarted connector, across a lease or more
+        _iterate(owner, tmp_path, access)
+        clock.now += wake_mod.CLAIM_TTL_S
+    assert len(record["delivered"]) == 1
+    assert set(wire.refs) == {wire.refs[0]}  # never a second, conflicting ref
+    assert store.screening_hold(owner, "bmsg_1") is None
+    assert store.drain_feed_refs(owner, 3) == []
 
 
 def test_a_session_claim_is_never_parked_for_redelivery(tmp_path, monkeypatch) -> None:

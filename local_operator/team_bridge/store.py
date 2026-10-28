@@ -3112,6 +3112,29 @@ class Store:
         except StoreRefused:
             return None
 
+    def intent_client_ref(self, owner: OwnerSnapshot, message_id: str, target: str) -> str | None:
+        """The ``client_ref`` already recorded for this (message, target), ANY state.
+
+        WHY (PR #3063 QA Q-1): the ref is the hub's idempotency key and the
+        ledger's write-once identity. A connector stopped or killed after its
+        read ACK confirmed, but before the session handoff, re-drives the same
+        message; minting a FRESH ref there made ``record_ack_intent`` refuse
+        ``intent_conflict`` on every replay, so the handoff never ran again and
+        the message was lost. Replaying with the stored ref turns that into the
+        exact replay the ledger already supports (a confirmed intent returns
+        without a second request). A DIFFERENT screening tuple still conflicts:
+        the ref is reused, never the verdict. ``None`` when nothing is recorded.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT client_ref FROM ack_intents WHERE owner_key = ? AND message_id = ? "
+                "AND target = ?",
+                (_owner_key(owner), message_id, target),
+            ).fetchone()
+            return None if row is None else str(row["client_ref"] or "") or None
+
     def find_pending_intent(
         self, owner: OwnerSnapshot, message_id: str, target: str
     ) -> dict[str, Any] | None:
@@ -4841,7 +4864,11 @@ class Store:
         :data:`CONNECTOR_CLAIM_TOKEN_PREFIX`) rather than a session's own
         ``ack working`` claim (which proves the message already reached a
         session). The token itself is lease authority and stays private.
-        Read-only; ``None`` when no row exists or the store is unreadable.
+        Read-only; ``None`` only when no row exists. An unreadable store
+        raises ``StoreRefused`` (``state_unreadable`` or whatever ``_connect``
+        refuses with) rather than reading as "no claim": the loop would take
+        a missing claim as "nothing holds this" and retire the retry
+        (PR #3063 review m3), so callers must tell the two apart.
         """
 
         try:
@@ -4852,8 +4879,8 @@ class Store:
                     "WHERE owner_key = ? AND message_id = ?",
                     (_owner_key(owner), message_id),
                 ).fetchone()
-        except sqlite3.Error:
-            return None
+        except sqlite3.Error as error:
+            raise StoreRefused("state_unreadable", "claim row unreadable") from error
         if row is None:
             return None
         return {

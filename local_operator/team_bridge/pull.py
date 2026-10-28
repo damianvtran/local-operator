@@ -345,7 +345,12 @@ async def ack(
 
     store = Store(config_dir)
     _guard_owner(store, owner, access)
-    ref = client_ref or str(uuid.uuid4())
+    # A re-driven message (a stop or kill landed after its ACK, before the
+    # handoff) replays the STORED ref: a fresh one is a write-once conflict
+    # that strands the handoff forever (PR #3063 QA Q-1). A confirmed replay
+    # then returns without a second request; a pending one re-sends the same
+    # key, which the hub answers as a replay.
+    ref = client_ref or store.intent_client_ref(owner, message_id, target) or str(uuid.uuid4())
     intent_id = store.record_ack_intent(owner, message_id, target, receipt, ref)
     return await flush_ack(owner, intent_id, config_dir=config_dir, access=access, client=client)
 

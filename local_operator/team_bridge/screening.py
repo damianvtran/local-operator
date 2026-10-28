@@ -119,6 +119,9 @@ HOLD_CODES = (
     # (team_bridge.connector.loop.HOLD_STALE_CLAIM). Transient — at most one
     # claim lease — but listed so it renders as itself, not ``unknown_hold``.
     "stale_claim",
+    # Its re-drive: the same message as an ordinary retry, so a stop that
+    # interrupts the re-drive can never retire it (PR #3063 review M1).
+    "stale_claim_retry",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
