@@ -228,8 +228,32 @@ def test_registering_a_second_op_under_the_same_name_is_refused() -> None:
     existing = approval_ops.get(finite_share.OP)
     assert existing is not None
     impostor = copy.copy(existing)
-    with pytest.raises(ValueError, match="already registered"):
-        approval_ops.register(impostor)
+    # Unsealed so the DUPLICATE check is what answers, not the seal.
+    with approval_ops._unsealed_for_tests():
+        with pytest.raises(ValueError, match="already registered"):
+            approval_ops.register(impostor)
+        # A family's refusal answers for every unknown member: never silently replaced.
+        with pytest.raises(ValueError, match="already registered"):
+            approval_ops.register_family("credential_", lambda *a: None)
+    assert approval_ops.get(finite_share.OP) is existing
+
+
+def test_the_registry_is_sealed_after_the_providers_load() -> None:
+    """R2: once loaded, ``register``/``register_family`` refuse -- the registry is closed."""
+    approval_ops.registered()  # any lookup finishes loading and seals
+    fresh = _SyntheticTypedOp()
+    with pytest.raises(RuntimeError, match="sealed"):
+        approval_ops.register(fresh)
+    with pytest.raises(RuntimeError, match="sealed"):
+        approval_ops.register_family("synthetic_", lambda *a: None)
+    assert approval_ops.get(fresh.op) is None
+    # The test-only unseal restores the tables and the seal exactly.
+    with approval_ops._unsealed_for_tests():
+        approval_ops.register(fresh)
+        assert approval_ops.get(fresh.op) is fresh
+    assert approval_ops.get(fresh.op) is None
+    with pytest.raises(RuntimeError, match="sealed"):
+        approval_ops.register(fresh)
 
 
 # ---------------------------------------------------------------------------
@@ -400,14 +424,36 @@ class _SyntheticTypedOp:
         return approval_ops.typed_required(approval_id)
 
 
-def _synthetic(rig: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:  # noqa: F811
+class _DeferringTypedOp(_SyntheticTypedOp):
+    """A registered op OUTSIDE every family whose own refusal DEFERS (returns ``None``).
+
+    The R1 / SC-1 shape: a future op (``pair_phone``) that cannot parse a malformed payload
+    and so has no specific answer. Key presence alone must still refuse on BOTH generic
+    approvers -- ``None`` defers to the fail-closed default, it never means "signable".
+    """
+
+    op = "probe_none_op"
+
+    def generic_refusal(self, record: Any, approval_id: str) -> MeshRefusal | None:
+        return None
+
+
+def _synthetic(
+    rig: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    op: Any = None,
+    payload: Any = None,
+) -> dict[str, Any]:
     from tests.unit.network.test_finite_share import _record_with_what
 
+    op = op or _SyntheticTypedOp()
     template = _finite(rig, monkeypatch)
-    monkeypatch.setitem(approval_ops._OPS, _SyntheticTypedOp.op, _SyntheticTypedOp())
+    # The registry is sealed; the stub enters through the private table and monkeypatch
+    # removes it again, which is the test seam the seal docstring names.
+    monkeypatch.setitem(approval_ops._OPS, op.op, op)
     what = {
         "anchor": copy.deepcopy(template["what"]["anchor"]),
-        _SyntheticTypedOp.op: {"payload": "synthetic"},
+        op.op: {"payload": "synthetic"} if payload is None else payload,
     }
     return _record_with_what(template, what, rig.root)
 
@@ -448,6 +494,64 @@ def test_cli_approve_refuses_a_registered_typed_op_before_the_signer(
     # Deny (and withdraw) stay open on the CLI too.
     assert _lop_network("approvals", "deny", aid, "--json") == 0
     assert A.load_record(aid, root=rig.root)["state"] == "denied"
+
+
+def test_cli_approve_negative_control_signs_without_the_registry_check(
+    rig: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R5: the CLI twin of the bodiless negative control -- the check is what refuses."""
+    record = _synthetic(rig, monkeypatch)
+    counters = _counted(monkeypatch)
+    aid = record["approval_id"]
+    monkeypatch.setattr(approval_ops, "require_generic_approvable", lambda *a, **k: None)
+    capsys.readouterr()
+    assert _lop_network("approvals", "approve", aid, "--json") == 0
+    assert counters["signer"] == 1
+    assert A.load_record(aid, root=rig.root)["state"] == "approved"
+
+
+MALFORMED_PAYLOADS = ["not-a-dict", 7, [], {}]
+
+
+@pytest.mark.parametrize("payload", MALFORMED_PAYLOADS)
+@pytest.mark.asyncio
+async def test_bodiless_approve_fails_closed_for_a_deferring_op_with_a_malformed_payload(
+    rig: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+) -> None:
+    """R1 / SC-1 (desktop): key presence refuses even when the op's own refusal is ``None``."""
+    record = _synthetic(rig, monkeypatch, op=_DeferringTypedOp(), payload=payload)
+    _level(monkeypatch, PRESENCE)
+    counters = _counted(monkeypatch)
+    aid = record["approval_id"]
+    async with _client(rig, monkeypatch) as client:
+        response = await client.post(f"/v1/desktop/approvals/{aid}/approve")
+    assert counters["signer"] == 0
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == approval_ops.TYPED_APPROVAL_REQUIRED
+    assert A.load_record(aid, root=rig.root)["state"] == "requested"
+
+
+@pytest.mark.parametrize("payload", MALFORMED_PAYLOADS)
+def test_cli_approve_fails_closed_for_a_deferring_op_with_a_malformed_payload(
+    rig: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    payload: Any,
+) -> None:
+    """R1 / SC-1 (CLI): the same record refuses on ``lop network approvals approve``."""
+    record = _synthetic(rig, monkeypatch, op=_DeferringTypedOp(), payload=payload)
+    counters = _counted(monkeypatch)
+    aid = record["approval_id"]
+    capsys.readouterr()
+    rc = _lop_network("approvals", "approve", aid, "--json")
+    assert counters["signer"] == 0
+    assert rc != 0
+    assert json.loads(capsys.readouterr().out)["code"] == approval_ops.TYPED_APPROVAL_REQUIRED
+    assert A.load_record(aid, root=rig.root)["state"] == "requested"
 
 
 @pytest.mark.asyncio

@@ -364,7 +364,11 @@ async def approve_credential(
     desktop builds (``credential_approvals``).
 
     Kept with its ``Literal`` body model, so an op that is not a credential op is a 422 here
-    exactly as before; the handler is the same function.
+    exactly as before; the handler is the same function. THE ONE INTENDED DIFFERENCE from
+    ``/approve-operation`` (QA round 1, Q1): an unregistered ``operation`` is rejected by
+    validation here (422), but passes the open ``OperationApprovalAcknowledgment`` there and
+    the engine refuses it (409 ``credential_operation_mismatch``). Either way nothing signs;
+    every registered op answers identically on both families.
     """
     return await _approve_operation(request, approval_id, body)
 
@@ -375,5 +379,9 @@ async def approve_credential(
 async def apply_credential(
     request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
 ):
-    """ALIAS of ``/apply-operation`` for shipped desktop builds."""
+    """ALIAS of ``/apply-operation`` for shipped desktop builds.
+
+    Same 422-here / 409-there difference for an unregistered ``operation`` as
+    :func:`approve_credential`.
+    """
     return await _apply_operation(request, approval_id, body)

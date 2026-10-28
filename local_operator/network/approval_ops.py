@@ -25,10 +25,17 @@ CONSTRAINTS.
 * CLOSED AND STATIC. Registration happens only at import of the modules named in
   :data:`_PROVIDERS`; there are no entry points and nothing outside this repository can add
   an op. A typo'd or missing provider fails the import loudly rather than leaving an op
-  unguarded.
+  unguarded. ENFORCED: :func:`register` / :func:`register_family` raise on a duplicate name
+  or prefix, and raise once the providers have loaded (the registry is SEALED by the first
+  lookup). This is a guard against a programming error, not a runtime security boundary:
+  same-process code can always reach the private tables (the tests' stub-op seam does),
+  and same-uid code is outside the threat model.
 * KEY PRESENCE IS THE BOUNDARY. An op claims a record when its key is present in the
   record's ``what`` block, whether or not the payload parses -- a malformed payload must
-  fail closed, never fall through to a generic signer.
+  fail closed, never fall through to a generic signer. :func:`require_generic_approvable`
+  ENFORCES this rather than trusting each op: a present key that no op refusal and no
+  family refusal answered is refused with :func:`typed_required` (agent review round 1,
+  R1 / shape check SC-1).
 * FROZEN REFUSALS. The credential ops keep the exact refusal codes and sentences their
   literal guards answered (clients and tests key on them); :data:`TYPED_APPROVAL_REQUIRED`
   is the default only for ops that register no refusal of their own.
@@ -43,10 +50,11 @@ and decide ``file_only_signing`` as an explicit operator decision -- never by de
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import threading
 from pathlib import Path
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Iterator, Mapping, Protocol, runtime_checkable
 
 from local_operator.network.types import MeshRefusal
 
@@ -95,11 +103,13 @@ class ApprovalOp(Protocol):
         """Apply a signed card; raises ``MeshRefusal`` on refusal."""
 
     def generic_refusal(self, record: Mapping[str, Any], approval_id: str) -> MeshRefusal | None:
-        """The refusal a GENERIC approver answers for this record, or ``None`` if unclaimed.
+        """This op's OWN refusal for a generic approver, or ``None`` to defer.
 
-        Return ``None`` when the record does not carry this op in a form this op owns, so
-        the next op (or a family rule) can answer; the default answer for a claimed record
-        is :func:`typed_required`.
+        Called only when this op's key is present in ``what``. ``None`` NEVER means
+        "signable": it defers to the fail-closed default -- a later op's refusal, then (on
+        the desktop) a family refusal, then :func:`typed_required`. Return a refusal only to
+        give a record a more specific code or sentence than that default (the credential
+        ops do, to keep their frozen bodies).
         """
 
 
@@ -109,39 +119,82 @@ _OPS: dict[str, ApprovalOp] = {}
 #: member (e.g. an unknown ``credential_*`` op): undisclosable, so never signable.
 _FAMILIES: dict[str, Any] = {}
 _loaded = False
+#: Set once the providers have imported: from then on the registry only answers lookups.
+#: Providers register DURING their import, which :func:`_ensure_loaded` finishes before it
+#: seals, so the seal can never land between a provider's registrations.
+_sealed = False
+
+
+def _refuse_if_sealed(what: str) -> None:
+    if _sealed:
+        raise RuntimeError(
+            f"approval op registry is sealed; {what} must register at import of a module "
+            "named in approval_ops._PROVIDERS"
+        )
 
 
 def register(operation: ApprovalOp) -> ApprovalOp:
-    """Add ``operation``; registering the same op name twice is a programming error.
+    """Add ``operation``; a duplicate name, or a call after the seal, raises.
 
     Registration ORDER is the precedence of :func:`require_generic_approvable` when one
     record carries several op keys, so a provider registers in the order its old literal
     guards ran.
     """
     with _LOCK:
-        if operation.op in _OPS and _OPS[operation.op] is not operation:
+        _refuse_if_sealed(f"op {operation.op!r}")
+        if operation.op in _OPS:
             raise ValueError(f"approval op {operation.op!r} is already registered")
         _OPS[operation.op] = operation
     return operation
 
 
 def register_family(prefix: str, unsupported: Any) -> None:
-    """Own every ``what`` key starting with ``prefix``.
+    """Own every ``what`` key starting with ``prefix``; a duplicate prefix raises.
 
     ``unsupported(record, approval_id) -> MeshRefusal`` answers for a key of the family that
-    no op registered: the generic approver must not sign what no op can disclose.
+    no op registered: the generic approver must not sign what no op can disclose. Silently
+    replacing a family's refusal would swap the answer for every unknown member, so a
+    second registration of the same prefix is a programming error.
     """
     with _LOCK:
+        _refuse_if_sealed(f"family {prefix!r}")
+        if prefix in _FAMILIES:
+            raise ValueError(f"approval op family {prefix!r} is already registered")
         _FAMILIES[prefix] = unsupported
 
 
 def _ensure_loaded() -> None:
-    global _loaded
+    global _loaded, _sealed
     if _loaded:
         return
     for name in _PROVIDERS:
         importlib.import_module(name)
     _loaded = True
+    _sealed = True
+
+
+@contextlib.contextmanager
+def _unsealed_for_tests() -> Iterator[None]:
+    """TEST-ONLY: lift the seal for a block, then restore the registry exactly.
+
+    The registry tests need to register stub ops (and prove ``register`` refuses a
+    duplicate) without leaking them into later tests; production code must never call this.
+    The tables are snapshotted and put back, so anything registered inside is dropped.
+    """
+    global _sealed
+    _ensure_loaded()
+    with _LOCK:
+        ops, families, sealed = dict(_OPS), dict(_FAMILIES), _sealed
+        _sealed = False
+    try:
+        yield
+    finally:
+        with _LOCK:
+            _OPS.clear()
+            _OPS.update(ops)
+            _FAMILIES.clear()
+            _FAMILIES.update(families)
+            _sealed = sealed
 
 
 def registered() -> tuple[ApprovalOp, ...]:
@@ -185,6 +238,12 @@ def require_generic_approvable(
     what = record.get("what")
     if not isinstance(what, dict):
         return
+    # FAIL CLOSED (agent review round 1, R1 / SC-1): a registered op's key that this surface
+    # may not sign is refused even when the op's own refusal defers (``None``, e.g. a payload
+    # it cannot parse). The specific answers keep their pre-S4a order -- op refusals in
+    # registration order, then the desktop family scan -- so every credential record keeps
+    # its frozen body; ``typed_required`` is the last word, never a fall-through to sign.
+    unanswered = False
     for operation in registered():
         if operation.op not in what:
             continue
@@ -194,15 +253,17 @@ def require_generic_approvable(
         refusal = operation.generic_refusal(record, approval_id)
         if refusal is not None:
             raise refusal
-    if surface != SURFACE_DESKTOP:
-        # PURE REFACTOR: the CLI verb never refused unknown family keys; changing that is a
-        # behaviour change for its own PR.
-        return
-    with _LOCK:
-        families = dict(_FAMILIES)
-    for prefix, unsupported in families.items():
-        if any(isinstance(key, str) and key.startswith(prefix) for key in what):
-            raise unsupported(record, approval_id)
+        unanswered = True
+    if surface == SURFACE_DESKTOP:
+        with _LOCK:
+            families = dict(_FAMILIES)
+        for prefix, unsupported in families.items():
+            if any(isinstance(key, str) and key.startswith(prefix) for key in what):
+                raise unsupported(record, approval_id)
+    # (The CLI never refused UNREGISTERED family keys, and skips ``cli_approvable`` ops
+    # entirely: that pre-S4a CLI behaviour is unchanged here and is its own PR.)
+    if unanswered:
+        raise typed_required(approval_id)
 
 
 # ---------------------------------------------------------------------------
