@@ -4358,8 +4358,15 @@ class TestTheStreamCompletedStopBoundary:
         *,
         script: list[list[tuple[str, dict[str, Any]]]],
         max_steps: int,
+        progress_guards: Any = None,
+        frozen: bool = False,
     ) -> tuple[list[dict[str, Any]], Any, str]:
-        """One real episode; returns (wire calls, outcome, record text)."""
+        """One real episode; returns (wire calls, outcome, record text).
+
+        ``frozen`` makes every executed batch return the SAME public state
+        (the FakeAdapter's default text changes per step, which is progress);
+        ``progress_guards`` is passed straight to ``run_session_episode``.
+        """
 
         import local_operator.providers.clients as clients_mod
 
@@ -4378,6 +4385,25 @@ class TestTheStreamCompletedStopBoundary:
         (world / "note.txt").write_text("synthetic world note", encoding="utf-8")
 
         calls, transport = self._wire(script)
+        if frozen:
+            # The FakeAdapter's screen text is ``state-<sequence>`` -- it
+            # changes every step, which is progress. Freezing the PUBLIC text
+            # (the content id still moves with the sequence) is the clock-only
+            # shape task030 recorded.
+            import tests.unit.evaluation.runner.conftest as runner_fakes
+
+            real_observation = runner_fakes.observation
+
+            def frozen_observation(episode_id: str, sequence: int, **kw: Any) -> Any:
+                draft = real_observation(episode_id, sequence, **kw)
+                if sequence == 0:
+                    return draft
+                fixed = draft.model_copy(update={"text": "frozen", "observation_id": "p"})
+                return fixed.model_copy(
+                    update={"observation_id": observation_content_id(fixed)}
+                )
+
+            monkeypatch.setattr(runner_fakes, "observation", frozen_observation)
         original = clients_mod.client_for_spec
 
         def patched(spec: Any, **kwargs: Any) -> Any:
@@ -4441,6 +4467,7 @@ class TestTheStreamCompletedStopBoundary:
             secrets=(),
             launch=launch,
             rescue=rescue,
+            progress_guards=progress_guards,
         )
         record = outcome.record_root / "events.jsonl" if outcome.record_root else None
         text = ""
@@ -4519,6 +4546,76 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.attempted_groups == 1
         assert outcome.steps == 0
         assert text.count("tool_execution_end") == 2  # both paired
+
+    #: The task030 shape on the REAL stack: one no-op chord per turn, forever.
+    _NOOP_CALL = ("mcp__episode_actions_apply_actions", {"actions": [{"kind": "key", "keys": ["ctrl", "l"]}]})
+
+    @pytest.mark.asyncio
+    async def test_progress_guards_stop_a_frozen_repeat_on_the_real_stack(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Opt-in parity, end to end: SDK session -> MCP tool -> bridge -> guard.
+
+        ``RepeatedBatchGuard(4)``: the batch completing the window runs, the
+        guard reads its result, the session is stopped before the next root
+        request, and the outcome is a scored truncation named by the guard.
+        """
+
+        from local_operator.evaluation.runner.guards import progress_guards
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=20,
+            progress_guards=progress_guards(),
+            frozen=True,
+        )
+        # The reset screen (``state-0``) differs from the frozen one, and the
+        # guard's span includes the screen each batch was decided on -- so the
+        # first all-unchanged window of 4 is batches 2-5, not 1-4.
+        assert outcome.steps == 5
+        assert outcome.status == "truncated"
+        assert outcome.terminal_reason == "repeated-batch"
+        assert outcome.diagnostic is not None and "4 times" in outcome.diagnostic
+        assert len(calls) == 5  # the graceful stop: no 6th root request
+        assert '"progress_stop"' in text or "action_progress_stop" in text
+
+    @pytest.mark.asyncio
+    async def test_without_the_policy_the_frozen_repeat_runs_to_the_budget(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The control: same script, same stack, policy unset -- the old shape."""
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=8,
+            frozen=True,
+        )
+        assert outcome.steps == 8
+        assert outcome.terminal_reason == "max-steps"
+        assert "progress_stop" not in text
+
+    @pytest.mark.asyncio
+    async def test_progress_guards_never_stop_an_advancing_screen(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Advancing-observation control: identical batches, changing state."""
+
+        from local_operator.evaluation.runner.guards import progress_guards
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=8,
+            progress_guards=progress_guards(),
+        )
+        assert outcome.steps == 8
+        assert outcome.terminal_reason == "max-steps"
+        assert "progress_stop" not in text
 
 
 def test_identical_read_only_pixels_are_neutral_and_do_not_escalate_action_streak(
