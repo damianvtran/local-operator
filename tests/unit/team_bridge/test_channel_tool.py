@@ -47,6 +47,9 @@ def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    # The room ops that are endpoint-addressed (channel_create/post/history/thread/react)
+    # dispatch through the OUTBOUND fence, so this file must open that one too.
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
 
 

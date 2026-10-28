@@ -32,8 +32,10 @@ import pytest
 
 import local_operator
 from local_operator.harness.types import ToolContext
+from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
 from local_operator.team_bridge.tool import BRIDGE_OPS, build_bridge_tool
+from tests.unit.team_bridge.test_channel_tool import RecordingClient, _runtime
 from tests.unit.team_bridge.test_client import FakeStore, _ok
 
 PACKAGE = Path(local_operator.__file__).parent
@@ -45,6 +47,18 @@ GRANT_CALLERS = {
     "server/routes/desktop_team_bridge.py",
 }
 GRANT_METHODS = ("cos_read_grant", "cos_read_revoke")
+
+
+@pytest.fixture(autouse=True)
+def _destination_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Open the destination allow-list: this file tests the GRANT path gate.
+
+    Without it the transport refuses `https://hub.example` first, with
+    `bridge_destination_refused`, and every assertion below would be measuring the
+    wrong refusal (found by running the file).
+    """
+
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
 
 
 class _Recorder:
@@ -121,10 +135,15 @@ async def test_the_human_methods_still_reach_the_wire(tmp_path: Path) -> None:
     await client.cos_read_grant("bcv_abcd1234", tenant_id="ten_1", expected_account_id="acc_1")
     assert [r.method for r in recorder.requests] == ["PUT"]
     assert recorder.requests[0].url.path.endswith("/conversations/bcv_abcd1234/cos-read")
-    assert recorder.requests[0].url.params["tenant_id"] == "ten_1"
+    # The PUT carries the tenant in its BODY (a strict-decoded write), the DELETE in
+    # the query string (a DELETE body is not reliably carried).
+    import json as _json
+
+    assert _json.loads(recorder.requests[0].content)["tenant_id"] == "ten_1"
 
     await client.cos_read_revoke("bcv_abcd1234", tenant_id="ten_1", expected_account_id="acc_1")
     assert [r.method for r in recorder.requests] == ["PUT", "DELETE"]
+    assert "tenant_id=ten_1" in str(recorder.requests[1].url)
 
 
 @pytest.mark.asyncio
@@ -170,7 +189,7 @@ def test_no_bridge_tool_op_can_reach_a_grant_method() -> None:
 def test_the_desktop_grant_routes_are_the_documented_path() -> None:
     """The tool description must point at tool://bridge, never at a grant API."""
 
-    tool = build_bridge_tool(ToolContext(bridge_runtime=None))
+    tool = build_bridge_tool(ToolContext(bridge_runtime=_runtime(RecordingClient())))
     assert tool is not None
     description: Any = tool.description
     assert "read tool://bridge" in description

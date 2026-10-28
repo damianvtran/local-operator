@@ -69,7 +69,12 @@ def test_writer_runtime_does_not_grant_inbound_authority(
         if session_id == "sess_cos":
             assert refusal is None
         else:
-            assert refusal is not None and refusal["code"] == "owner_changed"
+            # A DESIGNATION miss is not account drift: the binding is intact, this
+            # session is simply not the inbox reader (review round 2, MAJOR A). Pin
+            # BOTH halves so a later refactor cannot flatten the distinction back
+            # onto the alarming `owner_changed`.
+            assert refusal is not None and refusal["code"] == "not_designated"
+            assert refusal["code"] != "owner_changed"
     assert Store(enrolled.config_dir).designated_session_for(OWNER) == "sess_cos"
 
 
