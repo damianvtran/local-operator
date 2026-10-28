@@ -1951,6 +1951,37 @@ def test_an_unlinked_agent_loses_its_status_row(env) -> None:
     assert any(link["local_id"] == row.id for link in links["links"])
 
 
+def test_a_stored_id_that_cannot_be_a_path_never_crashes_the_check(env) -> None:
+    """r4 m1: a NUL byte in a stored id must not abort every full check.
+
+    Writers validate ids, but a corrupted or hand-edited ``status.json`` can hold
+    one, and ``os.stat`` raises ``ValueError`` ("embedded null character") before
+    any syscall -- which escaped ``_absent`` and crashed the whole check, on every
+    runner tick that retried it. Keep is the conservative answer. The check runs
+    on a FRESH context so nothing in-memory hides a disk read (round-4 n1).
+    """
+
+    ctx, _hub, _agents, _teams, root = env
+    svc.check_items(ctx)  # a first pass, so the store exists with a real row
+
+    def plant(doc: dict[str, Any]) -> None:
+        items = doc.setdefault("items", {})
+        for kind in ("agent", "team"):
+            items[f"{kind}:a\x00b"] = dict(st.blank_item(kind, "a\x00b", "nul", "h-nul", None))
+
+    st.StatusStore(root).mutate(plant)
+    fresh = svc.HubSyncContext(
+        config_dir=root,
+        config_manager=ConfigManager(root),
+        client_for_tenant=ctx.client_for_tenant,
+    )
+    svc.check_items(fresh)  # must complete, not raise
+
+    items = st.StatusStore(root).load()["items"]
+    assert "agent:a\x00b" in items, "an id that cannot be a path is unknown, not gone"
+    assert "team:a\x00b" in items
+
+
 def test_a_read_only_agents_dir_never_reads_a_live_agent_as_gone(env) -> None:
     """m1 (round 3): EACCES is UNKNOWN, never absence.
 

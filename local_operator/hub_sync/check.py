@@ -417,8 +417,9 @@ def _absent(path: Path) -> bool:
     but not TRAVERSE makes every item under it look deleted, and its row pruned
     (round-3 m1). ``Path.exists`` also cannot tell that case from a real absence on
     older interpreters, so the decision is made here instead: only FileNotFoundError
-    is absence; every other OSError is UNKNOWN, which the callers answer by keeping
-    the row.
+    is absence; every other OSError -- and a path that cannot exist at all, such as
+    a stored id carrying a NUL byte (round-4 m1) -- is UNKNOWN, which the callers
+    answer by keeping the row.
     """
 
     try:
@@ -426,7 +427,12 @@ def _absent(path: Path) -> bool:
         return False
     except FileNotFoundError:
         return True
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers an id that can never be a path at all -- ``os.stat``
+        # raises "embedded null character" for a stored ``local_id`` carrying a NUL
+        # byte, before any syscall. A corrupted or hand-edited ``status.json`` can
+        # hold one, and crashing here would abort EVERY full check and every runner
+        # tick that retries it (round-4 m1). Keep is the conservative answer.
         return False
 
 
