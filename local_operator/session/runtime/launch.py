@@ -447,7 +447,19 @@ def _spawn_runtime(
     # The session runtime never reads the daemon's desktop bearer, and anything it
     # holds its tool children can read (``ps -E`` showed it in cell 14 on #3002), so
     # it is never handed one (operator ask a-772b; ``agent_shell.DAEMON_BEARER_ENVS``).
+    # Kept first because it is a subtraction on the inherited environment; the
+    # ownership stamp below then ADDS a value this supervisor means to set, and a
+    # later scrub would be the only thing that could undo it by accident.
     without_daemon_bearer(env)
+    # ONLY the wake supervisor ITSELF stamps its ownership token, and only on a
+    # runtime it forks directly. Gated on pid equality, not on the variable
+    # being present: a wake runtime inherits the variables, so a presence
+    # check made every session it messaged or spawned look supervisor-owned,
+    # and a stop then cut their turns (#3028 review r4, MAJOR-2). Every other
+    # spawn has the marker stripped. Routing/ownership data, not a credential.
+    from local_operator.wakes.owned_runtimes import stamp_child_env
+
+    stamp_child_env(env)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
     env["LOP_MOBILE_CHILD_RESUME"] = session_id
     # A viewer's birth sample seeds only a new conversation. It is NOT a

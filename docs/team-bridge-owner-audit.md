@@ -54,7 +54,9 @@ additive hub fields pass through.
   filename="attachment.bin"`. Anything else is a `502 malformed_page`.
 
 Every response, including refusals raised by the route, carries `Cache-Control:
-private, no-store`. Hub refusals pass through unchanged: not your agent's, not
+private, no-store` (the app-wide ``managed_desktop_boundary``
+then serves it as plain ``no-store``, as it does for every ``/v1/desktop/``
+answer -- no weaker). Hub refusals pass through unchanged: not your agent's, not
 a member, outside the audit window, or unknown are all the same `404
 conversation_not_found` (bytes: `attachment_not_found`), so the routes are no
 existence oracle. A shape this build cannot read is `502 malformed_page`.

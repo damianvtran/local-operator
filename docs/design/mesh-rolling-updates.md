@@ -291,7 +291,7 @@ whole reason a standing grant is defensible here where a standing
 | Code | Sentence skeleton |
 |---|---|
 | `update_not_granted` | "`<device>` has not granted `update` to this device; its operator can grant it in the Mesh tab on `<device>`, or run `lop network member grant <net> <this-device> update` there." |
-| `unknown_target` / `target_not_published` | "the target `<version>` is not resolvable on this device's channel; nothing was installed." |
+| `unknown_target` / `target_not_published` | "the target `<version>` is not resolvable on this device's channel; nothing was installed." (A *wait* on the origin's record, not a terminal refusal — see §3's map and the 2026-10-27 amendment below.) |
 | `ahead_of_target` | "this device runs `<v2>` and the target is `<v1>` — an update never moves backwards." |
 | `editable_install` | "this device runs from a development tree; updates are out of scope there (`lop update` by hand is the path)." |
 | `update_in_progress` | "an update is already running here (`<run-id or pid>`); retry when it settles." |
@@ -351,7 +351,17 @@ a per-network policy.**
   the readiness comparison, and the drill's acceptance surface all compare
   versions exactly (`mesh-remote-onboarding.md` §3.4, "the tag is pinned in the
   record"). A newer release published mid-rollout is the *next* rollout's
-  target; this one converges the fleet onto one build.
+  target; this one converges the fleet onto one build. A target the member's
+  channel does not serve **yet** is waited for inside this rollout (amended
+  2026-10-27): the origin installs at tag time while PyPI publication lags it —
+  0.90.17's wheel landed 21.5 minutes after the member's first ask — so the
+  member is parked `deferred (target_not_published)` on the failure ladder
+  (5/10/20/40 min, then 2 h, counted separately from `failed`) and re-asked
+  until it installs, the window closes, or a newer rollout supersedes this one.
+  A window that closes on it says in plain words that the version never
+  appeared on PyPI and may not have been published at all (a 404 also covers an
+  upload PyPI refused, e.g. its project size quota), naming the members left on
+  their build.
 - **Offline / unreachable.** A member that cannot be dialled within the existing
   connect budget is recorded `unreachable` and the pass continues. Catch-up is
   **the origin's job, lazily**: the rollout record stays active, and the
@@ -404,7 +414,8 @@ member states (§6.1) — and this table is their single reconciliation:
 | the slow call itself, installing | — | `applying` |
 | pass completed | `done` | `done` |
 | no action needed | `already_on_target` / `ahead_of_target` | `already_on_target` / `ahead_of_target` |
-| member-side terminal refusal | `refused` (`target_not_published` / `editable_install`) | `refused` (same code) |
+| member-side terminal refusal | `refused` (`editable_install`) | `refused` (same code) |
+| target not on the member's channel yet | `refused` (`target_not_published`) | `deferred` (`target_not_published`), on the backoff ladder until the window or a superseding rollout ends it; the origin's own unparseable build stamp (refused before any frame) stays terminal `refused (target_not_published)` |
 | retry-class: busy past the budget / no answer / an update already in flight | `busy` / — / `refused` (`update_in_progress`) | `deferred` (`busy` / `no_answer` / `update_in_progress`) |
 | install or relay-roll failure | `failed` | `failed` |
 
@@ -437,9 +448,21 @@ substituted where it exists:
    scan`, the same read `process._another_move_in_flight` uses,
    `process.py:1864-1873`) and records the live set. No viewer, no TUI, no
    operator needed on the member.
-2. **Drain.** Wait until **no session is `busy`** — the registry walk plus the
+2. **Drain — in-place installs only** (amended 2026-10-27). Wait until **no
+   session is `busy`** — the registry walk plus the
    busy bit (`mesh-update-propagation.md` §4), re-checked under the update lock
-   before the install. The wait budget is the record's window: each ask is a
+   before the install. **A generation-layout member takes no drain at all**,
+   matching `docs/INSTALL_TRANSACTIONS.md` ("Immutable generations do NOT take
+   this gate") and what a local `lop update` already does there: the install
+   writes a new tree and flips a pointer, a running runtime keeps its own tree
+   (prune keeps any generation a live record names), and step 4 keeps each busy
+   runtime where it is. The pass proceeds, and its receipt NAMES the busy
+   sessions it left on the old build (`N busy session(s) stay on <old> until
+   they settle: name (id, waiting for approval); …`, plus a `left_busy` list
+   for `--json`). The measured reason: a wake-spawned Librarian parked on an
+   approval nobody could answer kept a headless worker `busy` for a day and
+   refused every rolling update. The rest of this step describes the in-place
+   shape. The wait budget is the record's window: each ask is a
    fresh probe, a member that answers `busy` is parked and re-asked on the
    origin's cadence (record `deferred`, code `busy`, detail `2 sessions busy
    since 10:02`) while the pass continues. The drain never
@@ -632,8 +655,10 @@ creates (`approvals.py:193-227` are the pattern to copy, not the store). Shape:
 Member states are the map's record column (§3); `code` distinguishes
 causes where the state alone cannot (`skipped`: `no_grant` /
 `predates_rolling_updates` / `unsupported_kind`; `refused`:
-`target_not_published` / `editable_install`; `deferred`: `busy` / `no_answer` /
-`update_in_progress`).
+`editable_install`, or `target_not_published` for the origin-side stamp case;
+`deferred`: `busy` / `no_answer` / `update_in_progress` /
+`target_not_published`). A member also carries `fails` and `waits`, the
+consecutive counters behind the `failed` and not-yet-published ladders.
 
 The member keeps **no mirrored record** — deliberately. Its ground truth is the
 install itself (dist-info + `.lop-source`), its lock, and its audit rows; the

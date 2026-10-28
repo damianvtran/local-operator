@@ -19,10 +19,18 @@ else entirely:
 - stdio fully redirected to ``DEVNULL``. A child that inherits this process's
   stdout writes bytes straight into the middle of a painted Textual frame, and
   one that inherits stdin competes with the input loop for keystrokes.
-- never waited on and never polled. The child is a side effect (a toast, a new
-  terminal window); its exit status tells this app nothing it can act on, and
-  waiting for a hung emulator or a stalled D-Bus activation would hold the
-  event loop.
+- never waited on BY THE CALLER and never polled. The child is a side effect
+  (a toast, a new terminal window); its exit status tells this app nothing it
+  can act on, and waiting for a hung emulator or a stalled D-Bus activation
+  would hold the event loop.
+- but always REAPED. On POSIX an exited child stays a zombie until its parent
+  waits on it, and CPython reaps an abandoned ``Popen`` only opportunistically
+  (``subprocess._cleanup`` runs at the NEXT ``Popen`` construction). A
+  long-lived session runtime that spawns one toast and nothing after it keeps
+  that zombie for its whole life — measured on a headless worker as a defunct
+  ``sh`` under a runtime parked on an approval, from the clickable
+  ``notify-send`` waiter. :func:`_reap_in_background` waits on a daemon thread
+  instead, so nothing blocks and nothing is left behind.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from collections.abc import Mapping, Sequence
 
 from local_operator.procstate import detached_popen_kwargs
@@ -86,7 +95,7 @@ def spawn_detached(
             launch[0], executable = procname.spawn_identity(label)
 
     try:
-        subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        child = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             launch,
             executable=executable,
             cwd=cwd,
@@ -96,10 +105,25 @@ def spawn_detached(
             stderr=subprocess.DEVNULL,
             **detached_popen_kwargs(),
         )
-        return True
     except Exception:
         # Best-effort by design: a missing binary or a spawn failure must never
         # surface as an error in a session, because the user asked for a task
         # and not for a toast (or a window).
         logger.debug("detached spawn failed: %s", list(argv)[:1], exc_info=True)
         return False
+    _reap_in_background(child)
+    return True
+
+
+def _reap_in_background(child: subprocess.Popen[bytes]) -> None:
+    """Collect ``child``'s exit status off-thread so it never lingers as a zombie.
+
+    A DAEMON thread: it must not hold interpreter shutdown for a child that
+    outlives us (a terminal window), and when this process exits the child is
+    re-parented to init, which reaps it — so an unfinished wait loses nothing.
+    Best-effort: a thread that cannot start leaves exactly today's behaviour.
+    """
+    try:
+        threading.Thread(target=child.wait, name="detached-reaper", daemon=True).start()
+    except Exception:  # noqa: BLE001 — reaping is hygiene, never a spawn failure
+        logger.debug("could not start the detached reaper", exc_info=True)

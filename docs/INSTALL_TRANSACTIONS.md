@@ -60,6 +60,9 @@ Immutable generations do NOT take this gate at all: a promotion lands in its own
 tree and moves a pointer, never rewriting a running runtime's imports, so the
 fleet may be busy. Central components update promptly; a running session keeps
 running on its own root and rolls onto the new build at its own next idle.
+The mesh member pass (`network/meshupdate.py`) follows the same rule: its busy
+gate applies to the in-place shape only, and on generation layout its receipt
+names the busy sessions it left on the previous build instead of refusing.
 
 ## Observation and recovery
 

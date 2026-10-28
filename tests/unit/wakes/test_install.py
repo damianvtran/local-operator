@@ -1011,6 +1011,23 @@ def test_the_linux_unit_quotes_paths_systemd_would_otherwise_split(
     assert 'ExecStart="/home/a b/python3" -m local_operator.wakes.supervisor' in text
 
 
+def test_the_wakes_unit_stops_only_the_supervisor_never_its_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``KillMode=process`` (M2 on #3028): a unit stop must not take wake-spawned runtimes.
+
+    Under systemd's default ``control-group`` every detached runtime left in the
+    unit's cgroup was SIGTERMed on stop/restart and SIGKILLed at 90 s. The
+    relay's unit carries the same line for the same reason.
+    """
+    from local_operator.wakes import install as mod
+
+    monkeypatch.setattr(mod.procname, "supervised_image", lambda: None)
+    text = mod.render_systemd(tmp_path / "store")
+    service = text.split("[Service]", 1)[1]
+    assert "KillMode=process" in service.splitlines(), text
+
+
 def test_the_systemd_probe_reads_state_rather_than_an_exit_code() -> None:
     """Pure parse, against recorded ``systemctl show`` output."""
     from local_operator.wakes.install import _parse_systemd_state

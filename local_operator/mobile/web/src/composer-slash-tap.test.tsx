@@ -105,6 +105,7 @@ function projection(): SessionProjection {
 async function openSheet() {
 	render(
 		<Composer
+			ended={false}
 			pid="p1"
 			projection={projection()}
 			onOpenModels={() => {}}

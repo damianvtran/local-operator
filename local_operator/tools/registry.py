@@ -38,6 +38,7 @@ from local_operator.tools.project_tool import (
 )
 from local_operator.tools.public_copy import build_read_public_copy_tool
 from local_operator.tools.secret_tool import build_secret_tool
+from local_operator.tools.skill_tool import build_skill_tool
 from local_operator.tools.tags_tool import build_tags_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
 from local_operator.tools.video_tool import (
@@ -219,6 +220,13 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # purpose: appending never shifts a provider-visible array prefix, which is
     # what the prompt cache keys on.
     "notify": lambda context: builtin.build_notify_tool(context),
+    # OPT-IN, NOT DEFAULT: the configuration run's skill editor. In this table so
+    # a declaring host can build it (`session_factory.AGENTS_CONFIG_TOOLS` +
+    # `Session._merge_capability_tools`), and deliberately ABSENT from
+    # `DEFAULT_TOOL_NAMES` below, so no ordinary session builds it and no other
+    # session's tools array -- the prompt-cache prefix -- moves. Appended at END
+    # for the same prefix reason as every entry above.
+    "skill": lambda context: build_skill_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit

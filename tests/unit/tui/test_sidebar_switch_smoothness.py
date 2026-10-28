@@ -1106,3 +1106,493 @@ async def test_a_fill_deferred_on_a_hidden_transcript_resumes_when_shown() -> No
     assert resumed, "the fill never resumed after the view was shown"
     assert resumed <= 2, ("the resumed fill needed more than two pages", resumed)
     assert scroll >= goal, ("the resumed fill did not reach its reserve", scroll, goal)
+
+
+def _conversation_signature(view) -> tuple[tuple[str, str], ...]:  # type: ignore[no-untyped-def]
+    """What is on screen, as the reader would describe it: rows in order.
+
+    Kind PLUS the projecting message's anchor id, because the count alone is not
+    the complaint — a page arriving above the viewport keeps the count growing
+    while the rows under the reader's eyes move 20 lines, which is the shift.
+    """
+    return tuple(
+        (type(block).__name__, getattr(block, "navigation_anchor_id", "") or "")
+        for block in view.blocks()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 70), (220, 70)])
+async def test_the_revealed_frame_is_already_the_settled_frame(
+    size: tuple[int, int], monkeypatch
+) -> None:
+    """ONE page, then a deferred fill, is two frames; the loop makes it one.
+
+    `_prefill_resume_before_reveal` mounted exactly one page and handed the rest
+    to a fill chained off that page's settle — so on any conversation whose
+    reserve needs more than one page, the rows that close the under-fill
+    arrived in a SECOND painted frame. `insert_blocks` re-pins a follower to the
+    tail (`transcript.py`, `if following_tail: self._scroll_to_tail()`), so that
+    second page does not merely appear: it drags the visible rows up by its own
+    height. Measured on the bench's legacy shape: 20 visible lines moved, twice
+    (once pre-reveal, once at the bind).
+
+    The sizes are the other half. 160x70 is a shape where the single-page rule
+    MUST show its second frame; 220x70 needs the most pages, so it is where a
+    page budget that is too small shows up as a regression rather than as a win.
+    (Height is what drives this — the reserve is rows, not columns.)
+
+    AND THE PAGE SIZE IS PATCHED, which is not cheating. The reserve is a
+    viewport; a page is `RESUME_PAGE_MESSAGES` messages. Whether one page closes
+    the reserve is therefore a GEOMETRY FACT about the conversation, and the
+    bench's legacy shape — short event rows, a 41-row viewport — is on the wrong
+    side of it: one page renders shorter than the viewport, the fill mounts a
+    second, and the reader sees 20 lines move. At the default 24 this fixture's
+    two-row messages render ~48 rows, which happens to cover a 70-row terminal,
+    so a unit rig left at the default passes on the UNFIXED tree — which is how
+    the single-page rule survived review while still shuffling on the real
+    bench. Eight messages reproduces the legacy ratio through the system's own
+    knob.
+
+    Asserted at the moment `_commit_sidebar_session` returns — the state the
+    first frame carries — against the state after the app has gone quiet.
+    """
+    monkeypatch.setattr("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8)
+    home = SidebarRemote("home-session")
+    target = _conversation("settled-session", 60)
+
+    app = OperatorApp(lambda: _factory(home))
+    at_reveal: dict[str, object] = {}
+
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
+        async with app.run_test(size=size) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            real_commit = app._commit_sidebar_session
+
+            def commit(session_id, prepared, generation):  # type: ignore[no-untyped-def]
+                out = real_commit(session_id, prepared, generation)
+                view = app._transcript_view()
+                viewport = int(view.container_size.height or view.size.height)
+                at_reveal["scroll_y"] = float(view.scroll_y)
+                at_reveal["viewport"] = viewport
+                at_reveal["blocks"] = _conversation_signature(view)
+                # The criterion is computed HERE, from the reader's side, not
+                # through the production predicate: a test that asks the code
+                # under test whether it agrees with itself proves nothing.
+                # "One viewport above the reader, plus the head notice's own
+                # rows" is what the deferred fill promises.
+                notice = app._resume_head_notice
+                prefix = (
+                    notice.virtual_region.bottom
+                    if notice is not None and notice.parent is view
+                    else 0
+                )
+                at_reveal["goal"] = float(max(viewport + prefix, 0))
+                at_reveal["goal_met"] = float(view.scroll_y) >= at_reveal["goal"]
+                at_reveal["paging"] = app._resume_paging
+                return out
+
+            app._commit_sidebar_session = commit  # type: ignore[method-assign]
+            await _switch(app, pilot, target)
+            for _ in range(60):
+                await pilot.pause()
+            view = app._transcript_view()
+            settled = _conversation_signature(view)
+
+    assert at_reveal, "the switch never committed"
+    assert at_reveal["goal_met"], (
+        f"the revealed frame had not reached the reserve at {size}: "
+        f"scroll_y={at_reveal['scroll_y']} goal={at_reveal['goal']} "
+        f"viewport={at_reveal['viewport']} — the rows that close it mount after the view is "
+        "already on screen, and each of those pages re-pins the tail"
+    )
+    assert at_reveal["paging"] is False, (
+        "the reveal left a paging transaction open, so the fill the commit chained is not the "
+        "one that would settle it"
+    )
+    # Hoisted out of the f-string below: `at_reveal` is a `dict[str, object]`, so
+    # `len()` needs the same argument-type waiver the equivalent assertion further
+    # down this file carries, and an f-string expression cannot hold one.
+    revealed_blocks = len(at_reveal["blocks"])  # type: ignore[arg-type]
+    assert at_reveal["blocks"] == settled, (
+        f"the block list moved between the revealed frame ({revealed_blocks}) and "
+        f"settled ({len(settled)}) at {size}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_pre_reveal_fill_stops_at_its_page_budget(monkeypatch) -> None:
+    """The loop is BOUNDED: a spent page budget hands over, it does not run on.
+
+    The pre-reveal section may not await, so nothing else in the app can
+    interrupt it — the only thing between a pathological shape and an
+    unbounded synchronous render is this budget. With the budget at one page the
+    commit must mount exactly one, and the deferred fill must still be the thing
+    that lands the reserve: the bound defers work, it never strands the reader.
+    """
+    monkeypatch.setattr("local_operator.tui.app.RESUME_PREFILL_MAX_PAGES", 1)
+    home = SidebarRemote("home-session")
+    target = _conversation("budget-session", 60)
+
+    app = OperatorApp(lambda: _factory(home))
+    during: list[int] = []
+    revealed = {"yes": False}
+    real_mount = app._mount_older_resume_page
+
+    def mount(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if not revealed["yes"]:
+            during.append(1)
+        return real_mount(*args, **kwargs)
+
+    app._mount_older_resume_page = mount  # type: ignore[method-assign]
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
+        async with app.run_test(size=(160, 70)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            real_commit = app._commit_sidebar_session
+
+            def commit(session_id, prepared, generation):  # type: ignore[no-untyped-def]
+                out = real_commit(session_id, prepared, generation)
+                revealed["yes"] = True
+                return out
+
+            app._commit_sidebar_session = commit  # type: ignore[method-assign]
+            await _switch(app, pilot, target)
+            for _ in range(60):
+                await pilot.pause()
+            view = app._transcript_view()
+            viewport = int(view.container_size.height or view.size.height)
+            scroll = float(view.scroll_y)
+
+    assert (
+        len(during) == 1
+    ), f"the pre-reveal loop mounted {len(during)} pages against a one-page budget"
+    assert scroll >= viewport, (
+        "the deferred fill never landed the reserve the bound handed over to it",
+        scroll,
+        viewport,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_spent_time_budget_reveals_what_it_has_and_defers_the_rest(monkeypatch) -> None:
+    """A budget that is already spent must not delay the first frame at all.
+
+    The wall-clock half of the bound exists for the shape nobody predicted — a
+    page that projects far slower than the fixture's. Zero is the worst case of
+    that: the commit must mount nothing, reveal what it already has, and let the
+    ordinary fill finish the reserve afterwards. A loop that read the clock
+    without re-checking it per pass would mount one page regardless.
+    """
+    monkeypatch.setattr("local_operator.tui.app.RESUME_PREFILL_BUDGET_S", 0.0)
+    home = SidebarRemote("home-session")
+    target = _conversation("clock-session", 60)
+
+    app = OperatorApp(lambda: _factory(home))
+    during: list[int] = []
+    revealed = {"yes": False}
+    real_mount = app._mount_older_resume_page
+
+    def mount(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if not revealed["yes"]:
+            during.append(1)
+        return real_mount(*args, **kwargs)
+
+    app._mount_older_resume_page = mount  # type: ignore[method-assign]
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
+        async with app.run_test(size=(160, 70)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            real_commit = app._commit_sidebar_session
+
+            def commit(session_id, prepared, generation):  # type: ignore[no-untyped-def]
+                out = real_commit(session_id, prepared, generation)
+                revealed["yes"] = True
+                return out
+
+            app._commit_sidebar_session = commit  # type: ignore[method-assign]
+            await _switch(app, pilot, target)
+            for _ in range(60):
+                await pilot.pause()
+            view = app._transcript_view()
+            viewport = int(view.container_size.height or view.size.height)
+            scroll = float(view.scroll_y)
+
+    assert during == [], f"a spent time budget still mounted {len(during)} pages before the reveal"
+    assert scroll >= viewport, (
+        "the deferred fill never landed the reserve the spent budget deferred",
+        scroll,
+        viewport,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_that_fits_one_screen_mounts_no_pages() -> None:
+    """A no-op, at the other end of the same predicate: nothing owed, nothing done.
+
+    The loop's exit condition must be reached by the view already satisfying it,
+    not by the pending head running out — a four-message conversation is
+    exhausted AND satisfied, and mounting a page for it would put history the
+    reader never scrolled to below a head notice claiming there is more above.
+    """
+    home = SidebarRemote("home-session")
+    target = _conversation("short-session", 2)
+
+    at_reveal: dict[str, object] = {}
+    app = OperatorApp(lambda: _factory(home))
+    during: list[int] = []
+    revealed = {"yes": False}
+    real_mount = app._mount_older_resume_page
+
+    def mount(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if not revealed["yes"]:
+            during.append(1)
+        return real_mount(*args, **kwargs)
+
+    app._mount_older_resume_page = mount  # type: ignore[method-assign]
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
+        async with app.run_test(size=(160, 70)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            real_commit = app._commit_sidebar_session
+
+            def commit(session_id, prepared, generation):  # type: ignore[no-untyped-def]
+                out = real_commit(session_id, prepared, generation)
+                revealed["yes"] = True
+                return out
+
+            app._commit_sidebar_session = commit  # type: ignore[method-assign]
+            await _switch(app, pilot, target)
+            for _ in range(60):
+                await pilot.pause()
+            view = app._transcript_view()
+            at_reveal["blocks"] = _conversation_signature(view)
+            settled = _conversation_signature(view)
+
+    assert during == [], f"a one-screen conversation mounted {len(during)} pages"
+    assert at_reveal["blocks"] == settled, (
+        "the rows of a conversation that fits one screen changed after the reveal",
+        at_reveal["blocks"],
+        settled,
+    )
+    assert len(settled) >= 4, f"a four-message conversation rendered {len(settled)} blocks"
+
+
+def _prose_conversation(session_id: str, turns: int, paragraphs: int) -> SidebarRemote:
+    """A conversation whose reply rows are TALL, so the stale/fresh viewport differs.
+
+    Both readings of the parked view's height are plausible for the same block
+    list: `container_size` carries the last layout the view had before the
+    commit, and the real one only exists after a layout pass. A reply whose
+    paragraphs wrap into several rows is what puts a conversation BETWEEN those
+    two readings — past the stale goal, short of the real one — which is the
+    band `test_the_revealed_frame_is_already_the_settled_frame` (short replies,
+    8-message pages) cannot see.
+    """
+    history = []
+    for turn in range(turns):
+        user = _message("user", f"question {turn} about the switch path")
+        user.id = f"{session_id}-u{turn}"
+        assistant = _message(
+            "assistant",
+            "\n\n".join(
+                f"paragraph {index} of answer {turn}, long enough to wrap at eighty columns "
+                "and take more than one row on the way"
+                for index in range(paragraphs)
+            ),
+        )
+        assistant.id = f"{session_id}-a{turn}"
+        history.extend((user, assistant))
+    return SidebarRemote(session_id, history=history)
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_past_the_stale_viewport_still_reveals_settled() -> None:
+    """The first goal check must read the REAL viewport, not the parked one.
+
+    Review round 1, M1. `container_size` at entry is the last layout the parked
+    view had — 44 rows at 160x70 against the 61 the same view measures once it
+    is laid out. A conversation whose reserve sits between those two readings is
+    already "done" by the stale number, so the loop exits with zero mounts and
+    the deferred fill then mounts its page into the REVEALED view: 38 blocks at
+    the first frame, 62 settled, one re-pin shift later. The band is narrow
+    (only two-paragraph replies land in it at this size) but it is ordinary
+    conversation text, and it is exactly the shift this method exists to remove.
+
+    So the layout is not a first-visit repair, it is the READING, and it runs
+    before the first check. This asserts the consequence a reader sees: one
+    mount before the reveal, none after it, and the revealed rows are the
+    settled rows.
+    """
+    home = SidebarRemote("home-session")
+    target = _prose_conversation("prose-session", 80, 2)
+
+    app = OperatorApp(lambda: _factory(home))
+    during: list[int] = []
+    after: list[int] = []
+    revealed = {"yes": False}
+    at_reveal: dict[str, object] = {}
+    real_mount = app._mount_older_resume_page
+
+    def mount(*args, **kwargs):  # type: ignore[no-untyped-def]
+        (after if revealed["yes"] else during).append(1)
+        return real_mount(*args, **kwargs)
+
+    app._mount_older_resume_page = mount  # type: ignore[method-assign]
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
+        async with app.run_test(size=(160, 70)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            real_commit = app._commit_sidebar_session
+
+            def commit(session_id, prepared, generation):  # type: ignore[no-untyped-def]
+                out = real_commit(session_id, prepared, generation)
+                view = app._transcript_view()
+                viewport = int(view.container_size.height or view.size.height)
+                at_reveal["scroll_y"] = float(view.scroll_y)
+                at_reveal["viewport"] = viewport
+                at_reveal["blocks"] = _conversation_signature(view)
+                revealed["yes"] = True
+                return out
+
+            app._commit_sidebar_session = commit  # type: ignore[method-assign]
+            await _switch(app, pilot, target)
+            for _ in range(60):
+                await pilot.pause()
+            settled = _conversation_signature(app._transcript_view())
+
+    assert after == [], f"{len(after)} pages mounted into the revealed view"
+    assert at_reveal["blocks"] == settled, (
+        "the revealed rows are not the settled rows",
+        len(at_reveal["blocks"]),  # type: ignore[arg-type]
+        len(settled),
+        at_reveal["scroll_y"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_pre_reveal_burst_stands_down_on_a_hidden_view() -> None:
+    """The burst shares the deferred fill's hidden-view stand-down (round 1, m2).
+
+    `container_size` keeps its last height while nothing lays the view out, so a
+    burst that only checked `viewport` would mount page after mount with
+    `scroll_y` pinned and every pass reading as progress — measured at eight
+    blind pages, `scroll_y` stuck at 29, ended only by the page cap. The
+    deferred fill already refuses this state; the pre-reveal burst is the same
+    work on the same view and must apply the same rule.
+
+    Reachability is by construction rather than measured: the commit closes the
+    views this was reachable from, but other views that hide the transcript also
+    set `display = False`, and this must not depend on that list staying short.
+    """
+    app = OperatorApp(lambda: _factory(SidebarRemote("hidden-prefill")))
+    with patch("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8):
+        async with app.run_test(size=(160, 70)) as pilot:
+            for _ in range(10):
+                await pilot.pause()
+            view = app._transcript_view()
+            assert view is not None
+            app._resume_pending_head = [
+                _message("assistant", "older row " + "x" * 100) for _ in range(200)
+            ]
+            mounts: list[int] = []
+            real_mount = app._mount_older_resume_page
+
+            def mount(*args, **kwargs):  # type: ignore[no-untyped-def]
+                mounts.append(1)
+                return real_mount(*args, **kwargs)
+
+            app._mount_older_resume_page = mount  # type: ignore[method-assign]
+            before = len(view.blocks())
+            view.display = False
+            for _ in range(4):
+                await pilot.pause()
+            app._prefill_resume_before_reveal()
+            for _ in range(12):
+                await pilot.pause()
+            # SNAPSHOT BEFORE THE VIEW IS SHOWN AGAIN. Showing it lays it out,
+            # which fires the extent hook that LEGITIMATELY re-arms the deferred
+            # fill — those pages are the next cell's subject, not this one's
+            # (review round 2, M2: counting them made this fail 5/5 at 2-11
+            # mounts, a timing-dependent number, while the burst itself mounted
+            # nothing). The snapshot also has to be taken here rather than derived
+            # from `blocks()`, because the re-show legitimately mounts into it.
+            hidden_mounts = len(mounts)
+            hidden_blocks = len(view.blocks())
+            view.display = True
+            for _ in range(2):
+                await pilot.pause()
+
+    assert hidden_mounts == 0, f"the burst mounted {hidden_mounts} pages into a hidden transcript"
+    assert hidden_blocks == before, (
+        "pages appeared in a transcript that could not be laid out",
+        before,
+        hidden_blocks,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_pre_reveal_burst_stands_down_when_an_ancestor_is_hidden() -> None:
+    """`container_size` survives hiding; the widget's own size does not (round 2, m4).
+
+    A view under an ancestor that is not laid out keeps its last
+    `container_size` while measuring (0, 0), so a stand-down that reads only
+    `view.display` lets the burst mount page after mount against a stale height:
+    eight blind pages with `scroll_y` pinned at 0.0, ended only by the page cap.
+    The deferred fill already refuses that state through its `view.size.height`
+    clause; the burst is the same work on the same view and applies the same rule
+    (checked after the layout pass, because a first visit has no size until that
+    pass runs).
+
+    Latent rather than reachable today — production hides this view itself at
+    every call site — so this cell exists to keep the rule from depending on that
+    list staying short.
+    """
+    app = OperatorApp(lambda: _factory(SidebarRemote("hidden-parent")))
+    with patch("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8):
+        async with app.run_test(size=(160, 70)) as pilot:
+            for _ in range(10):
+                await pilot.pause()
+            view = app._transcript_view()
+            assert view is not None
+            app._resume_pending_head = [
+                _message("assistant", "older row " + "x" * 100) for _ in range(200)
+            ]
+            mounts: list[int] = []
+            real_mount = app._mount_older_resume_page
+
+            def mount(*args, **kwargs):  # type: ignore[no-untyped-def]
+                mounts.append(1)
+                return real_mount(*args, **kwargs)
+
+            app._mount_older_resume_page = mount  # type: ignore[method-assign]
+            before = len(view.blocks())
+            parent = view.parent
+            assert parent is not None
+            parent.display = False
+            for _ in range(4):
+                await pilot.pause()
+            app._prefill_resume_before_reveal()
+            for _ in range(12):
+                await pilot.pause()
+            # Same split as the hidden-view cell: re-showing the ancestor lays
+            # the view out and re-arms the deferred fill, whose pages are not
+            # this test's subject.
+            hidden_mounts = len(mounts)
+            hidden_blocks = len(view.blocks())
+            parent.display = True
+            for _ in range(2):
+                await pilot.pause()
+
+    assert hidden_mounts == 0, f"the burst mounted {hidden_mounts} pages under a hidden ancestor"
+    assert hidden_blocks == before, (
+        "pages appeared in a transcript that could not be laid out",
+        before,
+        hidden_blocks,
+    )

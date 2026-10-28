@@ -109,6 +109,19 @@ CARRIED_DECISIONS_LIMIT = 20
 #: is not eviction: the ask still appears, with an explicit ellipsis.
 _QUESTION_CHARS = 500
 
+#: Per-decision clamp. The carried tier re-enters the prompt on every compaction
+#: and was bounded only by count, so its worst case scaled with the store's item
+#: cap: raising that cap to 512 content tokens would let 20 decisions reach ~10k
+#: tokens. 400 characters (~100 tokens) bounds the tier near 2.1k — below the
+#: ~5k worst case under the old 256-token cap — and a decision's lead sentence is
+#: what a resumed turn needs; the full fact stays one memory read away.
+CARRIED_DECISION_CHARS = 400
+#: The same clamp in TOKENS. Characters alone do not bound tokens: 400 characters of
+#: dense text (identifiers, hashes, CJK) measured ~280 tokens each, 5.6k for the tier.
+#: Prose never reaches this bound (400 chars is ~100 tokens), so it only trims the
+#: pathological row, never an ordinary decision.
+CARRIED_DECISION_TOKENS = 100
+
 _ASK_HEADING = "<unresolved-asks>"
 _ASK_CLOSING = "</unresolved-asks>"
 _DECISION_HEADING = "<recent-decisions>"
@@ -173,8 +186,19 @@ def _ask_line(ask: Mapping[str, Any]) -> str:
 
 
 def _decision_body(decision: Mapping[str, Any]) -> str:
-    """One rendered decision body, whitespace-collapsed."""
-    return " ".join(str(decision.get("body") or "").split())
+    """One rendered decision body, whitespace-collapsed and clamped with an ellipsis."""
+    from local_operator.compaction.tokens import count_text_tokens
+
+    body = " ".join(str(decision.get("body") or "").split())
+    clipped = body[:CARRIED_DECISION_CHARS]
+    # Shrink toward the token bound (at most ~3 cheap passes for a 400-char row),
+    # one token under it when clipping so the appended ellipsis stays inside it.
+    while count_text_tokens(clipped) > CARRIED_DECISION_TOKENS - (clipped != body):
+        limit = CARRIED_DECISION_TOKENS - 1
+        clipped = clipped[: max(1, len(clipped) * limit // count_text_tokens(clipped))]
+    if clipped != body:
+        return clipped.rstrip() + "…"
+    return body
 
 
 def read_unresolved_asks(

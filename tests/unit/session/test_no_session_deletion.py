@@ -3679,6 +3679,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.move",
         "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
     ),
+    (
+        "local_operator/memory_triage.py::apply",
+        "<path>.move",
+        "MemoryStore.move relocates global facts to their source session's bank; the "
+        "receiver is a store, not a path. Its only filesystem effect is the existing "
+        "atomic FILE rewrite of that session's memory-session.jsonl (MemoryStore._export); "
+        "it never removes or renames a directory",
+    ),
     # -- the TUI's sidebar grouping toggle: config-root view state ------------
     # `write_tag_groups` writes `<config>/sidebar-tags.json`, a FIXED path
     # built from the config root: `os.replace` moves only the sibling mkstemp

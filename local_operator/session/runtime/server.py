@@ -1143,6 +1143,80 @@ _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 #: :meth:`RuntimeServer._dispatch_frame`.
 _UNCHAINED_OPS = frozenset({"ping", "abort"})
 
+#: Ops that change the model or reasoning effort, and so ride their OWN lane of
+#: the connection's op chain instead of queuing behind whatever was admitted
+#: before them.
+#:
+#: WHY. A switch takes effect at the next provider call, and the user reaches
+#: for it mid-turn because the running model is doing badly (see
+#: ``Session.set_model``). The desktop's attach connection is shared with its
+#: sends, and a ``prompt`` sent while a turn runs PARKS inside the handle until
+#: the turn lock frees (``wait_for_turn``). Chained behind it, the switch waited
+#: for the whole remaining turn. Measured on a real runtime
+#: (``scripts/bench_model_switch.py --condition parked``: 12 lanes, a 240-child
+#: roster, a 40 MB transcript, one prompt parked on the same connection): the
+#: dispatcher first SAW a ``set_model`` 31.3 s after it was sent and the client
+#: gave up at its 15 s ack bound; ``set_effort`` the same (16.9 s). That is the
+#: operator's "/model did not run: the app waits up to 20 seconds".
+#:
+#: WHAT ORDERING SURVIVES. Two guarantees, and the lane is shaped to keep both:
+#:
+#: * switches stay in order AMONG THEMSELVES — each waits for the previous
+#:   switch on this connection (``_ClientConn.switch_chain``), so a quick
+#:   A-then-B cannot land as B-then-A;
+#: * anything admitted AFTER a switch still waits for it — the chain head
+#:   becomes a join of the previous head and the switch, so a ``prompt`` sent
+#:   after a ``/model`` runs on the model the user just picked (the draft's
+#:   ``_consume_model_override`` awaits the switch before it sends, and a
+#:   client that does not await is still ordered by this join).
+#:
+#: The one thing given up is that a switch no longer waits for an op admitted
+#: BEFORE it that is still parked — which is the point: a parked prompt whose
+#: turn has not begun will now run on the newly picked model, exactly what the
+#: switch would have done to the turn in flight anyway.
+#:
+#: ``slash``/``slash_result`` belong here only for the commands that ARE
+#: switches, or dials a switch resets (:data:`_SWITCH_SLASH_COMMANDS`): the desktop's model picker
+#: dispatches its choice as ``slash_result`` ``/model`` (see
+#: ``AttachedSession.route_shared_slash``), and every other slash keeps its
+#: place in the main chain. See :func:`_is_switch_frame`.
+_SWITCH_OPS = frozenset({"set_model", "set_effort"})
+
+#: The routed slash commands that ride the switch lane, by registry PRIMARY name.
+#:
+#: ``/fast`` is here for ORDER, not speed (PR #3053 QA round 1, Q1-2). It is a
+#: dial on the model's spec, and a genuine ``/model`` switch drops it. Left on
+#: the main chain while ``/model`` overtook, a ``/fast on`` sent BEFORE a
+#: ``/model B`` behind a parked prompt landed AFTER the switch, so the session
+#: ended on B with the premium tier on, where the send order (and the base
+#: behaviour) ends on B with it off. On the same lane the two keep send order
+#: among themselves, which is the lane's first guarantee.
+_SWITCH_SLASH_COMMANDS = frozenset({"model", "effort", "fast"})
+
+
+def _is_switch_frame(frame: Any) -> bool:
+    """Whether ``frame`` is a model/effort switch that rides the switch lane.
+
+    The slash command is resolved through the registry's alias table
+    (``primary_slash_name``) because the owner's dispatcher resolves it the same
+    way before it runs (``run_slash_authoritative``): a client sending the
+    advertised alias ``/models`` reaches the same ``/model`` branch, and must
+    reach it through the same lane (review round 1, R1-3).
+    """
+    if not isinstance(frame, dict):
+        return False
+    op = frame.get("op")
+    if op in _SWITCH_OPS:
+        return True
+    if op not in ("slash", "slash_result"):
+        return False
+    command = frame.get("command")
+    if not isinstance(command, str):
+        return False
+    from local_operator.slash_commands import primary_slash_name
+
+    return primary_slash_name(command.strip().lower()) in _SWITCH_SLASH_COMMANDS
+
 
 #: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
 #: of it: each mutates only this connection's own relay state and never touches
@@ -1932,6 +2006,11 @@ class _ClientConn:
     #: flight. See ``RuntimeServer._dispatch_frame`` for the measured failure
     #: the shape fixes (a parked ``steer`` made the whole connection mute).
     op_chain: asyncio.Task[None] | None = None
+    #: The last model/effort switch admitted on this connection. Switches wait
+    #: on THIS rather than on ``op_chain`` so a parked op ahead of them cannot
+    #: hold them, while still running in order among themselves — see
+    #: :data:`_SWITCH_OPS`.
+    switch_chain: asyncio.Task[None] | None = None
     #: Strong references to those tasks. A bare ``create_task`` can be collected
     #: mid-await, which would leave an op half-run and its reply never written —
     #: the same reason ``RuntimeServer._event_sends`` exists.
@@ -4829,7 +4908,13 @@ class RuntimeServer:
         # crashing gate in front of it: a non-dict frame is chained like any
         # other and left to the dispatch to reject.
         chained = not (isinstance(frame, dict) and frame.get("op") in _UNCHAINED_OPS)
-        previous = conn.op_chain if chained else None
+        # A switch waits only on the switch before it, never on the main chain:
+        # see :data:`_SWITCH_OPS` for the measured stall and what ordering is kept.
+        switch = chained and _is_switch_frame(frame)
+        if switch:
+            previous = conn.switch_chain
+        else:
+            previous = conn.op_chain if chained else None
 
         async def run() -> None:
             if previous is not None:
@@ -4845,7 +4930,25 @@ class RuntimeServer:
                 self._release_request()
 
         task = asyncio.create_task(run())
-        if chained:
+        if switch:
+            conn.switch_chain = task
+            # The head becomes the JOIN of everything admitted so far, so an op
+            # admitted after this switch still waits for it AND for whatever
+            # the switch overtook — the chain stays transitive.
+            head = conn.op_chain
+            if head is None or head.done():
+                conn.op_chain = task
+            else:
+                joined = {head, task}
+
+                async def join() -> None:
+                    await asyncio.wait(joined)
+
+                join_task = asyncio.create_task(join())
+                conn.op_chain = join_task
+                conn.op_tasks.add(join_task)
+                join_task.add_done_callback(conn.op_tasks.discard)
+        elif chained:
             conn.op_chain = task
         conn.op_tasks.add(task)
         task.add_done_callback(lambda completed: self._op_settled(conn, completed))

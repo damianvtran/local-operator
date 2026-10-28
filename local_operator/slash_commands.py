@@ -2265,6 +2265,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
             "inspect",
             "consolidate",
             "compact",
+            "triage",
         ),
     ),
     SlashCommand(
