@@ -217,7 +217,11 @@ class Validity:
         and not in ``reasons``.
         """
 
-        return self.clean and (not self.full_dataset or not self.dataset_balanced)
+        return self.clean and (
+            not self.full_dataset
+            or not self.dataset_balanced
+            or (not self.detector_observed and not self.detector_observable)
+        )
 
     @property
     def partial_reasons(self) -> tuple[str, ...]:

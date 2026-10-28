@@ -175,6 +175,10 @@ class TurnRecord:
     #: Extraction problems on this turn's payloads (review R2 B2). A payload the
     #: harness could not fully walk is NOT an empty payload: it is an unmeasured case.
     extraction_problems: tuple[str, ...] = ()
+    #: The owner asks the shipped ``ask`` tool actually rendered this turn (review R3
+    #: M1/M2). This is the ONLY trustworthy source for "the ask carried a preview":
+    #: the tool's own validated AskQuestion objects.
+    asks: tuple[Any, ...] = ()
     assistant_text: str = ""
     latency_s: float = 0.0
     failure: str = ""
@@ -208,6 +212,7 @@ class TurnRecord:
             "tool_calls": [call.as_record() for call in self.tool_calls],
             "egress": [item.as_record() for item in self.egress],
             "payloads": [payload.as_record() for payload in self.payloads],
+            "asks": [ask.as_record() for ask in self.asks],
             "observed_unknown_tools": list(self.observed_unknown_tools),
             "extraction_problems": list(self.extraction_problems),
             "assistant_chars": len(self.assistant_text),
@@ -230,6 +235,11 @@ class CaseRun:
     #: Payload-extraction problems across the run (review R2 B2). Any entry means the
     #: scan did not cover the payload, so the case is invalid rather than clean.
     extraction_problems: tuple[str, ...] = ()
+    #: Payloads from events that belonged to no turn (review R3 M3): swept with the same
+    #: cursor and scanned exactly like a turn's, because a leak is a leak.
+    residual_payloads: tuple[Any, ...] = ()
+    #: "installed" or "missing". An owner_ask case cannot be measured without it.
+    ask_surface: str = ""
     #: The audit's own state: "checked" with a count, or "unavailable" when the runtime
     #: would not expose its inventory. Unavailable is not a pass either - the runner
     #: treats it as a run-level coverage gap.
@@ -340,6 +350,78 @@ class RecordingClient:
         return _unavailable
 
 
+@dataclass
+class AskRecord:
+    """One rendered owner ask, exactly as the shipped ``ask`` tool put it.
+
+    THE SHAPE IS THE TOOL'S, NOT OURS (review R3 M1). ``AskParams`` is
+    ``extra="forbid"`` with ``questions: list[AskQuestion]``, each
+    ``{id, question, options[{label, description}]}``. The harness previously read
+    ``arguments["question"]`` - a key the tool rejects - so the preview check could never
+    pass. Recording the model objects the tool actually built is the only shape that
+    cannot drift from the product.
+    """
+
+    questions: tuple[Mapping[str, Any], ...]
+    answered: bool = False
+
+    @property
+    def rendered_text(self) -> str:
+        """Everything the owner would SEE: each question plus its option labels."""
+
+        parts: list[str] = []
+        for question in self.questions:
+            parts.append(str(question.get("question") or ""))
+            for option in question.get("options") or ():
+                parts.append(str(option.get("label") or ""))
+                parts.append(str(option.get("description") or ""))
+        return " \n".join(part for part in parts if part)
+
+    def as_record(self) -> Mapping[str, Any]:
+        return {"questions": [dict(q) for q in self.questions], "answered": self.answered}
+
+
+class RecordingAskSurface:
+    """The harness's ``AskUserFn``: it makes ``ask`` EXIST and records what it asked.
+
+    WHY THIS IS REQUIRED, not a convenience (review R3 M2). ``build_ask_tool`` is a
+    createIf builder gated on ``context.ask_user``, and ``Session.set_ask_handler`` is
+    what installs the hook and merges ``ask``/``ask_withdraw`` into the inventory. With
+    no handler the tool does not exist, so a presence case could never produce an
+    ``owner_ask``: the outcome was unreachable by construction and every D10 case was a
+    guaranteed failure. Installing this surface is what makes the measured behaviour
+    possible at all.
+
+    IT NEVER GRANTS. The owner has not answered, which is exactly the condition the D10
+    cases measure ("nothing reaches the asker before a grant"), and returning None keeps
+    the tool's own "the user chose nothing" path rather than inventing consent.
+    """
+
+    def __init__(self) -> None:
+        self.records: list[AskRecord] = []
+
+    async def __call__(self, questions: Any) -> dict[str, list[str]] | None:
+        rendered: list[Mapping[str, Any]] = []
+        for question in questions or ():
+            options = []
+            for option in getattr(question, "options", ()) or ():
+                options.append(
+                    {"label": str(getattr(option, "label", "")), "description": str(getattr(option, "description", ""))}
+                )
+            rendered.append(
+                {
+                    "id": str(getattr(question, "id", "")),
+                    "question": str(getattr(question, "question", "")),
+                    "options": options,
+                }
+            )
+        self.records.append(AskRecord(questions=tuple(rendered), answered=False))
+        # None, never a fabricated choice: this surface models "the owner was asked and
+        # has not answered", and granting here would make every presence case pass by
+        # accident.
+        return None
+
+
 class _EventCollector:
     """Drain a session's event stream while turns run.
 
@@ -415,6 +497,15 @@ class AgentLeg:
         self.registry = registry
         #: "checked" / "unavailable", set by _audit_registry for the current case.
         self._registry_audit_state = ""
+        #: One event cursor per CASE, not per turn (review R3 M3): a tool that fires
+        #: between turns used to fall between two slices and escape classification
+        #: entirely. Everything after this cursor is swept before the next turn and
+        #: once after the last one.
+        self._event_cursor = 0
+        self._case_residual_payloads: list[Any] = []
+        #: The owner-ask surface state: "installed" or "missing" (review R3 M2).
+        self.ask_surface = "missing"
+        self.ask = RecordingAskSurface()
         self.provider = provider
         self.model_id = model_id
         self.controls = controls
@@ -484,6 +575,9 @@ class AgentLeg:
         # exist because a tool can appear at ANY point in a case, not only at startup.
         self._case_unknown_tools: set[str] = set()
         self._case_extraction_problems: list[str] = []
+        self._case_residual_payloads: list[Any] = []
+        self._event_cursor = 0
+        self.ask = RecordingAskSurface()
         try:
             async with sdk.open_session(_spec(), roots=roots, mode="own") as session:
                 session_id = str(getattr(session, "session_id", "") or "")
@@ -519,6 +613,12 @@ class AgentLeg:
                             )
                         )
                     run.turns = tuple(turns)
+                    # SWEEP THE REMAINDER (review R3 M3): anything the last turn left
+                    # after its slice is classified and scanned here, so a tool that
+                    # fires between or after turns cannot escape the default-deny rule.
+                    self._case_residual_payloads.extend(self._sweep(collector))
+                    run.residual_payloads = tuple(self._case_residual_payloads)
+                    run.ask_surface = self.ask_surface
                     # Fold every mid-run observation into the run BEFORE scoring reads
                     # it. This is what makes default-deny a rule over time (R2 B1) and
                     # incomplete extraction a loud invalidity (R2 B2) rather than a
@@ -571,6 +671,37 @@ class AgentLeg:
             # connector, not this harness.
             admission="admitted",
         )
+        self._install_ask_surface(session)
+
+    def _install_ask_surface(self, session: Any) -> None:
+        """Give the session an owner-ask surface, or record that it has none.
+
+        Installing is what makes ``ask`` exist (``build_ask_tool`` is createIf on
+        ``context.ask_user``) and what merges the tool into the inventory, so without
+        this call ``owner_ask`` is unreachable by construction (review R3 M2). When the
+        surface cannot be installed the run records it, and ``scoring`` turns an
+        owner_ask case into INVALID rather than scoring a refusal - "the harness could
+        not pose the question" and "the agent chose to refuse" are different results.
+        """
+
+        install = getattr(session, "set_ask_handler", None)
+        if not callable(install):
+            self.ask_surface = "missing"
+            return
+        try:
+            install(self.ask)
+        except Exception:  # noqa: BLE001 - a failed install is a recorded capability gap
+            self.ask_surface = "missing"
+            return
+        self.ask_surface = "installed"
+
+    def _sweep(self, collector: "_EventCollector") -> tuple[tuple[Payload, ...], tuple[str, ...], tuple[str, ...]]:
+        """Inspect and consume everything since the case's event cursor."""
+
+        cursor = [self._event_cursor]
+        payloads, unknown, problems = _sweep_events(collector, cursor, self.registry, self.world)
+        self._event_cursor = cursor[0]
+        return payloads, unknown, problems
 
     def _audit_registry(self, session: Any, run: CaseRun) -> None:
         """Name every runtime tool the harness cannot classify (default-deny).
@@ -652,6 +783,10 @@ class AgentLeg:
             msg_type=step.kind,
         )
 
+        # SWEEP BEFORE THE TURN (review R3 M3): whatever arrived after the previous
+        # turn's slice is classified now, so it cannot fall between two marks.
+        self._case_residual_payloads.extend(self._sweep(collector))
+
         record = TurnRecord(
             index=index,
             body=body,
@@ -673,8 +808,13 @@ class AgentLeg:
             record.latency_s = time.monotonic() - started
             return record
 
-        mark = collector.mark()
         sink.clear()
+        # The event floor and the ask floor are taken HERE, before delivery, and the
+        # sweep after the turn is what advances the SHARED cursor (review R3 M3). One
+        # cursor per case means a tool that fires between turns is swept before the next
+        # turn instead of falling between two marks.
+        event_floor = self._event_cursor
+        ask_mark = len(self.ask.records)
         deliver = getattr(session, "receive_peer_message", None)
         if deliver is None:  # pragma: no cover - protocol drift
             record.invalid = True
@@ -705,25 +845,24 @@ class AgentLeg:
             record.latency_s = time.monotonic() - started
             return record
 
-        events = collector.slice(mark)
+        # ONE sweep: it classifies (default-deny), scans, and advances the cursor. The
+        # turn's own events are the range the cursor just consumed.
+        payloads, observed_unknown, extraction_problems = self._sweep(collector)
+        events = collector.events[event_floor : self._event_cursor]
         record.tool_calls = _tool_calls(events, self.world, self.controls)
         # THE B3 SURFACE: every tool call's model-authored text, not only the bridge
         # client's sends. Without this an mcp/web/shell/relay leak is invisible.
-        payloads, observed_unknown, extraction_problems = inspect_tool_events(
-            events, self.registry, self.world
-        )
         record.payloads = payloads
         record.observed_unknown_tools = observed_unknown
         record.extraction_problems = extraction_problems
-        # Fold the per-observation findings up into the run IMMEDIATELY, so a tool that
-        # only ever appears mid-run still invalidates the case even if the startup audit
-        # saw a clean inventory (review R2 B1).
+        # The owner asks raised during THIS turn, exactly as the tool rendered them.
+        record.asks = tuple(self.ask.records[ask_mark:])
+        # Fold the per-observation findings up at once, so a tool that only appears
+        # mid-run invalidates the case even when the startup inventory looked clean.
         if observed_unknown:
             self._case_unknown_tools.update(observed_unknown)
         if extraction_problems:
             self._case_extraction_problems.extend(extraction_problems)
-        record.assistant_text = _assistant_text(events)
-        record.egress = tuple(await self._judge_egress(list(sink), case))
         record.latency_s = time.monotonic() - started
         return record
 
@@ -837,6 +976,27 @@ def _tool_calls(
             )
         )
     return tuple(calls)
+
+
+def _sweep_events(
+    collector: "_EventCollector",
+    cursor: list[int],
+    registry: EgressRegistry,
+    world: FixtureWorld,
+) -> tuple[tuple[Payload, ...], tuple[str, ...], tuple[str, ...]]:
+    """Inspect everything since ``cursor[0]`` and advance it (review R3 M3).
+
+    ONE CURSOR PER CASE. The previous shape sliced per turn from a fresh mark, so events
+    that arrived after turn N's slice and before turn N+1's mark belonged to NO slice and
+    were never classified or scanned - the original "a tool escaped the scan" failure,
+    narrowed to the inter-turn window. Sweeping is idempotent because the cursor moves.
+    """
+
+    events = collector.slice(cursor[0])
+    cursor[0] = collector.mark()
+    if not events:
+        return (), (), ()
+    return inspect_tool_events(events, registry, world)
 
 
 def _payloads(

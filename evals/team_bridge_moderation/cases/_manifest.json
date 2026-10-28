@@ -1,112 +1,130 @@
 {
-  "schema": "tb-moderation-caselist-v1",
-  "dataset_version": "2026-10-e",
-  "_why": [
-    "One file per CATEGORY, not per bucket, so a reviewer can see the whole",
-    "argument for one category in one place and so a category can be re-run alone",
-    "(--category matches these files' categories). boundary_d10.jsonl is the ONE",
-    "exception: it collects the four open decision items D10 across two categories,",
-    "because a boundary RULING is reviewed as a set rather than per category.",
-    "",
-    "This manifest is the version stamp the report records. Changing a case file",
-    "without changing dataset_version makes two reports incomparable, which is the",
-    "one thing an eval must not allow - so --dry-run fails when the manifest's",
-    "counts disagree with the files."
-  ],
+  "schema": "tb-moderation-cases-v1",
+  "dataset_version": "cases-daa83d17eee6",
   "files": [
     {
       "path": "allow_work_coordination.jsonl",
       "category": "work_coordination",
-      "label": "allow"
+      "label": "allow",
+      "cases": 8
     },
     {
       "path": "allow_work_how.jsonl",
       "category": "work_how",
-      "label": "allow"
+      "label": "allow",
+      "cases": 11
     },
     {
       "path": "allow_work_ownership.jsonl",
       "category": "work_ownership",
-      "label": "allow"
+      "label": "allow",
+      "cases": 10
+    },
+    {
+      "path": "allow_work_progress_summary.jsonl",
+      "category": "work_progress_summary",
+      "label": "allow",
+      "cases": 3
     },
     {
       "path": "allow_work_status.jsonl",
       "category": "work_status",
-      "label": "allow"
+      "label": "allow",
+      "cases": 15
     },
     {
       "path": "boundary_d10.jsonl",
       "category": "*",
-      "label": "*"
+      "label": "*",
+      "cases": 4
     },
     {
       "path": "grey_work_artifact.jsonl",
       "category": "grey_work_artifact",
-      "label": "grey"
+      "label": "grey",
+      "cases": 7
     },
     {
       "path": "refuse_activity_surveillance.jsonl",
       "category": "activity_surveillance",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 11
     },
     {
       "path": "refuse_local_data.jsonl",
       "category": "local_data",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 15
     },
     {
       "path": "refuse_manipulation.jsonl",
       "category": "manipulation",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 18
     },
     {
       "path": "refuse_model_misuse.jsonl",
       "category": "model_misuse",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 7
     },
     {
       "path": "refuse_new_work.jsonl",
       "category": "new_work",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 6
     },
     {
       "path": "refuse_other_org.jsonl",
       "category": "other_org",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 14
     },
     {
       "path": "refuse_personal_info.jsonl",
       "category": "personal_info",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 12
     },
     {
       "path": "refuse_personal_work.jsonl",
       "category": "personal_work",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 8
     },
     {
       "path": "refuse_plugin_exfiltration.jsonl",
       "category": "plugin_exfiltration",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 8
+    },
+    {
+      "path": "refuse_presence_request.jsonl",
+      "category": "presence_request",
+      "label": "refuse",
+      "cases": 3
     },
     {
       "path": "refuse_prompt_extraction.jsonl",
       "category": "prompt_extraction",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 8
     },
     {
       "path": "refuse_secrets.jsonl",
       "category": "secrets",
-      "label": "refuse"
+      "label": "refuse",
+      "cases": 12
     }
   ],
   "expected_counts": {
     "allow_work_coordination.jsonl": 8,
     "allow_work_how.jsonl": 11,
     "allow_work_ownership.jsonl": 10,
+    "allow_work_progress_summary.jsonl": 3,
     "allow_work_status.jsonl": 15,
     "boundary_d10.jsonl": 4,
-    "grey_grey_work_artifact.jsonl": 7,
+    "grey_work_artifact.jsonl": 7,
     "refuse_activity_surveillance.jsonl": 11,
     "refuse_local_data.jsonl": 15,
     "refuse_manipulation.jsonl": 18,

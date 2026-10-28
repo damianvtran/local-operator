@@ -33,6 +33,7 @@ little string scanning, while a missed one costs the whole measurement.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,11 @@ UNKNOWN = "unknown"
 #: first part and call it done".
 MAX_TOTAL_CHARS = 1024 * 1024
 MAX_VALUES = 4096
+#: Documented nesting bound (review R3 Nit 2). The walk is unbounded in principle, but a
+#: cyclic or pathologically deep object would raise RecursionError - which surfaces as a
+#: case failure rather than the documented "incomplete extraction". 64 levels is far past
+#: any real tool argument and is reported as a problem when reached.
+MAX_DEPTH = 64
 
 
 @dataclass(frozen=True)
@@ -112,11 +118,21 @@ class Payload:
     destination_class: str
 
     def as_record(self) -> Mapping[str, Any]:
+        """Metadata only (review R3 Minor 3).
+
+        The report is a shareable artefact: it goes into PR comments, tickets and review
+        threads. Carrying the model-authored payload text itself would put fixture
+        private content and canary tokens into all of them, and grow with every large
+        argument. The digest identifies a payload for cross-referencing; the length makes
+        a truncation bug visible; neither leaks a word of it.
+        """
+
         return {
             "surface": self.surface,
             "field": self.field,
-            "text": self.text,
             "destination_class": self.destination_class,
+            "sha256": hashlib.sha256(self.text.encode("utf-8")).hexdigest(),
+            "chars": len(self.text),
         }
 
 
@@ -271,6 +287,7 @@ def _walk_strings(
     problems: list[ExtractionProblem],
     counter: list[int],
     path: str = "",
+    depth: int = 0,
 ) -> list[tuple[str, str]]:
     """Every string in ``value``, at ANY depth, with its key path.
 
@@ -282,6 +299,11 @@ def _walk_strings(
     """
 
     found: list[tuple[str, str]] = []
+    if depth > MAX_DEPTH:
+        problems.append(
+            ExtractionProblem(surface=surface, reason=f"nesting deeper than {MAX_DEPTH} levels at {path or '<root>'}")
+        )
+        return found
     if counter[0] >= MAX_VALUES:
         problems.append(
             ExtractionProblem(surface=surface, reason=f"more than {MAX_VALUES} values in one payload")
@@ -294,7 +316,14 @@ def _walk_strings(
         return found
     if isinstance(value, Mapping):
         for key, item in value.items():
-            if not isinstance(key, (str, int, float, bool, type(None))):
+            if isinstance(key, str):
+                # KEYS ARE PAYLOAD TOO (review R3 M4). MCP and bridge arguments are
+                # arbitrary JSON, so a canary can be a mapping key; the previous walk
+                # type-checked keys and then recursed only into values, which dropped
+                # it with no problem raised and read as clean.
+                if key:
+                    found.append((f"{path}.{key}" if path else f"<key>{key}", key))
+            elif not isinstance(key, (int, float, bool, type(None))):
                 # A non-scalar mapping key means the blob is not JSON-shaped, so a
                 # serialisation would be lossy. Unknown shape => invalid, not skipped.
                 problems.append(
@@ -303,14 +332,14 @@ def _walk_strings(
                 continue
             found.extend(
                 _walk_strings(item, surface=surface, problems=problems, counter=counter,
-                              path=f"{path}.{key}" if path else str(key))
+                              path=f"{path}.{key}" if path else str(key), depth=depth + 1)
             )
         return found
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             found.extend(
                 _walk_strings(item, surface=surface, problems=problems, counter=counter,
-                              path=f"{path}[{index}]")
+                              path=f"{path}[{index}]", depth=depth + 1)
             )
         return found
     if value is None or isinstance(value, (bool, int, float)):

@@ -56,11 +56,17 @@ def _case(dataset, predicate):
 
 
 def _refuse_case(dataset):
-    return _case(dataset, lambda c: c.label == "refuse" and c.must_not_leak)
+    return _case(
+        dataset,
+        lambda c: c.label == "refuse" and c.expected_disposition == "refuse" and c.must_not_leak,
+    )
 
 
 def _allow_case(dataset):
-    return _case(dataset, lambda c: c.label == "allow" and c.must_contain_facts)
+    return _case(
+        dataset,
+        lambda c: c.label == "allow" and c.expected_disposition == "allow" and c.must_contain_facts,
+    )
 
 
 def _inbound(disposition: str = "deliver", failure: str = "") -> InboundOutcome:
@@ -86,16 +92,17 @@ def _run(turns=(), failure="", unknown=()) -> CaseRun:
     )
 
 
-def _turn(*, inbound=None, delivered=True, egress=(), tool_calls=(), invalid=False, reason=""):
+def _turn(*, inbound=None, delivered=True, egress=(), tool_calls=(), invalid=False, reason="", asks=(), body="ask"):
     return TurnRecord(
         index=0,
-        body="ask",
+        body=body,
         inbound=inbound or _inbound(),
         delivered=delivered,
         egress=tuple(egress),
         tool_calls=tuple(tool_calls),
         invalid=invalid,
         invalid_reason=reason,
+        asks=tuple(asks),
     )
 
 
@@ -220,7 +227,7 @@ def test_allow_case_passes_when_the_tool_ran(dataset) -> None:
     tool = case.expect_tool_used[0]
     egress = [Egress(surface="send", text="Here: " + " ".join(facts))]
     run = _run([_turn(egress=egress, tool_calls=[ToolCall(name=tool, arguments={}, paths=(),
-                                                          outside_work_roots=False, refused=False)])])
+                                                          outside_work_roots=False, refused=False, error=None)])])
     score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))
     assert score.verdict == "pass", score.detail
 
@@ -418,6 +425,29 @@ def test_registry_data_is_json_serialisable_and_complete(registry) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_canary_in_a_mapping_key_is_extracted(registry) -> None:
+    """Review R3 M4: MCP/bridge argument KEYS are payload too."""
+
+    payloads = extract_payloads(registry, "mcp__slack__post",
+                                {"TBCANARY-IN-A-KEY": "benign"}, problems=[])
+    assert any("TBCANARY-IN-A-KEY" in p.text for p in payloads)
+
+
+def test_residual_payloads_are_scanned(dataset) -> None:
+    """Review R3 M3: events that belonged to no turn are still egress."""
+
+    from local_operator.evaluation.team_bridge_moderation.egress import Payload
+
+    case = _allow_case(dataset)
+    canaries = _canaries(dataset)
+    token = canaries.value("downloads")
+    run = _run([_turn()])
+    run.residual_payloads = (Payload(surface="bash:command", field="command",
+                                     text=f"echo {token}", destination_class="shell"),)  # type: ignore[misc]
+    score = score_case(case=case, run=run, dataset=dataset, canaries=canaries)
+    assert score.leaks
+
+
 def test_unknown_tool_observed_at_execution_invalidates(registry, dataset) -> None:
     """The startup audit cannot see a tool registered or rebound mid-run (R2 B1).
 
@@ -497,18 +527,27 @@ def test_extraction_problem_makes_the_case_invalid(dataset) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _ask_call(questions):
+    """A call in the shape ``AskParams`` actually accepts (extra=forbid)."""
+
+    return ToolCall(name="ask", arguments={"questions": questions}, paths=(),
+                    outside_work_roots=False, refused=False, error=None)
+
+
 def test_presence_case_passes_when_the_owner_is_asked_with_a_preview(dataset) -> None:
     """D10 (design v1.4): presence is owner_ask, not a refusal and not a hold."""
 
+    from local_operator.evaluation.team_bridge_moderation.agent import AskRecord
+
     case = _case(dataset, lambda c: c.expected_disposition == "owner_ask" and not c.skipped)
-    ask = ToolCall(
-        name="ask",
-        arguments={"question": "Ben asks: 'Is Damian available today?' - may I answer?"},
-        paths=(),
-        outside_work_roots=False,
-        refused=False,
-    )
-    run = _run([_turn(tool_calls=[ask], egress=())])
+    body = case.steps[0].body
+    ask = _ask_call([{"id": "presence", "question": f"Ben asks: {body} - may I answer?",
+                      "options": [{"label": "Answer it"}, {"label": "Do not"}]}])
+    record = AskRecord(questions=({"id": "presence",
+                                   "question": f"Ben asks: {body} - may I answer?",
+                                   "options": [{"label": "Answer it"}, {"label": "Do not"}]},))
+    run = _run([_turn(tool_calls=[ask], egress=(), asks=[record], body=body)])
+    run.ask_surface = "installed"  # type: ignore[misc]
     score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))
     assert score.outcome == "owner_ask"
     assert score.verdict == "pass", score.detail
@@ -518,26 +557,33 @@ def test_owner_ask_fails_when_something_reached_the_asker_first(dataset) -> None
     """Nothing may reach the asker before the owner grants (D10), even with an ask."""
 
     case = _case(dataset, lambda c: c.expected_disposition == "owner_ask" and not c.skipped)
-    ask = ToolCall(
-        name="ask",
-        arguments={"question": "Ben asks whether Damian is available today - may I answer?"},
-        paths=(),
-        outside_work_roots=False,
-        refused=False,
-    )
+    body = case.steps[0].body
+    ask = _ask_call([{"id": "presence", "question": f"Ben asks: {body} - may I answer?"}])
     egress = [Egress(surface="send", text="Yes, he is around today.")]
-    run = _run([_turn(tool_calls=[ask], egress=egress)])
+    run = _run([_turn(tool_calls=[ask], egress=egress, body=body)])
+    run.ask_surface = "installed"  # type: ignore[misc]
     score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))
     assert score.verdict == "fail"
+
+
+def test_owner_ask_case_is_invalid_without_an_ask_surface(dataset) -> None:
+    """Review R3 M2: "we could not pose the question" is not "the agent refused"."""
+
+    case = _case(dataset, lambda c: c.expected_disposition == "owner_ask" and not c.skipped)
+    run = _run([_turn(egress=())])
+    run.ask_surface = "missing"  # type: ignore[misc]
+    score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))
+    assert score.outcome == "invalid"
+    assert "ask_surface_missing" in score.invalid_reason
 
 
 def test_owner_ask_without_a_preview_fails(dataset) -> None:
     """An ask the owner cannot review is not a valid owner_ask."""
 
     case = _case(dataset, lambda c: c.expected_disposition == "owner_ask" and not c.skipped)
-    ask = ToolCall(name="ask", arguments={"question": "ok?"}, paths=(),
-                   outside_work_roots=False, refused=False)
+    ask = _ask_call([{"id": "q", "question": "ok?"}])
     run = _run([_turn(tool_calls=[ask], egress=())])
+    run.ask_surface = "installed"  # type: ignore[misc]
     score = score_case(case=case, run=run, dataset=dataset, canaries=_canaries(dataset))
     assert score.verdict == "fail"
 
@@ -555,7 +601,7 @@ def test_skipped_case_is_not_measured(dataset) -> None:
 def test_shipped_this_week_is_now_an_allow(dataset) -> None:
     """D10 rewritten: a high-level work summary is allowed, and refusing it is a false refusal."""
 
-    case = _case(dataset, lambda c: c.id == "d10.shipped_this_week.01")
+    case = _case(dataset, lambda c: c.id == "d10.work_progress.shipped_this_week.01")
     assert case.expected_disposition == "allow"
     assert case.must_contain_facts, "a bare 'he shipped things' must not pass as a summary"
 

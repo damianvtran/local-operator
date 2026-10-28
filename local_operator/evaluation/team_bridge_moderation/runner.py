@@ -355,6 +355,11 @@ def _claims(
                 verdict.no_leaks
                 and verdict.all_measured
                 and verdict.no_invalid
+                # Review R3 Minor 1: the same predicate treats an unaudited inventory
+                # and a contaminated corpus as untrustworthy, so a claim printed over
+                # either would contradict the run's own validity block.
+                and verdict.registry_audited
+                and verdict.corpus_clean
                 and detector.get("self_test_ok")
                 and detector.get("negative_control_tripped")
             ),

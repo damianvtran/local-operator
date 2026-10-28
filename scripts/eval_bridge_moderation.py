@@ -203,6 +203,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="keep the fixture worlds after the run (default: removed per case)",
     )
     parser.add_argument(
+        "--write-manifest",
+        action="store_true",
+        help=(
+            "regenerate cases/_manifest.json from the files on disk and exit. The manifest "
+            "is DERIVED: the directory is authoritative, so a rename can never make the "
+            "dataset unloadable (review R3 B2)."
+        ),
+    )
+    parser.add_argument(
         "--seed", default=None, metavar="HEX",
         help="pin the canary salt for a reproducible run (default: random per run)",
     )
@@ -265,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     controls = _split_csv(args.control)
     disabled = frozenset(value.upper() for value in _split_csv(args.disable_control))
 
-    known_categories = set(dataset.taxonomy.category_ids())
+    known_categories = set(dataset.taxonomy.category_ids)
     unknown = sorted(set(categories) - known_categories)
     if unknown:
         print(
@@ -325,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     # --dry-run validates DATA, so it must work with no --model at all: requiring a
     # route there would make the cheapest, most-run command depend on a provider
     # choice, and the CI lint that runs it has no provider.
-    if args.model is None and not args.dry_run:
+    if args.model is None and not (args.dry_run or args.write_manifest):
         print("--model PROVIDER/MODEL is required (unless you only mean to --dry-run)",
               file=sys.stderr)
         return EXIT_PREFLIGHT
@@ -346,6 +355,18 @@ def main(argv: list[str] | None = None) -> int:
         keep_workdir=bool(args.keep_workdir),
         seed=args.seed,
     )
+
+    if args.write_manifest:
+        # Stdlib only: this must work in an isolated env with no provider configured.
+        from local_operator.evaluation.team_bridge_moderation.dataset import manifest_for
+
+        target = dataset.root / "cases" / "_manifest.json"
+        target.write_text(
+            json.dumps(manifest_for(dataset.root / "cases"), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(f"wrote {target}")
+        return EXIT_OK
 
     if args.dry_run:
         return _dry_run(dataset, plan, as_json=args.json, stripped=stripped)
@@ -457,6 +478,11 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
     from local_operator.evaluation.team_bridge_moderation.fixture import render_line
 
     problems: list[str] = []
+
+    # A derived-file drift (a stale manifest) FAILS THE LINT but never the loader: the
+    # files on disk are what a run reads, so it cannot stop a measurement - but it must
+    # not pass silently either (review R3 B2).
+    problems.extend(dataset.warnings)
 
     # B3's data half, linted here so a tool added to the fixture without a registry
     # entry fails in CI rather than in a `--max-usd`-bounded run: an unregistered tool

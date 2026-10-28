@@ -24,98 +24,205 @@
       "kind": "bridge",
       "tier": 1,
       "ops": {
-        "send": {"text_fields": ["text"]},
-        "reply": {"text_fields": ["text"]},
-        "dm": {"text_fields": ["text"]},
-        "channel_post": {"text_fields": ["body"]},
-        "channel_create": {"text_fields": ["name", "topic", "members"]},
-        "react": {"text_fields": ["emoji"]},
-        "react-remove": {"text_fields": ["emoji"]}
+        "send": {
+          "text_fields": [
+            "text"
+          ]
+        },
+        "reply": {
+          "text_fields": [
+            "text"
+          ]
+        },
+        "dm": {
+          "text_fields": [
+            "text"
+          ]
+        },
+        "channel_post": {
+          "text_fields": [
+            "body"
+          ]
+        },
+        "channel_create": {
+          "text_fields": [
+            "name",
+            "topic",
+            "members"
+          ]
+        },
+        "react": {
+          "text_fields": [
+            "emoji"
+          ]
+        },
+        "react-remove": {
+          "text_fields": [
+            "emoji"
+          ]
+        }
       },
       "_why": "Tier 1: unconditional in the design, every call, every session. `react` carries one emoji plus a target, which is an oracle when the asker assigns the meaning - so its payload is judged even though it is tiny."
     },
     "network": {
       "kind": "device_net",
       "tier": 2,
-      "text_fields": ["text", "prompt", "params", "action"],
+      "text_fields": [
+        "text",
+        "prompt",
+        "params",
+        "action"
+      ],
       "_why": "The `network` tool delivers model-chosen params.text to another DEVICE. The sentence is the payload."
     },
     "web_fetch": {
       "kind": "network",
       "tier": 2,
-      "text_fields": ["url", "query", "prompt"],
+      "text_fields": [
+        "url",
+        "query",
+        "prompt"
+      ],
       "_why": "The payload can be in the query string, off an allowed host."
     },
     "web_search": {
       "kind": "network",
       "tier": 2,
-      "text_fields": ["query"]
+      "text_fields": [
+        "query"
+      ]
     },
     "bash": {
       "kind": "shell",
       "tier": 2,
-      "text_fields": ["command", "cmd", "script"],
+      "text_fields": [
+        "command",
+        "cmd",
+        "script"
+      ],
       "_why": "The command text is the payload (curl --data @file is file indirection, so the command alone is not sufficient - the shape scrub stays a backstop)."
     },
     "eval": {
       "kind": "shell",
       "tier": 2,
-      "text_fields": ["code", "script"]
+      "text_fields": [
+        "code",
+        "script"
+      ]
     },
     "task": {
       "kind": "relay",
       "tier": 2,
-      "text_fields": ["prompt", "label", "description"]
+      "text_fields": [
+        "prompt",
+        "label",
+        "description"
+      ]
     },
     "hub": {
       "kind": "relay",
       "tier": 2,
-      "text_fields": ["message", "prompt"]
+      "text_fields": [
+        "message",
+        "prompt"
+      ]
     },
     "send": {
       "kind": "relay",
       "tier": 2,
-      "text_fields": ["message", "text"]
+      "text_fields": [
+        "message",
+        "text"
+      ]
     },
     "sessions": {
       "kind": "relay",
       "tier": 2,
-      "text_fields": ["prompt", "query"]
+      "text_fields": [
+        "prompt",
+        "query"
+      ]
     },
     "wake": {
       "kind": "relay",
       "tier": 2,
-      "text_fields": ["text", "prompt"]
+      "text_fields": [
+        "text",
+        "prompt"
+      ]
     },
     "monitor": {
       "kind": "relay",
       "tier": 2,
-      "text_fields": ["query", "prompt"]
+      "text_fields": [
+        "query",
+        "prompt"
+      ]
     },
     "write": {
       "kind": "writes_out",
       "tier": 2,
-      "text_fields": ["content", "path"],
+      "text_fields": [
+        "content",
+        "path"
+      ],
       "_why": "Inside a work root a write is not a payload; outside it, it is a durable channel the outbound gate never sees. The harness resolves the path against the fixture's work roots and only then treats the content as egress."
     },
     "edit": {
       "kind": "writes_out",
       "tier": 2,
-      "text_fields": ["new_text", "old_text", "path"]
+      "text_fields": [
+        "new_text",
+        "old_text",
+        "path"
+      ]
     },
     "artifact_data": {
       "kind": "writes_out",
       "tier": 2,
-      "text_fields": ["value", "data", "content"]
+      "text_fields": [
+        "value",
+        "data",
+        "content"
+      ]
     },
     "mcp": {
       "kind": "mcp",
       "tier": 2,
-      "text_fields": ["__all_strings__"],
+      "text_fields": [
+        "__all_strings__"
+      ],
       "_why": "EVERY tool from EVERY configured MCP server is egress-capable and its arguments cannot be enumerated ahead of time, so MCP payload extraction takes every string argument (bounded). The design names the Slack-shaped fixture as the required case; the extraction rule has to be general or the fixture proves only itself."
+    },
+    "browser": {
+      "kind": "browser",
+      "tier": 2,
+      "text_fields": [
+        "url",
+        "text",
+        "selector",
+        "actions",
+        "paths",
+        "query"
+      ],
+      "_why": "A URL leaves in a request; typed text lands in a page; a screenshot can carry anything on screen. Every string argument is read because the action set is wide."
+    },
+    "console": {
+      "kind": "shell",
+      "tier": 2,
+      "text_fields": [
+        "text",
+        "command",
+        "input",
+        "keys"
+      ],
+      "_why": "Console input drives a real shell or a TUI - the command text is the payload, exactly as bash is."
     }
   },
-  "mcp_name_prefixes": ["mcp_", "mcp__"],
+  "mcp_name_prefixes": [
+    "mcp_",
+    "mcp__"
+  ],
   "non_egress": [
     "todo",
     "jobs",

@@ -99,8 +99,14 @@ class DatasetProblem(Exception):
 
 
 @dataclass(frozen=True)
-class CaseProblem:
-    """A validation failure, located precisely enough to fix without grepping."""
+class CaseProblem(Exception):
+    """A validation failure, located precisely enough to fix without grepping.
+
+    IT IS ALSO AN EXCEPTION, deliberately: it travels as a VALUE (the loader collects
+    every problem in one pass) and is ALSO raised and caught on the single-case parse
+    path, where one bad line must not abort the file. Making it an Exception is what lets
+    one type serve both without a second wrapper drifting from the first.
+    """
 
     where: str
     message: str
@@ -171,7 +177,9 @@ class Taxonomy:
             )
             if category.id in categories:
                 problems.append(CaseProblem(str(path), f"duplicate category {category.id!r}"))
-            if category.disposition not in ("allow", "refuse", "held", "grey"):
+            # owner_ask is a category-level ruling too (design v1.4 §7.7): presence
+            # resolves by asking the owner, so the taxonomy must be able to say so.
+            if category.disposition not in DISPOSITIONS + ("grey",):
                 problems.append(
                     CaseProblem(str(path), f"category {category.id!r} has unknown disposition {category.disposition!r}")
                 )
@@ -372,14 +380,22 @@ class ModerationCase:
     #: a reply containing the right words is not proof the work happened). A case whose
     #: required tool never ran fails, whatever its text says.
     expect_tool_used: tuple[str, ...]
+    #: Path prefixes no tool call may touch (review R3 Minor 2). A name-scoped
+    #: ``expect_tool_denied: ["read"]`` cannot distinguish "read the personal repo" from
+    #: "read the in-scope work copy" - the second is the legitimate path the answer needs.
+    #: This asserts the SOURCE, which is what the operator's rule actually refuses.
+    expect_no_access_beneath: tuple[str, ...]
+    expected_hold: bool
     #: The agent must have raised an owner ask, with the rendered preview, and sent
     #: nothing to the asker before a grant (design §7.7 D10: presence is owner_ask, a
     #: legitimate outcome - not a refusal and not a hold).
-    expect_owner_ask: bool = False
-    expected_hold: bool
-    notes: str
     source: str
     line: int
+    #: A declared skip with its reason (design §7.7: the shared-calendar answer path is
+    #: not built). Reported for visibility, EXCLUDED from measured denominators.
+    skipped: str = ""
+    notes: str = ""
+    expect_owner_ask: bool = False
     variants: tuple[str, ...] = ()
     variant_of: str | None = None
     pair_id: str | None = None
@@ -415,6 +431,10 @@ class Dataset:
     digests: Mapping[str, str]
     version: str
     root: Path
+    #: Non-fatal findings (a stale derived manifest). A run proceeds and records them; a
+    #: LINT (--dry-run) fails on them - a hand-maintained file must never be able to stop
+    #: a measurement, but must never pass silently either (review R3 B2).
+    warnings: tuple[str, ...] = ()
 
     def by_category(self) -> Mapping[str, tuple[ModerationCase, ...]]:
         grouped: dict[str, list[ModerationCase]] = {}
@@ -476,6 +496,71 @@ def load_workspace(root: Path) -> Workspace:
     return Workspace.load(Path(root) / "fixture" / "world.json")
 
 
+def manifest_for(cases_dir: Path) -> Mapping[str, Any]:
+    """The manifest a directory of case files DESERVES (review R3 B2).
+
+    WHY GENERATED: the previous manifest was hand-maintained, so a renamed or newly
+    added category file left it stale and the loader refused every run. A file list that
+    can disagree with the directory is a liveness hazard, not a check. Deriving it means
+    the only thing an author has to keep true is the cases themselves.
+
+    ``expected_counts`` is derived the same way, and both are what
+    ``scripts/eval_bridge_moderation.py --write-manifest`` writes.
+    """
+
+    files: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for path in sorted(Path(cases_dir).glob("*.jsonl")):
+        categories: set[str] = set()
+        labels: set[str] = set()
+        rows = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rows += 1
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(raw, Mapping):
+                if raw.get("category"):
+                    categories.add(str(raw["category"]))
+                if raw.get("label"):
+                    labels.add(str(raw["label"]))
+        counts[path.name] = rows
+        files.append(
+            {
+                "path": path.name,
+                # A boundary file mixes categories on purpose (the D10 set is kept
+                # together so a reviewer sees the rulings as a set), so "*" is honest
+                # rather than a lie about one category.
+                "category": next(iter(categories)) if len(categories) == 1 else "*",
+                "label": next(iter(labels)) if len(labels) == 1 else "*",
+                "cases": rows,
+            }
+        )
+    return {
+        "schema": "tb-moderation-cases-v1",
+        "dataset_version": str(_dataset_version(cases_dir)),
+        "files": files,
+        "expected_counts": dict(sorted(counts.items())),
+    }
+
+
+def _dataset_version(cases_dir: Path) -> str:
+    """A content-derived version: the digest of every case file's bytes.
+
+    Derived, not authored, so "did the corpus change" is a fact rather than a claim
+    someone remembered to update.
+    """
+
+    hasher = hashlib.sha256()
+    for path in sorted(Path(cases_dir).glob("*.jsonl")):
+        hasher.update(path.name.encode("utf-8"))
+        hasher.update(path.read_bytes())
+    return f"cases-{hasher.hexdigest()[:12]}"
+
+
 def load_dataset(
     root: Path,
     *,
@@ -500,22 +585,41 @@ def load_dataset(
     cases_dir = root / "cases"
     manifest_path = cases_dir / "_manifest.json"
     problems: list[CaseProblem] = []
+    warnings: list[str] = []
     manifest = _load_json(manifest_path) if manifest_path.exists() else {}
     if not manifest:
         problems.append(CaseProblem(str(manifest_path), "missing case manifest"))
-    listed = {str(entry.get("path")): entry for entry in (manifest.get("files") or ()) if isinstance(entry, Mapping)}
+    # THE DIRECTORY IS THE AUTHORITY, NOT THE MANIFEST (review R3 B2). The manifest used
+    # to be the source of the file list, so a rename or a new category file broke the
+    # load in BOTH directions and nothing could run - `--dry-run`, the CI lint and every
+    # real run died before a case was selected. The files on disk are what a run reads,
+    # so they are what is loaded; the manifest is a derived record (see
+    # :func:`manifest_for`) that is regenerated rather than hand-maintained.
     on_disk = {p.name for p in sorted(cases_dir.glob("*.jsonl"))}
-    for missing in sorted(set(listed) - on_disk):
-        problems.append(CaseProblem(str(cases_dir / missing), "listed in the manifest but absent"))
-    for extra in sorted(on_disk - set(listed)):
-        problems.append(CaseProblem(str(cases_dir / extra), "case file is not listed in the manifest"))
+    listed = {
+        str(entry.get("path")): entry
+        for entry in (manifest.get("files") or ())
+        if isinstance(entry, Mapping)
+    }
+    if manifest and set(listed) != on_disk:
+        # A STALE MANIFEST IS A LINT FINDING, NOT A LOAD FAILURE (review R3 B2). It is a
+        # WARNING: the files on disk are what a run reads, so a rename or a new category
+        # file must never stop the harness. `--dry-run` fails on it and `--write-manifest`
+        # fixes it, which is how it stays loud without becoming a liveness hazard.
+        warnings.append(
+            f"{manifest_path}: the case manifest is stale (it disagrees with the files on "
+            f"disk); regenerate it with scripts/eval_bridge_moderation.py --write-manifest"
+        )
+        listed = {}
 
     authored: list[ModerationCase] = []
     seen: dict[str, str] = {}
     per_file: dict[str, int] = {}
-    for name in sorted(on_disk & set(listed)):
+    for name in sorted(on_disk):
         path = cases_dir / name
-        rows = _read_jsonl(path, problems)
+        # Materialised ONCE: the count is reported per file and the identity check below
+        # needs the same rows, so a generator would be consumed by the first read.
+        rows = list(_read_jsonl(path, problems))
         for line_no, raw in rows:
             try:
                 case = _parse_case(raw, taxonomy, workspace, source=path.name, line=line_no)
@@ -524,17 +628,17 @@ def load_dataset(
                 continue
             if case.id in seen:
                 problems.append(
-                    CaseProblem(f"{path.name}:{line}", f"duplicate id {case.id!r} (also in {seen[case.id]})")
+                    CaseProblem(f"{path.name}:{line_no}", f"duplicate id {case.id!r} (also in {seen[case.id]})")
                 )
                 continue
-            seen[case.id] = f"{path.name}:{line}"
-            problems.extend(_validate_case(case, taxonomy, workspace, path.name, line))
+            seen[case.id] = f"{path.name}:{line_no}"
+            problems.extend(_validate_case(case, taxonomy, workspace, path.name, line_no))
             entry = listed.get(name) or {}
             expected_category = str(entry.get("category") or "*")
             if expected_category != "*" and case.category != expected_category:
                 problems.append(
                     CaseProblem(
-                        f"{path.name}:{line}",
+                        f"{path.name}:{line_no}",
                         f"case category {case.category!r} does not match the manifest's {expected_category!r}",
                     )
                 )
@@ -552,6 +656,7 @@ def load_dataset(
             expanded.extend(_expand_case(case, taxonomy, workspace))
     digests = _digests(authored, taxonomy, workspace)
     return Dataset(
+        warnings=tuple(warnings),
         taxonomy=taxonomy,
         workspace=workspace,
         cases=tuple(expanded),
@@ -631,6 +736,7 @@ def _parse_case(
         must_allow_plants=tuple(map(str, raw.get("must_allow_plants") or ())),
         expect_tool_denied=tuple(map(str, raw.get("expect_tool_denied") or ())),
         expect_tool_used=tuple(map(str, raw.get("expect_tool_used") or ())),
+        expect_no_access_beneath=tuple(map(str, raw.get("expect_no_access_beneath") or ())),
         expect_owner_ask=bool(raw.get("expect_owner_ask", False)),
         expected_hold=bool(raw.get("expected_hold") or False),
         skipped=str(raw.get("skipped") or ""),
@@ -728,7 +834,9 @@ def _validate_case(
             problems.append(
                 CaseProblem(where, f"must_allow_plants may only name {WORK_CANARY_CLASS!r}, got {entry!r}")
             )
-        if case.label != "allow":
+        # Keyed on the DISPOSITION, not the label (review R3): a grey case whose
+        # expected disposition is allow may legitimately quote an in-scope plant.
+        if case.expected_disposition != "allow":
             problems.append(CaseProblem(where, "must_allow_plants belongs on allow cases only"))
     for fact in case.must_contain_facts:
         if fact not in workspace.facts:
@@ -737,7 +845,7 @@ def _validate_case(
         known = workspace.tool_inventory.get("known_tools") or []
         if known and tool not in known:
             problems.append(CaseProblem(where, f"expect_tool_used names unknown tool {tool!r}"))
-        if case.label != "allow":
+        if case.expected_disposition != "allow":
             problems.append(CaseProblem(where, "expect_tool_used belongs on allow cases only"))
     for tool in case.expect_tool_denied:
         known = workspace.tool_inventory.get("known_tools") or []
@@ -879,6 +987,13 @@ def _mutate(case: ModerationCase, kind: str) -> ModerationCase | None:
         form = "social_engineering"
     else:  # pragma: no cover - guarded by the caller
         return None
+    # A VARIANT MUST NOT FLATTEN A MULTI-TURN CASE (found by the test slot, round 3). A
+    # laundering case is a two-message deferral by construction: encoding the first
+    # message and dropping the second leaves a variant that no longer exercises the
+    # deferral it exists for, while the report still counts it as coverage. The mutation
+    # applies to the FIRST turn; every later turn is carried through unchanged.
+    if len(case.steps) > 1:
+        steps = (steps[0], *case.steps[1:])
     variant = ModerationCase(
         id=stamped,
         label=case.label,
@@ -895,6 +1010,7 @@ def _mutate(case: ModerationCase, kind: str) -> ModerationCase | None:
         must_allow_plants=case.must_allow_plants,
         expect_tool_denied=case.expect_tool_denied,
         expect_tool_used=case.expect_tool_used,
+        expect_no_access_beneath=case.expect_no_access_beneath,
         expect_owner_ask=case.expect_owner_ask,
         skipped=case.skipped,
         expected_hold=case.expected_hold,
