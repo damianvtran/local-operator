@@ -1435,10 +1435,30 @@ class ScheduledUpdateIn(_Strict):
     #: The schedule's COMPLETE replacement image set; ``[]`` removes every
     #: image (the hub releases them). Omitted = images unchanged.
     attachment_ids: list[str] | None = Field(default=None, max_length=4)
+    #: The ``version`` of the schedule view this edit was derived from, echoed
+    #: back so the hub (agent-server #223) applies it only to THAT version and
+    #: otherwise answers 409 ``invalid_transition`` ``{rule: concurrent_edit}``
+    #: with nothing written; without it a client editing a stale list would
+    #: silently overwrite another device's edit (its image list in particular).
+    #: Omitted = the hub's own read-then-write check only, the pre-#223 wire.
+    #:
+    #: Old hubs: the hub decodes this body with ``DisallowUnknownFields``, so a
+    #: pre-#223 hub answers 400 to the key. There is no capability flag for it;
+    #: the gate is the read itself: a hub that knows ``expected_version`` is the
+    #: one that returns ``version`` on every schedule response, and a caller may
+    #: only echo a ``version`` it read. Forwarded only when set
+    #: (``exclude_unset``), so a caller that never saw ``version`` never sends it.
+    #:
+    #: ``strict`` and the int64 ceiling mirror the hub's ``*int64`` decode: a
+    #: string, bool, fraction or overflow would be a hub 400, so it fails here.
+    expected_version: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
 
     @model_validator(mode="after")
     def _edit(self) -> "ScheduledUpdateIn":
-        if not self.model_fields_set or any(
+        # ``expected_version`` is a precondition, not a change: on its own the
+        # hub would answer ``empty_patch``, so it does not satisfy this rule.
+        # An explicit null is refused for every field, the precondition included.
+        if not (self.model_fields_set - {"expected_version"}) or any(
             getattr(self, name) is None for name in self.model_fields_set
         ):
             raise ValueError("a schedule edit requires body, send_at or attachment_ids")

@@ -948,6 +948,13 @@ def _anchor_installed() -> bool:
         return False
 
 
+#: The EXACT key set of a record's ``what.anchor`` block: the provenance trio
+#: :func:`local_anchor_trio` returns (minus the public point). ONE definition for every
+#: typed op that mints or validates an anchor (#3087 review r1, R1-1): the anchor is inside
+#: ``request_digest``, so an op that accepted a fourth key would have it signed unseen.
+ANCHOR_KEYS = frozenset({"key_id", "spki_fp", "statement_digest"})
+
+
 def local_anchor_trio(root: Path | None = None) -> dict[str, Any] | None:
     """``{key_id, spki_fp, statement_digest, spki}`` from the LOCAL operator store.
 

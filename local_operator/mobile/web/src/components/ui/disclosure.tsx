@@ -36,7 +36,7 @@ export function Chevron({ open, className }: { open: boolean; className?: string
 	return (
 		<span
 			aria-hidden
-			className={cn("inline-block w-4 text-center text-ink-dim select-none", className)}
+			className={cn("lo-directional w-4 text-center text-ink-dim select-none", className)}
 		>
 			{open ? "▾" : "▸"}
 		</span>

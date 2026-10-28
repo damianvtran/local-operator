@@ -15,6 +15,7 @@
   "relay.asks.card.secret_notice_persisted": "गुप्त — सीधे भेजा गया, ट्रांसक्रिप्ट में नहीं दिखाया गया, और आपके क्रेडेंशियल स्टोर में सहेजा गया",
   "relay.asks.card.placeholder_secret": "गुप्त मान चिपकाएँ",
   "relay.asks.card.placeholder_answer": "आपका उत्तर",
+  "relay.asks.card.other": "अन्य",
   "relay.asks.card.recommended": "· अनुशंसित",
   "relay.asks.card.choose_any": "जो लागू हों, उन्हें चुनें",
   "relay.asks.card.urgent": "· अत्यावश्यक",
