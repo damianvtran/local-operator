@@ -948,6 +948,57 @@ def _refuses_field(refusal: BridgeRefusal, field: str) -> bool:
     return refusal.http_status == 400 and refusal.details.get("field") == field
 
 
+#: agent-server #227's owner-only read of the caller's agent invitations. ONE
+#: spelling, used by :meth:`TeamBridgeClient.owned_agent_invitations` only.
+OWNED_AGENT_INVITATIONS_HUB_PATH = "/messaging/agents/owned/invitations"
+#: The client-side code for "this hub predates the operation". Its own code,
+#: not the hub's 400/404, because those read as a client bug ("invalid
+#: request") or as a missing resource ("gone"), and the honest remedy for
+#: both is an update of the server, not a retry or a different input.
+OUTDATED_HUB = "outdated_hub"
+OUTDATED_HUB_SENTENCE = (  # i18n: ignore machine-coded refusal; the renderer owns the copy
+    "The agent-messages server does not support this yet; it needs an update."
+)
+
+
+def _consent_predates_withdraw(refusal: BridgeRefusal) -> bool:
+    """Whether a consent refusal is a pre-#227 hub not knowing `withdraw`.
+
+    CODED answers only (review R1-3). `bridge_error` is what :func:`_refusal`
+    assigns to any body without a `code` — a fronting proxy's plain-text 400, an
+    unrelated refusal, and the pre-#227 strict decoder's complaint about an
+    unknown body key all arrive that way — so treating it as "the server needs
+    an update" sent the operator to the wrong remedy. The one shape a pre-#227
+    hub answers `withdraw` with, and a #227 hub cannot, is the closed-set
+    refusal `invalid_request` naming `decision`/`unknown_value`. Everything else
+    (including an uncoded 400/422 for `endpoint_id`) surfaces as the hub's own
+    answer, which is honest: this build cannot tell why that hub refused.
+    """
+
+    return (
+        refusal.http_status == 400
+        and refusal.code == "invalid_request"
+        and refusal.details.get("field") == "decision"
+        and refusal.details.get("rule") == "unknown_value"
+    )
+
+
+def _outdated_hub(refusal: BridgeRefusal) -> BridgeRefusal:
+    """Re-code a pre-#227 refusal as :data:`OUTDATED_HUB`, keeping the hub's status.
+
+    409 because it is a condition of the deployment (the same class as
+    ``bridge_destination_refused``), not of the request; ``hub_status`` keeps
+    the original answer for diagnosis.
+    """
+
+    return BridgeRefusal(
+        OUTDATED_HUB,
+        OUTDATED_HUB_SENTENCE,
+        http_status=409,
+        details={"hub_status": refusal.http_status, "hub_code": refusal.code},
+    )
+
+
 def _local_settings_snapshot(config_dir: Path | None) -> TeamBridgeSettings | None:
     """The directory-scoped watcher's last-good local settings, or None.
 
@@ -2677,28 +2728,100 @@ class TeamBridgeClient:
         account_id: str,
         *,
         decision: str,
-        consent_version: str,
+        consent_version: str | None = None,
+        endpoint_id: str | None = None,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Accept or decline an AGENT invitation, as the agent's owner.
+        """Accept, decline or withdraw the owner's AGENT in a conversation.
 
         This is the only path that activates an agent member, and the version
         is the server-served ``bridge_agent_participation_v1`` — never the
-        agent-messages consent.
+        agent-messages consent. ``withdraw`` (agent-server #227) takes an ACTIVE
+        agent out and carries no version: leaving is not consenting. The hub
+        acts on one source state per decision and refuses every other with 409
+        ``invalid_transition`` (``details.rule`` ``not_invited``/``not_active``)
+        or, for two unpinned candidate rows, 400 ``rule=ambiguous``; those
+        travel unchanged, because the renderer's "already answered" copy keys
+        on exactly that rule.
+
+        ``consent_version`` and ``endpoint_id`` ride only when given, so an
+        accept/decline without a pin is the pre-#227 wire byte for byte.
         """
 
-        body: dict[str, Any] = {"decision": decision, "consent_version": consent_version}
+        body: dict[str, Any] = {"decision": decision}
+        if consent_version is not None:
+            body["consent_version"] = consent_version
+        if endpoint_id is not None:
+            body["endpoint_id"] = endpoint_id
         if tenant_id:
             body["tenant_id"] = tenant_id
-        return await self._send(
-            "POST",
-            f"/messaging/conversations/{conversation_id}/members/{account_id}/consent",
-            body=body,
-            access=access,
-            expected_account_id=expected_account_id,
-        )
+        try:
+            return await self._send(
+                "POST",
+                f"/messaging/conversations/{conversation_id}/members/{account_id}/consent",
+                body=body,
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+        except BridgeRefusal as refusal:
+            # Only a WITHDRAW is judged, and only on the shape above: an
+            # accept/decline is the pre-#227 wire and its refusals are always
+            # about the caller's rows (R1-3).
+            if decision == "withdraw" and _consent_predates_withdraw(refusal):
+                raise _outdated_hub(refusal) from refusal
+            raise
+
+    async def owned_agent_invitations(
+        self,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of the conversations where the caller's OWN agent is ``invited``.
+
+        agent-server #227 ``GET /messaging/agents/owned/invitations``: the only
+        place an invitation into a private channel or group the owner is not in
+        is visible at all. METADATA ONLY — the hub serves no body, preview or
+        member list, and nothing here asks for one or keeps the page. The hub
+        derives the agent rows from the caller + tenant (no endpoint parameter);
+        ``cursor`` is the hub's opaque ``next_cursor``, forwarded verbatim.
+
+        The captured-owner receipt is REQUIRED (the owner-audit rule): a page
+        captured for account A must not be answered while signed in as B. A hub
+        that predates #227 answers its router's uncoded 404, which is surfaced
+        as ``outdated_hub`` — no conversation id is in this path, so a 404 here
+        cannot mean "not yours".
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            return await self._send(
+                "GET",
+                OWNED_AGENT_INVITATIONS_HUB_PATH,
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
+        except BridgeRefusal as refusal:
+            # An UNCODED 404 here is "this hub has no such route": the path
+            # carries no id, so a coded 404 is the hub speaking about the caller
+            # (no membership, unknown tenant) and passes through. Deliberately
+            # unlike the consent arm (R1-3): there an uncoded 400/422 is
+            # ambiguous, while a router's 404 on a fixed metadata path is the
+            # absent-route answer itself — a #227 hub has no way to code a route
+            # it does not serve.
+            if refusal.http_status == 404 and refusal.code == "bridge_error":
+                raise _outdated_hub(refusal) from refusal
+            raise
 
     async def conversation_messages(
         self,
