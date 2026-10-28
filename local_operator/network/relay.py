@@ -14773,18 +14773,6 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     }
 
 
-def _systemd_unit_image() -> Path:
-    """The interpreter the Linux unit names, including the source-tree fallback.
-
-    The native historical-unit fixture must replace THIS choice, not reimplement
-    it: a source checkout has no generation shim, so an empty ``supervised_image``
-    result legitimately becomes the running interpreter.
-    """
-    from local_operator import procname
-
-    return procname.supervised_image() or Path(sys.executable)
-
-
 def render_systemd(port: int = DEFAULT_PORT) -> str:
     """The Linux user unit, in the shape every supervised daemon's unit shares.
 
@@ -14796,7 +14784,9 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
     installer's environment, so without it an install from a store override
     would serve a different store than the one it was installed against.
     """
-    image = _systemd_unit_image()
+    from local_operator import procname
+
+    image = procname.supervised_image() or Path(sys.executable)
     return supervisors.render_systemd_unit(
         description="Local Operator network relay",
         exec_start=(
