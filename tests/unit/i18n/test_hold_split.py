@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from rich.cells import cell_len
@@ -35,6 +36,36 @@ from local_operator.i18n.messages import Msg, envelope
 REPO = Path(__file__).resolve().parents[3]
 
 
+def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict[str, Any]]) -> None:
+    """Judge ledger freshness on the LATEST row per namespace, and prove the rest superseded.
+
+    WHY NOT EVERY ROW. ``i18n/ledger.json`` is append-only: re-auditing a namespace at
+    new English bytes appends a row and keeps the old one at its superseded source
+    hash, and ``generate.py`` ships by the LAST row per ``(locale, namespace)``. A
+    check that demanded every row be fresh would forbid ever re-auditing.
+
+    WHY NOT ONLY THE LATEST. Reading just the last row would let a stale duplicate,
+    or an older audit appended AFTER a newer one, pass unseen. So: the last row must
+    be at the current English hash, and every earlier row for that namespace must be
+    at a DIFFERENT hash (a second row at the same hash is a duplicate, not history).
+    """
+
+    by_namespace: dict[str, list[dict[str, Any]]] = {}
+    for entry in rows:  # file order: the ledger is read last-wins
+        by_namespace.setdefault(entry["namespace"], []).append(entry)
+    for namespace, entries in by_namespace.items():
+        current = catalogues.catalogue_sha256("en", namespace)
+        assert entries[-1]["source_sha256"] == current, (
+            namespace,
+            "stale audit against the current English bytes",
+        )
+        for earlier in entries[:-1]:
+            assert earlier["source_sha256"] != current, (
+                namespace,
+                "an earlier row is at the current hash: a duplicate, or a stale row after it",
+            )
+
+
 def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     ledger = json.loads((REPO / "i18n" / "ledger.json").read_bytes())["entries"]
     chinese = [entry for entry in ledger if entry["locale"] == "zh-CN"]
@@ -42,17 +73,37 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # a passed audit at the CURRENT en bytes; a row for a namespace with no
     # file (or a file with no row) would mean the released package carries
     # unaudited or missing copy. Keep the exact-name and freshness pins, not
-    # just the cardinality: 81 is the number that satisfied the gate on the
+    # just the cardinality: 81 was the number that satisfied the gate on the
     # disposition date, and the set equality is what actually enforces it.
-    assert len(chinese) == 81
+    # The relay wave adds the two namespaces zh-CN now carries alongside the
+    # release: `relay.approvals` (17 keys, the approval-scope copy main added
+    # as literals) and the restored 77-key `relay.asks`. Both were independently
+    # audited at these bytes on 2026-10-25 (four MINOR findings on relay.asks,
+    # nits elsewhere, no blocker/major), so the cardinality went 81 -> 83.
+    # The borderless relay redesign's own audited `relay.chrome` row (the
+    # namespace its English freeze minted, translated and independently audited
+    # at these bytes on 2026-10-25) is the eighty-fourth: it is CARRIED, so the
+    # set equality below already requires its row, and the pin moves with it.
+    # The condensed relay transcript's `relay.transcript` row (19 keys, its
+    # zh-CN bytes independently audited at the current English source) is the
+    # eighty-fifth: likewise CARRIED, so set equality requires it too.
+    # The session status dot's own nine-key `relay.health` namespace (minted
+    # so relay.chrome's frozen English bytes stay untouched; two keys audited
+    # on 2026-10-26, the round-2 seven added and the whole namespace's zh-CN
+    # bytes doubly audited at the current English source on 2026-10-27) is
+    # the eighty-sixth, CARRIED on the same terms.
+    # The skill-write error keys (PR #3013) re-audited `wire.errors.desktop`, a
+    # namespace the locale already carried, and the append-only ledger gained a
+    # second zh-CN row for it (the earlier row is retained at its superseded
+    # source hash): the eighty-seventh.
+    # PR #3072's independently audited `wire.settings` delta (the two 1h
+    # cache-TTL help strings) appends a fresh zh-CN row at the new English
+    # bytes; the earlier row stays at its superseded hash: one more.
+    assert len(chinese) == 92
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
-    for entry in chinese:
-        assert entry["source_sha256"] == catalogues.catalogue_sha256("en", entry["namespace"]), (
-            entry["namespace"],
-            "stale audit against the current English bytes",
-        )
+    _assert_latest_row_is_fresh_and_earlier_rows_superseded(chinese)
 
     hindi = [entry for entry in ledger if entry["locale"] == "hi"]
     # TWENTY-FOUR: the union plus independently audited P3a/P3b namespaces,
@@ -75,8 +126,8 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # P3b adds its 35-key tui.team_authoring namespace after independent audit.
     # The audited `hi/wire.memory` row this branch lands makes it TWENTY-FOUR;
     # the /tag slice's independently re-audited 27-key `tui.tags` row makes it
-    # TWENTY-FIVE. LOH-11's independently audited `relay.session.tags` row makes
-    # it TWENTY-SIX. The remote_compute six-key wire.settings delta's
+    # TWENTY-FIVE. LOH-11's independently audited `relay.session.tags` row
+    # makes it TWENTY-SIX. The remote_compute six-key wire.settings delta's
     # independently audited row makes it TWENTY-SEVEN. The S3e remote-compute
     # wave adds one row per carried namespace (`cli.exec_remote_help`,
     # `wire.remote_compute`) -- TWENTY-NINE. The pin stays cardinal so an
@@ -88,8 +139,25 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # audited 7-key `tui.palette` row makes it THIRTY-THREE. The fast-mode
     # fix's refusal notices add one audited row each for `tui.notices` and
     # `wire.errors.desktop` -- THIRTY-FIVE (both newly carried, 30 and 84 keys).
-    assert len(hindi) == 35
+    # The relay.asks re-audit adds the 77-key `hi/relay.asks` row -- THIRTY-SIX.
+    # The approvals slice adds the independently audited 17-key
+    # `hi/relay.approvals` row -- THIRTY-SEVEN. The borderless relay redesign's
+    # audited `relay.chrome` row (its English freeze minted the namespace; the
+    # Hindi bytes were translated and independently audited on 2026-10-25 at
+    # these source bytes) makes it THIRTY-EIGHT. The condensed relay
+    # transcript's independently audited 19-key `hi/relay.transcript` row makes
+    # it THIRTY-NINE. PR #2985's independently audited `wire.settings` delta
+    # (Anthropic cache-TTL help + subagent row) appends a fresh Hindi row at the
+    # new English bytes: FORTY. The session status dot's independently audited
+    # `hi/relay.health` row makes it FORTY-ONE.
+    # The skill-write error re-audit (PR #3013) appends a second hi row for the
+    # already-carried `wire.errors.desktop`: FORTY-TWO.
+    # PR #3072's independently audited `wire.settings` delta (the two 1h
+    # cache-TTL help strings) appends a fresh Hindi row at the new English
+    # bytes: one more.
+    assert len(hindi) == 47
     assert all(entry["status"] == "passed" for entry in hindi)
+    _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 
 
 def test_the_active_tree_holds_bytes_only_for_shipped_locales() -> None:

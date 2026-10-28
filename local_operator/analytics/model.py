@@ -262,6 +262,12 @@ class CallSnapshot:
     #: rather than being relabelled here.
     billing_basis: str = "not_tracked"
     cost_source: str = "none"
+    #: Anthropic cache-diagnostics verdict for the call (see
+    #: ``StreamStartEvent.cache_miss_type``) and the input tokens the API says
+    #: the divergence cost. '' / 0 = not diagnosed. Chained last so the
+    #: positional writer keeps its existing field order.
+    cache_miss_type: str = ""
+    cache_missed_tokens: int = 0
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:

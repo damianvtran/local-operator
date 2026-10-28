@@ -1039,6 +1039,29 @@ class ProviderError(RenderedStreamError):
         return f"{label}{detail}: {self.message}"
 
 
+#: Provider wordings that mean "THIS MODEL takes no images at all", as opposed
+#: to "this image block is bad". They became reachable when the registry stopped
+#: denying images to models nothing has described (an undescribed model's
+#: capability is unknown, and an unknown model is sent images): a text-only
+#: endpoint behind such an id answers with one of these, and without a marker
+#: the session re-sent the image and failed every turn (PR #3071 review round 1,
+#: M1 / QA Q1). Stable substrings, not whole messages, because the surrounding
+#: text carries indices and codes. Part of :data:`_IMAGE_REJECTION_MARKERS`
+#: (the strip is the same), and also a set of its own because the strip's
+#: LIFETIME differs: see :func:`is_image_modality_rejection`.
+_IMAGE_MODALITY_REJECTION_MARKERS = (
+    # OpenRouter, HTTP 404: "No endpoints found that support image input".
+    "support image input",
+    # DeepSeek direct, HTTP 400/422: "Failed to deserialize the JSON body into
+    # the target type: messages[0]: unknown variant `image_url`, expected `text`".
+    "unknown variant `image_url`",
+    # OpenAI-compatible gateways, HTTP 400: "Invalid content type. image_url is
+    # only supported by certain models." and the terser "image_url is not
+    # supported".
+    "image_url is only supported",
+    "image_url is not supported",
+)
+
 #: Provider wordings that mean "an image block in this request is unusable".
 #: Matched on the provider's OWN message, because no status distinguishes it:
 #: it arrives as a plain 400 alongside every other malformed-request refusal.
@@ -1077,7 +1100,60 @@ _IMAGE_REJECTION_MARKERS = (
     # ceiling are covered by one marker, since the number is the part that
     # moves.
     "image dimensions exceed max allowed size",
+    # The per-request image COUNT refusal: "Too much media: 0 document pages +
+    # 101 images > 100" (measured live on claude-haiku-4-5, PR #3004 QA round
+    # 1). Like the many-image dimension refusal it is reached by the
+    # conversation growing, not by a bad block, and without a marker it
+    # repeated on every prompt. The stale-frame batch flush
+    # (``compaction.pruning.stale_flush_due``) keeps requests under the limit;
+    # this is the backstop for images it cannot reach (user pastes, recent
+    # frames). Unlike every other entry it is a property of the PROVIDER's
+    # limit, not of a block, so the session scopes the resulting strip to
+    # the provider (see :func:`is_image_count_rejection`).
+    "too much media",
+    # The MODALITY refusals ("this model takes no images at all"); see
+    # :data:`_IMAGE_MODALITY_REJECTION_MARKERS`.
+    *_IMAGE_MODALITY_REJECTION_MARKERS,
 )
+
+#: The subset of :data:`_IMAGE_REJECTION_MARKERS` that names a per-request
+#: image COUNT limit rather than a bad block (see :func:`is_image_count_rejection`).
+_IMAGE_COUNT_REJECTION_MARKERS = ("too much media",)
+
+
+def is_image_count_rejection(error: BaseException | str) -> bool:
+    """Did the provider refuse the request for carrying too MANY images?
+
+    A subset of :func:`is_image_rejection` (same kind gate), split out because
+    the remedy differs: no block is poisoned, the request crossed THIS
+    provider's per-request limit (100 images on 200k-window Anthropic models,
+    600 on 1M ones). The session still strips images so the next turn
+    succeeds, but marks the strip provider-scoped, so a switch to a provider
+    with a higher limit lifts it, exactly like the size strip (agent review
+    round 2, R2-m2).
+    """
+    if not is_image_rejection(error):
+        return False
+    text = error.message if isinstance(error, ProviderError) else str(error)
+    haystack = text.lower()
+    return any(marker in haystack for marker in _IMAGE_COUNT_REJECTION_MARKERS)
+
+
+def is_image_modality_rejection(error: BaseException | str) -> bool:
+    """Did the provider refuse images because THIS MODEL takes none at all?
+
+    A subset of :func:`is_image_rejection` (same kind gate), split out for the
+    same reason as :func:`is_image_count_rejection`: no block is poisoned, so
+    the session's strip is evidence about the model it was talking to, not
+    about the bytes. Scoping it that way lets a ``/model`` switch onto a
+    vision model lift the strip instead of leaving the session blind on a
+    model that would have seen the images.
+    """
+    if not is_image_rejection(error):
+        return False
+    text = error.message if isinstance(error, ProviderError) else str(error)
+    haystack = text.lower()
+    return any(marker in haystack for marker in _IMAGE_MODALITY_REJECTION_MARKERS)
 
 
 def is_image_rejection(error: BaseException | str) -> bool:

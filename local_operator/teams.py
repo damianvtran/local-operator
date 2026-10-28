@@ -698,7 +698,16 @@ class Team(BaseModel):
             # channel is `hub`; the role word is a DELEGATION handle
             # (`task(agent='<role>')`). This mirrors :func:`escalation_preamble`'s
             # own "report to {reports_to}, through hub".
-            f"You are {role} on this team. You report to {self.manager}, through hub.",
+            #
+            # The FINAL-MESSAGE clause exists because members pre-sent their
+            # report through hub and then settled with the same text: measured
+            # 60% of child->parent hub notes were followed within 120 s by the
+            # job's settle carrying that report, so the manager paid for it
+            # twice. The settle already reaches the manager; hub is for
+            # mid-job blockers and questions only.
+            f"You are {role} on this team. You report to {self.manager}: your final "
+            "message is the report and reaches them automatically; use hub only "
+            "for a blocker or question mid-job, never to pre-send it.",
             # Same rule for members, who report into the manager; carried here
             # for custom roles that have no seed.
             "Derive it, or say where it came from: a result you report is one you "

@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
+import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,8 @@ import httpx
 import pytest
 
 from local_operator.browser_bridge.backend import (
+    HOST_COPY,
+    HOST_UI,
     BridgeError,
     BridgeUnreachable,
     HostPreDeliveryFailure,
@@ -780,3 +785,590 @@ def test_the_extension_host_copy_is_unchanged_by_this_seam() -> None:
         "went unanswered). Do not retry the same origin; ask the user to allow it from the "
         "extension popup if it is needed."
     )
+
+
+# --------------------------------------------------------------------------
+# Health-probe outcome classes (the "bounded health check" false negatives).
+#
+# Real loopback listeners, because the claim is about wall-clock behaviour of
+# the real httpx client against a real socket; a MockTransport cannot be late.
+# The budget is shrunk with monkeypatch so the suite stays fast — the constant is
+# read at call time, and the policy under test is relative to it.
+# --------------------------------------------------------------------------
+
+# 1.0 s, not smaller: these run on a fleet at load 50+, where the CHECKER's own
+# loop is the thing that gets starved (that is the defect under test), so a tight
+# budget would make the suite flake for the very reason the retry exists.
+_BUDGET = 1.0
+
+
+class _Host:
+    """A loopback UI host whose /health behaviour is scripted per request.
+
+    ``health_script`` is consumed one entry per GET: a float delays that response
+    by that many seconds before answering with the healthy body, ``"hang"`` holds
+    the connection open and never answers, and ``"until_retry"`` holds it until a
+    SECOND GET arrives (so the first attempt is late by construction, whatever the
+    machine load, rather than by a sleep the load can shorten or stretch). After
+    the script runs out it answers instantly. ``/rpc`` always succeeds and is
+    counted, so a test can prove the command was (or was not) dispatched.
+    """
+
+    #: The most recently built host, for fixtures that must observe its counters.
+    current: "_Host"
+
+    def __init__(self, *, pid: int, instance_id: str, health_script: list[Any] | None = None):
+        _Host.current = self
+        self.gets = 0
+        self.posts = 0
+        self.script = list(health_script or [])
+        self.pid = pid
+        self.instance_id = instance_id
+        #: When set, /health answers 200 with exactly these bytes (hostile bodies).
+        self.raw_health: bytes | None = None
+        #: Set the moment a /health request has been RECEIVED, so a test can act
+        #: only once the GET is provably in flight rather than guessing with a timer.
+        self.received = threading.Event()
+        #: When set, the reply to a /health request is withheld until it is set.
+        self.hold_reply: threading.Event | None = None
+        self._release = threading.Event()
+        host = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _reply(self, payload: dict[str, Any]) -> None:
+                raw = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                try:
+                    self.wfile.write(raw)
+                except OSError:  # the client already gave up on a slow first attempt
+                    pass
+
+            def do_GET(self) -> None:  # noqa: N802
+                host.gets += 1
+                host.received.set()
+                if host.hold_reply is not None:
+                    host.hold_reply.wait(timeout=10)
+                if host.raw_health is not None:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(host.raw_health)))
+                    self.end_headers()
+                    try:
+                        self.wfile.write(host.raw_health)
+                    except OSError:
+                        pass
+                    return
+                step = host.script.pop(0) if host.script else 0.0
+                if step == "hang":
+                    host._release.wait(timeout=10)
+                    return
+                if step == "until_retry":
+                    deadline = time.monotonic() + 10
+                    while host.gets < 2 and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                if step:
+                    time.sleep(float(step))
+                self._reply({"host": "ui", "pid": host.pid, "instance_id": host.instance_id})
+
+            def do_POST(self) -> None:  # noqa: N802
+                host.posts += 1
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                self._reply({"id": body["id"], "ok": True, "result": {"dispatched": True}})
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self._release.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def short_first_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Abandon ONLY the first /health attempt, once the host has provably received it.
+
+    The retry tests must not depend on how loaded the machine is (this fleet runs
+    at load 50+, which starves the checker — the very defect under test). A timer
+    shorter than the first request's arrival raced the host and sometimes cut the
+    first attempt BEFORE any GET landed, so the held "late" reply was then served
+    to the retry. Instead the first attempt runs for real, and is abandoned as a
+    TIMEOUT only after ``_Host.current.gets >= 1`` — i.e. the host is holding that
+    reply — while the retry gets the real, generous budget. The listener and the
+    httpx client stay real; only the first attempt's clock is replaced.
+    """
+    monkeypatch.setattr(backend, "HEALTH_PROBE_TIMEOUT_S", 5.0)
+    real = backend._probe_once
+    seen = {"n": 0}
+
+    async def probe_once(current: Any, budget: float) -> Any:
+        seen["n"] += 1
+        if seen["n"] > 1:
+            return await real(current, budget)
+        task = asyncio.ensure_future(real(current, budget))
+        deadline = time.monotonic() + 5.0
+        while _Host.current.gets < 1 and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return backend.HealthVerdict.TIMEOUT, "TimeoutError", ""
+
+    monkeypatch.setattr(backend, "_probe_once", probe_once)
+
+
+@pytest.fixture
+def small_budget(monkeypatch: pytest.MonkeyPatch) -> float:
+    monkeypatch.setattr(backend, "HEALTH_PROBE_TIMEOUT_S", _BUDGET)
+    return _BUDGET
+
+
+def _dead_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.mark.asyncio
+async def test_a_late_first_attempt_is_acquitted_by_exactly_one_retry(
+    tmp_path: Path, short_first_attempt: None
+) -> None:
+    """Healthy host, first probe late (a starved checker): the command still goes."""
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["until_retry"])
+    try:
+        publish(tmp_path, port=host.port, instance_id="instance-a")
+        result = await backend.UiHostClient(tmp_path).call("open", {"url": "https://example.test"})
+        assert result == {"dispatched": True}
+        assert (host.gets, host.posts) == (2, 1)
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_checker_loop_does_not_condemn_a_healthy_host(
+    tmp_path: Path, small_budget: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mechanism itself: the CHECKER's loop is blocked past the budget.
+
+    Measured on main (3/3 runs each): a ``time.sleep(2 * budget)`` that begins 1 ms
+    or 5 ms after the GET is issued condemns a healthy, instant host; a block that
+    begins only once the request has reached the host does NOT (the reply is already
+    queued and is read first when the loop wakes), and neither does one run via
+    ``call_soon``. So the discriminating shape is "the block begins before the
+    request lands". A fixed timer cannot guarantee that on a loaded box (the loop
+    can run it late), so the test asserts the shape it needs — the host had not yet
+    received the request when the block started — and retries a trial whose block
+    landed late rather than letting it pass without exercising the retry. A trial
+    that DID land early must succeed, with exactly one retry.
+    """
+    real_get = httpx.AsyncClient.get
+    trial: dict[str, Any] = {"gets": 0, "pre_request": False, "host": None}
+
+    def block() -> None:
+        trial["pre_request"] = not trial["host"].received.is_set()
+        time.sleep(_BUDGET * 2)
+
+    async def get_then_block(self: httpx.AsyncClient, url: Any, **kwargs: Any) -> Any:
+        if str(url).endswith("/health"):
+            trial["gets"] += 1
+            if trial["gets"] == 1:
+                asyncio.get_running_loop().call_later(0.001, block)
+        return await real_get(self, url, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", get_then_block)
+    for attempt in range(6):
+        host = _Host(pid=os.getpid(), instance_id="instance-a")
+        trial.update(gets=0, pre_request=False, host=host)
+        try:
+            publish(tmp_path / str(attempt), port=host.port, instance_id="instance-a")
+            result = await backend.UiHostClient(tmp_path / str(attempt)).call(
+                "open", {"url": "https://example.test"}
+            )
+        finally:
+            host.close()
+        assert result == {"dispatched": True}, "a healthy host must never be condemned"
+        if trial["pre_request"]:
+            assert trial["gets"] == 2, "the block expired attempt 1; the retry acquitted"
+            return
+    pytest.fail("the block never landed before the request in 6 trials; cannot discriminate")
+
+
+@pytest.mark.asyncio
+async def test_an_unresponsive_live_host_gets_the_overloaded_copy_not_unavailable(
+    tmp_path: Path, small_budget: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang", "hang"])
+    try:
+        record = publish(tmp_path, port=host.port, instance_id="instance-a")
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger=backend.__name__):
+            with pytest.raises(HostPreDeliveryFailure) as excinfo:
+                await backend.UiHostClient(tmp_path).call("open", {"url": "https://example.test"})
+        elapsed = time.monotonic() - started
+        message = str(excinfo.value)
+        assert "unavailable" not in message
+        assert f"published (pid {os.getpid()}, port {host.port})" in message
+        assert "did not answer the bounded health check" in message
+        assert "over 2 attempts" in message
+        assert "retry the same command; no command was sent" in message
+        assert host.posts == 0 and host.gets == 2
+        # 2 budgets + backoff, plus the rediscovery path (which re-reads the same
+        # record and so does not probe again) and scheduling slack.
+        assert elapsed < 2 * _BUDGET + backend.HEALTH_RETRY_BACKOFF_S + 0.6
+
+        lines = [
+            r.getMessage() for r in caplog.records if "ui_host_health_probe_failed" in r.message
+        ]
+        assert len(lines) == 1, lines
+        line = lines[0]
+        for field in (
+            "site=preflight",
+            "outcome=timeout",
+            f"pid={os.getpid()}",
+            f"port={host.port}",
+            "instance_id=instance-a",
+            f"generation={record.started_at}",
+            f"budget_s={_BUDGET:.3f}",
+            "elapsed_s=",
+            "attempts=2",
+            "loop_lag_ms=",
+            "error=",
+            "pid_alive=True",
+        ):
+            assert field in line, (field, line)
+        assert record.session_key not in line
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_no_published_record_is_the_absence_message_and_issues_no_get(
+    tmp_path: Path, small_budget: float
+) -> None:
+    host = _Host(pid=os.getpid(), instance_id="instance-a")
+    try:
+        with pytest.raises(BridgeUnreachable) as excinfo:
+            await backend.UiHostClient(tmp_path).call("open", {})
+        assert not isinstance(excinfo.value, HostPreDeliveryFailure)
+        assert str(excinfo.value) == HOST_COPY[HOST_UI].no_state
+        assert host.gets == 0
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_port_with_a_live_pid_fails_fast_with_one_attempt(
+    tmp_path: Path, small_budget: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    port = _dead_port()
+    publish(tmp_path, port=port, instance_id="instance-a")
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger=backend.__name__):
+        with pytest.raises(HostPreDeliveryFailure) as excinfo:
+            await backend.UiHostClient(tmp_path).call("open", {})
+    # Structural first (one attempt, no retry); the clock is only a coarse backstop.
+    assert time.monotonic() - started < _BUDGET, "a dead socket must not wait out a budget"
+    message = str(excinfo.value)
+    assert f"no longer answering at 127.0.0.1:{port}" in message
+    assert "re-open it" in message and "no command was sent" in message.lower()
+    assert "did not answer the bounded" not in message
+    line = next(
+        r.getMessage() for r in caplog.records if "ui_host_health_probe_failed" in r.message
+    )
+    assert "outcome=refused" in line and "attempts=1" in line
+
+
+@pytest.mark.asyncio
+async def test_a_recycled_generation_is_named_and_never_retried(
+    tmp_path: Path, small_budget: float
+) -> None:
+    host = _Host(pid=os.getpid(), instance_id="instance-other")
+    try:
+        publish(tmp_path, port=host.port, instance_id="instance-a")
+        with pytest.raises(HostPreDeliveryFailure) as excinfo:
+            await backend.UiHostClient(tmp_path).call("open", {})
+        message = str(excinfo.value)
+        assert "is not the published desktop browser host generation" in message
+        assert "unavailable" not in message and "no command was sent" in message
+        assert (host.gets, host.posts) == (1, 0)
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_the_retry_never_extends_past_the_callers_deadline(
+    tmp_path: Path, small_budget: float
+) -> None:
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang", "hang"])
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        client = backend.UiHostClient(tmp_path)
+        loop = asyncio.get_running_loop()
+        allowance = _BUDGET * 1.4  # room for one full attempt and a sliver of a second
+        started = time.monotonic()
+        with pytest.raises(HostPreDeliveryFailure):
+            await client.preflight(current, deadline=loop.time() + allowance)
+        assert time.monotonic() - started < allowance + 0.5
+        assert host.gets <= 2
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_retry_with_no_allowance_left_sends_no_second_get(
+    tmp_path: Path, small_budget: float
+) -> None:
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang"])
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        loop = asyncio.get_running_loop()
+        with pytest.raises(HostPreDeliveryFailure):
+            # The whole allowance is smaller than one budget: the first attempt
+            # consumes it, so the retry has nothing left and must not run.
+            await backend.UiHostClient(tmp_path).preflight(
+                current, deadline=loop.time() + _BUDGET * 0.5
+            )
+        # <= 1, not == 1: on a starved machine the allowance can be gone before the
+        # first GET is even written. The invariant is that there is never a second.
+        assert host.gets <= 1
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_reachability_acquits_a_healthy_fresh_record_and_a_dead_listener_stays_false_fast(
+    tmp_path: Path, small_budget: float
+) -> None:
+    """Reachability is single-attempt (see test_reachability_makes_one_attempt_only);
+    the starved-checker retry lives in preflight, so here only the two definite
+    answers are pinned: healthy -> True in one GET, dead -> False without a wait."""
+    host = _Host(pid=os.getpid(), instance_id="instance-a")
+    try:
+        publish(tmp_path, port=host.port, instance_id="instance-a")
+        assert state.liveness(tmp_path)[0] is state.Liveness.FRESH
+        assert await backend.ui_browser_reachable(tmp_path) is True
+        assert host.gets == 1
+    finally:
+        host.close()
+
+    publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    started = time.monotonic()
+    assert await backend.ui_browser_reachable(tmp_path) is False
+    assert time.monotonic() - started < _BUDGET
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_host_costs_exactly_one_get_and_logs_nothing(
+    tmp_path: Path, small_budget: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    host = _Host(pid=os.getpid(), instance_id="instance-a")
+    try:
+        publish(tmp_path, port=host.port, instance_id="instance-a")
+        with caplog.at_level(logging.DEBUG, logger=backend.__name__):
+            await backend.UiHostClient(tmp_path).call("open", {})
+        assert (host.gets, host.posts) == (1, 1)
+        assert not [r for r in caplog.records if r.name == backend.__name__]
+    finally:
+        host.close()
+
+
+# --------------------------------------------------------------------------
+# Remediation round 1: hostile bodies, bounded detail, single-attempt
+# reachability, rotation abandon, deadline-accurate copy, no-retry coverage.
+# --------------------------------------------------------------------------
+
+#: Bodies a hostile or buggy listener on a recycled port can serve. Every one must
+#: be a BAD_RESPONSE/MISMATCH verdict — the probe may never raise on host bytes.
+_HOSTILE_BODIES = {
+    "pid_infinity_literal": b'{"host":"ui","pid":1e999,"instance_id":"instance-a"}',
+    "pid_negative_infinity": b'{"host":"ui","pid":-1e999,"instance_id":"instance-a"}',
+    "pid_nan_literal": b'{"host":"ui","pid":NaN,"instance_id":"instance-a"}',
+    "pid_list": b'{"host":"ui","pid":[1],"instance_id":"instance-a"}',
+    "pid_dict": b'{"host":"ui","pid":{"a":1},"instance_id":"instance-a"}',
+    "pid_string": b'{"host":"ui","pid":"abc","instance_id":"instance-a"}',
+    "pid_null": b'{"host":"ui","pid":null,"instance_id":"instance-a"}',
+    "pid_huge_int": b'{"host":"ui","pid":' + b"9" * 5000 + b',"instance_id":"instance-a"}',
+    "pid_big_int": b'{"host":"ui","pid":' + b"9" * 400 + b',"instance_id":"instance-a"}',
+    "body_list": b"[1, 2, 3]",
+    "body_string": b'"ui"',
+    "body_null": b"null",
+    "body_number": b"42",
+    "body_not_json": b"<html>not json</html>",
+    "body_invalid_utf8": b"\xff\xfe\x00",
+    "body_empty": b"",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(_HOSTILE_BODIES))
+async def test_a_hostile_health_body_is_a_verdict_never_an_exception(
+    tmp_path: Path, small_budget: float, name: str
+) -> None:
+    """R1/Q1: ``{"pid":1e999}`` made ``int(inf)`` raise OverflowError out of the probe.
+
+    The old bool helper swallowed everything, so this was a regression: both the
+    action-path reachability gate ("discovery must never raise") and preflight
+    (which must raise the TYPED pre-delivery failure) surfaced a raw exception.
+    """
+    host = _Host(pid=os.getpid(), instance_id="instance-a")
+    host.raw_health = _HOSTILE_BODIES[name]
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        client = backend.UiHostClient(tmp_path)
+        with pytest.raises(HostPreDeliveryFailure) as excinfo:
+            await client.preflight(current)
+        assert "no command was sent" in str(excinfo.value)
+        assert await backend.ui_browser_reachable(tmp_path) is False
+        assert host.gets == 2, "one GET per site: a definite answer is never retried"
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_hostile_text_is_clipped_in_the_message_and_the_log(
+    tmp_path: Path, small_budget: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R3/Q2: a 50 KB ``host`` value must not reach the model or ``runtime.log`` whole."""
+    host = _Host(pid=os.getpid(), instance_id="instance-a")
+    host.raw_health = json.dumps({"host": "X" * 50_000, "pid": os.getpid()}).encode()
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        with caplog.at_level(logging.WARNING, logger=backend.__name__):
+            with pytest.raises(HostPreDeliveryFailure) as excinfo:
+                await backend.UiHostClient(tmp_path).preflight(current)
+        message = str(excinfo.value)
+        assert len(message) < 600 and "…" in message
+        line = next(
+            r.getMessage() for r in caplog.records if "ui_host_health_probe_failed" in r.message
+        )
+        assert len(line) < 800 and "…" in line
+        assert "X" * 200 not in message + line
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_reachability_makes_one_attempt_only(tmp_path: Path, small_budget: float) -> None:
+    """R4/Q3: the action-path gate has no deadline and runs before preflight.
+
+    A silent host must cost it one budget, not two: the starved-checker retry lives
+    in ``preflight``, which protects the command itself.
+    """
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang", "hang"])
+    try:
+        publish(tmp_path, port=host.port, instance_id="instance-a")
+        started = time.monotonic()
+        assert await backend.ui_browser_reachable(tmp_path) is False
+        elapsed = time.monotonic() - started
+        assert host.gets == 1
+        assert elapsed < 2 * _BUDGET, "a retry here would take ~2 budgets"
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_reachable_warnings_are_rate_limited_per_host_and_outcome(
+    tmp_path: Path, small_budget: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R6: a stale silent host must not log once per action; preflight is never limited."""
+    backend._reachable_last_logged.clear()
+    publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    with caplog.at_level(logging.WARNING, logger=backend.__name__):
+        for _ in range(3):
+            assert await backend.ui_browser_reachable(tmp_path) is False
+    lines = [r for r in caplog.records if "site=reachable" in r.getMessage()]
+    assert len(lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_retry_is_skipped_once_the_record_was_rotated(
+    tmp_path: Path, small_budget: float
+) -> None:
+    """Q3 second case: a rotated record means `call` should probe the NEW generation.
+
+    The old generation hangs; while its probe is stuck the app restarts and
+    publishes a healthy instance-b. Burning a second full budget on instance-a only
+    delays the rediscovery that `call` is about to do.
+    """
+    old = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang"])
+    new = _Host(pid=os.getpid(), instance_id="instance-b")
+    try:
+        publish(tmp_path, port=old.port, instance_id="instance-a")
+
+        async def rotate() -> None:
+            while not old.received.is_set():
+                await asyncio.sleep(0.001)
+            publish(tmp_path, port=new.port, instance_id="instance-b")
+
+        rotator = asyncio.ensure_future(rotate())
+        started = time.monotonic()
+        result = await backend.UiHostClient(tmp_path).call("open", {"url": "https://example.test"})
+        await rotator
+        assert result == {"dispatched": True}
+        assert old.gets == 1, "no second attempt against the replaced generation"
+        assert (new.gets, new.posts) == (1, 1)
+        assert time.monotonic() - started < 2 * _BUDGET
+    finally:
+        old.close()
+        new.close()
+
+
+@pytest.mark.asyncio
+async def test_a_bad_response_is_never_retried(tmp_path: Path, small_budget: float) -> None:
+    host = _Host(pid=os.getpid(), instance_id="instance-a")
+    host.raw_health = (
+        b'{"host":"ui","pid":%d,"instance_id":"instance-a","ready":false}' % os.getpid()
+    )
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        with pytest.raises(HostPreDeliveryFailure) as excinfo:
+            await backend.UiHostClient(tmp_path).preflight(current)
+        assert "unhealthy response" in str(excinfo.value)
+        assert host.gets == 1
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_whose_pid_is_gone_is_never_retried(
+    tmp_path: Path, small_budget: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang", "hang"])
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        # The listener hangs, but the PUBLISHED pid is reported dead: nothing a
+        # second GET could learn, and the copy must be the "no longer answering" one.
+        monkeypatch.setattr(state, "pid_alive", lambda pid: False)
+        with pytest.raises(HostPreDeliveryFailure) as excinfo:
+            await backend.UiHostClient(tmp_path).preflight(current)
+        assert "no longer answering" in str(excinfo.value)
+        assert host.gets == 1
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_the_copy_is_exact_when_the_deadline_shortens_the_second_attempt(
+    tmp_path: Path, small_budget: float
+) -> None:
+    """Q4: do not claim "within 1.0s over 2 attempts" when attempt 2 got a sliver."""
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang", "hang"])
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        loop = asyncio.get_running_loop()
+        with pytest.raises(HostPreDeliveryFailure) as excinfo:
+            await backend.UiHostClient(tmp_path).preflight(
+                current, deadline=loop.time() + _BUDGET * 1.4
+            )
+        message = str(excinfo.value)
+        assert "within the time allowed" in message
+        assert f"within {_BUDGET:.1f}s over" not in message
+    finally:
+        host.close()

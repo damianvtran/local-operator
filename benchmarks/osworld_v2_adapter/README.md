@@ -316,26 +316,32 @@ BASE=$(python3.12 -c 'import sys; print(sys.base_prefix)')   # e.g. ~/.local/sha
 #     copy); the -V beside it is the real check and catches a genuine miss.
 cp "$BASE/lib/libpython3.12.dylib" "$VENV/lib/" 2>/dev/null || true   # macOS only
 "$VENV/bin/python3.12" -V   # must print the version, not abort
-uv pip install --python "$VENV/bin/python3.12" \
-    --no-deps dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl
+# (The single-wheel --no-deps install that used to follow belongs to the
+#  superseded step 3b below: use scripts/build_osworld_arm.py, which installs
+#  both wheels against a resolved closure.)
 
-# 3b. install the locked set. For the PAID path export WITH the osworld extra
-#     (~380 packages the cloud-free wheel does not need); omit --extra for a
-#     cloud-free venv. Export to a FILE and keep it beside the venv: it is the
-#     record of what was actually installed, and the lock's own
-#     local-operator pin lags the harness (schema 1.2 and host_secrets only
-#     exist from 0.44.30+), so substitute the harness version you are running
-#     and note the substitution in the build record.
-uv export --frozen --no-emit-project --extra osworld --no-hashes \
-    -o "$VENV/build/requirements.locked.txt"
-sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' \
-    "$VENV/build/requirements.locked.txt"   # macOS sed; GNU sed wants -i without ''
-# The export is the full resolved closure. --no-deps preserves those rows and
-# the lock's requests override instead of re-resolving upstream's stale pin.
-uv pip install --no-deps --python "$VENV/bin/python3.12" -r "$VENV/build/requirements.locked.txt"
-
-# The one expected `uv pip check` incompatibility is the documented
-# requests>=2.32 override onto OSWorld's ~=2.31 pin (see [tool.uv] above).
+# 3b. install the locked set. SUPERSEDED -- read this before copying it.
+#     The recipe that used to sit here was
+#         uv export --frozen --no-emit-project --extra osworld --no-hashes \
+#             -o "$VENV/build/requirements.locked.txt"
+#         sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' ...
+#         uv pip install --no-deps --python "$VENV/bin/python3.12" \
+#             -r "$VENV/build/requirements.locked.txt"
+#     and it is exactly how main16 ended up with a missing `miniaudio`: a frozen
+#     export replays the rows the LOCK knew about, `--no-deps` installs them
+#     without resolving anything, and a harness that has since added a mandatory
+#     dependency produces an arm whose own requirement is unmet. The sed also
+#     rewrote evidence.
+#
+#     Use scripts/build_osworld_arm.py instead: it re-resolves the closure under
+#     the committed overrides, keeps the raw pip-check output, and admits or
+#     refuses the result under the reviewed policy --
+#         python scripts/build_osworld_arm.py --source-sha <40-hex-main-commit> --plan ...
+#         python scripts/build_osworld_arm.py --source-sha <40-hex-main-commit> \
+#             --out <new arm dir> --execute --plan ...
+#     See docs/benchmarks/osworld_2/arm-build.md for the sequence, the receipts
+#     and what a build does NOT prove. Steps 3/3a above remain the venv recipe
+#     the tool implements.
 
 # 4. compute package_digest FIRST: it digests the installed wheel's RECORD and
 #    does not depend on the workspace, while step 5's --package-digest does
@@ -830,7 +836,7 @@ statement that ends in a terminal transport failure costs at most one attempt's
 own deadline (~90 s, unchanged from a single send) plus the window; a fast
 refusal still gets its full schedule (~3.5 s). A refused port and an
 unreachable host (`EHOSTUNREACH`) are both retryable, because neither sent a
-byte. The bounded readiness GET to `/terminal` is taken once per statement and
+byte. The bounded liveness GET to `/platform` is taken once per statement and
 is **evidence, not a veto**: it rides the same host-to-guest path as the request
 that just failed, so a transient path failure fails the probe too, and
 requiring it would turn exactly that blip into a dead episode. Each retry logs
@@ -850,12 +856,22 @@ retries exhausted (N)`), console evidence, and the guest-down cause of death.
 **The pre-action receipt check gets the same treatment.** Before an action it
 waits for the control server with bounded backoff for up to 15 s of wall clock
 (~7x the observed time for a blipped path to come back). Each probe gets the
-watchdog's own 5 s bound: the action server is single-threaded around its
-control endpoints, so a screenshot or a page load blocks `/terminal` for
-seconds, and a probe that gives up sooner calls a BUSY server ambiguous -- the
-path connected, the HTTP never answered -- then refuses an episode the same
-server would serve. The probe is classification, not a kill, so patience costs
-only time inside the fixed budget. If every probe in that
+watchdog's own 5 s bound, and asks `GET /platform` -- upstream's
+`platform.system()`, no desktop work -- never `/terminal`. Upstream's
+`/terminal` serialises the whole AT-SPI desktop tree whenever a terminal is
+active; on a v2.1 guest it measured 0.06 s fresh, 4-6 s with a focused
+terminal over other apps, and 8-31 s beside a concurrent `/accessibility`
+read, while `/platform` stayed at 0.05-0.18 s in every state. Probing
+`/terminal` mid-episode turned a live server into a ReadTimeout (ambiguous:
+the path connected, the HTTP never answered) and refused the action unsent;
+that was 7 of the 10 main16 "action bridge wedged" endings. `/terminal` stays
+only as the allocation readiness check (`_ALLOCATION_READY_PATH`), upstream's
+own `ensure_ready` admission on a fresh desktop. The probe is classification,
+not a kill, so patience costs only time inside the fixed budget. Every
+recovery record also says whether its `watchdog` block was read in that call
+(`watchdog_source: fresh_receipt`) or re-emitted from the last successful read
+(`cached_last_receipt`, with `watchdog_observed_at` and `watchdog_age_s`): a
+cached `serving` is not evidence the watchdog sees the server now. If every probe in that
 wait failed on the CONNECT -- `probe_outcomes` all `not_sent`, recorded as
 `path_unreachable` -- nothing was learned about the server's generation, so the
 action is compiled and attempted anyway and the transport classifier decides
@@ -868,7 +884,7 @@ carries no `delivery=` token, because no delivery happened.
 The `delivery=ambiguous` verdict
 does feed exactly ONE gated harness measure: after such a failure the session
 asks a single read-only question, `probe` -- a bounded GET to the guest's
-readiness endpoint (`providers.aws._READY_PATH`) -- and only an ANSWERING
+liveness endpoint (`providers.aws._LIVENESS_PATH`) -- and only an ANSWERING
 control server lets the episode continue, with the model told the batch's
 effect is UNKNOWN and instructed to verify the screen before re-issuing
 anything. A probe that cannot answer fails closed, and an adapter that does

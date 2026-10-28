@@ -29,6 +29,11 @@ for pull requests - and this module copies that route's stance:
   absolute paths from its transcript; a mesh or phone surface must NOT reuse this route's
   projection - it calls the service with ``display=True``.
 
+A third, independent route lives here because it shares this module's stance (journal on
+disk, no bridge, same admission): ``GET /v1/desktop/sessions/{session_id}/user-attachments``,
+the files and pictures the PERSON attached (``session/user_attachments.py``), gated by its own
+key ``features.session_attachments``.
+
 Capability: ``features.session_files == 1`` (``server/features.py``). Absent means the surface
 does not exist; the renderer keeps its own scan and must not call the route.
 """
@@ -50,10 +55,12 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_session_files import (
     FilesListing,
     MaterialiseReceipt,
+    UserAttachmentsListing,
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import errors, host, reply
 from local_operator.server.utils.desktop_sessions import contained_descendants
+from local_operator.session import compression, user_attachments
 from local_operator.session_files import ledger, service
 
 logger = logging.getLogger(__name__)
@@ -64,6 +71,8 @@ router = APIRouter(tags=["Desktop session files"], dependencies=[Depends(require
 #: by FastAPI (422) before any handler runs.
 SessionID = Annotated[str, PathParam(pattern=r"^[a-f0-9]{12}$")]
 FileID = Annotated[str, PathParam(pattern=r"^[a-f0-9]{16}$")]
+#: The attachment store's digest shape (``attachments._DIGEST_CHARS``); the traversal gate.
+AttachmentDigest = Annotated[str, PathParam(pattern=r"^[a-f0-9]{32}$")]
 
 #: In-flight background completions, keyed ``(config_dir, session_id, scope)``. Single-flight:
 #: a 1 s client poll that arrives while a scan runs joins it rather than queueing another. The
@@ -291,3 +300,113 @@ _MATERIALISE_REFUSALS = {
     "artifact_missing": (410, _wd.session_files_artifact_missing()),
     "unsafe_destination": (409, _wd.session_files_materialise_failed(reason="unsafe destination")),
 }
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/user-attachments",
+    response_model=CRUDResponse[UserAttachmentsListing],
+)
+async def list_user_attachments(session_id: SessionID, request: Request):
+    """Every document and picture the user attached to this conversation, oldest first.
+
+    WHY A ROUTE: the renderer pages history lazily from the newest row, so an attachment from
+    the first turn of a long conversation is not in memory when the canvas opens; only the
+    journal has the complete list. Metadata only - bytes stay on ``…/attachments/{digest}``.
+
+    Same admission as the file index (``files_target``): unknown id 404, silent peer 409; a
+    DRAFT has no journal and answers an empty ``ready`` list; a PEER's conversation answers
+    ``state: "unsupported"``. An archive this host cannot decode answers
+    ``state: "unavailable"`` (never an empty ``ready``, which would read as "nothing
+    attached"). No ``scope``: a subagent's inputs were written by its parent, not the person.
+
+    Capability: ``features.session_attachments == 1``.
+    """
+    async with errors(request):
+        kind_of_target, directory = await host(request).files_target(session_id)
+    if kind_of_target == "peer":
+        return reply(UserAttachmentsListing(state="unsupported"))
+    if directory is None:
+        return reply(UserAttachmentsListing())
+    try:
+        listing = await asyncio.to_thread(
+            user_attachments.list_user_attachments,
+            directory,
+            deny=service.make_deny(_config_dir(request)),
+        )
+    except compression.ArchiveError:
+        logger.info("user-attachments: undecodable archive for %s", session_id, exc_info=True)
+        return reply(UserAttachmentsListing(state="unavailable"))
+    return reply(UserAttachmentsListing(state="ready", **listing))
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/user-attachments/{digest}/materialise",
+    response_model=CRUDResponse[MaterialiseReceipt],
+)
+async def materialise_user_attachment(
+    session_id: SessionID, digest: AttachmentDigest, request: Request
+):
+    """Copy one user attachment's RETAINED bytes to ``<session scratchpad>/generated/<name>``.
+
+    WHY: a pasted screenshot has no path at all, and a document whose origin was moved has
+    only ``<store>/<digest>.bin`` - a name no OS app opens. "Open", "reveal" and "copy path"
+    need a real, correctly named file, which is exactly what the file index's materialise
+    gives an artifact; this is the same copy (``service.materialise_bytes``: pinned no-follow
+    directory fds, sanitised name with a MIME-derived extension, idempotent, never
+    overwrites) over a different membership rule. NOT a byte transport: the response is a
+    path, and the bytes stay on the existing digest route.
+
+    MEMBERSHIP: the digest must be one the person attached to THIS conversation
+    (:func:`user_attachments.find_user_attachment`); the shared store means a bare digest
+    proves nothing. 404 otherwise (and for a draft or a peer, whose journal is not here, and
+    for a listed attachment with ``materialisable: false`` - a sensitive path or name); 410
+    when the store copy is gone; 409 for an unsafe destination. Capability:
+    ``features.session_attachments``.
+    """
+    async with errors(request):
+        kind_of_target, directory = await host(request).files_target(session_id)
+    not_found = HTTPException(
+        404, _wd.session_files_file_not_found().envelope(code="session_files_file_not_found")
+    )
+    if kind_of_target != "local" or directory is None:
+        raise not_found
+    deny = service.make_deny(_config_dir(request))
+
+    def run() -> dict[str, Any]:
+        from local_operator.scratchpad import scratchpad_root
+        from local_operator.session.attachments import store_for_transcript_dir
+
+        item = user_attachments.find_user_attachment(directory, digest, deny=deny)
+        if item is None:
+            raise service.MaterialiseError("file_not_found")
+        # SENSITIVE-PATH GATE, before any byte is read (PR #3042 QA round 3, Q1). The file
+        # index never lists a denied path, so its own materialise answers 404
+        # ``session_files_file_not_found`` for one; this route LISTS a denied attachment (the
+        # person chose it) with ``materialisable: false`` and refuses it with that same
+        # envelope, so a client handles both routes' denials identically and nothing is
+        # written. Judged on the ORIGINAL path and name, never only the sanitised copy name.
+        if not item.get("materialisable", True):
+            raise service.MaterialiseError("file_not_found")
+        blob = store_for_transcript_dir(directory).get_bytes(digest)
+        if blob is None:
+            raise service.MaterialiseError("artifact_missing")
+        data, stored_mime = blob
+        if scratchpad_root(directory) is None:
+            raise service.MaterialiseError("materialise_failed", "session has no scratchpad")
+        name = service.sanitise_name(
+            item.get("filename"), digest, item.get("mime_type") or stored_mime
+        )
+        return service.materialise_bytes(directory, name, digest, data)
+
+    try:
+        receipt = await asyncio.to_thread(run)
+    except service.MaterialiseError as error:
+        status, message = _MATERIALISE_REFUSALS.get(
+            error.code, (500, _wd.session_files_materialise_failed(reason=str(error)))
+        )
+        if error.code == "materialise_failed":
+            message = _wd.session_files_materialise_failed(reason=str(error))
+        raise HTTPException(status, message.envelope(code=f"session_files_{error.code}")) from None
+    except compression.ArchiveError:
+        raise not_found from None
+    return reply(receipt)

@@ -323,6 +323,15 @@ async def edit_setting(
         result = _view(manager, setting)
     if changed_identity:
         await _reconcile_bridge_identity(manager)
+    if key == "team_bridge.enabled":
+        # The explicit OFF is the other authoritative off event besides the
+        # hub's Turn off; the explicit ON may follow a resume with no new
+        # commit. Reconcile the connector on the SAME setting value just
+        # persisted, off the loop because launchctl is synchronous. Best-effort:
+        # the settings write already succeeded and must not become an error.
+        from local_operator.team_bridge.connector.install import sync_connector_service
+
+        await asyncio.to_thread(sync_connector_service, manager.config_dir)
     return CRUDResponse(status=200, message="Setting saved.", result=result)
 
 

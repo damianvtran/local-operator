@@ -26,6 +26,14 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
 - **channels** — one page of the owner account's conversations. Tenant-visible
   channels the owner has not joined come back with ``discoverable=true``,
   ``member=false`` and a member count, so an agent can find a channel to join.
+  It lists LIVE conversations only: an archived one has left the server's
+  default list (agent-server ``status=open``), so an agent cannot see or post to
+  it. That is the product intent. There is deliberately no ``status`` parameter:
+  measured against ``scripts/bench_context_budget.py``, publishing one optional
+  field costs ~22 billed tokens on both the main and the child arm, and the
+  child arm's ratchet had 2 tokens of headroom when this was decided, so the
+  field cannot ship without first paying for it elsewhere. The desktop
+  ``/conversations?status=archived`` route is the human's view of archives.
 - **channel_create** — a group or channel created by the agent identity. The
   creator agent member is added automatically (the server requires it); the
   human owner is added ONLY when named explicitly, because an agent-created
@@ -95,6 +103,7 @@ from .types import _CONVERSATION_MESSAGE_ID as _CANONICAL_MESSAGE_ID
 from .types import (
     CONVERSATION_ID_PATTERN,
     InvalidSendRecipient,
+    is_conversation_message_id,
     validate_send_recipient,
 )
 
@@ -273,6 +282,92 @@ _CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
 _CONVERSATION_MESSAGE_ID = _CANONICAL_MESSAGE_ID
 
 
+def _resolve_reply(
+    runtime: "BridgeRuntime", args: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Fill a ``reply``'s ``to``/``thread_id`` from the delivery it answers (D4).
+
+    Returns ``(args, None)`` to proceed or ``(args, refusal)``. WHY: ``reply``
+    once demanded ``to`` and never read ``message_id``, although the owner's
+    ``deliveries`` row already holds the sender and thread of every message it
+    received; and a ``bcmsg_`` id was pair-sent, so a DM answer landed in the
+    peer inbox and never in the DM. Constraints:
+
+    * the destination comes from a row THIS owner received (owner-keyed,
+      tenant-matched, generation-fenced) — an unknown or foreign id refuses,
+      and an explicit ``to``/``thread_id`` that the row contradicts, or cannot
+      vouch for, refuses rather than being trusted;
+    * a conversation message never pair-sends: the refusal names the
+      ``channel_post`` call instead of routing it, because posting into a
+      conversation humans read is a visible act the agent makes explicitly;
+    * no ``message_id`` keeps the legacy ``to`` + ``thread_id`` shape as is;
+    * local reads only, before admission, so a refusal schedules no status
+      read; refusals quote no caller-supplied value (``validate_send_recipient``).
+    """
+
+    message_id = str(args.get("message_id") or "").strip()
+    if not message_id:
+        return args, None
+    from .store import Store, StoreRefused
+
+    store = Store(Path(runtime.config_dir))
+    try:
+        if is_conversation_message_id(message_id):
+            conversation_id = store.conversation_of_reserved_message(runtime.owner, message_id)
+            # Kept short: a refusal is billed into the agent's context. The
+            # reservation has no thread-root column, so the thread comes from
+            # the card the agent already holds.
+            where = (
+                f"channel_id={conversation_id}"
+                if conversation_id
+                else "channel_id=<its conversation_id>"
+            )
+            return args, _error(
+                f"conversation message: answer with bridge channel_post {where}, "
+                "plus thread_root_id if its card names one; reply never reaches a conversation",
+                code="conversation_message",
+            )
+        row = store.reply_target(runtime.owner, message_id)
+    except StoreRefused as failure:
+        return args, _error(f"could not read the received message: {failure}", code=failure.code)
+    if row is None:
+        return args, _error(
+            "no received message has that message_id; reply answers only a delivery "
+            "this agent received",
+            code="unknown_message",
+        )
+    sender = {
+        key: str(row[f"sender_{key}"])
+        for key in ("endpoint_id", "account_id")
+        if row.get(f"sender_{key}")
+    }
+    if not sender:
+        return args, _error("the received message names no sender", code="unknown_message")
+    explicit = args.get("to")
+    if explicit is None:
+        # The endpoint is the precise addressee; the account is the fallback
+        # the pair contract also accepts (exactly one key on the wire).
+        to = {"endpoint_id": sender["endpoint_id"]} if "endpoint_id" in sender else sender
+    else:
+        try:
+            to = validate_send_recipient(explicit)
+        except InvalidSendRecipient as failure:
+            return args, _error(str(failure), code=failure.code)
+        key, value = next(iter(to.items()))
+        if sender.get(key) != value:
+            return args, _error(
+                "to is not the sender of that message; omit to and reply resolves it",
+                code="reply_conflict",
+            )
+    thread_id = args.get("thread_id")
+    if thread_id is not None and thread_id != row["thread_id"]:
+        return args, _error(
+            "thread_id is not that message's thread; omit it and reply resolves it",
+            code="reply_conflict",
+        )
+    return {**args, "to": to, "thread_id": row["thread_id"]}, None
+
+
 def _full_body_text(result: Any) -> str | None:
     message = (result or {}).get("message") or {}
     body = message.get("body") or {}
@@ -377,6 +472,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # The local authority fence keeps precedence; no invalid destination can
     # create an outbox intent, send a message, or trigger a status request.
     recipient: dict[str, str] = {}
+    if op == "reply":
+        # Resolution reads only the local store, so it sits between the fence
+        # and the recipient check (R9): an unresolvable reply refuses here,
+        # before admission could schedule any status read.
+        args, refused = _resolve_reply(runtime, args)
+        if refused is not None:
+            return refused
     if op in ("send", "reply"):
         try:
             recipient = validate_send_recipient(args.get("to"))
@@ -403,6 +505,16 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     if params.op == "take_up":
         if not params.message_id or not params.body_sha256:
             return _error("take_up needs message_id and body_sha256 (S-20)")
+        if is_conversation_message_id(params.message_id):
+            # A ``bcmsg_`` id lives in the conversation store; the pair
+            # read below would answer "does not exist" and the model would
+            # conclude the message vanished. The conversation lane admits its
+            # body through the connector, and the agent reads it from history.
+            return _error(
+                "conversation messages (bcmsg_ ids) are not taken up here: read them with "
+                "channel_history or channel_thread",
+                code="conversation_message",
+            )
         try:
             result = await runtime.client.message(params.message_id, tenant_id=runtime.tenant_id)
         except Exception as failure:  # BridgeRefusal/BridgeUnreachable -> model-readable
@@ -507,6 +619,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
             return _error(f"channels limit must be 1..{CONVERSATION_PAGE_MAX}")
         try:
+            # No ``status``: the server's default is ``open``, so archived
+            # conversations are intentionally invisible to the agent (module
+            # docstring, "channels", for why it is not a published option).
             result = await runtime.client.conversations(
                 tenant_id=runtime.tenant_id,
                 limit=int(params.limit),

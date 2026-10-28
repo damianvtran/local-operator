@@ -380,6 +380,53 @@ CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases (
 """
 
 
+def failure_block_window(
+    retry_after_ms: int | None,
+    *,
+    usage_limited: bool,
+    model_id: str = "",
+    floor_ms: int = DEFAULT_BLOCK_MS,
+) -> tuple[str, int]:
+    """``(block_scope, block_ms)`` for a credential that just failed: the ONE rule.
+
+    WHY THIS IS A FUNCTION: the window a failing credential sits out used to be
+    spelled inline in :meth:`AuthStore.rotate_sibling`, so the only credential
+    that obeyed it was a LOCAL row. A row borrowed over the mesh answered the same
+    ``429 … retry in 24h`` and was asked again on the very next request, because
+    nothing on the borrower remembered it (``MeshCredentialClient.report_sync``
+    now calls this too). Both sides read the same rule here so they cannot drift.
+
+    The rule itself is unchanged: the provider's advertised wait, floored at
+    ``floor_ms`` and capped at :data:`MAX_CREDENTIAL_BLOCK_MS` — the ceiling
+    :meth:`AuthStore.block_credential` already applied to every local block, so
+    a ``retry in 24h`` rests a row for an hour and is then re-probed once rather
+    than stranded for a day on one reading. A usage-limit verdict on a model
+    with a parsable family is scoped to that family (see ``rotate_sibling`` for
+    why the family is the under-block side that heals); anything else is
+    account-wide.
+    """
+    from local_operator.model.registry import model_family
+
+    family = model_family(model_id) if model_id else ""
+    scope = f"model:{family}" if (usage_limited and family) else ""
+    window = max(floor_ms, int(retry_after_ms or 0))
+    return scope, min(window, MAX_CREDENTIAL_BLOCK_MS)
+
+
+def block_scope_gates(scope: str, model_id: str) -> bool:
+    """Whether a block written with ``scope`` stops a request for ``model_id``.
+
+    The read half of :func:`failure_block_window`, shared for the same reason:
+    an account-wide block (``""``) gates every model, a ``model:<slug>`` block
+    gates exactly the models whose id contains the slug — the predicate
+    :meth:`AuthStore.is_blocked_for_model` applies to its stored rows.
+    """
+    if not scope:
+        return True
+    lowered = (model_id or "").lower()
+    return bool(lowered) and scope.removeprefix("model:") in lowered
+
+
 class AuthStoreError(Exception):
     """Credential resolution/refresh failure (never a bare sqlite error)."""
 
@@ -1353,6 +1400,10 @@ class AuthStore:
         #: write (no mkdir, no schema DDL, no WAL, no chmod). Read paths
         #: (:meth:`list_credentials`) work; write paths must not be reached.
         self._read_only = read_only
+        #: Whether the read-only handle reads the live WAL (both sidecars were
+        #: already present) rather than an immutable main-file snapshot. Set by
+        #: :meth:`_connect_read_only`; read by :meth:`read_only_sidecar_present`.
+        self._ro_sees_wal = False
         self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
@@ -1434,11 +1485,57 @@ class AuthStore:
     def _connect_read_only(self) -> _SerializedConnection | None:
         """The metadata-only handle, or ``None`` when there is nothing to read.
 
-        ``mode=ro&immutable=1`` over an existing file only: no mkdir, no
-        O_CREAT, no WAL PRAGMA, no schema DDL, no commit, no chmod. The
-        ``immutable=1`` is required, not decorative — a plain ``mode=ro`` open
-        still creates ``-wal``/``-shm`` sidecars (measured), which the no-writes
-        promise forbids. sqlite also refuses every write through this handle.
+        Two opens, chosen by what is ALREADY on disk, because the no-writes
+        promise (#2894: a read never creates a file) and a current answer pull
+        in opposite directions:
+
+        * Both ``-wal`` and ``-shm`` exist (any owner with a live writer, i.e.
+          practically every running desktop): plain ``mode=ro``. This reads
+          the committed WAL, so a busy store answers with its CURRENT rows
+          instead of being declared unknown/stale forever. It creates no file
+          (both sidecars are there) and never writes ``auth.db`` or ``-wal``;
+          like every WAL reader it records its read-mark in the existing
+          ``-shm``, which is SQLite's reader coordination, not credential data
+          and not a new file (#2894 forbids the latter).
+        * ``readonly_shm=1`` is deliberately NOT used, although it would leave
+          even the ``-shm`` bytes alone. SQLite keeps ONE wal-index mapping per
+          database file per process, and the first connection to map it decides
+          whether it is read-only: while such a reader is open, every writable
+          ``AuthStore`` opened in the same process fails with "attempt to write
+          a readonly database". The relay answers ``ready`` beside the credential
+          sync engine and owner broker, and the mobile daemon serves ``/usage``
+          beside ``/models``, so that broke real writes (PR #3084 review R1-1:
+          26,636 of 26,642 same-process writes failed under readonly_shm, 0 of
+          1,263 under plain ``mode=ro``). A read must never break a write.
+        * Otherwise ``mode=ro&immutable=1``: no sidecars means the last writer
+          checkpointed and closed, so the main file IS the current state. A
+          plain ``mode=ro`` here would CREATE ``-wal``/``-shm`` (measured),
+          which the promise forbids. A ``-wal`` without ``-shm`` (a crash
+          leftover) also lands here and is reported by
+          :meth:`read_only_sidecar_present` as possibly stale.
+
+        No mkdir, no O_CREAT of the database, no WAL PRAGMA, no schema DDL, no
+        commit, no chmod on either branch; sqlite refuses every row write
+        through both handles. A ``-shm`` that is corrupt, truncated or from an
+        older WAL generation with no writer alive is rebuilt from the WAL's own
+        checksummed frames, so it reads as the recovered truth (what the next
+        writer would see), not as unknown; a corrupt ``-wal`` or main file
+        still fails to open and reads as unavailable.
+
+        Two residual effects, both accepted rather than hidden:
+
+        * The sidecar check and the open are not atomic. If the last writer
+          checkpoints and unlinks both sidecars in between, this open recreates
+          them empty (a 0-byte ``-wal`` and a fresh ``-shm``, exactly what the
+          next writer would create) and still reads the right rows, which that
+          checkpoint has just put in the main file. They are NOT unlinked
+          afterwards: by then another process may be using them, and deleting a
+          live ``-shm`` is how WAL coordination gets corrupted. No credential
+          data is written.
+        * A reader open across the last writer's close can make that writer
+          skip its close-time checkpoint and leave ``-wal``/``-shm`` behind.
+          The next read takes this same branch and is correct; the next writer
+          checkpoints them. Read handles here are short-lived.
 
         Returns ``None`` when there is nothing to read: an ABSENT database
         (legitimately empty) or one that will not open. Callers distinguish the
@@ -1447,16 +1544,40 @@ class AuthStore:
         """
         if not self._db_path.exists():
             return None
+        if self._wal_sidecars_present():
+            conn = self._open_read_only_uri("mode=ro")
+            if conn is not None:
+                self._ro_sees_wal = True
+                return conn
+        return self._open_read_only_uri("mode=ro&immutable=1")
+
+    def _wal_sidecars_present(self) -> bool:
+        """Whether BOTH WAL sidecars already exist, so a WAL read creates no file."""
+        try:
+            return all(
+                self._db_path.with_suffix(self._db_path.suffix + suffix).is_file()
+                for suffix in ("-wal", "-shm")
+            )
+        except OSError:
+            return False
+
+    def _open_read_only_uri(self, query: str) -> _SerializedConnection | None:
+        """One read-only open with ``query``; ``None`` when it will not open."""
         try:
             conn = sqlite3.connect(
-                f"file:{self._db_path}?mode=ro&immutable=1",
+                f"file:{self._db_path}?{query}",
                 timeout=5.0,
                 uri=True,
                 check_same_thread=False,
             )
+        except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
+            return None
+        try:
             conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             return _SerializedConnection(conn)
         except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            conn.close()
             logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
             return None
 
@@ -1512,15 +1633,30 @@ class AuthStore:
         return required.issubset(cols)
 
     def read_only_sidecar_present(self) -> bool:
-        """True when a non-empty ``-wal`` sits beside the store's database.
+        """True when this read-only handle may be missing committed WAL frames.
 
-        ``immutable=1`` (the read-only open) cannot see an uncheckpointed WAL,
-        so a committed DELETE in the WAL is invisible to it: the reader still
-        sees the removed credential row. A non-empty ``-wal`` is that exact
-        on-disk signal, which the seam surfaces as staleness so a possibly-
-        deleted account is never presented as current. A zero-length WAL holds
-        no frames and is not staleness.
+        Only the IMMUTABLE handle can be stale: ``immutable=1`` cannot see an
+        uncheckpointed WAL, so a committed DELETE in it is invisible and the
+        reader would still see the removed credential row. A non-empty ``-wal``
+        beside that handle is the on-disk signal, which callers surface as
+        staleness (the phone seam) or unknown (``lop network ready``) so a
+        possibly-deleted account is never presented as current. A zero-length
+        WAL holds no frames and is not staleness.
+
+        The WAL-reading handle (both sidecars present, see
+        :meth:`_connect_read_only`) already reads every committed frame, so it
+        is never stale. Answering from the file size alone made every busy
+        owner permanently "could not be read": a live writer's ``-wal`` is
+        practically never empty, since SQLite reuses it after a checkpoint
+        rather than truncating it.
+
+        The name now reads "may be stale", not "a sidecar exists". It is kept
+        because :class:`UsageCacheStore` exposes the same probe and the phone
+        seam and readiness call it by name on either store, so renaming one
+        side would split that shared shape.
         """
+        if self._ro_sees_wal:
+            return False
         try:
             wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
             return wal.exists() and wal.stat().st_size > 0
@@ -2487,7 +2623,7 @@ class AuthStore:
             (credential_id, provider_key),
         ).fetchall()
         now = self._now_ms()
-        return any(until > now and scope.removeprefix("model:") in lowered for scope, until in rows)
+        return any(until > now and block_scope_gates(scope, lowered) for scope, until in rows)
 
     def blocked_remaining_ms(self, credential_id: int, provider: str, model_id: str) -> int:
         """The ms until ``credential_id`` could serve ``model_id`` again, or ``0``.
@@ -4498,6 +4634,80 @@ class AuthStore:
             account_created_at=row.created_at if row is not None else 0,
         )
 
+    async def get_catalogue_access(self, provider: str) -> OAuthAccess | None:
+        """A credential for READING a provider catalogue, not routing inference.
+
+        Inference selection deliberately excludes quota-depleted accounts. Model
+        discovery must not inherit that decision: an exhausted account can still
+        have a valid OAuth grant and a provider-published model list. Hiding that
+        list made a signed-in provider look completely empty.
+
+        Keep the cascade's credential precedence (runtime/config override, OAuth,
+        login key, environment, other stored key), but do not read usage, rank or
+        repoint accounts, clear demotions, or block a credential on failure. A
+        transient refresh error degrades to the next eligible credential; a
+        provider-declared dead grant is never sent. Successful token rotation is
+        still persisted because discarding a single-use refresh token would break
+        the account, not protect it.
+        """
+        provider = self._storage_id(provider)
+        override = self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
+        if override:
+            return OAuthAccess(access_token=override, credential_id=0, kind="api_key")
+
+        key_fn = self._oauth_key_fn(provider)
+        oauth_rows = [
+            row for row in self.list_credentials(provider) if row.credential_type == "oauth"
+        ]
+        for row in oauth_rows:
+            try:
+                creds = await self._ensure_oauth_fresh(row)
+            except AuthStoreError:
+                continue
+            key = key_fn(creds) if key_fn else creds.get("access")
+            if key:
+                current = self.get_credential(row.id) or row
+                data = current.data
+                return OAuthAccess(
+                    access_token=key,
+                    credential_id=current.id,
+                    account_id=data.get("account_id"),
+                    email=data.get("email"),
+                    org_id=data.get("org_id"),
+                    api_endpoint=data.get("api_endpoint"),
+                    kind="oauth",
+                    raw=data,
+                    account_created_at=current.created_at,
+                )
+
+        # Preserve the ordinary cascade's API-key tiers and environment fallback.
+        # Iterating stored rows directly is intentional: `_usable_key_rows` also
+        # applies inference blocks, which are unrelated to catalogue authorization.
+        for source in ("login", None):
+            for row in self.list_credentials(provider):
+                if row.credential_type != "api_key":
+                    continue
+                if (source == "login") != (row.data.get("source") == "login"):
+                    continue
+                key = row.data.get("key")
+                if key:
+                    return OAuthAccess(
+                        access_token=key,
+                        credential_id=row.id,
+                        kind="api_key",
+                        account_created_at=row.created_at,
+                    )
+            if source == "login":
+                env_key = self._env_api_key(provider)
+                if env_key:
+                    return OAuthAccess(access_token=env_key, credential_id=0, kind="api_key")
+
+        resolver = self._fallback_resolvers.get(provider)
+        fallback = resolver(provider) if resolver is not None else None
+        if fallback:
+            return OAuthAccess(access_token=fallback, credential_id=0, kind="api_key")
+        return None
+
     async def list_oauth_accesses(self, provider: str) -> list[OAuthAccess]:
         """EVERY logged-in OAuth account for ``provider``, each one refreshed.
 
@@ -5118,15 +5328,17 @@ class AuthStore:
                 # unusable", so it is never written from a family-named
                 # rotation. The family comes from the model the request ran,
                 # via the same parser the usage layer's tier rows key on.
-                from local_operator.model.registry import model_family
-
-                family = model_family(model_id) if model_id else ""
-                scope = f"model:{family}" if (usage_limited and family) else ""
+                scope, window_ms = failure_block_window(
+                    retry_after,
+                    usage_limited=usage_limited,
+                    model_id=model_id,
+                    floor_ms=block_ms,
+                )
                 self.block_credential(
                     failing.id,
                     provider,
                     block_scope=scope,
-                    block_ms=max(block_ms, retry_after or 0),
+                    block_ms=window_ms,
                 )
             if usage_limited:
                 # Sticky preserved: same account stays first after backoff.

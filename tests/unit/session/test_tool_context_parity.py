@@ -117,6 +117,10 @@ SENTINELS: dict[str, Any] = {
     # caller confined would run its UNCONFINED default -- shell on the host,
     # paths anywhere -- which is the boundary silently off.
     "confinement_root": "/tmp/sentinel-confinement",
+    # The scout's write-confined shell root. Dropped on the way to the
+    # executor, a scout's bash would run UNWRAPPED on the host -- reads, writes
+    # and network all open -- while its approval tier still said "read".
+    "shell_write_root": "/tmp/sentinel-shell-write",
 }
 
 #: ToolContext fields the Session takes under a DIFFERENT name. Kept tiny and

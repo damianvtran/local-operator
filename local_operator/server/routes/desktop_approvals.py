@@ -41,6 +41,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_approvals import (
     ApprovalDecision,
     ApprovalList,
+    CredentialApprovalAcknowledgment,
     NetworkEnrollmentAcknowledgment,
     OnboardProbe,
     OnboardRequest,
@@ -73,7 +74,15 @@ def _http_refusal(error: MeshRefusal) -> Exception:
     status = 404 if error.code in {"unknown_approval", "approval_missing"} else 409
     if error.code in {"ssh_port_conflict", "invalid_ssh_port", "unexpected_run_body"}:
         status = 422
-    return HTTPException(status, _wd.desktop_refusal(error=str(error)).envelope(code=error.code))
+    body = _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+    outcome = getattr(error, "apply_outcome", None)
+    if isinstance(outcome, dict):
+        # An APPLY-phase refusal says, in this same response, whether a retry can succeed
+        # (UX #3002 r2, U8b): ``{code, retryable, reason, remedy}``, the block the row's
+        # ``typed_approval.apply_outcome`` and the detail read carry. Absent on every other
+        # refusal, so existing clients see the body they always did.
+        body["apply_outcome"] = outcome
+    return HTTPException(status, body)
 
 
 async def _local(request: Request, work: Any) -> Any:
@@ -191,9 +200,16 @@ async def request_onboard(request: Request, body: OnboardRequest):
 @router.get("/v1/desktop/approvals/{approval_id}", response_model=CRUDResponse[Any])
 async def onboard_detail(request: Request, approval_id: str):
     """Durable local receipts; the request closing never cancels their writer."""
+    from local_operator.network.credentials import desktop_approval
     from local_operator.server.utils.desktop_onboard import detail
 
-    return reply(await _local(request, lambda: detail(_root(request), approval_id)))
+    def work():
+        answer = detail(_root(request), approval_id)
+        # Re-reading a card is the "review it again" a cancelled credential prompt asks for.
+        desktop_approval.refetched([approval_id])
+        return answer
+
+    return reply(await _local(request, work))
 
 
 @router.post(
@@ -298,3 +314,74 @@ async def approve_network_enrollment(
         return _decision(record)
 
     return reply(await _local(request, work))
+
+
+async def _approve_operation(request: Request, approval_id: str, body: Any) -> Any:
+    """THE ONE typed sign-then-apply handler behind ``/approve-operation`` and its alias.
+
+    Every refusal before the signature is a 409 with its code (nothing happened). Once
+    signed, an apply refusal is reported as ``applied: {ok: false, code}`` beside
+    ``signed: {ok: true}`` -- the decision stands and ``apply-operation`` retries it. Both
+    paths call this so their responses cannot drift (pinned by the parity tests).
+    """
+    from local_operator.network.credentials import desktop_approval
+
+    def work():
+        return desktop_approval.approve_and_apply(
+            _root(request),
+            approval_id,
+            op=body.operation,
+            request_digest=body.request_digest,
+            disclosure_digest_=body.disclosure_digest,
+        )
+
+    return reply(await _local(request, work))
+
+
+async def _apply_operation(request: Request, approval_id: str, body: Any) -> Any:
+    """THE ONE typed apply (the "signed, not applied" retry) behind both apply paths."""
+    from local_operator.network.credentials import desktop_approval
+
+    def work():
+        return desktop_approval.apply(
+            _root(request),
+            approval_id,
+            op=body.operation,
+            request_digest=body.request_digest,
+            disclosure_digest_=body.disclosure_digest,
+        )
+
+    return reply(await _local(request, work))
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/approve-credential", response_model=CRUDResponse[Any]
+)
+async def approve_credential(
+    request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
+):
+    """ALIAS of ``/approve-operation`` (``server.routes.desktop_credentials``) for shipped
+    desktop builds (``credential_approvals``).
+
+    Kept with its ``Literal`` body model, so an op that is not a credential op is a 422 here
+    exactly as before; the handler is the same function. THE ONE INTENDED DIFFERENCE from
+    ``/approve-operation`` (QA round 1, Q1): an unregistered ``operation`` is rejected by
+    validation here (422), but passes the open ``OperationApprovalAcknowledgment`` there and
+    the engine refuses it (409 ``credential_operation_mismatch``). Either way nothing signs;
+    every registered op answers identically on both families.
+    """
+    return await _approve_operation(request, approval_id, body)
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/apply-credential", response_model=CRUDResponse[Any]
+)
+async def apply_credential(
+    request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
+):
+    """ALIAS of ``/apply-operation`` for shipped desktop builds.
+
+    Same 422-here / 409-there difference for an unregistered ``operation`` as
+    :func:`approve_credential`.
+    """
+    return await _apply_operation(request, approval_id, body)

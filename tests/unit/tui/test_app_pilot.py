@@ -9372,6 +9372,61 @@ class _ClaimTrackedSession(_SwitchableSession):
 
 
 @pytest.mark.asyncio
+async def test_a_typed_model_switch_reads_the_claim_off_the_ui_thread() -> None:
+    """``/model`` publishes the access claim from a worker thread, and a read
+    that a newer switch overtook is dropped (PR #3053, the TUI known gap).
+
+    Fails on the old code: ``_cmd_model`` called ``_publish_model_access``
+    inline, so ``usable_providers`` — a SQLite scan — ran on the Textual thread
+    inside the keystroke.
+    """
+    import threading
+
+    session = _ClaimTrackedSession()
+
+    class _ThreadRecording(_AccessController):
+        def __init__(self) -> None:
+            super().__init__(stored=("openrouter", "anthropic"))
+            self.read_threads: list[int] = []
+            self.release = threading.Event()
+            self.hold = False
+
+        def usable_providers(self):  # noqa: ANN201
+            self.read_threads.append(threading.get_ident())
+            if self.hold:
+                assert self.release.wait(5.0), "the held read was never released"
+            return super().usable_providers()
+
+    ctrl = _ThreadRecording()
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(90, 24)) as pilot:
+        await _await_session(app, pilot)
+        ui_thread = threading.get_ident()
+        ctrl.read_threads.clear()
+
+        app._run_slash_command("/model anthropic/claude-opus-5")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert ctrl.read_threads, "the switch must still publish a claim"
+        assert ui_thread not in ctrl.read_threads, "the credential read ran on the UI thread"
+        claim = session._frontend_state_store.state.model_access
+        assert claim is not None and (claim.state, claim.provider) == ("ok", "anthropic"), claim
+
+        # STALE GUARD: hold the next read, switch again underneath it, release.
+        ctrl.hold = True
+        app._publish_model_access_off_thread(session)
+        await pilot.pause()
+        session._label = "openrouter/deepseek/deepseek-chat"
+        ctrl.hold = False
+        ctrl.release.set()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert (
+            session._frontend_state_store.state.model_access == claim
+        ), "a read the selector moved under must not be applied"
+
+
+@pytest.mark.asyncio
 async def test_a_routed_model_switch_republishes_the_access_claim() -> None:
     """The phone's `/model <selector>` lands in the ROUTED lane, and the claim
     must move with the switch there too (agent review round 1, R1-2).

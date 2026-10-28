@@ -15,8 +15,10 @@ WHAT THIS FILE OWNS (RU §8.2 item 3, first half; the trigger note §4/§6):
   member parked on the catch-up cadence (never waited on, never forced), a
   failed member backed off, an unreachable member caught on its next contact,
   a codeless refusal retried on the cadence (the wire's "not now", never a
-  claim of why — round 2, R2-2), and a CODED ``no_grant`` member parked for
-  the rollout with the remedy recorded.
+  claim of why — round 2, R2-2), a CODED ``no_grant`` member parked for
+  the rollout with the remedy recorded, and a member whose channel does not
+  serve the target YET parked ``deferred (target_not_published)`` on its
+  own short publish-wait ladder until PyPI catches up or the window closes.
   Every state re-enters from the record; the record is the only state.
 - **The origin-side audit rows** — ``update_rollout_started`` (durable, written
   by S3b's hook through :func:`open_record`'s callers), ``update_member_state``
@@ -98,6 +100,19 @@ CADENCE_S = 300.0
 #: (RU §10). There is no give-up counter; the record's window is the bound.
 FAIL_BACKOFF_S: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0, 7200.0)
 
+#: The not-yet-published wait's ladder (seconds), then its cap: 2, 5, 10 min,
+#: then every 15 min until the window closes. Deliberately NOT
+#: :data:`FAIL_BACKOFF_S`: that ladder guards against hammering a member whose
+#: install keeps breaking, where each attempt is expensive and a fast retry
+#: changes nothing. A publish wait is the opposite on both counts — PyPI lag
+#: after a tag is minutes (0.90.17: 21.5 min), and the ask that probes it is one
+#: small frame the member answers with a single index lookup. On the failure
+#: ladder an hour of lag pushed the next ask 2 h out, so on 2026-10-28 a member
+#: sat 98 min behind an already-published 0.91.1. The cap bounds the cost of a
+#: version that never appears (an upload PyPI refused) to four tiny asks an
+#: hour; the record's window is still the one bound that ends them.
+NOT_PUBLISHED_BACKOFF_S: tuple[float, ...] = (120.0, 300.0, 600.0, 900.0)
+
 #: The record's own window (seconds; RU §6.1) — the one bound that ends
 #: automatic retries.
 WINDOW_S = 86400.0
@@ -124,8 +139,30 @@ DONE_STATES: frozenset[str] = frozenset({"done", "already_on_target", "ahead_of_
 TERMINAL_STATES: frozenset[str] = DONE_STATES | {"refused", "skipped"}
 
 #: The codes that make a ``refused`` member TERMINAL: a member-side RULE said
-#: this target cannot be installed anywhere (RU §3's rule refusals).
+#: this target cannot be installed, whenever it is asked (RU §3's rule
+#: refusals). ``target_not_published`` stays here ONLY for its ORIGIN-side
+#: reading — ``update_peer`` refusing before any frame because the origin's own
+#: build stamp is not a parseable version, which no wait can change. The
+#: MEMBER's "not on my channel" answer no longer lands as ``refused`` at all:
+#: :func:`classify_answer` parks it ``deferred`` (see :data:`NOT_PUBLISHED_CODE`),
+#: a non-terminal state, so this tuple never ends its retries.
 RULE_REFUSAL_CODES: tuple[str, ...] = ("target_not_published", "editable_install")
+
+#: The member's "this version is not on my channel" answer: a positive 404 from
+#: PyPI for the exact version (``meshupdate.check_published``). It is a WAIT,
+#: not a rule refusal. The origin installs at tag time through the snapshot path
+#: while ``publish.yml`` uploads the wheel minutes later, so right after a tag a
+#: 404 nearly always means "not YET": 0.90.17's member was refused at 05:30:38Z
+#: and the wheel landed at 05:52:05Z, and 0.90.14 closed the same way, each
+#: rollout ending ``partial`` with nothing left to retry it. The member is
+#: parked ``deferred`` with this code on its own :data:`NOT_PUBLISHED_BACKOFF_S`
+#: ladder (counted in ``waits``, so ``fails`` keeps meaning "the install broke") and is
+#: re-asked until it installs, the record's window lapses, or a newer rollout
+#: supersedes this one. Those two bounds are the ones every other retry already
+#: has; no new deadline exists. A 404 can also mean NEVER (an upload PyPI
+#: rejected, e.g. for its project size quota), which is why the window close
+#: says so in plain words rather than going quiet (:func:`not_published_note`).
+NOT_PUBLISHED_CODE = "target_not_published"
 
 #: The audit kinds this half emits (registered in ``audit.py`` with the rest).
 ROLLOUT_STARTED = "update_rollout_started"
@@ -321,6 +358,7 @@ def open_record(
                 "version": "",
                 "next_ask_at": 0.0,
                 "fails": 0,
+                "waits": 0,
                 "receipts": [],
             }
             for member in members
@@ -409,8 +447,47 @@ def _rollable_remainder(record: Mapping[str, Any]) -> bool:
             continue
         if state == "refused" and str(member.get("code") or "") in RULE_REFUSAL_CODES:
             continue
+        if _waiting_for_publish(member):
+            # The window closed on a version PyPI never served: the closing
+            # sentence names that fact and its own remedy
+            # (:func:`not_published_note`), and a generic "re-run" beside it
+            # would promise a move that cannot happen until the upload exists.
+            continue
         return True
     return False
+
+
+def _waiting_for_publish(member: Mapping[str, Any]) -> bool:
+    """Is this member parked on the not-yet-published wait (:data:`NOT_PUBLISHED_CODE`)?"""
+    return (
+        str(member.get("state") or "") == "deferred"
+        and str(member.get("code") or "") == NOT_PUBLISHED_CODE
+    )
+
+
+def not_published_note(record: Mapping[str, Any]) -> str:
+    """The plain-words sentence for a window that closed on an unpublished target.
+
+    Empty when no member was still waiting. WHY IT SAYS "never" AS A
+    POSSIBILITY: the member's only evidence is a 404 for the exact version, and
+    a 404 a day after the tag is no longer "late" — an upload PyPI refused (its
+    per-project size quota is the measured case) looks identical from here. The
+    sentence states what is known (not on PyPI, these members not updated) and
+    the remedy that works either way, and claims nothing about why.
+    """
+    waiting = [
+        str(m.get("name") or m.get("device") or "?")
+        for m in record.get("members", [])
+        if _waiting_for_publish(m)
+    ]
+    if not waiting:
+        return ""
+    version = str((record.get("target") or {}).get("version") or "the target")
+    return (
+        f"{version} never appeared on PyPI while this rollout was open, so "
+        f"{', '.join(waiting)} stayed on its current build; it may not have been "
+        "published at all — check PyPI, then run `lop network update` again"
+    )
 
 
 def _mark_applying(record: dict[str, Any], device: str) -> bool:
@@ -447,6 +524,20 @@ def summary(record: Mapping[str, Any]) -> str:
             label = "queued"
         elif state == "skipped" and code:
             label = f"skipped ({code})"
+        elif state == "deferred" and code == NOT_PUBLISHED_CODE:
+            # The wait reads as a wait, with the version it is for and when it
+            # is looked at again — "deferred" alone would hide that nothing on
+            # the member is wrong.
+            version = str((record.get("target") or {}).get("version") or "the target")
+            if str(record.get("state") or "") == "active":
+                at = float(member.get("next_ask_at") or 0.0)
+                when = time.strftime("%H:%M", time.localtime(at)) if at > 0 else "now"
+                # No parentheses: the label sits inside the summary's own
+                # bracketed group list, and "(… (next check 06:24): device-a)"
+                # read as a typo (QA round 1 on #3028, copy).
+                label = f"waiting for {version} on PyPI, next check {when}"
+            else:
+                label = f"not updated, {version} is not on PyPI"
         else:
             label = state
         groups.setdefault(label, []).append(str(member.get("name") or member.get("device") or "?"))
@@ -463,6 +554,8 @@ def summary(record: Mapping[str, Any]) -> str:
         else f"is {state}: {count} peer(s)"
     )
     line = f"rollout {record.get('id')} {lead} ({parts})"
+    if state == "done" and (note := not_published_note(record)):
+        line += f"; {note}"
     if state == "done" and _rollable_remainder(record):
         line += (
             "; this rollout is no longer active — re-run `lop network update` to roll what remains"
@@ -475,12 +568,35 @@ def summary(record: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _backoff_s(fails: int) -> float:
-    index = min(max(fails, 1), len(FAIL_BACKOFF_S)) - 1
-    return FAIL_BACKOFF_S[index]
+def _backoff_s(fails: int, ladder: tuple[float, ...] = FAIL_BACKOFF_S) -> float:
+    """The rung for the ``fails``-th consecutive miss on ``ladder``; its last rung is the cap."""
+    index = min(max(fails, 1), len(ladder)) - 1
+    return ladder[index]
 
 
-def classify_answer(answer: Mapping[str, Any], *, fails: int, now: float) -> dict[str, Any]:
+#: How many ``left_busy`` ids a member's answer may put into the durable record
+#: and audit row. The list comes from a paired peer, so it is bounded by count
+#: as well as per id (agent review round 2 on #3028, n1) — the same reason
+#: :data:`DETAIL_CAP` bounds the sentence.
+LEFT_BUSY_CAP = 20
+
+
+def _left_busy_ids(answer: Mapping[str, Any]) -> list[str]:
+    """The session ids a generation-layout member left on its old build, from its answer."""
+    raw = answer.get("left_busy")
+    if not isinstance(raw, list):
+        return []
+    ids: list[str] = []
+    for item in raw[:LEFT_BUSY_CAP]:
+        ident = item.get("session_id") if isinstance(item, Mapping) else item
+        if ident:
+            ids.append(str(ident)[:80])
+    return ids
+
+
+def classify_answer(
+    answer: Mapping[str, Any], *, fails: int, now: float, waits: int = 0
+) -> dict[str, Any]:
     """One member answer → the record's next state (the §3 map's record column).
 
     Deliberately a pure function of the answer, the member's prior failure
@@ -519,13 +635,23 @@ def classify_answer(answer: Mapping[str, Any], *, fails: int, now: float) -> dic
             # the ladder anyway, and the ladder's own comment claims
             # "consecutive". The failure arms override this with fails + 1.
             "fails": 0,
+            # The not-published wait's own rung counter. CARRIED, not reset, by
+            # every other answer (agent review round 1 on #3028, m3): a busy or
+            # dropped ask between two 404s says nothing about whether PyPI has
+            # the wheel yet, so restarting the ladder at its first rung would
+            # re-poll the channel faster for no new fact. Only that arm advances it, and a
+            # settled member (the done arm) or ``--resume`` clears it.
+            "waits": waits,
         }
 
     if answer.get("ok") and state in DONE_STATES:
         # The member's own receipt sentence rides ``detail`` — the count line
         # (`this device moved from … ; N retired, M kept`) is authored prose
         # for a reader, and the record is where it belongs.
-        return moved(state)
+        # ``left_busy`` rides alongside as data (QA round 1 on #3028, Q2): the
+        # sentence can be cut at DETAIL_CAP with two or three named sessions,
+        # and the ids are what a `--json` reader and the audit row need.
+        return moved(state) | {"waits": 0, "left_busy": _left_busy_ids(answer)}
     if state == "busy" or code == "update_in_progress":
         # Skip-then-retry: parked on the cadence, a FRESH probe each time, and
         # nothing was touched on the member (its own sentence rides `detail`).
@@ -566,14 +692,32 @@ def classify_answer(answer: Mapping[str, Any], *, fails: int, now: float) -> dic
         # one row). Only a future CODED ``not_authorised`` frame parks
         # ``skipped (no_grant)`` (the S3b/follow-up item this PR names).
         return moved("refused", new_code="refused", floor=CADENCE_S, outcome="refused")
+    if code == NOT_PUBLISHED_CODE and state == "refused":
+        # THE MEMBER said its channel 404s this exact version. That is "not
+        # YET" far more often than "never" (see :data:`NOT_PUBLISHED_CODE`):
+        # park it on the publish-wait ladder (:data:`NOT_PUBLISHED_BACKOFF_S`,
+        # short and capped, never the failure ladder) and ask again, bounded by
+        # the window and by supersede like every other retry. ``state == "refused"`` is
+        # what tells this apart from the ORIGIN's own pre-frame refusal (a
+        # stamp that is not a version), which carries no state and stays a
+        # terminal rule refusal below.
+        next_waits = waits + 1
+        return moved(
+            "deferred",
+            new_code=NOT_PUBLISHED_CODE,
+            floor=_backoff_s(next_waits, NOT_PUBLISHED_BACKOFF_S),
+            cause="policy",
+            outcome="refused",
+        ) | {"waits": next_waits}
     if code == "predates_rolling_updates":
         return moved("skipped", new_code="predates_rolling_updates", cause="capability_denied")
     if code in RULE_REFUSAL_CODES:
-        # A member-side terminal refusal (the ack carries `state: refused`) or —
-        # in the rare case the origin's own build cannot be offered — the same
-        # class of fact: this target cannot be installed anywhere, so the
+        # A member-side terminal refusal (``editable_install``: the member runs
+        # from a dev tree) or — the origin's own build cannot be offered, so
+        # nothing was sent — the same class of fact: no wait changes it, so the
         # member is terminal for this rollout (:func:`member_terminal`) rather
-        # than retried on a timer.
+        # than retried on a timer. The member's not-published answer was
+        # taken above, as a wait.
         return moved("refused", new_code=code, cause="policy", outcome="refused")
     if code in ("unreachable", "no_answer"):
         if code == "no_answer":
@@ -620,7 +764,7 @@ def _audit_member_state(
     try:
         from local_operator.network.audit import AuditEvent, AuditLog
 
-        detail = {
+        detail: dict[str, Any] = {
             "rollout": str(record.get("id") or ""),
             "state": str(member.get("state") or ""),
             "code": str(member.get("code") or ""),
@@ -628,6 +772,10 @@ def _audit_member_state(
             "method": str(update.get("method") or ""),
             "version": str(update.get("version") or ""),
         }
+        if update.get("left_busy"):
+            # The ids the member deliberately left on its old build (QA Q2):
+            # the reason above is capped and may have lost the names.
+            detail["left_busy"] = list(update.get("left_busy") or [])
         event = AuditEvent(
             event=MEMBER_STATE,
             actor="self",
@@ -667,6 +815,16 @@ def _close_record(
         done = sum(1 for m in record.get("members", []) if str(m.get("state")) in DONE_STATES)
         total = len(record.get("members", []))
         counts = f"{done} of {total} moved"
+        waiting = sum(1 for m in record.get("members", []) if _waiting_for_publish(m))
+        if state == "done" and waiting:
+            # The closing row is what an operator reads later; it must say the
+            # version was never served, not just "partial" (the detail value is
+            # capped, so this is the short form of not_published_note).
+            version = str((record.get("target") or {}).get("version") or "the target")
+            counts += (
+                f"; {version} is not on PyPI — {waiting} peer(s) not updated, "
+                "it may never have been published"
+            )
         if state == "done" and _rollable_remainder(record):
             counts += (
                 "; this rollout is no longer active — re-run `lop network update` "
@@ -757,6 +915,7 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
         prior_state = str(member.get("state") or "")
         prior_code = str(member.get("code") or "")
         fails = int(member.get("fails") or 0)
+        waits = int(member.get("waits") or 0)
         # THE IN-FLIGHT STATE IS WRITTEN BEFORE THE ASK (note §3: "the slow call
         # itself, installing" is ``applying``). Without it a drop after the
         # member began its install could not be told from a drop before the
@@ -772,7 +931,7 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             answer = meshupdate.update_peer(server, device, rollout=record_id)
         except Exception as exc:  # noqa: BLE001 — a driver must never die on one member
             answer = {"ok": False, "code": "no_answer", "message": str(exc), "state": ""}
-        update = classify_answer(answer, fails=fails, now=moment)
+        update = classify_answer(answer, fails=fails, now=moment, waits=waits)
 
         def _apply(
             rec: dict[str, Any], _update: Mapping[str, Any] = update, _device: str = device
@@ -788,7 +947,10 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             target_member["detail"] = str(_update.get("detail") or "")
             target_member["version"] = str(_update.get("version") or "")
             target_member["fails"] = int(_update.get("fails") or 0)
+            target_member["waits"] = int(_update.get("waits") or 0)
             target_member["next_ask_at"] = float(_update.get("next_ask_at") or 0.0)
+            if "left_busy" in _update:
+                target_member["left_busy"] = list(_update.get("left_busy") or [])
             note_receipt(
                 target_member,
                 state=str(_update["state"]),
@@ -1002,6 +1164,9 @@ def resume_record(
             # next attempt on this scan.
             if int(member.get("fails") or 0):
                 member["fails"] = 0
+                cleared = True
+            if int(member.get("waits") or 0):
+                member["waits"] = 0
                 cleared = True
         return cleared
 

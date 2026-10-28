@@ -57,6 +57,7 @@ from collections.abc import (
     Callable,
     Collection,
     Coroutine,
+    Iterator,
     Mapping,
     Sequence,
 )
@@ -89,6 +90,7 @@ from local_operator.compaction.marker import (
     with_capture_elision_frontier,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
+from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.guard_area import source_is_exempt
@@ -259,6 +261,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
+from local_operator.session import roster_sidecar as _roster_sidecar
 from local_operator.session.attachment_hints import with_attachment_hints
 from local_operator.session.channel_spend import (
     CHANNEL_SPEND_CUSTOM_TYPE,
@@ -390,6 +393,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How many fallback turns one woken bridge card may open before its wake is
+#: dropped (PR #2951 round 4). A fallback that runs to dispatch settles the
+#: card, so a second admission means the first never sent its request (a
+#: pre-loop failure, a pre-aborted drop). Three allows a transient failure to
+#: recover twice; past that the cause is persistent, and every further attempt
+#: is a paid turn the same failure would refuse. The card stays durable in the
+#: transcript and on the live context, so the next ordinary turn still reads it.
+BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
+
 
 def _notice(
     message: Msg,
@@ -435,10 +447,18 @@ ACTIVE_ROUTE_CUSTOM_TYPE = "active_model_route"
 #: let alone resume — the children the previous process started, even though
 #: their transcripts survive on disk. Re-snapshotted (newest-wins, like every
 #: custom entry) whenever the roster moves; loaded once at construction.
-SUBAGENT_ROSTER_CUSTOM_TYPE = "subagent_roster"
-SUBAGENT_ROSTER_SIDECAR = "subagent-roster.v1.json"
-_SUBAGENT_ROSTER_VERSION = 1
+# The names live in the stdlib-only ``roster_sidecar`` leaf so cold read-only
+# readers (desktop facade restore, cleanup receipts) can use them without
+# importing this module and the tool stack it drags in; re-exported here under
+# the historical spellings so the writer below and every caller share one value.
+SUBAGENT_ROSTER_CUSTOM_TYPE = _roster_sidecar.SUBAGENT_ROSTER_CUSTOM_TYPE
+SUBAGENT_ROSTER_SIDECAR = _roster_sidecar.SUBAGENT_ROSTER_SIDECAR
+_SUBAGENT_ROSTER_VERSION = _roster_sidecar.SUBAGENT_ROSTER_VERSION
 _SUBAGENT_SUMMARY_CHARS = 500
+#: The Librarian's duty-session tools when her packaged seed cannot be read
+#: (#3028, review round 2 m2): the seed 1.1.0 list, every entry read-tier.
+#: Kept equal to the seed by ``test_librarian_tool_surface``.
+_LIBRARIAN_FALLBACK_TOOLS: tuple[str, ...] = ("library", "read", "glob", "grep", "todo")
 
 #: The build THIS PROCESS loaded, read once and memoised. Compared against the
 #: install on disk by ``update.classify_import_failure``, which is the only way
@@ -561,6 +581,10 @@ _FRONTEND_JOBS_FLOOR_S = 0.05
 _FRONTEND_JOBS_MAX_SHARE = 0.25
 _FRONTEND_JOBS_CEILING_S = 1.0
 
+#: Floor between two disk reads of the channel-spend pending sidecar on the
+#: frontend refresh path (see ``Session.pending_channel_records``).
+_CHANNEL_PENDING_MIN_S = 1.0
+
 
 def _frontend_jobs_delay(last_cost_s: float) -> float:
     """How long to wait before the next job-roster tick, given the last one's cost.
@@ -619,10 +643,13 @@ ATTENTION_REPUBLISH_DELAYS_S: tuple[float, ...] = (1.0, 5.0, 20.0, 60.0)
 
 #: Self-prompt scheduled after a compaction pass that cleared the recovery
 #: band, so the model resumes where the summary left off.
-_CONTINUATION_PROMPT = (
-    "The conversation context was just compacted into a summary. "
-    "Continue the task from where it left off."
-)
+#:
+#: DEFINED IN THE IMPORT-FREE LEAF, re-exported here: ``harness.rows`` has to
+#: RECOGNISE this text on every replayed row, and reading it from this module made
+#: the renderer import the session and its tool stack — 231 ``local_operator``
+#: modules, against 5 read from the leaf (module counts, not timings: the clock moves
+#: with host load, the graph does not). One literal, two spellings.
+_CONTINUATION_PROMPT = _chrome_prompts.CONTINUATION_AFTER_COMPACTION
 
 #: Cap on auto-continuation turns within one user turn
 #: MAX_PAUSED_TURN_CONTINUATIONS): a compaction pass that keeps clearing the
@@ -909,6 +936,37 @@ _PER_TOKEN_EVENT_TYPES = (
 #: the merge added, and ``set_ask_handler`` re-runs one entry of it. A tool
 #: added to the registry with a session-gated builder and not added here is
 #: advertised to nobody.
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _notify_sentence(outcome: Any) -> str:
+    """What the ``notify`` tool tells the model about one write (§1.3).
+
+    Model-facing English (a tool result), so it is not catalogued. Each arm
+    names what happened and, where the next move differs, what to do — the
+    dismissed arm especially, so a wake that ticks every five minutes stops
+    re-raising something the operator already set aside.
+    """
+    item = outcome.item_id
+    if outcome.action == "unchanged":
+        return f"Unchanged — {item} already says this."
+    if outcome.action == "absorbed":
+        return (
+            f"The operator dismissed {item}; the update was recorded without notifying. "
+            "Use a higher priority or a new key only if it now needs them."
+        )
+    if outcome.action == "updated":
+        return f"Updated {item} ({_ordinal(max(1, outcome.repeat_count - 1))} update)."
+    if outcome.action == "revived":
+        return f"Raised {item} again at {outcome.priority} priority; it was dismissed before."
+    return f"Notified (id {item})."
+
+
 def _deferred_availability(name: str, published: bool) -> str:
     """The line a ``tool://`` read appends when it activated a deferred tool.
 
@@ -966,6 +1024,12 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # Appended last for the same prefix reason as `sessions`.
     "generate_video",
     "video_status",
+    # The inbox tool is gated on `notify_inbox`, a field only the session's own
+    # per-turn context binds, so — exactly the `no_reply` lesson above — without
+    # this line the tool is created nowhere a real session looks. A child never
+    # receives it (`_job_id` is set before the merge, so the builder refuses).
+    # Appended last for the same prefix reason as `sessions`.
+    "notify",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -2377,6 +2441,71 @@ _WIRE_BUDGET_RATCHET = 0.75
 _WIRE_BUDGET_FLOOR = 4_000_000
 
 
+def _newest_usage_at_ms(transcript: Transcript, *, now_ms: int | None = None) -> int:
+    """Epoch ms of the newest provider usage the transcript recorded, else 0.
+
+    Every wire usage carries ``at_ms`` (the call's completion stamp), so the
+    newest one is the last time this conversation's prefix was sent. Uncut
+    rows on purpose: a compaction invalidates context-SIZE readings, not the
+    fact that a request reached the provider at that moment.
+
+    CLAMPED to ``now_ms`` (default: the wall clock). A stamp from the future
+    (clock skew, or a transcript copied from a machine whose clock runs ahead)
+    would make ``now - last`` negative, and the run-start idle flush
+    (``_sweep_before_run``) would then stay off until wall time passed the
+    stamp plus the flush window — a day of skew suppressed a real 2 h gap's
+    shed (PR #3004 agent review round 3, R3-m1). Clamping reads such a stamp
+    as "just now": the first run after the resume keeps its prefix (the safe,
+    no-rewrite direction), and every later gap is measured from a real time.
+    """
+    newest = 0
+    for row in transcript.all_usage_rows():
+        stamp = row.get("at_ms")
+        if isinstance(stamp, int) and stamp > newest:
+            newest = stamp
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    return min(newest, now_ms)
+
+
+def _resumed_cache_diagnostics_id(transcript: Transcript) -> str | None:
+    """The diagnostics chain id a resumed session should continue from, or ``None``.
+
+    The newest id the transcript persisted (``newest_cache_diagnostics_id``),
+    EXCEPT rows a transcript fork copied from its parent: those name the
+    PARENT's requests. A whole-transcript fork replays a byte-identical prefix
+    (which is why it inherits ``cache_lineage_id``), so comparing against them
+    would be meaningful there; the exclusion exists for the CUT fork
+    (``fork_snapshot`` with ``exclude_entry_ids``), which drops later rows and
+    whose first turn would report a by-design ``messages_changed`` against the
+    parent's newer request (PR #3018 review round 1, n3). One rule for both
+    keeps the fork's chain its own. "Copied" is decided by time, exactly as
+    ``Session._is_unnamed_fork`` and the wake-schedule restore decide it: a row
+    journalled at or before ``forked_at`` came across in the clone; anything
+    later was written by this fork and may seed its own resume.
+
+    Two ``ORIGIN_FORK`` writers stamp no ``forked_at`` — replica recovery
+    (``network/sync.py``) and the move/keep staging copy
+    (``network/mobility.py``) — so ``fork_instant`` is ``None`` there and their
+    copied rows DO seed (review round 1, m3). Accepted rather than widened
+    here: for a move that is the right chain (it is the same conversation);
+    for a keep-copy or a replica the stale id answers
+    ``previous_message_not_found`` or compares against an identical prefix,
+    both telemetry-only outcomes.
+    """
+    from local_operator.fork import fork_instant
+    from local_operator.session.transcript import newest_cache_diagnostics_id
+
+    entries = transcript.entries()
+    try:
+        forked_at = fork_instant(transcript.directory)
+    except Exception:  # noqa: BLE001 — an unreadable marker must not fail construction
+        forked_at = None
+    if forked_at is not None:
+        entries = [entry for entry in entries if entry.ts > forked_at]
+    return newest_cache_diagnostics_id(entries)
+
+
 def _history_captured_browser_views(messages: Sequence[Message]) -> bool:
     """Whether this rendered history shows the session capturing browser views.
 
@@ -2953,23 +3082,9 @@ def _write_roster_sidecar_if_changed(
     return fingerprint, True
 
 
-def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
-    """Read a supported sidecar, falling back to the legacy transcript on error."""
-    try:
-        with path.open(encoding="utf-8") as handle:
-            payload = json.load(handle)
-        if not isinstance(payload, dict) or payload.get("version") != _SUBAGENT_ROSTER_VERSION:
-            return None
-        generation = payload.get("generation")
-        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
-            return None
-        if not isinstance(payload.get("jobs"), list) or not isinstance(
-            payload.get("records"), list
-        ):
-            return None
-        return payload
-    except (OSError, ValueError, TypeError):
-        return None
+#: Reader moved to the import-light leaf (see ``roster_sidecar``); kept under this
+#: name for the owner path and existing callers.
+_read_roster_sidecar = _roster_sidecar.read_roster_sidecar
 
 
 _render_compaction_marker = render_compaction_marker
@@ -3219,6 +3334,15 @@ class Session:
         #: construction (``harness.subagent``): a setter-only value installed
         #: on a parent after construction would otherwise never reach a child.
         confinement_root: str | None = None,
+        #: The only directory this session's SHELL may write to, or ``None``.
+        #: Set by ``harness.subagent`` for a ``scout`` child (its own
+        #: scratchpad) and never by a host: reads stay open, writes and the
+        #: network are refused by the kernel sandbox in
+        #: ``local_operator.tools.confinement.ShellWriteConfinement``.
+        #: There is no way to LIFT it: the only other writer is
+        #: :meth:`_apply_readonly_shell_role` (a scout profile attached to an
+        #: existing session), which only ever sets it.
+        shell_write_root: str | None = None,
         #: The short name this session was DELEGATED under, set only on a
         #: subagent (``zoom-scroll-fix``, ``bridge-qa``). A child never
         #: generates a conversation title — naming runs in the TUI host and the
@@ -3457,6 +3581,27 @@ class Session:
         #: consumed exactly once by ``_finalize_attention_notify``.
         self._run_triggers: set[str] = set()
         self._run_notify_requested: bool = False
+        #: Set when THIS run posted an inbox item through ``notify`` (any
+        #: priority; ``docs/design/notifications-inbox.md`` §3.4). Reset with
+        #: ``_run_notify_requested``. It is what lets a ``notify:true`` wake turn
+        #: end quietly: the operator asked to be told, and the item told them.
+        self._run_notified: bool = False
+        #: Whether THIS run raised (or handed off) a `high` item banner. Read by
+        #: exactly one consumer, ``_finalize_attention_notify``: a run that
+        #: already put a banner on the operator's screen does not also raise the
+        #: completion banner for itself (contract §3.4).
+        self._run_notified_banner: bool = False
+        #: Installed by the serving handle when this session runs under a
+        #: `RuntimeServer` (`serving.py`, `_tui_viewer_active`). It answers
+        #: whether an attached terminal is BOTH showing this conversation and
+        #: being typed in — the rung-4 stand-down's evidence. Absent (None) for a
+        #: session with no runtime, which every caller reads as "cannot tell" and
+        #: so notifies (contract §6.3).
+        self._notify_tui_probe: Callable[[], Any] | None = None
+        #: Background raises of this run's held `high` item banners (the
+        #: runtime rung's grace), settled before the run's end is judged.
+        self._pending_item_banners: list[asyncio.Task[Any]] = []
+        self._item_banner_generation = 0
         #: The raw ``custom_type`` of every INTERNAL-class input this run
         #: consumed, beside the trigger record and reset with it. The class
         #: vocabulary deliberately collapses all of them into "internal", and
@@ -3659,6 +3804,29 @@ class Session:
         #: read by ``_build_tool_context`` on every turn, which is what makes
         #: it reach both the createIf checks and the executors.
         self._confinement_root = confinement_root
+        #: The write-confined shell root (see the ``shell_write_root``
+        #: parameter). Stored as given, like ``confinement_root``:
+        #: ``ShellWriteConfinement.at`` resolves it at the enforcement point, so
+        #: the sandbox profile always names the real path. Read by
+        #: ``_build_tool_context`` and by ``harness.subagent`` to keep the
+        #: confinement sticky downward.
+        self._shell_write_root = shell_write_root or None
+        #: Whether this session is a READ-ONLY shell role (``scout``): set by a
+        #: delegating parent (``shell_write_root`` given) or by attaching the
+        #: role's profile (:meth:`_apply_readonly_shell_role`). Held for the
+        #: life of this PROCESS, like a declared inventory: a later ``/agent``
+        #: switch or detach in the same process does not give the shell its host
+        #: reach back, because a model that ran as a scout may have been steered
+        #: by what it read. It is deliberately NOT persisted: a reopened session
+        #: takes the confinement of the profile attached at restore. Switching a
+        #: scout to ``coder`` is the operator choosing a coder's shell, so a
+        #: restore that finds ``coder`` attached gives exactly that, while a
+        #: scout restored as scout is confined again by the same
+        #: :meth:`attach_agent_profile` path
+        #: (``test_a_resumed_scout_attachment_is_confined_again``).
+        #: When set with no root (no scratchpad, or no sandbox on this host),
+        #: ``bash`` is withheld at :meth:`_filter_declared`.
+        self._readonly_shell = self._shell_write_root is not None
         #: Settled model-owned jobs whose results are durably journaled but have
         #: not yet committed into this turn's model context, in settle order.
         #: Safe aside boundaries offer the SAME canonical rows to the running
@@ -3882,6 +4050,15 @@ class Session:
         #: this task instead — see :meth:`_spawn_selected_model_write`.
         self._selected_model_task: "asyncio.Future[None] | None" = None
         self._system_blocks_provider = system_blocks_provider
+        if getattr(system_blocks_provider, "session_notify_membership", False):
+            # Factory-created providers render before their warm tool snapshot
+            # gains session-owned doors. Membership is authoritative here; a
+            # child/one-shot/output-contract never acquires the notify clause.
+            setattr(
+                system_blocks_provider,
+                "notify_available",
+                lambda: any(tool.name == "notify" for tool in self._tools),
+            )
         self._frozen_system_blocks: list[str] | None = None
         self._last_system_blocks: list[str] | None = None
         self._system_state_message_id: str | None = None
@@ -3934,7 +4111,9 @@ class Session:
         #: exactly like ``_wire_budget_override`` beside it. Kept as a separate
         #: bit rather than a tri-state so every existing read of
         #: ``_images_rejected`` keeps its meaning unchanged (agent review
-        #: round 2, R8).
+        #: round 2, R8). An image-COUNT refusal ("too much media") is the
+        #: same kind of evidence (THIS provider's per-request limit) and sets
+        #: it too (PR #3004 review round 2, R2-m2).
         self._images_rejected_for_size = False
         #: Latch for the text-only-model omission announcement (see
         #: :meth:`_render_history`). The omission itself is not sticky — it
@@ -4167,6 +4346,7 @@ class Session:
         # (McpStartupOutcome). See session_factory.wire_mcp_into_session.
         self._on_mcp_startup_settled: Callable[[Any], None] | None = None
         self._aside_thunks: list[Aside] = []
+        self._coalesced_notes: dict[str, CustomMessage] = {}
         self._continuation_queue: list[AgentMessage] = []
         # Latest provider-reported usage. SEEDED from the replayed transcript
         # rather than starting at None, because on a resumed session the last
@@ -4314,6 +4494,35 @@ class Session:
         # when ``_open_pending_body_turn`` actually won a reservation, so a
         # session with nothing pending never pays for the per-call gate.
         self._pending_body_turn: Any | None = None
+        # The body turn whose answer was already seen at a terminal step, so
+        # it is never cut afterwards (``_body_turn_cut_for_person``).
+        self._body_answered_turn: Any | None = None
+        # The live context's tail as the body turn's loop opened (``None`` on
+        # an empty context). A terminal tail counts as the body's answer only
+        # once it is NOT this object: before the turn produces a step, the
+        # tail is the previous turn's answer (MAJOR-R4-1).
+        self._body_turn_opening_tail: Any | None = None
+        # One tracked waiter coalesces admitted arrivals behind the current
+        # turn. The reservation, not this task or the card text, owes the work.
+        self._pending_body_followup_task: asyncio.Task[Any] | None = None
+        self._pending_body_followup_again = False
+        # Person prompts waiting for the turn lock (see
+        # ``person_prompt_waiting``): the body path yields to them.
+        self._person_prompts_waiting = 0
+        # The wake a woken idle bridge card is owed when it is routed through
+        # the body-only pass instead of the ordinary wake. That pass may open no
+        # turn (a retained failed body fails again), and a self-contained card
+        # (pair-lane excerpt, no reservation of its own) must still be read
+        # (PR #2951 round 1, MAJOR-1). A card leaves this list when a turn's
+        # pipeline starts with it on the live context, whichever path opened
+        # that turn (body pass, typed prompt, steering wake).
+        self._bridge_cards_owed_wake: list[CustomMessage] = []
+        # Fallback turns admitted per owed card (keyed by object id, cleared
+        # with the debt), and the cards the current fallback moved to its
+        # input with their original context index, so a turn that fails
+        # before the loop re-appends them can put them back.
+        self._bridge_card_fallback_attempts: dict[int, int] = {}
+        self._bridge_card_wake_moved: list[tuple[int, AgentMessage]] = []
         #: The turn's terminal verdict, captured where the loop's agent_end is
         #: handled. Settlement runs in the ``finally``, after ``_flush_held_end``
         #: has already released that event, so the verdict must be captured
@@ -4490,7 +4699,17 @@ class Session:
         # _last_activity_ms: the idle-flush pruning must measure provider-cache
         # age, and stamping turn bookkeeping right before the check made the
         # 90-minute flush dead code.
-        self._last_provider_request_ms = 0
+        #
+        # SEEDED from the transcript, not 0: the newest recorded usage's
+        # ``at_ms`` is when this conversation last reached the provider, which
+        # is exactly what the cache's age depends on, whichever process sent
+        # it. With 0, ``_sweep_before_run`` had nothing to judge on a resume
+        # and every later sweep read the fresh per-call stamp as warm, so a
+        # session reopened hours later never shed its stale outputs (agent
+        # review round 2, R2-M1: 0 prune rows where base wrote 5). A transcript
+        # without stamped usage (legacy, or never answered) keeps 0.
+        self._last_provider_request_ms = _newest_usage_at_ms(transcript)
+        self._seed_cache_diagnostics(transcript)
         self._seeded = False  # seed_history is once-only, pre-prompt
         self._logical_generation: int | None = None
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
@@ -5034,6 +5253,9 @@ class Session:
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
+        # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
+        # below must see the whole inventory it narrows.
+        self._declare_librarian_inventory()
         # The session, not an OperatorApp, owns state that must survive a second
         # frontend joining. Constructed after every durable source above has
         # restored so the first snapshot is already authoritative.
@@ -5853,10 +6075,26 @@ class Session:
         # composition root and docs/REWRITE.md forbids module-level provider
         # imports, because they are what makes importing a session expensive
         # (and, done at the top of this file, cyclic).
-        from local_operator.providers.failover import is_image_rejection
+        from local_operator.providers.failover import (
+            is_image_count_rejection,
+            is_image_modality_rejection,
+            is_image_rejection,
+        )
 
         if not is_image_rejection(error):
             return
+        # A COUNT refusal ("Too much media: ... 101 images > 100") poisons no
+        # block: the request crossed this provider's per-request limit. The
+        # strip is still what lets the next turn succeed, but it is
+        # provider-scoped like the size strip, so ``set_model`` to a provider
+        # with a higher limit lifts it (agent review round 2, R2-m2).
+        #
+        # A MODALITY refusal ("No endpoints found that support image input")
+        # poisons no block either: it says the MODEL takes no images, which is
+        # how a text-only model nothing described is discovered now that an
+        # undescribed model is sent images (PR #3071, M1). Same lifetime for the
+        # same reason — a switch onto a vision model must see the images again.
+        count_only = is_image_count_rejection(error) or is_image_modality_rejection(error)
         if self._images_rejected:
             # Already stripping, so there is nothing more to do to the render —
             # but a GENUINE refusal permanently downgrades the strip's scope.
@@ -5864,9 +6102,11 @@ class Session:
             # stays marked provider-scoped, and the next `/model` switch lifts
             # it and re-admits a block the provider actually refused (QA round
             # 3, Q6). Idempotent: clearing a flag that is already clear is free.
-            self._images_rejected_for_size = False
+            if not count_only:
+                self._images_rejected_for_size = False
             return
         self._images_rejected = True
+        self._images_rejected_for_size = count_only
         logger.warning(
             "provider rejected an image; dropping images from this session's context (%s)",
             self._image_drop_diagnostic(),
@@ -6036,6 +6276,9 @@ class Session:
             loop = asyncio.get_running_loop()
             delay_s = max(0.0, (self._resume_grace_ends_ms - int(time.time() * 1000)) / 1000.0)
             loop.call_later(delay_s + 0.05, self._handle_missed_wakes)
+        # A body left pending by the previous runtime (restart, crash) has no
+        # arrival coming to arm its turn: offer it once at bind (D-F2).
+        self._rearm_pending_body_followup()
 
     # -- runtime role (SessionProtocol) --------------------------------------
     # This class IS the runtime: it holds the harness loop, the lease and the
@@ -6883,7 +7126,7 @@ class Session:
                 if callable(withdraw):
                     withdraw()
                 self._journal_knobs_if_selection_changed(previous, model, previous_choice)
-                self.refresh_frontend_state()
+                self._refresh_frontend_model_selection()
                 # The label moved even though the pair did not (the pin came
                 # off), so the baked tier descriptions are stale for the same
                 # reason they are on a genuine switch — see the call on that
@@ -6920,7 +7163,7 @@ class Session:
                 if refreshed is not None:
                     self._active_fallback = refreshed
             self._journal_knobs_if_selection_changed(previous, model, previous_choice)
-            self.refresh_frontend_state()
+            self._refresh_frontend_model_selection()
             return
         # A genuine model change is a SELECTION, and selections outlive the
         # process: journal it so `--resume` comes back on this model instead
@@ -6985,7 +7228,7 @@ class Session:
         # turn (see journal_model_switch). No ``reason``: the head already reads
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
-        self.refresh_frontend_state()
+        self._refresh_frontend_model_selection()
         # The tier tools bake the session's model label into their schema text
         # at BUILD time (``describe_effort_tiers``), while a sentinel tier
         # resolves to ``self.model`` at LAUNCH. Without this the two drift the
@@ -7598,6 +7841,9 @@ class Session:
         # The team takes the agent slot (issue #2014), AFTER the brief so the
         # claim can only ever describe a team that is fully attached.
         self._claim_agent_slot_for_team()
+        # A team whose MANAGER is a read-only shell role makes this session
+        # that role: the same confinement ``attach_agent_profile`` applies.
+        self._apply_readonly_shell_role(self._team_manager_name())
         # Journal the NAME so a resume can rebuild this tail. On change only:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
@@ -8194,6 +8440,11 @@ class Session:
             # A role that NAMES a tool keeps its schema published (see
             # ``tools/deferral.py``); the lopdev manager names ``project``.
             self.set_tool_deferral(pins=self._attached_profile_tools)
+            # BEFORE the caller declares the role's inventory (``lop exec
+            # --profile`` declares it right after this returns, and unattended
+            # that declaration IS the approval): the scout's ``bash`` must be
+            # the sandboxed one, or absent, by the time anything can call it.
+            self._apply_readonly_shell_role(profile.name)
             return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
         if kind == "specialist":
             # A specialist carries instructions only — the registry row has no
@@ -8205,6 +8456,105 @@ class Session:
             body = f"[agent: {display_name}]\n{specialist_prompt}" if specialist_prompt else ""
             return self._stamp_agent_brief(body, display_name)
         return None
+
+    def _apply_readonly_shell_role(self, role: str) -> None:
+        """Confine this session's shell when ``role`` is a read-only shell role.
+
+        WHY HERE. ``harness.subagent`` confines a DELEGATED scout, but a scout
+        profile can also be attached to a session that already exists, and
+        every such path ends in :meth:`attach_agent_profile`: ``lop exec
+        --profile`` (and through it the ``sessions`` tool's spawn and mesh
+        ``--profile``), the SDK's profile, ``/agent`` in the TUI and the routed
+        runtime, and a resume restoring the attachment. Round 1 of PR #2987
+        measured the gap: ``lop exec --profile scout`` offered the seed's
+        ``bash`` unwrapped, auto-approved by the unattended declaration, and
+        ``echo PWNED > <outside path>`` wrote the file. The role test is the
+        same predicate the subagent path reads
+        (``harness.subagent.is_readonly_shell_role``), keyed by ROLE, not by
+        ``bash`` being in the allow-list.
+
+        The shell root is this session's own scratchpad when the host can
+        enforce the sandbox. The synchronous check reads only what is known
+        without a spawn (this runs on the event loop); if the probe has not
+        run yet the root is set optimistically, which is safe because
+        ``execute_bash`` awaits the full answer before every spawn and refuses
+        rather than run unwrapped. With no root, ``bash`` is withheld at
+        :meth:`_filter_declared`, the point every inventory writer passes.
+
+        The attached role's NAMES are floored too (see the end of this method),
+        because for ``lop exec --profile`` they are the unattended declaration:
+        filtering and rebuilding the inventory alone left a scout whose stored
+        row predates the shell with no ``bash`` at top level, while the same row
+        delegated got one through the child path's floor.
+        """
+        from local_operator.harness.subagent import (
+            BACKGROUND_OBSERVER_TOOLS,
+            _can_background,
+            is_readonly_shell_role,
+            readonly_shell_floor_names,
+            readonly_shell_write_root,
+        )
+
+        if not is_readonly_shell_role(role):
+            return
+        self._readonly_shell = True
+        if self._shell_write_root is None:
+            from local_operator.tools.confinement import (
+                shell_sandbox_known_unavailable_reason,
+            )
+
+            self._shell_write_root = readonly_shell_write_root(
+                self._scratchpad_dir(), unavailable=shell_sandbox_known_unavailable_reason()
+            )
+        # Re-run the inventory through the filter (which strips a root-less
+        # shell) and rebuild a present ``bash`` against the new context, so the
+        # schema says SANDBOXED and carries the ``read`` tier the executor's
+        # wrap makes honest. The executor reads the per-turn context, so even an
+        # old ``bash`` object would wrap; the rebuild keeps the schema truthful.
+        tools = list(self._tools)
+        if self._shell_write_root is not None and any(tool.name == "bash" for tool in tools):
+            try:
+                from local_operator.tools.registry import create_tools
+
+                # A MINIMAL context, not ``_build_tool_context()``: this also
+                # runs from ``__init__`` (a resume restoring the attachment),
+                # before the session's full context can be built, and the
+                # ``bash`` builder reads only ``shell_write_root``
+                # (``build_bash_tool``). The executor reads the full per-turn
+                # context, which carries the same root.
+                context = ToolContext(shell_write_root=self._shell_write_root)
+                rebuilt = {tool.name: tool for tool in create_tools(context, enabled=["bash"])}
+                tools = [rebuilt.get(tool.name, tool) for tool in tools]
+            except Exception:  # noqa: BLE001 — fail closed: drop the shell, never keep it open
+                logger.warning("could not rebuild the scout's sandboxed bash", exc_info=True)
+                self._shell_write_root = None
+        if self._attached_profile_tools:
+            # The SAME floor the delegated child gets
+            # (``harness.subagent.readonly_shell_floor_names``), applied to the
+            # names ``exec_startup.declared_tool_inventory`` turns into the
+            # declaration: an installed row frozen before the scout had a shell
+            # (seed sync holds tool changes back) still gets the sandboxed one,
+            # and a root-less session's declaration stops naming one it cannot
+            # have. AFTER the rebuild, whose failure clears the root. Only names:
+            # ``bash`` is admitted from the inventory the session already holds,
+            # never fabricated, like the child floor's ``available`` -- so the
+            # root is offered only when that inventory HAS a ``bash`` (a host or
+            # config that disabled it would otherwise declare a tool resolving
+            # to nothing, and the run would end reporting it unresolved).
+            holds_bash = any(tool.name == "bash" for tool in tools)
+            names = readonly_shell_floor_names(
+                self._attached_profile_tools,
+                shell_root=self._shell_write_root if holds_bash else None,
+            )
+            # Parity with the child prune: a shell that can background keeps
+            # the tools that observe and await its jobs, or its own
+            # ``background=true`` receipt points at a tool it was not declared.
+            if "bash" in names and _can_background([tool for tool in tools if tool.name == "bash"]):
+                names = (*names, *sorted(BACKGROUND_OBSERVER_TOOLS - set(names)))
+            self._attached_profile_tools = names
+            # Additive, so re-pinning only adds what the floor added.
+            self.set_tool_deferral(pins=names)
+        self.refresh_tools(tools)
 
     def clear_agent_profile(self) -> None:
         """Detach any active ``/agent`` profile (the ``/agent clear`` verb).
@@ -8601,6 +8951,27 @@ class Session:
         error = task.exception()
         if error is not None:
             logger.debug("conversation name write failed; will retry at dispose", exc_info=error)
+
+    def _seed_cache_diagnostics(self, transcript: Transcript) -> None:
+        """Hand a resumed conversation's diagnostics chain back to its stream.
+
+        The chain (``SessionStreamFn._cache_diagnostics_previous_id``) is
+        per-process, so without this a resume restarted at
+        ``previous_message_id: null`` and a break caused by an edited
+        instruction file was recorded as ``baseline`` (PR #2984 QA Q1).
+        ``getattr`` because test doubles and non-Anthropic stream fns have no
+        such hook; best-effort because telemetry must never stop a session from
+        opening.
+        """
+        seed = getattr(self._stream_fn, "seed_cache_diagnostics", None)
+        if not callable(seed):
+            return
+        try:
+            previous_id = _resumed_cache_diagnostics_id(transcript)
+            if previous_id:
+                seed(previous_id)
+        except Exception:  # noqa: BLE001 — a telemetry seed must never fail construction
+            logger.debug("cache diagnostics resume seed failed", exc_info=True)
 
     def _is_unnamed_fork(self) -> bool:
         """True while this session is a fork still wearing its parent's title.
@@ -9164,52 +9535,58 @@ class Session:
         # ``AudioInputUnsupported``); it is the audio door's rung-6 honest
         # error. It is cheap for every OTHER prompt: the check is one truthiness
         # test when ``audio`` is empty, which is every send but the recording.
-        if audio:
-            await self._refuse_audio_admission(audio)
-        # `@path` expansion, and it runs HERE — after the probe, before the
-        # lock, not inside it. An approval can park on a human indefinitely, and
-        # in the TUI the app awaiting this prompt is the same one that would
-        # draw the approval card; awaiting a person while holding `_turn_lock`
-        # also blocks the compaction that shares it, which is a deadlock-shaped
-        # risk rather than a slow turn. Expanding before `acquire()` costs
-        # nothing and removes the shape entirely.
-        #
-        # This one call is what gives EVERY composer surface the feature: CLI,
-        # headless, server, scheduler, mobile, subagents and the TUI's own
-        # submit exits all funnel through `prompt`. The TUI does NOT expand
-        # earlier — that pass was removed, because awaiting an approval card
-        # inside a Textual message handler deadlocks the composer (the pump
-        # awaits the handler to completion, and the card is mounted AND
-        # answered through that same pump; `on_editor_submitted` records the
-        # probe). So this is the first and only expansion of a composer draft,
-        # and the transcript row stays the typed line because the row is built
-        # from it, not because a second pass declined to touch it.
-        #
-        # THREE entry paths predate the feature and bypass `prompt`, so an
-        # `@path` in them stays inert prose: `steer` (queues the message
-        # directly — and `_submit_prompt` routes a draft typed while a turn
-        # runs there, so the TUI's own submit exit is on both lists), a wake
-        # delivery (`_prompt_messages`), and an aside fork (`adopt_aside`,
-        # which adopts the TYPED question — `_aside_worker` expands only the
-        # text it hands the model, and the panel keeps the typed one).
-        #
-        # IDEMPOTENCE is still a hard requirement with a single expansion site,
-        # because this pass runs on text it did not type: a subagent launch
-        # forwards the manager's own prompt into `child.prompt`, and a manager
-        # that quoted an already-expanded block out of its context would have
-        # it doubled here.
-        expansion = await expand_references(
-            text,
-            self._cwd,
-            request_approval=None if self._yolo else self._request_approval,
-        )
-        # Notices are discarded deliberately: `prompt` has no channel back to a
-        # UI, and no surface pre-expands a composer draft, so an unresolved
-        # token on a submit exit is sent verbatim and silently — the accepted
-        # cost `on_editor_submitted` records. The aside is the one path that
-        # paints its notices, from its own call in `_aside_worker`.
-        text = expansion.sent
-        await self._turn_lock.acquire()
+        # A PERSON'S PROMPT IS VISIBLE FROM HERE UNTIL IT HOLDS THE LOCK, so a
+        # Team Bridge body follow-up that wins the lock first (queued on the
+        # FIFO before this acquire, or across the expansion's await) yields
+        # instead of running one more body turn ahead of the person. Harness
+        # rows (goal continuations) are not a person and are not marked.
+        with contextlib.nullcontext() if harness_injected else self.person_prompt_waiting():
+            if audio:
+                await self._refuse_audio_admission(audio)
+            # `@path` expansion, and it runs HERE — after the probe, before the
+            # lock, not inside it. An approval can park on a human indefinitely, and
+            # in the TUI the app awaiting this prompt is the same one that would
+            # draw the approval card; awaiting a person while holding `_turn_lock`
+            # also blocks the compaction that shares it, which is a deadlock-shaped
+            # risk rather than a slow turn. Expanding before `acquire()` costs
+            # nothing and removes the shape entirely.
+            #
+            # This one call is what gives EVERY composer surface the feature: CLI,
+            # headless, server, scheduler, mobile, subagents and the TUI's own
+            # submit exits all funnel through `prompt`. The TUI does NOT expand
+            # earlier — that pass was removed, because awaiting an approval card
+            # inside a Textual message handler deadlocks the composer (the pump
+            # awaits the handler to completion, and the card is mounted AND
+            # answered through that same pump; `on_editor_submitted` records the
+            # probe). So this is the first and only expansion of a composer draft,
+            # and the transcript row stays the typed line because the row is built
+            # from it, not because a second pass declined to touch it.
+            #
+            # THREE entry paths predate the feature and bypass `prompt`, so an
+            # `@path` in them stays inert prose: `steer` (queues the message
+            # directly — and `_submit_prompt` routes a draft typed while a turn
+            # runs there, so the TUI's own submit exit is on both lists), a wake
+            # delivery (`_prompt_messages`), and an aside fork (`adopt_aside`,
+            # which adopts the TYPED question — `_aside_worker` expands only the
+            # text it hands the model, and the panel keeps the typed one).
+            #
+            # IDEMPOTENCE is still a hard requirement with a single expansion site,
+            # because this pass runs on text it did not type: a subagent launch
+            # forwards the manager's own prompt into `child.prompt`, and a manager
+            # that quoted an already-expanded block out of its context would have
+            # it doubled here.
+            expansion = await expand_references(
+                text,
+                self._cwd,
+                request_approval=None if self._yolo else self._request_approval,
+            )
+            # Notices are discarded deliberately: `prompt` has no channel back to a
+            # UI, and no surface pre-expands a composer draft, so an unresolved
+            # token on a submit exit is sent verbatim and silently — the accepted
+            # cost `on_editor_submitted` records. The aside is the one path that
+            # paints its notices, from its own call in `_aside_worker`.
+            text = expansion.sent
+            await self._turn_lock.acquire()
         try:
             # A USER TURN IS A REPLY (R34): retire every pending patience row
             # before anything else in this turn. Over-cancel is deliberate —
@@ -9307,6 +9684,8 @@ class Session:
                 carried_prompt=True,
             )
         finally:
+            # A body this person's turn left pending is served by its own turn.
+            self._rearm_pending_body_followup()
             # D8: anything queued after the pipeline's own flush (or on an
             # early exit before it) lands before the lock goes free.
             # Release in its own ``finally`` (R2-1): see the helper.
@@ -10296,7 +10675,25 @@ class Session:
             self._spawn_background(self._prompt_messages([message], carried_prompt=True))
             return receipt("delivered (opened a turn)")
         # mode == "mailbox"
-        if wake and not busy:
+        body_waiter = self._pending_body_followup_task
+        joins_body_waiter = (
+            wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+            and body_waiter is not None
+            and not body_waiter.done()
+        )
+        if joins_body_waiter:
+            # Hydration owns the turn lock BEFORE is_streaming becomes true.
+            # Rearm the live finite pass before any append await can let it
+            # retire, retaining its attempted exclusions. A second ordinary
+            # idle wake would retry failed A and strand newly admitted B.
+            self._ensure_pending_body_followup()
+        native_body_wake = (
+            wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+            and (joins_body_waiter or self._pending_body_followup_row() is not None)
+        )
+        if wake and not busy and not native_body_wake:
             # _prompt_messages persists the row through the pipeline — a
             # separate transcript/context append here would double-write.
             await self._emit_peer_receipt(message, sender)
@@ -10332,6 +10729,24 @@ class Session:
                 # durable; a degraded store must not abort the receive.
                 logger.warning("bridge ask: hook failed on the record-only append", exc_info=True)
         self._append_or_park_journal(message)
+        owes_card_wake = native_body_wake and not busy
+        if owes_card_wake:
+            # Recorded only now that the card is on the context or parked. The
+            # waiter settles this with an ordinary wake if its pass opens no
+            # turn that read the card; re-arming covers a waiter that retired
+            # during the awaits above.
+            self._bridge_cards_owed_wake.append(message)
+        if owes_card_wake or (
+            not joins_body_waiter
+            and busy
+            and wake
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+        ):
+            # Idle admitted bodies need the SAME finite pass as busy arrivals:
+            # an ordinary oldest-only prompt could retry retained failed A and
+            # strand new B after the prior waiter exited. Persist the card first;
+            # the helper rechecks native authority before starting a new waiter.
+            self._ensure_pending_body_followup()
         await self._emit_peer_receipt(message, sender)
         # LAST, deliberately: this wakes a blocking `wait`, and the woken tool
         # returns into the loop's injection boundary where _drain_steering
@@ -10344,6 +10759,10 @@ class Session:
         # at the post-batch boundary, which is what keeps the splice hazard
         # documented above from being reintroduced here.
         self._peer_arrival.mark()
+        if owes_card_wake:
+            # The waiter opens a turn for this card (a body turn, or the
+            # ordinary fallback), so the sender is told what actually happens.
+            return receipt("delivered and woke the session")
         return receipt("delivered to the mailbox (will be read on the next turn)")
 
     async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
@@ -12834,7 +13253,7 @@ class Session:
         """
         self._on_mcp_startup_settled = sink
 
-    def refresh_tools(self, tools: Sequence[AgentTool]) -> bool:
+    def refresh_tools(self, tools: Sequence[AgentTool], *, republish: bool = True) -> bool:
         """Replace the full tool inventory mid-session.
 
         THE committed hook for MCP ``set_on_tools_changed`` (orchestrator
@@ -12861,11 +13280,16 @@ class Session:
         whole point: MCP tools are discovered lazily, so filtering only the
         construction-time builtins would leave the declaration unenforced on
         exactly the surface an embedder declares it for.
+
+        ``republish=False`` skips the canonical frontend refresh for a caller
+        that publishes its own (``_rebuild_effort_tier_tools``, a model edge):
+        that refresh rescans the whole roster and reads nothing from the tool
+        list, so on a switch it was pure cost on the session loop.
         """
         self._tools = self._filter_declared(tools)
         self._context.tools = self._tools
         self._refresh_tool_roster()
-        if hasattr(self, "_frontend_state_store"):
+        if republish and hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
         return self._published_tools is None
 
@@ -13091,6 +13515,12 @@ class Session:
         :meth:`_scope_declared_ops`; this method is where every inventory writer
         passes, so this is where the two cannot be applied apart.
         """
+        if self._readonly_shell and self._shell_write_root is None:
+            # A read-only shell role with no enforceable sandbox gets NO shell
+            # (see :meth:`_apply_readonly_shell_role`). Here, not at the attach,
+            # because every later writer (an MCP refresh, a capability merge)
+            # passes through this method and must not hand ``bash`` back.
+            tools = [tool for tool in tools if getattr(tool, "name", None) != "bash"]
         if self._declared_tools is None:
             return list(tools)
         allowed = self._declared_tools
@@ -13405,11 +13835,15 @@ class Session:
         # drops ``ask``; clearing the contract restores the door, so re-run the
         # merge and let the builder decide (it refuses wherever the door stays
         # ``None`` for some other reason).
+        # ``notify`` shares the door's exclusions (``_notify_inbox_callable``),
+        # so it follows the same drop/re-merge.
         if contract is not None:
-            if any(tool.name == "no_reply" for tool in self._tools):
-                self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+            if any(tool.name in ("no_reply", "notify") for tool in self._tools):
+                self.refresh_tools(
+                    [tool for tool in self._tools if tool.name not in ("no_reply", "notify")]
+                )
         else:
-            self._merge_capability_tools(("no_reply",))
+            self._merge_capability_tools(("no_reply", "notify"))
 
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
@@ -13570,6 +14004,10 @@ class Session:
     @property
     def attached_profile_tools(self) -> tuple[str, ...]:
         """The ``tools:`` allow-list the attached role declares, or ``()``.
+
+        For a read-only shell role this is the list AFTER the shell floor
+        (see :meth:`_apply_readonly_shell_role`), since it is what an unattended
+        ``lop exec --profile`` declares.
 
         ``()`` means "the role declares none", NOT "declare an empty
         inventory"; a caller deciding whether to bound itself on this must treat
@@ -14307,6 +14745,9 @@ class Session:
         """
         store = getattr(self, "_frontend_state_store", None)
         publish = getattr(store, "refresh_spend_channels", None) if store is not None else None
+        # A money edge reads the sidecar fresh; only the per-tick refresh path
+        # is throttled (see ``pending_channel_records``).
+        self._channel_pending_cache = None
         if callable(publish):
             try:
                 publish(self)
@@ -14330,19 +14771,85 @@ class Session:
         one — a lost marker degrades to "nothing pending", never a broken
         publish.
         """
-        try:
-            directory = getattr(self._transcript, "directory", None)
-            if directory is None:
+        # THROTTLED DISK READ. This runs from every jobs tick and every
+        # per-event frontend refresh ON THE SESSION LOOP; even the common
+        # no-sidecar answer is an ``isfile`` syscall, and returning from any
+        # syscall costs the loop a GIL re-acquire behind every busy lane
+        # (measured ~0.5-0.75 s of sampled loop stall per 40 s on a 12-lane
+        # manager). The sidecar is written by ANOTHER process (the voice
+        # routes, ``server/utils/voice_spend.py``) on human timescales, so the
+        # raw entries are re-read at most once per ``_CHANNEL_PENDING_MIN_S``;
+        # the fold exclusion below still runs every call, so a marker the fold
+        # has absorbed retires immediately.
+        # A throttled answer arms ONE trailing re-read at the end of the floor
+        # (``_schedule_channel_pending_recheck``) so a marker written just after
+        # a read still reaches the band within the floor when the session goes
+        # quiet, rather than at the next unrelated tick (review round 1, R1-2).
+        now = time.monotonic()
+        cached = getattr(self, "_channel_pending_cache", None)
+        if cached is not None and now - cached[0] < _CHANNEL_PENDING_MIN_S:
+            entries = cached[1]
+            self._schedule_channel_pending_recheck(_CHANNEL_PENDING_MIN_S - (now - cached[0]))
+        else:
+            try:
+                directory = getattr(self._transcript, "directory", None)
+                if directory is None:
+                    return []
+                entries = read_pending_records(directory)
+            except Exception:  # noqa: BLE001 — a marker read must never break a publish
+                logger.debug("channel pending read failed", exc_info=True)
                 return []
-            entries = read_pending_records(directory)
-        except Exception:  # noqa: BLE001 — a marker read must never break a publish
-            logger.debug("channel pending read failed", exc_info=True)
-            return []
+            self._channel_pending_cache = (now, entries)
         return [
             entry
             for entry in entries
             if not self.channels.has(str(entry.get("record_id", "") or ""))
         ]
+
+    def _schedule_channel_pending_recheck(self, delay: float) -> None:
+        """Arm one trailing sidecar re-read ``delay`` from now; coalesced."""
+        if getattr(self, "_channel_pending_recheck_scheduled", False):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop (a synchronous caller or test host): the next tick re-reads.
+            return
+        self._channel_pending_recheck_scheduled = True
+        # WEAKLY: a pending timer is a loop-owned strong edge, and a disposed
+        # session must stay collectable for up to a floor after its last tick
+        # (``test_launch_subagent``'s retention cells pin that). A collected
+        # session has no band to publish to, so the re-check simply lapses.
+        ref = weakref.ref(self)
+
+        def fire() -> None:
+            session = ref()
+            if session is not None:
+                session._flush_channel_pending_recheck()
+
+        loop.call_later(max(delay, 0.0), fire)
+
+    def _flush_channel_pending_recheck(self) -> None:
+        """Re-read the sidecar; publish the spend band only if it changed.
+
+        Publishing only on a difference keeps the trailing edge free when
+        nothing moved — the common case, a burst of ticks over an unchanged
+        (usually absent) sidecar — so the throttle's saving is kept.
+        """
+        self._channel_pending_recheck_scheduled = False
+        before = getattr(self, "_channel_pending_cache", None)
+        self._channel_pending_cache = None
+        self.pending_channel_records()
+        after = getattr(self, "_channel_pending_cache", None)
+        if before is not None and after is not None and before[1] == after[1]:
+            return
+        store = getattr(self, "_frontend_state_store", None)
+        publish = getattr(store, "refresh_spend_channels", None) if store is not None else None
+        if callable(publish):
+            try:
+                publish(self)
+            except Exception:  # noqa: BLE001 — a publish must never break the loop
+                logger.debug("trailing channel spend publish failed", exc_info=True)
 
     def rebuild_channels_if_needed(self) -> None:
         """The adopt seam for channel history: the legacy backfill.
@@ -15327,6 +15834,233 @@ class Session:
                 self._run_user_text = str(getattr(message, "text", "") or "")[:USER_TEXT_MAX_CHARS]
                 self._last_typed_user_text = self._run_user_text
 
+    def _turn_is_user_directed(self) -> bool:
+        """Whether a person's own message drives this run (body-exclusion gate).
+
+        Read at ``_run_turn``'s claim site. True when this run consumed a
+        person's words (``_run_typed_user``: a typed TUI/desktop/phone prompt,
+        or a person answering an ask) or a person is waiting to speak
+        (:meth:`_person_is_waiting`). Three shapes reach it without a typed
+        ``initial``, and each is covered on purpose:
+
+        * the IDLE user steer (``_ensure_steering_wake``): its row is still on
+          the steering queue when the run opens, so the waiting arm sees it;
+        * the post-compaction continuation (``_drain_continuation``): the run
+          flags are reset only at the pipeline head, so it inherits the
+          originating run's verdict;
+        * the ask answer: ``_note_run_input`` sets ``_run_typed_user`` for it.
+
+        DELIBERATELY NOT ``'user' in _run_triggers``: harness-minted rows (goal
+        loop and judge continuations, spooled owner chrome) land in that class
+        but are no person speaking, and excluding them would starve a body
+        behind a long goal loop. A PEER message (``lop send``, another
+        session's agent) is also not this session's operator, so a peer-opened
+        run may still serve a body.
+        """
+        return self._run_typed_user or self._person_is_waiting()
+
+    def _person_is_waiting(self) -> bool:
+        """Whether a PERSON's words are waiting for a turn on this session.
+
+        The priority signal for the Team Bridge body path: a direct user
+        message always goes first and is about the user, so a body turn that
+        has not started yields to it, and one that has started ends at its
+        next boundary instead of folding the person's words in after the frame.
+
+        Two places a person's words wait, and both count:
+
+        * the steering queue (:meth:`_person_steer_queued`);
+        * the turn lock: a prompt admitted and waiting for the lock, marked by
+          :meth:`person_prompt_waiting` (``prompt`` itself, and the serving
+          handle's prompt queue). Without it a desktop prompt arriving while
+          the follow-up waiter was queued ran AFTER one more body turn
+          (design review D-F2: body0, body1, USER).
+        """
+        return self._person_prompts_waiting > 0 or self._person_steer_queued()
+
+    def _person_steer_queued(self) -> bool:
+        """Whether a PERSON's row sits on the steering queue, unconsumed.
+
+        A typed or spooled ``SOURCE_USER`` steer, or an answered ask parked by
+        its busy arm. Harness-injected rows are NOT a person
+        (``is_harness_injection``: spooled owner chrome, goal continuations),
+        which is why this does not reuse ``_has_awaiting_user`` -- that one
+        feeds the notify rule, where any queued user-role row must count.
+        """
+        return any(
+            ask_answer_is_person(message)
+            or (
+                getattr(message, "custom_type", None) is None
+                and getattr(message, "role", None) == "user"
+                and not is_harness_injection(message)
+            )
+            for message in self.queued_steering()
+        )
+
+    @contextlib.contextmanager
+    def person_prompt_waiting(self) -> Iterator[None]:
+        """Mark a person's prompt as waiting for this session's turn lock.
+
+        A counter, not a flag: the serving handle's queue and a direct
+        ``prompt`` can both be waiting at once. Hosts that queue a person's
+        prompt OUTSIDE ``prompt`` (``serving._drain_prompt_queue`` waits out a
+        foreign turn first) hold this across that wait so a body follow-up that
+        wins the lock first still sees the person and yields.
+        """
+        self._person_prompts_waiting += 1
+        try:
+            yield
+        except BaseException:
+            # The prompt never reached its turn (refused, cancelled), so its
+            # release will not re-arm a body pass that yielded to it.
+            self._person_prompts_waiting -= 1
+            self._rearm_pending_body_followup()
+            raise
+        else:
+            self._person_prompts_waiting -= 1
+
+    def _body_turn_yields_to_person(self) -> bool:
+        """Whether the running body-carrying turn must stop for a person's steer.
+
+        A person who steers (TUI text while a turn streams, a spooled
+        ``SOURCE_USER`` row, an answered ask) into a turn that holds a Team
+        Bridge frame would otherwise have their words folded in at the tool
+        boundary with the frame appended AFTER them on every later call --
+        their message riding the body's request. So ``_drain_steering`` holds
+        the queue back and the loop's boundary-cancel hook ends the turn at
+        its next safe boundary; the person's row then opens its own turn
+        (the turn-end flush gives it a consumer).
+
+        WHY END THE TURN, not let it finish: a held steer keeps the urgent
+        interrupt poll true, which cancels every later interruptible tool, so
+        a body turn that carried on would thrash. Ending it is what an Esc
+        does to a body turn already (``settle`` releases the row as
+        ``admission_drift`` and a later turn re-serves it), and it keeps the
+        person's interrupt: their steer still cancels the running tool.
+
+        A TURN THAT ENDS ON ITS ANSWER IS NOT CUT. This predicate is the
+        HOLD (``_drain_steering`` keeps the person's row off the body turn);
+        the CUT is :meth:`_body_turn_cut_for_person`, which also requires
+        another model call to be coming. Cutting a finished turn released the
+        row and re-served the body: answered twice, and an earlier
+        side-effecting tool (a bridge ``reply``) run twice (PR #2999 agent
+        review round 2, MAJOR-R2-1).
+
+        STEERS ONLY. A prompt waiting for the lock does not cut a running body
+        turn: it waits for that turn (bounded: the current turn), because
+        cutting it would re-serve the body and repeat the side effects its
+        tools already had. It does stop the NEXT body turn from starting.
+        """
+        return self._pending_body_turn is not None and self._person_steer_queued()
+
+    def _body_turn_cut_for_person(self) -> bool:
+        """Whether the loop's boundary-cancel hook must END the body turn now.
+
+        :meth:`_body_turn_yields_to_person`, narrowed to boundaries where the
+        loop would make another model call: the turn's context ends on a tool
+        batch that feeds back, or on input drained for the next request. At a
+        TERMINAL step the body has been answered and no later request carries
+        its frame, so there is nothing to protect: the turn ends normally,
+        ``settle`` completes the row, and the held row gets its own turn from
+        the turn-end flush. That terminal step is also where a body turn
+        spends most of its streaming time, so a steer usually lands there
+        (MAJOR-R2-1, probe C).
+
+        Read from the shared loop context because the hook takes no
+        arguments. At the post-response boundary the loop has already
+        appended the step's assistant message and its tool results, so the
+        tail shows what ``has_more_tool_calls`` will be. The two terminal
+        tails mirror the loop's rule exactly: an assistant message with no
+        tool calls, and a batch whose LAST result is the quiet-turn marker
+        (``harness.loop._batch_ends_quiet``).
+
+        ONCE ANSWERED, NEVER CUT. A yield-edge re-entry after the terminal
+        step (a hub aside, a job result, a moving todo) puts drained input on
+        the tail and the loop calls again, yet the body was already answered:
+        cutting there re-served it and repeated its earlier tools (PR #2999
+        code review round 3, MINOR-R3-1). So the first terminal reading
+        latches for this turn, keyed by the turn object so the next body turn
+        starts unlatched (``_settle_pending_body`` also clears it). Its later
+        requests still carry no person words: ``_drain_steering`` keeps
+        holding them. The same latch lets a loop recovery after a terminal
+        tail (the wordless-stop re-ask, a truncated-answer continuation) run
+        uncut, AND any tool chain that recovered reply starts: the latch holds
+        for the rest of the turn, not one call (code review round 4,
+        MINOR-R4-1). Deliberate: clearing it on a later non-terminal step
+        would cut a turn whose body was already answered, re-serving it and
+        repeating its earlier tools (outbound bridge replies), the harm the
+        latch exists to prevent. The cost is bounded by the loop's own
+        continuation and recovery budgets: the person waits, held and never
+        folded in, and their held steer may skip interruptible tools.
+        ``_body_turn_answered`` scopes the latch to THIS turn's steps.
+        """
+        turn = self._pending_body_turn
+        if turn is None or self._body_answered_turn is turn:
+            return False
+        # Latched before the steer check: the answer may land with no person
+        # waiting and the steer only during the re-entered call after it.
+        if self._body_turn_answered():
+            self._body_answered_turn = turn
+            return False
+        return self._person_steer_queued()
+
+    def _body_turn_answered(self) -> bool:
+        """Whether THIS body turn has produced its terminal step.
+
+        Not merely "the context ends terminal": a body-only turn opens with no
+        new messages and its body rides the request transform, never the
+        context, so until the turn's first step lands the tail is the
+        PREVIOUS turn's answer (or quiet ``no_reply``). Reading that latched
+        "answered" before the body was even sent, and a person steering
+        mid-work then waited through the whole tool chain while their held
+        steer cancelled every interruptible tool (PR #2999 code review round
+        4, MAJOR-R4-1; every cell then started from an empty context).
+
+        Identity, not an index: a mid-turn compaction replaces the context
+        list (``on_turn_end``), which would move an index but keeps the
+        surviving messages' objects, and a step this turn produces is always
+        a new object on the tail.
+        """
+        if not self._context.messages:
+            return False
+        if self._context.messages[-1] is self._body_turn_opening_tail:
+            return False
+        return self._context_tail_is_terminal()
+
+    def _context_tail_is_terminal(self) -> bool:
+        """Whether the live context ends on a step after which the loop stops."""
+        if not self._context.messages:
+            return False
+        tail = self._context.messages[-1]
+        role = getattr(tail, "role", None)
+        if role == "assistant":
+            return not getattr(tail, "tool_calls", None)
+        if role == "tool":
+            payload = getattr(tail, "provider_payload", None)
+            details = payload.get("details") if isinstance(payload, Mapping) else None
+            return bool(details) and details.get(QUIET_TURN_KEY) is True
+        return False
+
+    def _rearm_pending_body_followup(self) -> None:
+        """Re-arm the body follow-up pass at a turn's release and at bind (D-F2).
+
+        A person's turn no longer claims bodies, so nothing else would retry a
+        body left pending by an Esc, a once-failed attempt, a yield to a
+        person or a restart: the follow-up drain had only arrival-driven call
+        sites. This is a read-only check (``_pending_body_followup_row``) that
+        refuses while an abort is pending, so an Esc is honoured until the
+        next turn ends. The drain's OWN turns are skipped: re-arming itself
+        would re-run the card-fallback branch. Never raises -- it runs in
+        ``finally`` blocks.
+        """
+        task = self._pending_body_followup_task
+        if task is not None and task is asyncio.current_task():
+            return
+        try:
+            self._ensure_pending_body_followup()
+        except Exception:  # noqa: BLE001 — a re-arm never fails the turn releasing
+            logger.debug("bridge: body follow-up re-arm failed", exc_info=True)
+
     def _has_awaiting_user(self) -> bool:
         """§14.2's ``awaiting_user``: a plain user message queued, unconsumed.
 
@@ -15418,6 +16152,13 @@ class Session:
         if notify and kind != "error" and self._run_ended_quiet(event):
             notify = False
         if notify and kind != "error" and self._proactive_banner_veto(event):
+            notify = False
+        # ONE BANNER PER EVENT (contract §3.4): a run that already raised a
+        # `high` item banner — or handed it to the desktop's update channel —
+        # does not also raise the completion banner for itself. `error` is
+        # exempt: a turn that died always notifies, whatever else it said. The
+        # unseen completion mark is untouched; this gates banners only.
+        if notify and kind != "error" and self._run_notified_banner:
             notify = False
         # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
         # of her check-in banners is judged HERE, once, beside ``notify``. The
@@ -15672,6 +16413,229 @@ class Session:
             return None
         return self._quiet_end_refusal
 
+    def _notify_inbox_callable(self) -> Callable[..., Awaitable[str]] | None:
+        """The ``notify`` tool's inbox door, or ``None`` where no inbox reads this session.
+
+        createIf rung 3 (``docs/design/notifications-inbox.md`` §3.2): the tool
+        exists only for a TOP-LEVEL conversation the operator's own listings
+        show, because that is the conversation an item can send them back to.
+        ``None`` for:
+
+        * a delegated child (``_job_id``): it reports through ``hub`` and its
+          parent decides whether the operator needs an item, so one event is
+          one item, attributed to a conversation the operator can open;
+        * a session the listings HIDE (``resume.is_user_session`` false, the
+          predicate ``_session_may_announce`` gates banners on): a hidden
+          session puts nothing on the operator's screen;
+        * a one-shot host or an output-contract session (the ``quiet_end``
+          exclusions — the host's product is the final text);
+        * ``LOP_NOTIFY=0``.
+
+        The gate answers "is there an inbox the operator reads for this
+        session" — reachability, not host identity (AGENTS.md footprint ladder).
+        """
+        if self._job_id is not None or self._one_shot_exit or self._output_contract is not None:
+            return None
+        from local_operator.tools import builtin
+
+        if not builtin.notify_enabled():
+            return None
+        if not self._session_is_listed():
+            return None
+        return self._notify_inbox
+
+    def _session_is_listed(self) -> bool:
+        """Whether the operator's own listings show this session (``is_user_session``).
+
+        A session with no directory answers YES, the ``_session_may_announce``
+        rule: absence of a marker means the user's own.
+        """
+        directory = getattr(getattr(self, "transcript", None), "directory", None)
+        if not directory:
+            return True
+        try:
+            from local_operator.resume import is_user_session
+
+            return is_user_session(Path(directory))
+        except Exception:  # noqa: BLE001 — an unanswered question keeps the tool
+            logger.debug("notify: could not read the session origin", exc_info=True)
+            return True
+
+    async def _notify_inbox(
+        self,
+        *,
+        title: str,
+        body: str,
+        priority: str,
+        key: str,
+        links: list[dict[str, str]],
+        anchor_id: str,
+    ) -> str:
+        """Persist unread; presence never proves a newly written callout was seen.
+
+        Even a focused session with fresh machine input may be scrolled up,
+        covered, or showing a child. Only a later item-specific render receipt
+        can acknowledge this revision. L1b owns bounded banner grace; it must
+        re-read the item's read watermark before claiming delivery.
+        """
+        from local_operator.notifications.store import NotificationStore
+
+        root = Path(self._config_dir)
+        store = NotificationStore(root)
+        outcome = await asyncio.to_thread(
+            store.notify,
+            session_id=self.session_id,
+            title=title,
+            body_md=body,
+            priority=priority,
+            key=key,
+            links=links,
+            anchor_id=anchor_id,
+            session_title=self.conversation_name,
+            agent_id=self._agent_id or "",
+        )
+        self._run_notified = True
+        # THE BANNER, decided here because this is the only place that knows
+        # the write's action, revision and priority. Best-effort: a banner is
+        # chrome and the item is already durable, so a delivery failure leaves
+        # an unread row rather than failing the tool call the model made.
+        if outcome.priority == "high":
+            await self._route_item_banner(root, store, outcome, title=title, body=body)
+        return _notify_sentence(outcome)
+
+    async def _route_item_banner(
+        self, root: Path, store: Any, outcome: Any, *, title: str, body: str
+    ) -> None:
+        """Decide a `high` revision's banner now; raise it after its grace.
+
+        TWO HALVES, because the grace cannot run inside the tool call (round-1
+        N2/Q4). The in-view receipt that may cancel the banner needs the
+        notify call's own result row ON SCREEN (its anchor), and that row only
+        renders once this call has returned. So:
+        - the ROUTE is decided here, synchronously and uncached: nothing to
+          raise (normal/low, unchanged/absorbed, a gated switch), or handed to
+          an advertising desktop (whose feed holds the grace itself);
+        - the runtime rung's hold-then-claim runs as a background task, and
+          the run's end waits for it, bounded, before deciding the completion
+          banner (:meth:`_settle_item_banners`). That way the one-banner-per-
+          event rule sees what really happened (round-1 R1).
+        """
+        from local_operator.notifications import delivery as _delivery
+
+        try:
+            route = await asyncio.to_thread(
+                _delivery.route_item,
+                root,
+                action=outcome.action,
+                priority=outcome.priority,
+                # R2-2: a TUI showing this conversation with the operator active
+                # in it is the surface that acknowledges the card, so the
+                # runtime must not raise its detached banner over it. The probe
+                # answers True only on real evidence; unknown is None and
+                # notifies (§6.3).
+                tui_watching=self._notify_tui_evidence(),
+            )
+        except Exception:  # noqa: BLE001 — chrome must not fail the write
+            logger.debug("notify: banner routing failed", exc_info=True)
+            return
+        logger.info(
+            "notify: item %s %s banner rung=%s (%s) for %s",
+            outcome.item_id,
+            outcome.action,
+            route.rung,
+            route.detail,
+            self.session_id,
+        )
+        if route.rung == _delivery.RUNG_TUI_VIEWER:
+            # The TUI is showing it; its rung 3 stands down and its receipt
+            # reads the item. Nothing to hand off and no banner to raise, and
+            # the run's completion banner is NOT the same event (R1), so
+            # spoken_for stays False.
+            return
+        if route.spoken_for:
+            # Handed to an advertising desktop: the feed raises it (contract
+            # §3.4 suppression applies now — the handoff is the banner).
+            self._run_notified_banner = True
+            return
+        if route.rung != _delivery.RUNG_DETACHED:
+            return
+
+        generation = self._item_banner_generation
+
+        async def raise_after_grace() -> None:
+            # THE PROBE IS RE-READ HERE, not inherited from the write-time
+            # route (R6-2). The grace exists so an in-view receipt can cancel
+            # the banner, which means the operator may well have switched to
+            # this conversation while it ran; carrying the write-time answer
+            # would raise the banner over the screen they moved to. Unknown
+            # (None) still notifies — the fail-open direction of §6.3.
+            result = await asyncio.to_thread(
+                _delivery.deliver_item,
+                root,
+                item_id=outcome.item_id,
+                revision=int(outcome.revision),
+                priority=outcome.priority,
+                action=outcome.action,
+                session_id=self.session_id,
+                title=title,
+                body=body,
+                store=store,
+                tui_watching=self._notify_tui_evidence(),
+            )
+            logger.info(
+                "notify: item %s banner after grace rung=%s (%s)",
+                outcome.item_id,
+                result.rung,
+                result.detail,
+            )
+            # Recorded HERE, not read back from the task: ``_spawn_background``
+            # wraps the coroutine and discards its return value. Only for the
+            # run that wrote it: a raise that outlived its run's bounded settle
+            # must not suppress the NEXT run's completion banner.
+            if result.spoken_for and generation == self._item_banner_generation:
+                self._run_notified_banner = True
+
+        task = self._spawn_background(raise_after_grace())
+        if task is not None:
+            self._pending_item_banners.append(task)
+
+    async def _settle_item_banners(self) -> None:
+        """Wait (bounded) for this run's held item banners before its end is judged.
+
+        The completion banner is suppressed only for an item banner that
+        actually went out (round-1 R1), so the run's end must know the outcome.
+        Bounded by the grace plus slack: a hung notifier must not hold a turn
+        end hostage, and an unfinished raise counts as "not raised" — the
+        conservative direction, which at worst costs a second banner rather
+        than none.
+        """
+        pending, self._pending_item_banners = self._pending_item_banners, []
+        if not pending:
+            self._item_banner_generation += 1
+            return
+        from local_operator.notifications.delivery import BANNER_GRACE_MS
+
+        # The raise itself sets ``_run_notified_banner``; this only bounds the
+        # wait so a hung notifier cannot hold the turn's end.
+        await asyncio.wait(pending, timeout=BANNER_GRACE_MS / 1000 + 3.0)
+        self._item_banner_generation += 1
+
+    def _notify_tui_evidence(self) -> Any:
+        """The attached TUI's input evidence, when the runtime reports one (L1b/L2).
+
+        ``None`` today: the ``activity`` control op that carries a TUI's
+        Key/MouseDown edges to its runtime lands with the TUI lane, and an
+        absent report is "not active" — the item stays unread, which is the
+        direction every unknown falls (§6.3).
+        """
+        probe = getattr(self, "_notify_tui_probe", None)
+        if not callable(probe):
+            return None
+        try:
+            return probe()
+        except Exception:  # noqa: BLE001 — unknown is "not active"
+            return None
+
     async def _quiet_end_refusal(self) -> str | None:
         """The refusal sentence for a quiet end, or ``None`` when it is allowed.
 
@@ -15695,10 +16659,26 @@ class Session:
         ``notify=false`` — may end quietly: an incident notice's
         operator-visible row is already published, so silence about it loses
         nothing (pinned by test).
+
+        EXCEPT A BODY TURN'S HELD PERSON. While a Team Bridge body turn runs,
+        a queued person row is held off it (``_drain_steering``) and gets its
+        own turn from the turn-end flush, so this turn is not the one they
+        wait on and its quiet end loses them nothing. Refusing there made the
+        quiet end non-terminal, the body cut fired on a finished turn, and
+        the body was served twice; the refusal sentence also landed in the
+        person's own turn (PR #2999 QA round 3, Q-R3-1). Every other turn
+        folds the queued row into its next request, so it keeps the refusal.
         """
-        if "user" in self._run_triggers or self._has_awaiting_user():
+        if "user" in self._run_triggers or (
+            self._has_awaiting_user() and not self._body_turn_yields_to_person()
+        ):
             return "A person asked this turn; answer them in one line."
-        if self._run_notify_requested:
+        # A ``notify:true`` delivery is answered by an inbox item as well as by
+        # text: the operator asked to be told, and the item (with its own
+        # banner per priority) tells them, durably, before the turn ends
+        # (docs/design/notifications-inbox.md §3.4). The person-asked rule above
+        # still wins — a human waiting on words gets words.
+        if self._run_notify_requested and not self._run_notified:
             return "This wake or monitor asked to tell the user; say what they need to know."
         return None
 
@@ -16269,6 +17249,21 @@ class Session:
         if store is not None:
             store.refresh_from_session(self)
 
+    def _refresh_frontend_model_selection(self) -> None:
+        """Publish a model/effort switch to the canonical frontend state, in O(1).
+
+        ``set_model``'s publish. It used to be :meth:`refresh_frontend_state`,
+        whose full rescan rebuilds every job row: on a long manager with a large
+        roster that made a switch's cost on the session loop grow with the
+        roster, and the desktop's 20 s request deadline expired on exactly those
+        sessions. Only the selection fields move on a switch; the scheduled
+        roster/jobs refreshes keep the rest current. Same guard as the full
+        refresh: the store does not exist yet during construction.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_model_selection(self)
+
     def refresh_frontend_usage(self) -> None:
         """Refresh restored usage without scanning transcript/jobs/tool schemas.
 
@@ -16559,6 +17554,9 @@ class Session:
             # publish) does the right thing without being taught a new field. A
             # deliberate stop is left exactly as it was.
             event = self._classify_cut_off(event)
+            # A held item banner decides whether this run's completion banner
+            # is redundant, so it settles first (bounded; see the method).
+            await self._settle_item_banners()
             # §14.2's ONE notify computation for the run this end closes,
             # stamped here so it rides the EMITTED end on both exit paths —
             # the immediate error/abort emission and the held end flushed from
@@ -16656,6 +17654,22 @@ class Session:
         # runs (idempotent: it re-adopts the newest usage it scans).
         if isinstance(event, MessageEndEvent):
             self._note_usage([event.message])
+            # The provider-cache clock the prune sweeps read
+            # (``_plan_compaction``) advances on EVERY completed provider
+            # call, not only when a run ends. A subagent usually lives inside
+            # one long run, so with the run-end stamp alone this read 0 for its
+            # whole life. Every boundary sweep then saw a 90-minute "idle" gap
+            # and blanked already-cached frames and reads mid-run, which is the
+            # prefix-break mechanism described in ``compaction/pruning.py``.
+            #
+            # Read against this stamp, a sweep measures the gap BEFORE the
+            # request it precedes: the mid-turn sweep runs after the tool batch
+            # and before the next call, so a 90-minute tool still flushes. The
+            # one gap no post-call sweep can see is the user's wait between
+            # runs; ``_sweep_before_run`` covers that, before the first request
+            # (agent review round 1, M2).
+            if isinstance(event.message, Message) and event.message.usage is not None:
+                self._last_provider_request_ms = int(time.time() * 1000)
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
         #
@@ -16825,6 +17839,9 @@ class Session:
         guard: Callable[[], bool] | None = None,
         guard_note: str = "",
         drain_steering_on_open: bool = False,
+        pending_body_only: bool = False,
+        pending_body_selected: tuple[str, str] | None = None,
+        initial_after_guard: Callable[[], list[AgentMessage]] | None = None,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
         handling so it can REJECT reentrants instead of queueing).
@@ -16895,6 +17912,13 @@ class Session:
                     f" ({guard_note})" if guard_note else "",
                 )
                 return
+            if initial_after_guard is not None:
+                # Input that depends on the context as the guard saw it, so it
+                # is computed under the same lock hold (the bridge card
+                # fallback re-presents a card stranded behind a reply). The
+                # ``finally`` below undoes the move if the turn never got that
+                # far.
+                initial = [*initial, *initial_after_guard()]
             # A newly ARRIVING unit of work is a fresh intent, exactly like a
             # typed prompt, so it clears the sticky abort the same way
             # ``prompt()`` does — see that method for the flag's contract.
@@ -16970,12 +17994,35 @@ class Session:
             # instead of publishing the ``error|disposed`` its own rationale
             # promises (repro: peer_carried_prompt.py; the cell is
             # ``test_a_peer_prompt_cut_with_zero_round_trips_still_errors``).
+            opened_body = None
+            if pending_body_only:
+                if self._person_is_waiting():
+                    # A person is waiting (a queued steer, or a prompt waiting
+                    # on this lock): their turn goes first and the body is not
+                    # even hydrated. Releasing hands the lock on; the drain
+                    # ends its pass and the person's turn re-arms it at its end
+                    # (``_rearm_pending_body_followup``).
+                    return
+                # The normal guard ran under the lock. Hydrate before opening
+                # a turn, so a refused body costs no empty model request.
+                await self._open_pending_body_turn(selected=pending_body_selected)
+                opened_body = self._pending_body_turn
+                if opened_body is None:
+                    return
             await self._run_turn_pipeline(
                 initial,
                 carried_prompt=carried_prompt,
                 drain_steering_on_open=drain_steering_on_open,
+                opened_body=opened_body,
             )
         finally:
+            if initial_after_guard is not None:
+                self._restore_unpresented_bridge_cards()
+            if pending_body_only:
+                # Cancellation between hydration and pipeline entry still
+                # releases our claim; normal settlement already cleared it.
+                self._settle_pending_body()
+            self._rearm_pending_body_followup()
             # Release in its own ``finally`` (R2-1): see the helper.
             try:
                 await self._flush_queued_before_release()
@@ -16992,6 +18039,7 @@ class Session:
         may_drop: bool = True,
         carried_prompt: bool = False,
         drain_steering_on_open: bool = False,
+        opened_body: Any = None,
     ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
 
@@ -17118,6 +18166,8 @@ class Session:
         # exactly once, at turn end, by ``_finalize_attention_notify``.
         self._run_triggers = set()
         self._run_notify_requested = False
+        self._run_notified = False
+        self._run_notified_banner = False
         self._run_input_types = set()
         self._run_wake_ids = set()
         self._run_catchup_unidentified = False
@@ -17158,6 +18208,7 @@ class Session:
                 producer_command_id=producer_command_id,
                 may_drop=may_drop,
                 drain_steering_on_open=drain_steering_on_open,
+                opened_body=opened_body,
             )
             await self._drain_continuation()
         except ImportError as exc:
@@ -17315,7 +18366,276 @@ class Session:
             sender_kind=kind if isinstance(kind, str) else "unknown",
         )
 
-    async def _open_pending_body_turn(self) -> None:
+    def _pending_body_followup_row(
+        self,
+        *,
+        selected: tuple[str, str] | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+        admitted_before: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Local authority for a body-only wake; a metadata card is not authority."""
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is None or self._disposed or self._leaving_deliveries or self._one_shot_exit:
+            return None
+        if self._abort_requested or self._graceful_cancel_requested:
+            return None
+        from local_operator.team_bridge.host import owner_fence_refusal
+        from local_operator.team_bridge.store import Store
+
+        try:
+            if owner_fence_refusal(runtime) is not None:
+                return None
+            store = Store(runtime.config_dir)
+            skipped = set(exclude)
+            while True:
+                row = store.pending_body_reservation_for(
+                    runtime.owner,
+                    runtime.session_id,
+                    selected=selected,
+                    exclude=frozenset(skipped),
+                    admitted_before=admitted_before,
+                )
+                if row is None:
+                    return None
+                facts = store.per_call_admission_state(runtime.owner, runtime.session_id)
+                receipt = store.receipt_for_message(runtime.owner, str(row["message_id"]))
+                if (
+                    facts
+                    and facts.get("designation_matches")
+                    and facts.get("consent_version") == row["consent_version"]
+                    and facts.get("policy_epoch") == row["policy_epoch"]
+                    and receipt
+                    and receipt.get("verdict") == "allow"
+                    and receipt.get("body_sha256") == row["body_sha256"]
+                ):
+                    return row
+                if selected is not None:
+                    return None
+                # Stale admission is not permission to consume or quarantine
+                # the row, nor to hide independently valid neighbors behind it.
+                skipped.add((row["conversation_id"], row["message_id"]))
+        except Exception:  # noqa: BLE001 — no readable authority means no automatic work
+            logger.debug("bridge: follow-up authority unavailable")
+            return None
+
+    def _ensure_pending_body_followup(self) -> None:
+        """Coalesce busy arrivals without cancelling work or creating a session.
+
+        Like the steering wake, this uses the normal guarded prompt lock. Unlike
+        a card-only wake, it must open a verified body before any provider call.
+        Each finite admission-horizon pass tries an identity at most once,
+        leaving failed rows pending with their existing reason while allowing
+        valid neighbors through. New arrivals rearm the same waiter, excluding
+        identities it already tried: no timer or same-row retry/spend loop.
+        Pending rows survive crashes under the existing claim lease; this never
+        resurrects a new runtime.
+        """
+        task = self._pending_body_followup_task
+        if task is not None and not task.done():
+            self._pending_body_followup_again = True
+            return
+        if not self._bridge_cards_owed_wake and self._pending_body_followup_row() is None:
+            return
+
+        async def drain() -> None:
+            attempted: set[tuple[str, str]] = set()
+            while True:
+                self._pending_body_followup_again = False
+                horizon = time.time()
+                while (
+                    row := self._pending_body_followup_row(
+                        exclude=frozenset(attempted),
+                        admitted_before=horizon,
+                    )
+                ) is not None:
+                    identity = (row["conversation_id"], row["message_id"])
+                    attempted.add(identity)
+                    await self._prompt_messages(
+                        [],
+                        guard=lambda identity=identity: (
+                            self._pending_body_followup_row(selected=identity) is not None
+                        ),
+                        guard_note="selected admitted bridge body no longer eligible",
+                        pending_body_only=True,
+                        pending_body_selected=identity,
+                    )
+                    # Each attempt releases the ordinary turn lock. Selecting
+                    # B explicitly prevents failed A being hydrated again here.
+                    if self._person_is_waiting():
+                        # A person spoke while this pass held or waited for
+                        # the lock: end the pass so their turn runs next (no
+                        # body0, body1, USER). Their turn's release re-arms a
+                        # fresh pass, which re-offers a yielded row.
+                        return
+                if self._pending_body_followup_again:
+                    continue
+                if self._bridge_cards_owed_wake:
+                    # No turn in this pass read a woken card: give it the
+                    # ordinary wake it would have had without the body route.
+                    # The pipeline still offers the oldest eligible body, so a
+                    # retained failed row gets at most one more attempt here.
+                    #
+                    # A waiting person refuses it UNDER THE LOCK, like the
+                    # per-row attempts: a prompt that starts waiting while this
+                    # call is queued on the lock goes first instead of behind
+                    # one paid wake turn (PR #2999 round 2, MINOR-R2-1). The
+                    # refusal leaves the card owed, and the person's turn-end
+                    # re-arm opens a fresh pass for it (this pass's own re-arm
+                    # is skipped, see ``_rearm_pending_body_followup``).
+                    await self._prompt_messages(
+                        [],
+                        carried_prompt=True,
+                        guard=lambda: (
+                            not self._person_is_waiting() and self._bridge_card_wake_still_owed()
+                        ),
+                        guard_note=(
+                            "a person is waiting, or the woken bridge card was already"
+                            " read by a later turn"
+                        ),
+                        initial_after_guard=self._fallback_card_wake_initial,
+                    )
+                if not self._pending_body_followup_again:
+                    return
+
+        self._pending_body_followup_task = self._spawn_background(drain())
+
+    def _settle_bridge_card_wakes(self, read: set[int]) -> None:
+        """Drop every owed card a dispatched provider request carried.
+
+        A card is READ only when a request built from it crosses the dispatch
+        boundary. Being on the live context is not enough: an idle card is
+        appended with no turn behind it, and a turn's closing journal flush is
+        followed by no request. Settling anywhere earlier either re-answers a
+        card (a flush mid-turn, PR #2951 round 2 MAJOR-R2-1) or strands one
+        (round 1 MAJOR-1).
+        """
+
+        if self._bridge_cards_owed_wake:
+            self._bridge_cards_owed_wake = [
+                card for card in self._bridge_cards_owed_wake if id(card) not in read
+            ]
+            self._forget_settled_card_attempts()
+
+    def _bridge_card_wake_still_owed(self) -> bool:
+        """The fallback turn's under-lock guard: is any owed card still unread?
+
+        Re-derived from the live context rather than trusted from the list, so
+        a path into the context that skipped settlement cannot open a turn for
+        a card already answered. That turn would end on the model's own
+        assistant message, which current Claude models reject as a prefill.
+        """
+
+        # Only the dispatch settle proves a card was read. The context's shape
+        # does not: an adopted aside's user/assistant pair can land behind a
+        # still-unread card (PR #2951 round 3, MINOR-R3-1), so a trailing
+        # assistant message says nothing about the card.
+        #
+        # Every owed card must be on the live context or parked: that is what
+        # lets the fallback's request end on it rather than on a reply. A card
+        # in neither place can never be carried, so its debt would only open
+        # turns ending on the model's own reply (PR #2951 round 4, MAJOR-R4-1).
+        # Drop it, loudly; the card stays durable in the transcript.
+        live = {id(message) for message in self._context.messages}
+        parked = {id(message) for message in self._pending_context_journal}
+        unreachable = [
+            card
+            for card in self._bridge_cards_owed_wake
+            if id(card) not in live and id(card) not in parked
+        ]
+        exhausted = [
+            card
+            for card in self._bridge_cards_owed_wake
+            if self._bridge_card_fallback_attempts.get(id(card), 0) >= BRIDGE_CARD_FALLBACK_ATTEMPTS
+        ]
+        if unreachable or exhausted:
+            logger.warning(
+                "bridge card wake: dropped %d unreachable and %d exhausted owed card(s)",
+                len(unreachable),
+                len(exhausted),
+            )
+            gone = {id(card) for card in (*unreachable, *exhausted)}
+            self._bridge_cards_owed_wake = [
+                card for card in self._bridge_cards_owed_wake if id(card) not in gone
+            ]
+            self._forget_settled_card_attempts()
+        if not self._bridge_cards_owed_wake:
+            return False
+        for card in self._bridge_cards_owed_wake:
+            attempts = self._bridge_card_fallback_attempts
+            attempts[id(card)] = attempts.get(id(card), 0) + 1
+        return True
+
+    def _forget_settled_card_attempts(self) -> None:
+        """Keep attempt counts only for cards still owed (ids can be reused)."""
+
+        owed = {id(card) for card in self._bridge_cards_owed_wake}
+        self._bridge_card_fallback_attempts = {
+            key: count for key, count in self._bridge_card_fallback_attempts.items() if key in owed
+        }
+
+    def _restore_unpresented_bridge_cards(self) -> None:
+        """Put back a card the fallback moved if its turn never re-appended it.
+
+        ``_fallback_card_wake_initial`` takes a stranded card off the context so
+        the loop's own ``extend`` of the turn input can put it last. A failure
+        before that extend (restart fence, metadata refresh, model selection,
+        inbox drain, ask reconciliation, system blocks) would otherwise leave
+        the card neither live nor parked. Restored at its original index, so
+        live order matches the transcript again; a pre-aborted turn that
+        re-parked it already put it somewhere reachable and is left alone.
+        """
+
+        moved, self._bridge_card_wake_moved = self._bridge_card_wake_moved, []
+        if not moved:
+            return
+        live = {id(message) for message in self._context.messages}
+        parked = {id(message) for message in self._pending_context_journal}
+        for index, card in sorted(moved, key=lambda pair: pair[0]):
+            if id(card) in live or id(card) in parked:
+                continue
+            self._context.messages.insert(min(index, len(self._context.messages)), card)
+            live.add(id(card))
+
+    def _fallback_card_wake_initial(self) -> list[AgentMessage]:
+        """The fallback turn's input: owed cards already behind a reply.
+
+        A card the context holds BEFORE a later assistant message would
+        otherwise leave the request ending on that reply, which current Claude
+        models reject as a prefill. Re-presenting the durable card as the
+        turn's input moves it to the tail without a second transcript row
+        (``_run_turn`` journals only initials the transcript lacks) and adds no
+        new model-facing text. Cards still parked, or already last, need
+        nothing: the opening flush or the context already ends on them.
+        """
+
+        messages = self._context.messages
+        last_reply = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if getattr(messages[index], "role", None) == "assistant"
+            ),
+            -1,
+        )
+        if last_reply < 0 or self._pending_context_journal:
+            return []
+        behind = {id(message) for message in messages[:last_reply]}
+        stranded: list[AgentMessage] = [
+            card for card in self._bridge_cards_owed_wake if id(card) in behind
+        ]
+        if not stranded:
+            return []
+        # Recorded before the move so ``_restore_unpresented_bridge_cards`` can
+        # undo it on any path that never reaches the loop's re-append.
+        self._bridge_card_wake_moved = [
+            (index, message)
+            for index, message in enumerate(messages)
+            if any(message is card for card in stranded)
+        ]
+        self._context.messages[:] = [m for m in messages if all(m is not c for c in stranded)]
+        return stranded
+
+    async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
         ONLY a session the bridge runtime already admitted reaches here (owner
@@ -17334,9 +18654,30 @@ class Session:
         try:
             from local_operator.team_bridge.pending_turn import PendingTurn
 
-            turn = PendingTurn(runtime.owner, runtime.session_id, config_dir=runtime.config_dir)
+            captured_owner = runtime.owner
+            captured_scope = (Path(runtime.config_dir), runtime.session_id, runtime.tenant_id)
+
+            def binding_guard() -> bool:
+                current = getattr(self, "bridge_runtime", None)
+                if current is None:
+                    return False
+                return (
+                    current is runtime
+                    and current.owner == captured_owner
+                    and (Path(current.config_dir), current.session_id, current.tenant_id)
+                    == captured_scope
+                )
+
+            turn = PendingTurn(
+                captured_owner,
+                runtime.session_id,
+                config_dir=runtime.config_dir,
+                binding_guard=binding_guard,
+            )
             won = await turn.open(
-                budget=self._pending_body_budget(), fetch=self._fetch_pending_body
+                budget=self._pending_body_budget(),
+                fetch=self._fetch_pending_body,
+                selected=selected,
             )
         except Exception:  # noqa: BLE001 — an ordinary request is the fallback
             logger.debug("bridge: pending body unavailable", exc_info=True)
@@ -17381,6 +18722,8 @@ class Session:
         finally:
             self._pending_body_turn = None
             self._pending_body_verdict = None
+            self._body_answered_turn = None
+            self._body_turn_opening_tail = None
 
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
@@ -17408,6 +18751,7 @@ class Session:
         producer_command_id: str | None = None,
         may_drop: bool = True,
         drain_steering_on_open: bool = False,
+        opened_body: Any = None,
     ) -> None:
         """One loop run + persistence. Caller holds ``_turn_lock``.
 
@@ -17492,6 +18836,9 @@ class Session:
             signal.abort("interrupted")
         try:
             await self._ensure_selected_model()
+            # Before anything is sent: the one point that can see the user's
+            # wait since the last call (see the method).
+            await self._sweep_before_run()
             # Imported HERE, once per real turn, rather than at module scope:
             # `harness.rows` gathers the chrome prompts from
             # `session.goal_loop`/`session.session` behind a function precisely
@@ -17671,16 +19018,60 @@ class Session:
             def marking_stream_fn(
                 request: ChatRequest, stream_signal: AbortSignal | None = None
             ) -> AsyncIterator[StreamEvent]:
+                frame = self._pending_body_turn
+                if frame is not None and not frame.binding_intact():
+                    # The prepared request may already contain the old owner's
+                    # frame. Refuse dispatch, rather than just stopping future
+                    # transforms after these bytes have crossed the boundary.
+                    raise RuntimeError("bridge body authority changed before dispatch")
                 inner = base_stream_fn(request, stream_signal)
+                # The context this request was built from, taken before any
+                # later boundary can extend it.
+                carried = (
+                    {id(message) for message in self._context.messages}
+                    if self._bridge_cards_owed_wake
+                    else set()
+                )
 
                 async def witness() -> AsyncIterator[StreamEvent]:
+                    # Lazy provider generators may start only after another
+                    # await. Carry the same guard to that first I/O boundary.
+                    if frame is not None and not frame.binding_intact():
+                        raise RuntimeError("bridge body authority changed before dispatch")
                     self._attention_run_request_dispatched = True
+                    if carried:
+                        # Past the refusal checks, the request is going out:
+                        # any owed card it carries has now been read.
+                        self._settle_bridge_card_wakes(carried)
                     async for event in inner:
                         yield event
 
                 return witness()
 
-            await self._open_pending_body_turn()
+            if opened_body is None:
+                if not self._turn_is_user_directed():
+                    await self._open_pending_body_turn()
+                # else: a person's own message is about the person and must
+                # never carry (or be delayed by) a Team Bridge body, which
+                # would land after their words in the same request. The body
+                # stays pending; the lock release at this turn's end re-arms
+                # the follow-up pass that serves it in its own turn.
+            else:
+                # The guarded same-session follow-up already claimed/fetched
+                # this immutable turn frame. Never claim a second body here.
+                # Pipeline awaits (notably attention_started) may have rebound
+                # the Session while the captured owner's SQLite row stayed live.
+                if not opened_body.binding_intact():
+                    return
+                self._pending_body_turn = opened_body
+            # Taken HERE, after every pre-loop append (journal flush, carried
+            # cards) and before the loop adds this turn's own input or steps,
+            # so "tail is not this object" means "this turn produced it".
+            self._body_turn_opening_tail = (
+                self._context.messages[-1]
+                if self._pending_body_turn is not None and self._context.messages
+                else None
+            )
             config = LoopConfig(
                 # The conversation BODY goes in HERE and nowhere else: the loop
                 # calls this once per PHYSICAL request, so a turn that makes
@@ -17731,7 +19122,16 @@ class Session:
                 # paid no-op call (see ``_ensure_steering_wake`` and the loop's
                 # opening-drain comment).
                 drain_steering_on_open=drain_steering_on_open,
-                graceful_cancel_requested=lambda: self._graceful_cancel_requested,
+                # A body-carrying turn also stops at the next safe boundary
+                # when a person is waiting AND another model call is coming:
+                # their words are held off this turn (``_drain_steering``) and
+                # open their own turn next. A turn ending on its answer is not
+                # cut (``_body_turn_cut_for_person``). The urgent-steer poll
+                # still cancels a running tool, so the person can always
+                # interrupt; only the fold-in is refused.
+                graceful_cancel_requested=lambda: (
+                    self._graceful_cancel_requested or self._body_turn_cut_for_person()
+                ),
                 has_urgent_steering_messages=self._has_urgent_steering,
                 # Rides the SAME interrupt poll steering uses, so a fork
                 # requested mid-tool reaches its boundary in ~250 ms instead of
@@ -18803,6 +20203,11 @@ class Session:
             # tool's enforcement point reads this single answer (see
             # ``local_operator.tools.confinement``).
             confinement_root=self._confinement_root,
+            # The scout's write-confined shell root, when it has one: the bash
+            # executor wraps every command in the write-confining sandbox (or
+            # refuses) whenever this is set. Dropped here, a scout's shell
+            # would run UNWRAPPED -- see ``test_tool_context_parity``.
+            shell_write_root=self._shell_write_root,
             # Derived, never configured: see :meth:`_scratchpad_dir`.
             scratchpad_dir=self._scratchpad_dir(),
             # The session's OWN directory: where the eval tool records its
@@ -18816,6 +20221,9 @@ class Session:
             # its namespace mid-task). See the module docstring of
             # ``local_operator/tools/eval.py``.
             kernel_managed_by_session=True,
+            # What THIS prompt carries, frozen at construction beside the
+            # prompt block itself (children inherit the parent's).
+            injected_guidance=getattr(self._system_blocks_provider, "injected_guidance", ()),
             session_id=self._session_id,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
@@ -18881,6 +20289,11 @@ class Session:
             # kill switch, which is exactly where the tool must not exist. Its
             # presence is what ``build_no_reply_tool``'s createIf gate reads.
             quiet_end=self._quiet_end_callable(),
+            # THE INBOX DOOR (docs/design/notifications-inbox.md §3.2): the
+            # whole availability fact of ``notify`` — ``None`` for delegated
+            # children, hidden sessions, one-shot hosts, output-contract
+            # sessions and under the kill switch.
+            notify_inbox=self._notify_inbox_callable(),
             # The channel-spend ingest seam. ACTIVE only where a session owns a
             # fold: tools build a frozen record and call it, and the session
             # folds, journals and publishes. A bound method (not a value) so the
@@ -20933,8 +22346,12 @@ class Session:
         # this method just closed is a one-way latch — the mounted tool could
         # only refuse from here on. Drop it the way
         # ``set_ask_handler(None)`` drops ``ask``.
-        if any(tool.name == "no_reply" for tool in self._tools):
-            self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+        # ``notify`` closes on the same latch (``_notify_inbox_callable``): a
+        # one-shot host's product is its final text, not an inbox item.
+        if any(tool.name in ("no_reply", "notify") for tool in self._tools):
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name not in ("no_reply", "notify")]
+            )
 
     def declare_headless_host(self) -> None:
         """Declare this session's host a HEADLESS print-mode host (turn-supplements R8).
@@ -21215,6 +22632,14 @@ class Session:
         self._flush_context_journal()
         messages: list[AgentMessage] = []
         while not self._steering_queue.empty():
+            if self._body_turn_yields_to_person():
+                # A person's words must never ride a request that carries a
+                # Team Bridge body (the frame goes last, after them). Leave the
+                # rest of the queue, in order: the boundary-cancel hook ends
+                # this turn, and the turn-end flush gives the queue its own
+                # consumer. Re-asked per item because the append below awaits,
+                # and a person can steer during it.
+                break
             message = self._steering_queue.get_nowait()
             # THE PRODUCERS MAP IS KEYED BY THE QUEUED OBJECT'S IDENTITY, so it
             # is captured before the append below can REPLACE the object with a
@@ -21459,6 +22884,96 @@ class Session:
         # wait, which is harmless — the still-running payload just gets
         # re-issued — and cheaper than teaching the tool about withdrawal.
         self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+
+    def queue_aside_coalesced(
+        self,
+        thunk: Callable[[], AsideResult],
+        *,
+        settled: asyncio.Event,
+        grace_s: float,
+    ) -> None:
+        """Queue a child's unprompted note NOW; hold only its WAKE for ``grace_s``.
+
+        WHY. Measured over 7 days of top-level transcripts: 60% of child->parent
+        hub notes were followed by the SAME job's settle within 120 s, 75%
+        within 20 s, and 99.6% landed while the parent was mid-turn (usually
+        parked in ``wait``). The immediate mark in :meth:`queue_aside` cut that
+        wait short, the parent paid a full-context model call (~244k input
+        tokens for a manager) to read the note and re-issue ``wait``, and was
+        woken again seconds later by the job_result carrying the same news.
+        Deferring the mark to the EARLIER of the settle and the grace window
+        collapses those two wakes into one.
+
+        What is NOT deferred, and why each matters:
+
+        * The note is queued immediately; any earlier boundary can carry it.
+          Its commit discharges the wake obligation and cancels the timer. A
+          pending note is flushed to the parent transcript during disposal, so
+          the grace window cannot turn a durable report into abandoned memory.
+        * An IDLE parent marks at once. An aside wakes no idle session today
+          (the mark only cuts a parked ``wait``), so deferral would buy nothing
+          there; marking keeps that path byte-for-byte what it was.
+        * Unless delivery already discharged it, the mark is issued EXACTLY
+          ONCE on every exit of the timer — settle,
+          expiry, or cancellation by :meth:`dispose` — through the same
+          :meth:`_PeerArrival.mark`, so the never-clear/only-increment
+          invariant holds and no arrival is ever silently swallowed. On settle
+          the mark coincides with the job manager's own settle event; ``wait``
+          checks a settled job BEFORE the peer count, so a parent waiting on
+          that job wakes once with the result, and a parent waiting on a
+          DIFFERENT job is still woken to read the note (plus the result its
+          boundary now carries) rather than sleeping through both.
+
+        ``settled`` is the owning job manager's ``settled_event`` for the
+        child; ``grace_s <= 0`` is today's behaviour exactly.
+        """
+        # Immediate paths retain the original queue contract (including lazy
+        # materialization). Only delayed notes need a delivery acknowledgment.
+        if grace_s <= 0 or settled.is_set() or not self._is_streaming or self._disposed:
+            self.queue_aside(thunk)
+            return
+        message = thunk()
+        assert isinstance(message, CustomMessage)
+        self._coalesced_notes[message.id] = message
+        self._aside_thunks.append(lambda: message)
+        delivered = False
+        marked = False
+        timer: asyncio.Task[Any] | None = None
+        previous_commit = message.on_commit
+
+        def acknowledge() -> None:
+            nonlocal delivered
+            delivered = True
+            self._coalesced_notes.pop(message.id, None)
+            if timer is not None:
+                timer.cancel()
+            if previous_commit is not None:
+                previous_commit()
+
+        def finish(_task: asyncio.Task[Any] | None = None) -> None:
+            nonlocal marked
+            # Outside the coroutine: a task cancelled before first execution
+            # never enters its finally. A committed note no longer owes a wake;
+            # marking it would interrupt a NEW wait with already-read news.
+            if not delivered and not marked:
+                marked = True
+                self._peer_arrival.mark(HUB_MESSAGE_TYPE)
+
+        message.on_commit = acknowledge
+
+        async def deferred_mark() -> None:
+            try:
+                await asyncio.wait_for(settled.wait(), grace_s)
+            except TimeoutError:
+                pass
+            finally:
+                finish()
+
+        timer = self._spawn_background(deferred_mark())
+        if timer is None:
+            finish()
+        else:
+            timer.add_done_callback(finish)
 
     async def _todo_continuation(self) -> list[AgentMessage]:
         """The loop's follow-up hook: re-assert the outstanding todos at the yield.
@@ -22017,6 +23532,15 @@ class Session:
             # token side depends on is untouched; a figure that over-states
             # this render can at worst fall through to a plan gate that
             # re-derives its own and returns ``below_threshold``.
+            #
+            # The batch-flush ceiling is judged at EVERY tool boundary, before
+            # the pre-gate below can return. Asked only inside
+            # ``_plan_compaction``, it was reached only once a compaction might
+            # be due, which on a 200k window means ~133 images or 16 MB, past
+            # the 100-image limit it exists to stay under: QA round 2 (Q5)
+            # measured 2 sweeps in 142 boundaries and requests of 112 images.
+            # Before the render below, so the bound reads the flushed history.
+            await self._flush_stale_if_due(compaction_api, settings)
             rendered = self._render_history(messages)
             current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
@@ -22539,6 +24063,135 @@ class Session:
         rest = args[1:]
         return await asyncio.to_thread(lambda: func(snapshot, *rest))
 
+    async def _sweep_stale_outputs(
+        self,
+        compaction_api: Any,
+        settings: Any,
+        llm_history: list[Message],
+        *,
+        only_if_due: bool = False,
+    ) -> bool:
+        """Run the in-place prune sweeps over ``llm_history`` and journal them.
+
+        (a) Superseded/useless tool outputs, then (b) stale frames, behind a
+        session gate: only a session that has CAPTURED browser views can own
+        frames a newer view of a surface supersedes, so every other session
+        type is left byte-identical (the gate's own comment draws the line).
+        Both take the sent-prefix and idle-flush guards: a blank of anything
+        already sent rewrites the prompt cache from that point on.
+
+        The idle flush compares against the last completed PROVIDER call
+        (``_last_provider_request_ms``), which every post-call sweep reads as
+        "the gap before the NEXT request": a 90-minute tool flushes. It is
+        deliberately not the stamp from before the call that just completed: if
+        that gap was idle, that call already rewrote the cache, and blanking now
+        would buy a SECOND rewrite on the next one (QA round 1, C4, where main
+        did exactly that). The user's wait between runs is judged once, before
+        the run's first request, by :meth:`_sweep_before_run`.
+
+        When the retained stale set (stale frames AND superseded reads, so a
+        text-only session is bounded too) crosses a batch-flush ceiling
+        (``stale_flush_due``) both sweeps run with ``flush=True``: everything
+        stale leaves in ONE batch, one prefix break instead of one per item.
+        The stale set is computed ONCE and handed to both the ceiling and the
+        frame sweep (agent review round 2, R2-m3).
+
+        ``only_if_due`` is the mid-turn ceiling check (:meth:`_flush_stale_if_due`):
+        sweep only when a flush is due, and otherwise leave the history alone.
+        Returns whether a batch flush was due.
+        """
+        now_ms = int(time.time() * 1000)
+        last_ms = self._last_provider_request_ms
+        frames = _history_captured_browser_views(llm_history)
+        flush = False
+        stale: Any = None
+        compute: Any = getattr(compaction_api, "stale_set", None)
+        due: Any = getattr(compaction_api, "stale_flush_due", None)
+        if callable(compute) and callable(due):
+            stale = compute(llm_history, frames=frames)
+            flush = bool(
+                due(
+                    llm_history,
+                    context_window=self.effective_model.context_window,
+                    wire_bytes_trigger=self._wire_trigger_bytes(compaction_api, settings) or 0,
+                    stale=stale,
+                )
+            )
+        if only_if_due and not flush:
+            return False
+        pruned_before = _pruned_ids(llm_history)
+        # ``flush`` and ``victims`` are passed only when set, so a duck-typed
+        # hook that predates the parameters (the suite has several) keeps its
+        # old signature.
+        extra: dict[str, Any] = {"flush": True} if flush else {}
+        try:
+            compaction_api.prune_tool_outputs(llm_history, now_ms, last_ms, **extra)
+        except (ImportError, AttributeError):
+            pass  # optional pruning hook absent; degrade to no pruning
+        if frames:
+            frame_extra = dict(extra)
+            if stale is not None:
+                frame_extra["victims"] = stale.frames
+            try:
+                compaction_api.prune_stale_frames_in_place(
+                    llm_history, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
+                )
+            except (ImportError, AttributeError):
+                pass  # optional frame sweep absent; degrade to no sweep
+        await self._journal_prunes(llm_history, pruned_before)
+        return flush
+
+    async def _flush_stale_if_due(self, compaction_api: Any, settings: Any) -> None:
+        """Batch-flush stale outputs at a tool boundary when a ceiling is crossed.
+
+        The mid-turn half of the batch flush: the boundary sweep inside
+        ``_plan_compaction`` sits behind the compaction pre-gate, so a long
+        run under every compaction trigger never reached the ceiling (QA
+        round 2, Q5). This judges the ceiling on the persisted render the
+        sweep uses, and sweeps (journalled, like every other sweep) only
+        when a flush is due: below the ceiling the history stays
+        byte-identical and the cached prefix intact. Best-effort: an
+        optimisation must never fail the run.
+        """
+        try:
+            llm_history = self._render_for_compaction()
+            await self._sweep_stale_outputs(compaction_api, settings, llm_history, only_if_due=True)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("mid-turn stale flush failed", exc_info=True)
+
+    async def _sweep_before_run(self) -> None:
+        """Flush stale outputs before a run's first request, when the cache is cold.
+
+        Every other sweep runs right after a provider call, so none of them can
+        see the gap a user leaves between runs. Without this, the per-call
+        clock made the cross-run idle flush unreachable (agent review round 1,
+        M2; QA Q2): stale frames and superseded reads then left only by
+        compaction, and a resumed session carried every copy (QA Q1).
+
+        Here, before anything is sent, a gap of ``idle_flush_ms`` or more since
+        the last provider call proves the cache cold, so blanking costs nothing
+        the first request would not pay anyway. Best-effort: a sweep that fails
+        must never stop the run.
+        """
+        last_ms = self._last_provider_request_ms
+        if last_ms <= 0:
+            return  # nothing sent yet in this process: nothing to judge
+        try:
+            from local_operator.compaction import api as compaction_api
+        except ImportError:
+            return
+        settings = self._compaction_settings or compaction_api.CompactionSettings()
+        if not getattr(settings, "enabled", True):
+            return
+        idle_flush_ms = int(getattr(compaction_api, "IDLE_FLUSH_MS", 5_400_000))
+        if int(time.time() * 1000) - last_ms < idle_flush_ms:
+            return
+        try:
+            llm_history = self._render_for_compaction()
+            await self._sweep_stale_outputs(compaction_api, settings, llm_history)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("pre-run idle sweep failed", exc_info=True)
+
     async def _plan_compaction(
         self, *, respect_threshold: bool
     ) -> _CompactionPlan | CompactionOutcome:
@@ -22591,30 +24244,7 @@ class Session:
 
         # (1) Prune before deciding: blanked outputs shrink the estimate and
         # may avoid a compaction pass entirely. Mutates messages in place.
-        # The idle flush compares against the last PROVIDER request, not turn
-        # bookkeeping, so a genuinely idle session reclaims the warm region.
-        now_ms = int(time.time() * 1000)
-        pruned_before = _pruned_ids(llm_history)
-        try:
-            compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_provider_request_ms)
-        except (ImportError, AttributeError):
-            pass  # optional pruning hook absent; degrade to no pruning
-        # (1b) Stale frames ride the same boundary, behind a session gate:
-        # only a session that has CAPTURED browser views can own frames a
-        # newer view of a surface supersedes, so every other session type is
-        # left byte-identical (the gate's own comment draws the line). The
-        # frame blank writes bytes the prompt cache may still hold, so the
-        # sweep takes the same warm-suffix/idle-flush guards (1) takes.
-        if _history_captured_browser_views(llm_history):
-            try:
-                compaction_api.prune_stale_frames_in_place(
-                    llm_history,
-                    now_ms=now_ms,
-                    last_activity_ms=self._last_provider_request_ms,
-                )
-            except (ImportError, AttributeError):
-                pass  # optional frame sweep absent; degrade to no sweep
-        await self._journal_prunes(llm_history, pruned_before)
+        await self._sweep_stale_outputs(compaction_api, settings, llm_history)
 
         # (2) Trigger math: prefer the provider's ground-truth context size.
         provider_reported = (
@@ -24037,6 +25667,14 @@ class Session:
         explicit = getattr(settings, "strategy", "auto")
         if explicit in ("context-full", "snapcompact", "off"):
             return str(explicit)
+        if self._images_rejected:
+            # The provider has refused images in this session, so every frame
+            # an image archive produced would be stripped on the way out and
+            # the archived turns would reach the model as nothing at all.
+            # context-full keeps them as a text summary (PR #3071 review m1).
+            # Read live rather than latched: a provider-scoped strip lifts on a
+            # switch, and the next compaction may then use frames again.
+            return "context-full"
         try:
             from local_operator.compaction import thresholds as _thresholds
 
@@ -24091,9 +25729,16 @@ class Session:
                 # and tokenized for the model that will actually receive the
                 # replay, which during a fallback is the fallback.
                 effective = self.effective_model
+                # Lift the leading rendered marker OUT of the span. Snapcompact
+                # already folds that same archive through previous_text below;
+                # serializing the marker as [User] also mined its hard-wrapped
+                # replay pages as fresh operator asks (QA round 5, Q16). This is
+                # the snapcompact half of the lift-XOR-keep rule used below for
+                # context-full, and by compaction.pass_ for both strategies.
+                _, archive_span = compaction_api.split_leading_marker(to_summarize)
                 archive = await asyncio.to_thread(
                     snapcompact.compact_to_archive,
-                    to_summarize,
+                    archive_span,
                     effective.provider,
                     effective.model_id,
                     self._previous_archive_text(),
@@ -24611,9 +26256,12 @@ class Session:
             # ahead of the last request the turn actually sent.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL: the session stamps its
+            # Same prefix as the turn, so the same size: the session stamps its
             # own hint here because the shared stream fn holds none (a child
             # would overwrite it — see ``ChatRequest.context_tokens_hint``).
+            # On Anthropic the hint no longer picks the TTL: an aside is an
+            # auxiliary errand and goes out at 5m, and a 5m-marked request still
+            # reads the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
         )
         parts: list[str] = []
@@ -24742,8 +26390,10 @@ class Session:
             # would change position 0 and force a full re-process.
             tools=self._side_channel_tools(),
             tool_choice="none",
-            # Same prefix as the turn, so the same TTL — the session stamps its
-            # own hint because the shared stream fn holds none.
+            # Same prefix as the turn, so the same size — the session stamps its
+            # own hint because the shared stream fn holds none. On Anthropic a
+            # clearance is an auxiliary errand at 5m regardless, and still reads
+            # the turn's 1h prefix in full (``anthropic_cache_ttl``).
             context_tokens_hint=self._context_tokens_hint,
             # Nothing here reaches a screen until the whole answer is parsed, so
             # a stalled read may be discarded and retried whole (the advisor's
@@ -25835,6 +27485,63 @@ class Session:
             return schedules
 
     # -- librarian engine attachment ----------------------------------------
+
+    def _declare_librarian_inventory(self) -> None:
+        """Bound the Librarian's DUTY session to her role's ``tools:`` list.
+
+        WHY THIS EXISTS. A role's ``tools:`` list is ENFORCED only where a host
+        declares it — ``lop exec --profile``/the SDK (``exec_startup``) and a
+        delegated child (``harness.subagent``). Her duty session is neither: the
+        wake supervisor opens it as a plain runtime and the attachment restore
+        only RECORDS the list (:attr:`attached_profile_tools`). So her seed's
+        empty ``tools:`` meant every tool, and on a headless worker under
+        ``tool_approval_mode: ask`` one write-tier call from an unattended pass
+        parked on an approval nobody could answer — holding the session busy
+        for a day and blocking every mesh update meanwhile.
+
+        THE RULE. On her duty session only (``_librarian_duty``, set from
+        ``librarian/state.json`` — never a session that merely ran ``/agent
+        librarian``), declare her role's list as the inventory. An installed
+        row that declares no list (a row installed before seed 1.1.0, the only
+        shape a pre-allow-list row can have) falls back to the PACKAGED seed's
+        list: an unattended pass must not run with everything because the row
+        predates the boundary. ``unattended=False``: the declaration narrows
+        reach but approves nothing — every tool on her list is read-tier, so a
+        pass has nothing to gate on, and anything an operator adds to her row
+        is still asked about. One-way for the session's life
+        (:meth:`set_tool_inventory`), which is what an unattended scope should
+        be. Best-effort: a failure leaves today's behaviour, never a broken
+        session.
+        """
+        if not getattr(self, "_librarian_duty", False):
+            return
+        # GATED ON THE DUTY FLAG ALONE (agent review round 1 on #3028, m1): the
+        # attachment is NOT the identity. ``_restore_attachment`` can leave it
+        # unresolved (``ProfileRegistryUnavailable``: empty agent name), and
+        # returning early then let her unattended pass run with every tool —
+        # fail-open on exactly the path this method closes. The attached row's
+        # list is used only when the attachment really is hers; anything else
+        # falls back to the packaged seed's list.
+        attached_is_hers = (self._goal_state.agent_name or "").strip().casefold() == "librarian"
+        try:
+            names: tuple[str, ...] = tuple(self._attached_profile_tools) if attached_is_hers else ()
+            if not names:
+                from local_operator.agent_profiles import load_seed
+
+                seed = load_seed("librarian")
+                names = tuple(seed.tools or ()) if seed is not None else ()
+            if not names:
+                # FAIL CLOSED (agent review round 2 on #3028, m2): an unreadable
+                # packaged seed must not leave her unattended pass with every
+                # tool. The literal is the 1.1.0 read-tier list.
+                names = _LIBRARIAN_FALLBACK_TOOLS
+            self.set_tool_inventory(list(names), unattended=False)
+        except Exception:  # noqa: BLE001 — never a reason her session fails to open
+            logger.debug("librarian: could not declare her tool inventory", exc_info=True)
+            try:
+                self.set_tool_inventory(list(_LIBRARIAN_FALLBACK_TOOLS), unattended=False)
+            except Exception:  # noqa: BLE001 — the same contract, one rung down
+                logger.debug("librarian: fallback inventory failed too", exc_info=True)
 
     def _librarian_is_hers(self) -> bool:
         """Whether THIS session is the one ``librarian/state.json`` names.
@@ -29092,7 +30799,14 @@ class Session:
             return
         if not rebuilt:
             return
-        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
+        # ``republish=False``: nothing in the canonical frontend state is
+        # derived from the tool list (``refresh_from_session`` never reads it),
+        # so the full republish ``refresh_tools`` runs by default would publish
+        # nothing new. On a model switch it was the second roster-sized pass a
+        # single ``/model`` paid on the session loop (see
+        # ``FrontendStateStore.refresh_model_selection``); ``set_model``
+        # publishes the selection itself.
+        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools], republish=False)
 
     def _on_configured_model_changed(
         self, values: Mapping[str, Any], *, local: bool, changed: frozenset[str]
@@ -30094,6 +31808,13 @@ class Session:
             # rung uses: bounded by the store's own retry, idempotent by token,
             # under the publish lock, and it never raises into teardown.
             await self._flush_pending_attention_republish()
+            # Coalesced notes may not have reached any model boundary before
+            # shutdown. Persist them WITHOUT a provider call; the normal aside
+            # drain and transcript identity guard keep this write idempotent.
+            await self._transcript.append_messages(
+                [m for m in self._coalesced_notes.values() if not self._transcript.has_entry(m.id)]
+            )
+            self._coalesced_notes.clear()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
             for task in list(self._background_tasks):

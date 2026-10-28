@@ -51,6 +51,10 @@ def proxy(tmp_path, monkeypatch):
     calls: list[tuple[str, str, Any, str | None, str | None]] = []
     state: dict[str, Any] = {"serve_type": "image/png", "serve": PNG, "error": None}
 
+    class AvatarStore(FakeStore):
+        def native_login_incarnation(self, credential_id: int) -> str | None:
+            return state["incarnation"]
+
     class Hub(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
             pass  # bytes and bearer never reach fixture logs either
@@ -59,6 +63,8 @@ def proxy(tmp_path, monkeypatch):
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
+            if state.get("etag"):
+                self.send_header("ETag", state["etag"])
             self.end_headers()
             self.wfile.write(payload)
 
@@ -92,7 +98,16 @@ def proxy(tmp_path, monkeypatch):
                 self.send_response(204)
                 self.end_headers()
                 return None
-            if self.command == "GET" and "/attachments/" in self.path:
+            if self.command == "GET" and "/avatar?" in self.path:
+                conditional = self.headers.get("if-none-match")
+                state.setdefault("conditionals", []).append(conditional)
+                if state.get("on_avatar"):
+                    state["on_avatar"]()
+                if state.get("force304") or (conditional and conditional == state.get("etag")):
+                    state.setdefault("statuses", []).append(304)
+                    return self._reply(304, b"", state["serve_type"])
+                state.setdefault("statuses", []).append(200)
+            if self.command == "GET" and ("/attachments/" in self.path or "/avatar?" in self.path):
                 return self._reply(200, state["serve"], state["serve_type"])
             out = json.dumps({"msg": "Message sent", "result": {"id": MID, "seq": 1}}).encode()
             return self._reply(200, out, "application/json")
@@ -102,7 +117,9 @@ def proxy(tmp_path, monkeypatch):
     hub = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
     hub_thread = threading.Thread(target=hub.serve_forever, daemon=True)
     hub_thread.start()
-    store = FakeStore()
+    store = AvatarStore()
+    state["store"] = store
+    state["incarnation"] = "login-a"
     real_client = bridge.TeamBridgeClient
     monkeypatch.setattr(bridge, "org_oauth_destination_allowed", lambda _base: True)
     monkeypatch.setattr(

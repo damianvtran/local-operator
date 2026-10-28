@@ -32,7 +32,7 @@ from local_operator.memory import (
     format_bytes,
     quota_relief,
 )
-from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
+from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, capture_status, policy
 from local_operator.memory_duplicates import duplicates
 from local_operator.paths import config_dir
 
@@ -47,6 +47,7 @@ OPERATIONS = (
     "inspect",
     "consolidate",
     "compact",
+    "triage",
 )
 #: Fields a flag-based edit may change; everything else is carried over from the
 #: revision being corrected, so a one-word fix never needs the whole record retyped.
@@ -69,6 +70,7 @@ USAGE = (
     "Commands: list · show ID · search WORDS · move ID [ID…] --to SCOPE · status · "
     "inspect (read-only preview) · consolidate (read-only duplicate preview) · "
     "compact (journal maintenance preview; apply with --yes --expect FINGERPRINT) · "
+    "triage --scope global (preview; apply with --apply --expect FINGERPRINT) · "
     "edit ID --revision REV (--title T | --body B | --tag T | --alias A | --verified) · "
     "forget ID --revision REV --yes · forget --scope S [--older-than D] [--unverified] "
     "[--tag T] [--title-matches RE] [--body-matches RE] (dry run; confirm with "
@@ -92,6 +94,8 @@ EPILOG = (
     "  lop memory consolidate --scope global --limit 10\n"
     "  lop memory compact\n"
     "  lop memory compact --yes --expect <fp>\n"
+    "  lop memory triage --scope global\n"
+    "  lop memory triage --scope global --apply --expect <fp>\n"
     "Session-scoped facts need the session: add --session ID (inside a session the /memory "
     "command binds it automatically)."
 )
@@ -202,7 +206,26 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "--expect",
         default="",
         metavar="FINGERPRINT",
-        help="forget filters/compact: the fingerprint of the dry run being confirmed",
+        help="forget filters/compact/triage: the fingerprint of the dry run being confirmed",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="triage: move the previewed plan (with --expect; `lop memory` only)",
+    )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        metavar="SESSION",
+        help="triage: restrict the plan to these source sessions (repeat)",
+    )
+    parser.add_argument(
+        "--include",
+        action="append",
+        default=None,
+        metavar="ID",
+        help="triage: also move this unmarked global fact to its source session (repeat)",
     )
     parser.add_argument(
         "--force",
@@ -282,6 +305,8 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
     # A receipt stores the stable device id; the name is resolved here, at the one
     # place both the human renderer and `--json` read, so a failing peer is a
     # machine an operator can recognise rather than an opaque 32-hex token.
+    from local_operator.memory_maintenance import last_auto_pass
+
     peers = peer_status(root)
     for peer in peers:
         peer["name"] = _device_name(str(peer.get("device") or ""), root)
@@ -304,6 +329,13 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
             ),
         },
         "usage": store.inventory(),
+        # Value-free aggregates only: B2's capture budget (evictions are the one
+        # automatic forget, so they must be visible) and B5's recall telemetry.
+        "capture": capture_status(store),
+        "recall": store.recall_summary(),
+        # JSON-only for now: the newest UNATTENDED compaction, so an operator
+        # can confirm the automatic pass is running (`lop memory status --json`).
+        "maintenance": {"last_auto_pass": last_auto_pass(root)},
         "limits": (
             "Shape guards are heuristic: they catch recognized sensitive patterns, not every "
             "secret. Unrecognized secrets can still be stored and journaled — keep values in "
@@ -632,6 +664,40 @@ def _compact(store: MemoryStore, prefix: str, *, confirm: bool, expect: str) -> 
     return store.compact(expect=expect)
 
 
+def _triage(args: argparse.Namespace, root: Path, prefix: str) -> dict[str, Any]:
+    """Preview (default) or apply the global-bank triage plan; see ``memory_triage``."""
+    from local_operator import memory_triage
+
+    if args.scope != "global":
+        raise MemoryError(f"Triage reviews the global bank: run {prefix} triage --scope global.")
+    if args.target or args.revision or args.yes:
+        raise MemoryError(
+            "Triage takes no ID, --revision or --yes: preview it, then confirm with "
+            "--apply --expect FINGERPRINT. Nothing was moved."
+        )
+    if args.expect and not args.apply:
+        raise MemoryError(
+            "--expect confirms a triage preview: pass it with --apply. Nothing was moved."
+        )
+    only, include = list(args.only or []), list(args.include or [])
+    if not args.apply:
+        return memory_triage.plan(root, only=only, include=include)
+    if not prefix.startswith("lop"):
+        # Moving facts into OTHER sessions' banks is an operator act. The slash
+        # command runs inside a session (and can be driven remotely), so it
+        # previews only; the terminal `lop memory` is the one apply surface.
+        raise MemoryError(
+            "Triage applies from a terminal only: run `lop memory triage --scope global "
+            "--apply --expect FINGERPRINT`. Nothing was moved."
+        )
+    if not args.expect:
+        raise MemoryError(
+            "Applying a triage needs the fingerprint from its preview. Nothing was moved. "
+            f"Run: {prefix} triage --scope global"
+        )
+    return memory_triage.apply(root, expect=args.expect, only=only, include=include)
+
+
 def execute(
     args: argparse.Namespace,
     *,
@@ -673,13 +739,29 @@ def execute(
                 + ("applies" if len(stray) == 1 else "apply")
                 + " to a filter-based `forget` only (--tag also sets tags on `edit`)."
             )
-    if args.expect and args.operation not in ("forget", "compact"):
-        # ``--expect`` confirms a preview (a bulk forget, or a journal compaction).
-        # On any other verb a silently ignored confirmation is worse than a
-        # refusal: the operator believes a preview was honoured.
+    if args.expect and args.operation not in ("forget", "compact", "triage"):
+        # ``--expect`` confirms a preview (a bulk forget, a journal compaction or a
+        # triage plan). On any other verb a silently ignored confirmation is worse
+        # than a refusal: the operator believes a preview was honoured.
         raise MemoryError(
-            "--expect confirms a preview: it applies to a filter-based `forget` or " "`compact`."
+            "--expect confirms a preview: it applies to a filter-based `forget`, "
+            "`compact` or `triage`."
         )
+    triage_flags = [
+        name
+        for name, used in (
+            ("--apply", args.apply),
+            ("--only", bool(args.only)),
+            ("--include", bool(args.include)),
+        )
+        if used
+    ]
+    if triage_flags and args.operation != "triage":
+        raise MemoryError(f"{', '.join(triage_flags)} applies to `triage` only.")
+    if args.operation == "triage":
+        # BEFORE import_session(): the preview is read-only, and apply opens its own
+        # unbound store (see memory_triage for why).
+        return _triage(args, root, prefix)
     if args.operation == "inspect":
         # Inspect lists; it never targets a row. A silently ignored target reads
         # as a filter that was applied (same argument as the --limit refusal
@@ -996,6 +1078,10 @@ _PEER_REMEDY: dict[str, str] = {
     "skipped:no_admin": "Grant receiver-admin to this device on the peer, or exclude "
     "this peer from memory sync.",
     "peer_too_old": "Run lop-update on both peers.",
+    # Deliberately NOT a healthy code: facts over the old item cap are owed to this
+    # peer, and they arrive by themselves on the first sync after it updates.
+    "withheld_pending": "This peer runs an older build that refuses large memory facts; "
+    "run lop-update there and they are delivered on the next sync.",
     "refused": "Grant this device memory access on the peer.",
     "not_authorised": "Grant this device memory access on the peer.",
     "capability_denied": "Grant memory-sync-v1 on the peer.",
@@ -1594,6 +1680,10 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
         return _consolidate_text(value, prefix)
     if value.get("action") in ("compact", "compact-preview"):
         return _compact_text(value, prefix)
+    if value.get("action") in ("triage-preview", "triaged"):
+        from local_operator.memory_triage import render
+
+        return "\n".join(render(value, prefix))
     if "entries" in value:
         return _inspect_text(value, prefix)
     if "results" in value:
@@ -1617,6 +1707,8 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
                 f"Next: {prefix} show {rows[0]['to']}{value.get('context', '')} --related "
                 "(the previous scope is shown as moved_from)"
             )
+        if value.get("compatibility"):
+            lines += _shaped(value["compatibility"])
         lines += _quota_receipt(value)
         return "\n".join(lines)
     if "items" in value:

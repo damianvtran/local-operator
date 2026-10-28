@@ -4282,6 +4282,9 @@ async def _drain_for_signal(
         SIGNAL_DRAIN_S,
     )
     if getattr(handle, "_draining", False) and not stop.is_set():
+        # The signal decides that this process ends; a gate parked on a person
+        # would hold the progress bound off forever (see ``_refuse_gates``).
+        _refuse_gates(handle, sig_name)
         # A departure is ALREADY committed to — the build on disk was replaced
         # first — so its own call site owns the exit and this signal adds only
         # the one thing that path does not have: a bound, judged on PROGRESS
@@ -4323,6 +4326,10 @@ async def _drain_for_signal(
         # then asserts no pair, which is what this path means).
         reasons=(f"{sig_name}: drained to the end of the turn in flight",),
     )
+    if drain is not None:
+        # AFTER the latch, never before: only a runtime that has committed to
+        # leaving may answer its gates on the operator's behalf.
+        _refuse_gates(handle, sig_name)
     if drain is None:
         if stop.is_set() or getattr(handle, "_disposing", False):
             # An exit is already under way and owns the ordering; a second
@@ -4360,6 +4367,37 @@ async def _drain_for_signal(
         await asyncio.sleep(REAP_CHECK_S)
     _warn_signal_reap(sig_name, bound)
     stop.set()
+
+
+def _refuse_gates(handle: object, sig_name: str) -> None:
+    """Settle parked approvals/asks once a signal has committed this runtime to leave.
+
+    A gate-parked call is an EXECUTING step to :func:`_step_in_flight` (its tool
+    batch is open while it waits), so :class:`_SignalDrainBound` never sees the
+    silence it cuts on, and the published "cut if silent 2 min" was false for
+    exactly the state a headless node gets stuck in (agent review round 1 on
+    #3028, M1). Denying here — the socket stop's and a timeout's answer — lets
+    the turn reach its boundary and the drain end it. Chosen over "do not count
+    a parked gate as executing" because that would still hold the process for
+    the whole bound and then cut the turn, where denying ends it at once with
+    the model told the call did not run. Best-effort: a handle without the hook
+    (an older host, a test double) keeps today's behaviour.
+    """
+    refuse = getattr(handle, "refuse_gates_for_exit", None)
+    if not callable(refuse):
+        return
+    try:
+        denied = refuse()
+    except Exception:  # noqa: BLE001 — the drain still runs; it is only slower
+        logger.warning("session runtime: could not settle parked gates on %s", sig_name)
+        return
+    if denied:
+        logger.info(
+            "session runtime: %s settled %d parked gate(s) as refused; nobody can answer "
+            "them before this process exits",
+            sig_name,
+            denied,
+        )
 
 
 def _resume_consumed_ids(directory: Path) -> set[str]:
@@ -5534,6 +5572,21 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # as well; the answer would be "no control surface", and this path's
     # behaviour on a dead socket is what it always was.
     await runtime.wait_until_published()
+    # THE MEMORY STORE'S MAINTENANCE IS OFFERED HERE, once per runtime, after the
+    # record is published so it never sits inside the window a viewer waits on.
+    # A runtime is the long-lived host a one-shot command is not: the pass (plan
+    # +212 MB, up to 60 s) finishes here instead of being killed at exit, which
+    # is why ``lop exec``/``lop memory status`` do not offer it (PR #3057 QA
+    # round 1, Q1/Q2). The wake supervisor is the primary seat; this covers the
+    # hours it is retired. The pass gates itself (6 h interval, cross-process
+    # lock), so most runtime starts cost one stamp read on a daemon thread.
+    try:
+        from local_operator.memory_maintenance import start_background
+        from local_operator.paths import config_dir as _memory_config_dir
+
+        start_background(_memory_config_dir())
+    except Exception:  # noqa: BLE001 — housekeeping never fails a runtime boot
+        logger.debug("memory maintenance offer could not start", exc_info=True)
 
     # `SIGUSR1` is POSIX-only, so the debug dump is installed only where the
     # constant exists — an unguarded `signal.SIGUSR1` is an AttributeError that
@@ -5938,6 +5991,16 @@ async def _run_amain(operator_cap: bytes | None) -> int:
 
 
 def main() -> int:
+    # A WAKE MARKER IS THIS PROCESS'S IDENTITY, NOT ITS CHILDREN'S. Drop it from
+    # the live environment before anything can spawn, so a tool child (or a
+    # `lop serve` started from this session's shell) never carries the
+    # supervisor's token into runtimes no supervisor forked (#3028 review r4,
+    # MAJOR-2). The stop sweep reads this process's EXEC-TIME environment, which
+    # this does not rewrite. Stdlib-only import, so it costs nothing at boot.
+    from local_operator.wakes.owned_runtimes import forget_inherited_marker
+
+    forget_inherited_marker()
+
     # THE TOKENIZER WARM STARTS FIRST, before the log file, the imports and the
     # lease: it is the only piece of boot work that nothing else on this path
     # touches until the user's first message has already been sent, so

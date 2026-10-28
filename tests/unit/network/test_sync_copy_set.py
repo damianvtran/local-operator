@@ -278,6 +278,11 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/notifications/store.py": (
+        1,
+        "notifications.db is the machine-wide config-root inbox, not a session "
+        "directory entry; session transfer must not copy every conversation's inbox.",
+    ),
     "local_operator/owned_process.py": (
         2,
         "``_OWNER_DIR`` ('owner'): the run-root segment a managed owner's lease and "
@@ -288,6 +293,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/memory_maintenance.py": (
+        3,
+        "``LOCK_NAME``/``STAMP_NAME``/``ATTEMPT_NAME`` ('.compact.lock', '.compact.stamp', "
+        "'.compact.attempt'): the memory store's unattended-maintenance lock and cadence "
+        "stamps, inside the DEVICE-LEVEL store directory (<config>/memory/), never an entry "
+        "of a session directory. They describe THIS host's compaction/expiry passes (a "
+        "cross-process fcntl lock and wall-clock stamps), so no session copy may carry "
+        "them: a peer inheriting them would skip or back off passes it never ran",
+    ),
     "local_operator/network/mobility.py": (
         1,
         "``DROPPED_ROLES_DIRNAME`` ('dropped-session-roles'): the DEVICE-LEVEL stash a "
@@ -295,6 +309,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "before the commit deletes the session directory. Deliberately a sibling of "
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
+    "local_operator/session/cold_metadata.py": (
+        1,
+        "``CACHE_DIRNAME`` ('cold_replay'): the segment under the DEVICE cache root "
+        "(<config>/cache/) holding a session's deferred-open metadata record. A derived "
+        "cache file, rebuilt from the journal on the next open, never an entry of a "
+        "session directory and never part of what a sync copy carries.",
     ),
     "local_operator/role_provenance.py": (
         2,
@@ -325,6 +346,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``<config>/network/credentials/<network_id>/``. Machine-local state about "
         "which sign-in this device must recover, beside the placement document, "
         "never an entry of a session directory and never copied to a peer",
+    ),
+    "local_operator/network/credentials/desktop_approval.py": (
+        1,
+        "``_CREDENTIAL_PREFIX`` ('credential_'): the approval-op registry's record-key "
+        "prefix that claims every ``credential_*`` ``what`` key for this module's family "
+        "refusal. An in-memory dispatch key, not a filename or directory: nothing on "
+        "disk is named by it, so it is not a session-directory entry",
     ),
     # ---- the transcript compression pass's STORE-LEVEL names ----
     "local_operator/session/compression.py": (
@@ -636,6 +664,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "config root, beside the seen-store and the push registries — machine "
         "state about moves, never an entry of a session directory",
     ),
+    # The keyed session-start receipt store (`mobile/start_receipts.py`). Its ONE
+    # construction site passes `config_dir()` (`mobile/daemon.py`), so the database
+    # sits at the config root beside the transfer receipts. It must never travel with
+    # a session: a request id replayed from another device's store would resolve to a
+    # session that is not on this daemon.
+    "local_operator/mobile/start_receipts.py": (
+        1,
+        "``RECEIPTS_NAME``: the per-installation keyed session-start receipt store "
+        "under the config root, beside the transfer receipts — machine state mapping "
+        "a request id to THIS daemon's session, never an entry of a session directory",
+    ),
     "local_operator/secrets/keys.py": (
         5,
         "``secrets/`` and its registration ticket: the credential store at the config root. "
@@ -731,6 +770,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/relay.py": (
+        1,
+        "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
+        "deliberate-stop marker at ``<config>/run``, beside ``run/peers`` -- device-local "
+        "runtime state about THIS device's supervised relay process, written by a stop "
+        "verb and consumed by the relay's exit; never a session entry and never synced",
+    ),
     "local_operator/i18n/catalogues.py": (
         2,
         "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
@@ -866,6 +912,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``proc-groups`` under the store root, plus the ``.lock`` suffix on its own lock file",
     ),
     "local_operator/tools/spill.py": (1, "``spill``, where elided tool output is parked"),
+    # Declared, not classified: the shell confinement profile only DENIES this suffix
+    # to sandboxed children. The files it matches live under the config root
+    # (`network/store.py` writes `networks/<id>.secrets.json`), so listing it in the
+    # copy set or EXCLUDED_ENTRIES would claim a session entry that never exists.
+    "local_operator/tools/confinement.py": (
+        1,
+        "``_NETWORK_SECRETS_SUFFIX`` ('.secrets.json'): a kernel-deny regex suffix for "
+        "``network/networks/<id>.secrets.json`` under the CONFIG dir, never an entry of a "
+        "session directory",
+    ),
     "local_operator/tools/builtin.py": (
         3,
         "the ripgrep excludes file under the agent home, plus two HOST-id fragments "
@@ -964,10 +1020,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
     "local_operator/server/utils/desktop_feed.py": (
-        3,
+        4,
         "the agent and team directories the desktop app reads (the profile store), plus "
-        "``code_requests``: the derived per-session index the feed's 1 s probe stats to "
-        "invalidate one conversation's rows (review round 1, Q3)",
+        "``code_requests`` and ``asks``: config-root derived indexes the feed's 1 s "
+        "probe stats, not entries inside one session directory",
     ),
     "local_operator/tui/sidebar_pins.py": (
         3,

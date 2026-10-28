@@ -14,6 +14,7 @@ from local_operator.compaction.pruning import (
     prune_stale_frames_in_place,
     prune_tool_outputs,
     reclaim_captures_to_wire_budget,
+    stale_flush_due,
 )
 from local_operator.compaction.tokens import estimate_tokens, estimate_wire_bytes
 from local_operator.harness.types import (
@@ -451,6 +452,147 @@ def test_warm_suffix_defers_frames_until_idle():
     dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=NOW - IDLE_AGO)
     assert dropped == 1
     assert not any(isinstance(block, ImageContent) for block in oldest.content)
+
+
+def test_a_sent_frame_waits_for_idle_even_behind_a_small_suffix():
+    """The sent-prefix guard is structural, not a token budget.
+
+    The old guard let a frame through whenever fewer than 8,000 estimated
+    tokens followed it. In a screenshot loop that is every boundary: the frame
+    blanked was the one the PREVIOUS request carried, and the provider then
+    lost every cache entry written since (measured: 27,967-token head reads
+    with 165k+ token re-writes on consecutive calls 5-8 s apart). A frame the
+    provider has already been sent therefore waits for the idle flush, however
+    little follows it.
+    """
+    oldest, middle = [_frame(f"/shots/{i}.png") for i in range(2)]
+    newest = _frame("/shots/2.png")
+    messages = [
+        Message.user("look"),
+        oldest,
+        Message.assistant("next"),
+        middle,
+        Message.assistant("again"),
+        newest,
+    ]
+    assert compute_suffix_tokens(messages)[1] < 8000  # the old guard let this through
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE)
+    assert dropped == 0
+    assert any(isinstance(block, ImageContent) for block in oldest.content)
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=NOW - IDLE_AGO)
+    assert dropped == 1
+    assert not any(isinstance(block, ImageContent) for block in oldest.content)
+
+
+def test_unsent_tail_still_prunes_while_warm():
+    """Candidates after the newest assistant message were never sent, so no
+    cache entry covers them and the sweep blanks them at any time."""
+    first, second, third = [_frame(f"/shots/{i}.png") for i in range(3)]
+    messages = [Message.user("look"), Message.assistant("reading all three"), first, second, third]
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE)
+    assert dropped == 1
+    assert not any(isinstance(block, ImageContent) for block in first.content)
+
+
+def test_a_sent_superseded_read_waits_for_idle_even_behind_a_small_suffix():
+    """Same structural guard for the superseded pass: a re-read of a file blanks
+    the earlier read only once the cache is cold, unless the victim outweighs
+    its suffix (the oversized exception, covered separately)."""
+    old_read = _read_result("/repo/a.py")
+    messages = [
+        Message.user("hi"),
+        old_read,
+        Message.assistant("again"),
+        _read_result("/repo/a.py"),
+    ]
+    assert compute_suffix_tokens(messages)[1] < 8000
+
+    _, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is False
+    _, changed = prune_tool_outputs(messages, NOW, NOW - IDLE_AGO)
+    assert changed is True
+    assert old_read.text == SUPERSEDED_NOTICE
+
+
+def test_image_count_ceiling_on_a_200k_window_model():
+    """A 200k-window Anthropic model refuses more than 100 images per request
+    (live: ``Too much media: ... 101 images > 100``, PR #3004 QA C2c). The
+    batch flush fires at min(limit - margin, STALE_FLUSH_MAX_REQUEST_IMAGES)
+    images, even when the stale-frame count ceiling has not been reached,
+    because the images are mostly unflushable user pastes."""
+    from local_operator.compaction.pruning import (
+        PROVIDER_IMAGE_LIMIT_MARGIN,
+        STALE_FLUSH_MAX_REQUEST_IMAGES,
+        provider_image_limit,
+    )
+
+    ceiling = min(
+        provider_image_limit(200_000) - PROVIDER_IMAGE_LIMIT_MARGIN,
+        STALE_FLUSH_MAX_REQUEST_IMAGES,
+    )
+    assert provider_image_limit(200_000) == 100
+    assert provider_image_limit(None) == 100  # unknown window: the safe, small limit
+    assert ceiling <= 90  # always under the 100-image refusal
+
+    def request(total_images: int) -> list[Message]:
+        frames = [_frame(f"/shots/{i}.png") for i in range(3)]  # 1 stale, 2 retained
+        pastes = [
+            Message.user("ref", images=[ImageContent(data="aGVsbG8=", mime_type="image/png")])
+            for _ in range(total_images - len(frames))
+        ]
+        return pastes + frames
+
+    assert stale_flush_due(request(ceiling - 1), context_window=200_000) is False
+    assert stale_flush_due(request(ceiling), context_window=200_000) is True
+
+
+def test_image_ceiling_does_not_fire_with_nothing_to_flush():
+    """Only images a flush can free make the flush due."""
+    pastes = [
+        Message.user("ref", images=[ImageContent(data="aGVsbG8=", mime_type="image/png")])
+        for _ in range(60)
+    ]
+    assert stale_flush_due(pastes + [_frame("/shots/0.png")], context_window=200_000) is False
+
+
+def test_stale_frame_count_ceiling():
+    frames = [_frame(f"/shots/{i}.png") for i in range(9)]  # 7 stale
+    assert stale_flush_due(frames, context_window=1_000_000) is False
+    frames.append(_frame("/shots/9.png"))  # 8 stale
+    assert stale_flush_due(frames, context_window=1_000_000) is True
+
+
+def test_stale_wire_bytes_ceiling():
+    """A few huge stale frames flush before the wire trigger would summarize."""
+    big = [_frame(f"/shots/{i}.png") for i in range(4)]
+    for message in big:
+        message.content[1] = ImageContent(data="A" * 1_000_000, mime_type="image/png")
+    # 2 stale frames, ~2 MB: over 25% of a 4 MB trigger, under 25% of 16 MB.
+    assert stale_flush_due(big, context_window=1_000_000, wire_bytes_trigger=4_000_000) is True
+    assert stale_flush_due(big, context_window=1_000_000, wire_bytes_trigger=16_000_000) is False
+
+
+def test_flush_lifts_the_sent_prefix_guard_for_both_sweeps():
+    oldest, middle, newest = [_frame(f"/shots/{i}.png") for i in range(3)]
+    messages = [
+        Message.user("look"),
+        oldest,
+        Message.assistant("n"),
+        middle,
+        Message.assistant("m"),
+        newest,
+    ]
+    assert prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE) == 0
+    assert (
+        prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE, flush=True) == 1
+    )
+    old_read = _read_result("/repo/a.py")
+    reads = [Message.user("hi"), old_read, Message.assistant("again"), _read_result("/repo/a.py")]
+    assert prune_tool_outputs(reads, NOW, ACTIVE)[1] is False
+    assert prune_tool_outputs(reads, NOW, ACTIVE, flush=True)[1] is True
 
 
 def test_user_frames_are_never_swept():
@@ -944,3 +1086,30 @@ def test_apply_capture_elisions_uses_recorded_addresses_not_a_fresh_prefix() -> 
                 frame = block.captured_frame
                 kept_blocks.append((frame.producer_scope, frame.revision_id))
     assert kept_blocks == [("mcp:s:b", "1"), ("mcp:s:a", "2"), ("mcp:s:b", "2")]
+
+
+def test_superseded_text_reads_flush_at_the_text_ceiling():
+    """A text-only session that re-reads files is bounded too: the ceiling
+    counts superseded reads, not only frames, and needs no browser capture
+    (PR #3004 agent review round 2). Below the ceiling it stays quiet, so the
+    warm prefix is kept."""
+    from local_operator.compaction.pruning import STALE_FLUSH_MAX_TEXT_BYTES, stale_set
+
+    def read(path: str, size: int) -> Message:
+        return Message(
+            role="tool",
+            tool_call_id=f"call-{path}-{size}",
+            tool_name="read",
+            content=[TextContent(text="x" * size)],
+            provider_payload={"details": {"path": path}},
+        )
+
+    chunk = 16_000
+    copies = STALE_FLUSH_MAX_TEXT_BYTES // chunk
+    below = [read("/src/a.py", chunk) for _ in range(copies)]  # copies-1 stale
+    at = below + [read("/src/a.py", chunk)]  # copies stale
+    assert len(stale_set(below, frames=False).reads) == copies - 1
+    assert stale_flush_due(below, context_window=200_000) is False
+    assert stale_flush_due(at, context_window=200_000) is True
+    # Precomputed and computed agree (the session passes the former).
+    assert stale_flush_due(at, stale=stale_set(at, frames=False)) is True

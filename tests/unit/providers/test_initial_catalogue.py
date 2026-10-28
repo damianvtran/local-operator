@@ -27,6 +27,7 @@ import json
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from local_operator.model import discovery
@@ -113,6 +114,135 @@ def _plant_prices(
 
 def _no_network(*_args: object, **_kwargs: object) -> list[discovery.DiscoveredModel]:
     raise AssertionError("the first frame must only peek at the cache")
+
+
+@pytest.mark.asyncio
+async def test_openai_first_frame_uses_the_selected_accounts_cached_catalogue(
+    controller: ProviderController, tmp_path: Path
+) -> None:
+    """Subscription-only rows must survive a no-network picker reopen.
+
+    The live OAuth listing is authoritative and account-scoped. Reading the
+    plain API-key cache instead hides every newly discovered subscription model
+    on the first frame, even after a successful Refresh from providers.
+    """
+    from local_operator.model.discovery import available_models
+
+    store = controller.auth_store
+    assert isinstance(store, AuthStore)
+    store.upsert_credential(
+        "openai",
+        {
+            "type": "oauth",
+            "access": "synthetic-oauth",
+            "refresh": "synthetic-refresh",
+            "expires": int(time.time()) + 3600,
+            "account_id": "acct-42",
+        },
+    )
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "slug": "gpt-6.1-sol",
+                            "display_name": "GPT-6.1 Sol",
+                            "visibility": "list",
+                            "context_window": 1_050_000,
+                        }
+                    ]
+                },
+            )
+        )
+    )
+    rows, status = available_models(
+        "openai",
+        api_key="synthetic-oauth",
+        is_oauth=True,
+        account_id="acct-42",
+        client=client,
+        cache_dir=tmp_path,
+    )
+    assert status == "ok"
+    assert [row.id for row in rows] == ["gpt-6.1-sol"]
+
+    frame = [
+        row.model_id
+        for row in controller.initial_catalogue(cache_dir=tmp_path)
+        if row.provider == "openai"
+    ]
+    assert "gpt-6.1-sol" in frame
+    assert (
+        "gpt-6-astra" not in frame
+    ), "the account's authoritative cache must not resurrect static ids"
+
+
+@pytest.mark.asyncio
+async def test_api_key_override_owns_the_first_frame_cache_scope(
+    controller: ProviderController, tmp_path: Path
+) -> None:
+    """An API-key override must not read a stored OAuth account's document.
+
+    Runtime/config overrides outrank OAuth in the live cascade. The first
+    frame must make the same choice even when a previous live pass remembered
+    one of several OAuth account scopes; otherwise it exposes a different
+    authorization scope's models and omits the live override's rows.
+    """
+    from local_operator.model.discovery import available_models
+
+    store = controller.auth_store
+    assert isinstance(store, AuthStore)
+    for account_id in ("acct-one", "acct-two"):
+        store.upsert_credential(
+            "openai",
+            {
+                "type": "oauth",
+                "access": f"synthetic-{account_id}",
+                "refresh": f"synthetic-refresh-{account_id}",
+                "expires": int(time.time()) + 3600,
+                "account_id": account_id,
+            },
+        )
+        rows, status = available_models(
+            "openai",
+            api_key=f"synthetic-{account_id}",
+            is_oauth=True,
+            account_id=account_id,
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request, account_id=account_id: httpx.Response(
+                        200, json={"models": [{"slug": f"oauth-{account_id}"}]}
+                    )
+                )
+            ),
+            cache_dir=tmp_path,
+        )
+        assert status == "ok" and rows[0].id == f"oauth-{account_id}"
+    rows, status = available_models(
+        "openai",
+        api_key="synthetic-api-key",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, json={"data": [{"id": "api-key-only"}]})
+            )
+        ),
+        cache_dir=tmp_path,
+    )
+    assert status == "ok" and rows[0].id == "api-key-only"
+    store.set_config_api_key("openai", "synthetic-api-key")
+    controller._catalogue_scopes["openai"] = "acct-two"
+
+    key, oauth, _account = await controller.listing_credential("openai")
+    assert key == "synthetic-api-key" and not oauth
+    frame = {
+        row.model_id
+        for row in controller.initial_catalogue(cache_dir=tmp_path)
+        if row.provider == "openai"
+    }
+    assert "api-key-only" in frame
+    assert not {"oauth-acct-one", "oauth-acct-two"} & frame
 
 
 def test_the_first_frame_with_nothing_cached_is_the_shipped_rows(

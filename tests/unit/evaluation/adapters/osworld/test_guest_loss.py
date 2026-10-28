@@ -609,6 +609,9 @@ async def test_a_refused_guest_is_reported_not_sent_and_the_batch_is_not_replaye
     assert all(0 < delay <= 2.5 for delay in stubs.slept), stubs.slept
     error = raised.value
     assert error.delivery == guest_loss.DELIVERY_NOT_SENT
+    # Every attempt of statement 1 was refused at connect: this call sent
+    # nothing, which is what lets the adapter declare the batch not applied.
+    assert error.nothing_sent is True
     message = str(error)
     assert "delivery=not_sent" in message
     assert "connection refused" in message
@@ -651,12 +654,53 @@ async def test_a_refusal_after_earlier_actions_says_the_batch_is_partial(
     # statement 1 of the SECOND batch failed to connect: nothing of it applied.
     assert "no input of this batch was applied" in message
 
+    # Statement 1 of THIS call never connected, so this call sent nothing.
+    assert raised.value.nothing_sent is True
+
     # Now the mid-batch case, via the pure function: a refusal at index 2.
     text = guest_loss.describe_failed_action(
         2, guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT, "refused")
     )
     assert "guest action 3 was not sent" in text
     assert "2 earlier action(s) of this batch applied, input may be partial" in text
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_after_statement_1_succeeded_is_not_proof_of_nothing_sent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same call, real sockets: statement 1 is DELIVERED, then the guest dies
+    and statement 2 is refused at connect. The verdict for statement 2 is
+    ``not_sent``, but the call already applied input, so ``nothing_sent`` must
+    stay False -- the adapter must not declare this batch not applied."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _OkHandler)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", port)
+    real = _CountingTransport()
+
+    def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        answer = real(url, payload, timeout)
+        if real.calls == 1:
+            # Statement 1 was answered with success; kill the guest before 2.
+            server.shutdown()
+            server.server_close()
+        return answer
+
+    try:
+        with _Stubs() as stubs:
+            provider = _provider_over(stubs, tmp_path, post=post)
+            provider._clients.ec2 = _NoConsoleEc2()
+            with pytest.raises(GuestExecutionError) as raised:
+                await provider.execute(["first()", "second()"])
+    finally:
+        thread.join(timeout=5)
+
+    assert raised.value.delivery == guest_loss.DELIVERY_NOT_SENT
+    assert "guest action 2 was not sent" in str(raised.value)
+    assert raised.value.nothing_sent is False
 
 
 class _OkHandler(BaseHTTPRequestHandler):
@@ -706,6 +750,7 @@ async def test_an_ambiguous_failure_is_never_replayed(
     assert stubs.slept == []
     assert len(server.received) == 1
     assert raised.value.delivery == guest_loss.DELIVERY_AMBIGUOUS
+    assert raised.value.nothing_sent is False, "an ambiguous delivery is never proof"
     message = str(raised.value)
     assert "outcome is unknown; batch not retried" in message
     assert "delivery=ambiguous" in message
@@ -724,7 +769,7 @@ async def test_refused_connect_recovers_with_one_delivered_request(
 
     class Handler(_OkHandler):
         def do_GET(self) -> None:
-            assert self.path == aws_mod._READY_PATH
+            assert self.path == aws_mod._LIVENESS_PATH
             self.send_response(200)
             self.end_headers()
 
@@ -885,7 +930,7 @@ async def test_an_unreachable_path_recovers_when_the_readiness_probe_also_fails(
 
     def probe(url: str, timeout: float) -> int:
         # A probe that CANNOT reach the guest: the path is down for it as well.
-        raise _no_route(origin, aws_mod._READY_PATH)
+        raise _no_route(origin, aws_mod._LIVENESS_PATH)
 
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path, post=post)
@@ -1056,7 +1101,7 @@ async def test_the_retry_bound_is_spent_then_the_episode_fails_as_today(
         raise _no_route(origin)
 
     def probe(url: str, timeout: float) -> int:
-        raise _no_route(origin, aws_mod._READY_PATH)
+        raise _no_route(origin, aws_mod._LIVENESS_PATH)
 
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path, post=post)
@@ -1218,6 +1263,8 @@ async def test_the_refusal_message_claims_no_cause_it_cannot_know(
     assert "guest action 1 was not attempted" in message
     assert "delivery=" not in message, "no delivery happened, so there is no verdict"
     assert raised.value.delivery is None
+    # Refused before statement 1 was compiled: the call sent nothing.
+    assert raised.value.nothing_sent is True
     assert "unreachable" not in message, "the server answered"
     assert "connection could not be established" not in message
     assert "connection refused" not in message

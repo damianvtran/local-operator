@@ -533,7 +533,17 @@ unknown_model_info: ModelInfo = ModelInfo(
     name="Unknown",
     max_tokens=-1,
     context_window=-1,
-    supports_images=False,
+    # ``None``, NOT ``False``: this row answers "nothing has described this model",
+    # and in the registry's three-state scheme (``ModelInfo.supports_images``)
+    # ``False`` is a POSITIVE DENIAL that ``build_model_spec`` must honour, so a
+    # template that says it turns every undescribed id into a text-only model.
+    # Measured: an OSWorld session on ``openrouter/deepseek/deepseek-v4.1-flash-1017``
+    # (a vision model) started before the OpenRouter listing was cached; every
+    # leg was silent, resolution fell to this template, and the session stripped
+    # every screenshot and announced ``tui.notices.image_unsupported``. Only a
+    # source that SPEAKS may deny (a listing whose modalities omit ``image``,
+    # a shipped row); silence leaves ``build_model_spec``'s default standing.
+    supports_images=None,
     supports_prompt_cache=False,
     input_price=0.0,
     output_price=0.0,
@@ -945,7 +955,9 @@ ollama_default_model_info: ModelInfo = ModelInfo(
 openrouter_default_model_info: ModelInfo = ModelInfo(
     max_tokens=-1,
     context_window=-1,
-    supports_images=False,
+    # ``None`` for the same reason as ``unknown_model_info``: an undescribed id
+    # is not a text-only one.
+    supports_images=None,
     supports_prompt_cache=False,
     input_price=0.0,
     output_price=0.0,
@@ -960,7 +972,9 @@ openrouter_default_model_info: ModelInfo = ModelInfo(
 radient_default_model_info: ModelInfo = ModelInfo(
     max_tokens=-1,
     context_window=-1,
-    supports_images=False,
+    # ``None`` for the same reason as ``unknown_model_info``: an undescribed id
+    # is not a text-only one.
+    supports_images=None,
     supports_prompt_cache=False,
     input_price=0.0,
     output_price=0.0,

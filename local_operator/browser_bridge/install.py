@@ -204,8 +204,11 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
     label and its own path (:func:`label`, :func:`plist_path`), so a sandbox
     either finds no file or finds one whose identity check fails.
 
-    Never raises. A platform without ``launchctl`` is reported unsupported: the
-    systemd unit is re-read on every start and has no image name to go stale.
+    Never raises. A platform without ``launchctl`` is reported unsupported. The
+    systemd unit's content CAN go stale (its ``Environment="PATH=…"`` line, from
+    ``supervisors.systemd_path``), but it is rewritten only by ``lop browser
+    install``'s content comparison: an upgrade-time Linux refresh is audit A24's
+    named follow-up (``update._linux_refresh_steps``), not this function.
     """
     name = "browser bridge"
     try:

@@ -202,7 +202,7 @@ export function agentConversationEntries(detail: SubagentDetail): TranscriptEntr
 function Outcome({ detail }: { detail: SubagentDetail }) {
 	if (detail.status === "completed") {
 		return (
-			<section aria-live="polite" className="mt-2 border-l-2 border-success pl-3">
+			<section aria-live="polite" className="mt-2 border-s-2 border-success ps-3">
 				<p className="mb-1 text-meta font-medium text-success">
 					✓ Result from {detail.label}
 				</p>
@@ -216,7 +216,7 @@ function Outcome({ detail }: { detail: SubagentDetail }) {
 	}
 	if (detail.status === "failed") {
 		return (
-			<section role="alert" className="mt-2 border-l-2 border-danger pl-3">
+			<section role="alert" className="mt-2 border-s-2 border-danger ps-3">
 				<p className="mb-1 text-meta font-medium text-danger">✕ Agent failed</p>
 				{detail.error_text ? (
 					<Markdown text={detail.error_text} />
@@ -306,7 +306,7 @@ function AgentHeader({
 		? { label: detail.label, agent: detail.agent, effort: detail.effort, status: detail.status }
 		: identity ?? null;
 	return (
-		<header className="flex min-h-[52px] items-center gap-1 border-b border-hairline bg-surface px-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
+		<header className="flex min-h-[52px] items-center gap-1 bg-surface px-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 			<button
 				type="button"
 				onClick={() => navigateUp(parentPath)}
@@ -369,8 +369,8 @@ export function AgentUnavailable({
 				<p role="alert" className="text-body-sm font-medium text-ink">This agent is no longer available.</p>
 				<p className="text-body-sm text-ink-dim">It may have expired or been removed.</p>
 				<div className="mt-2 flex flex-wrap gap-2">
-					{onRetry ? <button type="button" onClick={onRetry} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Retry</button> : null}
-					<button type="button" onClick={() => navigateUp(fallbackPath)} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Back to parent</button>
+					{onRetry ? <button type="button" onClick={onRetry} className="min-h-11 rounded-sm px-3 text-body-sm">Retry</button> : null}
+					<button type="button" onClick={() => navigateUp(fallbackPath)} className="min-h-11 rounded-sm px-3 text-body-sm">Back to parent</button>
 					<button type="button" onClick={() => navigate(rootPath)} className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated">View root</button>
 				</div>
 			</InlineState>
@@ -417,8 +417,8 @@ export function AgentLoadFailed({
 					</p>
 				</div>
 				<div className="mt-2 flex flex-wrap gap-2">
-					<button type="button" onClick={onRetry} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Retry</button>
-					<button type="button" onClick={() => navigateUp(fallbackPath)} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Back to parent</button>
+					<button type="button" onClick={onRetry} className="min-h-11 rounded-sm px-3 text-body-sm">Retry</button>
+					<button type="button" onClick={() => navigateUp(fallbackPath)} className="min-h-11 rounded-sm px-3 text-body-sm">Back to parent</button>
 					<button type="button" onClick={() => navigate(rootPath)} className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated">View root</button>
 				</div>
 			</InlineState>
@@ -840,6 +840,7 @@ export function AgentConversation({
 				pid={sessionId}
 				jobId={jobId}
 				entries={entries}
+				streaming={detail.status === "running"}
 				peerCycles={projection?.peer_cycles === 1}
 				tailContent={
 					<>
@@ -853,7 +854,7 @@ export function AgentConversation({
 				emptyContent={hasRows ? null : fetchState}
 			/>
 			{detail.status === "running" ? (
-				<footer className="flex min-h-11 items-center justify-between border-t border-hairline bg-surface px-3 pb-[max(env(safe-area-inset-bottom),0.25rem)] text-meta">
+				<footer className="flex min-h-11 items-center justify-between bg-surface px-3 pb-[max(env(safe-area-inset-bottom),0.25rem)] text-meta">
 					<span className="text-ink-dim">Read-only</span>
 					<button type="button" onClick={() => navigate(parentPath)} className="min-h-11 rounded-sm px-2 text-info active:bg-elevated">Open parent to steer</button>
 				</footer>

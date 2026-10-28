@@ -1,0 +1,5 @@
+COMMAND isolated .venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/audit-core.py wire.slash.notifications_page
+INPUT_SHA256 {"en": {"path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json", "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594"}, "en_context_sidecar": {"path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json", "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"}, "target": {"path": "local_operator/i18n/catalogues/zh-CN/wire.slash.notifications_page.json", "sha256": "31c919f35913e6c0f333c739acd3a602912bf54f6ef8fd82ed0176bcec988b67"}}
+KEY wire.slash.notifications_page.help EN "Asks and agent updates; read marks all read" ZH "问题和智能体更新；read全部标为已读" RENDER "问题和智能体更新；read全部标为已读" CELLS 34
+PASS maxCells 34 <= 50
+PASS 1 keys: EN/target/context parity, own-core ICU parser, argument name/type parity, target rendering; negative controls 2/2

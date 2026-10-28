@@ -89,6 +89,13 @@ _AMBIENT_VARS = (
     # rather than by each test remembering.
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
+    # The DESCRIPTOR channel for the same bearer (``server/desktop.TOKEN_FD_ENV``,
+    # #3039): a number naming an inherited pipe the daemon reads its bearer from at
+    # serve start-up. Scrubbed, not explained as harmless: an inherited value names a
+    # real descriptor of the parent process (a desktop-launched shell carries one), so
+    # a test calling ``adopt_spawn_bearer`` would read -- and close or ``dup2`` over --
+    # whatever that fd is in pytest, and open the plane on a token no test chose.
+    "LOCAL_OPERATOR_DESKTOP_TOKEN_FD",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
     # The static-route root allowlist (``server/utils/static_roots.ROOTS_ENV``),
     # a directory list that WIDENS what the server will serve. An inherited value
@@ -138,6 +145,9 @@ _AMBIENT_VARS = (
     # paths untested. The kill-switch cell sets the resolved constant through
     # ``monkeypatch`` explicitly, which is where that reason is written down.
     "LOP_NO_REPLY",
+    # Inbox kill switch is sampled at import; inherited off must not disable
+    # every test of the shipped tool. Explicit tests patch the resolved flag.
+    "LOP_NOTIFY",
     # The turn-supplement kill switch (``supplements/policy.SUPPLEMENTS``, read from
     # ``LOP_SUPPLEMENTS``). The same ESCAPE-HATCH class as the ask gate: the feature is the
     # shipped default, and an inherited kill value would silently move every cell that
@@ -290,6 +300,20 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # The wake supervisor's per-invocation ownership stamp (#3028,
+    # ``wakes/owned_runtimes.OWNER_ENV``) and the flag that lets ``launch``
+    # propagate it. serve() sets both in its own environment, so a suite run
+    # from a shell (or an agent session) descended from a live supervisor
+    # inherits them, and every runtime a test then spawns would carry the LIVE
+    # supervisor's token: the cells that assert "only this invocation's
+    # children are marked" would pass on inherited state, and a live supervisor's
+    # stop sweep could match a test's child in a shared store.
+    "LOP_WAKE_SUPERVISOR_ACTIVE",
+    "LOP_WAKE_SUPERVISOR_OWNER",
+    # The supervisor's own pid, the stamp gate (#3028 review r4). Inherited from
+    # a live supervisor it is harmless on its own (no test process shares that
+    # pid), but it belongs to the same live-machine state as the token.
+    "LOP_WAKE_SUPERVISOR_PID",
     # The engage claim (``session/runtime/types.ENGAGED_ENV``), written by
     # ``launch._spawn_runtime`` for a warm and read at boot by
     # ``RuntimeServer``, which stamps ``SessionRecord.engaged_at`` from it. This
@@ -1138,6 +1162,24 @@ def reset_store_maintenance() -> Iterator[None]:
         yield
     finally:
         reset_store_maintenance_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def reset_desktop_launch_capture() -> Iterator[None]:
+    """Give every test a process whose desktop bearer has not been adopted.
+
+    ``desktop.adopt_spawn_bearer`` latches the spawner's bearer in
+    ``_SPAWN_BEARER`` once per process, and ``tests/unit/test_cli_serve.py`` and
+    friends reach it in-process through ``cli.main()``, so without this reset a
+    later test's ``monkeypatch.setenv`` of the token would be answered from an
+    earlier test's latched value (or its absence).
+    """
+
+    from local_operator.server import desktop
+
+    desktop._SPAWN_BEARER = None
+    yield
+    desktop._SPAWN_BEARER = None
 
 
 @pytest.fixture(autouse=True)

@@ -1360,3 +1360,44 @@ async def test_a_public_subscribe_of_an_org_skill_is_one_plain_404(api) -> None:
     assert pulled_foreign.json() == pulled_missing.json() == missing.json()
     assert nothing_installed(root)
     assert not [r for r in prov.iter_baselines(root) if r.kind == "skill"]
+
+
+async def test_a_skill_is_checked_and_applied_by_its_link_id_alone(api) -> None:
+    """`hub_items_by_id`: the skill link id addresses exactly one link of kind skill.
+
+    Two linked skills exist; an unaddressed check reaches both, the id arm reaches
+    one, and the same id under another kind is the plain 404 an unknown id gets.
+    """
+
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    first = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert first.status_code == 200, first.text
+    weather = first.json()["result"]["reports"][0]["local_id"]
+    holder["anon"] = SkillClient(BASE, {**envelope(manifest("forecast")), "id": "sk-2"})
+    second = await client.post(
+        "/v1/desktop/hub/skills/pull", json=pull_body(hub_id="sk-2", local_alias="forecast")
+    )
+    assert second.status_code == 200, second.text
+    forecast = second.json()["result"]["reports"][0]["local_id"]
+    assert weather != forecast
+
+    def ids(response: Any) -> list[str]:
+        return [r["local_id"] for r in response.json()["result"]["reports"]]
+
+    everything = await client.post(
+        "/v1/desktop/hub/updates/check", json={"request_id": str(uuid.uuid4()), "kind": "skill"}
+    )
+    assert sorted(ids(everything)) == sorted([weather, forecast])
+    for route, extra in (("check", {}), ("apply", {"dry_run": True})):
+        one = await client.post(
+            f"/v1/desktop/hub/updates/{route}",
+            json={"request_id": str(uuid.uuid4()), "kind": "skill", "local_id": forecast, **extra},
+        )
+        assert one.status_code == 200, one.text
+        assert ids(one) == [forecast]
+    wrong_kind = await client.post(
+        "/v1/desktop/hub/updates/apply",
+        json={"request_id": str(uuid.uuid4()), "kind": "team", "local_id": forecast},
+    )
+    assert wrong_kind.status_code == 404

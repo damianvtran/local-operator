@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a2",
+  "locale": "vi",
+  "namespace": "wire.slash.notifications_page",
+  "record": "i18n/audits/evidence/vi/wire.slash.notifications_page/nt25a2/record.json",
+  "provenance": "Independent auditor cfdff5945838, actual model openai/gpt-6-astra, current-byte delta audit on 2026-10-25; nt25a1 preserved unchanged.",
+  "hashes": {
+    "record.json": "421f9af5d2ede097a01e07b00d0b76895e104ea9c8fc7c31d7cf76d136ae1be5",
+    "report.md": "10f497670fb70ece5482284fb4b0239505c66978cebdee47da4f5a164b8fbc51",
+    "audit.log": "a1685ef53f24bb11879970ca4403a48fe1aa48db3d6ebdc7441ebf0469415342",
+    "audit-script.py.txt": "6084d59b34b081b0a949769fe675f317e0df4ac34aa36e618383c8c8c7e8d12a"
+  }
+}

@@ -1104,6 +1104,11 @@ async def test_the_events_route_forwards_entry_ts_into_the_open_frame(remote_api
     bridge = _RecordingBridge()
 
     class _Pool:
+        # A stand-in for the plane's pool carries the root the routes read off
+        # it (the paint hold keys by it); the real pool is built from exactly
+        # this config dir.
+        root = client._transport.app.state.config_manager.config_dir
+
         @contextlib.asynccontextmanager
         async def session(self, session_id: str, **kwargs: Any):
             yield bridge

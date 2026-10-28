@@ -184,6 +184,11 @@ def test_bootstrap_kill_switch_and_eligibility(tmp_path, monkeypatch):
     assert helper.help_locale() == "en"
 
 
+# Help follows the ELIGIBLE (shipped) set, never the prompt preference. Every
+# shipped locale now renders help - `ur` on its relay.asks wave and `zh-CN` on
+# its 2026-10-24 security disposition - so the `unknown` case is what keeps the
+# two sets apart here: a tag that is recognisable but unshipped falls back to
+# `en` rather than to itself.
 @pytest.mark.parametrize(
     "tag, expected",
     [

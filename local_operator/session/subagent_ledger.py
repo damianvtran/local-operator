@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from local_operator.paths import config_dir
+from local_operator.session.coalescing_writer import EVIDENCE_WRITER
 
 #: Payload schema version, stamped into every artifact so a later reader can
 #: tell which shape it is looking at. Bump only on an incompatible change.
@@ -251,25 +252,63 @@ def write_lane_receipt(child_dir: Path, payload: Mapping[str, Any]) -> Path | No
 def note_lane_step(
     child_dir: Path, job_id: str, step: str, at: float, wip_ref: str = "", *, force: bool = False
 ) -> None:
-    """Persist the last completed operation before a hard death can erase it."""
+    """Persist the last completed operation before a hard death can erase it.
+
+    OFF THE LOOP, COALESCED. The caller is a child's ``on_tool_end`` relay,
+    which runs on the PARENT session's event loop, and this is a
+    read-modify-write of a JSON file (measured up to 315 ms per call on a busy
+    manager, 0.8 s of loop wall per 40 s; see ``coalescing_writer``). The
+    write is queued on the process's evidence writer, latest-wins per receipt,
+    and ``force`` survives coalescing: a step carrying a NEW recovery ref must
+    not be dropped by a later throttled step that replaced it in the queue.
+    """
     target = lane_receipt_path(child_dir, job_id)
-    try:
-        payload = json.loads(target.read_text())
-        # A new recovery ref must be durable with its step even inside the
-        # throttle window; ordinary high-frequency tool completions may lag.
-        now = time.time()
-        if (
-            not force
-            and now - float(payload.get("step_written_at") or 0) < 5
-            and payload.get("wip_ref", "") == wip_ref
-        ):
-            return
-        payload.update(
-            last_step=step, last_step_at=at, wip_ref=wip_ref, state="running", step_written_at=now
-        )
-        _staged_write(target, payload)
-    except (OSError, ValueError, TypeError):
-        pass  # Evidence failure must not fail a running child.
+    EVIDENCE_WRITER.submit(
+        target, _LaneStep(target, step, at, wip_ref, force), merge=_LaneStep.merge
+    )
+
+
+@dataclass(frozen=True)
+class _LaneStep:
+    """One deferred lane-step write; the newest step wins, ``force`` is sticky."""
+
+    target: Path
+    step: str
+    at: float
+    wip_ref: str
+    force: bool
+
+    @staticmethod
+    def merge(previous: Any, newer: Any) -> Any:
+        if isinstance(previous, _LaneStep) and isinstance(newer, _LaneStep) and previous.force:
+            return _LaneStep(newer.target, newer.step, newer.at, newer.wip_ref, True)
+        return newer
+
+    def __call__(self) -> None:
+        try:
+            # Read at WRITE time: a receipt withdrawn since the submit is gone,
+            # and this must never re-create it (``withdraw_lane_receipt`` also
+            # drops the pending op under the writer's lock).
+            payload = json.loads(self.target.read_text())
+            # A new recovery ref must be durable with its step even inside the
+            # throttle window; ordinary high-frequency tool completions may lag.
+            now = time.time()
+            if (
+                not self.force
+                and now - float(payload.get("step_written_at") or 0) < 5
+                and payload.get("wip_ref", "") == self.wip_ref
+            ):
+                return
+            payload.update(
+                last_step=self.step,
+                last_step_at=self.at,
+                wip_ref=self.wip_ref,
+                state="running",
+                step_written_at=now,
+            )
+            _staged_write(self.target, payload)
+        except (OSError, ValueError, TypeError):
+            pass  # Evidence failure must not fail a running child.
 
 
 def withdraw_lane_receipt(child_dir: Path, job_id: str) -> None:
@@ -279,10 +318,16 @@ def withdraw_lane_receipt(child_dir: Path, job_id: str) -> None:
     the runner settles; a leftover file is exactly the "ran here and never
     settled" reading the boot reconcile pass looks for.
     """
-    try:
-        lane_receipt_path(Path(child_dir), job_id).unlink()
-    except OSError:
-        pass
+    target = lane_receipt_path(Path(child_dir), job_id)
+    # Under the evidence writer's lock, dropping any deferred step: a queued
+    # ``note_lane_step`` that ran after this unlink would find the file gone
+    # (it never creates one), but one already MID-WRITE could land its rename
+    # after the unlink and resurrect a settled lane as "never settled".
+    with EVIDENCE_WRITER.exclusive(target):
+        try:
+            target.unlink()
+        except OSError:
+            pass
 
 
 def read_lane_receipts(child_dir: Path) -> list[dict[str, Any]]:

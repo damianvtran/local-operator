@@ -179,7 +179,7 @@ export function DirectorySheet({
 						   an unavailable action. The accent border, the wash and
 						   the word do the work at full opacity (4.86:1 / 4.57:1). */
 						className={cn(
-							"flex min-h-11 items-center gap-2 rounded-sm border px-3 text-left active:bg-elevated",
+							"flex min-h-11 items-center gap-2 rounded-sm border px-3 text-start active:bg-elevated",
 							tag === "current" ? "border-accent bg-accent-wash" : "border-control bg-surface",
 						)}
 					>
@@ -217,13 +217,13 @@ export function DirectorySheet({
 						   ``focus:`` variant, matching the list's own search input --
 						   this sheet's field is the only place in the app that had one,
 						   and it would now be a no-op. */
-						className="min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-transparent px-3 font-mono text-mono-sm text-ink outline-none placeholder:text-ink-dim"
+						className="min-h-11 min-w-0 flex-1 rounded-sm bg-transparent px-3 font-mono text-mono-sm text-ink outline-none placeholder:text-ink-dim"
 					/>
 					<button
 						type="button"
 						onClick={() => void commit(typed)}
 						disabled={busy || !typed.trim()}
-						className="flex min-h-11 shrink-0 items-center justify-center rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-elevated disabled:text-ink-disabled"
+						className="flex min-h-11 shrink-0 items-center justify-center rounded-sm bg-surface px-3 text-body-sm text-ink active:bg-elevated disabled:text-ink-disabled"
 					>
 						{busy ? "moving…" : "change"}
 					</button>
@@ -278,7 +278,7 @@ export function WorkingDirectoryChip({
 		};
 	}, []);
 
-	const label = cwd ? displayPath(cwd, home) : "…";
+	const label = cwd ? cwd.split("/").filter(Boolean).at(-1) || displayPath(cwd, home) : "…";
 
 	return (
 		<div className="flex min-w-0 items-center">
@@ -293,8 +293,17 @@ export function WorkingDirectoryChip({
 			    (design round 1, D1). */}
 			<Chip
 				onClick={() => setOpen(true)}
-				aria-label={`working directory: ${cwd || "unknown"}`}
-				className="min-w-0 max-w-full"
+				aria-label={messageRuntime.t("relay.chrome.composer.folder_label", { name: cwd || label })}
+				/* NO PSEUDO EXPANSION HERE (QA round 2, Q2-1; design D7). `lo-hit`
+				   grows a control's band by 6 px each side, which is right for a 32 px
+				   chip and wrong for this one: the box is already 44 px, so the growth
+				   bought nothing and took the attach button's bottom 6 px — a tap on
+				   attach's lower edge opened THIS sheet (measured: attach's real band
+				   38 px, folder 56 px). `before:hidden` drops the growth; the band is
+				   now exactly the 44 px box, and no two controls in the composer share
+				   a pixel. `!ps-[7px]` puts the glyph on the composer's 15 px optical
+				   inset instead of 13 px. */
+				className="!h-11 w-11 min-w-11 max-w-full !bg-transparent !ps-[7px] !text-meta before:hidden"
 			>
 				{/* A folder glyph drawn inline: this package carries no icon
 				    dependency (the same reason the list's marks are text). 14 px
@@ -303,7 +312,11 @@ export function WorkingDirectoryChip({
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
 					<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
 				</svg>
-				<span className="min-w-0 truncate">{label}</span>
+				{/* GLYPH ONLY (design review round 1, D1): at 360 and 390 the name
+				    spent the composer meta row's whole budget and still rendered as
+				    `local-o…`, so it cost a fact without telling one. The full path
+				    is the control's accessible name above and the sheet's own
+				    subject; the last segment alone was never the useful part. */}
 			</Chip>
 			<DirectorySheet
 				open={open}

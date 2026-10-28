@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "audit_id": "ntt2",
+  "locale": "zh-CN",
+  "namespace": "tui.notifications",
+  "round": 2,
+  "record": "tui-audit/zh-CN/tui.notifications/ntt2/record.json",
+  "provenance": "Original evidence written by independent translation-auditor session 0603506819c6, actual model radient/auto, on 2026-10-25; before/after arms are the same script run against d25392f3553 and 8976104b83b, output captured in-session.",
+  "verdict": "passed",
+  "key_count": 72,
+  "ledger_pairing": {
+    "catalogue_sha256": "cd60e55f3d532f44848fe44a88ee87b879192f1b5149545526b7ded829768156",
+    "code_commit": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a"
+  },
+  "hashes": {
+    "record.json": "38aa362b1252a881fac6fe83a8253633137d355d2f809b97b8fcb2239d798fa4",
+    "report.md": "34af05eff57d492253fb3bb6cbafbeb3f629c1ddc2e17c50f6615707a6c24c40",
+    "audit.log": "307ed292bc06dcaa0a39e64147aa92ad3b9b4cdd79480056e7cfa208bfb6e279"
+  }
+}

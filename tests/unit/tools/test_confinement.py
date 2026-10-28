@@ -31,6 +31,15 @@ _reach_the_network`` proves the denial with the real kernel sandbox -- including
 a PRE-FIX CONTROL that patches the profile back to main's
 ``(allow network-outbound)`` so the test shows the leak reproduces when only
 that line differs, rather than merely passing.
+
+The MACH half (landed 2026-10-26) follows the same pattern: the profile shape
+(no bare ``(allow mach-lookup)``, none of the GUI-session services in the
+allowlist) is pure logic, and ``TestShellBoundary.test_a_jailed_shell_cannot_
+look_up_host_session_services`` proves the denial from inside the real
+sandbox with a PRE-FIX CONTROL. The probe only LOOKS UP a service name
+(``bootstrap_look_up``) and never sends it a message: a test must never run
+``pbcopy``/``pbpaste`` against the real pasteboard -- ``pbcopy`` destroys the
+operator's clipboard, ``pbpaste`` reads it.
 """
 
 from __future__ import annotations
@@ -52,6 +61,46 @@ DARWIN_ONLY = pytest.mark.skipif(
     sys.platform != "darwin" or not confinement_module.SANDBOX_EXEC.exists(),
     reason="the shell boundary is a macOS seatbelt profile; the refusal path is covered below",
 )
+
+
+#: Mach services that reach the operator's GUI session or credential stores.
+#: The confined child must be REFUSED a lookup of each (see the confinement
+#: module's MACH SERVICES section for the measurement that found the leak).
+_HOST_SESSION_SERVICES: tuple[str, ...] = (
+    "com.apple.pasteboard.1",
+    "com.apple.SecurityServer",
+    "com.apple.securityd.xpc",
+    "com.apple.coreservices.launchservicesd",
+    "com.apple.lsd.open",
+    "com.apple.lsd.mapdb",
+    "com.apple.coreservices.appleevents",
+    "com.apple.windowserver.active",
+    "com.apple.tccd",
+)
+
+#: A LOOKUP-ONLY Mach probe: resolves each name to a send right (or a denial)
+#: and prints the kern_return_t, never messaging the service. 0 is "found",
+#: 1100 is BOOTSTRAP_NOT_PRIVILEGED -- the sandbox's refusal.
+_MACH_LOOKUP_PROBE = """\
+import ctypes, sys
+libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+bootstrap = ctypes.c_uint.in_dll(libc, "bootstrap_port")
+for name in sys.argv[1:]:
+    port = ctypes.c_uint(0)
+    print(name, libc.bootstrap_look_up(bootstrap, name.encode(), ctypes.byref(port)))
+"""
+_BOOTSTRAP_NOT_PRIVILEGED = 1100
+
+
+def _lookup_results(text: str) -> dict[str, int]:
+    """``name -> kern_return`` from the probe's output lines."""
+
+    results: dict[str, int] = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+            results[parts[0]] = int(parts[1])
+    return results
 
 
 def _context(root: Path, *, cwd: Path | None = None) -> ToolContext:
@@ -86,6 +135,37 @@ class TestConfinementDecisions:
         # the allow (however spelled) fails here before it fails a probe run.
         assert "network-outbound" not in profile
         assert "(deny network*)" in profile
+
+    def test_mach_lookup_is_an_exact_name_allowlist(self, tmp_path: Path) -> None:
+        """No bare ``(allow mach-lookup)``, and no GUI-session service allowed.
+
+        A bare allow is what let a confined child read and overwrite the
+        operator's clipboard; like the network line, a broad allow beside a
+        narrow one would make the narrow one meaningless, so EVERY mach-lookup
+        line must carry filters, and every filter must be an exact global name
+        from the measured allowlist (a regex/prefix would readmit services
+        nobody measured).
+        """
+
+        root = tmp_path / "jail"
+        root.mkdir()
+        profile = ToolConfinement.at(root).profile()
+        mach_lines = [line for line in profile.splitlines() if "mach-lookup" in line]
+        assert mach_lines, profile
+        for line in mach_lines:
+            assert line.strip() != "(allow mach-lookup)", profile
+            assert "(global-name " in line, line
+            assert "regex" not in line and "prefix" not in line, line
+        allowed = set(confinement_module._MACH_LOOKUP_GLOBAL_NAMES)
+        assert allowed, "the allowlist must not be empty"
+        for name in allowed:
+            assert f'(global-name "{name}")' in profile
+        for name in _HOST_SESSION_SERVICES:
+            assert name not in profile, name
+        for fragment in ("pasteboard", "Security", "securityd", "windowserver", "CoreDisplay"):
+            assert fragment not in profile, fragment
+        for fragment in ("launchservices", "lsd.", "appleevents", "tccd"):
+            assert fragment not in profile, fragment
 
     def test_a_relative_root_resolves_before_it_is_compared(
         self, tmp_path: Path, monkeypatch
@@ -374,6 +454,100 @@ class TestShellBoundary:
             "net-dns", {"command": resolve}, AbortSignal(), None, context
         )
         assert "DNS-FAILED gaierror" in result.text, result.text
+
+    @DARWIN_ONLY
+    @pytest.mark.asyncio
+    async def test_ordinary_machinery_still_runs_under_the_mach_allowlist(
+        self, tmp_path: Path
+    ) -> None:
+        """The narrowed Mach grant must not break the work a confined shell does.
+
+        Each leg is one the allowlist was derived against: an interpreter, git,
+        a write inside the root, and the user-name lookup that is the reason
+        ``opendirectoryd.libinfo`` is allowed at all (without it ``getpwuid``
+        raises ``KeyError`` in the jail).
+        """
+
+        root = tmp_path / "jail"
+        root.mkdir()
+        # ``HOME`` is set to the jail rather than inherited: git stat()s
+        # ``$HOME/.gitconfig``, the operator's home is deliberately OUTSIDE the
+        # read allowlist, and on a host where that file exists an inherited
+        # HOME makes ``git --version`` fail with "unable to access
+        # ~/.gitconfig: Operation not permitted" -- measured, and it fails
+        # identically under main's profile, so it is the filesystem boundary
+        # working as designed rather than this grant. Pinning HOME keeps the
+        # leg a statement about the Mach allowlist instead of about whichever
+        # HOME the developer or CI shell happened to export.
+        command = (
+            'export HOME="$PWD"; '
+            "python3 -c 'import os,pwd;print(\"PY-OK\", bool(pwd.getpwuid(os.getuid()).pw_name))'"
+            " && git --version"
+            " && git init -q repo && echo GIT-INIT-OK"
+            " && echo written > inside.txt && cat inside.txt"
+        )
+        result = await builtin.execute_bash(
+            "mach-machinery", {"command": command}, AbortSignal(), None, _context(root)
+        )
+        assert not result.is_error, result.text
+        assert "PY-OK True" in result.text, result.text
+        assert "git version" in result.text, result.text
+        assert "GIT-INIT-OK" in result.text, result.text
+        assert (root / "repo" / ".git").is_dir()
+        assert (root / "inside.txt").read_text().strip() == "written"
+        # The shims' confstr fallback noise is the visible symptom of a
+        # missing ``opendirectoryd.membership``; it must not reappear.
+        assert "couldn't create cache file" not in result.text, result.text
+
+    @DARWIN_ONLY
+    @pytest.mark.asyncio
+    async def test_a_jailed_shell_cannot_look_up_host_session_services(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Clipboard, keychain, launch services, AppleEvents, window server: refused.
+
+        NON-DESTRUCTIVE by construction: the probe calls ``bootstrap_look_up``
+        only -- it obtains (or is refused) a send right and never sends on it,
+        so neither the pasteboard nor securityd sees a request. The positive
+        leg (an allowlisted name resolves) proves the probe itself works inside
+        the jail, and the pre-fix control (main's bare ``(allow mach-lookup)``,
+        one string swap, same tool path) proves the refusal is the profile line
+        and not the probe.
+        """
+
+        root = tmp_path / "jail"
+        root.mkdir()
+        (root / "mach_probe.py").write_text(_MACH_LOOKUP_PROBE)
+        context = _context(root)
+        allowed = confinement_module._MACH_LOOKUP_GLOBAL_NAMES[0]
+        command = f"python3 mach_probe.py {allowed} {' '.join(_HOST_SESSION_SERVICES)}"
+
+        result = await builtin.execute_bash(
+            "mach-jailed", {"command": command}, AbortSignal(), None, context
+        )
+        verdicts = _lookup_results(result.text)
+        assert verdicts.get(allowed) == 0, result.text
+        for name in _HOST_SESSION_SERVICES:
+            assert verdicts.get(name) == _BOOTSTRAP_NOT_PRIVILEGED, (name, result.text)
+
+        real_profile = ToolConfinement.profile
+
+        def pre_fix(self: ToolConfinement) -> str:
+            lines = real_profile(self).splitlines(keepends=True)
+            return "".join(
+                "(allow mach-lookup)\n" if line.startswith("(allow mach-lookup ") else line
+                for line in lines
+            )
+
+        monkeypatch.setattr(ToolConfinement, "profile", pre_fix)
+        control = await builtin.execute_bash(
+            "mach-prefix-control",
+            {"command": f"python3 mach_probe.py {_HOST_SESSION_SERVICES[0]}"},
+            AbortSignal(),
+            None,
+            context,
+        )
+        assert _lookup_results(control.text).get(_HOST_SESSION_SERVICES[0]) == 0, control.text
 
 
 class TestPathTools:

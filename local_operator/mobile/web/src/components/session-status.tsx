@@ -48,6 +48,8 @@
  * D2 ruling. See `contextEstimateMarker` for both precedents and the ruling.
  */
 import { useEffect, useId, useState } from "react";
+import { Sheet } from "./ui/sheet";
+import { messageRuntime } from "../store";
 import { cn } from "../lib/cn";
 import {
 	channelBreakdown,
@@ -96,7 +98,19 @@ function isTextEntry(target: EventTarget | null): boolean {
 	);
 }
 
-export function SessionStatus({ projection }: { projection: SessionProjection }) {
+/**
+ * The reading's facts, derived ONCE for every consumer (review R3-2/R3-6).
+ *
+ * `SessionStatus` renders from this; the composer folds `label` into its
+ * footer fit's input key (the text is what decides the reading's width, so a
+ * subagent-spend or context-only change must re-fit even when `usage` did not
+ * move); and the session header gates its ⋮ `Spend & context` row on `hasRow`
+ * (the meter renders, and the spend sheet has content, exactly when it is
+ * true — a resumed session with durable context and spend but no usage
+ * receipt yet still has a reading). A second derivation in any of those
+ * places is how they would drift apart.
+ */
+export function meterFacts(projection: SessionProjection) {
 	// THE PUBLISHED OBJECT WINS when the runtime has one: its `total_micro`
 	// already spans this session's inference, its channels AND its children,
 	// computed in one backend place — so the row renders that figure rather
@@ -107,7 +121,6 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 		? { text: published.text }
 		: { text: sessionSpend(projection, projection.usage).text };
 	const context = contextReading(projection);
-	const estimateMarker = contextEstimateMarker(context);
 	// The drill-down (PR-2's chips): shown only when the published object
 	// exists and has something to say — named rows, an honest remainder count,
 	// or the untracked disclosure. An old daemon sends no object and the panel
@@ -117,17 +130,26 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 		breakdown !== null &&
 		(breakdown.chips.length > 0 || breakdown.hiddenCount > 0 || breakdown.untrackedNotice);
 	const hasReading = Boolean(spend.text || context.spelling);
-	const hasRow = hasReading || hasBreakdown;
+	/* The compact composer reading's two spellings: the full pair, and the ONE
+	   whole figure it compacts to (context %, else spend). */
+	const label = [context.spelling?.split("/")[0], spend.text].filter(Boolean).join(" · ");
+	const shortReading = context.spelling?.split("/")[0] || spend.text;
+	return { spend, context, breakdown, hasBreakdown: Boolean(hasBreakdown), hasRow: hasReading || Boolean(hasBreakdown), label, shortReading };
+}
+
+export function SessionStatus({ projection, compact = false, detail = false, mode = "auto", short = false }: { projection: SessionProjection; compact?: boolean; detail?: boolean; mode?: "auto" | "full" | "short" | "hidden"; short?: boolean }) {
+	const { spend, context, breakdown, hasBreakdown, hasRow, label, shortReading } = meterFacts(projection);
+	const estimateMarker = contextEstimateMarker(context);
 	/* The disclosure is user state, not wire state: the runtime never says
 	   whether a reader has opened the chips, and the next projection must not
 	   re-open what they closed. */
-	const [expanded, setExpanded] = useState(false);
+	const [expanded, setExpanded] = useState(detail);
 	const panelId = useId();
 	/* A reading is only a door when there is a panel behind it, and a control
 	   with nothing behind it is the dead control this row must not ship. */
 	const canExpand = hasBreakdown;
 	useEffect(() => {
-		if (!expanded) return;
+		if (!expanded || compact || detail) return;
 		/* USER INTENT ONLY — NEVER `scroll`. This listener used to collapse on
 		   every scroll event, and at the bottom of a long transcript the panel's
 		   own 61px insertion shrank the scroll extent, so the browser's tail-follow
@@ -152,11 +174,51 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 			window.removeEventListener("touchmove", collapse, true);
 			window.removeEventListener("keydown", onKey, true);
 		};
-	}, [expanded]);
+	}, [expanded, compact, detail]);
 	if (!hasRow) return null;
 	/* Collapsed means ABSENT, including the no-figure case: a breakdown whose
 	   total cannot be spelled keeps its facts behind the `cost detail` control
 	   rather than spending a permanent second line. */
+	/* The compact composer reading is the same published spend/context fact,
+	   not a new telemetry calculation. Its drill-down lives in an in-flow
+	   sheet so reading channels cannot steal conversation height. */
+	if (compact) {
+		/* UNIT AND CURRENCY ARE NOT NEGOTIABLE (design review round 1, D1). In a
+		   44 px box the two facts rendered `30.9…` and the money never appeared at
+		   all — a reading clipped inside its own value is not a shorter reading, it
+		   is a false one. The slot is fixed at 96 px (6 rem) so the model button's
+		   truncation point does not move as the numbers change, and it never
+		   shrinks: the model label beside it is the elastic element, because a
+		   truncated NAME stays truthful while a truncated AMOUNT does not. */
+		/* The composer passes its measured level explicitly. The full pair stays in
+		   the accessible name and in the sheet; explicit modes do not inspect global
+		   DOM, so a viewport flip and the reading change in the same React commit. */
+		return <>
+			<button type="button" onClick={() => setExpanded(true)}
+				aria-label={messageRuntime.t("relay.chrome.composer.spend_label", { label })}
+				/* THE READING ENDS ON THE SAME 15 px INSET AS EVERYTHING ELSE (QA round 3,
+				   Q3-2). The slot is still 96 px — the fixed width that keeps the model
+				   label's truncation point from moving as the numbers change (D1) — but
+				   `pe-[7px]` moves the TEXT 7 px in from the composer's 8 px padding, so
+				   the reading's right edge lands at 15 px like the field's left inset.
+				   The slot's own outer edge still lines up with the stop/send discs. */
+				data-foot="reading"
+				data-foot-form={mode === "full" || mode === "short" ? mode : short ? "short" : "full"}
+				className={cn(
+					"flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap pe-[7px] text-meta tabular-nums text-ink-dim active:text-ink",
+					"min-w-11 max-w-full short-column:w-auto",
+					mode === "hidden" && "hidden",
+				)}>
+				{/* Literal class strings: Tailwind only emits the utilities it finds
+				    spelled out in source. */}
+				<span className={cn(mode === "full" ? "inline" : mode === "short" || mode === "hidden" ? "hidden" : "short-column:hidden")}>{label}</span>
+				<span aria-hidden className={cn(mode === "full" ? "hidden" : mode === "short" ? "inline" : mode === "hidden" ? "hidden" : "hidden short-column:inline")}>{shortReading}</span>
+			</button>
+			<Sheet open={expanded} onClose={() => setExpanded(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
+				<SessionStatus projection={projection} detail />
+			</Sheet>
+		</>;
+	}
 	const showPanel = hasBreakdown && expanded;
 	return (
 		<>
@@ -164,7 +226,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 				<div
 					data-testid="session-status"
 					className={cn(
-						"flex items-center gap-2 border-b border-hairline px-3 font-mono text-mono-sm tabular-nums",
+						"flex items-center gap-2 px-3 font-mono text-mono-sm tabular-nums",
 						/* The spend control carries the 44px touch floor; the row's
 						   own vertical padding would add to it, so the padded row is
 						   only for the non-interactive (legacy / no-breakdown) cell.
@@ -174,7 +236,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 				>
 					{/* Reading order is the one both references use — the TUI band's right
 					    group and the desktop strip both read context before spend — and
-					    `ml-auto` sits on the SECOND cell rather than on `justify-between`,
+					    `ms-auto` sits on the SECOND cell rather than on `justify-between`,
 					    so a lone reading keeps a fixed edge and the row does not reflow as
 					    the other appears or vanishes. */}
 					{context.spelling ? (
@@ -186,7 +248,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							{/* The estimate marker: the desktop's dim WORD, not a glyph —
 							    D2's ruling; `contextEstimateMarker` names both precedents. */}
 							{estimateMarker ? (
-								<span className="ml-1 text-ink-dim">{estimateMarker}</span>
+								<span className="ms-1 text-ink-dim">{estimateMarker}</span>
 							) : null}
 						</span>
 					) : null}
@@ -201,7 +263,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 								   should hear; the suffix names what the press opens. */
 								aria-label={`${spend.text} spend breakdown`}
 								onClick={() => setExpanded((open) => !open)}
-								className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
+								className="ms-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
 							>
 								<span className="truncate">{spend.text}</span>
 								<span aria-hidden className={CHEVRON_BOX}>
@@ -214,7 +276,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							   dead control. */
 							<span
 								data-testid="session-status-spend"
-								className="ml-auto min-w-0 truncate text-ink-muted"
+								className="ms-auto min-w-0 truncate text-ink-muted"
 							>
 								{spend.text}
 							</span>
@@ -232,7 +294,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 							aria-controls={expanded ? panelId : undefined}
 							aria-label="cost detail"
 							onClick={() => setExpanded((open) => !open)}
-							className="ml-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
+							className="ms-auto flex min-h-11 min-w-0 items-center gap-1 text-ink-muted"
 						>
 							<span className="truncate">cost detail</span>
 							<span aria-hidden className={CHEVRON_BOX}>
@@ -255,7 +317,7 @@ export function SessionStatus({ projection }: { projection: SessionProjection })
 				<div
 					id={panelId}
 					data-testid="session-status-channels"
-					className="flex flex-wrap items-baseline gap-x-2 border-b border-hairline px-3 pt-1 pb-1 font-mono text-mono-sm tabular-nums text-ink-muted"
+					className="flex flex-wrap items-baseline gap-x-2 px-3 pt-1 pb-1 font-mono text-mono-sm tabular-nums text-ink-muted"
 				>
 					{breakdown.chips.map((chip, index) => (
 						<span key={`${chip.label}-${index}`} data-testid="session-status-channel">

@@ -1838,6 +1838,20 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0,
         maximum=10_000_000,
     ),
+    Setting(
+        # The delegated-child sibling of the row above (see
+        # ``providers/anthropic_cache_ttl.py``): 0 = subagents never use the 1h
+        # TTL, the measured-cheaper default. LIVE for the same reason as above.
+        key="providers.anthropic.subagent_cache_ttl_1h_min_context_tokens",
+        path=("providers", "anthropic", "subagent_cache_ttl_1h_min_context_tokens"),
+        section="providers",
+        label=_t(_ws.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_label()),
+        kind=Kind.INT,
+        default=0,
+        help=(_t(_ws.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_help())),
+        minimum=0,
+        maximum=10_000_000,
+    ),
     # -- providers.openrouter: chat-completions `provider` routing object ----
     #
     # These rows build the OpenRouter chat-completions request body's

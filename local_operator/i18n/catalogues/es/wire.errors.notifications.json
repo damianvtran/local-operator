@@ -1,0 +1,6 @@
+{
+  "wire.errors.notifications.store_busy": "El almacén de notificaciones está ocupado ahora mismo, así que no cambió nada. Vuelve a intentarlo en un momento.",
+  "wire.errors.notifications.store_full": "Este equipo se quedó sin espacio en disco, así que no cambió nada. Libera espacio en el volumen que contiene {where} y vuelve a intentarlo.",
+  "wire.errors.notifications.store_unavailable": "No se pudo leer ni escribir el almacén de notificaciones. Reintentar no servirá; revisa {where} y el disco donde está.",
+  "wire.errors.notifications.unknown_item": "Esa notificación ya no está en Notificaciones."
+}

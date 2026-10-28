@@ -117,6 +117,15 @@ def static_feature_flags() -> dict[str, Any]:
         # no network) plus check/apply/apply-all/retry. A renderer gates the
         # sidebar indicator on this so it never polls a backend that lacks it.
         "hub_updates": 1,
+        # ADDRESSING ONE HUB ITEM BY ITS LOCAL ID: check/apply/retry under
+        # `/v1/desktop/hub/updates/*` accept `local_id` (with `kind`) beside
+        # `name`. Display names are not unique, and the name arm matches
+        # case-insensitively, so `name: "coder"` reaches both `Coder` and
+        # `coder`; a renderer that sees this key sends the `local_id` its
+        # `/hub/links` row carries and touches exactly one item. Its OWN key
+        # rather than a bump of `hub_updates`: older cores refuse the field as
+        # an unknown key (422), so a renderer must keep sending `name` there.
+        "hub_items_by_id": 1,
         # The full local-only LINKS inventory: GET /v1/desktop/hub/links plus
         # PATCH /v1/desktop/hub/links/{link_id} (independent subscribe/auto_push
         # with a policy-revision CAS). Its OWN key rather than a bump of
@@ -140,6 +149,28 @@ def static_feature_flags() -> dict[str, Any]:
         # the pin in tests/unit/server/test_desktop_hub_skill_publish.py fails if
         # one is removed without also removing this key.
         "hub_skills": 1,
+        # THE SKILL LIBRARY ROWS: `GET /v1/desktop/skills` rows carry the
+        # additive `source`/`link_id`/`editable`/`installed`/`fingerprint`/`form`
+        # fields, the list also lists a subscribed-but-not-installed link, and the
+        # `name` arm adds `skill_detail` (body, files, fingerprint, publish budget).
+        # Its OWN key rather than a bump of `hub_skills` or `skill_catalogue`: a
+        # renderer gated on those keeps the plain name/description list and never
+        # draws a card from a field this backend does not send. Read-only: the
+        # write routes advertise their own key, `skill_write`, below.
+        "skill_library": 1,
+        # THE SKILL LIBRARY WRITES: `POST /v1/desktop/skills` (create, or a copy
+        # of a read-only skill via `copy_from`), `PUT /v1/desktop/skills/{name}`
+        # (replace the whole file set, guarded by `expected_fingerprint`) and
+        # `DELETE /v1/desktop/skills/{name}` (backup-move of a local skill, unpull
+        # of a hub-linked one, with `discard_local_changes`). Every write carries
+        # a `request_id` and is receipted. Its OWN key rather than a bump of
+        # `skill_library`: v0.90.17 already shipped `skill_library: 1` as the READ
+        # side, and those cores answer these routes with 405/404, so a renderer
+        # that offered create/edit/remove on `skill_library >= 1` would draw
+        # controls that fail on every released core. It implies nothing about
+        # `skill_library`: a renderer that draws the editor needs BOTH (the rows
+        # and fingerprints it edits come from the read side).
+        "skill_write": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #
@@ -388,6 +419,31 @@ def static_feature_flags() -> dict[str, Any]:
         # in this runtime: feature branches must adopt the same guard before
         # advertising their mutations alongside this capability.
         "team_bridge_conversation_owner_guard": 1,
+        # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
+        # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
+        # #221, where the signed-in owner reads every conversation their own
+        # agent is or was in, with full bodies and per-message
+        # `agent_delivery_status`. Its own key by the `radient_org` rule: a
+        # renderer that does not see it hides the section rather than mounting
+        # one whose every call 404s. 1 is the shape version
+        # (`server/models/desktop_team_bridge_owner_audit.py`). The renderer
+        # keys the section's AVAILABILITY on this capability, never on a 404:
+        # `conversation_not_found` is also what a non-owner or an out-of-window
+        # conversation answers, so treating a 404 as "no audit here" would hide
+        # the section over one conversation (#3022 R1-N2). A hub that predates
+        # #221 is detected on the LIST route only (its 404 there).
+        "team_bridge_owner_audit": 1,
+        # The owner's agent-invitation surface over agent-server #227: the
+        # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
+        # only, receipt required, `private, no-store`) and `decision=withdraw`
+        # (no consent_version) plus an optional `endpoint_id` pin on the
+        # consent route. Its own key by the `radient_org` rule: a renderer that
+        # does not see it neither mounts the invitations list nor offers
+        # "Remove my agent", because a build without this key would 404 the
+        # read and 422 the decision. It promises the RUNTIME only; a hub that
+        # predates #227 answers either with 409 `outdated_hub`, which the
+        # renderer shows as "the server needs an update" rather than probing.
+        "team_bridge_owner_invitations": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -605,6 +661,15 @@ def static_feature_flags() -> dict[str, Any]:
         # and are deliberately not re-declared here: a client requires the
         # conjunction, it does not get a second spelling of the same fact.
         "agents_config": 1,
+        # The configuration run can also revise the operator's OWN skills: its
+        # declaration names the opt-in `skill` tool (list/show/create/update,
+        # through the same write path as `skill_write`). ITS OWN KEY for the
+        # reason `agents_config` states: an older backend has `agents_config`
+        # but builds no `skill` tool, so a run there would answer "I can't edit
+        # skills" -- the Skills tab must not mount its composer against it.
+        # The renderer requires it together with `agents_config` and
+        # `skill_library` (its settle diff reads the skills list).
+        "agents_config_skills": 1,
         # Durable conversation pins: the `pinned` flag on every catalogue
         # row, and POST /v1/desktop/sessions/{id}/pin.
         #
@@ -789,6 +854,13 @@ def static_feature_flags() -> dict[str, Any]:
         "approvals": 1,
         # Existing signed SSH onboarding, surfaced without a new trust engine.
         "mesh_onboard": 1,
+        # TYPED CREDENTIAL APPROVAL: `POST /v1/desktop/approvals/{id}/approve-credential`
+        # (review -> sign -> apply in one call, phase-by-phase answer) and
+        # `.../apply-credential` (the retry of a signed card), plus the `typed_approval`
+        # block on a credential row. ITS OWN KEY, not a bump of `approvals`: a renderer
+        # without it keeps the CLI-remedy card (`can_approve_here: False`) and never
+        # POSTs a body this backend would not understand.
+        "credential_approvals": 1,
         # THE ONE DIAL on the projects surface: `POST
         # /v1/desktop/projects/{key}/request-update`, which asks the linked
         # sessions for a progress update through the same peer-send core the
@@ -932,6 +1004,16 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the feature's first contract revision; new row fields are additive and do not
         # bump it.
         "session_files": 1,
+        # THE USER-ATTACHMENT INVENTORY: `GET /v1/desktop/sessions/{id}/user-attachments`,
+        # every document and picture the PERSON attached to the conversation, scanned from the
+        # whole journal (`session/user_attachments.py`). Its OWN key rather than a bump of
+        # `session_files`: that index is the agent's OUTPUT and its key promises nothing about
+        # inputs, so a backend with `session_files` but not this route must be recognisable.
+        # ADDITIVE: an older renderer never calls it. ABSENT MEANS the canvas builds its
+        # Attachments section from the history rows it has loaded and must not call the route
+        # (it would 404) - nor present that partial list as complete.
+        # `1` is the first contract revision; item fields are additive and do not bump it.
+        "session_attachments": 1,
         # The global, cross-conversation Library: list/detail/metadata/tags/
         # content. Its OWN key rather than a bump of `session_files`: the
         # surfaces (desktop sidebar, TUI /library, phone web, Expo) are new
@@ -941,6 +1023,27 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the first contract revision; row/occurrence fields are
         # additive and do not bump it.
         "library": 1,
+        # THE OPERATOR'S INBOX (`docs/design/notifications-inbox.md`): the
+        # `/v1/desktop/notifications` routes (list, count, detail, PATCH, seen)
+        # over the items agents raise with `notify` plus the open asks, and the
+        # `notifications` invalidation frame on `GET /v1/desktop/events`. Its OWN
+        # key: the page, the sidebar destination, the `/notifications` slash
+        # destination and the feed branch are all NEW surfaces, so a renderer
+        # must recognise an older backend as "no inbox" and offer none of them
+        # (the sidebar strips the `notifications` id on save unless this key is
+        # present, decision D10). `1` is the first contract revision; item and
+        # answer fields are additive and do not bump it. Served to the relay
+        # through `_feature_flags()` like every key here.
+        "notifications": 1,
+        # THE NATIVE SEEN DOOR (D11): this core's inbox accepts per-item
+        # ``evidence.surface: "native"`` receipts — touch/press/scroll edges
+        # re-checked exactly like the desktop's, recorded as ``in_view`` with
+        # their surface. It exists as its own key because the CONSUMER is the
+        # relay: the phone turns its receipt feed on only when this is present,
+        # and a core that predates it must be recognisable as "no native
+        # receipts" rather than silently refusing every one (the refusal native
+        # #117 would retry every 500 ms). ``1`` is the first contract revision.
+        "notifications_seen": 1,
         # THE DESKTOP SIDEBAR'S DESTINATION LAYOUT: the route pair
         # `GET`/`PUT /v1/desktop/sidebar-layout` over one stored preference (the
         # rows above the `More` fold and the rows below it). ADDITIVE — an older

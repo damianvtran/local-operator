@@ -35,13 +35,70 @@ from local_operator.session.frontend_state import (
     effective_identity_for,
 )
 from local_operator.session.model_selection import (
+    SelectionReading,
     StoredModelSelection,
     fast_dial_from_row,
     read_model_selection,
+    selection_rules_fingerprint,
 )
 from local_operator.session.usage_seed import denominator_window
 
 logger = logging.getLogger(__name__)
+
+
+class _ConfigReading:
+    """ONE reading of this machine's config: the configured pair and its effort.
+
+    WHY: a single :func:`resolve_conversation_model` call used to construct a
+    ``ConfigManager`` (a YAML parse) for the pair, again for the configured effort
+    inside the metadata resolution, and twice more on the saved-selection branch
+    (``configured_base_model``) — measured at 30.5 ms wall / 14.3 ms CPU on a warm
+    desktop open, of a 58.5 ms CPU resolution. The answers are the same fields of
+    the same file, so the call reads them once and threads the values down.
+
+    Public entry points that are called on their own (the preview, the boot
+    effort resolution) still read config lazily and exactly as before; only the
+    private implementations below take a reading.
+
+    The EFFORT stays lazy (:meth:`effort`): a saved selection that names its own
+    level never consulted ``model_effort`` before, and must not start paying for
+    it. It is read from the SAME manager the pair came from, which is also why
+    ``_configured_effort_without_writing``'s existence guard is not needed here —
+    constructing that manager is what the old pair read already did first.
+    """
+
+    __slots__ = ("provider", "model_id", "_config", "_effort", "_effort_read")
+
+    def __init__(self, config_dir: Path) -> None:
+        from local_operator.config import ConfigManager
+
+        self._config = ConfigManager(config_dir=config_dir)
+        self.provider, self.model_id = _pair_from(self._config)
+        self._effort: str | None = None
+        self._effort_read = False
+
+    def effort(self) -> str | None:
+        if not self._effort_read:
+            from local_operator.model.effort import configured_effort
+
+            self._effort = configured_effort(self._config)
+            self._effort_read = True
+        return self._effort
+
+    def base_model(self) -> FrontendModelSpec:
+        """:func:`configured_base_model` from this reading, without a second manager."""
+        return _configured_model(self.provider, self.model_id, self.effort)
+
+
+def _pair_from(config: Any) -> tuple[str, str]:
+    """``configured_model_pair``'s rule over an already-constructed manager."""
+    provider = str(config.get_config_value("hosting", "") or "")
+    model_id = str(config.get_config_value("model_name", "") or "")
+    if provider and not model_id:
+        from local_operator.model.defaults import default_model_for
+
+        model_id = default_model_for(provider) or ""
+    return provider, model_id
 
 
 def resolve_birth_effort(spec: ModelSpec, chosen: str | None, config_dir: Path) -> str | None:
@@ -82,6 +139,17 @@ def resolve_birth_effort(spec: ModelSpec, chosen: str | None, config_dir: Path) 
     Every return is a rung this spec's ladder accepts, or ``None`` (nothing to
     send) — the membership contract ``resolve_effort_in`` documents.
     """
+    return _birth_effort(spec, chosen, lambda: _configured_effort_without_writing(config_dir))
+
+
+def _birth_effort(
+    spec: ModelSpec, chosen: str | None, configured_of: Callable[[], str | None]
+) -> str | None:
+    """:func:`resolve_birth_effort` with the configured level supplied by the caller.
+
+    ``configured_of`` is a thunk so the standalone entry keeps reading config only
+    when no level was chosen; a :class:`_ConfigReading` holder passes its value.
+    """
     if spec.reasoning_effort is None and spec.reasoning_default_effort is not None:
         # The shape only a seed-CLEARED spec has: ``build_model_spec`` sets the
         # default to the seed it computed, so the two are equal in every spec it
@@ -99,7 +167,7 @@ def resolve_birth_effort(spec: ModelSpec, chosen: str | None, config_dir: Path) 
 
     if chosen:
         return resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, chosen)
-    configured = _configured_effort_without_writing(config_dir)
+    configured = configured_of()
     if configured:
         return resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, configured)
     return spec.reasoning_effort
@@ -141,6 +209,15 @@ def resolve_configured_model(provider: str, model_id: str, config_dir: Path) -> 
     here is the MODEL's own, exactly as ``build_model_spec`` reports it, and it can
     still differ from the first cold frame's on an account-scoped plan.
     """
+    return _configured_model(
+        provider, model_id, lambda: _configured_effort_without_writing(config_dir)
+    )
+
+
+def _configured_model(
+    provider: str, model_id: str, configured_of: Callable[[], str | None]
+) -> FrontendModelSpec:
+    """:func:`resolve_configured_model` with the configured level supplied."""
     bare = FrontendModelSpec(provider=provider, model_id=model_id)
     if not provider or not model_id:
         return bare
@@ -151,7 +228,7 @@ def resolve_configured_model(provider: str, model_id: str, config_dir: Path) -> 
     except Exception:  # noqa: BLE001 — metadata is best-effort; the name is still an answer
         logger.debug("configured model metadata could not be resolved", exc_info=True)
         return bare
-    effort = resolve_birth_effort(spec, None, config_dir)
+    effort = _birth_effort(spec, None, configured_of)
     if effort != spec.reasoning_effort:
         spec = spec.model_copy(update={"reasoning_effort": effort})
     return FrontendModelSpec(**spec.model_dump())
@@ -168,14 +245,7 @@ def configured_model_pair(config_dir: Path) -> tuple[str, str]:
     """
     from local_operator.config import ConfigManager
 
-    config = ConfigManager(config_dir=config_dir)
-    provider = str(config.get_config_value("hosting", "") or "")
-    model_id = str(config.get_config_value("model_name", "") or "")
-    if provider and not model_id:
-        from local_operator.model.defaults import default_model_for
-
-        model_id = default_model_for(provider) or ""
-    return provider, model_id
+    return _pair_from(ConfigManager(config_dir=config_dir))
 
 
 def configured_base_model(config_dir: Path) -> FrontendModelSpec:
@@ -221,11 +291,16 @@ def resolve_birth_model(birth: ModelSpec, config_dir: Path) -> FrontendModelSpec
     ones it left at a default are answered: the name, the effort LADDER, the
     LEVEL, and a window that is still ``ModelSpec``'s placeholder.
     """
+    return _birth_model(birth, lambda: _configured_effort_without_writing(config_dir))
+
+
+def _birth_model(birth: ModelSpec, configured_of: Callable[[], str | None]) -> FrontendModelSpec:
+    """:func:`resolve_birth_model` with the configured level supplied."""
     carried = FrontendModelSpec(**birth.model_dump())
     if not carried.provider or not carried.model_id:
         return carried
     try:
-        resolved = resolve_configured_model(carried.provider, carried.model_id, config_dir)
+        resolved = _configured_model(carried.provider, carried.model_id, configured_of)
     except Exception:  # noqa: BLE001 — metadata is best-effort; the pair is still an answer
         logger.debug("birth model metadata could not be resolved", exc_info=True)
         return carried
@@ -286,6 +361,17 @@ def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> Fronte
     Best-effort throughout: a resolution that raises leaves the bare pair, which is
     the selector the band has always known how to render.
     """
+    return _saved_model(saved, lambda: configured_base_model(config_dir))
+
+
+def _saved_model(
+    saved: StoredModelSelection, base_of: Callable[[], FrontendModelSpec]
+) -> FrontendModelSpec:
+    """:func:`resolve_saved_model` with the configured base supplied as a thunk.
+
+    A THUNK, not a value: the base is built only under ``saved.effort is None``
+    (see the note below), and that laziness is part of the measured saving.
+    """
     bare = FrontendModelSpec(
         provider=saved.provider, model_id=saved.model_id, reasoning_effort=saved.effort
     )
@@ -305,11 +391,7 @@ def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> Fronte
         # is the first frame: ``configured_base_model`` costs 7-200ms warm here and
         # far more cold, and the resolution below already resolves the target
         # (review round 1, minor 4).
-        base = (
-            configured_base_model(config_dir)
-            if saved.effort is None
-            else FrontendModelSpec(provider="", model_id="")
-        )
+        base = base_of() if saved.effort is None else FrontendModelSpec(provider="", model_id="")
         resolved = spec_for_target(base, FallbackTarget(saved.selector, saved.effort))
         if saved.effort:
             # THE COLD FRAME CLAMPS WHAT THE WARM RESTORE CLAMPS. A saved level
@@ -355,6 +437,7 @@ def resolve_conversation_model(
     birth_model: ModelSpec | None = None,
     model_selection_override: bool = False,
     selection_sink: Callable[[StoredModelSelection | None], None] | None = None,
+    selection: SelectionReading | None = None,
 ) -> FrontendModelSpec:
     """The model this conversation is on, from config and its own journal.
 
@@ -382,17 +465,39 @@ def resolve_conversation_model(
     selection itself — either duplicates that read or duplicates this resolution,
     and a second resolution is the defect this module exists to remove. Pass
     ``None`` (the default) if the value is not wanted.
+
+    ``selection`` is a reading of THIS journal's selection the caller already
+    holds — today only the deferred desktop open, from the durable cold record
+    (``cold_metadata.ColdMetadata.selection``), whose witness proves the journal
+    has not moved since the reading was taken. Given, the journal is not read at
+    all: on a warm open that read was the settle scan plus the forward fold,
+    measured at 49.9 + 19.7 ms wall on a 32k-row journal with no selection row.
+    ``None`` means "no reading", never "no selection" — the journal is read
+    exactly as before. Proved absence travels INSIDE the reading
+    (``SelectionReading(selection=None)``), so the two cannot be confused.
+
+    ONE CONFIG READING PER CALL (:class:`_ConfigReading`): the pair, the
+    configured effort and the saved-selection branch's base all come from one
+    ``ConfigManager`` rather than up to four, with the same values and order.
     """
     model: FrontendModelSpec | None = None
     saved: StoredModelSelection | None = None
     try:
-        provider, model_id = configured_model_pair(config_dir)
-        if session_dir is not None:
+        config = _ConfigReading(config_dir)
+        provider, model_id = config.provider, config.model_id
+        if selection is not None and selection.rules != selection_rules_fingerprint():
+            # A reading made under other selection rules (a provider added,
+            # removed or reclassified by an upgrade since the record was
+            # written) may not be this build's answer: read the journal.
+            selection = None
+        if selection is not None:
+            saved = selection.selection
+        elif session_dir is not None:
             saved = read_model_selection(session_dir)
         if selection_sink is not None:
             selection_sink(saved)
         if birth_model is not None and (saved is None or model_selection_override):
-            model = resolve_birth_model(birth_model, config_dir)
+            model = _birth_model(birth_model, config.effort)
         elif saved is not None:
             # The conversation's own pair, resolved through its OWN metadata — the
             # same treatment the configured pair below already gets, and for the
@@ -402,7 +507,7 @@ def resolve_conversation_model(
             # not ship) and a 128k window standing in for the model's real one (so
             # the band divided a measured reading by it). See
             # :func:`resolve_saved_model`.
-            model = resolve_saved_model(saved, config_dir)
+            model = _saved_model(saved, config.base_model)
         else:
             # The configured pair, resolved through its OWN metadata. A bare
             # ``FrontendModelSpec(provider, model_id)`` answers no ladder and no
@@ -412,7 +517,7 @@ def resolve_conversation_model(
             # half of it). See ``resolve_configured_model`` for what is
             # model-derived here (the ladder, the level) and what is still the
             # account's to answer (the effective window).
-            model = resolve_configured_model(provider, model_id, config_dir)
+            model = _configured_model(provider, model_id, config.effort)
     except Exception:  # noqa: BLE001 — an unreadable config is not fatal
         logger.debug("cold state could not read the configured model", exc_info=True)
         if selection_sink is not None and saved is None:
@@ -483,6 +588,7 @@ async def synthesise_cold_state(
     wakes: Iterable[WakeState] = (),
     monitors: Iterable[MonitorState] = (),
     selection_sink: Callable[[StoredModelSelection | None], None] | None = None,
+    selection: SelectionReading | None = None,
 ) -> FrontendSessionState:
     """Canonical state for a session with no runtime to ask.
 
@@ -498,6 +604,8 @@ async def synthesise_cold_state(
     models. The metadata step is deliberately NOT applied here — a caller that
     wants it calls :func:`resolve_context_metadata` — so a preview cannot move
     account stickiness on the strength of a synthetic key.
+
+    ``selection``: see :func:`resolve_conversation_model`.
     """
     session_dir = (config_dir / "sessions" / session_id) if session_id else None
 
@@ -508,6 +616,7 @@ async def synthesise_cold_state(
             birth_model=birth_model,
             model_selection_override=model_selection_override,
             selection_sink=selection_sink,
+            selection=selection,
         )
         return FrontendSessionState(
             session_id=session_id,

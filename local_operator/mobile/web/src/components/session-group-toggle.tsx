@@ -26,9 +26,10 @@
  * be a dead control: the screen keeps the ordinary flat view until a catalogue
  * answers.
  */
+import { messageRuntime } from "../store";
 import { cn } from "../lib/cn";
 
-const TOGGLE_LABEL = "group by tags";
+
 const RETRY_LABEL = "retry tags";
 
 /** The one line under the controls, or `null` when grouping is simply on. */
@@ -76,23 +77,23 @@ export function SessionGroupToggle({
 				<button
 					type="button"
 					aria-pressed={grouped}
-					aria-label="Group by tags"
+					aria-label={messageRuntime.t("relay.chrome.appearance.group_by_tag")}
 					onClick={onToggle}
 					className={cn(
-						"min-h-11 rounded-sm border px-3 text-body-sm",
+						"min-h-11 rounded-sm px-3 text-body-sm",
 						grouped
-							? "border-accent bg-accent-wash text-accent"
-							: "border-control bg-surface text-ink-muted",
+							? "bg-accent-wash text-accent"
+							: "bg-surface text-ink-muted",
 					)}
 				>
-					{TOGGLE_LABEL}
+					{messageRuntime.t("relay.chrome.appearance.group_by_tag")}
 				</button>
 				{failed ? (
 					<button
 						type="button"
 						aria-label="Retry tags"
 						onClick={onRetry}
-						className="min-h-11 rounded-sm border border-control bg-surface px-3 text-body-sm text-ink-muted"
+						className="min-h-11 rounded-sm bg-surface px-3 text-body-sm text-ink-muted"
 					>
 						{RETRY_LABEL}
 					</button>

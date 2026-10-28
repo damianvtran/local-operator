@@ -231,6 +231,9 @@ def test_pair_status_reports_pending_then_the_certificate(
         "device_id",
         "certificate",
         "operator_key_id",
+        # The installed anchor's PUBLIC point (B2), so the phone can verify its own
+        # certificate; "" here because this cell installs no root-owned anchor.
+        "operator_spki",
         "scope",
         "exp",
         "name",
@@ -686,3 +689,281 @@ def test_a_new_anchor_lifts_a_revocation_recorded_on_this_machine(
     assert fresh.key_id != anchor.key_id
     monkeypatch.setattr(trust, "load_anchor", load(fresh))
     assert claim().status_code == 200, "a superseded anchor's record still bricked the phone"
+
+
+# ---------------------------------------------------------------------------
+# The command path refuses a revoked device's certificate (C1)
+# ---------------------------------------------------------------------------
+
+
+def _paired_certificate(config_root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str, Any]:
+    """A REAL operator-signed device certificate, the device id it names, and the anchor.
+
+    Real rather than synthetic because the guard parses it with the same reader
+    the runtime uses; a hand-rolled string would test a parser nobody ships.
+    """
+    from local_operator.operator.sign import issue_device_cert, load_signer
+
+    anchor = _install_operator_key(config_root, monkeypatch)
+    point = _point()
+    device_id = devices.new_device_id(point)
+    signer = load_signer(config_root=config_root, backend_name="file-only")
+    assert signer is not None, "the fixture's operator key did not load"
+    try:
+        certificate = issue_device_cert(
+            device_spki=point, device_id=device_id, label="my phone", signer=signer
+        )
+    finally:
+        signer.close()
+    return certificate, device_id, anchor
+
+
+class _RecordingWriter:
+    """The session socket: records every frame the relay really writes, and acks it."""
+
+    def __init__(self, daemon: MobileDaemon, pid: int) -> None:
+        self.written: list[dict[str, Any]] = []
+        self._daemon = daemon
+        self._pid = pid
+
+    def write(self, payload: bytes) -> None:
+        frame = json.loads(payload.decode())
+        self.written.append(frame)
+        self._daemon._pending_reqs[(self._pid, frame["req"])].set_result(
+            {"op": "ack", "req": frame["req"], "detail": "ok"}
+        )
+
+    async def drain(self) -> None:
+        return None
+
+
+def _command_rig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[MobileDaemon, _RecordingWriter, TestClient]:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = _record(session_id="revoked-cert-session")
+    entry = SessionEntry(record)
+    writer = _RecordingWriter(daemon, record.pid)
+    entry.writer = writer  # type: ignore[assignment]
+    daemon.table.entries[record.pid] = entry
+    return daemon, writer, _logged_in(daemon)
+
+
+def _signed_command(certificate: str) -> dict[str, Any]:
+    return {
+        "op": "slash_result",
+        "command": "approvals",
+        "args": "auto",
+        "images": [],
+        "operator_sig": "bb" * 8,
+        "operator_key_id": "cc" * 16,
+        "operator_cert": certificate,
+    }
+
+
+@pytest.mark.parametrize("where", ["local-record", "anchor"])
+def test_the_command_route_refuses_a_revoked_devices_certificate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """C1: the phone kept approval authority after a LOCAL revocation.
+
+    `lop operator devices --revoke` records the device in the relay's own
+    ``revoked.json`` and deletes the stored certificate — but the phone keeps its
+    copy, and the runtime re-checks only the root-owned anchor. Measured on
+    origin/main: with the revocation in the local record only (``--print-only``, or
+    before the privileged anchor write), the relay FORWARDED the certificate. Both
+    lists must refuse it, before any frame is written or future parked.
+    """
+    daemon, writer, client = _command_rig(tmp_path, monkeypatch)
+    certificate, device_id, _anchor = _paired_certificate(tmp_path, monkeypatch)
+    if where == "local-record":
+        devices.record_revocation(tmp_path, device_id)
+    else:
+        _anchor_with_revocation(monkeypatch, device_id)
+        assert devices.is_revoked_here(tmp_path, device_id) is False
+    assert devices.is_revoked(tmp_path, device_id) is True
+
+    reply = client.post(
+        "/api/sessions/revoked-cert-session/command", json=_signed_command(certificate)
+    )
+    assert reply.status_code == 403, reply.text
+    assert reply.json() == {
+        "error": (
+            "This phone's approval access was removed on the computer, and only that "
+            "machine can restore it — pairing again will be refused until then. Ask Local "
+            "Operator on that machine to allow this phone again, then pair this phone again."
+        ),
+        "code": "operator_device_revoked",
+    }
+    assert writer.written == [], "a revoked device's signature reached the session"
+    assert daemon._pending_reqs == {}, "a refusal left a future parked"
+
+
+def test_a_new_anchor_lifts_a_local_revocation_on_the_command_route_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-2 on the command path: a SUPERSEDED anchor's local record does not refuse.
+
+    The command-route twin of
+    ``test_a_new_anchor_lifts_a_revocation_recorded_on_this_machine``. The guard asks
+    ``devices.is_revoked``, which ignores a ``revoked.json`` stamped with a key id
+    that is no longer installed; a refactor to an unscoped local-only check would
+    brick every re-anchored phone on this route while the ``/api/pair`` cell stayed
+    green. So the same record that refuses under its own anchor must FORWARD once a
+    genuinely new anchor is installed.
+    """
+    from local_operator.operator import trust
+    from local_operator.operator.keychain import FILE_ONLY
+    from local_operator.operator.sign import anchor_for_handle, create_key
+
+    _daemon, writer, client = _command_rig(tmp_path, monkeypatch)
+    certificate, device_id, anchor = _paired_certificate(tmp_path, monkeypatch)
+
+    def load(which: Any) -> Any:
+        return lambda uid=None: trust.AnchorLoad(
+            anchor=which, path=trust.anchor_path(uid), root_owned=True, reason="ok", exists=True
+        )
+
+    def send() -> Any:
+        return client.post(
+            "/api/sessions/revoked-cert-session/command", json=_signed_command(certificate)
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", load(anchor))
+    devices.record_revocation(tmp_path, device_id)
+    assert json.loads(devices.revoked_path(tmp_path).read_text())["operator_key_id"] == (
+        anchor.key_id
+    ), "the record was not stamped with the anchor it belongs to"
+    refused = send()
+    assert refused.status_code == 403, refused.text
+    assert writer.written == []
+
+    # Only the root-owned INSTALL fact is supplied; the key and anchor are real.
+    fresh = anchor_for_handle(
+        create_key(config_root=tmp_path / "fresh", preference=FILE_ONLY), label="second"
+    )
+    assert fresh.key_id != anchor.key_id
+    monkeypatch.setattr(trust, "load_anchor", load(fresh))
+    forwarded = send()
+    assert forwarded.status_code == 200, "a superseded anchor's record still refused the command"
+    assert writer.written[-1]["operator_cert"] == certificate
+
+
+def test_the_command_route_still_forwards_a_live_devices_certificate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: a paired, un-revoked device's certificate is carried as before,
+    and so is one the relay cannot parse — the runtime, not the courier, refuses that."""
+    _daemon, writer, client = _command_rig(tmp_path, monkeypatch)
+    certificate, device_id, _anchor = _paired_certificate(tmp_path, monkeypatch)
+    assert devices.is_revoked(tmp_path, device_id) is False
+
+    for presented in (certificate, "operator-signed-statement"):
+        reply = client.post(
+            "/api/sessions/revoked-cert-session/command", json=_signed_command(presented)
+        )
+        assert reply.status_code == 200, (presented, reply.text)
+        assert writer.written[-1]["operator_cert"] == presented
+    assert len(writer.written) == 2
+
+
+def test_pair_status_carries_the_operator_public_key_the_certificate_verifies_against(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: the phone could not verify its own certificate — the key was never sent.
+
+    The paired answer now carries the installed anchor's public point, which the
+    cell proves by VERIFYING the returned certificate against it, the way a phone
+    would. Only when the installed anchor is the certificate's signer: a superseded
+    anchor's point would verify nothing. The unpaired answer is unchanged.
+    """
+    from local_operator.operator import trust
+    from local_operator.operator.keychain import FILE_ONLY
+    from local_operator.operator.sign import anchor_for_handle, create_key
+    from local_operator.operator.verify import read_device_cert, verify_device_cert
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    certificate, device_id, anchor = _paired_certificate(tmp_path, monkeypatch)
+    parsed = read_device_cert(certificate)
+    assert parsed is not None
+    devices.write_device_cert(
+        tmp_path, certificate=certificate, parsed=parsed, operator_key_id=anchor.key_id
+    )
+
+    def installed(which: Any) -> Any:
+        return lambda uid=None: trust.AnchorLoad(
+            anchor=which, path=trust.anchor_path(uid), root_owned=True, reason="ok", exists=True
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", installed(anchor))
+    client = _logged_in(MobileDaemon(port=0, password="pw123"))
+
+    unpaired = client.get(f"/api/pair/{devices.new_device_id(_point())}")
+    assert set(unpaired.json()) == {"paired", "device_id"}, unpaired.text
+
+    body = client.get(f"/api/pair/{device_id}").json()
+    assert body["operator_spki"] == devices.encode_spki(anchor.spki)
+    point = base64.urlsafe_b64decode(
+        body["operator_spki"] + "=" * (-len(body["operator_spki"]) % 4)
+    )
+    assert (
+        verify_device_cert(certificate, operator_spki=point, now=parsed.issued_at) is not None
+    ), "the returned key does not verify the returned certificate"
+
+    fresh = anchor_for_handle(
+        create_key(config_root=tmp_path / "fresh", preference=FILE_ONLY), label="second"
+    )
+    monkeypatch.setattr(trust, "load_anchor", installed(fresh))
+    assert (
+        client.get(f"/api/pair/{device_id}").json()["operator_spki"] == ""
+    ), "a superseded anchor's key was offered for a certificate it did not sign"
+
+
+def test_an_unreadable_anchor_forwards_the_command_rather_than_failing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1: a root-owned DIRECTORY at the anchor path must not 500 the command route.
+
+    ``load_anchor`` opens a directory, its owner and mode checks pass, and the read
+    raises ``IsADirectoryError`` — which ``is_revoked`` does not catch. Measured on
+    c661224c0f1 (the arm removed): the route raised. The revocation belt fails OPEN
+    here, as round 1 did (R3-1): only root can create this state, and root can
+    already rewrite the anchor; a deleted or mode-0666 anchor already forwards a
+    stamped revocation (R9-2), so this keeps the three unusable-anchor states
+    consistent; and the revoked refusal would be false for this phone, while
+    ``/api/pair`` 500s in the same state. Residual: the runtime's cached anchor can
+    admit a locally stamped revocation for up to ~30 s; the follow-up is
+    ``load_anchor`` rejecting non-regular files.
+
+    Only root ownership is faked — creating a root-owned directory needs root — and
+    only for the anchor path; the directory and the real ``load_anchor`` are real.
+    """
+    import os
+
+    from local_operator.operator import trust
+
+    _daemon, writer, client = _command_rig(tmp_path, monkeypatch)
+    certificate, _device_id, _anchor = _paired_certificate(tmp_path, monkeypatch)
+    anchor = trust.anchor_path()
+    anchor.mkdir()
+    real_open = trust._open_no_follow
+
+    def as_root(path: Path) -> Any:
+        opened = real_open(path)
+        if opened is None or path != anchor:
+            return opened
+        descriptor, info = opened
+        fields = list(info)
+        fields[0], fields[4] = 0o040755, 0  # st_mode, st_uid
+        return descriptor, os.stat_result(fields)
+
+    monkeypatch.setattr(trust, "_open_no_follow", as_root)
+    with pytest.raises(IsADirectoryError):
+        trust.load_anchor()  # the premise: the anchor read really raises
+
+    reply = client.post(
+        "/api/sessions/revoked-cert-session/command", json=_signed_command(certificate)
+    )
+    assert reply.status_code == 200, reply.text
+    assert writer.written[-1]["operator_cert"] == certificate

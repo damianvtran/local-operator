@@ -562,6 +562,22 @@ that fallback, so one gate does not produce both an Electron and runtime toast.
 sends it once the last live lease has run out (45 s with no beat), never at a
 transient stream end.
 
+`activity` is the terminal's input half of that same question, and it exists
+because `viewer_watch` alone could not answer it (R6-1). `viewer_watch` says
+WHICH conversation a multiplexing terminal is displaying; a conversation can be
+on screen while the operator is away from the keyboard. The item ladder stands
+its rung 4 down only for a conversation that is BOTH displayed and being typed
+in, so an attached TUI sends `{"op": "activity", "input_at_ms": <epoch ms>}` on a
+real `Key`/`MouseDown` edge, throttled by the client to one report per 10 s. The
+payload is one positive integer and nothing else: the age of the newest edge is
+the whole of what routing needs, and keystroke content never leaves the UI. A
+runtime keeps, per attach connection, the newest stamp; the rung-4 check reads
+the newest stamp among connections that have not declared they are away, and
+answers `None` — "cannot tell" — when no such connection ever reported. `None`
+falls through to notifying, so an old client, a silent client and a stale stamp
+all keep today's behaviour. A frame whose `input_at_ms` is not a positive
+integer is refused, and a refused frame is never stored.
+
 A lease is also the one signal that CREATES residency rather than only
 preserving it. While a live lease says `visible`, the HTTP bridge starts the
 session's runtime in the background (`refresh_watch`), because that is term 3 of
@@ -765,6 +781,8 @@ readings.
 | GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1`, `open_frame=1` | snapshot frame below (**read envelope**); both flags also apply to the page embedded in `payload.history` (`open_frame=1` = §"The open frame") |
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1`, `open_frame=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
 | GET `.../{id}/files` | optional `scope=family\|self`, `kind`, `origin`, `highlighted=0\|1`, `q`, `sort=recent\|name\|kind\|modified\|created\|size`, `order=asc\|desc`, `limit` 1..200 (default 100), `cursor` | `{state,revision,scope,sort,order,total,counts,rows,next_cursor,cursor_reset,stat_complete,scan}` — the per-session file index (`session_files`); see §"The per-session file index" |
+| GET `.../{id}/user-attachments` | — | `{state:ready\|unsupported\|unavailable,items,truncated}` — every document and picture the USER attached, oldest first, metadata only (`session_attachments`); see §"The user-attachment inventory" |
+| POST `.../{id}/user-attachments/{digest}/materialise` | — | `{path,name,size_bytes,created}`; copies a user attachment's retained bytes to `<session scratchpad>/generated/` so open/reveal/copy-path have a real, correctly named file (`session_attachments`) |
 | POST `.../{id}/files/{file_id}/materialise` | — | `{path,name,size_bytes,created}`; copies a digest-only artifact to `<session scratchpad>/generated/` (`session_files`) |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
@@ -916,7 +934,7 @@ that clears nothing is still `200` — a non-2xx would make a client discard the
 partial result it did get — while a per-item failure is `unknown` for that item
 rather than a 404 for the call. A store failure (`sqlite3.Error`) goes through the
 shared classifier (`session/store_failures.py` — the same module the TUI's
-`/notifications` consumes, so one store cannot be described two ways), which
+`/unread` (formerly `/notifications`) consumes, so one store cannot be described two ways), which
 splits it by condition: contention (`SQLITE_BUSY`) answers the retryable `503`,
 a full volume `507` `store_out_of_space`, and a store this process cannot read or
 open `500` `store_unavailable`. Each call writes inside a single transaction, so
@@ -1820,6 +1838,34 @@ and two shapes for one page is the defect the capability exists to prevent.
    which is why a warm index stays cheap and why an unchanged journal costs a
    stat.
 
+#### Scheduling the index behind the first frame
+
+The desktop `GET /v1/desktop/sessions/{id}/checkpoints` manifest reads the index
+without attaching a session or constructing a cold facade. It uses the pool's
+same identity/draft/peer checks and retirement predicate; peer rows still return
+`unsupported`, registered drafts return an empty `ready` manifest, and a latched
+daemon still refuses the read. It does not acquire the bridge lock, so the
+parallel `/events` request never queues behind the manifest's facade build.
+
+The desktop `/events` route takes a **per-session paint hold** before its attach
+and releases it after writing the snapshot frame. While held, a cold index
+refresh whose full scan cannot fit the existing first-paint scan-rate budget
+waits instead of competing with the first frame for CPU/GIL time. This is the
+same size/rate predicate as the manifest's bounded wait, not another threshold.
+Small journals and existing index caches are not deferred. Unpayable scans
+already answered `building` before this scheduling change; clients must re-read
+a `building` manifest to obtain the completed ticks. There is no query flag and
+no change to the manifest or frame schema.
+
+Holds are reference-counted: two concurrent opens of the same session release
+the scan after the last snapshot (or teardown). Acquire failures, stream errors,
+disconnects and unconsumed response bodies release their own hold idempotently;
+a 15-second ceiling also prevents a missed release from starving the scan.
+The frame does not wait on a scan deferred by its own hold. Other sessions are
+independent. The TUI and mobile relay never take a desktop paint hold, so their
+index scheduling remains unchanged. `LOP_OPEN_TRACE` records
+`index.refresh_start` alongside `a.wire.frame kind=snapshot` for timing evidence.
+
 #### The anchored read keeps the reader's own counts
 
 `around_id` is the renderer's FAR JUMP: it asks for a POSITION, and its
@@ -2371,6 +2417,42 @@ that blanks `content`. Older sessions backfill from the `AttachmentContent` bloc
 `content` while those are unpruned; an old row that was already pruned is the one thing the
 index cannot recover.
 
+### The user-attachment inventory (`session_attachments: 1`)
+
+`GET /v1/desktop/sessions/{id}/user-attachments` answers *which files and pictures did the
+person attach to this conversation?* A renderer cannot answer that from loaded history: pages
+arrive newest-first on demand, so a PDF from the first turn of a long conversation is not in
+memory when the canvas opens, and listing only the loaded rows would claim "nothing attached".
+The route scans the whole journal (`local_operator/session/user_attachments.py`).
+
+Each item: `{message_id, ts, index, kind: document|image, attachment, filename, mime_type,
+bytes, path, exists, stored_path, stored, injection, materialisable}`. `index` is the block's position in its
+message's `content`; `attachment` is the store digest (`null` when the row's inline bytes are
+not in the store); `path` is the ORIGIN path and `exists` whether it is still a file (`null` with no origin),
+`stored_path`/`stored` the retained
+store copy and whether it is on disk now. `materialisable` is `false` when the sensitive-path
+denylist (the file index's `make_deny`) refuses the origin path, the original filename or the
+name a copy would get (`~/.ssh/id_rsa`, `.env`, `<config>/master.key`) — and for every row
+sharing a refused digest. Such a row is still listed (the person attached it), but no
+open/reveal/copy-path action may be offered for it. **Metadata only:** bytes stay on
+`…/attachments/{digest}`; there is no second transport. User rows only, and never a
+harness-injected row (`provider_payload.harness_injected`).
+
+States: `ready` (complete), `unsupported` (a peer's conversation), `unavailable` (an archive
+this host cannot decode). `truncated: true` past 2000 items. Admission is the file index's
+(404 unknown id, 409 silent peer, empty `ready` for a draft). Absent key: the renderer
+aggregates loaded rows and must not call the route.
+
+`POST …/user-attachments/{digest}/materialise` copies a listed attachment's RETAINED bytes to
+`<session scratchpad>/generated/<name>` (the file index's hardened copy: pinned no-follow
+directories, sanitised name, MIME-derived extension, idempotent, never overwrites). The
+digest must be one the person attached to this conversation (the store is shared, so a bare
+digest proves nothing). Refusals reuse the file index's codes: `404
+session_files_file_not_found` (also for a `materialisable: false` row — the file index
+answers the same for a denied path, which it never lists — checked before any byte is read,
+so nothing is written), `410 session_files_artifact_missing`, `409
+session_files_unsafe_destination`.
+
 ### Verification
 
 `tests/e2e/test_desktop_sessions.py` drives real loopback HTTP and the production
@@ -2392,6 +2474,123 @@ reset. The test-owned runtime exits through its own stop protocol. Neither test
 uses operator credentials or connects to operator sessions. Unit tests exercise
 receipt crash ambiguity, byte/count overflow, lease aggregation, cache isolation
 and the inclusive history paging boundary.
+
+## The Notifications inbox (`notifications: 1`)
+
+The operator's machine-wide inbox: items agents post with the `notify` tool plus
+the OPEN asks agents are blocked on (`docs/design/notifications-inbox.md`). Every
+route is cold — none opens a session, dials or starts a runtime — because items
+outlive the runtime that raised them. All need the desktop bearer (401 without).
+Absent `features.notifications`, a renderer must offer no page, sidebar row,
+slash destination or feed branch, and must strip the `notifications` sidebar id
+on save (an older core refuses it).
+
+| Route | Body / query | Answer (`result`) |
+|---|---|---|
+| `GET /v1/desktop/notifications` | `state=unread\|all\|dismissed` (default `unread`), `source=notify\|ask`, `priority=high\|normal\|low`, `session_id`, `cursor`, `through_seq` (freeze first-page boundary), `limit` 1..100 (default 50) | `{items, next_cursor, observed:[{id,revision}], unread_count, waiting_count, waiting_unread_count, high_water, waiting?}` — `waiting` (open asks, not paged) rides the first page only |
+| `GET /v1/desktop/notifications/count` | — | `{unread_count, waiting_count, waiting_unread_count, high_water}` |
+| `GET /v1/desktop/notifications/{id}` | `id` = `n_<16 base32>` or `ask:<session_id>:<ask_id>` | `{item, history, session, anchor, projects, asks}`; 404 `wire.errors.notifications.unknown_item`, 422 for a malformed id |
+| `PATCH /v1/desktop/notifications` | `{op: read\|unread\|dismiss\|undismiss}` plus EXACTLY ONE target: `ids:[{id, revision}]` (1..500), or `session_id`+`through_seq`+`observed`, or `all:true`+`through_seq`+`observed` (0..500 tokens) | `{changed, skipped:[{id, reason}], unread_count, waiting_count, waiting_unread_count, high_water}` |
+| `POST /v1/desktop/notifications/seen` | `{items:[{id, revision, anchor_id, visible_since_ms?}] (1..100), evidence:{surface, session_id, input_kind, input_at_ms, visible_since_ms}}` | same shape as PATCH |
+
+**Item shape** (`notifications/items.py`, one shape for both sources): `id`,
+`source` (`notify`/`ask`), `priority`, `title`, `excerpt`, `created_at`,
+`updated_at`, `seq`, `revision`, `read`, `read_via`
+(`explicit`/`in_view`/`null`; creation is always unread), `dismissed`, `repeat_count`, `key`,
+`anchor_id`, `session{id, title, agent_id, live}`, `projects[{key, name,
+status}]`, `ask` (the open ask's question/dismissibility, else `null`) and
+`actions{dismiss, answer, read}`. An open ask always reports `high` and
+`actions.dismiss=false`. `live_state` is core's own vocabulary
+(`busy`/`idle`/`attached`/`wedged`, and `""` for a cold row); this path is a
+cold reader, so it reports `idle` when the liveness marker shows a resident
+runtime and `""` otherwise, with `live` as the boolean beside it. The detail
+route's `session` adds `cwd`.
+
+**Writes are token-bound (R10), never sweeps.** A by-id write names the
+`revision` it rendered — a newer revision is `skipped: stale_revision` and stays
+unread. A by-session or all-items write must carry `through_seq` AND the
+`observed:[{id,revision}]` tokens the list returned. Tokens bound both source
+stores and the rendered filters/page; the scalar bound alone cannot identify
+asks. Missing observations are 422, not a legacy sweep. Session scope only
+narrows that set. Concurrent new revisions are skipped, never silently cleared.
+
+**Seen evidence is per item, and focus is not an edge.** `input_kind` is
+`pointerdown`, `keydown` or `wheel`; a focus-only report is 422 (D12). When an
+item supplies its own `visible_since_ms`, the server checks that stamp against
+THAT row's current `updated_at`, then `visible_since <= input_at <= now` and the
+120 s freshness/dwell rules. The batch field remains the fallback for clients
+that have not added per-item stamps; a mixed batch is judged row by row (D13).
+
+**Banners (`high` only) and the `update` feed branch.** `normal` and `low`
+never raise a native notification; they are the badge and the page. A `high`
+item is claimed at most once per revision by any banner producer
+(`claim_delivery`), and only while the row is still unread AND still
+UNDISMISSED — a dismissed row is never claimed, which is what keeps a keyed
+update to something the operator put away out of view (contract §1.3). The
+claim is released when a delivery attempt produces nothing
+(`release_delivery`), so an owed banner is never lost, and a later content
+change bumps `revision`, which makes the row claimable again.
+
+EVERY RUNG HOLDS A REVISION FOR `delivery.BANNER_GRACE_MS` (2500 ms) from its
+last content change before claiming it. The desktop's in-view receipt needs a
+1 s dwell after a fresh input (`POST .../notifications/seen`), so a raise at the
+write could never be cancelled by the operator already looking at the item;
+the hold is bounded, it only ever suppresses a banner for a revision ALREADY
+READ when it expires, and an unread revision always raises. An unchanged
+or dismissed update (`action` `unchanged`/`absorbed`) never raises and so never
+suppresses its run's completion banner.
+
+The desktop leg raises it on the `notification` frame with `kind: "update"`
+(`notification_contract` stays `1`; a renderer that does not know the kind
+renders it as text):
+`{kind, notification_id, item_revision, priority, title, body, session_id,
+focus_policy, dedupe_key}`. It is published only while a live desktop lease
+advertises `update` in `can_notify_kinds` — and only to the subscriptions of
+THIS feed that advertised it, never to every subscriber on the machine.
+
+The burst ceiling is a WINDOW, not a tick: at most `desktop_feed.BURST_LIMIT`
+(3) individual banners per `ITEM_BURST_WINDOW_S` (10 s), then ONE digest frame
+`{kind, overflow: true, count, notification_ids, priority, dedupe_key}` which
+claims the WHOLE remainder of that window in the same pass. A per-tick ceiling
+re-armed every 100 ms, so ten items became ten banners in a third of a second;
+a window is what makes "one interruption that says ten" true. The same two
+gates the completion leg applies — the `display.notifications` switch and the
+identity guard — refuse before any claim, so a gated revise is neither published
+nor stranded. A runtime run that raised (or handed off) an item banner does not also
+raise its own completion banner; `error` ends always do.
+
+**All means the entire explicitly requested scope, not the first 50 rows.** On
+an explicit mark-all/dismiss-session gesture, clients enumerate every page of
+that state/source/priority/session scope with progress/count feedback, freeze
+the FIRST response's `high_water`, pass it as `through_seq` on every later GET,
+and union each page's `observed` tokens. Keep the first page's ask refs; do not
+refresh them into a later ask set. Then PATCH batches of at most 500 tokens with
+the same boundary. A filtered action must name its filtered scope; it never
+silently widens to the whole inbox. Read/unread applies to observed live ask
+marks as well as notify revisions, without touching ask logs.
+
+`waiting_count` is all pending asks (the group); `waiting_unread_count` is its
+unread subset. The sidebar badge is `unread_count + waiting_unread_count`.
+Reading an ask clears that badge half but never removes its pending group row.
+
+An
+ask id under `dismiss`/`undismiss` is `skipped: live_ask` and the ask log is not
+written; under `read`/`unread` only its reel-side mark moves. Other skip
+reasons: `unknown`, `already`. `seen` re-checks its evidence per item (see
+`docs/ATTENTION.md`, "Inbox items") and adds `anchor_mismatch` and
+`stale_evidence`. Undo reuses the original by-id revision tokens, not the
+mutation receipt's newer high-water mark; an intervening content update makes
+that Undo `stale_revision`, not permission to affect a new revision.
+
+Consumers invalidate on EVERY `notifications` frame, not only a changed
+payload `revision`: replacing an ask can keep both SQLite high-water and all
+counts unchanged while the frame's envelope sequence advances.
+
+**Refusals** go through the shared classifier (`session/store_failures.py`)
+with this surface's own sentences (`wire.errors.notifications.*`, the
+`receipts_refusal` precedent): contention answers the retryable `503`
+`store_busy`, a full volume `507` `store_out_of_space`, and a store this process
+cannot read or open `500` `store_unavailable`.
 
 ## The machine-wide event feed
 
@@ -2436,7 +2635,9 @@ to.
 {"epoch":"…","seq":16,"type":"authoring","payload":{"revision":7}}
 {"epoch":"…","seq":17,"type":"session_status","session_id":"<12 hex>",
  "payload":{"code":"approval","label":"Approval needed","revision":3}}
-{"epoch":"…","seq":18,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":18,"type":"notifications",
+ "payload":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0}}
+{"epoch":"…","seq":19,"type":"heartbeat","payload":{"ts":1699999999.5}}
 {"epoch":"…","seq":19,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```
 
@@ -2583,14 +2784,24 @@ to.
   refetch on window focus and on mount is the backstop for both. What a row's
   file being READ costs is bounded the same way: a probe re-reads a row only when
   that row's stat moved.
+- `notifications` (`features.notifications`) is the inbox's INVALIDATION frame:
+  `{revision, unread_count, waiting_count}`, where `revision` is the store's
+  `high_water`. No `session_id` (the inbox is machine-wide) and never item
+  bodies — a client refetches `GET /v1/desktop/notifications` when `revision`
+  moved past what it painted, and draws the badge from the counts. Two
+  doorbells feed it: `notifications.db` and its sidecars on every tick (an item
+  write lands within one tick), and the asks index directory on the 1 s probe
+  (the badge also counts open asks). Published only when the triple changed, at
+  most once per tick; the connection's first read is a baseline, so a
+  reconnect replays nothing.
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
   overflow emits `gap` and closes.
 
 ### The polling cadence
 
 One task per process, started with the first subscriber and stopped with the
-last. Each tick is FIVE `os.stat` calls — `attention.db` with its two journal
-sidecars, plus `run/mobile`, the discovery-record directory, which is where the
+last. Each tick is EIGHT `os.stat` calls — `attention.db` with its two journal
+sidecars, `notifications.db` with the same two (the inbox doorbell), plus `run/mobile`, the discovery-record directory, which is where the
 status channel's edges come from — the doorbell `config_watch` already uses for
 `config.yml` — plus `config.yml` ITSELF, the settings doorbell: its movement
 publishes a `config` frame naming the changed keys and the freshly resolved
@@ -2646,7 +2857,7 @@ row**; a row's metadata file is READ only when that row's stat moved, so an idle
 probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
 is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
 its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
-on the 100 ms tick — a quiet tick still pays exactly the five stats the doorbell
+on the 100 ms tick — a quiet tick still pays exactly the eight stats the doorbell
 is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
 other probe here. The projection is a line filter rather than a YAML parse for
 the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,

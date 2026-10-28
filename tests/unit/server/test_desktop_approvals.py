@@ -231,9 +231,12 @@ def test_frozen_paths_remain_and_onboarding_is_additive() -> None:
         ("/v1/desktop/approvals/{approval_id}", ("GET",)),
         ("/v1/desktop/approvals/{approval_id}/run", ("POST",)),
         ("/v1/desktop/approvals/{approval_id}/approve-network-enrollment", ("POST",)),
+        ("/v1/desktop/approvals/{approval_id}/approve-credential", ("POST",)),
+        ("/v1/desktop/approvals/{approval_id}/apply-credential", ("POST",)),
     }
     assert feature_flags()["approvals"] == 1
     assert feature_flags()["mesh_onboard"] == 1
+    assert feature_flags()["credential_approvals"] == 1
 
 
 def _app_root() -> str:

@@ -401,8 +401,8 @@ dev host). `--run` prints each exclusion
 with its reason, so a local green is not evidence about those seven — the audit in
 particular, since a dependency-touching PR is exactly where a local green and a
 red audit can coexist. Use the four commands above by hand when you want the
-whole-tree form regardless — a release PR, or a diff that touches `.github/**`,
-both of which set every flag true.
+whole-tree form regardless. A diff that touches `.github/**` sets every flag
+true; a release bump (a version-line-only `pyproject.toml` diff) sets none.
 
 Do **not** invoke `.venv/bin/black`, `.venv/bin/flake8`, `.venv/bin/isort`, or
 `.venv/bin/pyright` directly. Those console scripts carry a shebang baked in
@@ -1264,11 +1264,19 @@ the job is the reviewer's missing memory, not a lock.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
 that is nothing but the `version =` line as a release bump, and a release
-bump runs *only* `changes` and `version-bump-guard` — two checks, not a
-matrix. That is the intended disposition (the classifier's `release_bump`
-rule is asserted in `tests/unit/test_ci_hygiene.py`), but it means "CI is
-green" on a release PR is evidence about the version line and nothing else.
-The code being released was gated on the PR that landed it, not on this one.
+bump runs six checks, not the matrix: `changes` and `version-bump-guard`
+from `ci.yml`, plus `Release invariants` and `Build and start the release
+artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (among its
+triggers, a push to `release-next`/`release-next-*`, the runbook's bump
+branch). Every other `ci.yml` job reports skipping. The classifier keys on
+the diff but the Release Gate keys on the branch name, so a bump pushed from
+any other branch shows only the two `ci.yml` checks: the artifact gate never
+ran, which is a reason to use the mandated branch, not a green. That is the
+intended disposition (the classifier's `release_bump` rule is asserted in
+`tests/unit/test_ci_hygiene.py`), but it means "CI is green" on a release PR
+is evidence about the version line, the release invariants and the built
+wheel starting at the bump branch's head — not about the code. The code
+being released was gated on the PR that landed it, not on this one.
 
 Note that `gh api repos/<owner>/<repo>/branches/main/protection` answers
 `404 Branch not protected` here. That endpoint reports only **legacy** branch
@@ -1378,6 +1386,51 @@ The owner is a role for one window, not a standing job. Whoever cuts the
 release is also responsible for telling every contributor in the window where
 it landed.
 
+### PyPI storage cap and per-release size
+
+PyPI caps a project at **10 GB total**, every release counts, and this project
+ships several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
+19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the cap was
+hit and v0.90.18/19 failed with `400 Project size too large`. Two changes bring
+a release to ~29 MB:
+
+- **Slim wheels.** `publish.yml` runs `scripts/slim_wheel.py` on the pure wheel
+  (the macOS wheel is retagged from it): `#` comments are stripped, while
+  docstrings, shebang/coding lines, pragma comments (`# type:`, `# noqa`,
+  `# pragma`, `# pyright:`, `# fmt:`) and every line number are kept. Each
+  module must be `ast.dump(..., include_attributes=True)`-identical with an
+  equal line count, or the build fails. `ci.yml` `packaging-smoke-build` and
+  `release-gate.yml` run the same step, so a PR the slimmer cannot verify fails
+  before a release does.
+- **The sdist lives on the GitHub Release** (`sdist-release` job), not on
+  PyPI. Nothing installs it from PyPI: the updater, desktop app and install
+  scripts take wheels, and the Dockerfile builds from the tree.
+
+`scripts/check_dist_size.py` is the guard: a wheel over **18 MiB** fails, over
+16 MiB warns. `--wheels-only` runs on both artifacts `pypi-publish` downloads
+(in `release-build` and `keyagent-macos`); the publisher itself runs no repo
+code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
+`release-gate.yml`) passes `--budget-mib 17.5`: its wheel lacks the phone
+bundle and key-agent helper (~0.37 MiB), so the plain 18 MiB line would first
+go red in the release's `keyagent-macos` job, after the tag exists.
+
+**Growth, measured.** The pure wheel grew 12.62 MiB (0.65.0, 10-01) to
+19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim. The
+0.91.0 slim wheel with the bundle is 14.41 MiB. At that rate the 16 MiB warning
+arrives in ~9 days and the 17.5 MiB PR line in ~3 weeks. **When the warning
+fires:** compare the wheel's member list and sizes against the last release
+(`unzip -l`) to find what grew; a large non-`.py` asset or a vendored file is
+the usual cause and the fix is to drop or move it. If it is genuine code
+growth, plan the next cut before the PR line is reached (docstrings are not a
+candidate: they are runtime help text), and raise the budgets only together
+with a retention change, after re-reading the script's docstring.
+
+**Retention is the operator's decision.** Suggested policy: keep every release
+from the last ~30 days and the last patch of every minor. Deleting a PyPI
+release is a manual, irreversible operator action on pypi.org; agents never
+delete releases or files. Quota-increase requests are pending as
+pypi/support#12738 and pypi/support#12882.
+
 ### What the release owner does
 
 1. **Collect** from each merger in the window: PR number, merge SHA, and
@@ -1409,13 +1462,35 @@ it landed.
    that also carries code is a defect — the code belongs in a reviewed PR
    of its own.
 
-   **Expect two checks on this PR, not a matrix.** A version-only
-   `pyproject.toml` diff classifies as a release bump, so only `changes` and
-   `version-bump-guard` run — the whole job set would be gating code this PR
-   does not touch. Do not read that short check list as a truncated pipeline,
-   and do not "fix" it by adding an always-run job: the narrow green is the
-   design (`scripts/ci_scope.py`, `release_bump`), and the code being released
-   was gated on the PR that landed it.
+   **Expect six checks on this PR, not a matrix.** A version-only
+   `pyproject.toml` diff classifies as a release bump, so from `ci.yml` only
+   `changes` and `version-bump-guard` run and every other job reports
+   skipping — the whole job set would be gating code this PR does not touch.
+   The other four come from `.github/workflows/release-gate.yml`, which fires
+   on the push to `release-next` (its triggers also include `release-next-*`,
+   pushes to `main`, and `workflow_dispatch`): `Release invariants` (the
+   pushed commit is the one checked out, the declared version parses as PEP
+   440, and the i18n `generate.py --check` and `check.py` pass) and `Build and
+   start the release artifact` on Python 3.12, 3.13 and 3.14
+   (`scripts/smoke_wheel.py` against the built wheel). That split is the
+   point: the gate shows the bump branch's head builds, installs and starts
+   on every declared interpreter, which is what a version bump can break,
+   while the suite is skipped because the diff is version-line-only (a
+   dependency or metadata edit to `pyproject.toml` is not a release bump and
+   keeps the whole matrix). Those rows cover the branch head as pushed, not
+   the tag target: the bump's merge commit on `main` is a different SHA. At
+   that SHA the combined-target proof below re-runs the release invariants
+   only (before tagging, and `publish.yml` repeats them at the event SHA);
+   the built wheel there is covered by the push-to-`main` Release Gate run
+   on the merge commit and by `publish.yml`'s `wheel-smoke`, which
+   `pypi-publish` waits on.
+   **Six checks appear only when the bump is pushed from a `release-next*`
+   branch.** A bump PR showing just `changes` and `version-bump-guard` means
+   the artifact gate never ran: push from the mandated branch name rather
+   than reading that as green. Do not read the six-check list as a truncated
+   pipeline, and do not "fix" it by adding an always-run job: the narrow green
+   is the design (`scripts/ci_scope.py`, `release_bump`), and the code being
+   released was gated on the PR that landed it.
    **Before cutting the tag, prove the combined target, not just each PR.** In
    the release owner's clean worktree checked out at the exact bump merge SHA,
    verify `git rev-parse HEAD` equals that intended target. With Python 3.12 and
@@ -2577,10 +2652,25 @@ round conclusive rather than merely narrow:
 Two further corollaries. Do not re-open dimensions the delta cannot have
 touched — a backend-only remediation keeps a design round valid, and
 re-running it spends a reviewer on unchanged pixels. And when a rebase moves
-the base, prove the content is unchanged (`git range-diff` plus byte-identical
-`+`/`-` line sets) and then run **one** convergence round over
-`<old-head>..<new-head>`, checking semantic conflicts only in files the
-upstream also touched.
+the base, run `python scripts/rebase_proof.py <old-head> <new-head> --base
+origin/main` (fetch the old head by SHA if the force-push dropped it) and post
+its `### Rebase proof` block on the PR. It checks `git range-diff` (all `=`),
+byte-identical `+`/`-` line sets of the PR's own patch, and the overlap between
+the files upstream moved and the PR's files. **MECHANICAL** (exit 0) keeps the
+last clean code review AND QA round fresh — no new agent round; measured, 85%
+of resolvable convergence rounds over the last 120 merged PRs had zero overlap
+and re-read an unchanged patch. **CONVERGENCE REVIEW NEEDED** (exit 1) means
+**one** convergence round over `<old-head>..<new-head>`, checking semantic
+conflicts in the files it names; if the proof fails, review and test the
+affected content. **The proof is file-level: it does NOT detect a cross-file
+semantic break** — upstream renames a function in a file the PR never touches
+while the PR calls it from another, and the verdict is still MECHANICAL (QA
+reproduced exactly that). Green CI on the rebased head is the guard for that
+class, which is why merge-time CI stays required. Likewise, a test-only or
+docs-only commit after a clean round needs only a delta review scoped to
+`<prev-head>..<head>` by any independent reviewer, and no QA re-run unless the
+change touches a QA'd surface. A real BLOCKER/MAJOR found anywhere is still
+fixed.
 
 **Finally, a terminal approval is a property of a SHA, not of a PR.** Commits
 landing after a clean round — including ones driven by a *different* stream,
@@ -2588,7 +2678,8 @@ such as a design fix after a terminal code round — make it stale, and the
 merge gate needs a fresh round on the current head. "Everything else is green"
 is exactly when that lapses. The one narrow exception: changes since the
 review that are exclusively non-conflicting fixes from parallel approved
-streams — a docs or nit commit from another round — leave it fresh.
+streams — a docs or nit commit from another round — leave it fresh, as does a
+rebase whose posted `### Rebase proof` is MECHANICAL.
 
 ## Security advisories
 
@@ -2645,6 +2736,8 @@ trivially corrected by the next release, while an over-called minor permanently
 misreports how much changed.
 
 ## Visual validation: how to actually look at a UI change
+
+Mobile relay UI: [docs/design/mobile-relay-guidelines.md](docs/design/mobile-relay-guidelines.md).
 
 This is a terminal UI. **A passing test is not evidence that a visual change
 looks right**, and every spacing, layout, or animation change in this repo has

@@ -357,6 +357,31 @@ def test_exec_hands_over_the_fd_the_new_interpreter_and_a_safe_path(
     assert seen["env"]["PATH"] == os.environ["PATH"]
 
 
+def test_exec_hands_the_desktop_bearer_on_by_pipe_never_by_environment(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator ask a-772b: a reload keeps the app's bearer without re-exporting it.
+
+    The successor adopts it from the descriptor (``desktop.adopt_spawn_bearer``), so the
+    plane survives the reload; the environment it is exec'd with never names the value.
+    """
+    from local_operator.server import desktop
+
+    monkeypatch.setattr(desktop, "_SPAWN_BEARER", "synthetic-reload-bearer")
+    monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: None)
+    seen: dict[str, Any] = {}
+
+    def capture(path: str, argv: list[str], env: dict[str, str]) -> None:
+        seen["env"] = env
+        seen["delivered"] = os.read(int(env[desktop.TOKEN_FD_ENV]), 4096)
+
+    monkeypatch.setattr(os, "execve", capture)
+    serve_reload._exec(_watch(_app(fd=13)).plan())
+    assert desktop.TOKEN_ENV not in seen["env"]
+    assert "synthetic-reload-bearer" not in "".join(seen["env"].values())
+    assert seen["delivered"] == b"synthetic-reload-bearer\n"
+
+
 @NEEDS_SIGUSR1
 @pytest.mark.asyncio
 async def test_install_arms_the_handler_and_the_signal_sets_the_flag(

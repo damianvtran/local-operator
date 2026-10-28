@@ -182,3 +182,20 @@ async def test_the_queued_aside_adopt_key_is_advertised_unconditionally(test_app
 
     assert response.status_code == 200
     assert _features(response.json()).get("aside_adopt_queue", 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_the_skill_write_key_is_its_own_and_the_read_key_is_unchanged(test_app_client):
+    """Create/edit/remove advertise ``skill_write``; ``skill_library`` stays the READ side.
+
+    v0.90.17 already shipped ``skill_library: 1`` for rows and details, and those
+    cores answer the write routes with 405/404. A renderer that offered editing on
+    ``skill_library >= 1`` would draw controls that fail on every released core,
+    so the writes have a key of their own and the read key must not move.
+    """
+    response = await test_app_client.get("/v1/capabilities")
+
+    assert response.status_code == 200
+    features = _features(response.json())
+    assert features.get("skill_write") == 1
+    assert features.get("skill_library") == 1

@@ -320,6 +320,9 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
         # Local recovery authority rides the same ready report; it is evidence
         # about the viewer's grant, never positive peer equipment evidence.
         "peer_restart",
+        # Non-gating equipment like resilience (readiness.NON_GATING_EQUIPMENT):
+        # a peer row the verify step must accept and report as a warning.
+        "serve_daemon",
         "selected_model_credential",
     }
     required: set[str] = set()
@@ -416,6 +419,7 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
                 "tooling",
                 "resilience",
                 "peer_restart",
+                "serve_daemon",
                 "selected_model_credential",
             }
             and row.get("code", "") in codes

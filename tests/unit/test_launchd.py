@@ -200,6 +200,48 @@ def test_loaded_policy_is_complete_top_level_same_target_snapshot(
 
 
 @pytest.mark.parametrize(
+    "job_state,expected",
+    [
+        ("running", True),
+        ("exited", None),
+        ("spawn scheduled", None),
+    ],
+)
+def test_loaded_job_state_is_neutral_only_while_running(tmp_path, monkeypatch, job_state, expected):
+    """A ``job state`` line must not turn a live no-restart job unknown.
+
+    launchd's own ``launchctl print`` carries this lifecycle line
+    inconsistently: measured 2026-10-26 on Darwin 27.0.1, it appeared from
+    t+0.4 s in one sampling run and never during the next 16 s of another. It
+    describes liveness, not restart policy, and the body's pid/state proof
+    already requires the job running -- but any value other than ``running``
+    is an unfamiliar shape and must stay unknown, never become admission.
+    """
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "live-job-state"
+    target = f"{launchd.job_domain()}/{label}"
+    body = (
+        f"{target} = {{\n"
+        "\tactive count = 1\n\tpath = /fixture\n\ttype = LaunchAgent\n"
+        "\tstate = running\n\tprogram = /fixture\n"
+        "\targuments = {\n\t\targ\n\t}\n\tenvironment = {\n\t}\n"
+        "\tdomain = gui/fixture\n\truns = 1\n\tpid = 12345\n"
+        f"\tjob state = {job_state}\n"
+        "\tspawn type = daemon (3)\n"
+        "\tproperties = runatload | inferred program\n}\n"
+    )
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    observed = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert observed.state is launchd.JobState.LIVE
+    assert observed.loaded_no_restart is expected
+
+
+@pytest.mark.parametrize(
     "section",
     [
         "arguments",

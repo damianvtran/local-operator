@@ -1,0 +1,155 @@
+"""Replay the mechanical parity checks recorded in an i18n audit ledger row.
+
+WHY THIS EXISTS: the in-session audits behind the `relay.approvals` and
+zh-CN `relay.asks` ledger rows reported mechanical results (key parity, ICU
+argument tuples, plural categories, control characters, English leakage) in
+prose, but no command log was preserved. This script is run at the *audited*
+git revision so those claims can be re-derived from the same bytes, and its
+output is stored beside the record as `mechanical-recheck.log`.
+
+It is NOT the auditor's log and it is not independent evidence: it was run by
+the implementation session, and the bundle record says so.
+
+Usage (from the repository root, with the repo's .venv):
+    python recheck.py.txt <git-rev> <locale> <namespace>
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+from local_operator.i18n import messages as msg_runtime
+from local_operator.i18n import runtime
+
+CATALOGUES = "local_operator/i18n/catalogues"
+PLURAL_RULES = Path(msg_runtime.__file__).with_name("data") / "plural_rules.json"
+
+# Bidi/zero-width controls that must never appear in committed copy, and the
+# quote/space habits the ledger rows claim were checked.
+BIDI = re.compile(
+    "[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\u200b\u200c\u200d\u2060\ufeff]"
+)
+STRAIGHT = re.compile("[\"']")
+
+
+def blob(rev: str, path: str) -> bytes:
+    out = subprocess.run(
+        ["git", "show", f"{rev}:{path}"], capture_output=True, check=False
+    )
+    if out.returncode != 0:
+        raise SystemExit(f"cannot read {rev}:{path}: {out.stderr.decode().strip()}")
+    return out.stdout
+
+
+def load(rev: str, locale: str, namespace: str) -> tuple[dict[str, str], str]:
+    raw = blob(rev, f"{CATALOGUES}/{locale}/{namespace}.json")
+    return json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()
+
+
+def main(argv: list[str]) -> int:
+    rev, locale, namespace = argv[1], argv[2], argv[3]
+    en, en_sha = load(rev, "en", namespace)
+    target, target_sha = load(rev, locale, namespace)
+    print(f"replay of the mechanical checks in the ledger row")
+    print(f"revision:  {rev}")
+    print(f"namespace: {namespace}")
+    print(f"locale:    {locale}")
+    print(f"en sha256:      {en_sha}")
+    print(f"{locale} sha256: {target_sha}")
+    print()
+
+    missing = sorted(set(en) - set(target))
+    unknown = sorted(set(target) - set(en))
+    print(f"keys: en={len(en)} {locale}={len(target)}")
+    print(f"  missing: {len(missing)} {missing if missing else ''}".rstrip())
+    print(f"  unknown: {len(unknown)} {unknown if unknown else ''}".rstrip())
+
+    parse_errors: list[str] = []
+    tuple_mismatches: list[str] = []
+    plural_keys: list[str] = []
+    plural_problems: list[str] = []
+    rules = json.loads(PLURAL_RULES.read_text(encoding="utf-8"))
+    cldr = set(rules.get("locales", {}).get(locale, {}).get("categories", ()))
+    for key in sorted(set(en) & set(target)):
+        try:
+            want = runtime.message_arguments(en[key])
+            got = runtime.message_arguments(target[key])
+        except runtime.MessageSyntaxError as exc:  # unused-variable style guard
+            parse_errors.append(f"{key}: {exc}")
+            continue
+        if want != got:
+            tuple_mismatches.append(f"{key}: en={want} {locale}={got}")
+        try:
+            plans = runtime.plural_arguments(target[key])
+        except runtime.MessageSyntaxError as exc:
+            parse_errors.append(f"{key}: {exc}")
+            continue
+        if plans:
+            plural_keys.append(key)
+            for plan in plans:
+                selectors = {branch.selector for branch in plan.branches}
+                missing_categories = sorted(cldr - selectors)
+                empty = sorted(branch.selector for branch in plan.branches if branch.empty)
+                renders = not all(branch.renders_value for branch in plan.branches)
+                if missing_categories or empty or renders:
+                    plural_problems.append(
+                        f"{key}/{plan.argument}: missing={missing_categories} empty={empty}"
+                    )
+    print(f"ICU: {len(set(en) & set(target))} messages compared")
+    print(f"  parse errors: {len(parse_errors)} {parse_errors if parse_errors else ''}".rstrip())
+    print(
+        f"  argument-tuple mismatches: {len(tuple_mismatches)} "
+        f"{tuple_mismatches if tuple_mismatches else ''}".rstrip()
+    )
+    print(f"plurals: {len(plural_keys)} plural message(s) {plural_keys if plural_keys else ''}")
+    print(f"  cldr categories for {locale}: {sorted(cldr)}")
+    print(
+        f"  lossless-branch problems: {len(plural_problems)} "
+        f"{plural_problems if plural_problems else ''}".rstrip()
+    )
+
+    bidi = [key for key, text in target.items() if BIDI.search(text)]
+    straight = [key for key, text in target.items() if STRAIGHT.search(text)]
+    doubles = [key for key, text in target.items() if "  " in text]
+    leakage = [key for key, text in target.items() if key in en and text == en[key]]
+    if locale == "zh-CN":  # the zh typography mandates a double ellipsis, not double spaces
+        doubles = [key for key in doubles if "……" not in target[key]]
+    print(f"controls: bidi/zero-width={len(bidi)} {bidi if bidi else ''}".rstrip())
+    print(f"  straight quotes: {len(straight)} {straight if straight else ''}".rstrip())
+    print(f"  double spaces: {len(doubles)} {doubles if doubles else ''}".rstrip())
+    print(f"  English leakage (value == en): {len(leakage)} {leakage if leakage else ''}".rstrip())
+
+    gate = [key for key in target if ".gate." in key]
+    print()
+    print("gate copy, side by side:")
+    for key in sorted(gate):
+        print(f"  {key}: {target[key]!r}")
+
+    # The audit's stated concern was the three approval-gate choices (two live
+    # in relay.asks, the global one in relay.approvals): print them together so
+    # the scope distinction can be read off the bytes, not out of the prose.
+    if namespace == "relay.approvals":
+        asks_en, _ = load(rev, "en", "relay.asks")
+        asks, _ = load(rev, locale, "relay.asks")
+        print()
+        print("the three approval-gate choices, side by side:")
+        for key in (
+            "relay.asks.gate.keep_asking",
+            "relay.asks.gate.run_without",
+            "relay.approvals.gate.default_auto",
+        ):
+            print(f"  {key}: {target.get(key) or asks[key]!r}")
+    print()
+    problems = parse_errors + tuple_mismatches + plural_problems + bidi + straight + doubles
+    print("RESULT:", "PASS — mechanical parity holds at the audited bytes"
+          if not problems and not missing and not unknown else "FAIL — see the lines above")
+    return 0 if not problems and not missing and not unknown else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

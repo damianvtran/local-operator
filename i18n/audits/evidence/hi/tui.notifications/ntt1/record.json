@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "audit_id": "ntt1",
+  "audit_id_assigned_by": "translation-auditor, assigned by delegation on 2026-10-25",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "hi",
+  "namespace": "tui.notifications",
+  "audit_date": "2026-10-25",
+  "audited_revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+  "audited_revision_note": "English source and context read at this pin; the target is an untracked file in the feat/notifications-tui worktree, copied out and audited by the delegation-supplied sha256, which still matched the live file at copy time. No repo file, generated key, git ref or ledger row was written.",
+  "attestation_revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+  "key_count": {
+    "en": 72,
+    "target": 72,
+    "context": 72
+  },
+  "verdict": "passed",
+  "result": "passed_with_minor_and_nit",
+  "verdict_reason": "All 72 keys compared against source and context. Accuracy, action intent (dismiss / mark read / mark unread / undo kept distinct), polite aaP register, glossary terms and internal lemmas are consistent; every ICU argument name/kind/order and literal token survives; 7 plural-bearing keys cover hi's one+other and render correctly at 0/1/2/5/21/1000; every rendered worst case fits maxCells; the two 8/8-cell hints were assessed for the Devanagari measurement caveat and do not overflow. One minor (code-side time-column alignment exposed only by the hi 'abhi' string) and two nits; no blocker or major.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, tui-audit-hi)",
+    "instance": "d184e3a74566",
+    "session": "d184e3a74566",
+    "model": "radient/auto",
+    "actual_model_source": "Requested anthropic/claude-opus-5-5. Session model-switch notices during this turn: anthropic/claude-sonnet-5-5, then openai/gpt-6.1-sol, latest radient/auto, each 'provider failure: quota'. The latest notice names radient/auto as the serving model; the audit was produced across those switches.",
+    "date": "2026-10-25",
+    "independence": "Independent agent and context. Authored neither the English source, the context sidecar nor the Hindi catalogue, and is not the translator (L1-core-notify coder / translator tr-hi). Read the pins and the untracked target copy only; no catalogue, code, generated file, git object or ledger row was edited. Checks ran outside the worktree on a scratch export."
+  },
+  "translator": {
+    "agent": "translator tr-hi",
+    "model": "not asserted by this auditor",
+    "date": "2026-10-25",
+    "source": "Delegation names the translator's four claims (CLDR-0-in-one, {source} moved inside the plural arms, chaiT for width, 8/8 hints) for verification; they were verified as stated, not taken on trust. Model attribution is the coder/translator's to report, not inferred here."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.json",
+      "revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+      "sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+      "matches_supplied_frozen_source_sha256": true
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+      "revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+      "sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+      "matches_supplied_frozen_source_sha256": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/tui.notifications.json",
+      "sha256": "8d503495a5aed2562306b7c06ed15eac6bbb5486c2717bb10bbda65e3303fc1e",
+      "matches_current_untracked_worktree_file": true,
+      "audited_copy": "input/hi.tui.notifications.json"
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "render.log",
+    "receipt.json",
+    "audit_hi.py",
+    "render_hi.py",
+    "input/en.tui.notifications.json",
+    "input/en.tui.notifications.context.json",
+    "input/hi.tui.notifications.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "run_by": "d184e3a74566",
+    "note": "Actual stdout of this auditor's audit_hi.py (466 PASS, 0 FAIL): input identity, key parity, check_catalogues(), ICU argument/category checks, renders at 0/1/2/5/21/1000, fit vs maxCells, literal tokens, NFC/bidi, and six negative controls. render.log is the separate actual stdout of render_hi.py (31 PASS, 0 FAIL) driving the pinned page renderer with hi copy."
+  },
+  "mechanical_checks": {
+    "check_catalogues_problems": 0,
+    "icu_argument_parity": "72/72 keys; names, order and kinds identical to en",
+    "plural_bearing_keys": 7,
+    "plural_categories_hi": ["one", "other"],
+    "plural_coverage": "every plural defines one+other; every branch renders the count",
+    "render_values": [0, 1, 2, 5, 21, 1000],
+    "max_cells": "every key within the en sidecar cap at worst-case parameters; worst-relative cases hint_read 8/8 and hint_undo 8/8",
+    "literal_tokens": ["/notifications", "/unread", "/unread read", "read", "y/n", "f", "a"],
+    "nfc": "all 72 keys",
+    "bidi_or_zero_width_controls": 0,
+    "negative_controls": {
+      "dropped_source_argument": "detected",
+      "renamed_error_argument": "detected",
+      "plural_category_not_in_hi": "detected",
+      "plural_without_other": "detected",
+      "legal_single_count_form": "stays green",
+      "over_budget_fit_measurer": "detected"
+    },
+    "real_render_widths": [40, 60, 76, 100, 120, 160],
+    "row_line_exact_width": "all rows exact at 40/60/76/100/120",
+    "header_line_within_width": "40/60/76/100/120",
+    "detail_text_within_width": "40/76/120 (bodies wrap; header line is the only no_wrap row)",
+    "footer_ladder": "hi 59/59 at 60 columns; 37/39, 59/75, 59/99, 59/119, 59/159 elsewhere; whole hints only"
+  },
+  "findings": [
+    {
+      "id": "NTT1-M1",
+      "severity": "minor",
+      "key": "tui.notifications.row_now",
+      "en": "now",
+      "current": "अभी",
+      "proposed": "no text change (the word is correct); code fix in notifications_render.row_line",
+      "reason": "The 5-cell time column is padded with str.rjust, which counts code points: 'अभी' is 3 code points but 2 cells, so the stamp paints 4 cells in a 5-cell column and the row's right edge gains one space on rows under a minute old. Hindi is the only locale whose row_now is not ASCII, so only hi shows it.",
+      "evidence": "render.log: width 40 row 3 '    ▁▃  Plan updated                 अभी ' (trailing pad) vs '                 6m'; cell_len('अभी'.rjust(5)) = 4, cell_len('now'.rjust(5)) = 5; pinned notifications_render.py line 164.",
+      "owner": "code (local_operator/tui/notifications_render.py), not this catalogue file; does not gate the ledger row"
+    },
+    {
+      "id": "NTT1-N1",
+      "severity": "nit",
+      "key": "tui.notifications.group_week",
+      "en": "Earlier this week",
+      "current": "इस हफ़्ते पहले",
+      "proposed": "इसी हफ़्ते पहले",
+      "reason": "Without the emphatic इसी the section header can be parsed as 'before this week', which is the 'पुराने' section's own range; the fix is the same measured width (10 cells of a 30-cell cap).",
+      "evidence": "fit table: group_week worst 10 cells, cap 30; section ladder rendered in render.log detail/empty passes."
+    },
+    {
+      "id": "NTT1-N2",
+      "severity": "nit",
+      "key": "tui.notifications.empty_filtered_title",
+      "en": "Nothing matches these filters",
+      "current": "इन फ़िल्टर से कुछ भी मेल नहीं खाता",
+      "proposed": "इन फ़िल्टरों से कुछ भी मेल नहीं खाता",
+      "reason": "The hi style guide asks for the natural plural in oblique cases (फ़ाइल -> फ़ाइलें, सत्र -> सत्रों); the plural demonstrative इन wants फ़िल्टरों. Caveat: the current string is byte-identical to the already-audited desktop copy, so fixing it here alone creates a new cross-surface split.",
+      "evidence": "style-guides/hi.md 'Plurals'; fit: proposed 23 cells of a 40-cell cap (current 23 cells at count-free render)."
+    }
+  ],
+  "noted_outside_scope": [
+    {
+      "id": "NTT1-X1",
+      "severity": "minor",
+      "scope": "cross-surface, hi",
+      "topic": "mark-read lemma split",
+      "detail": "This file is internally consistent: पढ़ा हुआ मानें / पढ़ा हुआ माना गया (6 keys) and अपठित मानें / अपठित माना गया (2 keys), the form the earlier audit c9c5d8079e51 preferred. The desktop hi catalogue still says पढ़ा गया चिह्नित करें, and core wire says 'read उन्हें पढ़ा हुआ चिह्नित करता है' (wire.slash.notifications) and 'read सब पढ़ा हुआ करता है' (wire.slash.notifications_page.help) - three Hindi forms for one action across surfaces. Not this file's defect; do not 'fix' this file toward the older desktop wording."
+    },
+    {
+      "id": "NTT1-X2",
+      "severity": "minor",
+      "scope": "cross-surface, hi",
+      "topic": "same-fact term split for 'seen in chat'",
+      "detail": "seen_in_chat says चैट में देखा गया (10 cells) while the desktop catalogue says बातचीत में देखा गया for the same fact; this file itself says बातचीत in six other keys. English also differs (seen in chat vs Seen in conversation), so the glossary table is not violated. बातचीत में देखा गया measures 12 of the 12-cell cap, so the choice buys headroom for the row title rather than being forced."
+    },
+    {
+      "id": "NTT1-X3",
+      "severity": "nit",
+      "scope": "source-side, affects the hi page",
+      "topic": "untranslated priority token in the detail header",
+      "detail": "The pinned renderer builds the detail header chip from the raw data word (right.append(BARS[...].rstrip() + ' ' + priority)), so the hi detail paints '▁▃ normal · अपडेट · 1/42'. No catalogue key exists for that word, so it is a source gap, not a translation defect."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 2,
+    "rejected": 0,
+    "findings_total": 3
+  },
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Static copy/ICU/fit audit plus direct renderer runs at real widths; the SHIPPED gate was shimmed to hi because this ledger row is what would ship it, so no live TUI process on a real terminal was exercised.",
+    "No release eligibility, runtime service, native-speaker or design sign-off is claimed."
+  ]
+}

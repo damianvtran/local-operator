@@ -118,10 +118,22 @@ from local_operator.evaluation.receipts import (
 # after a failed ``execute`` whose batch may not be replayed; it mutates
 # nothing, carries no operation key, and its answer decides nothing except
 # whether the session may stay usable for the bridge's read-only re-bind.
-ADAPTER_SCHEMA_VERSION = "1.6"
+#
+# 1.7 adds the NOT-APPLIED phase: ``"not_applied"`` joins ``ErrorPhase``
+# (rpc.py), written by a worker only when the adapter raised
+# ``ActionNotAppliedError`` from ``execute`` (see below). The bump is required:
+# ``phase`` is a CLOSED ``Literal``, so a 1.6 parent rejects the new value, not
+# a graceful "treat as unknown". 1.7 also adds ``ObserveParams.fresh`` for the
+# opt-in read-only live capture required by the declaration; its default keeps
+# cached snapshot semantics. That field changes canonical observe request
+# bytes even at the default: old workers forbid the new key, and new workers
+# cannot canonically round-trip old requests that lack it (same reason as 1.3).
+# The exact-version pin in ``AdapterSelector`` refuses mixed peers at selection
+# before a worker is spawned, not mid-episode on the error/recovery path.
+ADAPTER_SCHEMA_VERSION = "1.7"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
-SchemaVersion: TypeAlias = Literal["1.6"]
+SchemaVersion: TypeAlias = Literal["1.7"]
 ADAPTER_ENTRY_POINT_GROUP = "local_operator.evaluation_adapters.v1"
 MAX_RESCUE_REFS = 256
 MAX_REQUIREMENTS = 256
@@ -686,7 +698,17 @@ class ResetStartParams(OperationParams):
 
 
 class ObserveParams(ProtocolModel):
+    """Read the accepted snapshot, or explicitly capture a new read-only one.
+
+    ``fresh=False`` preserves the cached snapshot contract used by reset and
+    committed read-back recovery. ``fresh=True`` captures the actual environment
+    WITHOUT applying actions, settling, or creating an execution receipt. It
+    publishes the exact next observation sequence only after capture/build
+    succeeds; callers validate/adopt it as a new observation binding.
+    """
+
     episode_id: StrictIdentifier
+    fresh: bool = False
 
 
 class ObservationResult(ProtocolModel):
@@ -704,13 +726,13 @@ class ProbeParams(ProtocolModel):
     key for the same reason ``observe`` does not: there is no mutation to
     correlate or replay.
 
-    WHY NOT ``observe``. ``observe`` answers the LAST ACCEPTED observation
+    WHY NOT ``observe``. Default ``observe`` answers the LAST ACCEPTED observation
     from the worker's own state, deliberately without touching the guest (the
     re-bind contract depends on it: see ``test_fake_end_to_end``), so it
     cannot say whether the control server that dropped the in-flight execute
     is serving again. Liveness is therefore its own call, and the guest-side
-    implementation reuses the same bounded readiness GET the allocation loop
-    already trusts (``_READY_PATH``).
+    implementation reuses the same bounded liveness GET the pre-action
+    receipt wait uses (``_LIVENESS_PATH``).
     """
 
     episode_id: StrictIdentifier
@@ -757,6 +779,49 @@ class ObservationPhaseError(Exception):
 
     An adapter that never raises it is completely unaffected: the phase
     defaults to ``unknown`` and every failure poisons exactly as before.
+    """
+
+
+class ActionNotAppliedError(Exception):
+    """NO part of this ``execute`` batch was applied; the environment is untouched.
+
+    The mirror image of ``ObservationPhaseError``. That type says "the mutation
+    committed, only the read-back failed"; this one says the opposite and
+    stronger thing: the adapter stopped BEFORE any input of the batch reached
+    the environment, so the environment is exactly as it was before the call
+    and the batch's effect is not unknown but provably nil.
+
+    WHY IT EXISTS. Without it such a failure crosses the worker as
+    ``phase == "unknown"``, which the parent must treat as an ambiguous
+    mutation: it poisons the session and the action bridge ends the episode.
+    Measured on the OSWorld 2.1 offline subset (arm main16): 10 of 20 episodes
+    ended that way, several after hundreds of applied steps, on failures whose
+    own message read "guest action 1 was not attempted; no input was sent".
+    Declaring the fact lets the parent keep the session, re-read the current
+    observation once (read-only), and hand the model a tool error saying the
+    batch did not apply and may be retried.
+
+    WHAT IT DOES NOT LICENSE. It is NOT a committed claim, so it never licenses
+    ``resume_observation`` (whose contract is "the batch committed, skip the
+    re-apply" -- resuming a never-applied batch would accept an observation
+    for actions that never ran). The parent never resends the batch either;
+    only the model may choose to issue it again, against a fresh observation.
+
+    An adapter adopting this error must support ``observe(fresh=True)``: the
+    parent's ONE read-only recovery captures the actual current environment,
+    publishes the exact next observation sequence, and never applies input or
+    creates an execution receipt. Returning the old cache instead fails the
+    parent's next-sequence validation and ends the episode, fail-closed. A
+    capture/build failure must leave the adapter's last accepted observation
+    and sequence unchanged; the parent poisons that failed recovery normally.
+
+    Raising this when ANY input of the batch may have reached the environment
+    -- an ambiguous delivery, or a failure after an earlier statement of the
+    same batch succeeded -- is a contract violation that hides a partial
+    application from the model. Raise it only from a branch that has PROVED
+    nothing was sent. Like ``ObservationPhaseError`` it is honoured only from
+    ``execute``; from any other method the claim is dropped and the failure
+    stays ``unknown``.
     """
 
 

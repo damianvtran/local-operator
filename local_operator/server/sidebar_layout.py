@@ -68,14 +68,24 @@ SIDEBAR_DESTINATION_IDS: tuple[str, ...] = (
     "team-bridge",
     "agent-hub",
     "mesh",
+    # The operator's inbox (``features.notifications``). APPENDED, never
+    # inserted after ``aida``: this tuple is wire vocabulary that two repos
+    # read, and the DEFAULT layout below — not this order — is what places the
+    # row under Aida (decision D10).
+    "notifications",
 )
 
 #: Today's arrangement, exactly (design §2). This is the answer for a missing
 #: file and the arrangement a fresh install shows, so it is also the shape every
 #: reader can rely on.
+#:
+#: Notifications sits directly under Aida, and Schedules moved into More to make
+#: room (decision D10, design §1.1). A STORED layout is never migrated: an
+#: existing user's file keeps its own order, and the renderer's sanitiser
+#: inserts the missing ``notifications`` id into its default region.
 DEFAULT_SIDEBAR_LAYOUT: dict[str, list[str]] = {
-    "visible": ["aida", "library", "projects", "agents", "schedules", "browser"],
-    "more": ["team-bridge", "agent-hub", "mesh"],
+    "visible": ["aida", "notifications", "library", "projects", "agents", "browser"],
+    "more": ["schedules", "team-bridge", "agent-hub", "mesh"],
 }
 
 #: One file, beside ``config.yml``, inside the config directory. A separate
@@ -193,10 +203,30 @@ def read_layout(config_dir: Path) -> dict[str, Any]:
             SIDEBAR_LAYOUT_VERSION,
         )
         return default_layout()
+    # TOLERANT OF IDS THIS BUILD DOES NOT KNOW (decision D10). A file written
+    # by a NEWER build may carry a destination this one has never heard of; the
+    # strict model below would refuse the whole layout and serve defaults,
+    # throwing away the operator's order for one unknown row. So unknown ids
+    # are dropped from the READ, with a warning, and the rest of the layout is
+    # kept. The file itself is not rewritten (a read never writes), and the
+    # WRITE path stays strict: a client sending an unknown id is still refused.
+    regions = {}
+    for region in ("visible", "more"):
+        raw = payload.get(region)
+        if isinstance(raw, list):
+            unknown = [item for item in raw if item not in SIDEBAR_DESTINATION_IDS]
+            if unknown:
+                logger.warning(
+                    "sidebar layout: %s names unknown destination(s) %s in %r; "
+                    "dropped from this read",
+                    path,
+                    ", ".join(repr(item) for item in unknown),
+                    region,
+                )
+            raw = [item for item in raw if item in SIDEBAR_DESTINATION_IDS]
+        regions[region] = raw
     try:
-        layout = SidebarLayout.model_validate(
-            {"visible": payload.get("visible"), "more": payload.get("more")}
-        )
+        layout = SidebarLayout.model_validate(regions)
     except ValidationError:
         logger.warning("sidebar layout: %s is invalid; using defaults", path, exc_info=True)
         return default_layout()

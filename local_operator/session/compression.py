@@ -177,6 +177,7 @@ import stat as _stat
 import tempfile
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -238,6 +239,7 @@ __all__ = [
     "read_tail",
     "read_tail_window",
     "release_writer",
+    "release_writer_from_finaliser",
     "transcript_state",
     "restore_for_write",
     "run_compression",
@@ -1235,6 +1237,115 @@ def _stat_sig(path: Path) -> tuple[int, int, int, int] | None:
 _WRITERS: dict[str, list[Any]] = {}
 _WRITERS_GUARD = threading.Lock()
 
+#: Writer-lock releases a FINALISER asked for, keyed like :data:`_WRITERS`, that
+#: are applied by the next holder of :data:`_WRITERS_GUARD` instead of by the
+#: finaliser itself.
+#:
+#: WHY THIS EXISTS: a finaliser that takes the guard can deadlock its own
+#: thread. The guard is a plain ``threading.Lock``, and the code under it
+#: allocates (``_try_acquire_lock`` builds a ``Path``); any allocation can run
+#: the cyclic GC, the GC can finalise an unreferenced ``Transcript``, and its
+#: ``__del__`` then waited for the guard its own thread already held — forever.
+#: Measured in CI (run 40414178365, a 240 s shard stall in
+#: ``test_fork_snapshot``) and reachable by any process holding two sessions.
+#:
+#: Why not an ``RLock``: reentry would let the finaliser mutate a ``_WRITERS``
+#: row the interrupted holder is half-way through. ``acquire_writer`` reads
+#: ``held[1]`` and stores ``held[1] + 1``; a reentrant release of the SAME
+#: session landing between the two pops the row and closes its fd, and the
+#: acquire then bumps a detached list and reports a lock nobody holds.
+#:
+#: A ``deque`` because ``append``/``popleft`` are atomic and take no Python
+#: lock, so enqueueing is safe from any finaliser on any thread. Refcount
+#: arithmetic commutes, so applying a release late gives the same end state as
+#: applying it in place. Drained by :func:`_drain_deferred_releases`.
+_DEFERRED_RELEASES: deque[str] = deque()
+
+
+@contextmanager
+def _writers_guarded() -> Iterator[None]:
+    """Hold :data:`_WRITERS_GUARD`, then apply any release deferred meanwhile.
+
+    The drain runs AFTER the release, never under it: a finaliser that fired
+    while this holder had the guard enqueued its key and failed its own
+    non-blocking drain because the guard was held, so the release is this
+    holder's to apply. Checking only after letting go is what closes the gap: a
+    key enqueued before the finaliser's failed attempt is visible to a check
+    that happens after the release that attempt lost to. Every taker of the
+    guard must go through here, or a deferred release could wait for an
+    unrelated later acquire.
+    """
+    try:
+        with _WRITERS_GUARD:
+            yield
+    finally:
+        _drain_deferred_releases()
+
+
+def _drain_deferred_releases() -> None:
+    """Apply every deferred release now, unless someone else holds the guard.
+
+    NEVER BLOCKS, because a finaliser calls it: it only ever TRIES the guard.
+    When the try fails the current holder drains on its way out (see
+    :func:`_writers_guarded`), so giving up here cannot strand a key. The outer
+    loop re-checks after releasing because a finaliser that fired DURING this
+    drain lost its own try to us.
+    """
+    while _DEFERRED_RELEASES:
+        if not _WRITERS_GUARD.acquire(blocking=False):
+            return
+        try:
+            _apply_deferred_locked()
+        finally:
+            _WRITERS_GUARD.release()
+
+
+def _apply_deferred_locked() -> None:
+    """Apply every queued release; the caller holds :data:`_WRITERS_GUARD`."""
+    while True:
+        try:
+            key = _DEFERRED_RELEASES.popleft()
+        except IndexError:
+            return
+        _release_held_locked(key)
+
+
+def _settle_deferred_releases() -> None:
+    """Wait out any in-process guard holder, then apply its deferred releases.
+
+    For the readers of the KERNEL lock that bypass the registry
+    (:func:`compress_session`, :func:`lock_is_busy`). A finaliser that ran while
+    another thread held the guard queued its release and returned; before
+    deferral existed, that ``del`` blocked until the holder let go and released
+    in place, so "drop the writer, then compress" on one thread always found the
+    session idle. Passing through the guard here restores that: the holder's
+    post-release drain (or this one) has applied the queued key by the time the
+    probe opens the lock file.
+
+    The queue is applied UNDER the guard, not left to the post-release drain:
+    that drain only tries the guard, so a third thread taking it in between
+    would leave the key queued while this caller goes on to probe. Anything
+    queued before this call is therefore applied when it returns.
+
+    BLOCKS on the guard, so it must never run under it or from a finaliser. That
+    is cheap: no holder sleeps or does I/O-bound waiting under the guard (see
+    the poll loop in :func:`acquire_writer`).
+    """
+    with _writers_guarded():
+        _apply_deferred_locked()
+
+
+def _release_held_locked(key: str) -> None:
+    """Drop one hold on ``key``; the caller holds :data:`_WRITERS_GUARD`."""
+    held = _WRITERS.get(key)
+    if held is None:
+        return
+    held[1] = int(held[1]) - 1
+    if held[1] > 0:
+        return
+    _WRITERS.pop(key, None)
+    _release_lock_fd(held[0])
+
 
 def _lock_path(directory: Path) -> Path:
     return Path(directory) / LOCK_NAME
@@ -1317,6 +1428,7 @@ def lock_is_busy(directory: Path) -> bool:
     means no holder (the only way to hold the lock is to have created it), and
     an unreadable one reads as busy — fail closed, like every guard here.
     """
+    _settle_deferred_releases()
     path = _lock_path(directory)
     try:
         fd = os.open(os.fspath(path), os.O_RDWR)
@@ -1372,7 +1484,7 @@ def acquire_writer(directory: Path, *, wait_s: float = 0.0) -> bool:
     key = os.path.realpath(os.fspath(directory))
     deadline = time.monotonic() + max(0.0, float(wait_s))
     while True:
-        with _WRITERS_GUARD:
+        with _writers_guarded():
             held = _WRITERS.get(key)
             if held is not None:
                 held[1] = int(held[1]) + 1
@@ -1389,17 +1501,31 @@ def acquire_writer(directory: Path, *, wait_s: float = 0.0) -> bool:
 
 
 def release_writer(directory: Path) -> None:
-    """Release one hold on the session's writer lock (no-op if none is held)."""
+    """Release one hold on the session's writer lock (no-op if none is held).
+
+    Synchronous: the lock is free when this returns, which an explicit close
+    relies on (a compress right after it must find the session idle). A
+    FINALISER must call :func:`release_writer_from_finaliser` instead — this
+    one waits for the guard, and a finaliser can be running on the thread that
+    holds it.
+    """
     key = os.path.realpath(os.fspath(directory))
-    with _WRITERS_GUARD:
-        held = _WRITERS.get(key)
-        if held is None:
-            return
-        held[1] = int(held[1]) - 1
-        if held[1] > 0:
-            return
-        _WRITERS.pop(key, None)
-        _release_lock_fd(held[0])
+    with _writers_guarded():
+        _release_held_locked(key)
+
+
+def release_writer_from_finaliser(directory: Path) -> None:
+    """:func:`release_writer` for ``__del__`` and other GC-driven callers.
+
+    Never waits for :data:`_WRITERS_GUARD`, so it cannot deadlock against a
+    holder on its own thread (see :data:`_DEFERRED_RELEASES`). When the guard is
+    free — the ordinary case, a collection outside any acquire — the release
+    applies before this returns, exactly as :func:`release_writer` would. When
+    it is held, the release applies the moment that holder lets go, so another
+    process waiting on the flock sees it free promptly rather than at exit.
+    """
+    _DEFERRED_RELEASES.append(os.path.realpath(os.fspath(directory)))
+    _drain_deferred_releases()
 
 
 # ---------------------------------------------------------------------------
@@ -1699,6 +1825,10 @@ def compress_session(
     directory = Path(directory)
     started = time.monotonic()
     chosen = codec or available_codec()
+    # Not ``_try_acquire_lock`` alone: it reads the kernel lock directly, so a
+    # writer this process already dropped would still read as "in use" while
+    # its finaliser's release waits in the deferred queue.
+    _settle_deferred_releases()
     lock = _try_acquire_lock(directory)
     if lock is None:
         return Outcome(directory.name, "skipped", "session in use", codec=chosen)

@@ -79,10 +79,14 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import unicodedata
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -93,6 +97,12 @@ from local_operator.config_watch import process_watcher
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
+from local_operator.server.models.desktop_team_bridge_owner_audit import (
+    OwnerAuditConversationPage,
+    OwnerAuditMessagePage,
+    OwnerAuditThread,
+    owner_audit_projection,
+)
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
 from local_operator.team_bridge.types import (
@@ -552,6 +562,11 @@ def _raise_read(code: str) -> NoReturn:
 #: scope.
 ACCOUNT_SCOPE = "account"
 
+#: The list's lifecycle selector (agent-server ``status`` query). Closed here
+#: for the same reason ``scope`` is: a stale or mistyped value must not be
+#: forwarded as if the server had a mode for it.
+_LIST_STATUSES: dict[str, Literal["open", "archived"]] = {"open": "open", "archived": "archived"}
+
 
 def _account_scope(scope: str | None) -> bool:
     """Normalize a read's ``scope``: the one account literal, or absent.
@@ -657,6 +672,13 @@ async def status(
     # re-deriving it. The onboarding row also needs the LOCAL dismissal flag:
     # "once" in state B is decided by ``team_bridge.onboarding``.
     projection = surface_projection(check, onboarding_seen=local.onboarding == "seen")
+    # D1: the hub's ACTIVE endpoint (state C) proves only the hub side. Without
+    # a committed local owner for that exact endpoint this device never polls,
+    # so "can receive" must not be claimed for it.
+    enrolled = _locally_enrolled(config_manager, check)
+    #: The COMPOSED switch, computed ONCE so ``can_receive`` below and
+    #: ``local.enabled`` cannot disagree about the same machine (review R2-2).
+    composed_enabled = local.enabled_given(in_force)
     result = {
         # The capability THIS route family advertises (a renderer reads the
         # same number off ``GET /v1/capabilities``; it rides here so one
@@ -686,13 +708,23 @@ async def status(
         "state_note": check.state_note,
         "visibility": projection["visibility"],
         "read_only": projection["read_only"],
-        "can_receive": projection["can_receive"],
+        #: The claim needs BOTH sides, not just the hub's state (review R2-2):
+        #: a committed owner HERE and the local switch on. An explicit OFF holds
+        #: every message ``bridge_off`` in the wake spine, so an owned device
+        #: with the switch off receives nothing while ``local.enabled`` says so
+        #: right beside this field.
+        "can_receive": bool(projection["can_receive"]) and enrolled and composed_enabled,
         "can_decide": projection["can_decide"],
         "local": {
+            #: Whether THIS machine holds the committed owner for the selected
+            #: account, tenant and endpoint (D1). False with an active hub
+            #: endpoint is "on elsewhere, not on this device": the surface's cue
+            #: to offer enabling here instead of showing "on".
+            "enrolled": enrolled,
             # The COMPOSED switch (see the module docstring): explicit wins, an
             # absent key follows the served consent. v1-only hubs read exactly
             # ``local.enabled`` as before.
-            "enabled": local.enabled_given(in_force),
+            "enabled": composed_enabled,
             "onboarding": local.onboarding,
             "session": local.session,
         },
@@ -735,8 +767,59 @@ async def status(
         #: when nothing waits, so an older renderer that ignores the key loses
         #: nothing.
         "delivery_hold": _delivery_hold(config_manager),
+        # The receiver's SERVICE state, distinct from enrolment: installed is
+        # a plist launchd does not hold; missing is no receiver at all. Off
+        # macOS this says ``unsupported``; for an isolated store, ``isolated``.
+        # Awaited IN A THREAD (review R1-3): the reading runs ``launchctl
+        # print``, so on the loop one wedged launchd would stall every status
+        # poll rather than only this field.
+        "connector": await asyncio.to_thread(_connector_state, config_manager.config_dir),
     }
     return reply(result)
+
+
+def _connector_state(config_dir: Path) -> str:
+    """The connector's service state, as ``install.connector_state`` reports it.
+
+    SYNCHRONOUS on purpose: the caller owns the thread (``asyncio.to_thread``),
+    because the reading runs ``launchctl print`` and must not sit on the event
+    loop. It is otherwise cheap — one plist existence check plus at most that
+    one probe — never raises, and never installs; installation belongs to the
+    commit, opt-out and app-start events.
+    """
+
+    from local_operator.team_bridge.connector.install import connector_state
+
+    return connector_state(config_dir)
+
+
+def _locally_enrolled(config_manager: ConfigManager, check: Any) -> bool:
+    """Whether the committed local owner IS the selected account/tenant/endpoint.
+
+    Read-only (an absent store stays absent) and local, no network. Any store
+    failure, zero or several owners, or an owner for another endpoint reads as
+    False: the claim is "this device receives", and doubt must not assert it.
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.client import select_tenant
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    selected = select_tenant(check.payload)
+    endpoint = selected.get("endpoint") if selected is not None else None
+    endpoint_id = endpoint.get("id") if isinstance(endpoint, dict) else None
+    if not isinstance(endpoint_id, str) or not endpoint_id or not check.account_id:
+        return False
+    try:
+        owner = Store(config_manager.config_dir).active_owner_readonly()
+    except (StoreRefused, sqlite3.Error):
+        return False
+    return owner is not None and (owner.account_id, owner.tenant_id, owner.endpoint_id) == (
+        check.account_id,
+        selected.get("tenant_id") if selected is not None else None,
+        endpoint_id,
+    )
 
 
 def _delivery_hold(config_manager: ConfigManager) -> dict[str, Any] | None:
@@ -1537,8 +1620,30 @@ class ConversationReadIn(ConversationOwnerIn):
 
 
 class ConversationConsentIn(ConversationOwnerIn):
-    decision: Literal["accept", "decline"]
-    consent_version: str = Field(min_length=1, max_length=128)
+    """The owner's decision about their own agent (agent-server #227).
+
+    ``accept``/``decline`` answer an ``invited`` row and ``withdraw`` takes an
+    ``active`` agent out. Only the two answers to an invitation carry the
+    participation ``consent_version``: leaving is not consenting, so withdraw
+    neither needs nor sends one (a version on it is refused rather than
+    dropped, so a caller cannot believe it recorded consent). ``endpoint_id``
+    pins one of the caller's agent rows, as the invitations read hands it out;
+    it travels in the body, never in a path, so a length bound is enough here
+    and the hub owns the "is this one of yours" rule.
+    """
+
+    decision: Literal["accept", "decline", "withdraw"]
+    consent_version: str | None = Field(default=None, min_length=1, max_length=128)
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _version_per_decision(self) -> "ConversationConsentIn":
+        if self.decision == "withdraw":
+            if self.consent_version is not None:
+                raise ValueError("withdraw carries no consent_version")
+        elif self.consent_version is None:
+            raise ValueError("accept and decline require consent_version")
+        return self
 
 
 class ConversationAdmitIn(ConversationOwnerIn):
@@ -1644,9 +1749,15 @@ async def list_conversations(
     before: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     scope: str | None = Query(default=None),
+    status: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """One page, tenant-scoped or (with ``scope=account``) merged across orgs.
+
+    ``status=archived`` selects the archived half (the "Archived channels"
+    surface); omitted/``open`` is the live list. The set is closed here so a typo
+    is this family's ``invalid_request`` rather than a hub round trip, and what
+    the caller may see in the archived half is entirely the server's rule.
 
     The account page is ordered by activity across the caller's organizations and
     carries each row's own ``tenant_id``; conversations are never merged into one
@@ -1663,7 +1774,10 @@ async def list_conversations(
         "before",
         "cursor",
         "scope",
+        "status",
     }:
+        _raise_read("invalid_request")
+    if status is not None and status not in _LIST_STATUSES:
         _raise_read("invalid_request")
     account_wide = _account_scope(scope)
     if before is not None and cursor is not None:
@@ -1688,6 +1802,7 @@ async def list_conversations(
             before=before,
             cursor=cursor,
             scope=ACCOUNT_SCOPE if account_wide else None,
+            status=_LIST_STATUSES[status] if status is not None else None,
         )
     )
     return reply(payload)
@@ -1747,7 +1862,7 @@ async def conversation_archive(
     request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Archive (read-only for every member)."""
+    """Archive (read-only for every member). Owner, or an org owner/admin on a channel."""
     _require_conversation_id(conversation_id)
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
@@ -1769,7 +1884,7 @@ async def conversation_unarchive(
     request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Unarchive (owner only, server-enforced)."""
+    """Unarchive (same authority as archive, server-enforced)."""
     _require_conversation_id(conversation_id)
     _refuse_write_scope(request)
     client = _conversation_client(config_manager)
@@ -1777,6 +1892,36 @@ async def conversation_unarchive(
         await _conversation_reply(
             client.conversation_lifecycle(
                 conversation_id, "unarchive", **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_delete(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Permanently delete an ARCHIVED conversation (irreversible).
+
+    Passed through untouched: the server permits only the conversation owner or
+    an organization owner/admin, only on an archived non-built-in conversation,
+    and answers ``not_archived`` / ``builtin`` / ``conversation_not_found``
+    itself. Nothing is cached locally (the store keeps no bodies), so there is
+    nothing to purge on this side. The same owner receipt as every other write
+    is accepted and stripped.
+    """
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_delete(
+                conversation_id, **_conversation_owner_query(request).model_dump()
             )
         )
     )
@@ -1843,7 +1988,15 @@ async def conversation_consent(
     body: ConversationConsentIn,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Record an agent owner's participation decision (the agent only then becomes active)."""
+    """Record an agent owner's participation decision (accept, decline or withdraw).
+
+    The hub's state refusals (409 ``invalid_transition`` with ``rule``
+    ``not_invited``/``not_active``, 400 ``rule=ambiguous``) pass through
+    verbatim. Only a hub that refuses ``withdraw`` as an unknown decision (coded
+    400 ``decision``/``unknown_value``) becomes the client's 409
+    ``outdated_hub``; an older hub's uncoded refusal of ``endpoint_id`` passes
+    through as its own 400 ``bridge_error``.
+    """
     _require_conversation_id(conversation_id)
     _require_account_id(account_id)
     _refuse_write_scope(request)
@@ -1856,11 +2009,221 @@ async def conversation_consent(
                 account_id,
                 decision=body.decision,
                 consent_version=body.consent_version,
+                endpoint_id=body.endpoint_id,
                 tenant_id=body.tenant_id,
                 expected_account_id=body.expected_account_id,
             )
         )
     )
+
+
+# -- owner's pending agent invitations (agent-server #227) ---------------------
+#
+# `GET /conversations` lists only what the caller's HUMAN identity is in, so an
+# agent invited into a private channel or group its owner is not in was
+# visible to nobody who could accept it. This read is the owner's list of those
+# invitations; each row is answered through the consent route above, naming the
+# row's `endpoint_id`.
+#
+# It sits under the owner-audit gate on the hub (caller + tenant, no endpoint
+# parameter, `private, no-store`), and this route mirrors that gate: a closed,
+# single-valued query, the captured-owner receipt REQUIRED, an uncacheable
+# answer every time including refusals (served as `no-store`; see below), and
+# nothing persisted or cached. The rows
+# are metadata only (no body, preview or member list) and pass through as the
+# hub sent them; `cursor` is the hub's opaque `next_cursor`, forwarded verbatim.
+#
+# Availability is the `team_bridge_owner_invitations` capability
+# (server/features.py), never a probe: a hub that predates #227 answers 404 here,
+# which the client surfaces as 409 `outdated_hub`.
+#
+# SERVED vs SET Cache-Control. The route sets `private, no-store` so it carries
+# the hub's contract wherever the router is mounted, but the running core's
+# app-wide `managed_desktop_boundary` (server/app.py) rewrites EVERY
+# `/v1/desktop/` answer to plain `no-store`, as it already does for the avatar
+# and attachment routes. That is no weaker -- `no-store` keeps the page out of
+# every cache, shared or private -- so the served header is `no-store`; the
+# value below is what a router-only mount (the unit fixture) sees.
+
+OWNER_INVITATIONS_CACHE_CONTROL = "private, no-store"
+_OWNER_INVITATIONS_QUERY = frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
+_OWNER_INVITATIONS_LIMIT = re.compile(r"[1-9][0-9]{0,2}")
+#: The whole vocabulary of ONE invitation row, and the subset this build cannot
+#: render without. The hub's guarantee is "metadata only, no body, preview or
+#: member list"; that guarantee is the HUB's, so the only way this build can
+#: keep it is to refuse a page it cannot account for (review R1-1). An unknown
+#: key is not dropped, it is malformed_page: a hub that starts sending `body`
+#: must surface as "this build cannot read that", never as a forwarded body
+#: nobody validated. Same rule as the inbox's `inbox_view`/`malformed_page`.
+_OWNER_INVITATION_ROW_FIELDS = frozenset(
+    {
+        "conversation_id",
+        "tenant_id",
+        "kind",
+        "name",
+        "visibility",
+        "status",
+        "created_by",
+        "created_by_label",
+        "invited_by",
+        "invited_by_label",
+        "endpoint_id",
+        "agent_label",
+        "invited_at",
+        "last_message_at",
+    }
+)
+_OWNER_INVITATION_ROW_REQUIRED = frozenset(
+    {
+        "conversation_id",
+        "tenant_id",
+        "kind",
+        "visibility",
+        "status",
+        "created_by",
+        "created_by_label",
+        "endpoint_id",
+        "agent_label",
+        "invited_at",
+        "last_message_at",
+    }
+)
+_OWNER_INVITATIONS_PAGE_FIELDS = frozenset({"invitations", "next_cursor", "has_more"})
+
+
+def _owner_invitation_page(payload: Any) -> dict[str, Any]:
+    """The invitations page as this build can read it, or ``malformed_page``.
+
+    Every served field is a string (the hub's row is ids, labels, timestamps), so
+    a non-string is as unreadable as an unknown name — including the nested
+    value a `body`/`members` regression would carry.
+    """
+
+    if not isinstance(payload, Mapping) or set(payload) - _OWNER_INVITATIONS_PAGE_FIELDS:
+        _raise_read("malformed_page")
+    rows = payload.get("invitations")
+    if not isinstance(rows, list) or not isinstance(payload.get("has_more"), bool):
+        _raise_read("malformed_page")
+    cursor = payload.get("next_cursor")
+    if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 512):
+        _raise_read("malformed_page")
+    out_rows: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) - _OWNER_INVITATION_ROW_FIELDS:
+            _raise_read("malformed_page")
+        if _OWNER_INVITATION_ROW_REQUIRED - set(row):
+            _raise_read("malformed_page")
+        if any(not isinstance(value, str) for value in row.values()):
+            _raise_read("malformed_page")
+        out_rows.append(dict(row))
+    page: dict[str, Any] = {"invitations": out_rows, "has_more": payload["has_more"]}
+    if cursor is not None:
+        page["next_cursor"] = cursor
+    return page
+
+
+def _refuse_foreign_tenant(config_dir: Any, tenant_id: str | None) -> None:
+    """Refuse a tenant this machine did not enroll with, as the inbox does (R1-2).
+
+    On an enrolled machine the tenant is REQUIRED (R2-2): omitted, the hub would
+    answer for the account's first active membership, which need not be the
+    enrolled org, so "a page answers for this machine's org" would hold only
+    when the caller happened to name it. Refusing beats defaulting to the
+    enrolled org: the store cannot tell a single-org account from a multi-org
+    one, and the enrolled owner's account is not compared to the caller's
+    ``expected_account_id`` here, so a silent default could send a tenant the
+    signed-in account does not belong to. The inbox requires the tenant too.
+
+    The enrolled org is the only local fact that can answer this, and it lives in
+    the bridge store — so the read is the READ-ONLY accessor (review R-1/M-9):
+    a machine with no committed owner stays unenrolled rather than having a store
+    made for it, and the hub's own membership gate answers instead. Skipping the
+    cross-check there is deliberate: requiring an enrollment would make the
+    invitation list unreadable exactly for an owner who has not committed yet,
+    and this read exists to be answered before that.
+    """
+
+    from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    if tenant_id is not None and re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
+        _raise_read("invalid_request")
+    try:
+        owner = Store(config_dir).active_owner_readonly()
+    except StoreRefused as exc:
+        # A damaged store is a refusal on every read path (R-7), not a reason to
+        # let the hub decide what this machine's org is.
+        _raise_read(exc.code or "state_unreadable")
+    if owner is None:
+        return
+    if tenant_id is None:
+        _raise_read("invalid_request")
+    if owner.tenant_id != tenant_id:
+        _raise_read("invalid_tenant")
+
+
+@router.get(
+    "/v1/desktop/team-bridge/agents/owned/invitations",
+    response_model=CRUDResponse[Any],
+)
+async def owned_agent_invitations(
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page of the conversations where the signed-in owner's agent is invited.
+
+    Result: ``{invitations: [...], next_cursor?, has_more}``. Unknown or
+    repeated query names are refused before any I/O rather than dropped (the
+    hub refuses ``endpoint_id``/``scope``/``before`` on this read too), a
+    malformed or foreign ``tenant_id`` is refused on this family's own
+    vocabulary, and the page is shape-checked before the renderer sees it.
+    """
+
+    response.headers["Cache-Control"] = OWNER_INVITATIONS_CACHE_CONTROL
+    try:
+        names = set(request.query_params)
+        if names - _OWNER_INVITATIONS_QUERY or "expected_account_id" not in names:
+            _raise_read("invalid_request")
+        query: dict[str, str] = {}
+        for name in names:
+            values = request.query_params.getlist(name)
+            if len(values) != 1 or not values[0].strip() or len(values[0]) > 512:
+                _raise_read("invalid_request")
+            # The STRIPPED value is what is validated and what is sent: keeping
+            # the raw one made the two disagree about what was checked (R1-4).
+            query[name] = values[0].strip()
+        if not is_account_id(query["expected_account_id"]):
+            _raise_read("invalid_request")
+        _refuse_foreign_tenant(config_manager.config_dir, query.get("tenant_id"))
+        limit: int | None = None
+        if "limit" in query:
+            # Canonical ASCII digits and the inbox's own 1..100 window: a value
+            # this route accepts is one the hub is known to accept. `[0-9]` is
+            # deliberately not `str.isdigit()`/`\d`, which admit Unicode digits
+            # (`"²"` crashed `int()` into a 500, `"١٢"` was forwarded as 12; R2-1),
+            # and the leading `[1-9]` refuses `"0"`/`"07"` with `"+20"`/`"1_0"`.
+            if _OWNER_INVITATIONS_LIMIT.fullmatch(query["limit"]) is None:
+                _raise_read("bad_limit")
+            limit = int(query["limit"])
+            if limit > 100:
+                _raise_read("bad_limit")
+
+        client = _conversation_client(config_manager)
+        payload = await _conversation_reply(
+            client.owned_agent_invitations(
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                cursor=query.get("cursor"),
+            )
+        )
+        return reply(_owner_invitation_page(payload))
+    except HTTPException as exc:
+        # A refusal is an answer about the owner's agent too; it must not sit
+        # in a shared cache either (the hub stamps its refusals the same way).
+        exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_INVITATIONS_CACHE_CONTROL}
+        raise
 
 
 @router.post(
@@ -2153,6 +2516,50 @@ async def delete_conversation_attachment(
     return Response(status_code=204)
 
 
+@router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/avatar")
+async def get_account_avatar(
+    target_account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Relay only a versioned account image, never a renderer-supplied URL.
+
+    The viewer receipt is mandatory even on GET: queued desktop work must not
+    acquire a new account's authority after login changes. No-store prevents
+    an HTTP cache from outliving that account fence.
+    """
+    query = request.query_params
+    keys = {"v", "size", "expected_account_id"}
+    if set(query) != keys or any(len(query.getlist(key)) != 1 for key in keys):
+        _raise_read("invalid_request")
+    if (
+        not is_account_id(target_account_id)
+        or not is_account_id(query["expected_account_id"])
+        or re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None
+        or query["size"] not in {"64", "256"}
+    ):
+        _raise_read("invalid_request")
+    data, mime = await _conversation_reply(
+        _conversation_client(config_manager).fetch_avatar(
+            target_account_id,
+            v=query["v"],
+            size=int(query["size"]),
+            expected_account_id=query["expected_account_id"],
+        )
+    )
+    if mime not in _ATTACHMENT_SERVABLE or len(data) > 1024 * 1024:
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @router.get(
     "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}"
     "/attachments/{attachment_id}"
@@ -2439,3 +2846,292 @@ async def conversation_unread(
             client.unread(tenant_id=tenant_id, scope=ACCOUNT_SCOPE if account_wide else None)
         )
     )
+
+
+# -- owner audit (HUMAN-ONLY) --------------------------------------------------
+#
+# "{Chief of staff}'s messages": the agent OWNER's read-only audit of every
+# conversation their own agent is or was in (agent-server #221,
+# docs/TEAM-BRIDGE-CONVERSATIONS.md §16; owner-audit contract v1-v3 + FROZEN).
+#
+# HUMAN-ONLY BODY PATH. These routes serve FULL bodies, including messages the
+# agent's screening rejected or never screened — screening protects the agent's
+# context from injection; it does not keep text from the agent's owner. They
+# exist for the renderer alone: nothing in the agent's runtime (the
+# `team_bridge` tool, read_context, model_boundary, the connector) reaches the
+# client methods behind them, which
+# tests/unit/team_bridge/test_owner_audit_isolation.py pins.
+#
+# READ-ONLY AND STATELESS. No route here posts, reacts, admits, joins or marks
+# anything read, and nothing is persisted: no bridge-store write, no body cache
+# (store.py's no-body-cache rule), and every answer — success or refusal raised
+# here — carries `Cache-Control: private, no-store` like the hub's own.
+#
+# NO ENDPOINT PARAMETER (contract v2 M1). The hub derives the audited agent rows
+# from the signed-in caller + tenant, so the renderer cannot name an endpoint and
+# a non-owner cannot even express the request. Every refusal the hub makes —
+# not the owner, not a member, outside the window, unknown — is ONE uniform 404
+# (`conversation_not_found` / `attachment_not_found`), passed through unchanged
+# so this surface is no more of an existence oracle than the hub.
+#
+# The captured-owner receipt (`expected_account_id`) is REQUIRED on every read:
+# an audit page captured for account A must not be answered while the machine is
+# signed in as B (the attachment routes' #2772 B1 rule, applied from the start).
+
+# SERVED vs SET, the same split ``OWNER_INVITATIONS_CACHE_CONTROL`` documents above:
+# each route here sets ``private, no-store`` so it carries the hub's contract
+# wherever the router is mounted, and the running core's app-wide
+# ``managed_desktop_boundary`` (``server/app.py``) rewrites every ``/v1/desktop/``
+# answer to plain ``no-store``. That is no weaker (``no-store`` keeps the page out
+# of every cache, shared or private), so the SERVED header is ``no-store`` and the
+# value below is what a router-only mount sees.
+OWNER_AUDIT_CACHE_CONTROL = "private, no-store"
+#: Spelled here (not imported from the client) for the httpx boot rule; pinned
+#: equal to ``client.OWNER_AUDIT_ATTACHMENT_MIME_TYPES`` by a test.
+_OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", "application/octet-stream"}
+_OWNER_AUDIT_FILE_MIME = "application/octet-stream"
+
+
+@contextmanager
+def _owner_audit_no_store() -> Iterator[None]:
+    """Stamp ``private, no-store`` on any refusal raised inside the block.
+
+    A success gets the header from the route's ``Response``; an
+    ``HTTPException`` is rendered by FastAPI's handler from ``exc.headers``
+    alone, so without this a 404 for someone's conversation would leave with a
+    weaker policy than the page it stands in for (the hub sets the header on
+    refusals too, review #221).
+    """
+
+    try:
+        yield
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_AUDIT_CACHE_CONTROL}
+        raise
+
+
+def _owner_audit_query(request: Request, allowed: frozenset[str]) -> dict[str, str]:
+    """The audit routes' query, closed, single-valued and with the receipt REQUIRED.
+
+    An unknown name (``endpoint_id``, ``scope``, ``purpose`` …) is refused before
+    any I/O rather than dropped: the hub refuses the same names, and a renderer
+    that believes it read "as" an endpoint must learn otherwise here. A repeated
+    name is refused too — the URL parser and the hub could pick different values.
+    """
+
+    names = set(request.query_params)
+    if names - allowed or "expected_account_id" not in names:
+        _raise_read("invalid_request")
+    out: dict[str, str] = {}
+    for name in names:
+        values = request.query_params.getlist(name)
+        if len(values) != 1 or not values[0].strip() or len(values[0]) > 512:
+            _raise_read("invalid_request")
+        out[name] = values[0]
+    if not is_account_id(out["expected_account_id"]):
+        _raise_read("invalid_request")
+    if len(out.get("tenant_id", "")) > 128:
+        _raise_read("invalid_request")
+    return out
+
+
+def _owner_audit_int(query: dict[str, str], name: str) -> int | None:
+    """A numeric hint parsed (never interpolated); a bad or negative value is a 422."""
+
+    raw = query.get(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        _raise_read("invalid_request")
+    if value < 0:
+        _raise_read("invalid_request")
+    return value
+
+
+async def _owner_audit_reply(awaitable: Any, model: Any) -> Any:
+    """Await one audit read and project it through its contract model.
+
+    The refusal mapping is the conversation family's (``_conversation_reply``),
+    so the hub's uniform 404 arrives as-is. A success the contract cannot read
+    is ``malformed_page`` rather than a half-understood page in the renderer.
+    """
+
+    from pydantic import ValidationError
+
+    payload = await _conversation_reply(awaitable)
+    try:
+        return reply(owner_audit_projection(model, payload))
+    except ValidationError:
+        _raise_read("malformed_page")
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations",
+    response_model=CRUDResponse[OwnerAuditConversationPage],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_conversations(
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page of the conversations the signed-in owner's agent is or was in.
+
+    Result: ``OwnerAuditConversationPage``. Activity-descending; page with the
+    opaque ``cursor`` (the previous page's ``next_cursor``). No read state and
+    no unread counts — auditing never raises a badge.
+    """
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        query = _owner_audit_query(
+            request, frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
+        )
+        limit = _owner_audit_int(query, "limit")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_conversations(
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                cursor=query.get("cursor"),
+            ),
+            OwnerAuditConversationPage,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages",
+    response_model=CRUDResponse[OwnerAuditMessagePage],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_messages(
+    conversation_id: str,
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One audited timeline page (``OwnerAuditMessagePage``), newest-first.
+
+    FULL bodies with each message's ``agent_delivery_status``. ``before_seq``
+    (older page) and ``after_seq`` are mutually exclusive, as on the member
+    history route.
+    """
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        _require_conversation_id(conversation_id)
+        query = _owner_audit_query(
+            request,
+            frozenset({"expected_account_id", "tenant_id", "limit", "before_seq", "after_seq"}),
+        )
+        if "before_seq" in query and "after_seq" in query:
+            _raise_read("invalid_request")
+        limit = _owner_audit_int(query, "limit")
+        before_seq = _owner_audit_int(query, "before_seq")
+        after_seq = _owner_audit_int(query, "after_seq")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_messages(
+                conversation_id,
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                before_seq=before_seq,
+                after_seq=after_seq,
+            ),
+            OwnerAuditMessagePage,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages/{message_id}"
+    "/replies",
+    response_model=CRUDResponse[OwnerAuditThread],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_replies(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One audited thread (``OwnerAuditThread``): root + replies, oldest-first."""
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        _require_conversation_id(conversation_id)
+        _require_message_id(message_id)
+        query = _owner_audit_query(
+            request, frozenset({"expected_account_id", "tenant_id", "limit", "after_seq"})
+        )
+        limit = _owner_audit_int(query, "limit")
+        after_seq = _owner_audit_int(query, "after_seq")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_replies(
+                conversation_id,
+                message_id,
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                after_seq=after_seq,
+            ),
+            OwnerAuditThread,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages/{message_id}"
+    "/attachments/{attachment_id}"
+)
+async def owner_audit_attachment(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One audited attachment's bytes for the human owner.
+
+    Headers follow :func:`get_conversation_attachment`: a closed type map,
+    ``nosniff``, a sandboxing CSP and ``private, no-store``. The audit branch
+    also serves generic FILES (the hub's ``application/octet-stream``); those
+    go out as a download with the hub's fixed name, never inline, so a file can
+    never be rendered by the renderer under a type it chose.
+    """
+
+    with _owner_audit_no_store():
+        _require_conversation_id(conversation_id)
+        _require_message_id(message_id)
+        _require_attachment_id(attachment_id)
+        tenant_id, expected_account_id = _attachment_query(request)
+        client = _conversation_client(config_manager)
+        data, mime = await _conversation_reply(
+            client.owner_audit_attachment(
+                conversation_id,
+                message_id,
+                attachment_id,
+                tenant_id=tenant_id,
+                expected_account_id=expected_account_id,
+            )
+        )
+        if mime not in _OWNER_AUDIT_SERVABLE:  # the client refuses first; defence in depth
+            _raise_read("malformed_page")
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": OWNER_AUDIT_CACHE_CONTROL,
+        }
+        if mime == _OWNER_AUDIT_FILE_MIME:
+            headers["Content-Disposition"] = 'attachment; filename="attachment.bin"'
+        return Response(content=data, media_type=mime, headers=headers)

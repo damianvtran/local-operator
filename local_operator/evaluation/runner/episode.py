@@ -622,6 +622,50 @@ def _canary_values_outside_own_roots(
     return tuple(value for value in values if not _is_own_location(value))
 
 
+def _canary_values_outside_own_identity(
+    values: Iterable[str], identity: Iterable[str]
+) -> tuple[str, ...]:
+    """Resolved values minus those the episode's own route identity contains.
+
+    WHY THIS EXISTS (the measured failure, 2026-10-27). The OSWorld rig's
+    sealed INFRA refs join the secret channel (see
+    ``_canary_values_outside_own_roots``), and one of them is the scoring
+    judge's PROVIDER NAME -- a non-secret configuration word. When the episode
+    itself was routed through that same provider, the value equalled
+    ``requested_route.provider_id`` and was a substring of ``route_id``; every
+    ``model_request`` event carries ``requested_route``, so the writer refused
+    the FIRST request event (operation ``append:model_request``) before any
+    model response was recorded, and the episode was abandoned as
+    ``evidence-evidencefailure`` (run ``canary4-main20-task_002``). A route
+    with a different provider passed the same observation untouched, which is
+    why the refusal looked route-dependent.
+
+    WHAT THIS GIVES UP, AND WHY THAT IS SOUND. A dropped value is no longer a
+    canary ANYWHERE in the bundle, not only in the route fields: whatever ref it
+    came from -- a configuration word or a credential that happens to equal or
+    sit inside the route identity -- an artifact or event carrying it is no
+    longer refused. That is no new exposure. The manifest seals
+    ``requested_route`` unscanned (the writer canaries events and artifacts,
+    never the manifest) when the bundle is created, BEFORE the first event, so
+    such a value was already in the bundle in plaintext before this rule
+    existed; a canary for it could only refuse the run's own bookkeeping, never
+    keep the value out. The match is the same plaintext substring test
+    ``RedactionSet.assert_clear`` applies, so the drop is limited to exactly the
+    values the identity itself carries.
+
+    THE RULE, SCOPED. Only a value CONTAINED IN an identity string is dropped.
+    A value that merely contains one (an API key prefixed with the provider
+    name, say) stays a canary, as does every value unrelated to the route; those
+    are the credentials this rule leaves fully protected.
+    """
+
+    # ASSUMES served == requested route (fallback_policy=forbid); enabling fallback must revisit.
+    own = tuple(item for item in identity if item)
+    if not own:
+        return tuple(values)
+    return tuple(value for value in values if not any(value in item for item in own))
+
+
 class EpisodeRunner:
     """Drives one episode from launch to a sealed or abandoned bundle."""
 
@@ -793,15 +837,23 @@ class EpisodeRunner:
         # could carry.
         self._resolved_secrets = self._secrets.resolve([ref.name for ref in self._spec.secret_refs])
         if self._resolved_secrets:
+            # Two scoped exclusions, each a value the bundle carries by
+            # construction and so cannot prove a leak: the episode's own
+            # locations, and its own sealed route identity. Every other
+            # resolved value still widens the set (see both helpers).
+            route = self._spec.requested_route
             self._redactions = self._redactions.with_values(
-                _canary_values_outside_own_roots(
-                    (secret.value for secret in self._resolved_secrets),
-                    (
-                        self._config.evidence_root,
-                        self._config.artifact_root,
-                        self._config.rescue_root,
-                        self._selector.workspace,
+                _canary_values_outside_own_identity(
+                    _canary_values_outside_own_roots(
+                        (secret.value for secret in self._resolved_secrets),
+                        (
+                            self._config.evidence_root,
+                            self._config.artifact_root,
+                            self._config.rescue_root,
+                            self._selector.workspace,
+                        ),
                     ),
+                    (route.provider_id, route.route_id, route.model_id),
                 )
             )
 
@@ -3420,13 +3472,41 @@ def _refused_before_dispatch(error: BaseException) -> bool:
     return isinstance(error, RpcRemoteError) and error.code == "invalid_state"
 
 
+def _not_applied_failure(error: BaseException) -> bool:
+    """Did the ADAPTER declare that no part of the batch reached the environment?
+
+    Mirrors ``supervisor._declared_not_applied`` and must keep mirroring it:
+    the supervisor keeps the session usable on exactly this shape, and the
+    bridge's re-bind ``observe`` would hit the poison gate on any case the
+    supervisor did not. Both are pinned by lockstep tests.
+
+    WHY IT EXISTS. ``ActionNotAppliedError`` (``adapters/api.py``) crossed the
+    worker as ``phase == "unknown"`` before schema 1.7, so a failure the
+    adapter KNEW applied nothing ("guest action 1 was not attempted; no input
+    was sent") ended the episode as an ambiguous mutation: 10 of 20 OSWorld
+    2.1 offline episodes on arm main16, discarding up to 478 applied steps.
+
+    Like ``_refused_before_dispatch`` it admits the read-only re-bind ONLY;
+    the read-back retry loops keep the committed-only predicate.
+    """
+
+    return (
+        isinstance(error, RpcRemoteError)
+        and error.code == "adapter_error"
+        and error.detail is not None
+        and error.detail.phase == "not_applied"
+    )
+
+
 def _rebindable_failure(error: BaseException) -> bool:
     """The failures for which the ONE read-only re-bind may run.
 
     Either the adapter declared the batch committed and only the read-back was
     lost (``_observation_phase_failure``), or the worker refused before any
-    adapter code ran (``_refused_before_dispatch``). Everything else stays
-    ambiguous, poisons the session and ends the episode exactly as before.
+    adapter code ran (``_refused_before_dispatch``), or the adapter declared
+    that no part of the batch was applied (``_not_applied_failure``).
+    Everything else stays ambiguous, poisons the session and ends the episode
+    exactly as before.
 
     THE ONLY CONSUMER is ``ActionBridge._after_failed_execute``, whose recovery
     is a fresh read-only ``observe``. It must NOT gate ``resume_observation``
@@ -3436,7 +3516,11 @@ def _rebindable_failure(error: BaseException) -> bool:
     keeps the committed-only predicate.
     """
 
-    return _observation_phase_failure(error) or _refused_before_dispatch(error)
+    return (
+        _observation_phase_failure(error)
+        or _refused_before_dispatch(error)
+        or _not_applied_failure(error)
+    )
 
 
 def _failure_layer(error: BaseException) -> Literal["evidence", "adapter", "internal"]:

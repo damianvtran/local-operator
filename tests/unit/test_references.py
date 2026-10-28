@@ -125,8 +125,8 @@ async def test_an_existing_file_is_expanded_with_its_content(tmp_path):
 
 @pytest.mark.asyncio
 async def test_the_typed_token_survives_verbatim_inside_the_block(tmp_path):
-    """``typed=`` mirrors ``render_invocation``'s ``invocation=``: the payload is
-    what gets persisted, so a resumed session recovers the short row from it."""
+    """``typed=`` matches the legacy skill payload's ``invocation=``: the payload
+    is what gets persisted, so a resumed session recovers the short row from it."""
     (tmp_path / "notes.md").write_text("body\n", encoding="utf-8")
 
     result = await expand_references("read @notes.md", str(tmp_path))

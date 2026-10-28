@@ -38,6 +38,7 @@ from local_operator.tools.project_tool import (
 )
 from local_operator.tools.public_copy import build_read_public_copy_tool
 from local_operator.tools.secret_tool import build_secret_tool
+from local_operator.tools.skill_tool import build_skill_tool
 from local_operator.tools.tags_tool import build_tags_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
 from local_operator.tools.video_tool import (
@@ -53,7 +54,9 @@ from local_operator.web_search.tool import build_web_search_tool
 #: session without wakes never advertises a tool that can only error; the
 #: table order below is also the provider-visible tool order.
 TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
-    "bash": lambda _context: builtin.build_bash_tool(),
+    # Takes the context: a scout's write-confined shell is described as
+    # sandboxed and approved at ``read`` tier (see ``build_bash_tool``).
+    "bash": lambda context: builtin.build_bash_tool(context),
     "read": lambda _context: builtin.build_read_tool(),
     "read_public_copy": lambda _context: build_read_public_copy_tool(),
     "write": lambda _context: builtin.build_write_tool(),
@@ -207,6 +210,23 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # appending never shifts a provider-visible array prefix, which is what the
     # prompt cache keys on.
     "artifact_data": lambda context: build_artifact_data_tool(context),
+    # createIf: rung 3 — present only where the session bound its inbox door
+    # (`context.notify_inbox`; absent for delegated children, sessions the
+    # operator's listings hide, one-shot hosts, output-contract sessions and
+    # under LOP_NOTIFY=0 — see `Session._notify_inbox_callable` and
+    # docs/design/notifications-inbox.md §3.2). Published after the live deferred
+    # pilot failed discovery; the measured budget is recorded in the bench.
+    # The system.md clause names when to reach for it. Appended at END on
+    # purpose: appending never shifts a provider-visible array prefix, which is
+    # what the prompt cache keys on.
+    "notify": lambda context: builtin.build_notify_tool(context),
+    # OPT-IN, NOT DEFAULT: the configuration run's skill editor. In this table so
+    # a declaring host can build it (`session_factory.AGENTS_CONFIG_TOOLS` +
+    # `Session._merge_capability_tools`), and deliberately ABSENT from
+    # `DEFAULT_TOOL_NAMES` below, so no ordinary session builds it and no other
+    # session's tools array -- the prompt-cache prefix -- moves. Appended at END
+    # for the same prefix reason as every entry above.
+    "skill": lambda context: build_skill_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -265,9 +285,11 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "generate_voiceover",
     "generate_sound_effect",
     "tags",
-    # The newest append (see the table comment above): createIf-gated on a
-    # stored anthropic OAuth grant.
+    # createIf-gated on a stored anthropic OAuth grant.
     "artifact_data",
+    # The newest append (see the table comment above): createIf-gated on the
+    # session's inbox door.
+    "notify",
 ]
 
 

@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "audit_id": "nd2",
+  "locale": "ru",
+  "namespace": "tui.notifications",
+  "record": "record.json",
+  "provenance": "Independent audit on 2026-10-26; actual model kimi/k3.1-pro (provider-quota fallback from anthropic/claude-opus-5-5 via anthropic/claude-sonnet-5-5 and openai/gpt-6-astra); actual outputs in this bundle.",
+  "hashes": {
+    "after.check": "20713853885ad4b9042b1eca5248affe9c7e88a5d989e0ccb518539cb42b9fce",
+    "after.gen": "d32497d7d8fe1b910702964b6a342b2fe6e131ade59df4e111e21af8af1d8920",
+    "after.gencheck": "91ba697cb5c8b88bfaabaea425387318897f686afe68870ffbbd55b4e7321230",
+    "after.pytest": "6d1048ad1fecbe0b52da640a2663eb44ac21fc30e87cdd92808dd5e073d779dc",
+    "audit.log": "f06f85c12d868aef09bef4b5ff188cfd7fa46e6869d091d904386247421fdd3f",
+    "before.check": "20713853885ad4b9042b1eca5248affe9c7e88a5d989e0ccb518539cb42b9fce",
+    "before.gen": "d32497d7d8fe1b910702964b6a342b2fe6e131ade59df4e111e21af8af1d8920",
+    "before.gencheck": "91ba697cb5c8b88bfaabaea425387318897f686afe68870ffbbd55b4e7321230",
+    "before.pytest": "5837c0a045b6724d73e089225dedf62fc0f884f418ceef1b680a979f312206b0",
+    "matrix.log": "673599078980b7b05d8ad881e1e527c08538eb4420d4357d1e96c1934b148815",
+    "oldhead.check": "ab4991dcce1b206dc243683c59e3688d52d5be0dc935a01b43cb495087ab080f",
+    "record.json": "0e9990c015166df3970f31a6a12742e835c732bafec860314a6c9a7ca77aee16",
+    "report.md": "4acf256ffa4a7ae4bdfd14c5dcda67977a03c57ea0a47af2c22197c80537ce0a",
+    "target.json": "85b808d1c3baffc6d4c49cdb24c6642bcd194238d9d3c660fed20d2dc4516dec",
+    "urpaint.log": "8c8b3c5abae2d39d6ea634722d332101280567c80eb2dff98818e764bea6e043"
+  },
+  "audited_target_sha256": "85b808d1c3baffc6d4c49cdb24c6642bcd194238d9d3c660fed20d2dc4516dec",
+  "ledger_gate_sentence": "The ru ledger row may ship at this hash: 85b808d1c3baffc6d4c49cdb24c6642bcd194238d9d3c660fed20d2dc4516dec"
+}

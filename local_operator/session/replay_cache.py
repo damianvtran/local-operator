@@ -75,10 +75,20 @@ from typing import Any, Callable
 
 from local_operator.session import compression
 from local_operator.session.attachments import store_for_transcript_dir
+from local_operator.session.cold_metadata import (
+    ColdMetadata,
+    witness_for,
+    write_cold_metadata,
+)
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+from local_operator.session.model_selection import (
+    SelectionReading,
+    read_selection_reading,
+)
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import (
+    read_cold_tail,
     read_replay_suffix,
     replay_entries,
     usages_since_newest_shrink,
@@ -121,6 +131,14 @@ class ReplayKey:
     inode: int
     size: int
     mtime_ns: int
+    #: The inode CHANGE time. ``mtime`` is not enough on its own: the journal
+    #: writer restores mtime after a bookkeeping batch (``preserve_mtime``), so
+    #: a same-size interior rewrite with a restored mtime would leave the other
+    #: three fields equal. ``st_ctime_ns`` moves on every data or metadata write
+    #: and no unprivileged process can set it back, which is why the selection
+    #: ledger (``tail_anchor``) already validates on it. Part of equality, so the
+    #: post-read re-stat below also refuses a read the file changed under.
+    ctime_ns: int
     through_id: str | None
     #: Whether an absent ``through_id`` is an error (the negotiated cut) or a
     #: legacy fallback. Part of the REQUEST rather than the file: the same bytes
@@ -253,6 +271,7 @@ def replay_key(
         inode=stat.st_ino,
         size=stat.st_size,
         mtime_ns=stat.st_mtime_ns,
+        ctime_ns=stat.st_ctime_ns,
         through_id=through_id,
         strict_cut=strict_cut,
         checkpoint_types=_normalised(checkpoint_types),
@@ -304,6 +323,7 @@ def build_cold_replay(
     want_checkpoint: bool,
     through_id: str | None,
     strict_cut: bool,
+    metadata_path: Path | None = None,
 ) -> ColdReplay:
     """One cold parse of the journal, published under its file version.
 
@@ -407,7 +427,117 @@ def build_cold_replay(
     )
     if fresh != key:
         return ColdReplay(messages=tuple(messages), retained=0, **values)
+    _record_cold_metadata(metadata_path, key, values)
     return publish_replay(key, messages=messages, **values)
+
+
+def build_cold_tail_metadata(key: ReplayKey, path: Path) -> ColdMetadata | None:
+    """Defer a desktop record MISS only when bounded tail facts prove its state.
+
+    This never publishes a replay-cache entry: the tail's rows are evidence,
+    not the whole message list. Hydration still uses the exact eager replay.
+    Selection keeps its existing authority/rules; it is not guessed from the
+    checkpoint and the final journal witness covers both reads before filing.
+    """
+    if key.through_id is not None or key.strict_cut or not key.checkpoint_types:
+        return None
+    suffix = read_cold_tail(
+        key.directory,
+        checkpoint_types=key.checkpoint_types + key.opportunistic_types,
+    )
+    if suffix is None:
+        return None
+    seed = seed_reported_usage(usages_since_newest_shrink(suffix.entries))
+    # ``None`` has two meanings. With usage PROVEN ABSENT from the whole journal
+    # it is eager's own answer (no receipt anywhere to seed from). Otherwise it
+    # means the tail met no parseable receipt, so eager might seed from an older
+    # one, and the tail must decline.
+    if seed is None and not suffix.usage_proven_absent:
+        return None
+    selection = read_selection_reading(Path(key.directory))
+    fresh = replay_key(
+        key.directory,
+        through_id=key.through_id,
+        strict_cut=key.strict_cut,
+        checkpoint_types=key.checkpoint_types,
+        opportunistic_types=key.opportunistic_types,
+    )
+    if fresh != key:
+        return None
+    if selection.source != (key.inode, key.size, key.mtime_ns, key.ctime_ns):
+        return None
+    record = ColdMetadata(
+        witness=witness_for(key),
+        checkpoint=suffix.checkpoint,
+        checkpoints=suffix.checkpoints,
+        order=suffix.checkpoint_order,
+        seed_usage=seed,
+        bytes_read=suffix.bytes_read,
+        selection=selection,
+    )
+    write_cold_metadata(path, record)
+    return record
+
+
+def _record_cold_metadata(path: Path | None, key: "ReplayKey", values: dict[str, Any]) -> None:
+    """Write this replay's metadata behind it, for the NEXT process's cold open.
+
+    WRITE-BEHIND AND NEVER LOAD-BEARING. This runs only after the answer above
+    is already final and its after-read recheck has passed, so the record
+    describes exactly the answer the caller is about to receive. Storage is the
+    one thing a reader may ignore, so the write swallows every failure: a cache
+    that cannot be written costs the next open the parse it was already paying,
+    and must never fail the open, the append or the turn.
+
+    ONLY FOR THE COLD-OPEN REQUEST (``through_id is None``, non-strict, wants the
+    durable checkpoint). Every other shape -- a reconnect's negotiated cut, a
+    preheat that wanted no custom rows -- is a request no cold open makes, so a
+    record written for it could only sit on disk unread and push the record a
+    cold open does use out of its single slot.
+
+    THE MODEL SELECTION RIDES ALONG (``ColdMetadata.selection``), read HERE
+    rather than handed in by a caller, for two reasons. Every writer gets it —
+    the eager cold open AND the startup prewarm, whose records would otherwise
+    never carry one and so never spare their first open the selection scan. And
+    it costs the eager open nothing: ``read_model_selection`` is stat-memoised,
+    and the cold model resolution read this same journal version moments ago, so
+    this is a memo hit there; on the prewarm it is a background scan.
+
+    FILED ONLY WHEN THE READING'S SOURCE IS THIS KEY'S JOURNAL VERSION. The
+    reading is a separate read from this replay; an append between the two leaves
+    them describing different versions, and storing it under this key would let a
+    later HIT serve a selection the journal no longer has. Anything else is stored
+    as "not recorded", which costs the next open one selection read and no more.
+    """
+    if path is None:
+        return
+    if key.through_id is not None or key.strict_cut or not key.checkpoint_types:
+        return
+    selection: SelectionReading | None
+    try:
+        selection = read_selection_reading(Path(key.directory))
+    except Exception:  # noqa: BLE001 — write-behind: a failed read is "not recorded"
+        logger.debug("cold metadata: selection not recorded", exc_info=True)
+        selection = None
+    if selection is not None and selection.source != (
+        key.inode,
+        key.size,
+        key.mtime_ns,
+        key.ctime_ns,
+    ):
+        selection = None
+    write_cold_metadata(
+        path,
+        ColdMetadata(
+            witness=witness_for(key),
+            checkpoint=values.get("checkpoint"),
+            checkpoints=values.get("checkpoints") or {},
+            order=values.get("order") or {},
+            seed_usage=values.get("seed_usage"),
+            bytes_read=int(values.get("bytes_read") or 0),
+            selection=selection,
+        ),
+    )
 
 
 async def load_cold_replay(

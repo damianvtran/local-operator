@@ -897,6 +897,43 @@ async def test_a_provider_switch_does_not_lift_a_refusal_driven_strip(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_provider_switch_lifts_an_image_count_strip(tmp_path):
+    """An image-COUNT refusal ("Too much media: ... 101 images > 100") poisons
+    no block: the request crossed THIS provider's per-request limit. The strip
+    still lets the next turn succeed, but it is provider-scoped like the size
+    strip, so switching to a provider with a higher limit lifts it (PR #3004
+    agent review round 2, R2-m2)."""
+
+    class RefusesCount:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.calls += 1
+            first = self.calls == 1
+
+            async def gen():
+                if first:
+                    raise ProviderError(400, "Too much media: 0 document pages + 101 images > 100")
+                yield StreamTextDelta(delta="ok")
+                yield StreamEndEvent(stop_reason="endTurn")
+
+            return gen()
+
+    session = make_session(tmp_path, RefusesCount())
+    await session.seed_history(_frames(2))
+
+    await session.prompt("go")
+    assert session._images_rejected, "the count refusal did not strip images"
+    assert session._images_rejected_for_size, "a count refusal was treated as a poisoned block"
+
+    session.set_model(ModelSpec(provider="other", model_id="lax", context_window=1_000_000))
+
+    assert not session._images_rejected, "the departed provider's count strip survived"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_terminal_notice_does_not_claim_screenshots_on_a_text_history(tmp_path):
     """R9: this rung is reached on the FIRST refusal for a text-only history,
     where "dropping screenshots" describes something that never happened."""

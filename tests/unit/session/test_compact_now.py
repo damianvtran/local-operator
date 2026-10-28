@@ -274,6 +274,40 @@ def test_a_malformed_archive_degrades_to_the_text_summary():
 
 
 @pytest.mark.asyncio
+async def test_a_chained_snapcompact_pass_folds_the_previous_archive_once(tmp_path, monkeypatch):
+    """QA round 5 Q16: the rendered marker is lifted before snapcompact input.
+    Its archive comes only through ``previous_text``; its wrapped replay pages
+    never serialize as new operator history."""
+    from local_operator.compaction import snapcompact
+
+    stream = ScriptedStream(["reply"] * 8)
+    session = make_session(tmp_path, stream, model=VISION_MODEL)
+    await talk(session, turns=6)
+    assert (await session.compact_now()).ran
+    first = session._transcript.latest_entry("compaction")
+    assert first is not None
+    first_text = first.payload["preserve_data"]["snapcompact"]["text"]
+    await talk(session, turns=3)
+    seen = {}
+    original = snapcompact.compact_to_archive
+
+    def observe(messages, provider, model_id, previous_text=None, **kwargs):
+        seen["messages"] = list(messages)
+        seen["previous_text"] = previous_text
+        seen["serialized"] = snapcompact.serialize_for_snapcompact(messages)
+        return original(messages, provider, model_id, previous_text, **kwargs)
+
+    monkeypatch.setattr(snapcompact, "compact_to_archive", observe)
+    assert (await session.compact_now()).ran
+    assert seen["previous_text"] == first_text
+    assert all(
+        (m.provider_payload or {}).get("compaction_summary") is None for m in seen["messages"]
+    )
+    assert first_text not in seen["serialized"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_text_only_model_compacts_into_a_language_summary(tmp_path):
     """The same history on a model that cannot read images back: a written
     summary, and NO archive — rendering frames it could never see would spend

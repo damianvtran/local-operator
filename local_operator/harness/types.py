@@ -716,6 +716,19 @@ _CLONE_GUARD_FIELDS = frozenset(
         "context_tokens_hint_measured",
         "context_binding",
         "native_context_tokens",
+        # Cache-diagnostics opt-in stamped by ``SessionStreamFn``: it names a
+        # previous provider response for a server-side prefix comparison and
+        # never changes the prompt bytes the model reads.
+        "cache_diagnostics",
+        "cache_diagnostics_previous_id",
+        # Request role for the Anthropic cache-TTL policy, stamped by
+        # ``SessionStreamFn`` on every request (``anthropic_cache_ttl``). It
+        # selects a marker TTL, never message bytes, so an armed one-turn secret
+        # stays in the one body it was approved for.
+        "cache_role",
+        # Same policy input, same stamper: "this conversation already had a
+        # long-streaming turn" picks the marker TTL and nothing else.
+        "cache_after_long_call",
     }
 )
 #: Model fields that same decoration may set: the per-turn effort fit.
@@ -1300,6 +1313,11 @@ class Usage(BaseModel):
     #: :data:`_DECODE_WINDOW_ATTR` — private so it costs the wire nothing, and read
     #: through :func:`decode_window_of` so a future shape change is one function.
     _decode_window: tuple[int, int] | None = PrivateAttr(default=None)
+    #: The Anthropic response id of the DIAGNOSED request this usage belongs
+    #: to, or unset. See :data:`CACHE_DIAGNOSTICS_ID_KEY` — private for the same
+    #: zero-frame-bytes reason as the decode window; the transcript encoder is
+    #: the one writer that puts it on disk.
+    _cache_diagnostics_id: str | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(
@@ -2033,6 +2051,15 @@ class ToolContext(BaseModel):
     #: may reach, and what the boundary explicitly does not cover, is stated in
     #: ``local_operator.tools.confinement``.
     confinement_root: str | None = None
+    #: The ONLY directory this session's SHELL may write to, or ``None`` for an
+    #: ordinary shell. Unlike ``confinement_root`` it confines nothing else:
+    #: reads stay open and ``read``/``glob``/``web_fetch`` are untouched. Set
+    #: for ``scout`` children (``harness.subagent._with_readonly_shell_floor``)
+    #: so a read-only role can run ``strings`` or unpack an archive into its
+    #: scratchpad and still change nothing; enforced by the kernel sandbox in
+    #: ``local_operator.tools.confinement.ShellWriteConfinement``, and a host
+    #: that cannot enforce it refuses the command rather than run it.
+    shell_write_root: str | None = None
     #: This session's own DIRECTORY on disk (``.../sessions/<id>``), absolute,
     #: or ``None`` wherever ``scratchpad_dir`` is ``None`` (agent directories
     #: are exported wholesale and stay free of runtime files). Its one consumer
@@ -2058,6 +2085,12 @@ class ToolContext(BaseModel):
     #: true for a busy session and a dormant one alike — a probe would either
     #: never fire or invent a second idle definition beside the runtime's.
     kernel_managed_by_session: bool = False
+    #: The guidance files this session's system prompt actually carries, as
+    #: ``(resolved path, sha256 of the injected head)`` pairs; empty on a host
+    #: that injects none. The ``read`` tool shapes a whole read of one into its
+    #: section index only when the file is listed here and its head is still
+    #: the injected one (``context_files.render_read_index``).
+    injected_guidance: tuple[tuple[str, str], ...] = ()
     # Session-owned transport and duplicate-read coordinator. Kept off wire
     # payloads; its lifecycle belongs to the session that constructs tools.
     web_io: Any | None = Field(default=None, exclude=True)
@@ -2423,6 +2456,17 @@ class ToolContext(BaseModel):
     #: SENTENCE the model must act on (write text instead) or ``None`` when the
     #: quiet end is allowed. A refusal is never coerced into a message.
     quiet_end: Callable[[], Awaitable[str | None]] | None = None
+    #: THE INBOX DOOR (``docs/design/notifications-inbox.md`` §3.2): the
+    #: ``notify`` tool's whole availability fact, bound by
+    #: ``Session._notify_inbox_callable``. ``None`` for a delegated child (it
+    #: reports through ``hub`` and its parent decides), a session the operator's
+    #: own listings hide (``resume.is_user_session``), a one-shot host or an
+    #: output-contract session (the ``quiet_end`` exclusions), and under
+    #: ``LOP_NOTIFY=0``. Present, it is called with the validated arguments and
+    #: the tool call id, writes the item as unread, and returns
+    #: the sentence the model reads; it raises only for a store refusal the
+    #: tool reports as a retryable error.
+    notify_inbox: Callable[..., Awaitable[str]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per
@@ -3855,6 +3899,20 @@ class ModelSpec(BaseModel):
     max_output_tokens: int = 8_192
     supports_tools: bool = True
     supports_images: bool = True
+    # Whether ``supports_images`` above was STATED by a source (a shipped row,
+    # a listing's modalities, a caller building the spec by hand) or merely
+    # DEFAULTED because nothing described the model. The two must stay apart:
+    # sending an undescribed model images is right (a text-only endpoint
+    # refuses, and the session's refusal degrade strips them from then on),
+    # but a decision that cannot be undone by that degrade must not bet on a
+    # default. Snapcompact is the one that matters: it archives history AS
+    # image frames, so an undescribed text-only model that compacted that way
+    # lost the archived middle of its conversation for good (PR #3071 QA Q2).
+    # Readers that need a positive answer gate on ``supports_images and
+    # supports_images_stated``. Default ``True`` so a spec written out by hand
+    # (tests, a bare ``ModelSpec(provider, model_id)``) keeps its meaning;
+    # only ``configure.build_model_spec`` knows when the value was a default.
+    supports_images_stated: bool = True
     # Whether the model takes AUDIO input on its wire (a recorded block, not a
     # transcription call). DEFAULT FALSE ON PURPOSE, and the asymmetry with
     # ``supports_images`` above is the whole argument: a wrong ``True`` sends a
@@ -4251,6 +4309,31 @@ def turn_output_budget(model: "ModelSpec", ceiling: int | None = None) -> int:
     return min(limit, advertised) if advertised > 0 else limit
 
 
+class ConsumerCut:
+    """A consumer's receipt that it cut one provider call short on purpose.
+
+    See ``ChatRequest._consumer_cut`` for why it exists and who reads it. A
+    plain mutable object rather than a model: it is local bookkeeping between
+    two layers of ONE process, never serialized, and every request copy must
+    share the SAME instance.
+    """
+
+    __slots__ = ("output_chars", "estimated_usage")
+
+    def __init__(self) -> None:
+        #: Output characters (reasoning + text) streamed before the cut, or
+        #: ``None`` while the call has not been cut.
+        self.output_chars: int | None = None
+        #: The recorder's estimated ``Usage`` for the cut call, handed BACK so the
+        #: loop can put the same figure on the cut message (the session's spend
+        #: band reads ``message.usage``). ``None`` until the recorder ran, and on
+        #: a host whose stream fn does not record (a bare test stream).
+        self.estimated_usage: "Usage | None" = None
+
+    def mark(self, output_chars: int) -> None:
+        self.output_chars = max(0, int(output_chars))
+
+
 class ChatRequest(BaseModel):
     """One provider call. System prompt is a LIST of blocks so providers can
     place cache breakpoints per block (stable instruction block first,
@@ -4345,9 +4428,40 @@ class ChatRequest(BaseModel):
     # Local, request-owned binding of the counted boundary to the native
     # protocol and credential selected by the wire client. Never serialized.
     context_binding: Any = Field(default=None, exclude=True, repr=False)
+    #: Opt this request into Anthropic's cache diagnostics, comparing it with
+    #: ``cache_diagnostics_previous_id`` (``None`` = the conversation's first
+    #: diagnosed request, sent as an explicit JSON ``null``, which is still an
+    #: opt-in: the API fingerprints only requests that carry the object).
+    #:
+    #: Stamped ONLY by ``SessionStreamFn`` for its own conversation turns, from
+    #: that stream's last Anthropic response id. That is what makes the chain
+    #: per-conversation: a forked subagent owns a separate ``SessionStreamFn``
+    #: and asides/naming/compaction are never stamped, so no request can be
+    #: compared against another conversation's response. Metadata, not
+    #: content: only ``AnthropicClient._build_body`` reads it, and only for the
+    #: first-party API (Bedrock/Vertex/proxies do not offer the feature).
+    #: Excluded from dumps and ``repr`` like the neighbouring transport
+    #: metadata: it is request policy for one wire, not conversation state.
+    cache_diagnostics: bool = Field(default=False, exclude=True, repr=False)
+    cache_diagnostics_previous_id: str | None = Field(default=None, exclude=True, repr=False)
     # Native reasoning is opaque: use provider-reported token counts rather
     # than treating encrypted bytes as text. Populated only after replay checks.
     native_context_tokens: int = Field(default=0, exclude=True, repr=False)
+    #: Who is asking, for the Anthropic prompt-cache TTL policy
+    #: (``providers/anthropic_cache_ttl.py``): ``"main"``, ``"subagent"`` or
+    #: ``"auxiliary"``. Stamped by ``SessionStreamFn``, the one place that knows
+    #: whether the conversation is a delegated child; ``None`` (a request built
+    #: outside a session stream) derives the role from ``purpose`` alone, as a
+    #: top-level conversation. Transport policy, never wire content.
+    cache_role: str | None = Field(default=None, exclude=True, repr=False)
+    #: This conversation has already had a turn that ran at least
+    #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
+    #: start to stream end. Stamped by ``SessionStreamFn`` from its own
+    #: per-instance history (a fork starts clean), read only by the cache-TTL
+    #: policy, which moves such a subagent to 1h because its next request
+    #: would otherwise find the 5m prefix expired. Transport policy, never
+    #: wire content.
+    cache_after_long_call: bool = Field(default=False, exclude=True, repr=False)
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:
@@ -4687,6 +4801,39 @@ class ChatRequest(BaseModel):
     #: from "the harness bounded it" when it prefers a provider's own default.
     _max_tokens_from_policy: bool = PrivateAttr(default=False)
 
+    #: The consumer's cut receipt for this call, or ``None`` when the consumer
+    #: never armed one. The loop arms it BEFORE dispatch (one fresh
+    #: :class:`ConsumerCut` per model call) and its in-stream degeneration guard
+    #: (``harness.degeneration``) fills it the moment it cancels the stream; the
+    #: usage recorder (``model.configure.SessionStreamFn._record_stream``) reads
+    #: it in its ``finally``.
+    #:
+    #: WHY A REQUEST-OWNED, SHARED OBJECT. Providers report usage only in the
+    #: stream's closing frames, so a call the guard cancels arrives at the
+    #: recorder with no usage at all -- and an unreported call is booked as
+    #: UNKNOWN spend, which for a call that really billed its whole input context
+    #: plus ~10 KB of output reads as free (review round 1, m3). The recorder is
+    #: the one place that sees every provider call, but it sits BELOW the loop
+    #: and cannot see why its stream stopped; the request is the one thing both
+    #: hold. It must be an OBJECT armed before dispatch, not a scalar set at the
+    #: cut: ``SessionStreamFn`` decorates the request with ``model_copy`` before
+    #: streaming, and a copy made before a scalar is set never sees it (measured
+    #: while writing this), whereas every copy shares the one armed object.
+    #: Private, so it never reaches a wire body, a serialized request or the
+    #: one-turn-secret template.
+    _consumer_cut: "ConsumerCut | None" = PrivateAttr(default=None)
+
+    def arm_consumer_cut(self) -> "ConsumerCut":
+        """Arm (once) and return this call's cut receipt; copies share it."""
+        if self._consumer_cut is None:
+            self._consumer_cut = ConsumerCut()
+        return self._consumer_cut
+
+    @property
+    def consumer_cut(self) -> "ConsumerCut | None":
+        """The armed receipt, or ``None`` when no consumer armed one."""
+        return self._consumer_cut
+
     @property
     def max_tokens_from_policy(self) -> bool:
         """Whether ``max_tokens`` is the harness's bound rather than an ask.
@@ -4720,6 +4867,22 @@ class StreamStartEvent(BaseModel):
 
     type: Literal["start"] = "start"
     response_id: str | None = None
+    #: Anthropic cache diagnostics for THIS request, when it was opted in (see
+    #: ``ChatRequest.cache_diagnostics``). ``None`` = not diagnosed (another
+    #: provider, the conversation's first request, or the feature latched off).
+    #: Otherwise ``"unchanged"`` (compared, no divergence: a cache miss on such
+    #: a call is TTL expiry, not a prefix break; measure the gap that explains
+    #: it from the previous request's START, not its end — the TTL is
+    #: refreshed when a request starts, so a call that streams for over five
+    #: minutes expires its own prefix, and an end-to-start gap under five
+    #: minutes does not rule expiry out), ``"pending"`` (the comparison
+    #: had not finished when the response started), or the API's own
+    #: ``cache_miss_reason.type`` (``system_changed``, ``tools_changed``,
+    #: ``messages_changed``, ``model_changed``, ``previous_message_not_found``,
+    #: ``unavailable``). ``cache_missed_tokens`` is that reason's
+    #: ``cache_missed_input_tokens`` estimate, 0 when it gives none.
+    cache_miss_type: str | None = None
+    cache_missed_tokens: int = 0
 
 
 class StreamTextDelta(BaseModel):
@@ -4854,6 +5017,46 @@ StreamEvent = (
     | StreamEndEvent
     | StreamModelEvent
 )
+
+
+#: The key a transcript row's ``usage`` payload carries the diagnosed Anthropic
+#: response id under (PR #2984 QA Q1). The cache-diagnostics chain
+#: (``SessionStreamFn._cache_diagnostics_previous_id``) is per-process state, so
+#: without a durable copy a RESUMED session restarted at ``previous_message_id:
+#: null`` and recorded a prefix break caused by an edited instruction file as
+#: ``baseline``. Persisted on the usage row because that row already IS the
+#: per-call provider record a resume reads (``at_ms`` seeds the provider clock
+#: from the same rows).
+#:
+#: Never in a ``Usage`` dump; present in served journal rows. The in-memory
+#: value is a PRIVATE attribute (:meth:`Usage._cache_diagnostics_id`), so every
+#: surface built from a ``Usage`` dump — the attach frame, the
+#: ``usage_components`` receipts, job snapshots — pays nothing. Surfaces that
+#: serve journal rows verbatim (desktop history pages, the peer
+#: ``net_session_history``) DO carry the key, ~40 bytes per assistant row; it is
+#: not a secret and their consumers ignore unknown keys (PR #3018 review round
+#: 1, n1). ``Usage`` ignores unknown keys on validation, so a row carrying it
+#: replays on this build and on older ones alike.
+CACHE_DIAGNOSTICS_ID_KEY = "cache_diagnostics_id"
+
+
+def stamp_cache_diagnostics_id(usage: Any, response_id: str) -> None:
+    """Record on ``usage`` that its request was diagnosed as ``response_id``.
+
+    Best-effort like the decode window: a frozen or foreign usage records
+    nothing, which a resume reads as "no chain to continue" — the pre-fix
+    behaviour, never a raise into the stream.
+    """
+    try:
+        usage._cache_diagnostics_id = response_id
+    except Exception:  # noqa: BLE001 — telemetry must never fail a call
+        pass
+
+
+def cache_diagnostics_id_of(usage: Any) -> str | None:
+    """The diagnosed response id stamped on ``usage``, or ``None``."""
+    value = getattr(usage, "_cache_diagnostics_id", None)
+    return value if isinstance(value, str) and value else None
 
 
 def decode_window_of(usage: Any) -> tuple[int, int] | None:

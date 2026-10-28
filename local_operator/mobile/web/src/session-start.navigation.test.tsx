@@ -15,17 +15,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
 
-class EventSourceFixture {
-	static instances: EventSourceFixture[] = [];
-	onopen: (() => void) | null = null;
-	onerror: (() => void) | null = null;
-	listeners = new Map<string, (event: MessageEvent) => void>();
-	constructor(readonly url: string) { EventSourceFixture.instances.push(this); }
-	addEventListener(name: string, listener: EventListenerOrEventListenerObject) {
-		this.listeners.set(name, listener as (event: MessageEvent) => void);
-	}
-	close() {}
-}
+import { FetchStreamFixture as Stream } from "./sse-test-fixture";
 
 const sessionId = "abcd1234ef56";
 const pid = 4242;
@@ -33,10 +23,11 @@ const pid = 4242;
 let startBodies: string[] = [];
 
 beforeEach(() => {
-	EventSourceFixture.instances = [];
+	Stream.instances = [];
 	startBodies = [];
-	vi.stubGlobal("EventSource", EventSourceFixture);
+
 	vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+		if (input.endsWith("/events")) return new Stream(input, init?.signal).response;
 		let body: unknown;
 		if (input === "/api/directories") body = { home: "/tmp/fixture", recent: [], default: "/tmp/fixture" };
 		else if (input === "/api/models") body = { models: [] };
@@ -57,29 +48,27 @@ beforeEach(() => {
 	}));
 });
 
-afterEach(() => {
-	cleanup();
-	vi.unstubAllGlobals();
+afterEach(async () => {
+	vi.useFakeTimers(); cleanup();
+	await vi.advanceTimersByTimeAsync(10001);
+	vi.useRealTimers(); vi.unstubAllGlobals();
 });
 
 /** Publish the projection a mounted session stream is waiting for. */
 async function publishProjection(conversationName = "Ready conversation") {
 	const stream = await waitFor(() => {
-		const source = EventSourceFixture.instances.find((candidate) =>
+		const source = Stream.instances.find((candidate) =>
 			candidate.url === `/api/sessions/${sessionId}/events`);
 		expect(source).toBeTruthy();
 		return source!;
 	});
-	expect(EventSourceFixture.instances.some((source) =>
+	expect(Stream.instances.some((source) =>
 		source.url.includes(`/${pid}/`))).toBe(false);
-	act(() => {
-		stream.onopen?.();
-		stream.listeners.get("projection")?.(new MessageEvent("projection", {
-			data: JSON.stringify({
-				session_id: sessionId, pid, version: 1, conversation_name: conversationName,
-				transcript: [], todos: [], subagents: [], usage: {}, effort_ladder: [],
-			}),
-		}));
+	await act(async () => {
+		stream.emit("projection", {
+			session_id: sessionId, pid, version: 1, conversation_name: conversationName,
+			transcript: [], todos: [], subagents: [], usage: {}, effort_ladder: [],
+		});
 	});
 	await screen.findByText(conversationName);
 }
@@ -88,7 +77,7 @@ describe("session creation routes", () => {
 	it("one tap on the list starts a session with no cwd and focuses the composer", async () => {
 		history.replaceState(null, "", "#/");
 		render(<App />);
-		const button = await screen.findByRole("button", { name: "new session" });
+		const button = await screen.findByRole("button", { name: "New session" });
 		fireEvent.click(button);
 		await waitFor(() => expect(location.hash).toBe(`#/s/${sessionId}`));
 		// NO cwd: the daemon owns the default (GET /api/directories publishes the
@@ -127,7 +116,7 @@ describe("the retired new-session route", () => {
 		render(<App />);
 		// The list's own control, not a directory picker: the hash is kept
 		// working for bookmarks and stale links, and it lands somewhere sensible.
-		expect(await screen.findByRole("button", { name: "new session" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "New session" })).toBeTruthy();
 		expect(screen.queryByPlaceholderText("or type another path…")).toBeNull();
 		// AND THE ADDRESS BAR AGREES (UX round 1, U5). Rendering the list under a
 		// hash that names a screen we no longer have leaves a bookmark — and a

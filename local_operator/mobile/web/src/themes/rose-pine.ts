@@ -179,28 +179,37 @@ export const rosePineDawn: ThemeDefinition = {
 		 * line with - becomes the recessed ground. Only `elevated` is derived,
 		 * warmed rather than merely lightened for the reason the brand light
 		 * ramp documents: a near-white ladder has no lightness headroom left, so
-		 * the steps separate on the chroma axis. Walking the ladder from `sunken`
-		 * up, adjacent steps measure ΔE 2.06 / 2.04 / 2.55 - just past the ~2 the
-		 * eye needs.
+		 * the steps separated on the chroma axis alone. That left elevated−canvas
+		 * at 2.89 L*, too little for a borderless field, so the grounds below are
+		 * now the desktop's re-seat (lightness steps on the same hues).
 		 */
-		canvas: "#faf4ed",
-		surface: "#fffaf3",
-		elevated: "#fffdf9",
-		sunken: "#f4ede8",
+		// GROUNDS PORTED FROM THE DESKTOP (rose-pine-dawn.ts, local-operator-ui
+		// src/renderer/src/shared/themes/palettes). The relay's borderless chrome stands
+		// every field, the composer and the search pill on `elevated` over `canvas`
+		// with no edge, so the step between them IS the boundary; this palette's
+		// relay grounds measured under the contract's 4.0 L* elevated−canvas floor
+		// (scripts/contrast-contract.mjs), the desktop's re-seat clears it. The
+		// desktop moved the inks, hairline and tones on the SAME commit (a new
+		// ground changes what every ink is measured against), and those values are
+		// ported with it; a ground ported alone failed eight text/edge pairs.
+		canvas: "#f3ece5",
+		surface: "#f9f4f0",
+		elevated: "#fdfcfa",
+		sunken: "#f2e7da",
 
 		// Canonical text #575279 is 6.66:1 on `base` and 6.29:1 on the recessed
 		// ground, under the 7:1 primary floor on both. Deepened 3.8 ΔE.
-		ink: "#4e4970",
-		inkMuted: "#6d6785",
+		ink: "#464268",
+		inkMuted: "#544e6c",
 		// Canonical muted #9893a5 is 2.73:1 - a comment colour, not a caption
 		// colour. It moves to `inkDisabled` (the floor-exempt role it belongs in)
 		// and the tertiary ink is a darker neutral on the same violet-gray.
-		inkDim: "#6c697a",
+		inkDim: "#636071",
 		inkDisabled: "#9893a5",
 
-		hairline: "#e6ddd6",
+		hairline: "#e1d8d1",
 		// Canonical highlight-high #cecacd is 1.48:1: a highlight, not a boundary.
-		borderControl: "#91838c",
+		borderControl: "#8f828a",
 
 		/*
 		 * Every canonical dawn accent except pine misses the 4.5:1 floor on the
@@ -213,7 +222,7 @@ export const rosePineDawn: ThemeDefinition = {
 		 * which is deliberate - holding them further apart meant abandoning one
 		 * of the two canonical hues entirely.
 		 */
-		accent: "#a15552", // rose #d7827e: 2.60:1
+		accent: "#9e5350", // rose #d7827e: 2.60:1
 		accentHover: "#8b4644",
 		accentActive: "#743a38",
 		accentWash: "#fbece8",
@@ -223,20 +232,20 @@ export const rosePineDawn: ThemeDefinition = {
 		successWash: "#e4edf1",
 		successBorder: "#5c8ba0",
 
-		warning: "#995d00", // gold #ea9d34: 2.05:1 - the largest deviation
+		warning: "#975b00", // gold #ea9d34: 2.05:1 - the largest deviation
 		warningWash: "#f6ead6",
-		warningBorder: "#b08b4c",
+		warningBorder: "#a47f41",
 
-		danger: "#a1526a", // love #b4637a: 3.84:1
+		danger: "#9f5069", // love #b4637a: 3.84:1
 		dangerWash: "#fcebef",
-		dangerBorder: "#b57e90",
+		dangerBorder: "#ac7687",
 
 		// foam #56949f: 3.14:1, and darkening it along its own hue walks it
 		// straight into pine. Pushed to the teal side so info and success stay
 		// 20.1 ΔE apart, which is the separation the other palettes here hold.
-		info: "#107574",
+		info: "#10746E",
 		infoWash: "#e2eeef",
-		infoBorder: "#5b979a",
+		infoBorder: "#538f92",
 
 		overlayShadow: "0 12px 32px -12px rgb(87 82 121 / 0.24)",
 		scrim: "rgb(87 82 121 / 0.4)",

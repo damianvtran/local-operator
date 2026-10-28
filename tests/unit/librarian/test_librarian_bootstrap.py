@@ -230,3 +230,45 @@ def test_a_failed_create_records_a_failed_create_receipt(tmp_path: Path) -> None
     assert rows[0]["policy"] == "failed-create"
     assert rows[0]["session"] == session_id
     assert rows[0]["actor"] == "librarian"
+
+
+@pytest.mark.asyncio
+async def test_the_re_attribution_runs_once_per_process(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair of her old writes is asked for at the FIRST boot, and once.
+
+    ``ensure_session`` is called by every boot, every ``open`` and every ``run``
+    op, and the pass parses her whole journal: the metadata fact it writes makes
+    a second pass one read, and this flag is what keeps the rest of a
+    long-lived process from paying even that.
+    """
+    from local_operator.librarian import backfill
+
+    seen: list[Path] = []
+    monkeypatch.setattr(backfill, "reattribute_organized", lambda config: seen.append(config))
+    monkeypatch.setattr(bootstrap, "_ATTEMPTED_BACKFILL", False)
+
+    assert await bootstrap.ensure_session(isolated_root)
+    assert await bootstrap.ensure_session(isolated_root)
+
+    assert seen == [isolated_root]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_re_attribution_never_fails_the_boot(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bookkeeping, not a boot dependency: an unreadable journal is a warning."""
+    from local_operator.librarian import backfill
+
+    def explode(config: Path) -> int:
+        raise RuntimeError("the journal is unreadable")
+
+    monkeypatch.setattr(backfill, "reattribute_organized", explode)
+    monkeypatch.setattr(bootstrap, "_ATTEMPTED_BACKFILL", False)
+
+    assert await bootstrap.ensure_session(isolated_root)
+    # The attempt is spent even when it failed: a boot that retried on every
+    # call would pay for an unreadable journal on every ``open``.
+    assert bootstrap._ATTEMPTED_BACKFILL is True

@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from local_operator.team_bridge.pending_turn import FetchedBody, PendingTurn
 from local_operator.team_bridge.request_body import BodyBudget
 from local_operator.team_bridge.store import (
@@ -116,6 +118,99 @@ def _budget() -> BodyBudget:
 
 def _turn(tmp_path: Path) -> PendingTurn:
     return PendingTurn(_owner(), SESSION, config_dir=tmp_path)
+
+
+def test_live_host_binding_is_rechecked_before_each_body_injection(tmp_path) -> None:
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+    binding = {"current": True}
+    turn = PendingTurn(
+        _owner(),
+        SESSION,
+        config_dir=tmp_path,
+        binding_guard=lambda: binding["current"],
+    )
+    assert asyncio.run(turn.open(budget=_budget(), fetch=_fetch))
+    assert turn.for_call() is not None
+    binding["current"] = False
+    assert store.current_generation_is_live(_owner()), "captured owner still valid in SQLite"
+    assert turn.for_call() is None
+    row = _row(store)
+    assert row["state"] == "pending" and row["claim_token"] is None
+    assert row["last_error"] == "admission_drift"
+
+
+def test_selected_neighbor_does_not_reclaim_failed_oldest_or_change_its_reason(tmp_path) -> None:
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+    second_id = "bcmsg_abcdef02"
+    assert store.record_body_reservation(
+        _owner(),
+        conversation_id=CONVERSATION_ID,
+        message_id=second_id,
+        conversation_seq=4,
+        mention=False,
+        body_sha256=DIGEST,
+        screening_fingerprint=FINGERPRINT,
+        policy_epoch=epoch,
+        consent_version="bridge_consent_v1",
+        designated_session=SESSION,
+        now=time.time(),
+    )
+    first = _turn(tmp_path)
+    assert not asyncio.run(
+        first.open(
+            budget=BodyBudget(available_bytes=1, measured_from="bounded capacity control"),
+            fetch=_fetch,
+        )
+    )
+    failed = _row(store)
+    assert failed["state"] == "pending" and failed["last_error"] == "body_not_fitted"
+    candidate = store.pending_body_reservation_for(
+        _owner(),
+        SESSION,
+        exclude=frozenset({(CONVERSATION_ID, MESSAGE_ID)}),
+        admitted_before=time.time(),
+    )
+    assert candidate is not None and candidate["message_id"] == second_id
+    second = _turn(tmp_path)
+    assert asyncio.run(
+        second.open(
+            budget=_budget(),
+            fetch=_fetch,
+            selected=(CONVERSATION_ID, second_id),
+        )
+    )
+    assert _row(store) == failed, "failed A was not rewritten to make B selectable"
+    claimed = store.body_reservation(_owner(), CONVERSATION_ID, second_id)
+    assert claimed is not None and claimed["state"] == "claimed"
+    second.settle(entry_id=None, error=None, stop_reason=None, aborted=False)
+
+
+def test_cancelled_hydration_releases_its_claim_without_waiting_for_expiry(tmp_path) -> None:
+    store, epoch = _store(tmp_path)
+    assert _reserve(store, epoch)
+    turn = _turn(tmp_path)
+
+    async def exercise() -> None:
+        entered = asyncio.Event()
+
+        async def suspended_fetch(conversation_id, message_id):
+            entered.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(turn.open(budget=_budget(), fetch=suspended_fetch))
+        await asyncio.wait_for(entered.wait(), 2)
+        assert _row(store)["state"] == "claimed"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+    row = _row(store)
+    assert row["state"] == "pending"
+    assert row["claim_token"] is None
+    assert turn.has_claim is False
 
 
 def test_a_pending_row_is_claimed_and_its_frame_cached(tmp_path) -> None:

@@ -1,3 +1,5 @@
+import { useScrollCues } from "../lib/use-scroll-cues";
+import { usePriorityFit } from "../lib/use-priority-fit";
 /**
  * Session list (`#/`) — the phone's home. One card per live session, kept
  * current by the list SSE; footer row with new session, past sessions,
@@ -42,27 +44,36 @@ import {
 } from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
 import { SessionTagLine } from "../components/session-tag-line";
+import { Drawer, type DrawerItem } from "../components/ui/drawer";
+import { ChromeIcon } from "../components/ui/chrome-icon";
+import { BrandMark } from "../components/ui/brand-mark";
+import { Snackbar } from "../components/ui/snackbar";
+import { Chip } from "../components/ui/chip";
+import { AsksSheet } from "../components/asks-sheet";
+import { UsageSheet } from "../components/usage-sheet";
 import { SessionGroupToggle } from "../components/session-group-toggle";
 import { SessionTagsSheet } from "../components/session-tags-sheet";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
 import { markPendingFocus } from "../lib/pending-focus";
+import { badgeText, inboxServed } from "../lib/notifications";
 import { navigate } from "../router";
 import {
 	applySessionPin,
 	clearSessionPinMark,
 	messageRuntime,
+	notificationsBadge,
 	publishMarkNotice,
 	retainSessionListStream,
 	useCapabilities,
 	useMarkNotice,
+	useNotificationsBlock,
 	usePinMarks,
 	useSessions,
 } from "../store";
 import { WideViewButton } from "../components/wide-view-button";
 import { applyTheme, getTheme, THEMES } from "../theme";
 import { shortenHome } from "../lib/format";
-import { LIBRARY_LABEL } from "../lib/library-copy";
 import { MARK_DATA_URI } from "../lib/mark";
 import { clampPinReason, pinRefusalReason } from "../lib/pin-refusal";
 import { getGroupTags, setGroupTags } from "../lib/session-group-pref";
@@ -134,7 +145,7 @@ function subagentNoun(n: number): string {
     and the exact figure is one tap away in the session view's roster header. */
 const COUNT_CAP = 99;
 
-/** The right-cluster chip for a session's delegated children.
+/** The end-cluster chip for a session's delegated children.
 
     IT COUNTS `running + queued` BY DESIGN, which is deliberately NOT how the
     catalogue label counts: `CatalogEntry.status` prints `2 subagents running ·
@@ -159,7 +170,7 @@ function delegatedChip(children: number): string {
 	return `${shown} ${subagentNoun(children)}`;
 }
 
-/** The right-cluster word `new`. It lingers through a 120ms opacity fade when
+/** The end-cluster word `new`. It lingers through a 120ms opacity fade when
     the mark clears (session opened) instead of blinking out — but it MUST
     unmount once the fade lands: an opacity-0 `shrink-0` span would keep
     pushing the `N agents` / `N todo` chips rightward forever. The fade is a
@@ -330,7 +341,7 @@ function SessionCard({
 	const delegating = !leaving && children >= 1;
 	/* The second line's cwd half, computed once so the D1 reservation below can
 	   test emptiness against exactly what is rendered. */
-	const cwdText = home ? shortenHome(s.cwd, home) : s.cwd;
+	const cwdText = (home ? shortenHome(s.cwd, home) : s.cwd).split("/").filter(Boolean).at(-1) ?? "";
 	return (
 		<button
 			ref={ref}
@@ -340,7 +351,7 @@ function SessionCard({
 			onPointerUp={cancelPress}
 			onPointerLeave={cancelPress}
 			onPointerCancel={cancelPress}
-			/* THE SAME REQUEST, WITHOUT A POINTER. A right-click and the platform's
+			/* THE SAME REQUEST, WITHOUT A POINTER. A end-click and the platform's
 			   long-press context menu both mean "actions for this row", so they open
 			   the sheet instead of being swallowed. */
 			onContextMenu={(event) => {
@@ -369,7 +380,7 @@ function SessionCard({
 				}
 				navigate(`/s/${encodeURIComponent(s.session_id)}`);
 			}}
-			className="flex min-h-11 w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
+			className="flex min-h-14 w-full flex-col justify-center gap-0.5 ps-4 pe-11 py-2 text-start select-none active:bg-surface"
 		>
 			<div className="flex items-center gap-2">
 				{/* ONE reserved indicator slot serving every state, so every title
@@ -458,141 +469,21 @@ function SessionCard({
 				) : null}
 				<span
 					className={cn(
-						"min-w-0 flex-1 truncate text-body-sm font-medium",
+						"min-w-0 flex-1 truncate text-body font-medium",
 						s.streaming && "lo-shimmer",
 					)}
 				>
 					{s.conversation_name || "untitled"}
 				</span>
-				{decision && pendingLabel ? (
-					<span className="shrink-0 text-meta text-danger">
-						{pendingLabel}
-					</span>
-				) : null}
-				{/* SESSION HEALTH, SAID OUT LOUD (mobile UX batch 2, U7). The summary
-				    now carries the daemon's own `ended`/`degraded` receipts (the same
-				    facts its projection serves), and a row that rendered neither was
-				    indistinguishable from a live one: an ended conversation looked
-				    openable-and-running forever, and a degraded one — whose socket the
-				    relay cannot reach — looked exactly as live as a healthy session.
-				    Quiet by design (`text-ink-dim`, no dot, no danger ink): this is
-				    state a reader should notice on the row that has it, not an alarm
-				    that outranks the decision word beside it. `not answering` is the
-				    register the TUI uses for the same condition. */}
-				{s.ended ? (
-					<span className="shrink-0 text-meta text-ink-dim">ended</span>
-				) : null}
-				{s.degraded ? (
-					<span className="shrink-0 text-meta text-ink-dim">not answering</span>
-				) : null}
-				{/* THE AGENT-OPENED MARK (design §10.4). This conversation is a
-				    listed workstream an agent opened on the operator's behalf, not
-				    one the operator started — the 2026-09-18 confusion class, one
-				    surface out. Drawn from the PRESENCE of `opened_by`, never from a
-				    member: a top-level requester's object has all three members
-				    null and the row is still not the operator's own. Quiet like
-				    `ended`/`not answering` beside it — a fact to notice on the row
-				    that has it, not an alarm — and text, never a glyph (this
-				    package carries no icon dependency). `agent` is the word the
-				    product already uses for the certain half of the opener: the
-				    TUI's own gutter falls back to exactly it when the role cannot
-				    be read (`session/preview.py`). */}
-				{s.opened_by != null ? (
-					<span className="shrink-0 text-meta text-ink-dim">
-						{/* D1 (round 1): a bare `agent` is a noun, and a screen reader
-						    heard "Anonymous workstream agent" as the session's identity
-						    rather than its origin. The sr-only prefix makes the
-						    accessible name read "… opened by agent" — the TUI's own
-						    words for the same fact — at zero geometry cost: sr-only is
-						    clipped out of the layout, the same idiom as the `working`
-						    status span above, so the measured 40 px chip budget stands. */}
-						<span className="sr-only">opened by </span>
-						agent
-					</span>
-				) : null}
-				{/* A PINNED ROW CARRIES ITS ★, and it rides the RIGHT cluster rather than
-				    the state slot. The TUI made exactly this call (`session_sidebar.py`
-				    `_special_mark`): a ★ in the state column made the sessions a user
-				    cares about most the only ones that could not report being blocked,
-				    broken or finished, because the pin is the DURABLE fact and the state
-				    glyph is the volatile one — so the pin moves, not the state. The ★ is
-				    also the shape the ★ Pinned heading uses, so the mark and its section
-				    cannot disagree about what it means.
-
-				    Drawn from the RENDERED pin, not `s.pinned`: the reader's own press
-				    must show its ★ in the commit that handles the tap, while the row
-				    itself waits for the daemon (the mark/section split in `store.ts`). */}
-				{pinned ? (
-					<span
-						className="shrink-0 text-meta text-accent"
-						aria-label="pinned"
-					>
-						★
-					</span>
-				) : null}
-				{/* State word rides BEFORE the count chips in the right cluster
-				    (spec §1): `new` truncates the title only, row height never
-				    changes. */}
-				<NewMark visible={unread} />
-				{delegating ? (
-					/* The delegated-work chip. It keeps its place in the right cluster (the
-					   state word `new` rides before it) and its own geometry; what it says
-					   is `delegatedChip`'s business — the shared noun, one number for the
-					   population the session view counts, and a cap past three digits so a
-					   wide count cannot shrink-0 the name away (UX round 1, U2/U3/U4).
-
-					   `subagents` and not `agents`: the record's own field name, the word
-					   `/info` tallies in, and the word the TUI's own stop notice uses.
-					   `agents` alone is ambiguous here — this product has an "Agents" page of
-					   reusable profiles.
-
-					   Text, not a glyph: ⟳ and ☐ render as tofu boxes on phones whose
-					   system font lacks those codepoints. Text marks survive every font. */
-					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-						{delegatedChip(children)}
-					</span>
-				) : null}
-				{s.todos_open ? (
-					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-						{s.todos_open} todo
-					</span>
-				) : null}
-				{/* THE OUTSTANDING-ASKS CHIP (design §4/§5.0). DISTINCT FROM THE APPROVAL
-				    STATE and wearing the accent for exactly that reason: the row's
-				    `needs_attention`/`pending` arm means a decision is holding the run,
-				    while a queued ask is a question the agent keeps working through — a
-				    reader who could not tell them apart would learn to ignore both. The
-				    accent is the same ink the minimized bar's `?` glyph uses, so the two
-				    surfaces name one state with one colour.
-
-				    ABSENT AT ZERO, never a zero badge: the field itself is absent while
-				    the runtime cannot report asks, and `0` is a session with nothing
-				    outstanding, which needs no mark. */}
-				{typeof s.asks_open === "number" && s.asks_open > 0 ? (
-					/* THE UNIT IS THE FIELD'S OWN (agent review round 1, R3): `asks_open`
-					   counts ASKS (the outstanding set — open asks since #2388, when a
-					   timed-out ask became settled), and this chip used to print that
-					   number with the word "questions" — so the PR's own fixture showed "2 questions"
-					   where the bar above it said "4 questions waiting" and the header
-					   said 3. The chip now says what it counts ("2 asks"); the surfaces
-					   that hold the whole ask list state questions, which is §5.0's own
-					   unit for the bar.
-
-					   THE ARIA LABEL IS NOT "waiting" (M1, asks-open widening): the
-					   field's set once included a timed-out ask, and §5's
-					   header rule is explicit that an outstanding ask "is not a
-					   'waiting for you' state" — the agent keeps working. So the label
-					   uses this client's own word for the set (`outstandingAsks`,
-					   `lib/asks.ts`) rather than the reading the design forbids. */
-					<span
-						className="shrink-0 font-mono text-mono-sm text-accent"
-						aria-label={
-							s.asks_open === 1 ? "1 ask outstanding" : `${s.asks_open} asks outstanding`
-						}
-					>
-						{s.asks_open} ask{s.asks_open === 1 ? "" : "s"}
-					</span>
-				) : null}
+				{decision && pendingLabel ? <span className="shrink-0 text-meta text-danger">{pendingLabel}</span>
+					: (s.asks_open ?? 0) > 0 ? <span className="shrink-0 text-meta text-accent">{s.asks_open} ask{s.asks_open === 1 ? "" : "s"}</span>
+					: s.ended ? <span className="shrink-0 text-meta text-ink-dim">ended</span>
+					: s.degraded ? <span className="shrink-0 text-meta text-ink-dim">not answering</span> : null}
+				<NewMark visible={unread && !decision && !(s.asks_open ?? 0)} />
+				{/* The optimistic pin MARK remains observable while the daemon alone
+				    owns section membership; hiding its glyph must not erase the
+				    acknowledgement of a press awaiting confirmation. */}
+				{pinned ? <span aria-label="pinned" className="sr-only">★</span> : null}
 			</div>
 			{/* THE CONVERSATION'S TAGS, as a LABEL under the title row.
 
@@ -604,29 +495,14 @@ function SessionCard({
 			    line box to every untagged row and make the list's density depend on
 			    which conversations happen to be tagged, the same defect class the
 			    blank second line had. A tagged row grows by exactly one line. */}
-			<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} />
-			<div className="flex items-baseline gap-2">
-				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
-					{cwdText}
-					{/* D1 (round-1 design review): a second line with NOTHING on it
-					    rendered 44.00px against its neighbours' 50.89px — a 6.89px
-					    density break for every row below it. No live or durable row
-					    was measured rendering that shape (both carry
-					    `cwd`/`model_label`), so this is the structural fix at no
-					    cost: the line always carries at least one blank, whose line
-					    box is the height of a full line at whatever type scale the
-					    reader has chosen. */}
-					{cwdText === "" && s.model_label === "" ? "\u00a0" : null}
-				</span>
-				{/* D1 (mobile UX batch): the model label YIELDS like the cwd does.
-				    `shrink-0` made it unable to shrink and unable to ellipsize, so a
-				    long label ran to the viewport edge — no ellipsis, unreachable by
-				    touch (a row drag is a tap), and `main` itself became horizontally
-				    scrollable. `min-w-0 truncate` lets both spans share the row; the
-				    row can never exceed it. */}
-				<span className="ml-auto min-w-0 truncate font-mono text-mono-sm text-ink-dim">
-					{s.model_label}
-				</span>
+			<div className="flex min-w-0 items-center gap-2 ps-5 text-meta tabular-nums text-ink-dim">
+				<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} className="max-w-[45%] shrink-0" />
+				<span className="min-w-0 truncate">{[
+					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,
+					delegating ? delegatedChip(children) : null,
+					s.todos_open ? `${s.todos_open} todo` : null,
+					!s.tags?.length ? cwdText : null].filter(Boolean).join(" · ") || "\u00a0"}</span>
+				{s.opened_by != null ? <span className="ms-2 shrink-0"><span className="sr-only">opened by </span>agent</span> : null}
 			</div>
 		</button>
 	);
@@ -635,21 +511,24 @@ function SessionCard({
 function ThemePicker({
 	open,
 	onClose,
+	children,
 }: {
 	open: boolean;
 	onClose: () => void;
+	children?: React.ReactNode;
 }) {
 	const [current, setCurrent] = useState(getTheme);
 	return (
-		<Sheet open={open} onClose={onClose} title="theme">
+		<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.chrome.drawer.appearance")}>
 			<div className="flex flex-col p-2">
 				{/* The wide-view preference moved here when the Library entry made the
 				    footer six controls wide: measured at 360px the six-control row ran
 				    372px against a 360px footer, clipping `wide`. Both preferences are
 				    per-phone display settings, so one sheet is where they belong; the
 				    component stays shared with the session header. */}
-				<div className="border-b border-hairline pb-1">
+				<div className="pb-1">
 					<WideViewButton className="w-full" />
+					{children}
 				</div>
 				{THEMES.map((t) => (
 					<button
@@ -659,7 +538,7 @@ function ThemePicker({
 							applyTheme(t.id);
 							setCurrent(t.id);
 						}}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -881,6 +760,7 @@ function usePaintedRows(
 export function SessionListScreen() {
 	const { sessions, connected, revision } = useSessions();
 	const capabilities = useCapabilities();
+	const notificationsBlock = useNotificationsBlock();
 	/* FLIP settle state: per session id, the card ELEMENT measured last time and
 	   its top in LAYOUT space (see `layoutTop`). The element is part of the
 	   record because a pin LIFT remounts a card under another section — a new
@@ -943,7 +823,18 @@ export function SessionListScreen() {
 	   the store on every open, so a project another surface created meanwhile is
 	   never missed. */
 	const [projectsOpen, setProjectsOpen] = useState(false);
+	const listCue = useScrollCues();
+	const [tagFiltersOpen, setTagFiltersOpen] = useState(false);
 	const [query, setQuery] = useState("");
+	const [searchOpen, setSearchOpen] = useState(false);
+	const [drawerOpen, setDrawerOpen] = useState(false);
+	const [questionsOpen, setQuestionsOpen] = useState(false);
+	const [usageOpen, setUsageOpen] = useState(false);
+	const [filter, setFilter] = useState("all");
+	const [fabCollapsed, setFabCollapsed] = useState(false);
+	const listScroll = useRef(0);
+	const searchRef = useRef<HTMLInputElement>(null);
+	useEffect(() => { if (searchOpen) searchRef.current?.focus(); }, [searchOpen]);
 	/* The row whose pin action sheet is open, or NONE. Held as the id rather than
 	   the summary so a list repaint while the sheet is open cannot leave the
 	   sheet describing a stale object — the row it names is re-read from
@@ -1056,7 +947,7 @@ export function SessionListScreen() {
 	   control must stop asserting a number as fact. Set when the read comes back
 	   degraded, cleared as soon as a read answers for real — the number is
 	   verified again, not merely restored. */
-	const [countUnverified, setCountUnverified] = useState(false);
+	const [, setCountUnverified] = useState(false);
 	/* The receipt is STORE state, not component state: this screen unmounts on the
 	   way into a conversation and back, and the receipt is the only explanation
 	   of a partial or failed clear, so it must outlive the route change (UX U2);
@@ -1129,7 +1020,7 @@ export function SessionListScreen() {
 				   answers for real. */
 				setCountUnverified(true);
 				publishMarkNotice({
-					text: "Could not read what is unread — nothing was cleared. Try again.",
+					text: messageRuntime.t("relay.transcript.session.unread_refused"),
 					danger: true,
 				});
 				return;
@@ -1179,9 +1070,9 @@ export function SessionListScreen() {
 		}
 	};
 	const visible = rows.filter((session) =>
-		`${session.conversation_name} ${session.session_id} ${session.cwd}`
-			.toLowerCase()
-			.includes(query.toLowerCase()),
+		`${session.conversation_name} ${session.session_id} ${session.cwd}`.toLowerCase().includes(query.toLowerCase()) &&
+		(filter === "all" || (filter === "unread" ? session.unseen : filter === "needs" ?
+			(session.needs_attention || (session.asks_open ?? 0) > 0) : session.tags?.some(tag => tag.id === filter))),
 	);
 	/* THE SIDEBAR'S SECTION ORDER, top to bottom: pinned, then the shared
 	   active/previous partition, filtered through whatever query is typed. A
@@ -1326,10 +1217,8 @@ export function SessionListScreen() {
 	   says what is happening, so no label can precede the daemon's agreement. */
 	const pinConfirmed = Boolean(pinRow?.pinned);
 	const pinActionLabel = pinBusy
-		? "Saving…"
-		: pinConfirmed
-			? "Unpin from the top"
-			: "Pin to the top";
+		? messageRuntime.t("relay.chrome.row.saving")
+		: pinConfirmed ? messageRuntime.t("relay.chrome.row.unpin") : messageRuntime.t("relay.chrome.row.pin");
 	const pinRefusalText = refusalFor
 		? `Could not save the pin: ${clampPinReason(refusalFor)}`
 		: null;
@@ -1424,14 +1313,14 @@ export function SessionListScreen() {
 	   up: the ★ Pinned section it points at does not exist until the pin is
 	   confirmed, and retiring the caption for a mark alone would take away the
 	   only thing explaining the gesture, with nothing to replace it. */
-	const showPinHint = visible.length > 0 && !rows.some((session) => session.pinned);
+	
 
 	/* One card factory for all three sections, so a section cannot forget the FLIP
 	   ref or the long-press handler — the bug a fourth copy of this markup would
 	   eventually grow. */
 	const renderCard = (s: SessionSummary) => (
+		<div key={s.session_id} className="relative flex items-center">
 		<SessionCard
-			key={s.session_id}
 			s={s}
 			home={home}
 			pinned={renderedPin(s)}
@@ -1448,6 +1337,10 @@ export function SessionListScreen() {
 				else cardRefs.current.delete(s.session_id);
 			}}
 		/>
+		<button type="button" aria-label={messageRuntime.t("relay.chrome.row.more")}
+			onClick={() => { setPinTarget(s.session_id); setPinRefusal(null); setPinNotice(""); }}
+			className="absolute end-0 top-1 flex size-11 items-center justify-center rounded-md text-ink-dim active:bg-surface">⋮</button>
+		</div>
 	);
 
 	/* FLIP settle for reorders (spec §3): a card never teleports under a
@@ -1516,379 +1409,132 @@ export function SessionListScreen() {
 			});
 	}, []);
 
+	/* Navigation is data so a future capability-owned Notifications destination
+	   has a reserved slot after Questions without shipping a dead placeholder.
+	   Unknown capabilities have no entry at all (the Library contract). */
+	const DRAWER_ITEMS: DrawerItem[] = [
+		{ id: "conversations", icon: "☰", label: messageRuntime.t("relay.chrome.drawer.conversations"), href: "#/", current: true },
+		{ id: "questions", icon: "?", label: messageRuntime.t("relay.chrome.drawer.questions"), onSelect: () => setQuestionsOpen(true) },
+		/* The inbox (notifications lane). Shown when this relay serves the inbox
+		   (`inboxServed`: no row without one; a row, and no number, when the
+		   store is unreadable). The count is the one badge formula (D16),
+		   omitted at zero or unknown, capped 99+. */
+		{ id: "notifications", icon: "◉", label: messageRuntime.t("relay.notifications.title"), href: "#/notifications", available: inboxServed(capabilities, notificationsBlock), count: badgeText(notificationsBadge(notificationsBlock)) },
+		{ id: "past", icon: "◷", label: messageRuntime.t("relay.chrome.drawer.past"), href: "#/past" },
+		{ id: "projects", icon: "▱", label: messageRuntime.t("relay.chrome.drawer.projects"), onSelect: () => setProjectsOpen(true) },
+		{ id: "library", icon: "▤", label: messageRuntime.t("relay.chrome.drawer.library"), href: "#/library", available: Boolean(capabilities?.library) },
+		{ id: "usage", icon: "▥", label: messageRuntime.t("relay.chrome.drawer.usage"), onSelect: () => setUsageOpen(true), preference: true },
+		{ id: "appearance", icon: "◐", label: messageRuntime.t("relay.chrome.drawer.appearance"), onSelect: () => setThemeOpen(true), preference: true },
+		{ id: "settings", icon: "⚙", label: messageRuntime.t("relay.chrome.drawer.settings"), href: "#/settings/account-routing", preference: true },
+	];
+	const tags = Array.from(new Map(sessions.flatMap(row => row.tags ?? []).map(tag => [tag.id, tag])).values());
+	/* THE FILTER STRIP NEVER SCROLLS SIDEWAYS (operator finding B). It was an
+	   `overflow-x: auto` rail, so a tag past the edge was reachable only by a
+	   sideways swipe most phone users never try. All / Needs you / Unread always
+	   show; tags fill what is left of the one 44 px line; the rest sit behind
+	   ONE `+N` chip that opens the full tag list. A tag filter in force is never
+	   hidden — it takes the last visible slot. */
+	const tagFit = usePriorityFit(
+		tagsAvailable ? tags.map(tag => tag.id) : [],
+		tags.some(tag => tag.id === filter) ? filter : null,
+	);
+	const visibleTags = tags.filter(tag => tagFit.visible.includes(tag.id));
+	const needsCount = sessions.filter(row => row.needs_attention || (row.asks_open ?? 0) > 0).length;
+	const sectionClass = "sticky top-0 z-10 truncate bg-canvas px-4 pt-4 pb-1 text-meta font-medium text-ink-dim";
 	return (
 		<div className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col">
-			<header className="flex items-center gap-2 px-3 pt-[max(env(safe-area-inset-top),0.75rem)] pb-2">
-				<img
-					src={MARK_DATA_URI}
-					alt=""
-					width={20}
-					height={20}
-				/>
-				<h1 className="text-meta font-medium tracking-[0.18em] text-ink">
-					local operator
-				</h1>
-				<button type="button" onClick={() => navigate("/settings/account-routing")}
-					className="ml-auto min-h-11 shrink-0 rounded-md border border-control px-3 text-body-sm text-ink-muted"
-					aria-label={messageRuntime.t("relay.account_policy.title")}>
-					{messageRuntime.t("relay.account_policy.entry")}
+			<header className="flex h-[calc(52px+env(safe-area-inset-top))] shrink-0 items-center gap-1 px-1 pt-[env(safe-area-inset-top)]">
+				<button type="button" className="relative flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface"
+					ref={projectsButtonRef} aria-label={messageRuntime.t("relay.chrome.drawer.open")} aria-expanded={drawerOpen} aria-controls="relay-navigation" onClick={() => setDrawerOpen(true)}><ChromeIcon name="menu" />
+					{sessions.length > 0 && !connected ? <span aria-hidden className="absolute end-2 top-2 size-2 rounded-full bg-warning" /> : null}
 				</button>
-				{/* OFFLINE, QUIETLY (mobile UX batch 2, U11). `connected === false` on
-				    this screen used to change nothing once rows were on it: the list
-				    kept painting a frozen frame as though it were live. The chip is
-				    gated on holding data — an empty list already says `connecting…`
-				    in its placeholder — and it clears itself the moment a frame
-				    lands, because `connected` flips back on the SSE's own open. */}
-				{sessions.length > 0 && !connected ? (
-					<span role="status" className="ml-auto shrink-0 text-meta text-ink-dim">
-						reconnecting…
-					</span>
-				) : null}
+				{searchOpen ? <input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)}
+					aria-label={messageRuntime.t("relay.chrome.list.search_label")} placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
+					className="min-h-11 min-w-0 flex-1 rounded-md bg-elevated px-3 text-body text-ink placeholder:text-ink-dim" /> :
+					<div className="flex min-w-0 flex-1 items-center gap-2"><BrandMark />
+						<div className="min-w-0 flex-1"><h1 className="truncate text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.conversations")}</h1>
+							{sessions.length > 0 && !connected ? <p role="status" className="text-meta text-ink-dim">{messageRuntime.t("relay.chrome.link.reconnecting")}</p> : null}</div></div>}
+				<button type="button" className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface"
+					aria-label={searchOpen ? messageRuntime.t("relay.chrome.list.search_close") : messageRuntime.t("relay.chrome.list.search_open")}
+					onClick={() => { setSearchOpen(!searchOpen); setQuery(""); }}><ChromeIcon name={searchOpen ? "close" : "search"} /></button>
 			</header>
-			{/* BROWSER SCROLL ANCHORING STAYS ON (QA round 4, Q6). An earlier round
-			    opted the list out (`overflow-anchor: none`), and with the opt-out every
-			    unrelated list change moved a scrolled reader's rows: a new live session
-			    +76px, a session resuming +51px, another client's pin below the fold
-			    +45.5px at 100% and +91px at 200%, all 0px with anchoring on.
-
-			    The wrapper carries the column's `min-h-0` and keeps the scroller's
-			    height off the header and footer, so `<main>` inside it stays the thing
-			    that scrolls. It is no longer `relative`: the only absolutely positioned
-			    child it had was the refusal band, which moved to its own PR. */}
-			<div className="flex min-h-0 flex-1 flex-col">
-				<main
-					onPointerDown={onListPointerDown}
-					className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
-				>
-					<input
-						value={query}
-						onChange={(event) => setQuery(event.target.value)}
-						placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
-						className="mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
-					/>
-					{/* THE GROUP TOGGLE, on its own line under the search field: at 390px
-					    the field's row has no width to spare for a 44px target without
-					    shrinking a destination name. Capability-gated, so a relay without
-					    tags leaves NO control behind. `aria-pressed` carries the state and
-					    the static accessible name says what the control groups by. */}
-					{tagsAvailable ? (
-						<SessionGroupToggle
-							grouped={groupEnabled}
-							busy={catalogueBusy}
-							failed={groupingOn && catalogueError}
-							paused={groupingPaused}
-							onToggle={toggleGrouping}
-							onRetry={retryCatalogue}
-						/>
-					) : null}
-					{/* THE ONE-GESTURE CLEAR, in a STICKY band. The marks it acts on live
-					    further down the scroller, and a control left inside the scrolling
-					    content is reachable only at the top of the list — measured at y=-179,
-					    entirely off-screen, at this content's own maximum scroll, while the
-					    green marks stay visible near the foot (design D5, UX U7). Sticking it
-					    keeps the gesture where the marks are. It also collapses rather than
-					    vanishes, by the pin hint's own rule below: removing a node outright
-					    snapped the list up ~23px the moment the first pin landed (design D8),
-					    and the same snap would happen when the last unread clears under the
-					    reader's finger. The 0fr/1fr grid measures itself, so nothing jumps at
-					    either edge, and the button itself unmounts once the pile is gone
-					    (`showMarkAll` above) — only the exit animation needs it alive, and
-					    `inert` covers that window so a vanishing control cannot be tapped or
-					    tabbed. */}
-					{/* The band floats OVER scrolling rows, so it has to read as a
-					    layer rather than a clipping bug: with no edge on an opaque
-					    `bg-canvas`, a row slides under it and its text is cut
-					    mid-glyph against a flat fill (design round 2, D6) —
-					    `border-hairline` is the same token the footer uses for the
-					    same job. Drawn only while the band actually holds
-					    something, so an empty band leaves no stray line.
-
-					    `outline-none` is deliberately absent here (design round 2,
-					    D7 / QA Q-2): the band is the focus fallback when no session
-					    card is registered, and Tailwind's `outline-none` sets
-					    `--tw-outline-style: none`, which neutralises the app's own
-					    `html :focus-visible` ring — leaving a keyboard user's focus
-					    position invisible (WCAG 2.4.7). The base ring is the
-					    visible indicator this path needs, and `focus:` makes it
-					    deterministic rather than heuristic, since the band is only
-					    ever focused programmatically. */}
-					<div
-						ref={bandRef}
-						tabIndex={-1}
-						className={cn(
-							"sticky top-0 z-10 bg-canvas focus:outline-2 focus:outline-accent",
-							(showMarkAll || markNotice !== null) && "border-b border-hairline",
-						)}
-					>
-						<div
-							className={cn(
-								"grid transition-[grid-template-rows] duration-200 ease-out",
-								unreadCount > 0 ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-							)}
-							aria-hidden={unreadCount > 0 ? undefined : true}
-							inert={unreadCount > 0 ? undefined : true}
-						>
-							<div className="overflow-hidden">
-								{showMarkAll ? (
-									/* STRETCHED to the column, like the search field above and the footer
-									   buttons below: the pill shrink-wrapped to 99.5px against a 366px
-									   column (design D4), which also made the label jitter 100px ->
-									   63px while `marking…` (UX U6) — a full-width control moves
-									   neither edge. `aria-disabled`, NOT `disabled`: a disabled button
-									   drops focus to `<body>` the instant it is pressed (UX U3), so the
-									   re-entry guard is the state check in `markAllRead` and the button
-									   stays focusable. The COUNT is the pile the reader can see (the
-									   desktop's `Mark all N read`, #2016's "with a count"). */
-									<div className="px-2 pb-2">
-										<button
-											type="button"
-											onClick={() => void markAllRead()}
-											aria-disabled={markingAll}
-											aria-busy={markingAll}
-											className={cn(
-												"flex min-h-11 w-full items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium select-none active:bg-elevated",
-												markingAll ? "text-ink-dim" : "text-ink",
-											)}
-										>
-											{markingAll
-												? "marking…"
-												: countUnverified
-													? "mark all as read"
-													: `mark all ${unreadCount} read`}
-										</button>
-									</div>
-								) : null}
-							</div>
-						</div>
-						{/* THE RECEIPT, in the band and directly under the finger that tapped —
-						    it used to render 646px away beside the footer (design D3, UX U1). It
-						    sits OUTSIDE the collapsing grid so a receipt outlives the control it
-						    came from, and carries its own dismiss on top of the store's TTL (UX
-						    U8). The TEXT is the live region (`status`/`polite`, `alert`/
-						    `assertive` when it is a failure), so the dismiss control is not part
-						    of what gets announced. */}
-						{markNotice ? (
-							<div className="mx-2 mb-2 flex items-start gap-2">
-								<span
-									role={markNotice.danger ? "alert" : "status"}
-									aria-live={markNotice.danger ? "assertive" : "polite"}
-									className={cn(
-										"flex-1 rounded-md px-2 py-1 text-body-sm",
-										markNotice.danger ? "text-danger" : "text-ink-dim",
-									)}
-								>
-									{markNotice.text}
-								</span>
-								<button
-									type="button"
-									onClick={() => publishMarkNotice(null)}
-									aria-label="Dismiss"
-									className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-ink-dim"
-								>
-									×
-								</button>
-							</div>
-						) : null}
-					</div>
-					{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
-					    round 1, D2). The session view's ☆ is one tap away and does the same
-					    thing, but a reader has to already be in a conversation to find it, so
-					    it cannot teach the list's own long-press.
-
-					    GATED ON WHAT IS ON SCREEN, not on the store — the whole point of the
-					    caption is that it names a row the reader can see. Keying on
-					    ``sessions`` (unfiltered) put "touch and hold a row to pin it" directly
-					    above "no matching conversations" for a query that matched nothing, and
-					    brought it back whenever a search hid the pinned rows (design round 2,
-					    D5/D6). ``visible.length > 0`` is the honest condition; the pinned test
-					    reads the same painted `rows` as the section split above (round-1
-					    review N1), so a search that hides a pin does not re-show the hint.
-
-					    IT COLLAPSES RATHER THAN VANISHES, which is D8: removing the node
-					    outright snapped the whole list up ~23px at the exact moment the first
-					    pin landed. The wrapper is always mounted and animates its height to
-					    zero, so the list settles instead of jumping. `prefers-reduced-motion`
-					    caps it to instant for free (the global block), which is the right
-					    fallback — the point is not the motion, it is that nothing snaps.
-
-					    THE COLLAPSE IS CONTENT-AGNOSTIC, and that is not incidental. An
-					    earlier version capped `max-height` at a fixed 2rem — sized for ONE
-					    line of this caption at the default type scale. A caption that WRAPS
-					    to two lines (a longer localized string, a narrower container) is then
-					    taller than the cap, and `overflow-hidden` clips the second line away:
-					    the discoverer silently disappears for exactly the readers who need
-					    the label most. (The cap itself scales with the root font, so a
-					    large-text one-liner still fits — the failure is the WRAP, not the
-					    zoom.) The `0fr`/`1fr` grid trick measures the content itself, so the
-					    caption is fully painted at any string length and collapses to zero
-					    with no magic number to keep in sync with the type scale. */}
-					<div
-						className={cn(
-							"grid transition-[grid-template-rows] duration-200 ease-out",
-							showPinHint ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-						)}
-						aria-hidden={showPinHint ? undefined : true}
-					>
-						<div className="overflow-hidden">
-							{/* TWO SENTENCES, ONE SLOT. When the relay serves tags the caption
-							    must name BOTH gestures a long-press offers; on a relay without
-							    the capability the old sentence stays exactly as it was, because
-							    promising "or tag it" there would advertise a sheet whose
-							    requests 404. Each variant is its own paragraph so the one that
-							    does not apply is `display: none` (out of the accessibility tree
-							    and out of the collapse's measured height), and the first keeps
-							    the original paragraph as its text element — the shape both the
-							    copy baseline and the caption's own geometry tests read. */}
-							<p
-								className={cn(
-									"mx-2 mb-2 text-meta text-ink-dim",
-									tagsAvailable && "hidden",
-								)}
-							>
-								touch and hold a row to pin it
-							</p>
-							{tagsAvailable ? (
-								<p className="mx-2 mb-2 text-meta text-ink-dim">
-									{messageRuntime.t(
-										"relay.session.tags.pin_and_tags_hint",
-									)}
-								</p>
-							) : null}
-						</div>
-					</div>
-					{rows.length === 0 ? (
-						<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-							<p className="text-body text-ink-muted">
-								{connected
-									? messageRuntime.t("relay.shell.list.empty")
-									: messageRuntime.t("relay.shell.list.connecting")}
-							</p>
-							<p className="text-body-sm text-ink-dim">
-								{messageRuntime.t("relay.session.list.empty_hint")}
-							</p>
-						</div>
-					) : (
-						<div className="flex flex-col gap-3">
-							{/* AN EMPTY SECTION COSTS NO HEADING — the sidebar's own rule
-							    (`_display_rows`: "An empty section contributes no header"), and the
-							    ★ Pinned section above already followed it while these two did not.
-							    Newly reachable because of pinning: a pin LIFTS a row out of its
-							    ranked section, so pinning every row (or a search that matches none)
-							    painted two bare headings with nothing under them (design round 1,
-							    D1). */}
-							{pinned.length > 0 ? (
-								<section>
-									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">★ Pinned</h2>
-									{pinned.map(renderCard)}
-								</section>
-							) : null}
-							{showGroups
-								? groups.map((group) => (
-										<section key={group.key}>
-											<h2 className="truncate px-2 py-1 text-meta font-medium text-ink-muted">
-												{group.label}
-											</h2>
-											{group.rows.map(renderCard)}
-										</section>
-									))
-								: (
-										<>
-											{active.length > 0 ? (
-												<section>
-													<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.active")}</h2>
-													{active.map(renderCard)}
-												</section>
-											) : null}
-											{previous.length > 0 ? (
-												<section>
-													<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.previous")}</h2>
-													{previous.map(renderCard)}
-												</section>
-											) : null}
-										</>
-									)}
-							{/* The case where EVERY section is empty: a query that matched none, or
-							    every row pinned away — pinned rows are not empty, so this arm is the
-							    one where the screen would otherwise be a wordless void. */}
-							{pinned.length + active.length + previous.length === 0 ? (
-								<p className="px-2 py-4 text-center text-body-sm text-ink-dim">
-									{messageRuntime.t("relay.session.list.no_matches")}
-								</p>
-							) : null}
-						</div>
-					)}
-				</main>
-			</div>
-			{startError ? (
-				<p
-					role="alert"
-					aria-live="assertive"
-					className="px-3 pb-1 text-body-sm text-danger"
-				>
-					{startError}
-				</p>
-			) : null}
-			<footer className="flex items-center gap-1 border-t border-hairline px-2 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
-				<button
-					type="button"
-					onClick={() => void startNewSession()}
-					disabled={starting}
-					aria-busy={starting}
-					className="flex min-h-11 flex-1 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated disabled:text-ink-disabled"
-				>
-					{starting
-						? messageRuntime.t("relay.session.list.start_busy")
-						: messageRuntime.t("relay.session.list.start_idle")}
-				</button>
-				{/* U10 (mobile UX batch): the entry point the file's own contract
-				    describes. `#/past` — searchable, resumable history — was reachable
-				    only by knowing its hash; nothing in the app linked to it, so on a
-				    phone the feature was dead. The footer is where the other
-				    top-level entries live. */}
-				<button
-					type="button"
-					onClick={() => navigate("/past")}
-					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
-				>
-					past
-				</button>
-				{/* THE LIBRARY DESTINATION (design §6.3). Gated on the relay's own
-				    ``capabilities.library``: an older relay cannot serve the routes,
-				    so offering the destination would paint a screen whose every
-				    request 404s. The label is owned copy in an advisory module —
-				    see ``lib/library-copy`` for why it is not a key yet. */}
-				{capabilities?.library ? (
-					<button
-						type="button"
-						onClick={() => navigate("/library")}
-						className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
-					>
-						{LIBRARY_LABEL}
-					</button>
-				) : null}
-				<button
-					type="button"
-					ref={projectsButtonRef}
-					onClick={() => setProjectsOpen(true)}
-					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-2 text-body-sm text-ink-muted select-none active:bg-elevated"
-				>
-					projects
-				</button>
-				<button
-					type="button"
-					onClick={() => setThemeOpen(true)}
-					aria-label={messageRuntime.t("relay.shell.list.theme")}
-					className="flex min-h-11 min-w-11 items-center justify-center rounded-md border border-control bg-surface text-ink-muted select-none active:bg-elevated"
-				>
-					◐
-				</button>
-			</footer>
-			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
-			<ProjectsSheet
-				open={projectsOpen}
-				onClose={() => setProjectsOpen(false)}
-				returnFocusRef={projectsButtonRef}
-			/>
+			{/* `flex-wrap` is only the safety net for a column too narrow for even
+			    the three fixed filters plus `+N`; the fit keeps it to one line at
+			    phone width from 360 up; at 320 the three fixed filters plus `+N`
+			    need 306 px of a 296 px line and take two (measured). `gap-y-3` is
+			    what keeps a wrapped row's 44 px bands from overlapping: each chip's
+			    `::before` reaches 6 px past its 32 px pill, so rows need 12 px, and
+			    `py-1.5` keeps the first and last rows' bands inside the strip (the
+			    list below otherwise takes the bottom 6 px: measured 38 px). One line
+			    is still exactly 44 px tall (32 + 2 x 6).
+			    `overflow-hidden` is not used: nothing here may be clipped, it must
+			    fit or move behind `+N`. */}
+			{!searchOpen && (rows.length > 0 || !connected) ? <div ref={tagFit.rowRef} role="group" aria-label={messageRuntime.t("relay.chrome.list.filter_label")}
+				className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-3 px-3 py-1.5">
+				{/* `max-[380px]:px-2` is what keeps the 320 px strip to ONE line: the
+				    three fixed chips need 306 px of the 296 px a 320 phone offers, and
+				    the 8 px a narrower inset saves on each of them buys the 16 px the
+				    `+N` control was short. Reachability was never the problem — an
+				    orphaned `+N` alone on a second line was (design review round 2,
+				    NIT). The inset is scoped to this strip; the tray has the room. */}
+				<Chip data-fit-fixed selected={filter === "all"} aria-pressed={filter === "all"} onClick={() => setFilter("all")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.all")}</Chip>
+				<Chip data-fit-fixed selected={filter === "needs"} aria-pressed={filter === "needs"} onClick={() => setFilter("needs")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.needs_you", { count: needsCount })}</Chip>
+				<Chip data-fit-fixed selected={filter === "unread"} aria-pressed={filter === "unread"} onClick={() => setFilter("unread")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.unread", { count: unreadCount })}</Chip>
+				{tagsAvailable ? visibleTags.map(tag => <Chip key={tag.id} data-fit-key={tag.id} className="min-w-0 max-w-40 shrink-0" title={tag.name} selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}><span className="truncate">{tag.name}</span></Chip>) : null}
+				{/* ONE TAP TO EVERY TAG. The visible mark is `+N`; its accessible
+				    name is the existing "N more tags" sentence (the tag line's own
+				    `+N` mark, same meaning). The sheet lists EVERY tag, so the
+				    choice is never split between two places. */}
+				{tagsAvailable && tagFit.hidden > 0 ? <Chip data-fit-overflow className="shrink-0 max-[380px]:px-2" aria-haspopup="dialog" aria-expanded={tagFiltersOpen}
+					aria-label={messageRuntime.t("relay.session.tags.more", { count: tagFit.hidden })} onClick={() => setTagFiltersOpen(true)}>
+					<span aria-hidden>+{tagFit.hidden}</span></Chip> : null}
+			</div> : null}
+			<Sheet open={tagFiltersOpen} onClose={() => setTagFiltersOpen(false)} title={messageRuntime.t("relay.session.tags.sheet_title")}>
+				<div className="flex flex-wrap gap-2 p-3">
+					{tags.map(tag => <Chip key={tag.id} className="min-w-0 max-w-full" selected={filter === tag.id} aria-pressed={filter === tag.id}
+						onClick={() => { setFilter(tag.id); setTagFiltersOpen(false); }}><span className="truncate">{tag.name}</span></Chip>)}
+				</div>
+			</Sheet>
+			<main ref={listCue} onPointerDown={onListPointerDown} onScroll={event => {
+				const y = event.currentTarget.scrollTop;
+				if (Math.abs(y - listScroll.current) > 4) setFabCollapsed(y > 24 && y > listScroll.current);
+				listScroll.current = y;
+			}} className="lo-scroll lo-fade-y min-h-0 flex-1 overflow-y-auto pb-[calc(88px+env(safe-area-inset-bottom))]">
+				<div ref={bandRef} tabIndex={-1} className="sticky top-0 z-20 bg-canvas focus:outline-2 focus:outline-accent">
+					{filter === "unread" && showMarkAll ? <button type="button" onClick={() => void markAllRead()} aria-disabled={markingAll} aria-busy={markingAll}
+						className="min-h-11 w-full px-4 text-start text-body-sm text-ink-muted active:bg-surface">
+						{markingAll ? messageRuntime.t("relay.chrome.list.marking") : messageRuntime.t("relay.chrome.list.mark_all")}</button> : null}
+				</div>
+				{rows.length === 0 ? connected ? <div className="flex min-h-[55vh] flex-col items-center justify-center gap-2 px-6 text-center">
+					<img src={MARK_DATA_URI} alt="" width={40} height={40} className="mb-3" />
+					<h2 className="text-heading font-semibold">{messageRuntime.t("relay.chrome.list.empty")}</h2>
+					<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.chrome.list.empty_hint")}</p>
+				</div> : <div aria-label={messageRuntime.t("relay.chrome.list.connecting")} aria-busy="true" className="px-4 pt-4">{[0, 1, 2].map(i => <div key={i} className="flex h-14 flex-col justify-center gap-2"><div className="h-3 w-3/5 rounded-sm bg-surface" /><div className="h-2 w-[35%] rounded-sm bg-surface" /></div>)}</div> : <>
+					{pinned.length > 0 ? <section><h2 className={sectionClass}>{messageRuntime.t("relay.chrome.list.section.pinned")}</h2>{pinned.map(renderCard)}</section> : null}
+					{showGroups ? groups.map(group => <section key={group.key}><h2 className={sectionClass}>{group.label}</h2>{group.rows.map(renderCard)}</section>) : <>
+						{active.length > 0 ? <section><h2 className={sectionClass}>{messageRuntime.t("relay.chrome.list.section.active")}</h2>{active.map(renderCard)}</section> : null}
+						{previous.length > 0 ? <section><h2 className={sectionClass}>{messageRuntime.t("relay.chrome.list.section.previous")}</h2>{previous.map(renderCard)}</section> : null}
+					</>}
+					{visible.length === 0 ? <div className="px-4 py-8 text-center text-body-sm text-ink-dim"><p>{query ? messageRuntime.t("relay.chrome.list.no_matches") : messageRuntime.t("relay.chrome.list.filter_empty")}</p>
+						{query ? <button type="button" className="min-h-11 px-3 text-ink-muted" onClick={() => setQuery("")}>{messageRuntime.t("relay.chrome.list.clear_search")}</button> : null}</div> : null}
+				</>}
+			</main>
+			{/* The FAB costs no list row; its 88px end clearance keeps the final row
+			    finger-reachable. Collapse is presentation only: accessible name and
+			    starting re-entry guard never change with scrolling. */}
+			<button type="button" onClick={() => void startNewSession()} disabled={starting} aria-busy={starting} aria-label={messageRuntime.t("relay.chrome.list.new_label")}
+				className={cn("absolute end-4 bottom-[calc(16px+env(safe-area-inset-bottom))] flex h-14 items-center justify-center gap-2 rounded-lg bg-accent text-body font-semibold text-on-accent shadow-overlay active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled", fabCollapsed ? "w-14 rounded-full" : "px-5")}>
+				<span aria-hidden>＋</span>{!fabCollapsed || starting ? <span>{starting ? messageRuntime.t("relay.chrome.list.starting") : messageRuntime.t("relay.chrome.list.new")}</span> : null}
+			</button>
+			<Snackbar text={startError || markNotice?.text || ""} danger={Boolean(startError || markNotice?.danger)} onDismiss={() => { setStartError(""); publishMarkNotice(null); }} />
+			<Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} items={DRAWER_ITEMS}
+				status={messageRuntime.t("relay.chrome.drawer.status", { state: connected ? "online" : sessions.length ? "retrying" : "connecting" })} />
+			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)}>
+				{tagsAvailable ? <SessionGroupToggle grouped={groupEnabled} busy={catalogueBusy} failed={groupingOn && catalogueError} paused={groupingPaused} onToggle={toggleGrouping} onRetry={retryCatalogue} /> : null}
+			</ThemePicker>
+			<ProjectsSheet open={projectsOpen} onClose={() => setProjectsOpen(false)} returnFocusRef={projectsButtonRef} />
+			<AsksSheet open={questionsOpen} onClose={() => setQuestionsOpen(false)} currentSessionId="" />
+			<UsageSheet open={usageOpen} onClose={() => setUsageOpen(false)} />
 			{/* THE PIN ACTION SHEET. Long-press opened it, so it is where the gesture's
 			    meaning is spelled out rather than left to be discovered — the row shows
 			    a ★ once pinned, and this sheet is how a reader learns the gesture that
@@ -1912,7 +1558,7 @@ export function SessionListScreen() {
 						onClick={() =>
 							pinRow && void togglePin(pinRow.session_id, !pinConfirmed)
 						}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface disabled:opacity-50"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start text-body active:bg-surface disabled:opacity-50"
 					>
 						<span className="w-4 shrink-0 text-accent" aria-hidden>
 							★
@@ -1946,14 +1592,48 @@ export function SessionListScreen() {
 								setPinTarget(null);
 								setTagsTarget(pinRow.session_id);
 							}}
-							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface"
+							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start text-body active:bg-surface"
 						>
 							<span className="w-4 shrink-0 text-accent" aria-hidden>
 								#
 							</span>
-							{messageRuntime.t("relay.session.tags.action")}
+							{messageRuntime.t("relay.chrome.row.tags")}
 						</button>
 					) : null}
+					{pinRow?.unseen ? <button type="button" className="min-h-12 rounded-sm px-2 text-start text-body active:bg-surface"
+						onClick={async () => {
+							try {
+								const badge = await getAttentionUnread();
+								/* A DEGRADED READ IS NOT A CLEARED ROW (agent review round 1,
+								   C1-4 = QA Q1-3), the same rule the bulk control in this file
+								   already applies: the route answers 200 naming the sources it
+								   could not read and no `conversations` key at all, so falling
+								   through left a pressed control with no outcome and no
+								   explanation. Nothing is posted, and the refusal is stated
+								   in-flow inside this sheet. */
+								if (badge.degraded?.length) {
+									setPinNotice(messageRuntime.t("relay.transcript.session.unread_refused"));
+									return;
+								}
+								const row = badge.conversations?.find(row => row.session_id === pinRow.session_id);
+								/* The read answered and this row is not in it: the conversation is
+								   no longer unread (another surface cleared it, or a newer turn
+								   replaced it), so the receipt says nothing was cleared rather
+								   than the press going silent. */
+								if (!row?.completion_token) {
+									publishMarkNotice({ text: markAllReceipt(0, 0, 0), danger: false });
+									setPinTarget(null);
+									return;
+								}
+								const receipt = await markAllSeen([{ session_id: pinRow.session_id, completion_token: row.completion_token }]);
+								publishMarkNotice({ text: markAllReceipt(receipt.read.length, receipt.superseded.length, receipt.unknown.length), danger: false });
+								setPinTarget(null);
+							} catch (error) { setPinNotice(markAllFailure(error)); }
+						}}>{messageRuntime.t("relay.chrome.row.mark_read")}</button> : null}
+					<button type="button" className="min-h-12 rounded-sm px-2 text-start text-body active:bg-surface"
+						onClick={() => { if (pinRow) navigate(`/s/${encodeURIComponent(pinRow.session_id)}`); }}>
+						{messageRuntime.t("relay.chrome.row.open")}
+					</button>
 					{/* THE REFUSAL, IN FLOW INSIDE THE SHEET. A paragraph in the sheet's own
 					    column, not an overlay: it takes layout space, so it cannot cover
 					    another control, and nothing on the list scrolls or reorders to

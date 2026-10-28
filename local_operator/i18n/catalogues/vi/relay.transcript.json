@@ -1,0 +1,21 @@
+{
+  "relay.transcript.turn.condensed": "Lượt đã thu gọn",
+  "relay.transcript.turn.took": "Mất {duration}",
+  "relay.transcript.turn.actions": "{label, select, other {{count, plural, other {{label} thao tác}}}}",
+  "relay.transcript.turn.completed": "đã hoàn tất",
+  "relay.transcript.fold.unit": "{kind, select, files {{count, plural, other {# tệp}}} searches {{count, plural, other {# lượt tìm kiếm}}} web {{count, plural, other {# lượt tìm kiếm web}}} shell {{count, number} shell} python {{count, number} python} edits {{count, plural, other {# lượt chỉnh sửa}}} tasks {{count, plural, other {# tác vụ}}} incoming {{count, plural, other {# tin nhắn đến}}} wakes {{count, plural, other {# xác nhận thức dậy}}} other {{count, number} {name}}}",
+  "relay.transcript.fold.shell": "{count, plural, other {# shell}}",
+  "relay.transcript.fold.python": "{count, plural, other {# python}}",
+  "relay.transcript.fold.more": "{count, plural, other {và # thao tác khác}}",
+  "relay.transcript.fold.failed_label": "Có thao tác thất bại",
+  "relay.transcript.fold.partial_label": "{count, plural, other {Ít nhất # thao tác — tin nhắn trước chưa được tải}}",
+  "relay.transcript.older.failed": "Không thể tải tin nhắn trước",
+  "relay.transcript.label.steered": "Đã đổi chỉ dẫn",
+  "relay.transcript.label.wake": "Thức dậy",
+  "relay.transcript.label.peer": "Tin nhắn từ phiên khác",
+  "relay.transcript.label.job": "Kết quả tác vụ",
+  "relay.transcript.label.ask": "Câu hỏi",
+  "relay.transcript.label.messages": "Tin nhắn",
+  "relay.transcript.composer.queued": "{count, plural, other {# đang chờ}}",
+  "relay.transcript.session.unread_refused": "Không thể đọc trạng thái chưa đọc — chưa có gì bị xóa. Hãy thử lại."
+}

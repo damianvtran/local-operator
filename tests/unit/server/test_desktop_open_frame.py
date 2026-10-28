@@ -22,11 +22,19 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
+from local_operator.harness.types import Message, TextContent
 from local_operator.server.models.desktop_sessions import HistoryPage
 from local_operator.server.routes import desktop_sessions
-from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.server.utils.desktop_sessions import (
+    DesktopSessionBridge,
+    DesktopSessions,
+)
 from local_operator.session import transcript_index as ti
-from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
+from local_operator.session.transcript import (
+    TRANSCRIPT_FILENAME,
+    Transcript,
+    TranscriptEntry,
+)
 
 TOKEN = "synthetic-desktop-token"
 
@@ -429,6 +437,43 @@ async def test_the_first_frame_spends_only_what_is_left_of_its_budget(
 
 
 @pytest.mark.asyncio
+async def test_a_warm_reopen_does_not_wait_on_its_own_paused_scan(tmp_path: Path) -> None:
+    """The re-open of a conversation whose cold scan is still running.
+
+    That scan pauses while this open's paint hold is live (transcript_index "ITS
+    OWN OPEN TOO"), so it cannot land inside the snapshot budget and awaiting it
+    spends the whole budget idle for the same ``building`` answer -- measured
+    112-119 ms of a 120 ms budget on a real ``lop serve``. Mutant: drop the
+    ``refresh_paused_for_paint`` guard -> the read waits out the 1 s deadline.
+    """
+    async with _Harness(tmp_path) as harness:
+        session_dir = harness.root / "sessions" / harness.session_id
+        rows = _conversation(turns=2)
+        rows.append(
+            _entry(
+                "big",
+                1e6,
+                "message",
+                {"kind": "message", "role": "assistant", "content": [{"text": "x" * (6 << 20)}]},
+            )
+        )
+        _write(session_dir, rows)
+        task, started = ti.start_refresh(harness.root, harness.session_id)
+        assert started
+        release = ti.hold_paint(harness.root, harness.session_id)
+        try:
+            async with harness.pool.session(harness.session_id, read=True) as bridge:
+                began = time.monotonic()
+                index = await bridge._frame_index(time.monotonic() + 1.0)
+                elapsed = time.monotonic() - began
+        finally:
+            release()
+        assert index is None
+        assert elapsed < 0.5, f"waited {elapsed:.2f}s on a scan paused for this very open"
+        assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
 async def test_the_event_stream_states_attaching_only_to_a_negotiating_client(
     tmp_path: Path,
 ) -> None:
@@ -738,3 +783,178 @@ async def test_a_small_limit_still_reaches_the_openings_user_row(tmp_path: Path)
         # could match by answers ``ready`` with an empty list (see ``publish_runs``
         # and the note in ``build_frame``), which is legitimate — this test is
         # about the read's bound, not about the facts.
+
+
+# ---------------------------------------------------------------------------
+# conversation-first-paint R5(ii): the wire rows are built directly, not via a
+# dumps+loads round trip, and nothing about them changes.
+# ---------------------------------------------------------------------------
+
+
+def _reference_wire_rows(entries: Any) -> list[dict[str, Any]]:
+    """The pre-R5 spelling, verbatim: the oracle for byte identity."""
+    import json
+
+    from local_operator.harness.rows import visible_transcript_rows
+
+    return visible_transcript_rows(
+        [{**json.loads(entry.to_json()), "ts_source": "entry"} for entry in entries]
+    )
+
+
+def test_wire_rows_are_byte_identical_to_the_round_trip() -> None:
+    """Every JSON shape a journal row can hold, plus the two a round trip
+    NORMALISES (a tuple, a non-string key) should a page ever carry one: the
+    serialized wire must match the old round trip to the byte, key order and
+    float spelling included."""
+    import json
+
+    entries = [
+        _entry("u1", 1.0, "message", {"role": "user", "content": [{"text": "héllo ✓"}]}),
+        _entry(
+            "a1",
+            1.1,
+            "message",
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "x"}],
+                "usage": {"prompt_tokens": 10, "cost": 0.1 + 0.2, "big": 10**20},
+                "flags": [True, False, None, -0.0, 1e-300],
+            },
+        ),
+        _entry("c1", 1.2, "custom", {"custom_type": "x", "details": {"nested": [[{}], []]}}),
+        # Separate rows: a non-str key round-trips its WHOLE dict, which would
+        # also normalise a tuple beside it and hide that branch.
+        _entry("t1", 1.3, "message", {"role": "tool", "content": ("tuple", 1)}),
+        _entry("t2", 1.4, "message", {"role": "tool", "meta": {7: "int-key"}}),
+    ]
+    served = DesktopSessionBridge._wire_rows(entries)
+    expected = _reference_wire_rows(entries)
+    assert json.dumps(served) == json.dumps(expected)
+    assert served == expected
+
+
+def test_wire_rows_never_alias_the_cached_page() -> None:
+    """The page cache SHARES pages between requests, so a wire row a later step
+    edits must not reach back into the cached entry (the round trip guaranteed
+    that by construction; the direct build must too)."""
+    entry = _entry("u1", 1.0, "message", {"role": "user", "content": [{"text": "a"}]})
+    row = DesktopSessionBridge._wire_rows([entry])[0]
+    row["payload"]["content"][0]["text"] = "edited"
+    row["payload"]["role"] = "edited"
+    assert entry.payload == {"role": "user", "content": [{"text": "a"}]}
+
+
+@pytest.mark.asyncio
+async def test_an_incrementally_refreshed_index_serves_the_full_rebuilds_frame(
+    tmp_path: Path,
+) -> None:
+    """O1 (#3034 QA): the open frame may not depend on HOW the index was refreshed.
+
+    ``tail_head_reachable`` subtracts the tail run's ``first_seq`` from
+    ``scan.rows``. An incremental refresh used to record only the rows its suffix
+    re-read there, so the subtraction went to zero and the shortcut kept hunting
+    for a head the full scan's count correctly called out of reach. The tail run
+    below is that shape: its head is more raw rows above the end than the hunt
+    may cover, but few enough PAINTABLE rows that a hunt left running reaches it.
+    """
+    async with _Harness(tmp_path) as harness:
+        rows: list[Any] = []
+        for turn in range(1, 41):
+            rows.extend(_long_turn(turn, 3))
+        rows.extend(_long_turn(99, 100))
+        rows.pop()  # the tail run is still LIVE: no closing answer yet
+        directory = harness.root / "sessions" / harness.session_id
+        _write(directory, rows)
+        await harness.warm()
+        # One more tool row through the real writer: the next refresh is incremental.
+        await Transcript(directory).append_message(
+            Message(role="tool", content=[TextContent(text="output")], tool_call_id="c-extra")
+        )
+        await harness.warm()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 50, "open_frame": 1}
+        incremental = (await harness.client.get(url, params=params)).json()["result"]
+        ti._reset_for_tests()
+        ti.index_path(harness.root, harness.session_id).unlink()
+        await harness.warm()
+        full = (await harness.client.get(url, params=params)).json()["result"]
+
+        def canonical(page: dict[str, Any]) -> dict[str, Any]:
+            return {k: v for k, v in page.items() if k not in {"epoch", "journal_generation"}}
+
+        assert full["head_cut"] is True  # the shape under test: the head is out of reach
+        assert canonical(incremental) == canonical(full)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [20, 100])
+@pytest.mark.parametrize("case", ["one", "fifty", "new_run"])
+async def test_a_frame_whose_index_lands_during_the_hunt_is_the_steady_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, limit: int
+) -> None:
+    """The desktop twin of the relay's pre-index cell (#3037 QA, O1).
+
+    ``_frame_index`` at attempt 0 can answer ``None`` (the refresh did not land
+    inside the open budget) and the final call after the hunt can answer a
+    resident index (it landed meanwhile). The frame then carried the hunt's rows
+    under ``ready`` — rows the steady read refuses because the index calls the
+    tail run's head out of reach. Held still here: the first call answers None,
+    every later one is the real call.
+    """
+    from local_operator.server.utils.desktop_sessions import DesktopSessionBridge
+
+    async with _Harness(tmp_path) as harness:
+        rows: list[Any] = []
+        for turn in range(1, 3):
+            rows.extend(_long_turn(turn, 2))
+        rows.extend(_long_turn(99, 110))
+        rows.pop()  # the tail run is still LIVE: no closing answer yet
+        directory = harness.root / "sessions" / harness.session_id
+        _write(directory, rows)
+        await harness.warm()
+        transcript = Transcript(directory)
+        if case == "new_run":
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text="done")])
+            )
+            await transcript.append_message(
+                Message(role="user", content=[TextContent(text="next")])
+            )
+        else:
+            for call in range(1 if case == "one" else 50):
+                await transcript.append_message(
+                    Message(
+                        role="tool", content=[TextContent(text="output")], tool_call_id=f"x{call}"
+                    )
+                )
+        await harness.warm()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": limit, "open_frame": 1}
+
+        original = DesktopSessionBridge._frame_index
+        calls: list[int] = []
+
+        async def _lands_during_the_hunt(self: Any, deadline: float) -> Any:
+            calls.append(1)
+            return None if len(calls) == 1 else await original(self, deadline)
+
+        monkeypatch.setattr(DesktopSessionBridge, "_frame_index", _lands_during_the_hunt)
+        first = (await harness.client.get(url, params=params)).json()["result"]
+        assert len(calls) >= 2, "the read never re-asked for the index"
+        monkeypatch.setattr(DesktopSessionBridge, "_frame_index", original)
+        steady = (await harness.client.get(url, params=params)).json()["result"]
+
+        def canonical(page: dict[str, Any]) -> dict[str, Any]:
+            return {
+                k: v for k, v in page.items() if k not in {"epoch", "journal_generation", "cwd"}
+            }
+
+        assert steady["runs_state"] == "ready" and first["runs_state"] == "ready"
+        assert (len(first["entries"]), first["head_cut"]) == (
+            len(steady["entries"]),
+            steady["head_cut"],
+        )
+        assert canonical(first) == canonical(steady)

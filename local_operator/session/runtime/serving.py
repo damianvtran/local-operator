@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import functools
 import inspect
@@ -28,9 +29,11 @@ import json
 import logging
 import re
 import secrets
+import threading
 import time
 import unicodedata
 import uuid
+import weakref
 from asyncio import InvalidStateError
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -375,6 +378,49 @@ MAX_QUEUED_PROMPTS = 32
 #: as ``RuntimeServer._push_later`` (the repaint it feeds) and
 #: ``Session._schedule_frontend_jobs``; see ``_schedule_roster_refresh``.
 _ROSTER_REFRESH_COALESCE_S = 0.05
+
+#: Floor between two disk re-reads of the ask fold on the ``_notify`` path (see
+#: ``ServingSessionHandle._refresh_ask_projection``). Only another process's
+#: change to this session's ``asks.jsonl`` waits on it; this process's own ask
+#: changes are installed immediately through ``_ask_state_changed``.
+_ASK_REFRESH_MIN_S = 1.0
+
+#: The worker pool a model switch's blocking reads run on, built on first use.
+#:
+#: WHY NOT ``asyncio.to_thread``. That is the loop's DEFAULT executor, and on a
+#: busy manager it is shared with every lane's blocking work (transcript and
+#: ledger writes, token counting, store reads). A switch that queued its spec
+#: build and its credential read there waited for that backlog: measured with
+#: ``scripts/bench_model_switch.py --condition busy`` (12 lanes, a 1,000-child
+#: roster, a 110 MB transcript), the build started up to 750 ms and the read up
+#: to 690 ms after the handler asked, for work that takes ~1 ms and ~15 ms. The
+#: switch is the one request the user is actively waiting on, so its reads get a
+#: pool nothing else queues on.
+#:
+#: TWO workers, sized for the process, not one connection. The pool is shared
+#: process-wide, so two connections (desktop and phone) can switch at the same
+#: time, and a superseded credential read is not awaited by its reply, so it
+#: holds a worker until it finishes even though its result is discarded. Two is
+#: still enough: a switch needs at most one build and one read, the read takes
+#: ~15 ms, so a transient queue behind a superseded read or a second
+#: connection's switch costs milliseconds, and a deeper pool would mostly hold
+#: idle threads. Lazy because most runtimes never switch, and the test suite
+#: builds hundreds of handles that never do.
+_SWITCH_EXECUTOR_WORKERS = 2
+_switch_executor_pool: concurrent.futures.ThreadPoolExecutor | None = None
+_switch_executor_lock = threading.Lock()
+
+
+def _switch_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """The dedicated pool for a switch's blocking reads (see above)."""
+    global _switch_executor_pool
+    with _switch_executor_lock:
+        if _switch_executor_pool is None:
+            _switch_executor_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_SWITCH_EXECUTOR_WORKERS, thread_name_prefix="lop-switch"
+            )
+        return _switch_executor_pool
+
 
 #: THE RUNG-4 RETRY LADDER (review round 1, R7).
 #:
@@ -998,6 +1044,12 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.harness.rows import queued_ask_engine_live
 
         self._fold = ProjectionFold(self._projection, queued_engine=queued_ask_engine_live(session))
+        #: ``time.monotonic()`` of the last ask-fold install; ``-inf`` so the
+        #: first ``_refresh_ask_projection`` always reads.
+        self._ask_fold_installed_at = float("-inf")
+        #: One trailing re-read armed for a throttled ``_refresh_ask_projection``
+        #: (see ``_schedule_ask_refresh``).
+        self._ask_refresh_scheduled = False
         #: The broker registration that authorizes THIS process's descendants to
         #: retrieve secrets, or ``None`` (§6). Held so teardown can deregister
         #: promptly rather than waiting for the process's socket to close: a
@@ -1050,6 +1102,10 @@ class ServingSessionHandle(SessionHandle):
         # so the event loop cannot garbage-collect one mid-flight and drop the
         # title silently. Each task removes itself on completion.
         self._background_tasks: set[asyncio.Future[Any]] = set()
+        #: The access-claim publish in flight, if any: see
+        #: :meth:`_schedule_model_access_publish`.
+        self._model_access_publish: asyncio.Task[None] | None = None
+        self._model_access_publish_selector = ""
         #: ``(selected_selector, provider, model_id)`` of a re-home this owner
         #: REFUSED because the conversation was busy, retried at the turn end
         #: (``_retry_deferred_rehome``). Also serves as the reply classified by
@@ -1067,6 +1123,10 @@ class ServingSessionHandle(SessionHandle):
         self._rehome_retry_task: asyncio.Task[None] | None = None
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
+        #: Set by :meth:`refuse_gates_for_exit` once a SIGNAL has committed this
+        #: runtime to leaving: every gate opened afterwards answers at once with
+        #: the deny/escape answer instead of parking. See that method for why.
+        self._gates_closed_for_exit = False
         # request_id -> (monotonic instant, settled value) for gates that LANDED
         # recently. The desktop answer path retries ONCE under the same id when an
         # acknowledgement is lost, so a repeat that finds no parked future is a
@@ -1284,6 +1344,11 @@ class ServingSessionHandle(SessionHandle):
             # turn never stalls on a card no front end would present.
             if self._auto_approve:
                 return True
+            if self._gates_closed_for_exit:
+                # Leaving on a signal: nobody will be asked before the exit, and
+                # a card parked now would hold the drain open (see
+                # ``refuse_gates_for_exit``). The same answer a stop gives.
+                return False
             request_id = secrets.token_hex(8)
             future: asyncio.Future[bool] = self._loop.create_future()
             self._pending_futures[request_id] = future
@@ -1301,10 +1366,14 @@ class ServingSessionHandle(SessionHandle):
             )
             self._notify()
             self._announce_pending("approval", tool_name, description)
+            # Read ONCE, here: `asyncio.wait_for` fixes its deadline when the
+            # wait begins, so this is the wait that applies even if a surface
+            # attaches later and flips the policy (see `_record_gate_timeout`).
+            timeout_s = self._gate_timeout_s()
             try:
-                return await asyncio.wait_for(future, timeout=self._gate_timeout_s())
+                return await asyncio.wait_for(future, timeout=timeout_s)
             except TimeoutError:
-                await self._record_gate_timeout(tool_name, description)
+                await self._record_gate_timeout(tool_name, description, waited_s=timeout_s or 0.0)
                 return False
             finally:
                 self._pending_futures.pop(request_id, None)
@@ -1316,6 +1385,9 @@ class ServingSessionHandle(SessionHandle):
             if not questions:
                 # Nothing to ask: answer NOTHING (the harness's "user escaped"
                 # signal) rather than parking a card with no question on it.
+                return None
+            if self._gates_closed_for_exit:
+                # Same rule as the approval gate: leaving on a signal.
                 return None
             total = len(questions)
             if total > 1:
@@ -1330,6 +1402,13 @@ class ServingSessionHandle(SessionHandle):
             # ask_answer resolves the FRONT one, and we advance to the next.
             answers: dict[str, list[str]] = {}
             for index, question in enumerate(questions):
+                if self._gates_closed_for_exit:
+                    # RE-CHECKED PER QUESTION (agent review round 2 on #3028, m1):
+                    # a person answering question N in the same tick a signal
+                    # commits the exit would otherwise park question N+1 after
+                    # the refusal, holding the drain open. Same partial answer
+                    # a timeout reports.
+                    return answers or None
                 request_id = secrets.token_hex(8)
                 future: asyncio.Future[dict[str, list[str]] | None] = self._loop.create_future()
                 self._pending_futures[request_id] = future
@@ -1379,10 +1458,15 @@ class ServingSessionHandle(SessionHandle):
                 # ``BODIES["ask"]`` vocabulary is the right fallback for it.
                 announced = "" if getattr(question, "secret", False) else prose
                 self._announce_pending("ask", prose, announced)
+                # Read once per question, for the same reason as the approval
+                # gate: the deadline `wait_for` enforces is fixed right here.
+                timeout_s = self._gate_timeout_s()
                 try:
-                    answer = await asyncio.wait_for(future, timeout=self._gate_timeout_s())
+                    answer = await asyncio.wait_for(future, timeout=timeout_s)
                 except TimeoutError:
-                    await self._record_gate_timeout("ask", prose, kind="ask")
+                    await self._record_gate_timeout(
+                        "ask", prose, kind="ask", waited_s=timeout_s or 0.0
+                    )
                     # A timed-out question ends the whole ask: report whatever
                     # earlier questions collected (partial, like the terminal's
                     # Escape) rather than blocking forever on the next one.
@@ -1473,6 +1557,9 @@ class ServingSessionHandle(SessionHandle):
         """
         try:
             self._fold.set_asks(list(rows) if rows is not None else None, outstanding_count)
+            # Fresh from the queue itself: the throttled re-read in
+            # ``_refresh_ask_projection`` need not repeat it.
+            self._ask_fold_installed_at = time.monotonic()
         except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
             logger.debug("ask: could not install the wire fold", exc_info=True)
         self._publish_pending_gate()
@@ -1860,6 +1947,11 @@ class ServingSessionHandle(SessionHandle):
         task = self._completion_task
         if task is not None and not task.done():
             task.cancel()
+        # The access-claim read is additive state about a session that is going
+        # away; nothing may publish into its store after disposal.
+        publish = self._model_access_publish
+        if publish is not None and not publish.done():
+            publish.cancel()
         # The supplement job is droppable by contract: shutdown never waits on it.
         await self._supplements.cancel()
         # The dispose rung of EVERY exit that is not a viewer-driven retirement:
@@ -2985,7 +3077,15 @@ class ServingSessionHandle(SessionHandle):
         # this class of failure a degraded-but-alive runtime instead of a
         # wedged one.
         try:
-            if _wake_within_window(self):
+            if _wake_within_window(self) and not getattr(self, "_draining", False):
+                # A committed departure is not residency. An idle signalled
+                # runtime must leave at its boundary, not wait out the 120 s
+                # progress bound merely because a recurring wake is due soon;
+                # the successor owns that delivery (#3028 node control (c)).
+                # Read through getattr like the file's other latch reads: a
+                # direct attribute read raised on a handle without the latch,
+                # and the fail-open except below turned that into "no wake",
+                # silently disabling the warm-window term (#3028 CI shard 2).
                 return "wake due within the warm window"
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             logger.debug("warm-window probe failed; treating as no wake", exc_info=True)
@@ -3117,6 +3217,31 @@ class ServingSessionHandle(SessionHandle):
         note = getattr(self._session, "note_deliberate_stop", None)
         if callable(note):
             note()
+
+    def refuse_gates_for_exit(self) -> int:
+        """Deny every parked gate and refuse new ones: a signal committed this runtime to leave.
+
+        WHY (agent review round 1 on #3028, M1; QA Q5). The signal drain
+        (``process._drain_for_signal``) waits for the turn to end, cutting it
+        only after ``SIGNAL_DRAIN_S`` with NO progress. A call parked on an
+        approval counts as a step executing (its tool batch is open), so that
+        bound never fired: a SIGTERMed runtime parked on an approval nobody
+        could answer stayed up until the gate's own day-long timeout, while its
+        record promised "cut if silent 2 min" — and systemd's 90 s SIGKILL was
+        the only thing that ended it. A signal means this process is ending; no
+        answer can arrive in time to be acted on, so the drain answers the
+        gate now with the same deny the socket stop (``request_stop``) and a
+        timeout give, and the turn reaches its boundary and exits.
+
+        Gates opened AFTER this answer immediately too, without parking: the
+        model's next step after a denial is often another gated call, and a
+        fresh card would hold the drain open exactly as the first one did.
+        One-way for the life of the process — it is only called on an exit
+        that has already been committed to. Returns how many parked gates were
+        settled, for the log.
+        """
+        self._gates_closed_for_exit = True
+        return self._deny_pending_gates()
 
     def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.
@@ -3562,7 +3687,12 @@ class ServingSessionHandle(SessionHandle):
             if isinstance(event, ModelChangeEvent):
                 # Fallback/recovery is an access edge too: publishing only at
                 # primary selection leaves a signed-out Meta claim on OpenAI.
-                self.publish_model_access()
+                # SCHEDULED, never inline: this handler runs on the session
+                # loop, and the synchronous form is a SQLite read there (PR
+                # #3053 review round 1, R1-1). A switch made through
+                # ``set_model_effort`` has already scheduled the same read, and
+                # the schedule coalesces onto it rather than reading twice.
+                self._schedule_model_access_publish()
                 self._retry_naming_after_route_change()
             self._notify()
             # LAST, and guarded inside, because it is additive: the goal judge
@@ -4410,13 +4540,13 @@ class ServingSessionHandle(SessionHandle):
         and run the call as a background task so the title arrives ALONGSIDE
         the turn rather than after it.
 
-        ``text`` is the SENT message, and for a ``$skill`` invocation that is
-        the EXPANDED payload rather than the line the user typed: expansion is
-        the CLIENT's duty (a desktop renders ``skills.invoke.render_invocation``'s
-        payload itself, in ``local-operator-ui``'s ``skill-invocation.ts``), so
-        the harness never sees the typed line on its own. Naming from the
-        payload titles the conversation "The user invoked the `research`
-        skill…" and puts the whole SKILL.md body in the list row — the defect
+        ``text`` is the SENT message, and a ``$skill`` invocation is the line
+        the user typed followed by a tail block carrying the bodies. Expansion
+        is the CLIENT's duty, so the harness sees that payload rather than the
+        typed line alone; ``harness.rows.user_row_text`` strips complete blocks,
+        which is what keeps the title on the user's words instead of titling the
+        thread "The user invoked the `research` skill…" and putting the whole
+        SKILL.md body in the list row — the defect
         ``docs/design/history-fold-convergence.md`` row D8 calls out.
 
         Collapsed HERE rather than at the one call site today, because this is
@@ -4763,7 +4893,24 @@ class ServingSessionHandle(SessionHandle):
             unsubscribe_outcome = self._session.subscribe(observe_end)
             try:
                 if command.wait_for_turn:
-                    await self._await_turn_lock_free()
+                    # A person's prompt is visible to the Team Bridge body path
+                    # while it waits out a foreign turn, so a body follow-up
+                    # does not start one more body turn ahead of it. Harness
+                    # rows (goal continuations) are not a person and do not
+                    # hold it; a session without the seam keeps the plain wait.
+                    # Annotated because ``getattr`` on the probe yields ``Any |
+                    # None`` and ``callable()`` narrows that to a callable
+                    # returning ``object``, which a ``with`` cannot enter. The
+                    # seam is ``Session.person_prompt_waiting``, a
+                    # ``contextlib.contextmanager``.
+                    waiting: Callable[[], contextlib.AbstractContextManager[object]] | None = (
+                        getattr(self._session, "person_prompt_waiting", None)
+                    )
+                    if callable(waiting) and not command.harness_injected:
+                        with waiting():
+                            await self._await_turn_lock_free()
+                    else:
+                        await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
@@ -5443,7 +5590,25 @@ class ServingSessionHandle(SessionHandle):
             established=established,
             native=native_chat_provider_ids(),
         )
-        spec = await asyncio.to_thread(build_model_spec, provider, model_id)
+        # INLINE when the model's metadata is already in memory, which is every
+        # switch back to a model this process has run: the build is then pure
+        # CPU (well under 1 ms) and needs no thread hop at all. Only a cold
+        # build can reach discovery's synchronous HTTP legs, and that one goes
+        # to the switch's own pool rather than the default executor the lanes
+        # saturate (see :data:`_SWITCH_EXECUTOR_WORKERS` for the measurement).
+        # The memo's row is HANDED to the build so the inline path performs no
+        # lookup of its own: a warm check against one cache followed by a build
+        # that resolves through another is how a "warm" switch used to run the
+        # cold body on the loop anyway (review round 2, R2-1).
+        from local_operator.model.configure import warm_model_info
+
+        warm_info = warm_model_info(provider, model_id)
+        if warm_info is not None:
+            spec = build_model_spec(provider, model_id, info=warm_info)
+        else:
+            spec = await self._loop.run_in_executor(
+                _switch_executor(), build_model_spec, provider, model_id
+            )
         if provider == "meta-muse":
             from local_operator.harness.types import ModelSpec
 
@@ -5568,15 +5733,100 @@ class ServingSessionHandle(SessionHandle):
         if effort:
             switch["effort_choice"] = effort
         self._session.set_model(spec, **switch)
-        self._refresh_state()
+        # ``roster=False``: the child roster does not depend on the parent's
+        # model, and the full registry pass is the one cost here that grows
+        # with the roster (2.7 MB on the reported manager). The scheduled
+        # coalescer keeps the roster current on its own cadence.
+        self._refresh_state(roster=False)
         # The claim follows the model it is about: a switch can land on a
         # provider this host has no credential for, and a reader must not keep
         # reading the previous model's answer. ALL switch routes land here —
         # the phone's sheet, a peer's ``peer_set_model``, the desktop's
         # ``rehome_if_current`` — so this is the one place the claim can go
-        # stale from a model change.
-        self.publish_model_access()
+        # stale from a model change. Its credential read is SQLite, so it runs
+        # off the session loop, and the reply does NOT wait for it: the switch
+        # has already landed above, the selection publish has already withdrawn
+        # a claim about a different provider (``refresh_model_selection``), and
+        # under load each extra await is another wait for a saturated loop to
+        # come back round. The claim follows within one read.
+        self._schedule_model_access_publish()
         return f"model: {self._projection.model_label}"
+
+    def _schedule_model_access_publish(self) -> "asyncio.Task[None] | None":
+        """Start (or join) the off-loop access-claim publish for the serving model.
+
+        ONE READ PER MODEL EDGE. A genuine switch reaches this twice — from
+        ``set_model_effort`` and from the ``ModelChangeEvent`` the switch emits —
+        and both are asking about the same selector. A publish already in flight
+        for that selector is returned rather than duplicated; a different
+        selector starts a new one (the old one's stale guard then drops its
+        answer). Kept on ``self`` for a strong reference, and deliberately NOT in
+        ``_background_tasks``: that set is what ``is_busy`` reads as work a clean
+        exit would destroy, and an additive claim read is not that.
+
+        Outside a running loop (a synchronous host or test) it publishes inline,
+        the historical behaviour.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.publish_model_access()
+            return None
+        spec = getattr(self._session, "effective_model", None) or getattr(
+            self._session, "model", None
+        )
+        selector = f"{spec.provider}/{spec.model_id}" if spec is not None else ""
+        pending = self._model_access_publish
+        if (
+            pending is not None
+            and not pending.done()
+            and self._model_access_publish_selector == selector
+        ):
+            return pending
+        task = loop.create_task(self._publish_model_access_off_loop())
+        self._model_access_publish = task
+        self._model_access_publish_selector = selector
+        return task
+
+    async def _publish_model_access_off_loop(self) -> None:
+        """:meth:`publish_model_access` with the credential read on a worker thread.
+
+        WHY. The read is a SQLite open + query against the auth store, and on
+        the session loop of a busy manager it was measured at up to 1.0 s
+        (``scripts/bench_model_switch.py --condition parked``) — a stall every
+        other client of that loop shared, during the one request the user is
+        actively waiting on. The read moves to a thread; the store write stays
+        on the loop that owns the store.
+
+        STALE-READ GUARD. Another switch can land while the read is in flight
+        (a second connection, a fallback edge); the claim is applied only if
+        the model it was computed for is still the one serving, so a slow read
+        can never overwrite a newer claim with an older model's answer. The
+        newer switch publishes its own. The invariant is selector EQUALITY, not
+        switch identity: an A→B→A sequence inside one read applies the first
+        read's answer, which is correct because the claim is a function of the
+        selector and the credential store alone (review round 1, R1-2).
+
+        Never raises, like the synchronous form.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            return
+        try:
+            from local_operator.providers.model_access import serving_model_access_here
+
+            spec = getattr(self._session, "effective_model", None) or self._session.model
+            selector = f"{spec.provider}/{spec.model_id}"
+            claim = await self._loop.run_in_executor(
+                _switch_executor(),
+                functools.partial(serving_model_access_here, selector, config_dir=self._config_dir),
+            )
+            now = getattr(self._session, "effective_model", None) or self._session.model
+            if f"{now.provider}/{now.model_id}" != selector:
+                return
+            store.refresh_model_access(claim)
+        except Exception:  # noqa: BLE001 — additive state never fails its edge
+            logger.debug("model access publication failed", exc_info=True)
 
     def publish_model_access(self) -> None:
         """Publish "can the session's model actually run here" (the composer band).
@@ -5999,7 +6249,9 @@ class ServingSessionHandle(SessionHandle):
         self._session.set_model(
             spec.model_copy(update={"reasoning_effort": effort}), effort_choice=effort
         )
-        self._refresh_state()
+        # No roster pass: an effort change cannot move a child row (see
+        # ``set_model_effort``), and that pass is what scaled with the roster.
+        self._refresh_state(roster=False)
         return f"effort: {effort}"
 
     @_on_session_loop
@@ -6388,6 +6640,17 @@ class ServingSessionHandle(SessionHandle):
             self._session._aida_attended_probe = lambda: bool(self._attended_surfaces())
         except Exception:  # noqa: BLE001 — a session without the slot keeps its default
             logger.debug("could not install the attended probe", exc_info=True)
+        # R2-2: the item ladder's rung-4 stand-down reads the same surface table,
+        # through the session's own `_notify_tui_evidence` seam. A TUI ATTACHED to
+        # this session is a TUI RENDERING it (an attach names the one conversation
+        # the front end shows), which is the watched half of the predicate; the
+        # ACTIVE half needs the TUI's input evidence, and with none reported the
+        # probe answers None — unknown, which notifies rather than suppresses
+        # (contract §6.3). Installed here so the answer is live, not captured.
+        try:
+            self._session._notify_tui_probe = self._tui_viewer_active
+        except Exception:  # noqa: BLE001 — an unsettable slot keeps its default
+            logger.debug("could not install the inbox TUI probe", exc_info=True)
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
@@ -6395,6 +6658,41 @@ class ServingSessionHandle(SessionHandle):
             holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
+
+    def _tui_viewer_active(self) -> bool | None:
+        """Is a TUI showing THIS conversation with the operator active in it?
+
+        ``None`` when the answer cannot be established — no TUI attached, or a
+        TUI that reports no input evidence — and the caller treats that as "raise
+        the banner" (contract §6.3: every unknown fails toward notifying).
+
+        THE TWO HALVES ARE DELIBERATELY SEPARATE. An attach proves a terminal is
+        RENDERING this session; it says nothing about whether anyone is at the
+        keyboard. The activity half is the TUI's own ``activity`` report (its
+        Key/MouseDown edges, throttled, contract §6.1); a runtime that predates
+        it, or a TUI that has sent none, leaves the answer unknown — which
+        suppresses nothing.
+        """
+        reader = getattr(self._registrant, "tui_input_age_s", None)
+        if not callable(reader):
+            return None
+        watching = "attach" in self._attached_surfaces() or "tui" in self._watching_surfaces()
+        if not watching:
+            return None
+        try:
+            age = reader()
+        except Exception:  # noqa: BLE001 — an unreadable probe is unknown
+            return None
+        if not isinstance(age, (int, float)) or isinstance(age, bool):
+            # A registrant whose probe answers something other than a number is
+            # "cannot tell", not "active": the fail-open direction is to notify.
+            return None
+        # Imported here, not at module scope: `tui.attention` is a UI-tier
+        # module and this file must stay importable without it (same rule as
+        # every other server→tui read).
+        from local_operator.tui.attention import ATTENTION_INPUT_EVIDENCE_S
+
+        return float(age) <= float(ATTENTION_INPUT_EVIDENCE_S)
 
     def _attended_surfaces(self) -> frozenset[str]:
         """Local human front ends on this runtime (``RuntimeServer.attended_surfaces``).
@@ -6511,7 +6809,7 @@ class ServingSessionHandle(SessionHandle):
             return 0
 
     async def _record_gate_timeout(
-        self, tool: str, description: str, kind: str = "approval"
+        self, tool: str, description: str, kind: str = "approval", *, waited_s: float
     ) -> None:
         """Append the row that says NOBODY WAS THERE.
 
@@ -6519,6 +6817,15 @@ class ServingSessionHandle(SessionHandle):
         are different facts: one is the user's decision, the other is the
         absence of one. Without this row the next turn reads "the user denied
         this" and adjusts its plan around a choice nobody made.
+
+        ``waited_s`` IS THE CALLER'S, never re-derived here. It must be the
+        timeout the gate passed to ``asyncio.wait_for`` when its wait began.
+        This used to call ``_gate_timeout_s()`` again at write time, and that
+        policy is live: a gate that opened with nothing attached waited the
+        short cap, a phone attaching mid-wait flipped the policy to the
+        day-long park, and a 30-second expiry was recorded — and replayed to
+        the model and the phone — as ``waited_s: 86400`` (PR #3030 QA, X1).
+        Keyword-only and required so no caller can fall back to the re-read.
         """
         transcript = getattr(self._session, "transcript", None)
         append = getattr(transcript, "append_message", None)
@@ -6544,7 +6851,7 @@ class ServingSessionHandle(SessionHandle):
                         # and describing it in the approval gate's vocabulary
                         # told the user something that did not happen (D12).
                         "kind": kind,
-                        "waited_s": self._gate_timeout_s() or 0.0,
+                        "waited_s": waited_s,
                     },
                 )
             )
@@ -7204,9 +7511,32 @@ class ServingSessionHandle(SessionHandle):
         """
         from local_operator.session.frontend_state import ask_wire
 
+        # THROTTLED RE-READ. This runs on EVERY ``_notify`` (every relayed
+        # event), and ``ask_wire`` re-reads ``asks.jsonl`` from disk each time:
+        # ~950 reads per 40 s on a 12-lane manager, each a syscall that costs
+        # the loop a GIL re-acquire behind the lanes (measured ~40 ms apiece
+        # under 12 busy threads; ~1 s of loop wall per 40 s, the top sampled
+        # blocker after the evidence writes moved off-loop). This process's OWN
+        # ask changes do not depend on it: ``_ask_state_changed`` installs the
+        # fresh fold immediately and stamps it. What the re-read catches is a
+        # change made by ANOTHER process, which was only ever noticed when an
+        # unrelated event happened to arrive. A skipped read arms ONE trailing
+        # re-check at the end of the floor (``_schedule_ask_refresh``), so the
+        # bound is a true "at most ``_ASK_REFRESH_MIN_S`` late" even when the
+        # session goes quiet right after the skip (review round 1, R1-2/Q1:
+        # without it a skipped change stayed off the phone fold and the
+        # mirrored card until the next unrelated event, however long).
+        now = time.monotonic()
+        # ``getattr``: a handle built without ``__init__`` (a test double)
+        # has no stamp, and reads as never installed.
+        elapsed = now - getattr(self, "_ask_fold_installed_at", float("-inf"))
+        if elapsed < _ASK_REFRESH_MIN_S:
+            self._schedule_ask_refresh(_ASK_REFRESH_MIN_S - elapsed)
+            return
         try:
             rows, outstanding_count = ask_wire(self._session)
             self._fold.set_asks(rows, outstanding_count)
+            self._ask_fold_installed_at = now
         except Exception:  # noqa: BLE001 -- the card is chrome; the gate is not
             logger.debug("could not publish the ask fold", exc_info=True)
 
@@ -10877,6 +11207,49 @@ class ServingSessionHandle(SessionHandle):
         if running is self._loop:
             return
         raise RuntimeError("this session cannot accept that op right now")
+
+    def _schedule_ask_refresh(self, delay: float) -> None:
+        """Arm one trailing ask re-read ``delay`` from now; coalesced.
+
+        A burst of skipped reads arms a single timer (the flag), mirroring
+        ``_schedule_roster_refresh``. When it fires it republishes through
+        ``_notify``, whose ``_publish_pending_gate`` re-runs
+        ``_refresh_ask_projection`` with the floor elapsed — so the read, the
+        mirrored card and the viewer push happen together. If a fresh install
+        (``_ask_state_changed``) re-stamps the fold meanwhile, that call skips
+        once more and re-arms for the remainder: at most one read per floor.
+        """
+        if getattr(self, "_ask_refresh_scheduled", False):
+            return
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            # A handle built without ``__init__`` (a test double) has no loop
+            # to defer onto; the next ``_notify`` still re-checks.
+            return
+        self._ask_refresh_scheduled = True
+        # WEAKLY, for the same reason as the channel re-check in ``Session``:
+        # the loop's timer must not pin a disposed handle (and its session).
+        ref = weakref.ref(self)
+
+        def fire() -> None:
+            handle = ref()
+            if handle is not None:
+                handle._flush_ask_refresh()
+
+        try:
+            loop.call_later(max(delay, 0.0), fire)
+        except RuntimeError:
+            # A closing loop: nothing left to publish to.
+            self._ask_refresh_scheduled = False
+
+    def _flush_ask_refresh(self) -> None:
+        self._ask_refresh_scheduled = False
+        if getattr(self, "_disposing", False):
+            return
+        try:
+            self._notify()
+        except Exception:  # noqa: BLE001 — a card refresh never fails the loop
+            logger.debug("deferred ask refresh failed", exc_info=True)
 
     def _schedule_roster_refresh(self) -> None:
         """Republish the child roster once per :data:`_ROSTER_REFRESH_COALESCE_S`.

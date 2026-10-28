@@ -361,6 +361,24 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
             ToolDocOp(op="await_access", blurb="Wait for the user's decision."),
             ToolDocOp(op="cancel_access", blurb="Cancel YOUR pending exact-origin request."),
+            ToolDocOp(
+                op="network_start",
+                blurb=(
+                    "Begin recording THIS tab's requests (method, safe URL, "
+                    "status, timing, size, redirect links). Metadata only; "
+                    "url= + include_request_body= + approved= opt one exact "
+                    "origin+path's request bodies into a private file."
+                ),
+            ),
+            ToolDocOp(op="network_stop", blurb="Stop recording; the buffer stays readable."),
+            ToolDocOp(
+                op="network_read",
+                blurb=(
+                    "The recorded entries (bounded ring), optional filters: "
+                    "after_id=, request_id=, method=, status=, limit=."
+                ),
+            ),
+            ToolDocOp(op="network_clear", blurb="Drop the buffer."),
             ToolDocOp(op="recover", blurb="Recover YOUR tab."),
             ToolDocOp(op="retain", blurb="Hold it."),
             ToolDocOp(op="release", blurb="End that hold."),
@@ -381,6 +399,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- Tab ownership: 'tabs' lists every agent-driven tab including "
             "other sessions' (handles are redacted), and a redacted handle is "
             "not yours to drive.\n"
+            "- Network capture is the desktop app's host only (the extension "
+            "attaches its debugger per action and has no standing session): "
+            "'network_start' then read with 'network_read'. Bodies are opt-in "
+            "per exact origin+path and land in a private session file, never in "
+            "this transcript.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
@@ -709,10 +732,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "never overwrites a name/description either writer set.\n"
             "- `locked` protects a row from agent writes; the Librarian skips it.\n"
             "- An asset may carry at most 12 tags; `primary` must be one of them.\n"
-            "- `actor` defaults to `librarian`; pass `user` only for a user-"
-            "initiated action. `confidence` is recorded on the edit row.\n"
+            "- `actor` is derived: the Librarian session records `librarian`, "
+            "every other session `agent`; pass `user` only for a user-initiated "
+            "action, and `librarian` from elsewhere is refused. `confidence` is "
+            "recorded on the edit row.\n"
             "- `update` with a name/description marks the asset organized when "
-            "the actor is the Librarian.\n"
+            "the actor is the Librarian; so does a non-empty tag set.\n"
             "- Content bytes and thumbnails are HTTP surfaces, not tool ops: the "
             "tool is for finding and naming, not shipping files."
         ),
@@ -999,13 +1024,35 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "watcher job) so its completion is delivered normally."
         ),
     ),
+    "glob": ToolDocNotes(
+        notes=(
+            "- `path` is the base directory (absolute or relative to the working "
+            "directory); results print relative to it and the header names it. An "
+            "ABSOLUTE `pattern` is split at its first wildcard component — the "
+            "literal directory prefix becomes the base — so `/abs/dir/**/*.js` works; "
+            "give one or the other, not both.\n"
+            "- `..` is refused inside a pattern; a base outside the workspace asks for "
+            "the same approval `grep` does.\n"
+            "- A `SKILL.md` search is still refused: read `skill://<name>` instead."
+        ),
+    ),
     "grep": ToolDocNotes(
         notes=(
             "Detail moved off the wire in the slimming wave (audit items 2+7):\n"
             "\n"
             "- `context_lines` adds surrounding lines per match (like `grep "
-            "-C`); `skip` pages past the first 200 matches.\n"
+            "-C`); context lines render as `path:line-text` (dash), matches as "
+            "`path:line:text`. `skip` pages past the first 200 matches.\n"
+            "- `pattern` is a Python regex; `path` is a file or directory, absolute "
+            "or relative to the working directory; `include` is a glob on file names "
+            "or basenames (e.g. `*.py`, `**/*.ts`).\n"
             "- `grep` and `glob` both respect the project's ignore files.\n"
+            "- A matched line over 500 chars is shown as a window around the match "
+            "(`[…N chars]` marks what was dropped); read the file by line range for "
+            "the rest.\n"
+            "- Files over `max_filesize_mb` (default 1, ceiling 64) are never read: "
+            "the answer names the largest few. A no-match that names skipped files is "
+            "INCONCLUSIVE — re-run with the `max_filesize_mb` it suggests.\n"
             "- Failure semantics: a scan that hits its wall-clock deadline "
             "returns what it has so far, and the display caps at 200 matches "
             "with the rest written to a `spill://` handle you can search."

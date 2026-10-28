@@ -1,0 +1,6 @@
+{
+  "wire.errors.notifications.store_busy": "Kho thông báo đang bận, nên chưa có gì thay đổi. Hãy thử lại sau giây lát.",
+  "wire.errors.notifications.store_full": "Máy tính này đã hết dung lượng ổ đĩa, nên chưa có gì thay đổi. Hãy giải phóng dung lượng trên ổ chứa {where}, rồi thử lại.",
+  "wire.errors.notifications.store_unavailable": "Không thể đọc hoặc ghi kho thông báo. Thử lại sẽ không giúp được; hãy kiểm tra {where} và ổ đĩa chứa nó.",
+  "wire.errors.notifications.unknown_item": "Thông báo đó không còn trong mục Thông báo nữa."
+}

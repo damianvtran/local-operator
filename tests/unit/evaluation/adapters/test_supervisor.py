@@ -79,7 +79,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.6",
+        schema_version="1.7",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
@@ -101,7 +101,7 @@ def metadata() -> AdapterMetadata:
         entry_point="tiny_adapter:create",
         package_digest="a" * 64,
         release_digest="b" * 64,
-        schema_version="1.6",
+        schema_version="1.7",
         capabilities=AdapterCapabilities(routes=("computer",), ask_user=False, scoring=True),
     )
 
@@ -133,7 +133,7 @@ def plan() -> CleanupPlan:
 
 def descriptor(tmp_path: Path) -> RescueDescriptor:
     return RescueDescriptor(
-        schema_version="1.6",
+        schema_version="1.7",
         selector=selector(tmp_path),
         handshake=handshake(tmp_path),
         episode_id="episode",
@@ -1064,6 +1064,128 @@ def test_a_predispatch_refusal_on_a_non_execute_method_still_poisons(
     import asyncio
 
     asyncio.run(run())
+
+
+def _not_applied_error(method: str = "execute") -> RpcRemoteError:
+    """The wire shape of an adapter-declared ``ActionNotAppliedError``."""
+
+    return RpcRemoteError(
+        "adapter_error",
+        "adapter operation failed",
+        RpcErrorDetail(
+            exception_type="ActionNotAppliedError",
+            message="guest action 1 was not attempted; no input was sent",
+            method=method,  # pyright: ignore[reportArgumentType]
+            operation_id="exec-0",
+            phase="not_applied",
+        ),
+    )
+
+
+def test_a_declared_not_applied_execute_keeps_the_session_usable(tmp_path: Path) -> None:
+    """The precondition for the bridge's re-bind: a not-applied ``execute`` must
+    NOT poison, must demand no rescue, and must not probe (it is a structured
+    declaration, not the message-matched ambiguous shape) -- and the next call,
+    the bridge's read-only ``observe``, must actually reach the adapter."""
+
+    import asyncio
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    initial = observation("task", "episode", 0)
+    verifier.accept_initial(initial)
+    raw = RawSupervisor([_not_applied_error(), ObservationResult(observation=initial)])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+        ambiguous_rebind_budget=2,
+    )
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError) as raised:
+            await session.execute(_execute_params(initial), timeout=1)
+        # The ORIGINAL wire error, never an ``AmbiguousRebindCleared`` wrapper.
+        assert raised.value.detail is not None
+        assert raised.value.detail.phase == "not_applied"
+        result = await session.observe(ObserveParams(episode_id="episode"), timeout=1)
+        assert result.observation.observation_id == initial.observation_id
+
+    asyncio.run(run())
+    assert raw.calls == ["execute", "observe"]
+    assert not raw.terminated and rescue_required == []
+
+
+def test_a_not_applied_claim_on_a_non_execute_method_still_poisons(tmp_path: Path) -> None:
+    """Negative control: the stay-usable rule is scoped to ``execute``. (The
+    worker never stamps the phase for another method; this pins the parent's
+    own scoping in case a wire ever carried one.)"""
+
+    import asyncio
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_not_applied_error("reset_start")])
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError):
+            await session.reset_start(
+                ResetStartParams(
+                    operation_id="reset",
+                    task_id="task",
+                    episode_id="episode",
+                    artifact_root=str(tmp_path),
+                ),
+                timeout=1,
+            )
+        with pytest.raises(SupervisionError, match="poisoned"):
+            await session.observe(ObserveParams(episode_id="episode"), timeout=1)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(_adapter_error("observation"), id="observation"),
+        pytest.param(_adapter_error("unknown"), id="unknown"),
+        pytest.param(_not_applied_error(), id="not_applied"),
+        pytest.param(_invalid_state_error(), id="invalid_state"),
+        pytest.param(RuntimeError("boom"), id="foreign"),
+    ],
+)
+def test_the_session_and_runner_predicates_stay_in_lockstep(error: BaseException) -> None:
+    """The supervisor's stay-usable predicates and the runner's re-bind
+    predicates are DELIBERATELY duplicated; this pins them together so a drift
+    in either breaks here rather than in a paid episode.
+
+    * committed: ``_mutation_committed`` == ``episode._observation_phase_failure``
+      (the ONLY class that licenses ``resume_observation``);
+    * not-applied: ``_declared_not_applied`` == ``episode._not_applied_failure``;
+    * the re-bind gate admits exactly what the session keeps usable on
+      ``execute``.
+    """
+
+    from local_operator.evaluation.adapters.supervisor import (
+        _declared_not_applied,
+        _mutation_committed,
+        _refused_before_dispatch,
+    )
+    from local_operator.evaluation.runner import episode
+
+    assert _mutation_committed(error) == episode._observation_phase_failure(error)
+    assert _declared_not_applied(error) == episode._not_applied_failure(error)
+    assert _refused_before_dispatch(error) == episode._refused_before_dispatch(error)
+    stays_usable_on_execute = (
+        _mutation_committed(error)
+        or _refused_before_dispatch(error)
+        or _declared_not_applied(error)
+    )
+    assert stays_usable_on_execute == episode._rebindable_failure(error)
+    # Not-applied is never the committed class: it must not license a resume.
+    if _declared_not_applied(error):
+        assert not _mutation_committed(error)
 
 
 def _ambiguous_delivery_error(

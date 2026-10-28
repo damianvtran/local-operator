@@ -699,12 +699,18 @@ class ScreenModelRunner:
             TextContent,
         )
 
-        if images and not bool(getattr(self._selection.spec, "supports_images", False)):
+        spec = self._selection.spec
+        sees_images = bool(getattr(spec, "supports_images", False)) and bool(
+            getattr(spec, "supports_images_stated", True)
+        )
+        if images and not sees_images:
             # D5, fail closed: a screener that cannot see images must never be
             # sent them (a provider would strip or 400 them and the verdict
             # would then cover pixels nobody looked at). The connector screens
             # text-only for such a model; reaching here means the selection
             # changed under it, which is a hold, never a text-only allow.
+            # "Can see" means STATED: an undescribed model's spec defaults to
+            # True, which is not knowledge (PR #3071 review m2).
             raise _ScreeningStreamRefused("images_unsupported")
         image_blocks = [
             ImageContent(data=base64.b64encode(data).decode("ascii"), mime_type=mime)

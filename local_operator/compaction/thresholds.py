@@ -640,12 +640,24 @@ def resolve_strategy(
     """Concrete strategy for one model: ``snapcompact`` iff the setting says
     so, or ``auto`` and the model reads images; else ``context-full``.
 
-    ``model`` is duck-typed (only ``supports_images`` is read) so this module
-    never imports harness types; ``strategy == "off"`` is gated by the caller
-    (:func:`should_compact`) and resolves to ``context-full`` here.
+    ``model`` is duck-typed (only ``supports_images`` and
+    ``supports_images_stated`` are read) so this module never imports harness
+    types; ``strategy == "off"`` is gated by the caller (:func:`should_compact`)
+    and resolves to ``context-full`` here.
+
+    ``auto`` needs a STATED image capability, not the spec's default: the
+    archive is replayed as image frames, so a model nothing described that
+    turns out to be text-only would lose the archived middle of its
+    conversation for good — the refusal degrade strips the frames, and nothing
+    is left in their place (PR #3071 QA Q2). A stand-in without the
+    ``supports_images_stated`` attribute keeps the old reading.
     """
     if settings.strategy == "snapcompact":
         return "snapcompact"
-    if settings.strategy == "auto" and getattr(model, "supports_images", False):
+    if (
+        settings.strategy == "auto"
+        and getattr(model, "supports_images", False)
+        and getattr(model, "supports_images_stated", True)
+    ):
         return "snapcompact"
     return "context-full"

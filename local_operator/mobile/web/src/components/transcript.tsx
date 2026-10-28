@@ -1,3 +1,4 @@
+import { useScrollCues } from "../lib/use-scroll-cues";
 /**
  * The transcript: user bubbles, assistant prose (markdown), one-line tool
  * rows, quiet notices and compaction markers. Rendered as a tail window of
@@ -8,7 +9,7 @@
  * Auto-scroll: the view follows the tail only while the user is already at
  * the bottom. Scrolling up to read must never be yanked back by a repaint.
  */
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "./markdown"
 import { AskRow } from "./ask-row";
 import { AttachmentImage } from "./attachment-image";
@@ -19,6 +20,7 @@ import { RowBoundary } from "./row-boundary";
 import { Disclosure } from "./ui/disclosure";
 import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
+import { messageRuntime } from "../store";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
 import {
@@ -32,6 +34,10 @@ import { contextualQuietGroupsOf } from "../lib/peer-cycles";
 import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
+import { rowKey } from "../lib/condense-records";
+import { splitFirstLine } from "../lib/condense-rows";
+import { composeCondensedEntries, type CondenseEntry } from "../lib/condense-view";
+import { FoldBar, TurnBar } from "./condense-rows";
 
 const PAGE = 120;
 
@@ -123,7 +129,7 @@ function NoticeRow({ entry }: { entry: TranscriptEntry }) {
 	);
 }
 
-function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
+function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid: string; condensed?: boolean }) {
 	switch (entry.kind) {
 		case "user": {
 			/* The user's own words. Right-aligned like the desktop app's bubble,
@@ -133,9 +139,13 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			   is what the turn is on" signal (branding §7). Surface ground +
 			   hairline keeps it quiet next to the answer that follows. */
 			const images = entry.images ?? [];
+			/* A condensed turn keeps the user's opening line beside its outcome.
+			   Opening the turn removes `condensed`, restoring the identical full
+			   bubble and attachments rather than a separately reconstructed row. */
+			const firstLine = condensed ? splitFirstLine(entry.text).headline : entry.text;
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md bg-surface px-3 py-1.5">
 						{/* Attachments render inline like the TUI's image block: the
 						   picture the user sent is part of the turn, not a stripped
 						   "[image attached]" note. AttachmentImage owns the loading
@@ -154,9 +164,9 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 								))}
 							</div>
 						) : null}
-						{entry.text ? (
-							<div className="text-body leading-normal break-words whitespace-pre-wrap">
-								{entry.text}
+						{firstLine ? (
+							<div className={cn("text-body leading-normal break-words", condensed ? "truncate" : "whitespace-pre-wrap")}>
+								{firstLine}
 							</div>
 						) : null}
 					</div>
@@ -178,16 +188,16 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			// The child launch/user task also uses this kind during loading/error.
 			// Without producer facts it is a visible request boundary, not hub traffic.
 			if (!isHubReceipt(entry)) return entry.kind === "parent_message" ? (
-				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
+				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
 			) : (
-				<div className="min-w-0 rounded-sm border-l-2 border-l-hairline pl-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
+				<div className="min-w-0 rounded-sm border-s-2 border-s-hairline ps-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
 			);
-			// A receipt is internal traffic, not a right-aligned human turn. Reuse
+			// A receipt is internal traffic, not a end-aligned human turn. Reuse
 			// the existing disclosure so the full body remains reachable on demand.
 			const label = hubReceiptLabel(entry);
 			const intent = [entry.details?.expects_reply === true ? "Reply requested" : "", entry.details?.steer === true ? "Steered" : ""].filter(Boolean);
 			return <Disclosure header={<span className="text-meta text-ink-dim">Hub · From {label}{intent.length ? ` · ${intent.join(" · ")}` : ""}</span>}>
-				<div className="flex flex-col gap-2 pl-3">
+				<div className="flex flex-col gap-2 ps-3">
 					<p className="text-meta text-ink-muted">{label}{entry.details?.direction ? ` · ${entry.details.direction}` : ""}{entry.details?.job_id && entry.details?.label ? ` · Job ${entry.details.job_id}` : ""}</p>
 					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{typeof entry.details?.body === "string" ? entry.details.body : entry.text}</p>
 					{media}
@@ -207,7 +217,7 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			if (sender.model_label) parts.push(sender.model_label);
 			const label = parts.length > 0 ? parts.join(" · ") : "Peer session";
 			return (
-				<div className="min-w-0 rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
+				<div className="min-w-0 rounded-md bg-surface px-3 py-1.5">
 					<span className="block text-meta text-ink-dim">↔ {label}</span>
 					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
 				</div>
@@ -275,6 +285,39 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
  * in-progress animation (D25), and a second one per row is exactly the
  * competing-patterns defect that rule exists for — so the pending state is said
  * in words and ink, not in motion. */
+function CondensedRows({
+	items, pid, supplements, supplementLive, openRuns, onToggle,
+}: {
+	items: readonly CondenseEntry[];
+	pid: string;
+	supplements: Record<string, SupplementBeat>;
+	supplementLive: (beat: SupplementBeat) => boolean;
+	openRuns: ReadonlySet<string>;
+	onToggle: (entry: Extract<CondenseEntry, { kind: "turn" | "fold" }>, open: boolean) => void;
+}) {
+	return items.map((item) => {
+		if (item.kind === "row") {
+			const beat = supplements[item.entry.id];
+			const showBeat = beat && item.entry.kind === "assistant" && !item.condensed;
+			return <RowBoundary key={item.key}>
+				<div data-completion-anchor={item.entry.id} data-completion-complete={item.entry.final && item.entry.text_complete === true ? "true" : "false"}>
+					<Entry entry={item.entry} pid={pid} condensed={item.condensed} />
+				</div>
+				{showBeat ? <SupplementBlock beat={beat} sessionId={pid} jobLive={supplementLive(beat)} /> : null}
+			</RowBoundary>;
+		}
+		const children = <CondensedRows items={item.children} pid={pid} supplements={supplements}
+			supplementLive={supplementLive} openRuns={openRuns} onToggle={onToggle} />;
+		return item.kind === "turn" ? (
+			<TurnBar key={item.key} entry={item} open={openRuns.has(item.segment.key)}
+				onToggle={() => onToggle(item, !openRuns.has(item.segment.key))}>{children}</TurnBar>
+		) : (
+			<FoldBar key={item.key} entry={item} open={openRuns.has(item.key)}
+				onToggle={() => onToggle(item, !openRuns.has(item.key))}>{children}</FoldBar>
+		);
+	});
+}
+
 function PendingEchoRow({ echo, streaming }: { echo: PendingEcho; streaming: boolean }) {
 	const count = echo.imageCount;
 	const attachments = count > 0 ? (
@@ -307,7 +350,7 @@ function PendingEchoRow({ echo, streaming }: { echo: PendingEcho; streaming: boo
 				   accent leading edge and with `text-ink-muted` in place of the settled
 				   row's full ink. Its `gap-1.5` is the settled bubble's gap, matched
 				   rather than harmonised to the 4px ramp, so the two agree (design D5). */
-				<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline bg-surface px-3 py-1.5 text-body">
+				<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md bg-surface px-3 py-1.5 text-body">
 					{attachments}
 					{echo.text ? (
 						<div className="leading-normal break-words whitespace-pre-wrap text-ink-muted">
@@ -470,9 +513,22 @@ export function Transcript({
 	   never arrives over SSE — it is paged in from the transcript on disk as
 	   the user scrolls up. */
 	const [older, setOlder] = useState<TranscriptEntry[]>([]);
+	const [heldLive, setHeldLive] = useState<TranscriptEntry[]>(entries);
 	const [hasMore, setHasMore] = useState(true);
 	const [loadingOlder, setLoadingOlder] = useState(false);
+	const [olderError, setOlderError] = useState(false);
+	const [openRuns, setOpenRuns] = useState<ReadonlySet<string>>(new Set());
+	const heldRowsRef = useRef<import("../lib/condense-rows").Row[]>([]);
+	const foldLatchRef = useRef<Set<string>>(new Set());
+	const condensedRunsRef = useRef<Set<string>>(new Set());
+	const watchedRunRef = useRef<string | null>(null);
+	const [watchedRunId, setWatchedRunId] = useState<string | null>(null);
+	const latchSeenRef = useRef<{ seen: boolean; tailId: string | null }>({ seen: false, tailId: null });
+	const headCompletionRef = useRef(0);
+	const userPagedRef = useRef(false);
+	const pressedHeaderRef = useRef<{ id: string; top: number } | null>(null);
 	const scrollRef = useRef<HTMLDivElement>(null);
+	const scrollCue = useScrollCues();
 	const pinnedRef = useRef(true);
 	/* Auto-load trigger guard: one in-flight page at a time. */
 	const loadingRef = useRef(false);
@@ -481,6 +537,17 @@ export function Transcript({
 	   reader to the row they left instead of the latest token. */
 	useEffect(() => {
 		setOlder([]);
+		setHeldLive(entries);
+		setOpenRuns(new Set());
+		foldLatchRef.current.clear();
+		condensedRunsRef.current.clear();
+		watchedRunRef.current = null;
+		setWatchedRunId(null);
+		latchSeenRef.current = { seen: false, tailId: null };
+		headCompletionRef.current = 0;
+		userPagedRef.current = false;
+		heldRowsRef.current = [];
+		setOlderError(false);
 		setHasMore(true);
 		setWindowSize(PAGE);
 		const saved = Number(sessionStorage.getItem(`lo-mobile-scroll:${scrollKey}`));
@@ -504,17 +571,22 @@ export function Transcript({
 	const pendingKey = pending.map((echo) => echo.commandId).join(",");
 	const growthSignal = `${entries.length}:${tail?.id ?? ""}:${tail?.text?.length ?? 0}:${tail?.final ?? ""}:${pendingKey}`;
 
-	/* De-dupe: an older page can overlap the live window's head when the fold
-	   re-caps between the fetch and the render. Key on id, older first. */
-	const merged = (() => {
-		const seen = new Set(older.map((e) => e.id));
-		const live = entries.filter((e) => !seen.has(e.id));
-		return [...older, ...live];
-	})();
-
-	const visible =
-		merged.length > windowSize ? merged.slice(-windowSize) : merged;
-	const hiddenCount = merged.length - visible.length;
+	/* One ordered held list, upserted by the live/replay-stable row key. Rows
+	   falling out of the daemon's sliding projection stay held: deleting them
+	   would create a hole and make a turn summary claim a shorter run. */
+	const heldMap = new Map<string, TranscriptEntry>();
+	for (const entry of [...older, ...heldLive]) heldMap.set(rowKey(entry), entry);
+	const cappedProjection = entries.length >= PROJECTION_ROWS;
+	const pinnedOpener = cappedProjection && entries.length > 1 && entries[0]?.kind === "user" ? entries[0] : null;
+	const liveTail = pinnedOpener ? entries.slice(1) : entries;
+	for (const entry of liveTail) heldMap.set(rowKey(entry), entry);
+	const openerJoined = pinnedOpener !== null && older.some((entry) => rowKey(entry) === rowKey(pinnedOpener));
+	const detachedOpener = pinnedOpener && !openerJoined && older.length > 0 ? pinnedOpener : null;
+	if (detachedOpener) heldMap.delete(rowKey(detachedOpener));
+	/* Only unsolicited live retention is capped. Explicitly fetched history
+	   must survive the join: trimming its oldest page here both hides the
+	   rows the reader requested and pins the next cursor to that same page. */
+	const merged = [...heldMap.values()];
 	/* Long projections pin the opening user row ahead of a disjoint tail. It is
 	   already retained, but it is not the tail's chronological history cursor;
 	   anchor at the next row so the API can return the missing middle. The
@@ -535,25 +607,57 @@ export function Transcript({
 			? older[0].id
 			: entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user"
 				? entries[1]?.id ?? entries[0]?.id ?? null
-				: visible.length > 0
-					? visible[0].id
-					: null;
+				: merged[0]?.id ?? null;
 
 	/* THE QUIET GROUPS over the rows on hand (design §5, slice S4): pure per
 	   render — rows only append, so a closed group's facts cannot move and the
 	   open tail grows in place under its stable key. The definition lives once
 	   in `lib/quiet-groups` and is pinned across clients by the shared parity
 	   fixture. */
-	const groups = contextualQuietGroupsOf(visible, pid, peerCycles);
+	/* Quiet grouping speaks wire IDs; the condense join speaks canonical tool
+	   identities (`call:<tool_call_id>`). Normalize ownership once so both the
+	   fold exclusion and disclosure children refer to the exact same rows. */
+	const canonicalIds = new Map(merged.map((entry) => [entry.id, rowKey(entry)]));
+	const groups = contextualQuietGroupsOf(merged, pid, peerCycles).map((group) => ({
+		...group,
+		rowIds: group.rowIds.map((id) => canonicalIds.get(id) ?? id),
+	}));
+	const quietRowIds = new Set(groups.flatMap((group) => group.rowIds));
+	const live = streaming || pending.length > 0;
+	const condensed = useMemo(() => composeCondensedEntries(merged, {
+		live, openRuns, olderRowsExist: hasMore || detachedOpener !== null,
+		watchedRunId,
+		previousRows: heldRowsRef.current,
+		latchedFoldIds: live || watchedRunId ? foldLatchRef.current : new Set(),
+		quietRowIds,
+		condensedRunIds: condensedRunsRef.current,
+	}), [merged, live, openRuns, hasMore, detachedOpener, watchedRunId]);
+	if (!live) {
+		for (const item of condensed.entries) if (item.kind === "turn") condensedRunsRef.current.add(item.run.key);
+	}
+	heldRowsRef.current = condensed.rows;
+	if (live) foldLatchRef.current = condensed.foldIds;
+	else foldLatchRef.current.clear();
+	const visibleItems = condensed.entries.slice(-windowSize);
+	const hiddenCount = Math.max(0, condensed.entries.length - visibleItems.length);
 	const groupsByFirstId = new Map(groups.map((group) => [group.rowIds[0], group]));
-	const groupedIds = new Set(groups.flatMap((group) => group.rowIds));
-	const entriesById = new Map(visible.map((entry) => [entry.id, entry]));
-	/* A group whose first row IS the painted top edge may continue above: rows
-	   sit in `merged` but off-window (`hiddenCount`), and `hasMore` records that
-	   a page fetch has not yet proved there is nothing older. Its count is a
-	   minimum — the `N+` the bar states. */
-	const topGroup = visible.length > 0 ? groupsByFirstId.get(visible[0].id) : undefined;
 	const headCut = hiddenCount > 0 || hasMore;
+	const renderItems: Array<CondenseEntry | { kind: "quiet"; key: string; group: QuietGroup }> = [];
+	const claimedQuiet = new Set<string>();
+	for (const item of condensed.entries) {
+		if (item.kind === "row") {
+			const group = groupsByFirstId.get(rowKey(item.entry));
+			if (group && !claimedQuiet.has(group.key)) {
+				claimedQuiet.add(group.key);
+				for (const id of group.rowIds) claimedQuiet.add(id);
+				renderItems.push({ kind: "quiet", key: group.key, group });
+				continue;
+			}
+			if (claimedQuiet.has(rowKey(item.entry))) continue;
+		}
+		renderItems.push(item);
+	}
+	const pagedItems = renderItems.slice(-windowSize);
 
 	/* One row's box + anchor attrs, shared by the plain rows and a group's
 	   receipts so the two can never disagree about the follow contract. A
@@ -628,13 +732,41 @@ export function Transcript({
 	   also counted any tail growth in the same commit, at a frame's delay),
 	   exactly the shape the opt-out exists to prevent. */
 	const prependPage = (page: TranscriptEntry[]) => {
-		setOlder((cur) => [...page, ...cur]);
+		setOlder((cur) => {
+			const held = new Set([...cur, ...heldLive, ...entries].map(rowKey));
+			return [...page.filter((entry) => !held.has(rowKey(entry)) ||
+			(pinnedOpener !== null && rowKey(entry) === rowKey(pinnedOpener))), ...cur];
+		});
+	};
+
+	useEffect(() => {
+		setHeldLive((current) => {
+			const next = new Map(current.map((entry) => [rowKey(entry), entry]));
+			for (const entry of entries) next.set(rowKey(entry), entry);
+			return [...next.values()].slice(-2000);
+		});
+	}, [entries]);
+
+	const toggleCondensed = (item: Extract<CondenseEntry, { kind: "turn" | "fold" }>, open: boolean) => {
+		const id = item.kind === "turn" ? item.segment.key : item.key;
+		const header = scrollRef.current?.querySelector(`[data-condense-header="${CSS.escape(item.key)}"]`);
+		if (header && scrollRef.current) pressedHeaderRef.current = {
+			id: item.key,
+			top: header.getBoundingClientRect().top - scrollRef.current.getBoundingClientRect().top,
+		};
+		pinnedRef.current = false;
+		setOpenRuns((current) => {
+			const next = new Set(current);
+			if (open) next.add(id); else next.delete(id);
+			return next;
+		});
 	};
 
 	const loadOlder = async () => {
 		if (loadingRef.current || !hasMore || !oldestId) return;
 		loadingRef.current = true;
 		setLoadingOlder(true);
+		setOlderError(false);
 		try {
 			const { entries: page, has_more } = jobId
 				? await getSubagentHistory(pid, jobId, oldestId, PAGE)
@@ -652,14 +784,44 @@ export function Transcript({
 			}
 			setHasMore(has_more);
 		} catch {
-			/* A failed page is not fatal — leave hasMore so a retry can load it. */
+			/* Keep the cursor and hasMore intact: the explicit retry must request
+			   the failed page, not skip it or silently strand the reader. */
+			setOlderError(true);
 		} finally {
 			loadingRef.current = false;
 			setLoadingOlder(false);
 		}
 	};
 
+	useEffect(() => {
+		const newest = condensed.runs.at(-1);
+		if (!newest) return;
+		const tailId = newest.recordIds.at(-1) ?? null;
+		const seen = latchSeenRef.current;
+		const grew = seen.seen && tailId !== null && tailId !== seen.tailId;
+		latchSeenRef.current = { seen: true, tailId };
+		if (live || (grew && newest.answerId === null)) {
+			const id = condensed.rows[newest.run.openingIndex]?.record.id ?? null;
+			watchedRunRef.current = id;
+			setWatchedRunId((current) => current === id ? current : id);
+		}
+	}, [condensed, live]);
+
+	const topRun = condensed.runs[0];
+	const topHeadCut = topRun !== undefined && !topRun.run.opensWithUserRow;
+	useEffect(() => {
+		if (!topHeadCut || live || !topRun?.collapses || !hasMore || loadingOlder || userPagedRef.current) return;
+		if (headCompletionRef.current >= 3) return;
+		const timer = window.setTimeout(() => {
+			if (userPagedRef.current || loadingRef.current || headCompletionRef.current >= 3) return;
+			headCompletionRef.current += 1;
+			void loadOlder();
+		}, 0);
+		return () => window.clearTimeout(timer);
+	}, [topHeadCut, live, topRun?.collapses, hasMore, loadingOlder, oldestId]);
+
 	const onScroll = () => {
+		userPagedRef.current = true;
 		const el = scrollRef.current;
 		if (!el) return;
 		pinnedRef.current =
@@ -743,8 +905,23 @@ export function Transcript({
 				top: candidate.getBoundingClientRect().top - box.top,
 			});
 		}
+		const pressed = pressedHeaderRef.current;
+		if (pressed) {
+			pressedHeaderRef.current = null;
+			const header = el.querySelector(`[data-condense-header="${CSS.escape(pressed.id)}"]`);
+			if (header) {
+				const delta = header.getBoundingClientRect().top - box.top - pressed.top;
+				if (Math.abs(delta) > 0) el.scrollTop = Math.max(0, Math.min(max, scrollTop + delta));
+				/* The next render's generic follow uses these rows. Store them in
+				   the corrected frame, not the pre-click frame, or that render
+				   undoes this scroll and sends the pressed bar off-screen. Read the
+				   actual displacement so boundary clamping stays honest. */
+				const shift = el.scrollTop - scrollTop;
+				for (const row of rows) row.top -= shift;
+			}
+		}
 		const prev = anchorRows.current;
-		if (prev) {
+		if (!pressed && prev) {
 			const now = new Map(rows.map((r) => [r.id, r.top]));
 			const nearEdge = [...prev].sort((a, b) => Math.abs(a.top) - Math.abs(b.top));
 			for (const row of nearEdge) {
@@ -769,17 +946,17 @@ export function Transcript({
 		anchorRows.current = rows;
 		prevFollowScrollTop.current = el.scrollTop;
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [topInset, older, windowSize, entries, pending, hasMore, loadingOlder]);
+	}, [topInset, older, windowSize, entries, pending, hasMore, loadingOlder, visibleItems, openRuns]);
 
 	return (
 		<div
-			ref={scrollRef}
+			ref={node => { scrollRef.current = node; return scrollCue(node); }}
 			onScroll={onScroll}
 			className={cn(
 				/* overflow-x-hidden as the backstop: break-words on the rows should
 				   wrap everything, but a table or pre that still overflows scrolls
 				   INSIDE itself, never the whole chat sideways. */
-				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
+				"lo-scroll lo-fade-y flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
 				/* ONE HAND ON `scrollTop` (round 3; extended in round 4). The reserve,
 				   the live window's oldest-row removal at the cap, a prepended page and
 				   the window's own expansion are all "height above the reader" — and
@@ -823,6 +1000,15 @@ export function Transcript({
 			   23 of 27 transitions in one open were that 1px oscillation against
 			   a rig scrolling once every 300 ms, and the cascade pulled 13 pages
 			   (2.24 MB) into a window the reader could not see. */}
+			{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} /></div> : null}
+			{olderError ? (
+				<div className="flex min-h-11 items-center justify-center gap-1.5 text-meta text-ink-dim" role="status">
+					<span className="min-w-0 truncate">{messageRuntime.t("relay.transcript.older.failed")}</span>
+					<button type="button" className="min-h-11 shrink-0 px-1.5 text-ink-muted" onClick={() => void loadOlder()}>
+						{messageRuntime.t("relay.account_policy.retry")}
+					</button>
+				</div>
+			) : null}
 			{loadingOlder ? (
 				<div className="flex h-0.5 justify-center" aria-hidden>
 					<span className="lo-loadbar h-full w-16 overflow-hidden rounded-full bg-sunken">
@@ -834,29 +1020,25 @@ export function Transcript({
 					<span className="h-px w-10 bg-hairline" />
 				</div>
 			) : null}
-			{visible.flatMap((entry) => {
-				const group = groupsByFirstId.get(entry.id);
-				if (group !== undefined) {
-					return [
-						<RowBoundary key={group.key}>
-							<QuietGroupRow
-								group={group}
-								partial={headCut && group.key === topGroup?.key}
-							>
-								{group.rowIds.map((id) => {
-									const member = entriesById.get(id);
-									return member ? transcriptRow(member) : null;
-								})}
-							</QuietGroupRow>
-						</RowBoundary>,
-					];
+			{pagedItems.map((item) => {
+				if (item.kind === "quiet") {
+					return <RowBoundary key={item.key}>
+						<QuietGroupRow group={item.group} partial={headCut && item.group.rowIds[0] === (merged[0] ? rowKey(merged[0]) : undefined)}>
+							{item.group.rowIds.map((id) => {
+								const member = merged.find((entry) => rowKey(entry) === id);
+								return member ? transcriptRow(member) : null;
+							})}
+						</QuietGroupRow>
+					</RowBoundary>;
 				}
-				/* A row inside a group paints through the group's bar (its
-				   children mount only while open) — never a second time here. */
-				if (groupedIds.has(entry.id)) return [];
-				return [transcriptRow(entry)];
+				if (item.kind !== "row") {
+					return <CondensedRows key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
+						supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
+				}
+				return <CondensedRows key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
+					supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
 			})}
-			{visible.length === 0 && pending.length === 0 ? emptyContent : null}
+			{pagedItems.length === 0 && pending.length === 0 ? emptyContent : null}
 			{/* After the last projected row, because that is where the session will
 			    write them. */}
 			{pending.map((echo) => (

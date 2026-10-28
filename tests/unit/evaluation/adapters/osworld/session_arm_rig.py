@@ -53,7 +53,7 @@ from typing import Any
 #: Fragment of the arm's prompt header; the episode prompt stays in history, so
 #: every call of the episode's own turn matches it (the child's launch prompt
 #: does not carry it).
-SENTINEL = "Act on this computer by calling"
+SENTINEL = "Act on the remote computer by calling"
 
 ACTION_TOOL = "mcp__episode_actions_apply_actions"
 

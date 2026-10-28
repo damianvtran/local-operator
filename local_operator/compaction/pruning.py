@@ -16,18 +16,58 @@ Two passes (``pruneSupersededToolResults``):
 
 Prompt-cache guards (the whole point of doing this carefully):
 
-- Warm-suffix guard: ``suffix_tokens[i]`` is the estimated size of everything
-  after index ``i`` — the content the provider must re-write at cacheWrite
-  premium if ``i`` is mutated. Candidates whose suffix exceeds
-  ``cache_warm_suffix_tokens`` sit inside the warm cache prefix and are left
-  for compaction (which rebuilds the cache anyway) — *unless* the idle flush
-  applies, or the candidate is a superseded victim at least as large as that
-  suffix (see :data:`OVERSIZED_SUPERSEDE_TOKENS`). The useless pass has no
-  such exception: a worthless-once-consumed result does not repay a warm
-  re-write on any horizon the supersede arithmetic promises.
+- Sent-prefix guard: a candidate the provider has already been SENT (it sits
+  before the newest assistant message — see :func:`_sent_prefix_end`) is left
+  alone while the cache may still hold it, and waits for the idle flush or for
+  compaction (which rebuilds the cache anyway). The only exception is a
+  superseded victim at least as large as the suffix it invalidates (see
+  :data:`OVERSIZED_SUPERSEDE_TOKENS`). The useless pass has no such exception:
+  a worthless-once-consumed result does not repay a warm re-write on any
+  horizon the supersede arithmetic promises. Candidates in the not-yet-sent
+  tail (the tool batch that just landed) are blanked freely: no cache entry
+  covers them, so the rewrite costs nothing.
+
+  WHY structural, not a token budget. The guard used to let through any
+  candidate whose SUFFIX was under ``cache_warm_suffix_tokens`` (8,000
+  estimated tokens), on the theory that re-writing 8k tokens is cheap. The
+  provider does not re-write "the suffix", though. It reads the longest
+  prefix ending at a block it previously MARKED, found by walking back at
+  most ~20 content blocks from the new request's markers. Mutating a block
+  the previous request covered invalidates every entry written since. In a
+  frame-dense run the next valid entry is usually out of lookback reach, so
+  the read collapses to the system head and the whole conversation is
+  re-written. Measured on this fleet (7d, analytics ``calls`` table plus
+  transcript replays through ``AnthropicClient._build_body``): subagent
+  prefix breaks were 54% of all Anthropic cache writes. In the replayed
+  sessions, the first divergent byte of a break was a blank written by this
+  sweep before the previous request's final marker. Session 0d598f9ee38e
+  read exactly the 27,967-token system head and re-wrote 165-168k tokens on
+  7 consecutive calls, 5-8 s apart, each right after a stale-frame blank of
+  a frame with only ~2.4k estimated tokens after it. Carrying a stale frame
+  instead costs its tokens at the cache-READ rate (0.1x), and one avoided
+  break pays for that over hundreds of calls.
 - Idle flush: once ``now - last_activity >= idle_flush_ms`` the provider cache
   is provably cold (the default 90 min exceeds Anthropic's 1 h long-retention
-  TTL), so re-writing the sent region is free and every candidate flushes.
+  TTL), so re-writing the sent region is free and every candidate flushes in
+  one batch. The session stamps ``last_activity`` at every completed
+  provider call and hands each sweep the stamp of the call that just
+  completed, so a post-call sweep measures the gap before the NEXT request
+  (a 90-minute tool flushes). The user's wait between runs is judged once,
+  at run START before the first request, against that same stamp; a fresh
+  process seeds it from the transcript's newest usage, so a session resumed
+  hours later is seen as idle too (agent review round 2, R2-M1). A
+  run-end-only stamp read 0 for the whole of a subagent's first run, which
+  made every boundary look idle.
+- Batch flush: the sent-prefix guard keeps stale content resident while warm,
+  so something has to bound it short of compaction. When the retained stale
+  set crosses a ceiling (:func:`stale_flush_due`), every candidate flushes at
+  once: one prefix break per batch instead of one per frame. Without it a
+  screenshot loop climbed to 58 resident frames and was summarized mid-task
+  by the 16 MB wire trigger, and on a 200k-window model it crossed
+  Anthropic's 100-images-per-request 400 (review M1, QA Q3). The stale set
+  is stale frames AND superseded reads, so a text-only session that re-reads
+  files is bounded too (review round 2), and the session evaluates it at
+  every tool boundary, not only where a compaction pass might run (QA Q5).
 - ``MIN_PRUNE_TOKENS`` floor: blanking a result smaller than the floor costs
   more than it saves (the placeholder itself has a token cost) and only churns
   the cache — skip it.
@@ -53,6 +93,7 @@ from .marker import marker_exists
 from .tokens import estimate_tokens, estimate_wire_bytes, invalidate_message_cache
 
 __all__ = [
+    "IDLE_FLUSH_MS",
     "CaptureElision",
     "CapturePartition",
     "MIN_PRUNE_TOKENS",
@@ -73,6 +114,9 @@ __all__ = [
     "reclaim_captures_to_wire_budget",
     "shed_frames_to_wire_budget",
     "shed_stale_frames",
+    "StaleSet",
+    "stale_flush_due",
+    "stale_set",
 ]
 
 #: Generic pruning floor. Below this, blanking recovers nothing — the
@@ -91,7 +135,7 @@ USELESS_NOTICE = "[Uneventful result elided]"
 STALE_FRAME_NOTICE = "[screenshot omitted: superseded by a more recent view of the same surface]"
 
 #: Minimum size for the Fix C oversized-supersede exception (see
-#: :func:`prune_tool_outputs`). The warm-suffix guard exists because blanking
+#: :func:`prune_tool_outputs`). The sent-prefix guard exists because blanking
 #: forces the provider to re-write everything after the victim at the
 #: cacheWrite premium, so a small victim costs more than it saves. That
 #: arithmetic inverts only when the victim itself outweighs the suffix it
@@ -100,10 +144,8 @@ STALE_FRAME_NOTICE = "[screenshot omitted: superseded by a more recent view of t
 #: large as its suffix is repaid on the NEXT request alone. The exception
 #: therefore compares the victim estimate against the ACTUAL suffix
 #: (``suffix_tokens[i]``), never against a fixed number alone. This constant
-#: is only a floor beneath that comparison, mirroring
-#: ``cache_warm_suffix_tokens``' default (8,000) in the same units the guard
-#: already uses, so the exception can never fire for a victim the guard
-#: itself would call small. It deliberately does NOT apply to the useless
+#: is only a floor beneath that comparison (8,000 estimated tokens), so the
+#: exception never fires for a small victim. It deliberately does NOT apply to the useless
 #: pass (see the module docstring). This is NOT an earlier trigger: pruning
 #: already runs post-turn (session._maybe_compact -> _plan_compaction);
 #: the victims that accumulated did so because this guard deferred them,
@@ -118,6 +160,63 @@ OVERSIZED_SUPERSEDE_TOKENS = 8000
 #: of resident frames sat outside it, 91.7% outside newest-1). The evaluation
 #: runner keeps more (3) because a screen-driving loop re-frames every step.
 SESSION_KEEP_RECENT_FRAMES = 2
+
+#: Idle flush window. 90 minutes exceeds Anthropic's 1 h long-retention TTL,
+#: so a gap this long proves the prompt cache cold and a blank costs nothing.
+#: The session's pre-run sweep reads it too, so the two cannot disagree.
+IDLE_FLUSH_MS = 5_400_000
+
+#: Batch-flush ceilings (see :func:`stale_flush_due`). The sent-prefix guard
+#: keeps stale frames and superseded reads resident while the cache is warm;
+#: these decide when carrying them costs more than the ONE prefix break that
+#: flushing them all at once costs. Whichever ceiling is hit first wins.
+#:
+#: Measured (PR #3004, review and QA round 1): with the old per-frame sweep a
+#: screenshot loop peaked at 2 resident frames; with the guard and no ceiling
+#: it peaked at 58 (live probe, 80 reads of ~220 KB: 15.3 MB, then two
+#: summary compactions mid-task) and, on the replayed 0d598f9ee38e, at 338
+#: images per request.
+#:
+#: Stale-frame count. Eight frames at ~1.6k tokens each is ~13k tokens re-read
+#: per call; one break on a ~150k context costs ~150k at the write premium, so
+#: eight keeps breaks rare (one per ~6 new frames after the first flush)
+#: while bounding the dead weight to a few percent of a typical context.
+STALE_FLUSH_MAX_FRAMES = 8
+
+#: Absolute cap on images in one request, below every provider's limit. The
+#: per-model limit below is lower for small-window models.
+STALE_FLUSH_MAX_REQUEST_IMAGES = 50
+
+#: Anthropic's per-request image limit by context window: 100 images on
+#: 200k-window models, 600 on larger ones. Measured live (QA round 1, C2c):
+#: 101 images on claude-haiku-4-5 returned ``HTTP 400 Too much media: 0
+#: document pages + 101 images > 100``. An unknown window is treated as the
+#: small one, the safe direction.
+PROVIDER_IMAGE_LIMIT_SMALL_WINDOW = 100
+PROVIDER_IMAGE_LIMIT_LARGE_WINDOW = 600
+PROVIDER_IMAGE_LIMIT_LARGE_WINDOW_MIN = 1_000_000
+
+#: Headroom under the provider's image limit: the request about to be sent
+#: adds the frames of the batch that just landed (a parallel read batch can
+#: add several), so flushing exactly AT the limit would still 400.
+PROVIDER_IMAGE_LIMIT_MARGIN = 10
+
+#: Stale bytes as a share of the wire-byte compaction trigger. At 25% the
+#: flush lands well before the 16 MB trigger summarizes the session (which
+#: is what happened at ~58 frames in the review's probe), so a frame-heavy
+#: run sheds its dead weight by flushing instead of by a summary pass.
+STALE_FLUSH_WIRE_TRIGGER_SHARE = 0.25
+
+#: Stale TEXT bytes (superseded reads) that force a flush. Text has no image
+#: limit and rarely approaches the wire trigger, so without its own ceiling a
+#: session that re-reads files would carry every old copy until compaction
+#: (agent review round 2: the ceiling was consulted only for browser
+#: sessions). 128 KB is ~32k tokens: re-read at the 0.1x cache-read rate it
+#: costs ~3.2k token-equivalents per call, while one flush of a ~150k context
+#: costs ~190k at the 1.25x write rate, so the carry repays the avoided break
+#: for ~60 calls. The measured break-heavy subagents ran 100-370 calls, and
+#: the ceiling also caps the dead weight at ~16% of a 200k window.
+STALE_FLUSH_MAX_TEXT_BYTES = 128_000
 
 
 def count_frame_messages(messages: Sequence[Message]) -> int:
@@ -874,6 +973,175 @@ def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:
     return suffix
 
 
+def _sent_prefix_end(messages: Sequence[Message]) -> int:
+    """Index of the newest assistant message: everything before it was SENT.
+
+    An assistant message exists only because a request carrying every message
+    before it reached the provider, so those messages may sit under a live
+    prompt-cache entry. Anything after it (the tool batch that just landed,
+    a new user turn) has never been sent, and mutating it costs no cache.
+    ``0`` when there is no assistant message yet: nothing has been answered,
+    so nothing is known to be cached.
+
+    Structural on purpose: the sweep cannot see marker placement or TTLs (those
+    are per-provider wire decisions), but "was sent" is exactly the property a
+    cache entry depends on, and it holds for every provider.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == "assistant":
+            return index
+    return 0
+
+
+def _frame_victims(messages: Sequence[Message], keep_recent_frames: int) -> list[int]:
+    """Indices :func:`prune_stale_frames_in_place` may blank, guards aside.
+
+    One definition shared by the sweep and the batch-flush ceiling (through
+    :func:`stale_set`), so the ceiling counts exactly what a flush would free.
+    """
+    after, _ = prune_stale_frames(messages, keep_recent_frames=keep_recent_frames)
+    victims: list[int] = []
+    for index in range(len(messages)):
+        if after[index] is messages[index]:
+            continue
+        message = messages[index]
+        # User frames and markers are never candidates (see the sweep's
+        # docstring); the marker check is belt-and-braces — markers are
+        # user-role by construction — and keeps a future renderer that moves
+        # them out of that class from letting an archive be corrupted here.
+        if message.role != "tool" or marker_exists([message]):
+            continue
+        if not _is_prunable(message) or _is_pruned(message):
+            continue
+        if estimate_tokens(message) < MIN_PRUNE_TOKENS:
+            continue
+        victims.append(index)
+    return victims
+
+
+@dataclass(frozen=True)
+class StaleSet:
+    """What a batch flush would free right now, computed ONCE per boundary.
+
+    The ceiling (:func:`stale_flush_due`) and the frame sweep
+    (:func:`prune_stale_frames_in_place`) both need the frame victims, and
+    finding them copies the history and estimates every candidate; the
+    session computes this once and hands it to both (agent review round 2,
+    R2-m3).
+
+    ``frames`` are stale-frame candidates (empty unless the session captured
+    browser views: the sweep's own gate). ``reads`` are superseded tool
+    results, text or image, which every session can own.
+    """
+
+    frames: tuple[int, ...] = ()
+    reads: tuple[int, ...] = ()
+
+    def indices(self) -> list[int]:
+        """Every candidate once, in history order."""
+        return sorted(set(self.frames) | set(self.reads))
+
+
+def stale_set(
+    messages: Sequence[Message],
+    *,
+    frames: bool = True,
+    keep_recent_frames: int = SESSION_KEEP_RECENT_FRAMES,
+) -> StaleSet:
+    """The stale candidates in ``messages``, guards aside (see :class:`StaleSet`).
+
+    ``frames=False`` skips the frame walk: a session that never captured a
+    browser view has no frame sweep, so its stale frames are not candidates.
+    Superseded reads use the same predicate :func:`prune_tool_outputs`
+    blanks by, and the same token floor.
+    """
+    frame_victims = _frame_victims(messages, keep_recent_frames) if frames else []
+    reads = [
+        index
+        for index in _superseded_indices(messages)
+        if estimate_tokens(messages[index]) >= MIN_PRUNE_TOKENS
+    ]
+    return StaleSet(frames=tuple(frame_victims), reads=tuple(reads))
+
+
+def provider_image_limit(context_window: int | None) -> int:
+    """The per-request image limit the batch flush keeps under.
+
+    Keyed on the context window because that is what Anthropic's limit follows
+    (100 on 200k-window models, 600 on larger ones) and what every
+    :class:`ModelSpec` carries. Unknown (0/None) is treated as small.
+    """
+    if context_window and context_window >= PROVIDER_IMAGE_LIMIT_LARGE_WINDOW_MIN:
+        return PROVIDER_IMAGE_LIMIT_LARGE_WINDOW
+    return PROVIDER_IMAGE_LIMIT_SMALL_WINDOW
+
+
+def stale_flush_due(
+    messages: Sequence[Message],
+    *,
+    context_window: int | None = None,
+    wire_bytes_trigger: int = 0,
+    keep_recent_frames: int = SESSION_KEEP_RECENT_FRAMES,
+    stale: StaleSet | None = None,
+) -> bool:
+    """Whether the retained stale set has crossed a batch-flush ceiling.
+
+    The sent-prefix guard trades a prefix break per stale item for carrying
+    it. That trade is only good while the carried set is small, so the
+    session asks this at every tool boundary and, when it says yes, sweeps
+    with ``flush=True``: everything stale goes in ONE batch, costing one break
+    instead of one per item. Ceilings, first hit wins (constants above):
+
+    (a) stale images >= :data:`STALE_FLUSH_MAX_FRAMES`;
+    (b) images in the request >= min(provider limit - margin,
+        :data:`STALE_FLUSH_MAX_REQUEST_IMAGES`), where the provider limit is
+        :func:`provider_image_limit` of ``context_window``;
+    (c) stale wire bytes >= :data:`STALE_FLUSH_WIRE_TRIGGER_SHARE` of
+        ``wire_bytes_trigger`` (skipped when the trigger is 0, i.e. disabled);
+    (d) stale text bytes >= :data:`STALE_FLUSH_MAX_TEXT_BYTES`.
+
+    (b) counts every image, stale or not, because the provider's limit does,
+    but it only fires when a flush can free an image: a request whose images
+    are all recent or user-authored has nothing to batch.
+
+    ``stale`` is the boundary's precomputed :func:`stale_set`; omitted, it is
+    computed here with the frame walk on.
+    """
+    if stale is None:
+        stale = stale_set(messages, keep_recent_frames=keep_recent_frames)
+    victims = [messages[index] for index in stale.indices()]
+    if not victims:
+        return False
+    stale_images = sum(
+        1 for message in victims for block in message.content if isinstance(block, ImageContent)
+    )
+    if stale_images >= STALE_FLUSH_MAX_FRAMES:
+        return True
+    if stale_images:
+        images = sum(
+            1
+            for message in messages
+            for block in message.content
+            if isinstance(block, ImageContent)
+        )
+        image_ceiling = min(
+            provider_image_limit(context_window) - PROVIDER_IMAGE_LIMIT_MARGIN,
+            STALE_FLUSH_MAX_REQUEST_IMAGES,
+        )
+        if images >= image_ceiling:
+            return True
+    if wire_bytes_trigger > 0:
+        if estimate_wire_bytes(victims) >= STALE_FLUSH_WIRE_TRIGGER_SHARE * wire_bytes_trigger:
+            return True
+    text_bytes = sum(
+        len(block.text.encode("utf-8"))
+        for message in victims
+        for block in message.content
+        if isinstance(block, TextContent)
+    )
+    return text_bytes >= STALE_FLUSH_MAX_TEXT_BYTES
+
+
 def _payload_of(message: Message) -> dict[str, Any]:
     """The message's provider payload when it is a plain dict, else ``{}``."""
     payload = message.provider_payload
@@ -1033,35 +1301,14 @@ def _blank(message: Message, notice: str) -> None:
     invalidate_message_cache(message)
 
 
-def prune_tool_outputs(
-    messages: Sequence[Message],
-    now_ms: int,
-    last_activity_ms: int,
-    cache_warm_suffix_tokens: int = 8000,
-    idle_flush_ms: int = 5400000,
-) -> tuple[list[Message], bool]:
-    """Blank superseded and useless tool outputs in place.
+def _superseded_indices(messages: Sequence[Message]) -> list[int]:
+    """Indices of tool results a newer result for the same resource supersedes.
 
-    ``now_ms`` and ``last_activity_ms`` are MILLISECONDS epoch values — the
-    idle-flush gap is compared against ``idle_flush_ms`` directly, so passing
-    seconds here silently disables the idle flush (see RC-8 regression test).
-
-    Returns ``(messages, changed)`` — the same messages, mutated in place;
-    ``changed`` is True when at least one result was blanked. Messages are
-    NEVER removed so tool-call/result pairing survives for every provider.
-
-    Guards, in order per candidate: never errors, never skill/guide reads,
-    never already-pruned, never below :data:`MIN_PRUNE_TOKENS`, and never
-    inside the warm cache suffix — unless the idle flush window has elapsed,
-    or (superseded pass only) the victim is at least as large as the suffix
-    it invalidates and at least :data:`OVERSIZED_SUPERSEDE_TOKENS`.
+    Newest first. One definition shared by :func:`prune_tool_outputs` and the
+    batch-flush ceiling (:func:`stale_set`), so the ceiling counts exactly
+    what the prune would blank. Pure: reads ``messages``, mutates nothing.
     """
-    if not messages:
-        return list(messages), False
-
-    idle = (now_ms - last_activity_ms) >= idle_flush_ms
-
-    # Pass (a): superseded reads. Walk newest-to-oldest; a seen key marks any
+    # Walk newest-to-oldest; a seen key marks any
     # earlier result with the same key superseded, and a seen FULL read marks
     # any earlier RANGED read of the same path superseded (never the reverse).
     # A seen ranged read ALSO supersedes an earlier ranged read of the same
@@ -1106,6 +1353,45 @@ def prune_tool_outputs(
         elif span is not None:
             path, (start, end) = span
             seen_covered_spans.setdefault(path, []).append((start, end))
+    return superseded
+
+
+def prune_tool_outputs(
+    messages: Sequence[Message],
+    now_ms: int,
+    last_activity_ms: int,
+    idle_flush_ms: int = IDLE_FLUSH_MS,
+    *,
+    flush: bool = False,
+) -> tuple[list[Message], bool]:
+    """Blank superseded and useless tool outputs in place.
+
+    ``now_ms`` and ``last_activity_ms`` are MILLISECONDS epoch values — the
+    idle-flush gap is compared against ``idle_flush_ms`` directly, so passing
+    seconds here silently disables the idle flush (see RC-8 regression test).
+
+    Returns ``(messages, changed)`` — the same messages, mutated in place;
+    ``changed`` is True when at least one result was blanked. Messages are
+    NEVER removed so tool-call/result pairing survives for every provider.
+
+    Guards, in order per candidate: never errors, never skill/guide reads,
+    never already-pruned, never below :data:`MIN_PRUNE_TOKENS`, and never in
+    the already-SENT prefix (:func:`_sent_prefix_end`) — unless the idle flush
+    window has elapsed, or (superseded pass only) the victim is at least as
+    large as the suffix it invalidates and at least
+    :data:`OVERSIZED_SUPERSEDE_TOKENS`.
+
+    ``flush=True`` lifts the sent-prefix guard for this call: the caller has
+    decided a batch flush is due (see :func:`stale_flush_due`), and riding the
+    same break releases the superseded reads that piled up beside the frames.
+    """
+    if not messages:
+        return list(messages), False
+
+    idle = flush or (now_ms - last_activity_ms) >= idle_flush_ms
+
+    # Pass (a): superseded reads (see :func:`_superseded_indices`).
+    superseded = _superseded_indices(messages)
 
     # Pass (b): useless-flagged results (excluding supersede victims).
     superseded_set = set(superseded)
@@ -1121,7 +1407,7 @@ def prune_tool_outputs(
 
     # Suffix sums are computed HERE, after the candidate passes, and only when
     # there is a candidate to judge. They are read by exactly one guard below
-    # (``suffix_tokens[i] > cache_warm_suffix_tokens``), and both passes above
+    # (the oversized-supersede exception), and both passes above
     # are pure structural walks that never look at a token count — so deferring
     # is behaviour-identical: nothing has been mutated yet, and the sums are a
     # pure function of ``messages``.
@@ -1136,6 +1422,7 @@ def prune_tool_outputs(
     # nothing to prune. Candidates present -> the guard needs real numbers and
     # we pay honestly.
     suffix_tokens = compute_suffix_tokens(messages) if (superseded or useless) else []
+    sent_end = _sent_prefix_end(messages)
 
     changed = False
     # WHY the two passes do not share the oversized exception (R2): the
@@ -1154,10 +1441,11 @@ def prune_tool_outputs(
             victim_tokens = estimate_tokens(message)
             if victim_tokens < MIN_PRUNE_TOKENS:
                 continue
-            if not idle and suffix_tokens[i] > cache_warm_suffix_tokens:
-                # Inside the warm cache prefix: re-writing it costs the
-                # cacheWrite premium on the whole suffix. Leave it for
-                # compaction, which rebuilds the cache anyway — UNLESS this
+            if not idle and i < sent_end:
+                # Already sent, so a live cache entry may cover it: blanking it
+                # invalidates every entry written since (see the module
+                # docstring for the measured collapse). Leave it for the idle
+                # flush or for compaction, which rebuilds the cache anyway — UNLESS this
                 # is a superseded victim that alone outweighs that suffix
                 # (see OVERSIZED_SUPERSEDE_TOKENS): then the re-write is
                 # repaid by not re-billing the victim on the very next
@@ -1209,8 +1497,9 @@ def prune_stale_frames_in_place(
     now_ms: int,
     last_activity_ms: int,
     keep_recent_frames: int = SESSION_KEEP_RECENT_FRAMES,
-    cache_warm_suffix_tokens: int = 8000,
-    idle_flush_ms: int = 5400000,
+    idle_flush_ms: int = IDLE_FLUSH_MS,
+    flush: bool = False,
+    victims: Sequence[int] | None = None,
 ) -> int:
     """Blank stale frames in place — the session-side sibling of
     :func:`prune_stale_frames`.
@@ -1222,11 +1511,15 @@ def prune_stale_frames_in_place(
 
     - never errors and never skill/guide reads (:func:`_is_prunable`), never an
       already-pruned result, and never below :data:`MIN_PRUNE_TOKENS`;
-    - never a candidate whose suffix lies inside the warm prompt cache
-      (``cache_warm_suffix_tokens``) — mutating there re-writes everything
-      after it at cacheWrite price — *unless* the idle flush
+    - never a candidate the provider has already been sent
+      (:func:`_sent_prefix_end`) — mutating there invalidates every cache
+      entry written since, which on a frame-dense run collapses the read to
+      the system head (see the module docstring) — *unless* the idle flush
       (``idle_flush_ms`` since the last provider request) proves the cache
-      cold.
+      cold, or the caller passes ``flush=True`` because a batch-flush ceiling
+      was crossed (:func:`stale_flush_due`). By the time a newer frame
+      supersedes one, it has usually been sent, so frames leave in batches:
+      at an idle flush, at a batch flush, or by compaction.
 
     Two deliberate narrowings vs the runner's primitive, each the reason this
     sibling exists. Only TOOL-result frames are candidates: the runner's
@@ -1241,36 +1534,27 @@ def prune_stale_frames_in_place(
 
     ``now_ms`` and ``last_activity_ms`` are MILLISECONDS epoch values,
     matching :func:`prune_tool_outputs` (passing seconds silently disables
-    the idle flush). Returns the number of image blocks replaced.
+    the idle flush). ``victims`` is the boundary's precomputed
+    ``StaleSet.frames`` (see :class:`StaleSet`); omitted, it is computed here.
+    Returns the number of image blocks replaced.
     """
     if not messages:
         return 0
     # Victim selection IS the module's retention rule, read off the primitive
-    # so "recent" has one definition: the copy walk returns victims as the
-    # entries whose identity changed.
-    after, _ = prune_stale_frames(messages, keep_recent_frames=keep_recent_frames)
-    victims = [index for index in range(len(messages)) if after[index] is not messages[index]]
+    # so "recent" has one definition, and shared with the batch-flush ceiling
+    # so the ceiling counts exactly what a flush frees.
+    if victims is None:
+        victims = _frame_victims(messages, keep_recent_frames)
     if not victims:
         return 0
-    idle = (now_ms - last_activity_ms) >= idle_flush_ms
-    suffix_tokens = compute_suffix_tokens(messages)
+    idle = flush or (now_ms - last_activity_ms) >= idle_flush_ms
+    sent_end = _sent_prefix_end(messages)
     dropped = 0
     for index in victims:
         message = messages[index]
-        # User frames and markers are never candidates (see the docstring);
-        # the marker check is belt-and-braces — markers are user-role by
-        # construction — and is what keeps a future renderer that moves them
-        # out of that class from letting an archive be corrupted here.
-        if message.role != "tool" or marker_exists([message]):
-            continue
-        if not _is_prunable(message) or _is_pruned(message):
-            continue
-        if estimate_tokens(message) < MIN_PRUNE_TOKENS:
-            continue
-        if not idle and suffix_tokens[index] > cache_warm_suffix_tokens:
-            # Inside the warm cache prefix: re-writing it costs the
-            # cacheWrite premium on everything after it. Leave the frame for
-            # the idle flush, or for compaction, which cuts it away.
+        if not idle and index < sent_end:
+            # Already sent: a live cache entry may cover it. Leave the frame
+            # for the idle flush, the batch flush, or compaction.
             continue
         dropped += _blank_frames(message)
     return dropped

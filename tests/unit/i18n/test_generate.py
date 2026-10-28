@@ -16,6 +16,54 @@ from local_operator.i18n import format as fmt
 REPO = Path(__file__).resolve().parents[3]
 
 
+def test_long_keyword_signature_wraps_without_losing_required_parameters(i18n_generate) -> None:
+    """Several typed placeholders must not make generated source fail its own lint."""
+    import ast
+
+    module = i18n_generate._render_keys_module(
+        "demo",
+        {
+            "demo.session.tray.agents_failed": (
+                "Agents {running, number}/{total, number}: {failed, number} failed"
+            )
+        },
+    )
+    assert all(len(line) <= 100 for line in module.splitlines())
+    tree = ast.parse(module)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    assert {arg.arg for arg in function.args.kwonlyargs} == {"failed", "running", "total"}
+    assert function.args.kw_defaults == [None, None, None]
+    assert not function.args.args and function.args.kwarg is None
+    compile(module, "demo.py", "exec")
+
+
+def test_long_placeholder_free_name_stays_valid_source(i18n_generate) -> None:
+    """The OTHER long-header shape: no placeholders at all (agent review C1-2).
+
+    Wrapping an empty parameter list emitted `def name(\n    ,\n) -> Msg:`, a
+    SyntaxError for a key the generator has always accepted. A function name can
+    be split by no formatter, so this shape must stay parseable — the long-line
+    lint concern cannot justify emitting invalid Python.
+    """
+    import ast
+
+    key = "demo." + "one_" * 24 + "label"
+    module = i18n_generate._render_keys_module("demo", {key: "A fixed label"})
+    tree = ast.parse(module)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    # The generated name is `one_` x 24 plus `label`: split only for the
+    # 100-column gate. Implicit concatenation keeps the asserted text
+    # byte-identical (one Constant after parsing).
+    assert function.name == (
+        "one_one_one_one_one_one_one_one_"
+        "one_one_one_one_one_one_one_one_"
+        "one_one_one_one_one_one_one_one_label"
+    )
+    assert not function.args.args and not function.args.kwonlyargs
+    assert function.args.kw_defaults == []
+    compile(module, "demo.py", "exec")
+
+
 @pytest.fixture()
 def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     """A fixture catalogue root + emitted tables wired into the generator."""

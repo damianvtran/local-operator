@@ -251,6 +251,26 @@
         "effort": null,
         "delegate": true,
         "class": "proactive"
+      },
+      {
+        "sha": "5f08285ee660d9212b535b1d7c2e60b032532fbc",
+        "version": "1.5.6",
+        "instructions_sha256": "966dd93d5796e3bd0bfdb492498658cd6e0e7f0e505fedda080e48b298109eca",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "66b13c81c0b3a7975fab3579c08073dc6743b376",
+        "version": "1.5.6",
+        "instructions_sha256": "52a8ced411ea1d9fd448a9ef1e6e60c2447e04e5ce37e4884e0c4cd812974434",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
       }
     ],
     "architect": [
@@ -448,6 +468,16 @@
         "effort": "default",
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
+        "version": "1.3.1",
+        "instructions_sha256": "cf696e0bb97bcd9c1787c22d7acdf2a514991e74e1b7ea44de8eeff26b8abc9a",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": "default",
+        "delegate": false,
+        "class": null
       }
     ],
     "copy-reviewer": [
@@ -485,6 +515,16 @@
         "sha": "4e505b2ecc2df2225eddbdcae7e4d26e33eef4a0",
         "version": "1.3.0",
         "instructions_sha256": "f5ea12bb34e95159c4c8ba8b62622518720437f765242d40d175019051ce6b9d",
+        "description": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
+        "version": "1.3.1",
+        "instructions_sha256": "89588635efeac6994c8db9ab3d1d2851111169e53fd4e20435bf9de648297159",
         "description": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
         "tools": null,
         "effort": null,
@@ -612,6 +652,16 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
+        "version": "1.5.4",
+        "instructions_sha256": "8fc969adbc3d2a3ea178739f93d10aa3c92fc04d4075b7ec2315c34c95aa9b11",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "librarian": [
@@ -621,6 +671,22 @@
         "instructions_sha256": "ace534b358da4149f8c7176d457897127e751ced5d6bf9a13136a0e36c1f8682",
         "description": "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds.",
         "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "5a52df7f8dc1c6b01294007baa95f8a3118951eb",
+        "version": "1.1.0",
+        "instructions_sha256": "95a2d980b1c9e50e74c583574fb2e60ccbdc86abe66bec1fd6039461f27ffffd",
+        "description": "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds.",
+        "tools": [
+          "library",
+          "read",
+          "glob",
+          "grep",
+          "todo"
+        ],
         "effort": null,
         "delegate": true,
         "class": "proactive"
@@ -998,6 +1064,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
+        "version": "1.0.1",
+        "instructions_sha256": "6b0dd52b27afb59a27ea179bc9a20dfa20a02e6a40529290091b9a3d6da8079b",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "reviewer": [
@@ -1222,6 +1309,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
+        "version": "1.3.6",
+        "instructions_sha256": "36a7713002ca5367e9474532741c32bf9754f5d9356c2829b6f73152429c39de",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "scout": [
@@ -1310,6 +1418,25 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "2bfc16875e9157045ade5d1fa68d2a268dd73f1a",
+        "version": "1.3.0",
+        "instructions_sha256": "39795754a665c9b63cb4d6f380de3de00acc9553cf392795aab8fd20e2e19248",
+        "description": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, researching a library or an API on the web, or gathering evidence — read-only, nothing is modified.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "bash",
+          "list_variables",
+          "read_variable",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "tui-designer": [
@@ -1377,6 +1504,16 @@
         "sha": "4e505b2ecc2df2225eddbdcae7e4d26e33eef4a0",
         "version": "1.3.0",
         "instructions_sha256": "3558d55dbbdef54de23873773f87dddfa6491c5c4530fc3aad6c2f60c1e92547",
+        "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
+        "version": "1.3.1",
+        "instructions_sha256": "7810bcb7ee27efb48bb3755002e3a1d34e3b44a1a6ef6bd9954788660cbd1533",
         "description": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
         "tools": null,
         "effort": null,
@@ -1469,6 +1606,16 @@
         "sha": "8078806dbf617674133fa6167a3b12eee636811a",
         "version": "1.4.3",
         "instructions_sha256": "9560c52e1a7356cb2ffed3ad26b4a20cd0f0ab56f7c98b786249593cd0ba135a",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "9beb36b72c3a5d12375f9fb36b8a1fdb1acab987",
+        "version": "1.4.4",
+        "instructions_sha256": "b5fcecb025bda69ec92bf80bbadd2dd351a09ea0f287f89264a201341efa9348",
         "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
         "tools": null,
         "effort": null,

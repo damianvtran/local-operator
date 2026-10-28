@@ -75,7 +75,9 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -182,6 +184,13 @@ RESIDENCY_SWEEP_INTERVAL_S = 300.0
 #: sleep (see :class:`_TriggerSweep`): the possibility of a future trigger must
 #: never keep the supervisor resident.
 TRIGGER_EVAL_INTERVAL_S = 300.0
+
+#: How often the supervisor reads the memory maintenance gate (see
+#: :class:`_MemoryMaintenanceSeat`). The pass itself runs at most every 6 h
+#: (``memory_maintenance.PASS_INTERVAL_S``); between runs a tick is one stamp
+#: read, so an hour keeps that negligible while a store that crossed a
+#: threshold is compacted within the hour once its interval has passed.
+MEMORY_MAINTENANCE_INTERVAL_S = 3600.0
 
 #: How often the machine memory pass runs (see :class:`_MachineMemorySweep`).
 #:
@@ -1949,6 +1958,83 @@ class _Sweeper:
         return launched
 
 
+class _MemoryMaintenanceSeat:
+    """The memory store's maintenance pass's seat: cadence and detached task only.
+
+    The pass lives in :mod:`local_operator.memory_maintenance` (journal
+    compaction plus capture expiry). It is seated HERE beside
+    :class:`_MachineMemorySweep` because this is the one long-lived process
+    beside every runtime: a ``journal_plan`` loads every op (measured +212 MB
+    RSS), which is fine once per machine and not fine once per session.
+
+    **IT DOES NOT BOUND THE SLEEP**, for :class:`_TriggerSweep`'s reason: the possibility of a
+    compaction must never keep the supervisor resident. Each session runtime offers the same pass
+    once at boot for the hours this process is retired (one-shot commands deliberately do not). The
+    pass gates itself (6 h interval, cross-process lock), so this cadence only decides how often the
+    cheap gate is read.
+
+    **THE PASS IS DETACHED, ON A WORKER THREAD**, and bounded by its own 60 s
+    timeout; a pass already in flight is left alone and a failing one is a
+    warning, never a crash path for the wake loop.
+    """
+
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = config_dir
+        #: ``None`` until the first pass, so a fresh supervisor reads the gate at once.
+        self.next_at: float | None = None
+        self._task: "asyncio.Task[Any] | None" = None
+
+    def seconds_until(self, now: float | None = None) -> float:
+        moment = time.monotonic() if now is None else now
+        if self.next_at is None:
+            return 0.0
+        return max(0.0, self.next_at - moment)
+
+    def due(self, now: float | None = None) -> bool:
+        return self.seconds_until(now) <= 0.0
+
+    def kick(self) -> None:
+        """Start a pass if one is due, WITHOUT holding this loop for it."""
+        if self._task is not None and not self._task.done():
+            return
+        if not self.due():
+            return
+        self.next_at = time.monotonic() + MEMORY_MAINTENANCE_INTERVAL_S
+        self._task = asyncio.ensure_future(asyncio.to_thread(self.sweep))
+        self._task.add_done_callback(self._finished)
+
+    def sweep(self) -> dict[str, Any]:
+        """One gated pass. Blocking; the import is deferred like the other seats'."""
+        from local_operator.memory_maintenance import run_pass
+
+        return run_pass(self.config_dir)
+
+    def _finished(self, task: "asyncio.Task[Any]") -> None:
+        """Log a finished pass. Never raises out of a done-callback."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("the memory maintenance pass failed", exc_info=error)
+            return
+        report = task.result()
+        status = report.get("status") if isinstance(report, dict) else None
+        (logger.info if status in ("ran", "timeout", "failed") else logger.debug)(
+            "memory maintenance: %s", report
+        )
+
+    async def shutdown(self) -> None:
+        """Drop an in-flight pass on the way out.
+
+        Cancelling stops the LOOP waiting; it does not stop the worker thread,
+        which runs to completion and commits (Python cannot interrupt a thread
+        inside SQLite) while holding the pass's lock. Only if the process exits
+        first does SQLite roll back its open transaction.
+        """
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+
+
 class _TriggerSweep:
     """The trigger pass's seat: the throttle, the detached task, nothing else.
 
@@ -2406,10 +2492,58 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     pass or the next one (≤ ``SLICE_S``). ``--once`` awaits the pass inline for
     the same reason.
     """
+    from local_operator.wakes.owned_runtimes import (
+        OWNER_ENV,
+        SUPERVISOR_PID_ENV,
+        spawn_token,
+        sweep,
+    )
+
+    # This token belongs to THIS supervisor invocation, not to the store. It is
+    # propagated only to candidates launch actually forks for this process;
+    # adoption or another root's runtime cannot be claimed. The stop handler
+    # installed just below turns a unit SIGTERM into cancellation, and ONLY that
+    # path runs the ownership sweep in serve()'s finally (see ``stop_requested``).
+    owner_token = spawn_token()
+    os.environ[OWNER_ENV] = owner_token
+    # The stamp gate: ``launch`` stamps only where os.getpid() equals this, so
+    # the token cannot travel past the runtimes this process forks itself.
+    os.environ[SUPERVISOR_PID_ENV] = str(os.getpid())
+    # A UNIT STOP MUST REACH THE SWEEP. Under KillMode=process systemd signals
+    # only this process, and SIGTERM's default action terminates without running
+    # any cleanup: measured on a real store, `systemctl stop` exited -15 and the
+    # supervisor's owned runtime outlived it. Installing a stop handler turns a
+    # signal into task cancellation, so serve()'s finally block runs the
+    # ownership sweep and the runtimes drain (#3028 Q-S1).
+    #
+    # THE SWEEP IS FOR A STOP, NEVER FOR A RETIREMENT. The supervisor's whole
+    # contract is to START a runtime and leave the wake to it: a session fires its
+    # own overdue wakes on load, seconds after the engage returns. A sweep on
+    # every exit therefore SIGTERMed the runtime a `--once` pass (or a loop that
+    # just ran out of fireable wakes) had started, before its wake fired —
+    # tests/e2e/test_cold_wake_e2e.py failed on both CI platforms with "the
+    # supervised cold wake never ran its turn" and passed with the sweep removed.
+    # An idle runtime outliving its supervisor is the normal, pre-existing shape:
+    # its own residency rules end it. Only a SIGNAL means "this unit is going
+    # away, take your work with you", so only a signal sets ``stop_requested``.
+    stop_requested = False
+    running = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+
+    def _on_stop() -> None:
+        nonlocal stop_requested
+        stop_requested = True
+        if running is not None:
+            running.cancel()
+
+    stop_signals: list[signal.Signals] = []
+    if running is not None and threading.current_thread() is threading.main_thread():
+        stop_signals = _install_stop_handlers(loop, _on_stop)
     sweeper = _Sweeper()
     triggers_seat = _TriggerSweep(config_dir)
     residency = _ResidencySweep(config_dir)
     memory_sweep = _MachineMemorySweep(config_dir)
+    store_maintenance = _MemoryMaintenanceSeat(config_dir)
     rescue_seat = _RescueSweep(config_dir)
     primary_error: BaseException | None = None
     try:
@@ -2542,6 +2676,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # operator — so it is rate-limited by its own cooldown and silent
             # while the machine is healthy.
             memory_sweep.kick()
+            # THE MEMORY STORE'S MAINTENANCE PASS RIDES HERE TOO: it compacts the
+            # memory journal and expires captured candidates (see
+            # :class:`_MemoryMaintenanceSeat`). Unattended and gated by its own
+            # 6 h interval and lock, so nothing here waits on it, and it does not
+            # bound the sleep below.
+            store_maintenance.kick()
             # THE RESCUE PASS RIDES THE SAME POSITION, for a third reason: it
             # SPAWNS a runtime for a session whose last one died involuntarily,
             # and spawning is not wake work — nothing this iteration read is
@@ -2576,7 +2716,14 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
         cleanup_errors: list[BaseException] = []
         # Every seat is joined even when a sibling cleanup fails. Keep both the
         # actual primary and cleanup errors; never convert fail-stop to success.
-        for seat in (residency, memory_sweep, rescue_seat, triggers_seat, sweeper):
+        for seat in (
+            residency,
+            memory_sweep,
+            store_maintenance,
+            rescue_seat,
+            triggers_seat,
+            sweeper,
+        ):
             try:
                 await seat.shutdown()
             except BaseException as cleanup_error:
@@ -2584,10 +2731,57 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                     cleanup_error is old for old in cleanup_errors
                 ):
                     cleanup_errors.append(cleanup_error)
+        # KillMode=process means systemd signalled only this process. Forward
+        # SIGTERM to the runtimes this invocation owns so a working turn drains
+        # and a parked approval is denied instead of surviving the unit stop.
+        # Do this after engagement seats have shut down, so no new candidate is
+        # spawned behind the sweep. Gated on a real stop signal: see the
+        # ``stop_requested`` comment above for why a retirement must not sweep.
+        #
+        # ANY INVOCATION'S MARKER, NOT JUST THIS ONE'S (#3028 review r3, MAJOR-1).
+        # Since a retirement stopped sweeping, a runtime outlives the invocation
+        # that spawned it, and the next invocation carries a NEW token — so the
+        # long-lived parked runtime a stop exists for is exactly one this token
+        # never matched. The sweep is keyed on the wake-supervisor marker being
+        # PRESENT (``sweep(any_owner=True)`` skips a process without one) and on
+        # this config root: the `lop serve` daemon's runtimes and interactive or
+        # mesh-created sessions carry no marker and are never signalled, and
+        # another root's runtimes are out of reach. Consequence, deliberate: a
+        # stop also reaches runtimes a CONCURRENT supervisor in the same store
+        # spawned (nothing makes one store's supervisor a singleton). That is the
+        # stop's meaning — "wake delivery for this store is going away" — and
+        # each such runtime drains its turn and denies its parked gate exactly as
+        # on a stop; the surviving supervisor re-engages any wake still due.
+        if stop_requested:
+            sweep(config_dir, any_owner=True, why="supervisor stop")
+        for stop_signal in stop_signals:
+            try:
+                loop.remove_signal_handler(stop_signal)
+            except (RuntimeError, ValueError):
+                pass
         if cleanup_errors:
             if primary_error is not None:
                 cleanup_errors.insert(0, primary_error)
             raise BaseExceptionGroup("supervisor cleanup failures", cleanup_errors)
+
+
+def _install_stop_handlers(
+    loop: asyncio.AbstractEventLoop, on_stop: Callable[[], None]
+) -> list[signal.Signals]:
+    """Route SIGTERM/SIGINT to ``on_stop``; return the signals actually installed.
+
+    A seam so a test can fire the stop the event loop would, without sending a
+    real signal to the test process. Platforms without loop signal support
+    (Windows, a non-main thread) install nothing, and serve() then never sweeps.
+    """
+    installed: list[signal.Signals] = []
+    for stop_signal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(stop_signal, on_stop)
+            installed.append(stop_signal)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+    return installed
 
 
 async def _sleep_in_slices(
@@ -2686,6 +2880,12 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(serve(config_dir(), once=args.once))
     except KeyboardInterrupt:
         return 130
+    except asyncio.CancelledError:
+        # A unit stop (SIGTERM/SIGINT) cancels the loop so serve()'s finally
+        # block runs the ownership sweep. That is a REQUESTED stop, not a crash:
+        # 0 keeps `Restart=on-failure` from restarting a supervisor a person
+        # just stopped.
+        return 0
 
 
 if __name__ == "__main__":

@@ -40,11 +40,69 @@ import { HttpError, isAuthorityRefusalCode, sendCommandWithProof } from "../api"
 import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
 import { NotPairedError, storedCertificate } from "../lib/operator-device";
-import { globalDefaultReceipt, setApprovalsPolicy, approvalPolicyLine } from "../lib/approval-policy";
+import {
+	approvalPolicyLine,
+	globalDefaultReceipt,
+	setApprovalsPolicy,
+} from "../lib/approval-policy";
+import { messageRuntime, useLocaleSnapshot } from "../store";
 import { PairPromptSheet } from "../screens/pair";
 import type { ApprovalMode, ApprovalProvenance } from "../types";
 
 type Mode = "ask" | "auto" | "default auto";
+
+/* HOW THE COMPOSED SCOPE SENTENCE IS JOINED, PER COPY LANGUAGE.
+
+   WHY THIS IS NOT ALWAYS ONE U+0020. The sentence was one catalogued string until
+   it was split so the two blast-radius phrases could stay bold; the split turned
+   every former character into a seam the component now chooses. A single U+0020 is
+   right for a language that separates words with spaces, and wrong for two of the
+   locales this ships in:
+
+   * zh-CN (the one CJK locale in the shipped set — `RESOLVED` in `i18n/runtime.ts`
+     has en/fr/es/zh-CN/ru/vi/ur/hi, so ja and ko are named for the languages that
+     write without inter-clause spaces, not as a claim that they ship) writes Han
+     with no space between clauses. Four U+0020 at the four seams are four visible
+     gaps in an otherwise compact sentence and four cells of width; the pre-split
+     single key had none. Concatenation is the rule, not "a thinner space".
+   * fr's style guide (`i18n/style-guides/fr.md`, binding) REQUIRES the espace fine
+     insécable U+202F before `: ; ! ?`, and inside the guillemets: `« … »`. A plain
+     U+0020 is a line-break opportunity, so `;` can wrap onto the next line in a
+     narrow sheet — a typographic error, not just a wide gap. U+202F is a no-break
+     space (line-break class GL), so the mark stays with the word it follows.
+
+   The language is the COPY's, never the reader's backend preference: the join is
+   typography for the words actually on screen, so English copy under a French
+   reader still takes English spacing (a Chinese reader is not served English
+   words run together). `uiLocale` is exactly that fact — `uiLocaleFor` only
+   selects a non-English locale once the whole owned bundle is translated.
+
+   Nothing here belongs in the catalogues: a trailing or leading space in a message
+   is invisible to a translator and to review, would be stripped by formatters, and
+   would re-stale the attested rows. The seam is the component's decision, so it is
+   made here. */
+const CJK_LANGUAGES = new Set(["zh", "ja", "ko"]);
+/** U+202F NARROW NO-BREAK SPACE — the fr guide's "espace fine insécable". */
+const FRENCH_FINE_SPACE = "\u202f";
+/** The marks the fr guide puts a fine space BEFORE, plus the closing guillemet;
+    `«` is the same rule read from the other side (the space after it). */
+const FRENCH_SPACED_BEFORE = new Set([";", ":", "!", "?", "»"]);
+
+/** The separator this COPY language puts between two composed clauses.
+
+    `previous` is needed for the guillemet case: when the preceding clause ends on
+    an opening quote, the space that follows it is the quoted text's inner space and
+    takes the same fine space. Exported for the join test, like `humanizeGateError`
+    below — the rule is what has to stay pinned, not just its one rendered seam. */
+export function clauseSeparator(locale: string, previous: string, next: string): string {
+	const language = locale.toLowerCase().split("-")[0];
+	if (CJK_LANGUAGES.has(language)) return "";
+	if (language === "fr") {
+		const mark = next.charAt(0);
+		if (FRENCH_SPACED_BEFORE.has(mark) || previous.endsWith("«")) return FRENCH_FINE_SPACE;
+	}
+	return " ";
+}
 
 export function GateSheet({
 	open,
@@ -87,6 +145,10 @@ export function GateSheet({
 	const [error, setError] = useState("");
 	const [notice, setNotice] = useState("");
 	const [pairPrompt, setPairPrompt] = useState(false);
+	/* The copy language the sentence below is rendered in (see `clauseSeparator`).
+	   Subscribing here is also what repaints the seams when the language changes
+	   under a mounted sheet. */
+	const { uiLocale } = useLocaleSnapshot();
 	/* Read ONCE per render, synchronously, from storage this phone already has:
 	   the point is to say what will be refused BEFORE the tap rather than after
 	   (design round 6, D4). No async probe — `ask` must stay usable while this is
@@ -94,11 +156,14 @@ export function GateSheet({
 	   revoked still passes this check, which is why it HEADS THE DECISION rather
 	   than replaces the refusal. */
 	const paired = storedCertificate() !== null;
-	const policyLine = approvalPolicyLine({
-		approval_mode: approvalMode,
-		approval_provenance: approvalProvenance,
-		approval_global_mode: approvalGlobalMode,
-	});
+	const policyLine = approvalPolicyLine(
+		{
+			approval_mode: approvalMode,
+			approval_provenance: approvalProvenance,
+			approval_global_mode: approvalGlobalMode,
+		},
+		messageRuntime.t,
+	);
 
 	async function choose(mode: Mode) {
 		if (busy) return;
@@ -116,7 +181,7 @@ export function GateSheet({
 					args: "ask",
 					images: [],
 				});
-				setNotice("keeping approvals at ask in this session");
+				setNotice(messageRuntime.t("relay.asks.gate.notice_ask"));
 				/* AND THE LOOSENING RECEIPT GOES (UX round 8, U8-3). It lives on the
 				   header, above this sheet, and it reports a STATE ("the gate is now
 				   auto — gated tools run without asking"); a tighten from this very
@@ -145,7 +210,7 @@ export function GateSheet({
 				   change the runtime says did not happen, so the refusal stays in
 				   THIS sheet, in the runtime's own words, with the choices still
 				   there for the reader to take another way. */
-				setError(receipt.detail.trim() || "that was refused — nothing changed");
+				setError(receipt.detail.trim() || messageRuntime.t("relay.approvals.gate.refused_nothing_changed"));
 				return;
 			}
 			// OUT FIRST, THEN CLOSE: the receipt has to exist somewhere that is not
@@ -154,8 +219,8 @@ export function GateSheet({
 			// which is why that one never had this bug.
 			onReceipt(
 				mode === "auto"
-					? "this session's gate is now auto — gated tools run without asking"
-					: globalDefaultReceipt(receipt),
+					? messageRuntime.t("relay.asks.gate.notice_auto")
+					: globalDefaultReceipt(receipt, messageRuntime.t),
 			);
 			onClose();
 		} catch (failure) {
@@ -163,18 +228,28 @@ export function GateSheet({
 				/* The remedy the refusal copy names, one tap away rather than a
 				   sentence telling the reader to go and find a terminal. */
 				setPairPrompt(true);
-				setError(
-					"This phone is not paired with that machine yet — pair it once and it can give this consent itself.",
-				);
+				setError(messageRuntime.t("relay.asks.gate.not_paired_error"));
 				return;
 			}
 			setError(humanizeGateError(failure));
 		}
 	}
 
+	/* THE FIVE CLAUSES, read once so each SEAM can be joined on its own terms: the
+	   fr rule looks at what the NEXT clause starts with, and the CJK rule applies to
+	   the language as a whole. Reading them here rather than inline keeps the join
+	   expressions readable and gives the test one place to name the pieces. */
+	const scope = {
+		before: messageRuntime.t("relay.approvals.gate.body_scope.before"),
+		session: messageRuntime.t("relay.approvals.gate.body_scope.session_clause"),
+		between: messageRuntime.t("relay.approvals.gate.body_scope.between"),
+		global: messageRuntime.t("relay.approvals.gate.body_scope.default_clause"),
+		after: messageRuntime.t("relay.approvals.gate.body_scope.after"),
+	};
+
 	return (
 		<>
-			<Sheet open={open} onClose={onClose} title="Approvals in this session">
+			<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.asks.gate.title")}>
 				<div className="flex flex-col gap-3 p-3">
 					{policyLine ? (
 						/* THE STATE, BEFORE THE ACTIONS. Every other line here says what a
@@ -184,16 +259,36 @@ export function GateSheet({
 						   sends no provenance — see the prop's note. */
 						<p className="text-meta text-ink-muted">{policyLine}</p>
 					) : null}
+					{/* THE SCOPE SENTENCE IS COMPOSED, NOT ONE STRING (M5). Main renders
+					    "The first two choices change <strong>this session</strong> only; the
+					    last changes the <strong>default for all sessions</strong> that
+					    follow it." — the two phrases that carry the blast radius are bold
+					    because they are what the third choice's danger turns on. A single
+					    catalogued string can only render them flat, and no translator could
+					    restore emphasis the key dropped. Clause keys keep it structural:
+					    five keys are read in this fixed order, only the two *_clause keys
+					    are wrapped here, and the SEPARATOR between them follows the copy
+					    language rather than being one U+0020 everywhere — `clauseSeparator`
+					    above is the rule and says why (zh-CN concatenates; fr needs U+202F
+					    before its spaced marks). The body sentence's own trailing space is
+					    untouched: it is a sentence boundary that existed pre-split. */}
 					<p className="text-body-sm text-ink-muted">
-						Ask parks every gated tool call until you answer its card. Auto lets them run
-						without asking. The first two choices change <strong>this session</strong> only; the
-						last changes the <strong>default for all sessions</strong> that follow it.
+						{messageRuntime.t("relay.asks.gate.body")}{" "}
+						{scope.before}
+						{clauseSeparator(uiLocale, scope.before, scope.session)}
+						<strong>{scope.session}</strong>
+						{clauseSeparator(uiLocale, scope.session, scope.between)}
+						{scope.between}
+						{clauseSeparator(uiLocale, scope.between, scope.global)}
+						<strong>{scope.global}</strong>
+						{clauseSeparator(uiLocale, scope.global, scope.after)}
+						{scope.after}
 					</p>
 					<Button disabled={busy !== null} onClick={() => void choose("ask")}>
-						{busy === "ask" ? "…" : "keep asking (ask)"}
+						{busy === "ask" ? "…" : messageRuntime.t("relay.asks.gate.keep_asking")}
 					</Button>
 					<Button disabled={busy !== null} onClick={() => void choose("auto")}>
-						{busy === "auto" ? "…" : "run without asking (auto)"}
+						{busy === "auto" ? "…" : messageRuntime.t("relay.asks.gate.run_without")}
 					</Button>
 					{/* THE SCOPE-CHANGING CHOICE, and the reason it is `quiet`: the two
 					    buttons above act on the session in front of the reader, this one
@@ -203,11 +298,11 @@ export function GateSheet({
 					    which scope it is BEFORE the tap rather than in a receipt after
 					    it. */}
 					<Button
-						variant="quiet"
+						variant="ghost"
 						disabled={busy !== null}
 						onClick={() => void choose("default auto")}
 					>
-						{busy === "default auto" ? "…" : "run without asking in all sessions (default auto)"}
+						{busy === "default auto" ? "…" : messageRuntime.t("relay.approvals.gate.default_auto")}
 					</Button>
 					{!paired ? (
 						/* SAID BEFORE THE TAP, not after (design round 6, D4). Both buttons
@@ -218,9 +313,12 @@ export function GateSheet({
 						   honest thing to state; `storedCertificate()` is a synchronous read
 						   this component already has. */
 						<p className="text-meta text-ink-muted">
-							This phone is not paired with that machine, so <strong>run without asking</strong> and{" "}
-							<strong>run without asking in all sessions</strong> will ask you to pair it first.
-							Keeping approvals at <strong>ask</strong> never needs a pairing.
+							{messageRuntime.t("relay.asks.gate.unpaired_before")}{" "}
+							<strong>{messageRuntime.t("relay.asks.gate.unpaired_run_label")}</strong>{" "}
+							{messageRuntime.t("relay.asks.gate.unpaired_middle")}{" "}
+							<strong>{messageRuntime.t("relay.asks.gate.unpaired_ask_label")}</strong>{" "}
+							{messageRuntime.t("relay.asks.gate.unpaired_after")}{" "}
+							{messageRuntime.t("relay.approvals.gate.unpaired_default_auto")}
 						</p>
 					) : null}
 					{notice ? <p className="text-body-sm text-ink-muted">{notice}</p> : null}
@@ -254,15 +352,15 @@ export function humanizeGateError(error: unknown): string {
 			   must not reword a refusal it does not own), but the one step that is
 			   actually left is knowable here and nowhere else: the machine refused a
 			   signature from a device that believed it was paired. */
-			return `${error.message} (This phone's signature was refused — on that machine, \`lop operator devices\` shows whether this device is revoked or expired.)`;
+			return messageRuntime.t("relay.asks.gate.operator_refused", { message: error.message });
 		}
 	}
 	const message = String((error as Error)?.message ?? error);
 	if (message.includes("504") || message.toLowerCase().includes("did not answer")) {
-		return "The session didn’t respond in time — try again.";
+		return messageRuntime.t("relay.asks.error.session_timeout");
 	}
 	if (message.includes("409") || message.toLowerCase().includes("not connected")) {
-		return "The session went away — reopen it from the session list.";
+		return messageRuntime.t("relay.asks.error.session_gone_list");
 	}
 	return message;
 }

@@ -35,6 +35,73 @@ presses. The receiving application may normalize them, remove a trailing
 newline, or submit on a newline; transport equality is not a guarantee of
 application storage semantics.
 
+## Key names
+
+`key` (and the `paste_text` chord) take an array of key names pressed
+together. A name is either a single printable ASCII character, which is the
+key itself and keeps its case in the parsed representation (`"A"` is not
+`"a"`), or one of the named keys
+`protocol.NAMED_KEYS` defines: `alt`, `backspace`, `capslock`, `ctrl`,
+`delete`, `down`, `end`, `enter`, `esc`, `home`, `insert`, `left`, `meta`
+(the Super/logo key), `pagedown`, `pageup`, `right`, `shift`, `space`, `tab`,
+`up`, `f1`–`f24`. Named keys are matched case-insensitively. A chord may not
+name the same key twice. Representation is not a promise of uppercase input:
+the OSWorld compiler lowercases single-character key names, so both `"A"`
+and `"a"` compile to the same physical key. Use `["shift", "a"]` when an
+uppercase key press is intended (or `type` for literal text).
+
+The validator also accepts a small set of standard spellings and rewrites each
+one to the single key it names (`protocol.KEY_ALIASES`):
+
+| Accepted spelling (any case) | Becomes |
+| --- | --- |
+| `Return` | `enter` |
+| `Escape` | `esc` |
+| `Page_Down`, `pgdn` | `pagedown` |
+| `Page_Up`, `pgup` | `pageup` |
+| `Caps_Lock` | `capslock` |
+| `del` | `delete` |
+| `super`, `Super_L`, `win` | `meta` |
+| `Control_L` / `Shift_L` / `Alt_L` | `ctrl` / `shift` / `alt` |
+| `minus` / `plus` / `equal` | `-` / `+` / `=` |
+
+X11 keysyms that already match a named key once case is ignored (`BackSpace`,
+`Tab`, `Delete`, `Home`, `End`, `Insert`, arrow names) need no alias.
+"Case-insensitive" was never what refused `Escape`: it folds to `ESCAPE`, and
+the named key is `ESC`.
+
+The rewrite happens while the action is parsed, before the batch is bound to
+an observation. Parsed actions, bound-batch artifacts, their digests and compiled
+guest commands therefore contain canonical key names and match what the
+canonical spelling produces. Existing canonical batches replay unchanged.
+Raw model-response evidence is not rewritten and can still contain aliases.
+The surface schema and its `tool_schema_digest` are unchanged too, because
+`named_keys` still lists exactly the same set.
+
+An alias is admitted only when it is a standard X11 keysym or
+pyautogui/xdotool name **and** it presses exactly the key its target presses.
+pyautogui's X11 table is the check: the OSWorld compiler emits `ctrl`, and
+pyautogui sends `Control_L`. Two kinds of name stay refused:
+
+- Names that could mean different keys: `cmd`/`command` mean Ctrl in a Linux
+  shortcut but Super if read literally; `option` could mean Alt or AltGr.
+- Names that would press a different key: `Control_R`, `Shift_R`, `Alt_R` and
+  `Super_R` would press the left key, and `Next`/`Prior` read as commands.
+
+The refusal for `cmd` names both meanings and leaves the choice to the model.
+
+Unknown fields stay refused rather than dropped. Only a field that belongs to
+another action kind is dropped (`public_reply.drop_sibling_action_fields`),
+because the model's `kind` tag already says what it meant. Dropping a pause
+field such as `wait` or `wait_ms` on a `key` would lose the pause. Turning it
+into a `wait` would add an action to an ordered batch. Either way the action
+would not be the one the model asked for. Instead, the refusal shows the
+corrected two-action form,
+`[{"kind": "key", "keys": ["enter"]}, {"kind": "wait", "duration_ms": 1000}]`.
+A near-miss of the kind's own field gets a "Did you mean" suggestion
+(`"key"` → `"keys"`). A rule broken inside a field (duplicate keys in a chord)
+is quoted in that field's refusal.
+
 ## X11 execution and ownership
 
 The generic stdlib host helper `local_operator.computer_input` generates guest

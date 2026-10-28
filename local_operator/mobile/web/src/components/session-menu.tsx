@@ -25,6 +25,7 @@
 import { useEffect, useState, type RefObject } from "react";
 import { applyWideView, getWideView } from "../lib/viewport";
 import { Sheet } from "./ui/sheet";
+import { messageRuntime } from "../store";
 
 /** One full-width menu row: the 44px touch floor the header controls use. */
 const MENU_ROW =
@@ -36,6 +37,12 @@ export function SessionMenu({
 	pinned,
 	onTogglePin,
 	onOpenApprovals,
+	onOpenSpend,
+	showSpend = false,
+	queuedCount = 0,
+	showQueued = false,
+	onResume,
+	resuming = false,
 	returnFocusRef,
 }: {
 	open: boolean;
@@ -51,6 +58,21 @@ export function SessionMenu({
 	onTogglePin: () => Promise<boolean>;
 	/** Summon the existing gate sheet. The menu closes first. */
 	onOpenApprovals: () => void;
+	/** Fallback while the compact footer's meter has yielded to the phone's
+	    width. It uses the existing sheet title, so no new copy is introduced. */
+	onOpenSpend?: () => void;
+	showSpend?: boolean;
+	/** The composer's queued count, shown as a plain line here only while the
+	    footer had no room for it whole (fit level 4). Not a control: there is
+	    nothing behind it to open, and a button with no action is a dead one. */
+	queuedCount?: number;
+	showQueued?: boolean;
+	/** Present only while the session is ENDED (UX round 1, U3): the menu is
+	    where a reader looks for actions, and the header's status line carries
+	    no visual tap cue. The header's own resume path — this row starts it and
+	    the health sheet shows how it went — so there is one implementation. */
+	onResume?: () => void;
+	resuming?: boolean;
 	/** The ⋮ button, so closing returns focus to the control that opened it. */
 	returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
@@ -61,9 +83,47 @@ export function SessionMenu({
 	useEffect(() => {
 		if (open) setWide(getWideView());
 	}, [open]);
+	/* THE FOOTER'S MOVED-OUT ROWS ARE LATCHED FOR THE LIFE OF ONE OPENING
+	   (design D9 = review R3-2a). Their presence follows the footer's fit, and
+	   opening this sheet moves focus off the text field, which on a phone closes
+	   the keyboard and refits the footer — so the row the reader came for used to
+	   leave the open dialog under their finger. The decision is captured in the
+	   render that opens the sheet (render-time, not an effect, so the first
+	   frame already has it) and held until it closes. The count's TEXT stays
+	   live: a figure frozen while the queue drains would be a false one. */
+	const [latch, setLatch] = useState({ open, spend: showSpend, queued: showQueued });
+	if (latch.open !== open) setLatch({ open, spend: showSpend, queued: showQueued });
+	const spendRow = open && latch.open ? latch.spend : showSpend;
+	const queuedRow = open && latch.open ? latch.queued : showQueued;
 	return (
 		<Sheet open={open} onClose={onClose} title="Session" returnFocusRef={returnFocusRef}>
 			<div className="flex flex-col gap-1 p-2">
+				{queuedRow && queuedCount > 0 ? (
+					/* A fact, not an action: plain text in the dialog, read in order
+					   by a screen reader, in the footer's own register. */
+					<p data-menu="queued" className="flex min-h-11 items-center px-3 text-meta tabular-nums text-ink-dim">
+						{messageRuntime.t("relay.transcript.composer.queued", { count: queuedCount })}
+					</p>
+				) : null}
+				{onResume ? (
+					<button
+						type="button"
+						disabled={resuming}
+						onClick={() => {
+							/* Close first, like Approvals: the health sheet is where the
+							   outcome lands, and two stacked dialogs would hide it. */
+							onClose();
+							onResume();
+						}}
+						className={MENU_ROW}
+					>
+						<span className="min-w-0 flex-1 truncate">
+							{resuming
+								? messageRuntime.t("relay.chrome.session.resuming")
+								: messageRuntime.t("relay.chrome.session.resume")}
+						</span>
+					</button>
+				) : null}
 				<button
 					type="button"
 					onClick={async () => {
@@ -103,6 +163,13 @@ export function SessionMenu({
 						{wide ? "on" : "off"}
 					</span>
 				</button>
+				{/* Beside Approvals (design D11): the two ▸ rows that open a sheet. */}
+				{spendRow && onOpenSpend ? (
+					<button type="button" onClick={() => { onClose(); onOpenSpend(); }} className={MENU_ROW}>
+						<span className="min-w-0 flex-1 truncate">{messageRuntime.t("relay.chrome.spend.title")}</span>
+						<span aria-hidden className="shrink-0 text-ink-dim">▸</span>
+					</button>
+				) : null}
 				<button
 					type="button"
 					onClick={() => {

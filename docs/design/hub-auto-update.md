@@ -1221,10 +1221,18 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 | Method + path | Body | Purpose |
 |---|---|---|
 | `GET /v1/desktop/hub/updates` | — | **Store read, no network, O(items).** The UI polling endpoint. |
-| `POST /v1/desktop/hub/updates/check` | `{request_id, kind?: "agent"\|"team", name?: str}` | Check now (network). Honors `force_refresh`. Applies nothing, even with auto on (user asked to *check*). Runs are single-flight (B3.3): a concurrent runner tick is joined, not doubled. |
-| `POST /v1/desktop/hub/updates/apply` | `{request_id, kind, name, prefer?: "local"\|"remote", acknowledge_unknown_baseline?: bool, replace?: "remote"\|"local", dry_run?: bool}` | Apply ONE item (click-to-update). `dry_run` returns the `ItemMergeReport` without writing (the preview a UI/CLI can show). `replace` requires `confirm_replace: true`. |
+| `POST /v1/desktop/hub/updates/check` | `{request_id, kind?: "agent"\|"team"\|"skill", name?: str, local_id?: str}` (at most one of `name`/`local_id`; `local_id` requires `kind`) | Check now (network). Honors `force_refresh`. Applies nothing, even with auto on (user asked to *check*). Runs are single-flight (B3.3): a concurrent runner tick is joined, not doubled. |
+| `POST /v1/desktop/hub/updates/apply` | `{request_id, kind, name?: str, local_id?: str, prefer?: "local"\|"remote", acknowledge_unknown_baseline?: bool, replace?: "remote"\|"local", dry_run?: bool}` (exactly one of `name`/`local_id`; `resolve_source` is name-only) | Apply ONE item (click-to-update). `dry_run` returns the `ItemMergeReport` without writing (the preview a UI/CLI can show). `replace` requires `confirm_replace: true`. |
 | `POST /v1/desktop/hub/updates/apply-all` | `{request_id, kind?: "agent"\|"team"}` | B4.4 semantics. |
-| `POST /v1/desktop/hub/updates/retry` | `{request_id, kind, name}` | Clears `attempts`/`next_retry_at`/`auto_retry=false`, then check+apply(auto=cfg) for that item. |
+| `POST /v1/desktop/hub/updates/retry` | `{request_id, kind, name?: str, local_id?: str}` (exactly one of `name`/`local_id`) | Clears `attempts`/`next_retry_at`/`auto_retry=false`, then check+apply(auto=cfg) for that item. |
+
+**Addressing (`hub_items_by_id`).** `name` matches display names case-insensitively, and
+display names are not unique (`Coder` and `coder` can both be linked), so a `name` request
+can reach several rows. `local_id` (the registry id, or a skill's link id, as `/hub/links`
+rows carry it) addresses exactly one row of exactly `kind`. An unknown id and an id of
+another kind are both 404, the same shape as an unknown name. A blank or whitespace-only
+id is 422. Renderers send `local_id` only when the capabilities advertise
+`hub_items_by_id`; older cores refuse the field with a 422.
 
 `GET /v1/desktop/hub/updates` → `CRUDResponse.result`:
 

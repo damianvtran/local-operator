@@ -10,6 +10,13 @@ import pytest
 
 from local_operator.i18n import catalogues, runtime
 
+#: The generated CLDR table the catalogue checker reads; the parity test passes
+#: it to `arguments_match` so the `number -> plural` upgrade is judged by the
+#: same losslessness rule as `check_catalogues`.
+_PLURAL_RULES = json.loads(
+    (Path(runtime.__file__).with_name("data") / "plural_rules.json").read_text(encoding="utf-8")
+)
+
 #: The `wire.*` namespaces still awaiting their extraction slice: stub files
 #: that M0 shipped and no slice has populated yet (RFC §5: later slices
 #: populate them). An extraction slice removes its namespace from this tuple
@@ -82,6 +89,13 @@ def test_shipped_wire_namespaces_exist() -> None:
         # which fr/hi/vi CARRY, and an English edit to a carried namespace
         # invalidates that locale's ledger row and unships the whole locale.
         "wire.remote_compute",
+        # The Notifications inbox (docs/design/notifications-inbox.md): the
+        # desktop routes' refusal copy, and the `/notifications` page row's
+        # description as an English-only CHILD of `wire.slash` (the
+        # `wire.slash.library` shape — the audited `wire.slash` bytes and their
+        # locale ledger hashes do not move).
+        "wire.errors.notifications",
+        "wire.slash.notifications_page",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -100,6 +114,8 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
+    assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
+    assert catalogues.load_catalogue("en", "wire.slash.notifications_page") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale
@@ -153,7 +169,7 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 test_shipped_wire_namespaces_exist()
 
 
-def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
+def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> None:
     # Pin only the original ten Hindi groups plus each later reviewed slice.
     # Analytics/desktop backfill is explicitly unfinished; mechanical parity is
     # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
@@ -180,15 +196,46 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # namespace, so the refusal notices fell back to English; now each carries
     # a 30-key / 84-key catalogue with its own audited ledger row (see
     # i18n/ledger.json), which is the same condition every namespace above was
-    # admitted on.
+    # admitted on. The relay.asks slice adds the SPA's ask cards/sheet/dock
+    # namespace `relay.asks` on the same terms — it is a DIFFERENT namespace
+    # from R5's `relay.ask` (the dismiss reasons and stale-ask line), and
+    # `namespaces()` returns the files sorted, so `relay.asks` sorts before
+    # `relay.session.tags` rather than where the slice landed. The approvals
+    # slice adds `relay.approvals` (17 keys, the approval-scope copy main added
+    # as literals) on the same terms: carried only now that its independent
+    # audit row exists against the current en bytes. It sorts before
+    # `relay.ask`. The notifications-inbox wave adds `tui.notifications` (the
+    # inbox page's 72 keys) on exactly the same terms: six locales carry it
+    # only because their independent audit bundles and fresh ledger rows landed
+    # with the files in the same commit, and the seventh (ru) is still absent
+    # for want of its round-2 delta audit. Mechanical parity is asserted below
+    # for every namespace in this tuple, so the new one is checked too.
+    # `relay.ask`. The phone inbox adds `relay.notifications` (77 keys) with
+    # the other seven locales; it sorts after `relay.chrome`. Carrying it
+    # pins key/placeholder parity here, while shipping still waits on its
+    # independent audit row, exactly as each namespace above did.
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
+        "relay.approvals",
         "relay.ask",
+        "relay.asks",
+        # Borderless phone chrome carries its own audited namespace; existing
+        # English labels stay untouched while all seven locales join the wave.
+        "relay.chrome",
+        # The session status dot's 9-key namespace (round 2 added the
+        # reconnecting/dropped/quiet/ended copy), carried only with its
+        # doubly audited ledger row; it keeps relay.chrome's English bytes
+        # frozen, and sorts between relay.chrome and relay.session.tags.
+        "relay.health",
+        "relay.notifications",
         "relay.session.tags",
+        # Audited relay condensation copy adds 19 keys; keep this census exact.
+        "relay.transcript",
         "tui.asks",
         "tui.authoring",
         "tui.notices",
+        "tui.notifications",
         "tui.palette",
         "tui.projects_edit",
         "tui.review",
@@ -201,6 +248,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "tui.welcome",
         "wire.errors",
         "wire.errors.desktop",
+        "wire.errors.notifications",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
@@ -209,6 +257,7 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         "wire.remote_compute",
         "wire.settings",
         "wire.slash",
+        "wire.slash.notifications_page",
     )
     assert catalogues.namespaces(locale) == namespaces
     for namespace in namespaces:
@@ -216,8 +265,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         translated = catalogues.load_catalogue(locale, namespace)
         assert translated.keys() == source.keys(), (locale, namespace)
         for key in source:
-            assert runtime.message_arguments(translated[key]) == runtime.message_arguments(
-                source[key]
+            assert i18n_check.arguments_match(
+                runtime.message_arguments(source[key]),
+                runtime.message_arguments(translated[key]),
+                translated_source=translated[key],
+                locale=locale,
+                plural=_PLURAL_RULES,
             ), (locale, namespace, key)
 
 

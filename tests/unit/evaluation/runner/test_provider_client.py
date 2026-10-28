@@ -3073,7 +3073,7 @@ def _defective_reply(case: str, current: Observation) -> str:
         return json.dumps(
             {
                 "actions": [
-                    {"kind": "key", "observation_id": observation_id, "keys": ["ctrl", "Return"]}
+                    {"kind": "key", "observation_id": observation_id, "keys": ["control", "k"]}
                 ]
             }
         )
@@ -3196,7 +3196,7 @@ _REJECTION_HINT_CASES = [
         "envelope-shape",
         ["action_batch requires exactly", '{"actions": [...]}'],
     ),
-    ("unknown-key", "unknown-key", ["not an accepted key name", '"enter"', "array of key names"]),
+    ("unknown-key", "unknown-key", ["not an accepted key name", '"ctrl"', "array of key names"]),
     ("keys-not-array", "keys-not-array", ['["ctrl", "alt", "t"]', "not an object"]),
     ("unknown-action-kind", "unknown-action-kind", ['"right_click"', 'Did you mean "click"?']),
     ("coordinate", "out-of-frame-coordinate", ['"x" 0..1279', '"y" 0..719']),

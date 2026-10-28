@@ -61,6 +61,62 @@ all of this: an episode drives its VM through the apparatus (the action
 bridge, the adapter worker), and the only caller of :meth:`ToolConfinement.
 wrap` is the ``bash`` tool, so no apparatus process is inside the jail.
 
+MACH SERVICES (landed 2026-10-26 -- the same boundary, closed on the IPC
+side). The profile used to carry an unrestricted ``(allow mach-lookup)``, and
+that one line reached around the filesystem and network denials into the
+operator's GUI session: measured from inside the real profile,
+``pbpaste`` exited 0 READING the operator's clipboard, ``pbcopy`` exited 0
+OVERWRITING it, and ``security list-keychains`` reached securityd. It was
+not hypothetical: across 180 recorded benchmark episodes, 13 ``pbpaste``
+calls in 4 episodes read the operator's clipboard (none wrote it). The
+allowance is now an allowlist of Mach GLOBAL NAMES
+(``_MACH_LOOKUP_GLOBAL_NAMES``), DERIVED by measurement rather than copied
+from Apple's ``system.sb``:
+
+1. a representative confined workload (``python3`` incl. ``venv``/``ssl``/
+   ``sqlite3``/locale/tz, ``git`` init/commit/clone/status, ``uv``,
+   ``clang``/``cc``/``make``/``ld``, ``xcrun --find``/``--show-sdk-path``,
+   ``node``, ``perl``, ``ruby``, ``swift``, ``pdftotext``, coreutils,
+   ``tar``/``gzip``, ``curl`` and ``getaddrinfo`` for DNS) was run under the
+   old allow-all profile and under a profile with NO mach allowance, and the
+   outputs were diffed;
+2. every lookup the no-mach run was refused was read back from launchd's
+   ``denied lookup ... Sandbox restriction`` log lines (the kernel logs
+   nothing for these; launchd does);
+3. each candidate was then ABLATED one at a time against the allow-all
+   output.
+
+Only TWO names changed observable behaviour, so only two are allowed:
+``com.apple.system.opendirectoryd.libinfo`` (user/group NAME resolution --
+without it ``getpwuid`` raises ``KeyError`` and ``id``/``ls -l``/``whoami``
+print bare numbers) and ``com.apple.system.opendirectoryd.membership``
+(without it ``confstr(_CS_DARWIN_USER_TEMP_DIR)`` stops resolving, so
+``clang`` fails "unable to make temporary file" and the ``/usr/bin`` xcrun
+shims print "couldn't create cache file" on every ``python3``/``git`` when
+``TMPDIR`` is unset; the ``bash`` tool sets it, a script may not). With those two the
+workload's output is identical to the allow-all run's. Everything else the
+machinery asked for is denied and changed nothing measurable: ``logd``,
+``system.logger``, ``notification_center`` (notifyd), ``bsd.dirhelper``,
+``analyticsd``, ``SystemConfiguration.configd`` (curl's proxy probe; DNS
+still fails FAST), ``coreservicesd``/``diskarbitrationd`` (swift-driver).
+The denied set the brief named is pinned by tests with a ctypes
+``bootstrap_look_up`` that only LOOKS UP a name and never messages it:
+``com.apple.pasteboard.1``, ``com.apple.SecurityServer``,
+``com.apple.securityd.xpc``, ``com.apple.coreservices.launchservicesd``,
+``com.apple.lsd.open``/``.mapdb``, ``com.apple.coreservices.appleevents``,
+``com.apple.windowserver.active``, ``com.apple.tccd`` all return
+``BOOTSTRAP_NOT_PRIVILEGED`` (1100) from inside the jail.
+
+Residuals of the Mach side, stated rather than implied: the opendirectoryd
+libinfo service answers DIRECTORY records (local user and group names, home
+paths, memberships) -- account metadata, not file content, and the price of
+``getpwuid`` working; the confined child's own ``os_log`` output is dropped
+(logd is denied); ``mdls`` (Spotlight via ``metadata.mds``) and
+``defaults`` (cfprefsd) no longer answer, the latter already failing under
+the old profile; and the allowlist was measured on the build host's macOS
+(27.0), so a future release that moves libinfo behind another name would show
+up as "uid not found" in a confined child, not as a leak.
+
 WHAT THIS DOES NOT COVER, stated rather than implied:
 
 * Reads of SYSTEM paths stay allowed -- ``/usr``, ``/System``, ``/Library``,
@@ -109,11 +165,9 @@ WHAT THIS DOES NOT COVER, stated rather than implied:
   ancestors, and without it ordinary commands break (see :meth:`profile`). A
   confined child can therefore learn that a path EXISTS and its size/mtime;
   it cannot read file CONTENT or list directories outside the allowlist.
-* Mach services stay reachable (``mach-lookup`` is allowed: the runtime needs
-  it to function at all), so credential stores and daemons behind Mach --
-  securityd included -- answer requests under their OWN access controls.
-  Ordering Mach service registration is a follow-up; this module makes no
-  claim about it.
+* Mach services beyond the two-name allowlist are denied (see MACH SERVICES
+  above); the directory records the allowed libinfo service answers are the
+  residual.
 * DAEMON-MEDIATED SPAWN AND AUTOMATION -- the family where a request leaves the
   jail through a host service rather than a syscall. **Tested:** ``launchctl
   submit`` is refused inside the jail (rc=1, no job registered); ``launchctl
@@ -150,6 +204,9 @@ run under.
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -197,6 +254,21 @@ _SYSTEM_WRITE_LITERALS: tuple[str, ...] = (
     "/dev/tty",
     "/dev/stdout",
     "/dev/stderr",
+)
+
+#: The ONLY Mach services a confined child may look up. Derived by measurement
+#: (allow-all vs no-mach diff, launchd's ``denied lookup`` log, then one-at-a-
+#: time ablation -- see the module docstring's MACH SERVICES section): these
+#: two are the whole set whose denial changed an ordinary command's output.
+#: Exact names, never a regex or prefix: a ``com.apple.system.*`` pattern would
+#: quietly readmit notifyd and logd today and whatever Apple registers there
+#: tomorrow. Adding a name here widens the jail into the operator's session;
+#: it needs its own measurement, and must never be a pasteboard, security/
+#: keychain, window server/display, launchservices/lsd, AppleEvents or TCC
+#: service.
+_MACH_LOOKUP_GLOBAL_NAMES: tuple[str, ...] = (
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
 )
 
 
@@ -247,6 +319,18 @@ def kernel_exposed_read_subtrees() -> tuple[Path, ...]:
     Layouts that place controller state in these trees are refused at
     validation before anything is constructed instead (see
     ``sdk._resolve_world_root``).
+
+    CORRECTED 2026-10-26 (the scout-shell work re-measured it on macOS
+    27.0.1): an earlier version of this note said a broad allow followed by a
+    specific deny "still reached the denied file, in BOTH rule orders". That
+    is not what this host does. With a FILTERED allow (``(allow file-read*
+    (subpath ...))``, the shape :meth:`ToolConfinement.profile` emits) the
+    LATER rule wins: allow-then-deny refuses the file, deny-then-allow reads
+    it. With an UNFILTERED ``(allow file-read*)`` a filtered deny wins in
+    either order. Both are pinned by ``tests/unit/tools/
+    test_shell_write_confinement.py``. Refusing such layouts at validation
+    stays the right call regardless: it does not depend on seatbelt's
+    precedence rules, which Apple documents nowhere and could change.
     """
 
     subtrees = [Path(path) for path in _SYSTEM_READ_SUBPATHS]
@@ -408,7 +492,7 @@ class ToolConfinement:
     def profile(self) -> str:
         """The seatbelt profile for this root, as sandbox-exec's ``-p`` text.
 
-        ``deny default`` plus an explicit allowlist, with FOUR structural
+        ``deny default`` plus an explicit allowlist, with FIVE structural
         pieces worth stating because each was measured while building this.
         The first: reading the ROOT DIRECTORY itself is allowed
         (``literal "/"``). Without it every command aborts before exec;
@@ -440,6 +524,13 @@ class ToolConfinement:
         too: TCP (internet and loopback), UDP and AF_UNIX connects all fail
         with ``EPERM``, and DNS fails fast, while in-scratch file work is
         untouched (see the module docstring's network section).
+
+        The fifth: the Mach line. ``mach-lookup`` is allowed for the exact
+        ``_MACH_LOOKUP_GLOBAL_NAMES`` only, REPLACING the bare
+        ``(allow mach-lookup)`` that let a confined child read and overwrite
+        the operator's clipboard and reach securityd. The allowlist is the
+        whole grant -- like the network line, no broader mach allow may ride
+        beside it, or the narrow one stops meaning anything.
         """
 
         read_subpaths = (
@@ -449,13 +540,14 @@ class ToolConfinement:
         )
         reads = " ".join(f'(subpath "{path}")' for path in read_subpaths)
         writes = " ".join(f'(literal "{path}")' for path in _SYSTEM_WRITE_LITERALS)
+        mach = " ".join(f'(global-name "{name}")' for name in _MACH_LOOKUP_GLOBAL_NAMES)
         return (
             "(version 1)\n"
             "(deny default)\n"
             "(allow process-fork)\n"
             "(allow process-exec)\n"
             "(allow sysctl-read)\n"
-            "(allow mach-lookup)\n"
+            f"(allow mach-lookup {mach})\n"
             "(deny network*)\n"
             '(allow file-read-metadata (subpath "/"))\n'
             f'(allow file-read* (literal "/") {reads})\n'
@@ -467,3 +559,489 @@ def confinement_of(context: ToolContext | None) -> ToolConfinement | None:
     """The one call site-facing spelling of :meth:`ToolConfinement.from_context`."""
 
     return ToolConfinement.from_context(context)
+
+
+# ---------------------------------------------------------------------------
+# Write-only confinement: the read-only research shell (``scout``).
+# ---------------------------------------------------------------------------
+#
+# WHY A SECOND SHAPE. ``ToolConfinement`` jails an unattended episode: reads
+# AND writes stay inside one root and the in-process network tools refuse. A
+# ``scout`` is the opposite trade. Its job is reading -- the whole workspace
+# and the web -- and two real jobs failed because it could not run
+# ``strings`` on a binary or unpack an ``.asar`` into scratch, so it fell back
+# to an (edited) copy of the source on GitHub. What it must not do is CHANGE
+# anything. So this shape keeps reads open, confines WRITES to the scout's
+# own scratchpad, and gives the shell no network at all (``web_search``/
+# ``web_fetch`` stay the scout's network, unchanged and outside this module).
+#
+# The enforcement is the same kernel boundary as above, for the same reason:
+# a mutating command cannot be recognised from its text (``python3 -c``,
+# ``tar -x``, ``find -delete`` and ``git`` all write), so the write check runs
+# at the syscall. Measured on macOS 27.0.1 with this profile: writes to the
+# root, ``strings``/``otool``/``file``, ``python3`` with ``TMPDIR`` in the
+# root and ``tar -x`` into the root all work; writing, ``rm``, ``mv``,
+# ``chmod``, ``touch``, a symlink or hard link escape, ``git add``/``commit``,
+# loopback and AF_UNIX connects, ``kill`` of a process outside the sandbox and
+# a nested permissive ``sandbox-exec`` are all refused (see the darwin tests).
+#
+# THE RESIDUAL, stated (corrected in agent review round 1 of PR #2987): the
+# shell reads whatever the user can read, minus the credential stores denied
+# below. That is NOT "no wider than ``read``": ``read`` asks before opening a
+# path outside the workspace, while this shell is ``read`` tier and never
+# asks, so a file the deny list misses is readable here with no prompt -- and
+# the scout's ``web_fetch`` could carry it out. The deny list is therefore
+# DERIVED from the sensitive-path vocabulary lop already maintains
+# (``supplements.denylist``, itself the union of ``references`` and
+# ``browser_files``) plus lop's own config-dir stores, so a class added there is
+# denied here without an edit. It is still a list, not a proof: a credential
+# in a file no rule names (a project's ``config.yaml`` with a token in it) is
+# readable, and command output then passes only the bash tool's credential
+# masking, which recognises known shapes, not every secret.
+
+#: Credential stores in the operator's HOME that a write-confined shell may
+#: not READ, relative to the resolved home directory, that the DERIVED rules
+#: (:func:`_derived_denial_filters`) do not already reach by name. SSH keys,
+#: the login keychain files (measured: readable as raw files without a deny),
+#: ``.aws``, ``.config/gh`` and ``.netrc`` are derived too and stay listed
+#: here as belt and braces for the stores this module was written for.
+#: ``.config/glab-cli`` is the GitLab twin of ``.config/gh``;
+#: ``.codex/auth.json`` (an OpenAI token) and ``.config/op`` (1Password CLI)
+#: were measured readable in agent review / QA round 1 of PR #2987.
+_HOME_SECRET_SUBPATHS: tuple[str, ...] = (
+    ".ssh",
+    "Library/Keychains",
+    ".aws",
+    ".config/gh",
+    ".config/glab-cli",
+    ".netrc",
+    ".codex/auth.json",
+    ".config/op",
+    # The desktop app's persisted desktop-plane bearer (Electron ``userData`` is
+    # ``Application Support/<productName>``; a dev build runs under the package
+    # name). It opens every ``/v1/desktop/...`` route, including the human-only
+    # Team Bridge owner audit (#3022 r2 M3). ``*token*`` cannot carry it: that
+    # leaf glob is excluded from the kernel deny (``tokenizer.py``).
+    "Library/Application Support/Local Operator/desktop-token",
+    "Library/Application Support/local-operator-ui/desktop-token",
+)
+
+#: lop's OWN credential stores, relative to a config root (the active one and
+#: the default ``~/.local-operator``). ``secrets/`` holds the encrypted store
+#: and its master key; ``network/identity`` the mesh device PRIVATE key
+#: (``device.json``); ``network/credentials`` mesh-borrowed credentials;
+#: ``operator/`` the operator signing key; ``tunnel/cloudflared.token`` the
+#: tunnel token; ``push-handle.key`` the push handle; ``mcp.json`` MCP server
+#: definitions, which carry API keys in ``env``/headers. Each was measured
+#: readable from this shell in round 1 of PR #2987. These sit under one root
+#: with harmless siblings (``config.yml``), so they are listed rather than
+#: derived: the generic vocabulary deliberately does not deny ``*.json``.
+_CONFIG_SECRET_SUBPATHS: tuple[str, ...] = (
+    "secrets",
+    "network/identity",
+    "network/credentials",
+    "operator",
+    "tunnel/cloudflared.token",
+    "push-handle.key",
+    "mcp.json",
+)
+
+#: Per-network secret files: ``network/networks/<id>.secrets.json``. A regex
+#: because ``<id>`` varies and the sibling ``<id>.json`` is not a secret.
+_NETWORK_SECRETS_SUFFIX = ".secrets.json"
+
+#: Patterns from ``supplements.denylist._EXTRA_PATTERNS`` that are NOT carried
+#: into the kernel deny, each because it matches the source and data a research
+#: shell exists to read: ``*token*`` is ``tokenizer.py``, ``*secret*`` is
+#: ``secret_store.py``, and ``*.db``/``*.sqlite*`` is every project database
+#: (and the sqlite files a scout makes in its own scratchpad). The supplement
+#: pre-filter can afford them because it only decides what to OFFER a model;
+#: here they would refuse a ``grep -r`` over a source tree. Every name here
+#: must still exist upstream -- a parity test fails if one is renamed away, so
+#: this list cannot silently start excluding nothing.
+_KERNEL_EXCLUDED_PATTERNS: frozenset[str] = frozenset(
+    {"*token*", "*secret*", "*.db", "*.sqlite", "*.sqlite3"}
+)
+
+#: Components likewise NOT carried into the kernel deny. ``secrets`` is lop's
+#: own SOURCE package (``local_operator/secrets/``, ``tests/unit/secrets``)
+#: and a common module name elsewhere; a whole-tree deny would refuse a scout
+#: auditing exactly that code. lop's real ``secrets/`` store is denied by
+#: path (:data:`_CONFIG_SECRET_SUBPATHS`), and ``Library/Keychains`` by path.
+#: The residual, stated: a project-local ``secrets/`` directory of real
+#: secrets is readable from this shell.
+_KERNEL_EXCLUDED_COMPONENTS: frozenset[str] = frozenset({"secrets"})
+
+#: Dotenv files with a trailing qualifier (``prod.env.local``), which the
+#: derived name/suffix/prefix rules do not reach; ``envy.txt`` stays readable.
+_DOTENV_REGEX = r"/[^/]*\.env(\.[^/]*)?$"
+
+#: Characters a path may not contain to be written into a seatbelt profile.
+#: Measured on macOS 27.0.1: inside ``"..."`` a ``\\"`` escape works, but inside a
+#: ``#"..."`` regex literal a ``"`` cannot be expressed at all (``\\"`` ends the
+#: literal: "unbound variable"), and the same root is interpolated into both.
+#: So rather than escape one and not the other, a root (or HOME/config dir)
+#: containing ``"``, ``\\`` or a control character is REFUSED, deliberately:
+#: a lop-generated scratchpad never contains one, and a profile built from one
+#: would at best fail to parse (and show the model a raw parser error) and at
+#: worst parse as rules nobody wrote -- the ``"x) (allow default) (y`` root.
+_PROFILE_UNSAFE_CHARS = frozenset('"\\') | frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
+
+#: The no-op profile the availability probe applies. ``sandbox-exec`` can be
+#: PRESENT and still unable to apply a profile -- most commonly when lop is
+#: itself running inside a sandbox, where ``sandbox_apply`` answers EPERM --
+#: and a host in that state would refuse every command at execute time. The
+#: probe finds that once, before a scout is ever handed a shell it cannot use.
+_PROBE_PROFILE = "(version 1)(allow default)"
+
+
+def _seatbelt_regex_literal(path: str) -> str:
+    """``path`` with every regex metacharacter escaped, for a ``#"..."`` rule.
+
+    ``"`` and ``\\`` are not handled here: they cannot reach this function, because
+    :func:`profile_path_refusal` refuses any path containing them first.
+    """
+
+    return "".join(f"\\{ch}" if ch in r".^$*+?()[]{}|" else ch for ch in path)
+
+
+def profile_path_refusal(path: str | Path) -> str | None:
+    """Why ``path`` cannot be written into a seatbelt profile, or ``None``.
+
+    See :data:`_PROFILE_UNSAFE_CHARS`: refusal, never escaping, so a path that
+    could change the profile's meaning never reaches ``sandbox-exec``.
+    """
+
+    text = str(path)
+    bad = sorted({repr(ch) for ch in text if ch in _PROFILE_UNSAFE_CHARS})
+    if bad:
+        return f"the path {text!r} contains {', '.join(bad)}, which a sandbox profile cannot carry"
+    return None
+
+
+def _glob_to_seatbelt_regex(pattern: str) -> str:
+    """A basename ``fnmatch`` glob as a seatbelt regex anchored to a path's leaf.
+
+    Only ``*`` and ``?`` occur in the vocabulary (a parity test pins that), so
+    this is the whole translation: ``*`` never crosses a ``/``.
+    """
+
+    body = "".join(
+        "[^/]*" if ch == "*" else "[^/]" if ch == "?" else _seatbelt_regex_literal(ch)
+        for ch in pattern
+    )
+    return f"/{body}$"
+
+
+def _derived_denial_filters() -> tuple[str, ...]:
+    """Kernel deny FILTERS derived from the sensitive-path vocabulary.
+
+    The source is ``supplements.denylist``: the ONE place that already unions
+    ``references`` (the ``@``-reference gate) and ``browser_files`` (the upload
+    gate) and adds its own rows, with parity tests keeping it a superset of
+    both. Deriving from it rather than copying is what review round 1 of PR
+    #2987 asked for: a class added there is denied here without an edit.
+
+    Each rule kind maps to the regex that means the same thing on a path:
+
+    * names / credential globs / extra names / extra patterns -> the LEAF;
+    * suffixes and name prefixes -> the leaf's end / start;
+    * components and component sequences -> that directory and all beneath;
+    * dir+file pairs -> exactly that file under that directory.
+
+    LEAF rules exclude DIRECTORIES (``require-not (vnode-type DIRECTORY)``).
+    The vocabulary names credential FILES, and a leaf regex alone also matched
+    a directory of the same name -- measured: ``(regex #"/credentials$")``
+    refused ``ls local_operator/network/credentials``, which is lop SOURCE,
+    and so silently blinded ``grep -r`` over the tree. With the vnode filter
+    the directory lists and its ``.py`` files read, while a FILE called
+    ``credentials`` (and a symlink to one) is still refused (measured).
+
+    Case: seatbelt's path match is case-insensitive on this (case-insensitive)
+    volume -- measured: ``\\.pem$`` refuses ``UPPER.PEM`` and ``/\\.ssh(/|$)``
+    refuses ``X/.SSH/id`` -- and the vocabulary is lower-case, so no folding.
+    """
+
+    from local_operator.supplements import (
+        denylist,  # local: lazy like the module itself
+    )
+
+    names, suffixes, prefixes, parts, patterns = denylist._composed()
+    leaf_globs = {
+        *names,
+        *denylist._EXTRA_NAMES,
+        *patterns,
+        *(pattern for pattern, _rule in denylist._EXTRA_PATTERNS),
+    } - _KERNEL_EXCLUDED_PATTERNS
+    leaves = [_glob_to_seatbelt_regex(glob) for glob in sorted(leaf_globs)]
+    leaves += [f"/[^/]*{_seatbelt_regex_literal(suffix)}$" for suffix in sorted(suffixes)]
+    leaves += [f"/{_seatbelt_regex_literal(prefix)}[^/]*$" for prefix in sorted(prefixes)]
+    # ``prod.env.local``: a dotenv with a trailing qualifier, which no name,
+    # suffix or prefix rule above reaches (kept from the original list).
+    leaves.append(_DOTENV_REGEX)
+    # De-duplicated in order: the composed sources overlap (``*.pem`` is both a
+    # suffix and a credential glob), and one rule per meaning keeps the
+    # profile -- compiled on every command -- no larger than it must be.
+    filters = [
+        f'(require-all (regex #"{regex}") (require-not (vnode-type DIRECTORY)))'
+        for regex in dict.fromkeys(leaves)
+    ]
+    components = {*parts, *denylist._EXTRA_COMPONENTS} - _KERNEL_EXCLUDED_COMPONENTS
+    trees = [f"/{_seatbelt_regex_literal(component)}(/|$)" for component in sorted(components)]
+    for sequence, _rule in denylist._COMPONENT_SEQUENCES:
+        trees.append("/" + "/".join(_seatbelt_regex_literal(part) for part in sequence) + "(/|$)")
+    for directory, filename, _rule in denylist._DIR_FILE_PAIRS:
+        trees.append(f"/{_seatbelt_regex_literal(directory)}/{_seatbelt_regex_literal(filename)}$")
+    filters += [f'(regex #"{regex}")' for regex in dict.fromkeys(trees)]
+    return tuple(filters)
+
+
+@functools.lru_cache(maxsize=1)
+def _sandbox_apply_probe_reason() -> str | None:
+    """Why ``sandbox-exec`` cannot apply a profile here, or ``None`` if it can.
+
+    Cached for the life of the process: the answer is a property of the host
+    and of how lop was launched, neither of which changes mid-run, and the
+    probe is a ~16 ms spawn that would otherwise run per command.
+    """
+
+    try:
+        completed = subprocess.run(
+            [str(SANDBOX_EXEC), "-p", _PROBE_PROFILE, "/usr/bin/true"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{SANDBOX_EXEC} could not be run ({exc})"
+    if completed.returncode != 0:
+        detail = completed.stderr.decode(errors="replace").strip() or "no detail"
+        return f"{SANDBOX_EXEC} cannot apply a profile on this host ({detail})"
+    return None
+
+
+def shell_sandbox_unavailable_reason() -> str | None:
+    """Why a write-confined shell cannot run here, or ``None`` when it can.
+
+    The static check first (platform, binary present), then the cached apply
+    probe. Every caller that decides whether a scout HAS a shell, and every
+    spawn that decides whether to RUN one, reads this one answer, so the two
+    cannot disagree. SYNCHRONOUS and possibly a spawn on first use: from a
+    coroutine call :func:`shell_sandbox_unavailable_reason_async` instead.
+    """
+
+    return sandbox_unavailable_reason() or _sandbox_apply_probe_reason()
+
+
+def _probe_is_cached() -> bool:
+    """Whether the apply probe has already answered in this process.
+
+    ``getattr`` because tests replace the probe with a plain callable, which
+    has no cache and answers instantly -- treated as cached.
+    """
+
+    info = getattr(_sandbox_apply_probe_reason, "cache_info", None)
+    return info is None or info().currsize > 0
+
+
+async def shell_sandbox_unavailable_reason_async() -> str | None:
+    """The same answer as :func:`shell_sandbox_unavailable_reason`, off the loop.
+
+    The first probe is a ``subprocess.run`` with a 10 s timeout; on a wedged
+    host that would stall every session on the event loop for up to 10 s
+    (review round 1 R4 on PR #2987). So the FIRST probe runs on a worker
+    thread and populates the same ``lru_cache`` every later read hits; the
+    answer is then read through the synchronous function, so there is one
+    definition of it. Still fail closed: a probe that raises or exits non-zero
+    is a reason.
+    """
+
+    if sandbox_unavailable_reason() is None and not _probe_is_cached():
+        await asyncio.to_thread(_sandbox_apply_probe_reason)
+    return shell_sandbox_unavailable_reason()
+
+
+def shell_sandbox_known_unavailable_reason() -> str | None:
+    """The unavailability reason known WITHOUT spawning anything, or ``None``.
+
+    For synchronous callers on the event loop (a profile attached to a live
+    session): the full answer once the probe has run, else the static check
+    alone. ``None`` here does NOT mean the sandbox works -- only that nothing
+    yet says it does not -- which is safe because the shell's executor awaits
+    the full answer before every spawn and refuses rather than run unwrapped.
+    """
+
+    if _probe_is_cached():
+        return shell_sandbox_unavailable_reason()
+    return sandbox_unavailable_reason()
+
+
+def _secret_read_denials() -> tuple[str, ...]:
+    """The ``(deny file-read* ...)`` filters for credential stores.
+
+    Paths are RESOLVED because seatbelt matches the vnode's real path: a
+    ``/tmp``-style symlinked home or config dir spelled unresolved would match
+    nothing. Both the active config dir and the default ``~/.local-operator``
+    are covered, so an isolated ``LOCAL_OPERATOR_CONFIG_DIR`` does not leave
+    the operator's real store readable. The caller has already refused a
+    HOME or config root that :func:`profile_path_refusal` rejects
+    (:func:`_profile_roots_refusal`), so every interpolation here is safe.
+    """
+
+    home, config_roots = _profile_roots()
+    filters: list[str] = []
+    for root in config_roots:
+        filters.extend(f'(subpath "{root / rel}")' for rel in _CONFIG_SECRET_SUBPATHS)
+        # The ``credentials`` dir, ``credentials.env`` (+ backups) and
+        # ``auth.db`` (+ WAL/SHM) are matched by prefix so a sibling
+        # spelling the store writes later is covered too.
+        prefix = _seatbelt_regex_literal(str(root))
+        filters.append(f'(regex #"^{prefix}/(credentials|auth\\.db)")')
+        suffix = _seatbelt_regex_literal(_NETWORK_SECRETS_SUFFIX)
+        filters.append(f'(regex #"^{prefix}/network/networks/[^/]*{suffix}$")')
+    filters.extend(f'(subpath "{home / rel}")' for rel in _HOME_SECRET_SUBPATHS)
+    filters.extend(_derived_denial_filters())
+    return tuple(filters)
+
+
+def _profile_roots() -> tuple[Path, tuple[Path, ...]]:
+    """``(home, config roots)`` as the profile names them: resolved, sorted."""
+
+    from local_operator.paths import config_dir  # local: paths imports widely
+
+    home = Path.home().expanduser().resolve()
+    roots = {config_dir().expanduser().resolve(), home / ".local-operator"}
+    return home, tuple(sorted(roots))
+
+
+def _profile_roots_refusal(root: Path) -> str | None:
+    """Why a profile for ``root`` cannot be built safely, or ``None``.
+
+    Every path the profile interpolates: the write root, HOME and the config
+    roots. A HOME that cannot be written into the profile means the credential
+    denials cannot be either, so that refuses too -- fail closed.
+    """
+
+    home, config_roots = _profile_roots()
+    for path in (root, home, *config_roots):
+        refusal = profile_path_refusal(path)
+        if refusal is not None:
+            return refusal
+    return None
+
+
+@dataclass(frozen=True)
+class ShellWriteConfinement:
+    """A shell that reads the host, writes only under ``root``, and has no network.
+
+    The ``scout`` role's shell (see ``harness.subagent.READ_ONLY_SHELL_ROLES``).
+    Mirrors :class:`ToolConfinement`'s call-site surface (``from_context``,
+    ``wrap``, ``spawn_refusal``, ``temp_dir``) so ``execute_bash`` treats the
+    two the same way: wrap, or refuse -- never run unwrapped.
+    """
+
+    root: Path
+
+    @classmethod
+    def at(cls, root: str | Path) -> ShellWriteConfinement:
+        """A confinement for ``root``, resolved once (see :meth:`ToolConfinement.at`)."""
+
+        return cls(root=Path(root).expanduser().resolve())
+
+    @classmethod
+    def from_context(cls, context: ToolContext | None) -> ShellWriteConfinement | None:
+        """The write confinement a tool call carries, or ``None``.
+
+        ``getattr`` for the duck-typed contexts :meth:`ToolConfinement.
+        from_context` already tolerates: no field means not confined.
+        """
+
+        raw = getattr(context, "shell_write_root", None)
+        if not raw:
+            return None
+        return cls.at(raw)
+
+    def wrap(self, argv: Sequence[str]) -> list[str] | None:
+        """``argv`` under the write-confining sandbox, or ``None`` to refuse.
+
+        From a coroutine, await :func:`shell_sandbox_unavailable_reason_async`
+        first so the probe this reads is already cached (``execute_bash`` does).
+        """
+
+        if self.unavailable_reason() is not None:
+            return None
+        return [str(SANDBOX_EXEC), "-p", self.profile(), *argv]
+
+    def unavailable_reason(self) -> str | None:
+        """Why this confinement cannot be enforced here, or ``None``.
+
+        The host's answer, or a root/HOME the profile cannot carry safely
+        (:func:`profile_path_refusal`). Both refuse the command.
+        """
+
+        return _profile_roots_refusal(self.root) or shell_sandbox_unavailable_reason()
+
+    def spawn_refusal(self) -> str:
+        """The failure-closed sentence for a host that cannot enforce the boundary."""
+
+        reason = self.unavailable_reason() or "an unknown reason"
+        return (
+            f"refused: this shell may write only under {self.root} and this host "
+            f"cannot enforce that for shell children ({reason}); a read-only "
+            "session refuses to run commands it cannot confine"
+        )
+
+    def temp_dir(self) -> Path:
+        """The shell's temp directory INSIDE the root, created on demand."""
+
+        temp = self.root / "tmp"
+        temp.mkdir(parents=True, exist_ok=True)
+        return temp
+
+    def profile(self) -> str:
+        """The seatbelt profile for this root, as sandbox-exec's ``-p`` text.
+
+        RULE ORDER IS LOAD-BEARING, and the credential denials come LAST. On
+        this host a later conflicting rule wins over an earlier one when both
+        carry a filter, and a filtered deny beats the unfiltered
+        ``(allow file-read*)`` in either order (measured; see
+        :func:`kernel_exposed_read_subtrees`). Putting the denies after every
+        allow is correct under both behaviours, so a future change to how the
+        unfiltered allow ranks cannot silently reopen them.
+
+        Network: there is NO network allow anywhere, which is the actual
+        guarantee -- the deny line is documentation (see
+        :meth:`ToolConfinement.profile`'s fourth point for why a network allow
+        defeats the deny wherever it sits). Mach: the same two-name allowlist
+        as :class:`ToolConfinement`. Signals: only within the same sandbox,
+        so the shell cannot ``kill`` the operator's processes.
+        """
+
+        refusal = _profile_roots_refusal(self.root)
+        if refusal is not None:
+            # Never build the string: ``wrap`` refuses first, and a direct
+            # caller must not get a profile whose meaning a path could change.
+            raise ValueError(refusal)
+        writes = " ".join(f'(literal "{path}")' for path in _SYSTEM_WRITE_LITERALS)
+        mach = " ".join(f'(global-name "{name}")' for name in _MACH_LOOKUP_GLOBAL_NAMES)
+        denials = " ".join(_secret_read_denials())
+        return (
+            "(version 1)\n"
+            "(deny default)\n"
+            "(allow process-fork)\n"
+            "(allow process-exec)\n"
+            "(allow signal (target same-sandbox))\n"
+            "(allow sysctl-read)\n"
+            f"(allow mach-lookup {mach})\n"
+            "(deny network*)\n"
+            "(allow file-read*)\n"
+            f'(allow file-write* (subpath "{self.root}") {writes})\n'
+            '(allow file-ioctl (literal "/dev/null") (literal "/dev/tty"))\n'
+            f"(deny file-read* {denials})\n"
+        )
+
+
+def shell_write_confinement_of(context: ToolContext | None) -> ShellWriteConfinement | None:
+    """The call-site spelling of :meth:`ShellWriteConfinement.from_context`."""
+
+    return ShellWriteConfinement.from_context(context)

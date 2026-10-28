@@ -51,16 +51,56 @@ Kind = Literal["agent", "team", "skill"]
 T = TypeVar("T")
 
 
+#: ADDRESSING ONE ITEM. ``name`` is the original addressing and stays exactly as
+#: it was for the CLI, the TUI and released renderers -- but a display name is
+#: not an identity: ``create_agent`` refuses only an EXACT duplicate and a rename
+#: checks nothing, while the hub checks match names case-insensitively, so
+#: ``name: "coder"`` selects both ``Coder`` and ``coder`` and one Apply would
+#: merge into two agents. ``local_id`` (the registry id / skill link id the
+#: ``/hub/links`` rows carry) addresses exactly one row of exactly ``kind``;
+#: renderers gate on the ``hub_items_by_id`` capability before sending it.
+#: ``pattern`` refuses a whitespace-only id as a 422, like the empty string: no
+#: registry or skill link id is blank, so the request is malformed rather than an
+#: unknown item. ``name`` is deliberately left alone: its whitespace-only form has
+#: always been a 404 (its lookup strips), and released callers keep that answer.
+LocalId = Field(default=None, min_length=1, max_length=128, pattern=r"\S")
+
+
+def _one_address(
+    kind: str | None, name: str | None, local_id: str | None, *, required: bool
+) -> None:
+    """Refuse an ambiguous address: never both arms, and ``local_id`` needs its kind.
+
+    ``required`` is the apply/retry rule (exactly one arm); check may name
+    neither (check everything). An id without a kind is refused rather than
+    searched across kinds, so an id can never land on a row of another kind.
+    """
+
+    if name is not None and local_id is not None:
+        raise ValueError("pass either name or local_id, not both")
+    if required and name is None and local_id is None:
+        raise ValueError("pass name or local_id")
+    if local_id is not None and kind is None:
+        raise ValueError("local_id needs kind")
+
+
 class HubCheck(Input):
     request_id: RequestID
     kind: Kind | None = None
     name: str | None = Field(default=None, min_length=1, max_length=128)
+    local_id: str | None = LocalId
+
+    @model_validator(mode="after")
+    def _addressed(self) -> "HubCheck":
+        _one_address(self.kind, self.name, self.local_id, required=False)
+        return self
 
 
 class HubApply(Input):
     request_id: RequestID
     kind: Kind
-    name: str = Field(min_length=1, max_length=128)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    local_id: str | None = LocalId
     prefer: Literal["local", "remote"] | None = None
     acknowledge_unknown_baseline: bool = False
     #: ``replace`` discards one side wholesale and is the ONLY such operation; it
@@ -77,6 +117,16 @@ class HubApply(Input):
     visibility: Literal["public", "org"] | None = None
     tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
 
+    @model_validator(mode="after")
+    def _addressed(self) -> "HubApply":
+        _one_address(self.kind, self.name, self.local_id, required=True)
+        if self.resolve_source and self.local_id is not None:
+            # The resolve arm looks its row up by name in the registry
+            # (``service.resolve_source``); an id there would be silently
+            # ignored, so it is refused rather than half-honoured.
+            raise ValueError("resolve_source addresses its item by name")
+        return self
+
 
 class HubApplyAll(Input):
     request_id: RequestID
@@ -86,7 +136,36 @@ class HubApplyAll(Input):
 class HubRetry(Input):
     request_id: RequestID
     kind: Kind
-    name: str = Field(min_length=1, max_length=128)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    local_id: str | None = LocalId
+
+    @model_validator(mode="after")
+    def _addressed(self) -> "HubRetry":
+        _one_address(self.kind, self.name, self.local_id, required=True)
+        return self
+
+
+def _addressed_checks(svc: Any, ctx: Any, kinds: tuple[str, ...], body: Any) -> list[Any]:
+    """Check exactly the item(s) ``body`` addresses, refusing an unmatched address 404.
+
+    The id arm narrows through ``only_ids`` (already honoured per kind by every
+    checker) with ``names=None``; the name arm is byte-for-byte the call these
+    routes made before ``local_id`` existed. Apply and retry hand the result to
+    ``apply_items(checks=...)``, which acts on exactly those checks, so narrowing
+    HERE is what makes the merge touch one row. The 404 wording is shared so an
+    unknown id and an unknown name are indistinguishable in shape.
+    """
+
+    if body.local_id is not None:
+        checks = svc.check_items(ctx, kinds=kinds, only_ids={body.local_id})
+        if not checks:
+            raise _refusal(404, f"no linked {body.kind} with id {body.local_id!r}")
+        return checks
+    names = [body.name] if body.name else None
+    checks = svc.check_items(ctx, kinds=kinds, names=names)
+    if body.name and not checks:
+        raise _refusal(404, f"no linked {body.kind or 'item'} named {body.name!r}")
+    return checks
 
 
 class SkillPull(Input):
@@ -188,6 +267,33 @@ class SkillPublish(Input):
                 raise ValueError("a dry-run publication cannot carry a confirmation")
         elif self.preview_receipt is None or self.confirm_publish is not True:
             raise ValueError("an initial skill publication requires its reviewed draft receipt")
+        return self
+
+
+class HubPush(Input):
+    """``POST /v1/desktop/hub/updates/push`` -- the UI's ``hub.push`` arm.
+
+    Body is ``desktop-contract.ts``'s exact snake_case spelling (zod-pinned there):
+    ``dry_run: true`` asks for a PREVIEW and may carry no receipt or confirmation;
+    ``dry_run: false`` is the CONFIRM and must carry the reviewed ``preview_receipt``
+    with ``confirm_publish: true``. Enforced here as the renderer does, so an
+    unreviewed publication cannot be expressed by omitting a field.
+    """
+
+    request_id: RequestID
+    link_id: str = Field(min_length=1, max_length=256)
+    direction: Literal["push"]
+    dry_run: StrictBool
+    preview_receipt: str | None = Field(default=None, min_length=1, max_length=4096)
+    confirm_publish: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def _reviewed_proposal(self) -> "HubPush":
+        if self.dry_run:
+            if self.preview_receipt is not None or self.confirm_publish is not None:
+                raise ValueError("a push preview cannot carry a confirmation")
+        elif self.preview_receipt is None or self.confirm_publish is not True:
+            raise ValueError("a confirmed publication requires its reviewed preview receipt")
         return self
 
 
@@ -336,10 +442,7 @@ async def check(
 
     def work(ctx: Any) -> dict[str, Any]:
         kinds = (body.kind,) if body.kind else ("agent", "team", "skill")
-        names = [body.name] if body.name else None
-        checks = svc.check_items(ctx, kinds=kinds, names=names)
-        if body.name and not checks:
-            raise _refusal(404, f"no linked {body.kind or 'item'} named {body.name!r}")
+        checks = _addressed_checks(svc, ctx, kinds, body)
         return {
             "reports": [svc.check_report(c).to_json() for c in checks],
             "status": svc.status_snapshot(ctx),
@@ -383,6 +486,12 @@ async def apply(
         # are exactly the values the runtime checks above vouched for.
         requested_source: str = body.hub_source
         requested_visibility: Visibility = body.visibility
+        # The model validator refuses resolve_source with local_id and requires
+        # one address, so the name is present; this guard narrows it for pyright
+        # and keeps a future validator edit from passing None into the lookup.
+        if body.name is None:
+            raise _refusal(422, "resolve_source addresses its item by name")
+        requested_name: str = body.name
 
         def resolve_work(ctx: Any) -> dict[str, Any]:
             from local_operator.hub_sync.identity import LinkError as _IdentityError
@@ -404,7 +513,7 @@ async def apply(
                 record = svc.resolve_source(
                     ctx,
                     kind=body.kind,
-                    name=body.name,
+                    name=requested_name,
                     hub_source=source,
                     visibility=requested_visibility,
                     tenant_id=body.tenant_id,
@@ -457,9 +566,7 @@ async def apply(
         raise _refusal(422, "pass either prefer or replace, not both")
 
     def work(ctx: Any) -> dict[str, Any]:
-        checks = svc.check_items(ctx, kinds=(body.kind,), names=[body.name])
-        if not checks:
-            raise _refusal(404, f"no linked {body.kind} named {body.name!r}")
+        checks = _addressed_checks(svc, ctx, (body.kind,), body)
         report = svc.apply_items(
             ctx,
             kind=body.kind,
@@ -482,6 +589,140 @@ async def apply(
         return reply(
             await receipts(request).run(
                 "hub-apply:" + body.request_id, body.model_dump(), mutate, retry_safe=True
+            )
+        )
+
+
+#: Push refusals that are a STATE problem (the world moved since the review), so
+#: the renderer's "preview changed, review again" path -- which keys on exactly
+#: ``publication-preview-changed`` / ``remote-revision-changed`` -- handles them.
+_PUSH_STATE_REFUSALS = frozenset(
+    {
+        "publication-preview-changed",
+        "remote-revision-changed",
+        "policy-revision-changed",
+        "hub-moved",
+        "local-concurrent-edit",
+        "lineage-not-clean",
+    }
+    | _BUNDLE_STATE_REFUSALS
+)
+
+
+def _push_refusal(code: str, message: str) -> HTTPException:
+    """One typed status per push refusal code, so no refusal is an untyped 500.
+
+    An absent or foreign hub row is ONE plain 404 (never a distinguishable 403 that
+    would confirm a private skill exists); a hub that refused for membership is the
+    403 the publish route already uses; an unreachable hub is the 502 retry class.
+    """
+
+    if code == "no-credential":
+        from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
+
+        return _refusal(401, ORG_LOGIN_REMEDY)
+    if code in ("unauthorized", "http-401"):
+        return _refusal(401, message, code="unauthorized")
+    if code in (
+        "link-not-found",
+        "skill-not-found",
+        "skill_not_found",
+        "hub-item-missing",
+        "http-404",
+    ):
+        return _refusal(404, message, code="link-not-found")
+    if code in ("not_a_member", "insufficient_role", "forbidden", "http-403"):
+        return _refusal(403, message, code=code)
+    if code in _PUSH_STATE_REFUSALS:
+        return _refusal(409, message, code=code)
+    if code in ("hub-upstream", "hub-error", "deadline"):
+        return _refusal(502, message, code=code)
+    return _refusal(422, message, code=code or None)
+
+
+@router.post("/v1/desktop/hub/updates/push", response_model=CRUDResponse)
+async def push(
+    body: HubPush,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """Republish ONE linked skill: PREVIEW first, then a CONFIRM that carries its receipt.
+
+    This is the desktop twin of ``lop skills push`` and runs the same engine
+    (``service.preview_link_push`` / ``confirm_link_push`` over ``push_item``); it
+    adds no merge or send path of its own.
+
+    * ``dry_run: true`` -- a local-only proposal plus a receipt. NOTHING is sent to
+      the hub and no link state changes.
+    * ``dry_run: false`` -- re-validates the receipt against the CURRENT local
+      bytes, link scope, policy revision and the hub's own revision, and only then
+      sends. A stale, expired, spent or foreign receipt, or a hub that moved, is a
+      typed 409 and nothing is sent. Replaying the same ``request_id`` answers the
+      recorded outcome; a NEW id with a spent receipt finds no receipt.
+    """
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    def work(ctx: Any) -> dict[str, Any]:
+        try:
+            if body.dry_run:
+                preview = svc.preview_link_push(ctx, link_id=body.link_id)
+                return {
+                    "reports": [],
+                    "status": svc.status_snapshot(ctx),
+                    "links": svc.links_snapshot(ctx),
+                    "preview": preview,
+                }
+            assert body.preview_receipt is not None  # the model validator guarantees it
+            outcome = svc.confirm_link_push(
+                ctx, link_id=body.link_id, preview_receipt=body.preview_receipt
+            )
+        except LinkError as error:
+            raise _push_refusal(getattr(error, "code", "") or "", str(error)) from None
+        report = outcome["report"]
+        state = outcome["state"]
+        result = {
+            "reports": [report],
+            "status": svc.status_snapshot(ctx),
+            "links": svc.links_snapshot(ctx),
+            "preview": None,
+        }
+        if state in ("pushed", "no-op"):
+            return result
+        if state in ("pending-reconciliation", "skipped"):
+            # UNCERTAIN OR DEFERRED, not final: the commit may have landed (or the
+            # outbox is pacing a retry). Recording this answer against the request
+            # id would replay it forever; ``Unclaimed`` lets the same-id retry run
+            # again, where ``push_item`` replays the stored intent verbatim rather
+            # than sending a fresh create.
+            from local_operator.server.utils.desktop_receipts import Unclaimed
+
+            raise Unclaimed(result)
+        # A settled refusal: a deterministic hub answer or a lost CAS. The receipt
+        # stays unspent so the person can review again; the status carries the cause.
+        if outcome.get("outage"):
+            # The hub produced NO DECISION (transport failure or 5xx): answered as the
+            # 502 retry class under ``hub-error`` rather than a 422 carrying the hub's
+            # own code (``internal``, ``http-500``). The renderer maps ``hub-error``
+            # to its transport sentence where it words a reason
+            # (``hub-link-copy.ts`` ``hubReasonText``); the push action itself shows
+            # its generic action-failed message today. Keep the class: it is what
+            # tells a retrying client this is not a verdict on the request. The
+            # receipt stays valid.
+            raise _refusal(
+                502, "the hub could not be reached; a retry is scheduled", code="hub-error"
+            )
+        raise _push_refusal(str(outcome["reason"] or ""), f"the hub did not accept it ({state})")
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-push:" + body.request_id, body.model_dump(), mutate, retry_safe=True
             )
         )
 
@@ -532,17 +773,15 @@ async def retry(
     from local_operator.hub_sync import service as svc
 
     def work(ctx: Any) -> dict[str, Any]:
-        svc.clear_retry(ctx, body.kind, body.name)
-        checks = svc.check_items(ctx, kinds=(body.kind,), names=[body.name])
-        if not checks:
-            raise _refusal(404, f"no linked {body.kind} named {body.name!r}")
+        svc.clear_retry(ctx, body.kind, body.name, local_id=body.local_id)
+        checks = _addressed_checks(svc, ctx, (body.kind,), body)
         auto = ctx.settings().auto_for(body.kind)
         report = svc.apply_items(ctx, kind=body.kind, checks=checks, auto=True, dry_run=not auto)
         _raise_for(report.reports)
         if any(r.outcome == "would-merge" for r in report.reports):
             # Manual mode: the retry only PROVED the update computes. Retire the stale
             # failure so the row offers the update rather than another retry (U10).
-            svc.clear_failure(ctx, body.kind, body.name)
+            svc.clear_failure(ctx, body.kind, body.name, local_id=body.local_id)
         return {
             "reports": [r.to_json() for r in report.reports],
             "status": svc.status_snapshot(ctx),

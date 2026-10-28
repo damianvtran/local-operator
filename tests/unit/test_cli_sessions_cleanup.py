@@ -15,6 +15,7 @@ import argparse
 import io
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from local_operator.cli import (
 from local_operator.config import ConfigManager
 from local_operator.session import delegated_retention as dr
 from local_operator.session.cleanup import CLEANUP_LOG_NAME, mark_store
+from tests.unit.session.cleanup_store_fixture import idle_pads
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -381,6 +383,16 @@ def test_a_real_run_with_nothing_to_do_never_promises_a_removal(store: Path, cap
 # -- the scratchpad-content block --------------------------------------------
 
 
+def _settle(store: Path) -> None:
+    """Age every pad entry so this store models an IDLE pad (see ``idle_pads``).
+
+    Called AFTER a test writes its content: creating a file bumps its parent
+    directory's mtime, and a fresh directory keeps the pad just as surely as a
+    fresh file. A test that wants a pad to stay FRESH simply does not call it.
+    """
+    idle_pads(store, now=time.time())
+
+
 def _content_pad(store: Path, name: str) -> Path:
     """A scratchpad for a delegated session the RECORD pass keeps.
 
@@ -398,6 +410,7 @@ def _content_pad(store: Path, name: str) -> Path:
     directory = _delegated(store, name)
     pad = directory / "scratchpad"
     pad.mkdir()
+    _settle(store)
     return pad
 
 
@@ -414,6 +427,9 @@ def _big_log(path: Path, *, size_mb: int = 11, age_h: float = 24) -> Path:
 def test_dry_run_shows_the_scratchpad_content_block(store: Path, capsys: Any) -> None:
     pad = _content_pad(store, "content-kid-01")
     big = _big_log(pad / "desktop-suite.log")
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(dry_run=True)) == 0
     out = capsys.readouterr().out
     assert "scratchpad content: would reclaim 1 pad(s)" in out
@@ -425,6 +441,9 @@ def test_dry_run_shows_the_scratchpad_content_block(store: Path, capsys: Any) ->
 def test_json_carries_the_scratchpad_content_block(store: Path, capsys: Any) -> None:
     pad = _content_pad(store, "content-kid-02")
     big = _big_log(pad / "desktop-suite.log")
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
     payload = json.loads(capsys.readouterr().out)
     scratch = payload["delegated"]["scratchpad"]
@@ -444,6 +463,9 @@ def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
     big_size = big.stat().st_size
     monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args()) == 0
     out = capsys.readouterr().out
     assert (
@@ -492,6 +514,26 @@ def test_a_recently_touched_pad_is_kept_by_the_content_phase(store: Path, capsys
     assert "Reclaimed scratchpad content" not in capsys.readouterr().out
 
 
+def test_a_freshly_written_pad_is_kept_and_the_cli_names_the_reason(
+    store: Path, capsys: Any
+) -> None:
+    """The FLOOR as a positive, through the CLI text.
+
+    Every other test here settles its pads first; this one deliberately leaves
+    one fresh, so the recency floor is exercised as something that keeps work
+    rather than as a fixture nuisance.
+    """
+    pad = _content_pad(store, "content-kid-09")
+    _settle(store)
+    big = _big_log(pad / "desktop-suite.log")
+    # Creating the log bumped the pad's own mtime: fresh by construction now.
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "scratchpad content: would reclaim 0 pad(s)" in out
+    assert "content kept content-kid-09  (pad edited within 12h)" in out
+    assert big.exists()
+
+
 def test_the_scratchpad_switch_off_reclaims_nothing_and_says_so(store: Path, capsys: Any) -> None:
     _config(store, delegated={"scratchpad": {"enabled": False}})
     pad = _content_pad(store, "content-kid-04")
@@ -510,6 +552,9 @@ def test_force_runs_the_content_phase_when_the_scratchpad_switch_is_off(
     _config(store, delegated={"scratchpad": {"enabled": False}})
     pad = _content_pad(store, "content-kid-05")
     big = _big_log(pad / "desktop-suite.log")
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(force=True, yes=True)) == 0
     assert not big.exists()
 
@@ -568,6 +613,9 @@ def test_apply_confines_content_to_the_previewed_pads(
             grown.append(_big_log(pad_y / "sibling-fail.log"))
 
     monkeypatch.setattr(cli_module, "_print_content", mutate)
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(yes=True)) == 0
     out = capsys.readouterr().out
     assert "Reclaimed scratchpad content from 1 session(s)" in out
@@ -654,6 +702,9 @@ def test_scratchpads_only_yes_reports_confirmed_true(store: Path, capsys: Any) -
     pad = _content_pad(store, "confirmed-kid")
     _big_log(pad / "desktop-suite.log")
 
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(scratchpads_only=True, yes=True, json=True)) == 0
     payload = json.loads(capsys.readouterr().out)
 
@@ -670,6 +721,9 @@ def test_an_interactive_confirmation_and_a_decline_both_report_their_answer(
 
     monkeypatch.setattr("sys.stdin", io.StringIO("no\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert sessions_cleanup_command(_args(json=True)) == 2
     declined = json.loads(capsys.readouterr().out)
     assert declined["confirmed"] is False
@@ -784,6 +838,9 @@ def _copy_session(
 def test_the_copy_report_lists_the_class_and_removes_nothing(store: Path, capsys: Any) -> None:
     reference, copy = _copy_session(store)
 
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert (
         sessions_cleanup_command(
             _args(dry_run=True, report_non_git_copies=True, reference_repo=[str(reference)])
@@ -879,6 +936,9 @@ def test_the_copy_report_shows_a_configured_operator_hold(store: Path, capsys: A
 def test_the_copy_report_json_carries_every_row(store: Path, capsys: Any) -> None:
     reference, _copy = _copy_session(store)
 
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert (
         sessions_cleanup_command(
             _args(
@@ -959,6 +1019,9 @@ def test_the_copy_report_honours_the_delegated_window_override(store: Path, caps
     """A 10 h pad is inside 48 h and past 2 h: the override IS the preview."""
     reference, _copy = _copy_session(store, age_hours=10)
 
+    # The pads above are IDLE: the content layer's recency floor would
+    # (correctly) keep content written a second ago.
+    _settle(store)
     assert (
         sessions_cleanup_command(
             _args(
@@ -991,3 +1054,290 @@ def test_the_copy_report_honours_the_delegated_window_override(store: Path, caps
     assert payload["window_hours"] == 2
     assert payload["would_reclaim_now"] == 1
     assert payload["proof_ok_within_window"] == 0
+
+
+# -- a dry run that streams on a terminal and is unchanged everywhere else -----
+#
+# On the operator's 4,716-directory store the preview ran ~390 s and printed
+# nothing until the last pass finished. A terminal now sees the policy lines at
+# once, one updating status line, and each decided row as it is decided; a pipe
+# or file keeps the block layout it always had, and --json stays one object.
+
+
+def _tty(monkeypatch: pytest.MonkeyPatch, capsys: Any, value: bool) -> None:
+    # capsys swaps ``sys.stdout`` for a capture object that is never a tty.
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: value, raising=False)
+    # A CI box may have no TERM at all, which the stream (rightly) reads as "plain".
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+
+def _pad(root: Path, name: str, size: int = 100) -> None:
+    pad = root / "sessions" / name / "scratchpad"
+    pad.mkdir(parents=True, exist_ok=True)
+    (pad / "f").write_bytes(b"x" * size)
+
+
+def test_a_terminal_sees_the_policy_lines_before_any_pass_runs(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config(store, enabled=True, remove_empty=True)
+    _delegated(store, "kid-old-0001")
+    _tty(monkeypatch, capsys, True)
+    at_call: dict[str, str] = {}
+    real = dr.run_delegated_pass
+
+    def probe(*args: Any, **kwargs: Any) -> Any:
+        at_call["out"] = capsys.readouterr().out  # what the user had seen BEFORE the pass
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dr, "run_delegated_pass", probe)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    seen = at_call["out"]
+    assert seen.startswith("== Your conversations (parent sessions) ==")
+    assert "policy: enabled=on" in seen
+    assert "== Delegated work (subagents and background sessions) ==" in seen
+    assert "policy: on, remove delegated sessions idle over 48h" in seen
+
+
+def test_streamed_rows_appear_once_and_the_summary_still_closes_the_section(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _delegated(store, "kid-old-0001")
+    _delegated(store, "kid-old-0002")
+    _delegated(store, "kid-new-0001", age_h=1)
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert out.count("would remove kid-old-0001") == 1
+    assert out.count("would remove kid-old-0002") == 1
+    assert out.count("kept         kid-new-0001") == 1
+    assert "2 delegated sessions; " not in out or "would remove 2" in out
+    assert "nothing was removed (dry run)" in out
+    assert (store / "sessions" / "kid-old-0001").exists(), "a dry run removes nothing"
+    # No status line is left behind: every \r is followed by the erase code.
+    assert "\r" not in out.replace("\r\x1b[K", "")
+
+
+def test_a_pipe_gets_the_block_layout_with_no_control_codes(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _delegated(store, "kid-old-0001")
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\r" not in out
+    order = [
+        out.index("== Your conversations (parent sessions) =="),
+        out.index("parent class: off"),
+        out.index("== Delegated work (subagents and background sessions) =="),
+        out.index("1 delegated sessions;"),
+        out.index("would remove kid-old-0001"),
+        out.index("== Scratchpads =="),
+        out.index("nothing was removed (dry run)"),
+    ]
+    assert order == sorted(order)
+
+
+def test_json_is_one_object_whatever_the_terminal(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _delegated(store, "kid-old-0001")
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)  # raises if anything else was printed
+    assert payload["outcome"] == "dry-run"
+    assert [row["session"] for row in payload["delegated"]["removed"]] == ["kid-old-0001"]
+    assert "budget_exhausted" not in payload["scratchpads"]
+
+
+def test_a_budgeted_dry_run_audit_says_it_stopped_and_where_the_full_one_is(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session import scratchpad_audit
+
+    for index in range(6):
+        _delegated(store, f"kid-old-{index:04d}")
+        _pad(store, f"kid-old-{index:04d}")
+    monkeypatch.setattr(scratchpad_audit, "DRY_RUN_AUDIT_BUDGET_S", 0.0)
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    # D5: the HEADLINE is the partial count and a floor, not the store's total,
+    # and the full-audit command sits on its own line.
+    assert "1 of 6 session pad(s) audited (partial); at least " in out
+    assert "lower bound" in out and "ranks only the pads reached" in out
+    assert "\n  full audit: lop sessions cleanup --scratchpads-only --dry-run\n" in out
+
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    audit = json.loads(capsys.readouterr().out)["scratchpads"]
+    assert audit["budget_exhausted"] is True and audit["total_pads"] == 6 and audit["count"] == 1
+
+
+def test_scratchpads_only_dry_run_audits_every_pad_with_no_budget(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session import scratchpad_audit
+
+    for index in range(6):
+        _delegated(store, f"kid-old-{index:04d}")
+        _pad(store, f"kid-old-{index:04d}")
+    monkeypatch.setattr(scratchpad_audit, "DRY_RUN_AUDIT_BUDGET_S", 0.0)
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True, scratchpads_only=True)) == 0
+    out = capsys.readouterr().out
+    assert "6 session pad(s)" in out and "audit stopped" not in out
+
+
+def test_a_pinned_delegated_session_is_kept_by_the_cli_dry_run(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _delegated(store, "kid-pinned-01")
+    _delegated(store, "kid-old-0001")
+    (store / "sidebar-pins.json").write_text(json.dumps(["kid-pinned-01"]))
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "kept         kid-pinned-01  (pinned by the operator)" in out
+    assert "would remove kid-old-0001" in out and "would remove kid-pinned-01" not in out
+
+
+def _many_old(store: Path, count: int) -> None:
+    for index in range(count):
+        _delegated(store, f"kid-old-{index:04d}")
+
+
+def test_the_screen_never_goes_quiet_past_the_row_cap(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1: after the text cap rows stop printing but the status keeps counting."""
+    _many_old(store, _CLEANUP_TEXT_ROWS + 130)
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    frames = [f for f in out.replace("\x1b[K", "").split("\r") if f.startswith("  deciding")]
+    assert frames, "no deciding heartbeat at all"
+    # The last frame is the last multiple of the heartbeat at or below the count.
+    total = _CLEANUP_TEXT_ROWS + 130
+    assert frames[-1].startswith(
+        f"  deciding… {total // dr.DECIDE_PROGRESS_EVERY * dr.DECIDE_PROGRESS_EVERY}/{total} ("
+    )
+    assert out.count("would remove kid-old-") == _CLEANUP_TEXT_ROWS
+
+
+def test_the_first_scan_frame_already_carries_the_total(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _many_old(store, 3)
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out.replace("\x1b[K", "")
+    assert any(f.startswith("  scanning sessions… 0/") for f in out.split("\r"))
+
+
+@pytest.mark.parametrize("env", [{"TERM": "dumb"}, {"NO_COLOR": "1"}])
+def test_a_plain_terminal_gets_no_cursor_or_erase_codes(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    """D2: TERM=dumb / NO_COLOR keep the streamed rows but print no control bytes."""
+    _many_old(store, 3)
+    _tty(monkeypatch, capsys, True)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\r" not in out
+    assert out.startswith("== Your conversations (parent sessions) ==")
+    assert out.count("would remove kid-old-0001") == 1
+
+
+def test_the_status_line_is_cut_to_the_terminal_width(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: a narrow pane must not wrap the status into stacked copies."""
+    _many_old(store, 3)
+    _tty(monkeypatch, capsys, True)
+    monkeypatch.setattr(
+        "shutil.get_terminal_size", lambda fallback=(80, 24): os.terminal_size((24, 24))
+    )
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out.replace("\x1b[K", "")
+    frames = [
+        f for f in out.split("\r") if f.startswith("  scanning") or f.startswith("  deciding")
+    ]
+    assert frames and all(len(f.split("\n")[0]) <= 23 for f in frames), frames
+
+
+def test_kept_rows_share_the_removal_rows_name_column(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: interleaved on a terminal, the reasons line up with the table."""
+    _delegated(store, "kid-old-0001")
+    _delegated(store, "kid-new-0001", age_h=1)
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "  kept         kid-new-0001  (inside the 48h window" in out  # 12-wide name + 2 spaces
+    _tty(monkeypatch, capsys, False)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    assert "  kept         kid-new-0001  (inside the" in capsys.readouterr().out
+
+
+def test_a_long_kept_name_is_cut_to_the_shared_column(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4: a name wider than the 12-cell session column must not shift the reason."""
+    _delegated(store, "kid-old-0001")
+    _delegated(store, "a-rather-long-session-name", age_h=1)
+    _delegated(store, "kid-new-0001", age_h=1)  # exactly 12 cells: the column's width
+    _tty(monkeypatch, capsys, True)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    # Strip BEFORE splitting: str.splitlines() treats the \r as a line break.
+    lines = capsys.readouterr().out.replace("\r\x1b[K", "").splitlines()
+    kept = [ln for ln in lines if "kept" in ln and "content kept" not in ln]
+    long_line = next((ln for ln in kept if "a-rather" in ln), None)
+    short_line = next((ln for ln in kept if "kid-new-0001" in ln), None)
+    assert long_line and short_line, kept
+    # 11 characters and an ellipsis fill the 12-cell column; the reason starts at
+    # the same cell as on a row whose id is exactly 12 wide.
+    # A permanent row follows the erased status text on the same capture line, so
+    # compare each row from its own first cell, not from the start of the line.
+    long_row = long_line[long_line.index("  kept") :]
+    short_row = short_line[short_line.index("  kept") :]
+    assert long_row.startswith("  kept         a-rather-lo…  (")
+    assert long_row.index("(") == short_row.index("(")
+
+
+def test_an_interrupt_clears_the_status_line_before_the_traceback(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: Ctrl-C mid-scan must not leave ``scanning sessions…`` on the line."""
+    _many_old(store, 3)
+    _tty(monkeypatch, capsys, True)
+
+    def interrupted(*_a: Any, **kw: Any) -> Any:
+        kw["on_progress"]("scan", 256, 1000, 0.1)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dr, "run_delegated_pass", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        sessions_cleanup_command(_args(dry_run=True))
+    # Erased AND ended: the terminal's echoed ^C must not stay glued to the traceback.
+    assert capsys.readouterr().out.endswith("\r\x1b[K\n")
+
+
+def test_each_phase_reports_its_own_elapsed_time(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D7: a phase's elapsed time starts at the phase, not at the pass."""
+    from local_operator.cli import _CleanupStream
+
+    clock = iter([100.0, 100.0, 150.0, 150.0])
+    monkeypatch.setattr("local_operator.cli.time.monotonic", lambda: next(clock))
+    _tty(monkeypatch, capsys, True)
+    stream = _CleanupStream(True)
+    beat = stream.progress_callback()
+    beat("content", 32, 100, 149.0)  # the pass has run 149 s; the phase just began
+    beat("content", 64, 100, 190.0)
+    frames = capsys.readouterr().out.replace("\x1b[K", "").split("\r")
+    assert "(0s)" in frames[1] and "(50s)" in frames[2], frames

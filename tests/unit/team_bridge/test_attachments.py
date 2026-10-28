@@ -444,6 +444,22 @@ async def test_runner_sends_images_in_the_single_isolated_user_turn() -> None:
         await blind.acall("PROMPT", default_model="m", images=[(b"x", "image/png")])
     assert len(captured) == 1
 
+    # D5 fails closed on an UNSTATED capability too: a model nothing described
+    # has ``supports_images=True`` only as the spec builder's default, which is
+    # not knowledge that the screener sees the pixels (PR #3071 review m2).
+    undescribed = ScreenModelRunner(
+        stream_fn,
+        DefaultSelection(
+            provider="p",
+            model_id="m",
+            spec=spec.model_copy(update={"supports_images_stated": False}),
+            approved_identities=frozenset({"m"}),
+        ),
+    )
+    with pytest.raises(Exception):
+        await undescribed.acall("PROMPT", default_model="m", images=[(b"x", "image/png")])
+    assert len(captured) == 1
+
 
 # --------------------------------------------------------------------------
 # connector: screen fetch -> screen -> admit

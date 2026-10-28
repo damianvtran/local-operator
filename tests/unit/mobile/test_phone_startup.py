@@ -99,6 +99,9 @@ def fixture_children(monkeypatch):
     the machine-wide LRU cap, the stamp on detach) — so this fixture turns off a
     policy that is asserted elsewhere; it does not stop it being asserted.
     """
+    # These child-lifecycle tests exercise immediate readiness release. The
+    # production reconnect grace is pinned independently in test_stream_reliability.
+    monkeypatch.setattr("local_operator.mobile.daemon.PHONE_VIEW_GRACE_S", 0)
     _write_child_config()
     actual_spawn = asyncio.create_subprocess_exec
     children = []
@@ -276,7 +279,12 @@ async def test_a_daemon_that_inherited_a_warm_claim_does_not_pass_it_on(
     exec'd with rather than a helper's return value. The fixture's inert child
     still runs the product's registrant and reaper, and its own assertions on the
     argv contract run first.
+
+    THE DESKTOP BEARER rides the same test (#3002 review r2, R2-1): this was the one
+    runtime spawn that did not scrub it, so a mobile daemon inheriting it put it into
+    the session runtime's exec-time environment, readable by ``ps -E``.
     """
+    from local_operator.agent_shell import DAEMON_BEARER_ENVS
     from local_operator.session.runtime.types import ENGAGED_ENV
 
     inner = asyncio.create_subprocess_exec
@@ -288,6 +296,8 @@ async def test_a_daemon_that_inherited_a_warm_claim_does_not_pass_it_on(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", recording)
     monkeypatch.setenv(ENGAGED_ENV, "1")
+    for name in DAEMON_BEARER_ENVS:
+        monkeypatch.setenv(name, "synthetic-bearer-r2-1")
 
     daemon = MobileDaemon(password="pw")
     app = build_app(daemon)
@@ -313,6 +323,8 @@ async def test_a_daemon_that_inherited_a_warm_claim_does_not_pass_it_on(
             child_env = envs[-1]
             assert child_env["LOP_MOBILE_CHILD_RESUME"] == response.json()["session_id"]
             assert ENGAGED_ENV not in child_env, "a phone-start child inherited a warm claim"
+            leaked = [name for name in DAEMON_BEARER_ENVS if name in child_env]
+            assert not leaked, f"a phone-start child inherited the desktop bearer: {leaked}"
     finally:
         await stop_fixture(daemon, fixture_children)
 

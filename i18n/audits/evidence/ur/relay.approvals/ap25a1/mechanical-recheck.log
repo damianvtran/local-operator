@@ -1,0 +1,37 @@
+# Replayed by the implementation session on 2026-10-25 at 58102b3ae3cd0062e4f2dfee89f4b150bf330b68.
+# NOT the auditor's log: no command output was captured during the audit;
+# see record.json -> audit_log (absent) and mechanical_recheck.
+
+replay of the mechanical checks in the ledger row
+revision:  58102b3ae3
+namespace: relay.approvals
+locale:    ur
+en sha256:      321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125
+ur sha256: 27488a276d03dc539463ff9faffea57642912c0125362847d4299a7b19e03028
+
+keys: en=17 ur=17
+  missing: 0
+  unknown: 0
+ICU: 17 messages compared
+  parse errors: 0
+  argument-tuple mismatches: 0
+plurals: 0 plural message(s) 
+  cldr categories for ur: ['one', 'other']
+  lossless-branch problems: 0
+controls: bidi/zero-width=0
+  straight quotes: 0
+  double spaces: 0
+  English leakage (value == en): 0
+
+gate copy, side by side:
+  relay.approvals.gate.body_scope: 'پہلے دو اختیارات صرف اسی سیشن کو بدلتے ہیں؛ آخری والا اس کے بعد آنے والے تمام سیشنز کا ڈیفالٹ بدلتا ہے۔'
+  relay.approvals.gate.default_auto: 'تمام سیشنز میں بغیر پوچھے چلائیں (default auto)'
+  relay.approvals.gate.refused_nothing_changed: 'مسترد — کچھ تبدیل نہیں ہوا'
+  relay.approvals.gate.unpaired_default_auto: 'تمام سیشنز میں بغیر پوچھے چلانے کے لیے بھی جوڑا ہوا فون درکار ہے۔'
+
+the three approval-gate choices, side by side:
+  relay.asks.gate.keep_asking: 'پوچھتے رہیں (ask)'
+  relay.asks.gate.run_without: 'بغیر پوچھے چلائیں (auto)'
+  relay.approvals.gate.default_auto: 'تمام سیشنز میں بغیر پوچھے چلائیں (default auto)'
+
+RESULT: PASS — mechanical parity holds at the audited bytes

@@ -1,0 +1,415 @@
+{
+  "tui.notifications.ago": {
+    "note": "Detail meta: how long since the item last changed; age is preformatted (6m, 3h, 2d).",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.arg_read": {
+    "note": "Argument row under `/notifications ` in the command picker: `read` opens the page and asks y/n before marking every unread item read.",
+    "role": "TUI command picker argument row",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 44
+  },
+  "tui.notifications.ask_answer_hint": {
+    "note": "Footer when e was pressed on an open ask.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.ask_expires": {
+    "note": "Ask line in the detail; time preformatted (38m).",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 18
+  },
+  "tui.notifications.ask_kind": {
+    "note": "Detail header kind word for an open ask.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.asks_stay": {
+    "note": "Footer note when a dismiss skipped open asks (they can only be answered).",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.back": {
+    "note": "Detail's first segment; esc returns to the list.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 24
+  },
+  "tui.notifications.banner_digest_body": {
+    "note": "OS banner body under the digest title: the route to the inbox page.",
+    "role": "TUI OS banner (macOS notification)",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 60
+  },
+  "tui.notifications.banner_digest_title": {
+    "note": "OS banner title standing in for the high-priority items over the per-tick cap of 3. Name-free on purpose.",
+    "role": "TUI OS banner (macOS notification)",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 60
+  },
+  "tui.notifications.chip_high": {
+    "note": "Chip after a high-priority row's title, warning ink.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 6
+  },
+  "tui.notifications.confirm_dismiss_session": {
+    "note": "One-line confirm for E: dismiss every update in this conversation; source is the conversation title.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.confirm_mark_all": {
+    "note": "One-line confirm for A or /notifications read; count is every unread row in scope.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.dismissed": {
+    "note": "Footer receipt after a dismiss.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.empty_caught_up_body": {
+    "note": "Body under 'All caught up'; f is the filter key.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.empty_caught_up_title": {
+    "note": "Empty state on the Unread filter when everything is read.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.empty_filtered_title": {
+    "note": "Empty state when kind/priority filters exclude every row.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 40
+  },
+  "tui.notifications.empty_none_body": {
+    "note": "Body under 'No notifications yet'.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.empty_none_title": {
+    "note": "Empty state when the store has no items and no open asks.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.error_load": {
+    "note": "Body when the store read failed; error is a short technical reason.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.filter_all": {
+    "note": "Header right edge: the read filter shows read and unread rows.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.filter_unread": {
+    "note": "Header right edge: the read filter shows unread rows only.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.group_conversation": {
+    "note": "Header right edge: rows grouped by conversation.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.group_older": {
+    "note": "Section header: updates older than a week.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.group_time": {
+    "note": "Header right edge: rows grouped by day.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.group_today": {
+    "note": "Section header: updates changed today (local time).",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.group_waiting": {
+    "note": "Section header over open asks (questions blocking an agent).",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.group_week": {
+    "note": "Section header: updates changed 2–6 days ago.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.group_yesterday": {
+    "note": "Section header: updates changed yesterday.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.header_counts": {
+    "note": "Header line after the title and a ` · `: unread updates plus unread live asks; then open asks awaiting the operator's answer.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 40
+  },
+  "tui.notifications.header_partial": {
+    "note": "Appended to the header when the reel has more pages than the page painted; count is the number painted.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.hint_answer": {
+    "note": "Footer hint after a: answer the ask.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.hint_back": {
+    "note": "Footer hint after esc.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.hint_clear": {
+    "note": "Footer hint after esc in multi-select: clear the selection.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.hint_conversation": {
+    "note": "Footer hint after o: open the item's conversation.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 14
+  },
+  "tui.notifications.hint_dismiss": {
+    "note": "Footer hint after e.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 10
+  },
+  "tui.notifications.hint_dismiss_all": {
+    "note": "Footer hint after E in the detail.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.hint_filter": {
+    "note": "Footer hint after f.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.hint_open": {
+    "note": "Footer hint after ↵.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 10
+  },
+  "tui.notifications.hint_read": {
+    "note": "Footer hint after u (toggle read).",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.hint_select": {
+    "note": "Footer hint after space.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.hint_undo": {
+    "note": "Footer hint after z, shown for 6 s after a write.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.hint_unread": {
+    "note": "Footer hint after u when the row is read.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.just_now": {
+    "note": "Detail meta when the item changed under a minute ago (instead of `{age} ago`).",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.kind_asks": {
+    "note": "Header right edge: kind filter shows only questions agents are waiting on.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.kind_updates": {
+    "note": "Header right edge: kind filter shows only items agents flagged with notify.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.marked_read": {
+    "note": "Footer receipt after mark read / mark all read.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.marked_unread": {
+    "note": "Footer receipt after toggling a read row back to unread.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.no_body": {
+    "note": "Detail body when the agent posted only a title.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 40
+  },
+  "tui.notifications.nothing_to_dismiss": {
+    "note": "Receipt for E when the conversation has no dismissible updates.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.nothing_unread": {
+    "note": "Receipt for A or /notifications read when there is nothing to mark.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.pointer_unread": {
+    "note": "One line printed when /notifications is typed with an argument other than read.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.position": {
+    "note": "Detail header: this row's position in the list.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.priority_high": {
+    "note": "Header right edge: priority filter shows high only.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.priority_normal_up": {
+    "note": "Header right edge: priority filter hides low.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.refused_argument": {
+    "note": "Refusal for an unknown argument.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.restored": {
+    "note": "Footer receipt after z undo.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.row_now": {
+    "note": "List row's right-aligned time column when the item changed under a minute ago; 5-cell column.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 5
+  },
+  "tui.notifications.section_history": {
+    "note": "Detail section: previous revisions of a keyed item.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.section_links": {
+    "note": "Detail section: links the agent attached.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 20
+  },
+  "tui.notifications.section_projects": {
+    "note": "Detail section: projects linked to the conversation.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.section_waiting_here": {
+    "note": "Detail section: open asks from the item's conversation.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 40
+  },
+  "tui.notifications.seen_in_chat": {
+    "note": "Meta on a read row that was marked read when its flag line was on screen in the conversation.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.seen_live": {
+    "note": "Meta on a read row the operator saw arrive while in that conversation.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 12
+  },
+  "tui.notifications.selected": {
+    "note": "Header in multi-select mode; count of selected rows.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 16
+  },
+  "tui.notifications.sidebar_note": {
+    "note": "Sidebar footer fact beside `asks: N`: unread updates plus unread live asks. Lower case like its neighbours; hidden at zero. No emoji.",
+    "role": "TUI session sidebar footer",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 18
+  },
+  "tui.notifications.stale_skipped": {
+    "note": "Footer note: rows whose content moved after the page painted were not touched.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.title": {
+    "note": "Page title, first segment of the header line.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 20
+  },
+  "tui.notifications.unread_mark_all": {
+    "note": "Last line of the /unread completion-receipt listing when more rows exist than are shown. `/unread read` is a typed command: keep it verbatim. Replaces the pre-rename `tui.app.notifications.mark_all_read`, whose text named /notifications.",
+    "role": "TUI /unread completion-receipt listing",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.unread_mark_these": {
+    "note": "Last line of the /unread listing when every unread row is shown. `/unread read` verbatim.",
+    "role": "TUI /unread completion-receipt listing",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  },
+  "tui.notifications.update_kind": {
+    "note": "Detail header kind word for an item an agent posted with notify.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 8
+  },
+  "tui.notifications.updates_since": {
+    "note": "Detail meta: how many times the agent updated this keyed item since the first version at time (HH:MM).",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji",
+    "maxCells": 30
+  },
+  "tui.notifications.write_failed": {
+    "note": "Footer when a write failed; error is a short technical reason.",
+    "role": "TUI /notifications page",
+    "tone": "terse, operator-facing, sentence case, no emoji"
+  }
+}

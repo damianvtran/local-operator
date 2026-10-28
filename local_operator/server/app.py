@@ -31,6 +31,7 @@ from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
+from local_operator.server import early_paint_hold
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
@@ -47,6 +48,7 @@ from local_operator.server.routes import (
     desktop_catalogues,
     desktop_claim,
     desktop_code_requests,
+    desktop_credentials,
     desktop_hub,
     desktop_imports,
     desktop_librarian,
@@ -55,6 +57,7 @@ from local_operator.server.routes import (
     desktop_mcp,
     desktop_mesh,
     desktop_monitors,
+    desktop_notifications,
     desktop_preferences,
     desktop_profiles,
     desktop_projects,
@@ -182,6 +185,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # daemon STARTUP (the thing an attach waits on), and a raise inside a FastAPI
     # ``lifespan`` fails startup. The warm skips itself on a full disk or a busy
     # host, and drops the rest of its queue when the host gets busy mid-warm.
+    # It also starts the cold open's MODEL warm (``warm_model_metadata``): the
+    # first open in a fresh daemon otherwise paid a provider listing fetch plus
+    # the model-config imports inside its first frame.
     try:
         from local_operator.session.index_prewarm import start_index_prewarm
 
@@ -294,6 +300,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("librarian: boot ensure failed", exc_info=True)
 
     app.state.librarian_boot_task = asyncio.create_task(_librarian_boot_ensure())
+
+    # CONNECTOR CATCH-UP (D2a): a machine enrolled before the auto-install
+    # shipped has a committed owner but no LaunchAgent. One scheduled, best-
+    # effort sync at serve start is the repair; no poller is introduced. It is
+    # a task rather than an await because launchctl is synchronous and must
+    # never hold the server's readiness, and best-effort because the boot is
+    # the real work. The task name is ``bridge_connector_boot_task`` so a
+    # caller/test can settle it without inspecting this closure.
+    async def _bridge_connector_boot_sync() -> None:
+        try:
+            from local_operator.team_bridge.connector.install import (
+                sync_connector_service,
+            )
+
+            await asyncio.to_thread(sync_connector_service, config_dir)
+        except Exception:  # noqa: BLE001 — service catch-up must never fail boot
+            logger.debug("bridge connector boot catch-up failed", exc_info=True)
+
+    app.state.bridge_connector_boot_task = asyncio.create_task(_bridge_connector_boot_sync())
     app.state.job_manager = JobManager()
     # The SSE fan-out. One instance per process: it is the ONLY streaming
     # transport the server offers (the deprecated /v1/ws socket surface was
@@ -542,6 +567,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
     try:
+        # The boot warms are optional work nobody waits on: stop them first, so a
+        # model warm parked in a provider read cannot keep issuing requests while
+        # the server drains (PR #2992 review MINOR-1). Never raises.
+        try:
+            from local_operator.session.index_prewarm import cancel_prewarm
+
+            await cancel_prewarm()
+        except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
+            logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
         if hub_sync_task is not None:
             if app.state.hub_sync is not None:
                 app.state.hub_sync.stop()
@@ -954,6 +988,10 @@ app.include_router(desktop_mesh.router)
 # template declared earlier (`{id}/approve`/`{id}/deny` are two-segment children of a
 # path nothing else declares).
 app.include_router(desktop_approvals.router)
+# The op-generic TYPED approval routes (`{id}/approve-operation`, `{id}/apply-operation`):
+# their own router because `desktop_approvals.router`'s route set is a pinned contract.
+# Two-segment children of the same template family, so they collide with nothing above.
+app.include_router(desktop_credentials.router)
 # The CODE-REQUEST surface (`features.code_requests`): the per-session read of which PRs
 # and MRs this conversation touched, and the refresh affordance. Registered after the
 # approvals block for the reason each block above gives — FastAPI matches in declaration
@@ -973,6 +1011,11 @@ app.include_router(desktop_session_files.router)
 # the sessions router, so declaration order cannot shadow a session child; the
 # service's own content route is id-addressed and never accepts a path.
 app.include_router(desktop_library.router)
+# The operator's inbox (`features.notifications`). `/v1/desktop/notifications`
+# shares no prefix with the sessions router, and its literal children (`/count`,
+# `/seen`) are declared BEFORE the `/{item_id}` template inside the module, so
+# a literal can never be read as an item id.
+app.include_router(desktop_notifications.router)
 # The desktop's own PREFERENCES: `/v1/desktop/sidebar-layout`, the sidebar's
 # persisted destination order (capability `features.sidebar_layout`). It is a
 # single-segment literal path (`/v1/desktop/sidebar-layout`) with no child
@@ -1194,6 +1237,15 @@ async def desktop_supplement_response_policy(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+# REGISTERED LAST, SO OUTERMOST: a desktop first-paint ``/events`` open takes its
+# paint hold before any layer above runs, so other conversations' background
+# index scans yield during the stack's GIL hand-offs too (R1; the measurement
+# and the handoff contract are in ``server/early_paint_hold.py``). Anything
+# added after this line would run before the hold exists -- the test
+# ``test_the_real_app_takes_the_early_hold_outermost`` pins the position.
+app.add_middleware(early_paint_hold.EarlyPaintHoldMiddleware)
 
 
 # Include routers from the routes modules

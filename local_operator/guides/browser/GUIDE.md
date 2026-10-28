@@ -411,7 +411,49 @@ Same `browser` tool. Actions:
 - `request_access` / `await_access` / `cancel_access` (queued site approval — see above)
 - `download` (save what the page offers; see below)
 - `upload` (attach local files to a file input; see below)
+- `network_start` / `network_stop` / `network_read` / `network_clear` (record
+  and inspect the tab's own requests — desktop app host only; see below)
 - `close` (drop the surface and its tab)
+
+### Network capture: what the tab actually sent and received
+
+The desktop app's browser host can record the requests the session's own tab
+makes, which is how an agent CHECKS that a page called the endpoint it claims to
+(an OAuth callback, a sign-in POST) instead of inferring it from the page text.
+The extension and cmux hosts refuse these actions with a typed message: the
+extension opens a browser profile but keeps no network channel of its own.
+
+- `network_start` begins a capture on your tab. Metadata is the default and is
+  all most checks need: method, URL with query values removed, status, duration,
+  resource type, cache state, failure text, and the links between a redirect and
+  its destination.
+- Request bodies are opt-in and narrow: pass `url` with the exact origin and a
+  NON-ROOT path, plus `include_request_body=true` and `approved=true`. The body
+  goes to a private file whose path comes back in the result; it never enters the
+  conversation. Everything else keeps no body, and headers and cookies are never
+  captured.
+- `network_read` returns the buffer, newest last, with optional filters;
+  `network_stop` stops collecting but keeps what was read until the tab closes;
+  `network_clear` empties it. The buffer is a ring with entry and byte ceilings
+  and is discarded when the tab closes.
+- A capture belongs to the session that started it: another session reading the
+  same tab is refused rather than shown your traffic.
+
+Working example for a sign-in POST whose body you must inspect without printing
+it:
+
+```text
+open url="https://sso.example.com/login"        # reach the form page first
+network_start url="https://sso.example.com/auth/saml/acs" \
+  include_request_body=true approved=true      # scope = the EXACT POST path
+click selector="button[type=submit]"           # the POST happens here
+network_read url="https://sso.example.com/auth/saml/acs" \
+  include_request_body=true approved=true      # returns request_body_file
+```
+
+Start the capture BEFORE the click, and poll `network_read` for a moment: the
+body is pulled from the browser asynchronously, so a read issued the same
+millisecond as the response can legitimately arrive before the body does.
 
 ### Typing a credential: use `secret_ref`, never `text`
 

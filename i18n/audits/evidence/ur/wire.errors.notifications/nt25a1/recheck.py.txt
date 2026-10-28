@@ -1,0 +1,26 @@
+import sys, json, hashlib, re
+from pathlib import Path
+from local_operator.i18n.runtime import parse_message, message_arguments, plural_selectors, render_message
+from rich.cells import cell_len as wcswidth
+root=Path('/Users/damian/workspace/repos/lo-notifications-l1')
+ns=sys.argv[1]
+base=root/'local_operator/i18n/catalogues'
+enp=base/'en'/f'{ns}.json'; urp=base/'ur'/f'{ns}.json'; cp=base/'en'/f'{ns}.context.json'
+en=json.loads(enp.read_text()); ur=json.loads(urp.read_text()); context=json.loads(cp.read_text())
+print('COMMAND: isolated .venv/bin/python scratchpad/audit-core-ur.py '+ns)
+print('Parser: local_operator.i18n.runtime.parse_message from',sys.modules[parse_message.__module__].__file__)
+print('Key parity:',len(en),len(ur),'PASS' if set(en)==set(ur) else 'FAIL')
+for p in (enp,urp,cp):print('SHA256',p.relative_to(root),hashlib.sha256(p.read_bytes()).hexdigest())
+controls=[]
+for k,v in en.items():
+ a=parse_message(v); b=parse_message(ur[k]); ea=message_arguments(v); ta=message_arguments(ur[k]); ep=plural_selectors(v);tp=plural_selectors(ur[k]); print('PARSE/PARAMS',k,'PASS' if ea==ta and ep==tp else 'FAIL','en=',ea,'ur=',ta,'plural=',tp)
+ controls += [(k,hex(ord(c)))for c in ur[k] if re.match('[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]',c)]
+ params={'where':'/synthetic/config'} if 'where' in dict(ea) else {}
+ print('RENDER',k,repr(render_message(ur[k],params,'ur')))
+ if 'maxCells' in context[k]:print('WIDTH',k,'actual=',wcswidth(ur[k]),'budget=',context[k]['maxCells'],'PASS' if wcswidth(ur[k])<=context[k]['maxCells'] else 'FAIL')
+ if ns=='wire.slash.notifications_page':
+  print('Literal read token:',bool(re.search(r'\bread\b',ur[k])))
+  proposed='سوالات و ایجنٹ اپ ڈیٹس؛ read سب کو پڑھا قرار دے'
+  print('PROPOSED REPAIR',repr(proposed),'cells=',wcswidth(proposed),'budget=50','PASS' if wcswidth(proposed)<=50 else 'FAIL')
+print('Manual bidi controls:',len(controls),controls)
+print('No native/rendered RTL evidence; logical-order catalogue, preserved Latin token/path and static terminal-cell checks only.')

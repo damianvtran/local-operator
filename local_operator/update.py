@@ -975,16 +975,16 @@ def _downloadable_wheel(files: Any, version: str) -> bool:
 
     WHY THIS IS THE READINESS GATE: PyPI flips ``info.version`` when a
     release is created, before its files finish uploading (the publish
-    workflow uploads the pure wheel, the macOS wheel and the sdist in one
-    sequential pass). A checker that reads only the version string
-    therefore advertises a release the installer cannot yet download — the
-    operator's 2026-10-12 report, where the update offer appeared and
-    ``lop update`` exited 1 for 0.70.13 minutes after publication. The file
-    list in the SAME JSON document is the earliest signal that can agree
-    with the installer — provided it asks for the wheel the installer
-    would take (:func:`_installer_wheel`), not just any wheel. An sdist
-    alone does not count: this project always publishes wheels, so an
-    sdist-only moment is a release still mid-upload.
+    workflow uploads the pure wheel and the macOS wheel in one sequential
+    pass; the sdist is attached to the GitHub Release instead). A checker
+    that reads only the version string therefore advertises a release the
+    installer cannot yet download — the operator's 2026-10-12 report, where
+    the update offer appeared and ``lop update`` exited 1 for 0.70.13
+    minutes after publication. The file list in the SAME JSON document is
+    the earliest signal that can agree with the installer — provided it
+    asks for the wheel the installer would take (:func:`_installer_wheel`),
+    not just any wheel. An sdist alone does not count: this project always
+    publishes wheels, so an sdist-only moment is a release still mid-upload.
     """
     if not isinstance(files, list):
         return False

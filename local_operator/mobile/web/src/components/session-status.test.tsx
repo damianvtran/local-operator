@@ -37,6 +37,25 @@ function projection(overrides: Record<string, unknown> = {}): SessionProjection 
 	} as unknown as SessionProjection;
 }
 
+describe("the compact composer's explicit fit modes", () => {
+	it.each([
+		["full", true, false],
+		["short", false, true],
+		["hidden", false, false],
+	] as const)("renders the %s reading without consulting the DOM", (mode, full, short) => {
+		document.body.setAttribute("data-short", "");
+		const { container } = render(<SessionStatus projection={projection()} compact short={false} mode={mode} />);
+		const button = container.querySelector<HTMLButtonElement>('[data-foot="reading"]');
+		const visible = (element: Element | null) => element !== null && !element.classList.contains("hidden");
+		expect(button).not.toBeNull();
+		expect(visible(button!.children[0])).toBe(full);
+		expect(visible(button!.children[1])).toBe(short);
+		expect(button?.dataset.footForm).toBe(mode === "hidden" ? "full" : mode);
+		expect(button?.classList.contains("hidden")).toBe(mode === "hidden");
+		document.body.removeAttribute("data-short");
+	});
+});
+
 describe("SessionStatus", () => {
 	it("reads context before spend, each cell keeping its own edge", () => {
 		const { container } = render(<SessionStatus projection={projection()} />);
@@ -54,8 +73,8 @@ describe("SessionStatus", () => {
 		// `ml-auto` sits on the SECOND cell, so each keeps a fixed edge and a
 		// lone reading neither reflows nor floats: context hugs the left,
 		// spend the right — the single-cell states mirror the pair.
-		expect(spend?.className).toContain("ml-auto");
-		expect(context?.className).not.toContain("ml-auto");
+		expect(spend?.className).toContain("ms-auto");
+		expect(context?.className).not.toContain("ms-auto");
 
 		const contextOnly = render(
 			<SessionStatus projection={projection({ cumulative_parent_cost: null })} />,
@@ -64,12 +83,12 @@ describe("SessionStatus", () => {
 			'[data-testid="session-status-context"]',
 		);
 		expect(loneContext?.textContent).toBe("6.2%/200k");
-		expect(loneContext?.className).not.toContain("ml-auto");
+		expect(loneContext?.className).not.toContain("ms-auto");
 
 		const spendOnly = render(<SessionStatus projection={projection({ context_tokens: null })} />);
 		const loneSpend = spendOnly.container.querySelector('[data-testid="session-status-spend"]');
 		expect(loneSpend?.textContent).toBe("$1.25");
-		expect(loneSpend?.className).toContain("ml-auto");
+		expect(loneSpend?.className).toContain("ms-auto");
 	});
 
 	it("marks a lower-bound spend with the band's \u2265", () => {
@@ -602,3 +621,36 @@ describe("SessionStatus — the spend drill-down (state, not telemetry)", () => 
 		).toBe("tts $—");
 	});
 });
+
+describe("SessionStatus — the composer's compact reading on a short, narrow screen (QA round 3, O1)", () => {
+	/* At 320 with the keyboard open the composer row holds attach, the cwd
+	   glyph, the model button (44 px floor), the reading and the stop/send pair
+	   on ONE line: 156 px for cwd + model + reading. The full two-fact reading
+	   needs its fixed 96 px slot (D1), which only fits from 360 up. Below that
+	   it shows ONE figure (context, else spend), never a clipped one: the full
+	   reading stays in the accessible name and one tap away in the sheet. */
+	it("renders full and compact spans for the auto reading, selected by the short variant", () => {
+		const { container } = render(<SessionStatus projection={projection({ context_tokens: 61_800 })} compact />);
+		const button = container.querySelector("button")!;
+		const [full, short] = [...button.querySelectorAll("span")];
+		expect(full!.textContent).toBe("30.9% · $1.25");
+		expect(short!.textContent).toBe("30.9%");
+		// Which one paints is decided by the viewport, not by JS state, so the
+		// first frame and a stop button appearing cannot reflow the row.
+		expect(full!.className).toContain("short-column:hidden");
+		expect(short!.className.split(/\s+/)).toEqual(expect.arrayContaining(["hidden", "short-column:inline"]));
+		// The slot gives up its fixed 96 px only in that mode, and keeps a 44 px target.
+		expect(button.className).toContain("w-24");
+		expect(button.className).toContain("short-column:w-auto");
+		expect(button.className).toContain("min-w-11");
+		// Nothing is lost to assistive tech: the name still carries both facts.
+		expect(button.getAttribute("aria-label")).toContain("30.9% · $1.25");
+	});
+
+	it("falls back to the spend figure when there is no context reading", () => {
+		const { container } = render(<SessionStatus projection={projection({ context_tokens: null })} compact />);
+		const [, short] = [...container.querySelector("button")!.querySelectorAll("span")];
+		expect(short!.textContent).toBe("$1.25");
+	});
+});
+

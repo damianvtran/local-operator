@@ -88,6 +88,22 @@ SECURITY_HELD_LOCALES: frozenset[str] = frozenset()
 #: ``relay.session.tags`` is the tag slice (LOH-11 C1): the tag line, the
 #: assignment sheet and the list's long-press copy, split out of ``relay.session``
 #: because the catalogues are one small owned namespace per surface.
+#: ``relay.asks`` is the asks/cards slice (the relay's last planned namespace,
+#: RFC §5): the ask card, asks sheet, dock, settled row, pending decision card,
+#: approval-gate sheet and the disclosure that holds panels shut while a
+#: question waits. The tuple is one reviewed line per slice, never a glob.
+#: ``relay.approvals`` is the approvals-policy slice that landed on main while
+#: ``relay.asks`` was in flight (`feat(mobile): offer both approval scopes on
+#: the phone`): the policy state line, the third (global) scope and the mode
+#: change links the pending card carries. It is a namespace of its own rather
+#: than more ``relay.asks`` keys because the asks catalogues are already
+#: carried by every translated locale, and a new key there would be untranslated
+#: in all of them. It was expected to start en-only and ride §2.5 fallback; it
+#: does not, because the programme's rule is that new copy ships translated. It
+#: carries all seven locales, and the day it landed untranslated is the day the
+#: ratchet and the census became mutually unsatisfiable for it (check.py forbade
+#: the debt, the census required it). Recorded here because the next new
+#: namespace will hit the same wall.
 OWNED_SPA_NAMESPACES = (
     "relay.shell",
     "relay.session",
@@ -100,6 +116,26 @@ OWNED_SPA_NAMESPACES = (
     # new key in a namespace a locale has not carried yet GROWS the shrink-only
     # coverage allowance (docs/I18N.md).
     "relay.ask",
+    "relay.approvals",
+    "relay.asks",
+    # The borderless redesign's chrome (drawer, chips, tray, banners; 2026-10-25,
+    # docs/design/mobile-relay-redesign.md §11.1). Its own namespace so no existing
+    # English value changes: a value edit stales every locale's passed ledger rows.
+    "relay.chrome",
+    # Condensed transcript bars and tool-fold units (C2). A separate owned
+    # namespace keeps the frozen relay.chrome source bytes and ledger hashes
+    # untouched while its English copy is prepared for the translation wave.
+    "relay.transcript",
+    # The session header's status dot (live / not answering / ended). Its own
+    # owned namespace for the same reason relay.transcript has one: the two new
+    # keys must not change relay.chrome's frozen English bytes, which would stale
+    # every locale's passed ledger row for that namespace.
+    "relay.health",
+    # The phone inbox (`#/notifications`, docs/design/notifications-inbox.md §9):
+    # reel, item detail, receipts and confirmations. Its own namespace for the
+    # `relay.chrome` reason: adding keys there would stale every locale's passed
+    # ledger row for a redesign another lane owns.
+    "relay.notifications",
 )
 
 GENERATED_HEADER = (
@@ -223,7 +259,20 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
             # drift gate compares bytes, so a formatter pass after generation
             # would make the check unreproducible (review round 2, MAJOR).
             call = f'    return Msg(\n        "{key}",\n        {{{pairs}}},\n    )'
-        body.append(f"def {fname}({signature}) -> Msg:\n{call}\n")
+        header = f"def {fname}({signature}) -> Msg:"
+        # A namespace's longer function name plus several typed placeholders can
+        # exceed the same 100-column gate as the return statement. Wrap the
+        # generated signature too, rather than hand-editing one generated key
+        # module or giving this namespace a lint exemption. `signature` is EMPTY
+        # for a zero-placeholder key, and wrapping an empty one emitted a lone
+        # `,` inside the parentheses — invalid Python for a long identifier that
+        # the generator has always accepted (agent review round 1, C1-2). A
+        # function NAME cannot be split by any formatter, so that shape keeps the
+        # single-line header it has at the merge base.
+        if len(header) > 100 and signature:
+            wrapped = signature.replace(", ", ",\n    ")
+            header = f"def {fname}(\n    {wrapped},\n) -> Msg:"
+        body.append(f"{header}\n{call}\n")
     if body:
         # Imports only when something uses them: a namespace stub with zero
         # keys yet must not trip flake8's unused-import rule (F401) — the

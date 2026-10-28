@@ -555,52 +555,125 @@ def summary(record: dict[str, Any]) -> str | None:
     account = parsed["account"] + (f" / org {parsed['org']}" if parsed["org"] else "")
     return (
         f"Let {_recipient_label(parsed)} borrow your {parsed['provider']} login for account "
-        f"{account}: this sign-in and any later re-login of the SAME account, until you "
+        f"{account}: this sign-in and any later re-login of the same account, until you "
         "revoke it. Nothing is copied; the device gets short-lived access only."
     )
 
 
-def details(record: dict[str, Any]) -> list[str]:
-    """Every fact the operator must see BEFORE signing, from the signed record alone.
+#: Bumped when a field of :func:`disclosure` changes meaning (see ``finite_share``): the
+#: desktop echoes this dict's digest, so an older renderer cannot have a newer layout
+#: signed in its name.
+DISCLOSURE_VERSION = 1
 
-    Raises (fail closed) for a record this build cannot describe, so the CLI refuses to
-    sign what it cannot state.
+
+def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Every fact the operator must see BEFORE signing, as DATA, from the signed record alone.
+
+    ONE source for both surfaces: the CLI renders it in :func:`details`, the desktop
+    localizes its own labels over it, so no English and no CLI command travels in here
+    (i18n). Every value is an identifier/fingerprint copied from the digest-bound record or
+    a fixed machine token. Raises (fail closed, through :func:`_parse`) for a record this
+    build cannot describe; ``None`` when the record is not a credential permission.
     """
-    heading = summary(record)
-    if heading is None:
-        return []
+    if intent(record) is None:
+        return None
     parsed = _parse(record)
     data = parsed["data"]
-    expires = record.get("expires_at")
-    window = (
-        time.strftime("%Y-%m-%d %H:%M", time.localtime(float(expires)))
-        if isinstance(expires, (int, float)) and expires
-        else "its set time"
+    return {
+        "version": DISCLOSURE_VERSION,
+        "operation": OP,
+        "approval_id": str(record.get("approval_id") or ""),
+        "provider": parsed["provider"],
+        "account": parsed["account"],
+        # "" means NOT constrained: any org of this account (the CLI says so in words).
+        "org": parsed["org"],
+        "owner_device": data["owner_device"],
+        "network_id": data["network_id"],
+        "recipient": {
+            "device_id": data["recipient_device"],
+            "name": parsed["recipient_name"],
+            "key_fingerprint": data["public_key_fingerprint"],
+        },
+        "signing_principal": parsed["principal"],
+        # The two clocks, kept apart (see ``finite_share.disclosure``): the card's one-hour
+        # answerable window, and the permission's own lifetime, which is until revoked.
+        "request_window": {
+            "created_at": record.get("created_at"),
+            "expires_at": record.get("expires_at"),
+        },
+        "grant_lifetime": {"kind": "until_revoked"},
+        # A later sign-in to the SAME account is covered without asking again.
+        "future_logins": True,
+        "copies_credential": False,
+        # Needed, and NOT granted by this approval: ``broker_credential`` on both rows.
+        "requires_capability": {
+            "name": "broker_credential",
+            "devices": [data["owner_device"], data["recipient_device"]],
+        },
+        "installs_or_joins": False,
+    }
+
+
+def details(record: dict[str, Any]) -> list[str]:
+    """The CLI's rendering of :func:`disclosure` -- the SAME facts the desktop renders.
+
+    Raises (fail closed) for a record this build cannot describe, so the CLI refuses to
+    sign what it cannot state. The revoke/apply commands are CLI copy and live only here.
+    """
+    facts = disclosure(record)
+    heading = summary(record)
+    if facts is None or heading is None:
+        return []
+    parsed = _parse(record)
+    recipient = facts["recipient"]
+    label = (
+        f"{recipient['name']} ({recipient['device_id']})"
+        if recipient["name"]
+        else recipient["device_id"]
     )
+    from local_operator.network.credentials.finite_share import _window_line
+
     return [
         heading,
-        f"Provider: {parsed['provider']} (a native sign-in on THIS device; copied, borrowed, "
+        f"Provider: {facts['provider']} (a native sign-in on this device; copied, borrowed, "
         "device-bound, static-key and MCP logins are not covered)",
-        f"Account: {parsed['account']}",
-        "Org: " + (parsed["org"] or "not constrained (any org of this account)"),
-        f"Recipient device: {_recipient_label(parsed)}",
-        f"Recipient key fingerprint: {data['public_key_fingerprint']}",
-        f"Network: {data['network_id']}",
-        f"Signing principal: your operator key {parsed['principal']} on this machine",
-        "Duration: UNTIL YOU REVOKE IT. This permission has no automatic expiry; a sign-in "
+        f"Account: {facts['account']}",
+        "Org: " + (facts["org"] or "not constrained (any org of this account)"),
+        f"Recipient device: {label}",
+        f"Recipient key fingerprint: {recipient['key_fingerprint']}",
+        f"Network: {facts['network_id']}",
+        f"Signing principal: your operator key {facts['signing_principal']} on this machine",
+        "Duration: until you revoke it. This permission has no automatic expiry; a sign-in "
         "to the same account later is covered without asking again, a different account is not.",
-        f"Request window: this CARD can be approved and applied until {window}. That one-hour "
-        "window only limits how long this request stays answerable; it is NOT the lifetime "
-        "of the permission.",
+        # True for the card's current state (design D8); one wording with the finite card.
+        _window_line(record, facts["request_window"]["expires_at"], "permission"),
         "What the device receives: short-lived access minted here on request. The sign-in "
         "and its refresh token stay on this device; nothing is copied.",
         "Needs, and this does not grant: broker_credential on this device's own member row "
-        f"and on the row for the recipient (lop network member grant {data['network_id']} "
-        f"{data['recipient_device']} broker_credential).",
-        f"Revoke at any time: {_revoke_command(parsed)}",
-        f"Approving records your decision only. Then run: "
-        f"{_apply_command(parsed, str(record.get('approval_id', '')))}",
+        "and on the row for the recipient. To grant it for the recipient:",
+        # COMMANDS ON THEIR OWN LINES (design #3002 r2, D6; UX U7): the CLI never wraps a
+        # line that carries one, so a copied command pastes as one command.
+        f"lop network member grant {facts['network_id']} {recipient['device_id']} "
+        "broker_credential",
+        "Revoke at any time:",
+        _revoke_command(parsed),
     ]
+
+
+def next_lines(record: dict[str, Any]) -> list[str]:
+    """What the operator does next with an inheritance card after a CLI approve (UX U5).
+
+    The apply step lives HERE, not in ``details``, so ``approvals approve`` -- which prints
+    the disclosure before signing and this after -- names the command once (design N3).
+    """
+    if intent(record) is None:
+        return []
+    command = _apply_command(_parse(record), str(record.get("approval_id", "")))
+    if record.get("state") == approvals.STATE_REQUESTED:
+        return ["Approving records your decision only. Then run:", command]
+    if record.get("state") == approvals.STATE_APPROVED:
+        return ["Approved, not applied yet. Run:", command]
+    return []
 
 
 def list_lines(record: dict[str, Any]) -> list[str]:
@@ -639,8 +712,16 @@ def row_extras(record: dict[str, Any]) -> dict[str, Any] | None:
         "summary": heading,
         "details": lines,
         "can_approve_here": False,
+        # For a desktop that predates ``typed_approval`` (it ignores that block): one
+        # remedy, and it agrees with the typed route's rule rather than contradicting it
+        # (UX U3). A renderer that knows ``typed_approval`` shows its ``refusal_message``
+        # or its Approve instead and should not show this beside it.
         "approve_remedy": (
-            "Review and approve it from the command line on this machine: "
+            # The sentence ENDS before the command (``harness/test_approval_authority``'s
+            # window-remedy guard: "terminal" and "approvals" in one sentence reads as the
+            # TUI gate's loosen remedy), and the command stands alone after "Run:".
+            "This permission can't be approved in this version of the desktop app. Approve "
+            "it in a terminal on this Mac instead. Run: "
             f"lop network approvals approve {record.get('approval_id', '')}"
         ),
     }

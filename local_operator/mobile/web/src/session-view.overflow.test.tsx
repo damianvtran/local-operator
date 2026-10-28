@@ -44,7 +44,7 @@
 // `scripts/mobile_reachability_check.py`, which drives the real bundle in
 // headless Chrome with real touch input and asserts those pixels. Do not read a
 // green run of this file as proof of reachability.
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COLUMN_HEIGHT_VAR } from "./lib/column";
 import { SessionScreen } from "./screens/session-view";
@@ -219,9 +219,9 @@ describe("subagent roster default", () => {
 		render(<SessionScreen sessionId="s1" />);
 
 		// The header line stays as the at-a-glance signal...
-		expect(screen.getByText("1/22 running")).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^Agents 1\/22/ })).toBeTruthy();
 		// ...but its rows are not painted. `running > 0` used to open this.
-		const header = screen.getByRole("button", { name: /subagents/ });
+		const header = screen.getByRole("button", { name: /^Agents / });
 		expect(header.getAttribute("aria-expanded")).toBe("false");
 		expect(screen.queryByRole("button", { name: /surface-audit-01/ })).toBeNull();
 	});
@@ -230,7 +230,7 @@ describe("subagent roster default", () => {
 		slot = { projection: projection({ subagents: roster() }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		const header = screen.getByRole("button", { name: /subagents/ });
+		const header = screen.getByRole("button", { name: /^Agents / });
 		fireEvent.click(header);
 
 		// The a11y contract survives the new default.
@@ -252,9 +252,11 @@ describe("subagent roster default", () => {
 		// unit instead and fails here — which is the keyboard-open divergence.
 		const column = scroller?.closest<HTMLElement>(".h-dvh");
 		column?.style.setProperty(COLUMN_HEIGHT_VAR, "480px");
-		const cap = getComputedStyle(scroller as HTMLElement).maxHeight;
+		const panel = firstRow.closest<HTMLElement>(".lo-sheet-panel");
+		expect(panel).toBeTruthy();
+		const cap = getComputedStyle(panel as HTMLElement).maxHeight;
 		expect(cap).toContain("480px");
-		expect(cap).toContain("0.4");
+		expect(cap).toContain("0.85");
 	});
 
 	it("keeps the roster collapsed when nothing is running", () => {
@@ -264,7 +266,7 @@ describe("subagent roster default", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 		expect(
-			screen.getByRole("button", { name: /subagents/ }).getAttribute("aria-expanded"),
+			screen.getByRole("button", { name: /^Agents / }).getAttribute("aria-expanded"),
 		).toBe("false");
 	});
 });
@@ -327,34 +329,26 @@ describe("ask card reachability", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		for (const name of [/tasks/, /subagents/]) {
+		for (const name of [/^Tasks /, /^Agents /]) {
 			const header = screen.getByRole("button", { name });
 			// The row keeps its own 44px tap-target floor...
-			expect(header.className).toContain("min-h-11");
+			expect(header.className).toContain("lo-hit");
 			/* ...and the container AROUND it must not undercut that floor — the
 			   `min-h-0` the container used to carry let the column squeeze it
 			   below its own row, which is how the row's box then overflowed and
 			   painted over its sibling and the card. The deficit has to come from
 			   the card instead (asserted in the reachability test above). */
-			expect(header.parentElement?.className).toContain("min-h-11");
+			expect(header.parentElement?.className).toContain("h-11");
+			expect(header.parentElement?.className).toContain("shrink-0");
 			expect(header.parentElement?.className).not.toContain("min-h-0");
 		}
 
-		/* ONE STAND-DOWN RULE FOR THE PAIR (design round 1, D6 + agent-review
-		   NIT 2): the hint is hidden strictly below 385px of viewport — the width
-		   at which the SUBAGENTS row keeps its 30px label with the hint shown
-		   (measured: 6px at 360 under the old 352px threshold; with this class,
-		   30px at 385 hint on, 63px at 384 hint hidden, 41px at 320). Both rows
-		   carry the same class so the adjacent held-shut rows cannot disagree
-		   again (they did at 320: tasks showed the hint, the roster hid it), and
-		   the class encodes exactly what the comments say: hidden *below* 385,
-		   shown at it. */
-		for (const name of [/subagents/, /tasks/]) {
-			expect(
-				within(screen.getByRole("button", { name }))
-					.getByText(/answer first/)
-					.className,
-			).toContain("max-[385px]:hidden");
+		// The shared tray is one 44 px band, not two disclosures. Both pills
+		// remain held shut and explain why through their accessible tooltip.
+		for (const name of [/^Tasks /, /^Agents /]) {
+			const pill = screen.getByRole("button", { name });
+			expect((pill as HTMLButtonElement).disabled).toBe(true);
+			expect(pill.getAttribute("title")).toMatch(/answer it to reopen/);
 		}
 	});
 
@@ -437,7 +431,7 @@ describe("ask card reachability", () => {
 		);
 		// The action row ends clear of the overlay scrollbar's paint band, which
 		// was drawn inside `deny` at gapToContentEdge 0 (D3).
-		expect(approve.parentElement?.parentElement?.className).toContain("pr-1.5");
+		expect(approve.parentElement?.parentElement?.className).toContain("pe-1.5");
 	});
 
 	it("pins the stale-tap error outside the scroller, where it cannot land below the fold", async () => {
@@ -511,7 +505,7 @@ describe("ask card reachability", () => {
 		expect(scroller.contains(input as HTMLElement)).toBe(false);
 		// ...and they stay together, or one could move without the other.
 		expect(send.parentElement).toBe(input?.parentElement);
-		expect(send.parentElement?.parentElement?.className).toContain("pr-1.5");
+		expect(send.parentElement?.parentElement?.className).toContain("pe-1.5");
 	});
 });
 
@@ -536,8 +530,8 @@ describe("column budget while a request is pending", () => {
 		// 360x780 the card's top at y=781 in a 780px viewport. Real touch drags
 		// recovered none of it. A question outranks a task list (branding §7),
 		// so while one is pending the panels are held shut.
-		const rosterHeader = screen.getByRole("button", { name: /subagents/ });
-		const todosHeader = screen.getByRole("button", { name: /tasks/ });
+		const rosterHeader = screen.getByRole("button", { name: /^Agents / });
+		const todosHeader = screen.getByRole("button", { name: /^Tasks / });
 		expect(rosterHeader.getAttribute("aria-expanded")).toBe("false");
 		expect(todosHeader.getAttribute("aria-expanded")).toBe("false");
 
@@ -550,7 +544,7 @@ describe("column budget while a request is pending", () => {
 		expect(screen.queryByRole("button", { name: /surface-audit-01/ })).toBeNull();
 
 		// The counts stay legible, so nothing is hidden — only held.
-		expect(screen.getByText("1/22 running")).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^Agents 1\/22/ })).toBeTruthy();
 	});
 
 	it("releases the panels once nothing is pending", () => {
@@ -560,7 +554,7 @@ describe("column budget while a request is pending", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		const rosterHeader = screen.getByRole("button", { name: /subagents/ });
+		const rosterHeader = screen.getByRole("button", { name: /^Agents / });
 		fireEvent.click(rosterHeader);
 		expect(rosterHeader.getAttribute("aria-expanded")).toBe("true");
 	});
@@ -578,11 +572,24 @@ describe("column budget while a request is pending", () => {
 		slot = { projection: projection({ subagents: withFailures }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("1/22 running")).toBeTruthy();
-		const failed = screen.getByText(/3 failed/);
-		expect(failed).toBeTruthy();
+		/* The pill's VISIBLE failure marker is the compact `✗ N` the redesign
+		   chose (design review round 1, D2): at 360 the full sentence's last word
+		   was clipped flush at the strip's edge, so the one word that says why the
+		   roster matters was the first thing lost. The complete translated
+		   sentence rides on the control's accessible name, so nothing is lost to
+		   assistive tech, and the sibling assertions below still pin the danger
+		   ink and the roster counts. */
+		const pill = screen.getByRole("button", { name: /^Agents 1\/22/ });
+		expect(pill.getAttribute("aria-label")).toContain("3 failed");
 		// In the danger colour, or it reads as one more neutral count.
-		expect(failed.className).toContain("text-danger");
+		expect(pill.className).toContain("text-danger");
+		/* THE VISIBLE FORM NOW NAMES THE FAILURE (design round 2, D5 = UX U3). The
+		   bare `✗ 3` read as a dismiss control and never said what failed; the pill
+		   shows the full existing sentence — its accessible name too — with the
+		   danger ground carrying the state. Nothing is weakened: the count, the
+		   danger ink and the phrase "3 failed" are all still asserted. */
+		expect(pill.textContent).toContain("Agents 1/22 · 3 failed");
+		expect(pill.className).toContain("bg-danger-wash");
 	});
 
 	it("says nothing about failures when there are none", () => {
@@ -615,28 +622,25 @@ describe("column budget while a request is pending", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		const rosterHeader = screen.getByRole("button", { name: /subagents/ });
+		const rosterHeader = screen.getByRole("button", { name: /^Agents / });
 		expect(rosterHeader.getAttribute("aria-expanded")).toBe("false");
 
 		// The count is legible: neither it nor any ancestor up to the header
 		// carries the dim. Walking the chain is the assertion that matters —
 		// checking the span alone passes even when the dim sits above it, which
 		// is exactly how this shipped.
-		const failed = screen.getByText(/3 failed/);
-		expect(failed.className).toContain("text-danger");
+		expect(rosterHeader.getAttribute("aria-label")).toContain("3 failed");
+		const failed = screen.getByText("Agents 1/22 · 3 failed");
+		expect(rosterHeader.className).toContain("text-danger");
 		for (let el: HTMLElement | null = failed; el; el = el.parentElement) {
 			expect(el.className).not.toContain("opacity-60");
 			if (el === rosterHeader) break;
 		}
 
-		// The label beside it still dims, or the held state stops reading as
-		// inert at all and the tap looks live.
-		expect(
-			rosterHeader.querySelector(".opacity-60"),
-		).toBeTruthy();
-
-		// And the header says why nothing happens when it is tapped.
-		expect(screen.getAllByText(/answer first/).length).toBeGreaterThan(0);
+		// A complete translated pill cannot be split at an English word boundary.
+		// Failure ink wins over the held-state dim; disabled+the existing tooltip
+		// still explain the budget without fading the failure count itself.
+		expect((rosterHeader as HTMLButtonElement).disabled).toBe(true);
 		expect(rosterHeader.getAttribute("title")).toMatch(/answer it to reopen/);
 	});
 });

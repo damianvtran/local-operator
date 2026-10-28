@@ -88,3 +88,17 @@ catalogues before landing here.
   поверхность» — «рабочее» is dropped because the full term cannot fit the
   57/59-cell tip pool alongside the cite; accepted by the wave-2 audit.
   Revisit only with a budget change.
+- Recorded width exception: `relay.health.ended_placeholder` reads
+  «дом. папке» (standard abbreviation «дом.» = домашний, ruslang.ru normative
+  dictionary), because the full «домашней папке» with a send verb does not fit
+  the 276 px composer field at 16 px on a 320 px phone; `ended_detail` and
+  `ended_hint` keep the full form. Revisit only with a budget change.
+- Recorded budget exception (notifications inbox, wave 3): `filter_unread`
+  keeps «новые» and `seen_in_chat` keeps «было в чате». «непрочитанные» (13
+  cells) and «видели в чате» (13) each exceed their slot, and no compliant
+  synonym is both accurate and shorter. The two slots are not the same kind of
+  thing: `filter_unread`'s 8 cells are the page header's read-filter segment,
+  while `seen_in_chat`'s 12 are a row chip, which is absorbed by the title
+  column and drops wholesale at 43/44 columns on its own — 48/49 when the
+  priority chip is also painted. So the copy wins in both cases and the budgets
+  are recorded here rather than silently widened.

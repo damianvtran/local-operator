@@ -199,7 +199,7 @@ def test_the_derivation_rides_into_the_spec_metadata(tmp_path) -> None:
         episode_id="ep-cap",
         selector=run_episode.AdapterSelector.model_validate(
             {
-                "schema_version": "1.6",
+                "schema_version": "1.7",
                 "adapter_id": "tiny",
                 "distribution": "tiny-adapter",
                 "version": "1.0",
@@ -235,7 +235,7 @@ def test_main_refuses_an_unpriceable_basis_before_allocating(tmp_path, monkeypat
     selector.write_text(
         json.dumps(
             {
-                "schema_version": "1.6",
+                "schema_version": "1.7",
                 "adapter_id": "tiny",
                 "distribution": "tiny-adapter",
                 "version": "1.0",

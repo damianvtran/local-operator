@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -279,7 +280,7 @@ def rescue_selector(tmp_path: Path) -> AdapterSelector:
     release_digest = "b" * 64
     (workspace / "adapter-release.json").write_text(f'{{"release_digest":"{release_digest}"}}')
     return AdapterSelector(
-        schema_version="1.6",
+        schema_version="1.7",
         adapter_id="rescue",
         distribution="rescue-adapter",
         version="1.0",
@@ -301,7 +302,7 @@ def rescue_metadata() -> AdapterMetadata:
         entry_point="rescue_adapter:create",
         package_digest="a" * 64,
         release_digest="b" * 64,
-        schema_version="1.6",
+        schema_version="1.7",
         capabilities=AdapterCapabilities(routes=("computer",), ask_user=False, scoring=False),
     )
 
@@ -348,7 +349,7 @@ async def test_real_worker_rescue_invokes_each_cleanup_once_and_blocks_normal_fl
             ),
         )
         descriptor = RescueDescriptor(
-            schema_version="1.6",
+            schema_version="1.7",
             selector=selected,
             handshake=handshake,
             episode_id="episode",
@@ -470,7 +471,7 @@ def test_rescue_cleanup_rejects_forged_episode_and_action_without_losing_pin(
         selected_route="computer",
     )
     descriptor = RescueDescriptor(
-        schema_version="1.6",
+        schema_version="1.7",
         selector=selected,
         handshake=pinned_handshake,
         episode_id="episode",
@@ -585,6 +586,136 @@ def test_error_phase_is_declared_by_the_adapter_and_only_for_execute() -> None:
         )
         assert wrong_method is not None
         assert wrong_method.phase == "unknown", method
+
+
+def test_not_applied_phase_is_declared_by_the_adapter_and_only_for_execute() -> None:
+    """``not_applied`` follows the observation phase's discipline exactly.
+
+    Stamped only from ``ActionNotAppliedError`` (never from a message that
+    merely SAYS nothing was sent), only from ``execute``, and it survives the
+    canonical wire round-trip a 1.7 parent performs -- the closed ``Literal``
+    is the reason the schema had to move (see ``ADAPTER_SCHEMA_VERSION``).
+    """
+
+    from local_operator.evaluation.adapters.api import ActionNotAppliedError
+    from local_operator.evaluation.adapters.rpc import RpcErrorDetail
+    from local_operator.evaluation.adapters.worker import _error_detail
+
+    message = "guest action 1 was not attempted; no input was sent"
+    declared = _error_detail(ActionNotAppliedError(message), "execute", "exec-0", None)
+    assert declared is not None and declared.phase == "not_applied"
+    assert "phase=not_applied" in declared.render()
+    wire = declared.model_dump(mode="json")
+    assert RpcErrorDetail.model_validate(wire).phase == "not_applied"
+
+    # The same words on an undeclared type are not a declaration.
+    undeclared = _error_detail(RuntimeError(message), "execute", "exec-0", None)
+    assert undeclared is not None and undeclared.phase == "unknown"
+
+    for method in ("prepare", "reset_start", "ask_user_exchange", "score", "cleanup"):
+        wrong_method = _error_detail(
+            ActionNotAppliedError(message),
+            method,  # pyright: ignore[reportArgumentType]
+            "op-0",
+            None,
+        )
+        assert wrong_method is not None
+        assert wrong_method.phase == "unknown", method
+
+
+@pytest.mark.asyncio
+async def test_a_not_applied_execute_crosses_the_real_wire_and_leaves_the_worker_running() -> None:
+    """End to end over the worker's real pipes and canonical framing: the
+    adapter's ``ActionNotAppliedError`` arrives at the parent as an
+    ``adapter_error`` with ``phase == "not_applied"`` that round-trips the
+    canonicality check, and the worker stays RUNNING so the bridge's
+    read-only ``observe`` re-bind can be served."""
+
+    from local_operator.evaluation.adapters.api import (
+        ActionNotAppliedError,
+        ExecuteParams,
+    )
+    from local_operator.evaluation.protocol import ActionBatch, WaitAction
+
+    class NotAppliedWorker(Worker):
+        def __init__(self, request_fd: int, response_fd: int) -> None:
+            super().__init__(request_fd, response_fd)
+            self._state = "RUNNING"
+
+        async def _dispatch(self, method: Any, params: Any) -> Any:
+            assert method == "execute"
+            raise ActionNotAppliedError("guest action 1 was not attempted; no input was sent")
+
+    request_read, request_write = os.pipe()
+    response_read, response_write = os.pipe()
+    worker = NotAppliedWorker(request_read, response_write)
+    task = asyncio.create_task(worker.run())
+    writer = IncrementalWriter(request_write)
+    reader = IncrementalReader(response_read)
+    batch = ActionBatch(
+        protocol_version="1.0",
+        task_id="task",
+        episode_id="episode",
+        observation_id="obs-0",
+        actions=(WaitAction(observation_id="obs-0", duration_ms=1),),
+    )
+    params = ExecuteParams(
+        operation_id="exec-0",
+        action_batch=batch,
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+    )
+    try:
+        response = await exchange(
+            writer,
+            reader,
+            RpcRequest(
+                jsonrpc="2.0", id=1, method="execute", params=params.model_dump(mode="json")
+            ),
+        )
+        assert response.error is not None and response.error.code == "adapter_error"
+        detail = response.error.detail
+        assert detail is not None
+        assert detail.phase == "not_applied"
+        assert detail.exception_type == "ActionNotAppliedError"
+        assert detail.method == "execute"
+        # Not poisoned: an error does not advance the worker's state.
+        assert worker._state == "RUNNING"
+    finally:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        for fd in (request_read, request_write, response_read, response_write):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def test_a_pre_1_7_parent_model_rejects_the_not_applied_phase() -> None:
+    """Why the schema bump is REQUIRED, measured rather than asserted.
+
+    A 1.6 parent validates ``phase`` against ``Literal["unknown",
+    "observation"]``. Rebuilding that exact field shape here shows the new
+    value fails validation outright -- the old parent would NOT degrade it to
+    ``unknown`` -- so mixed versions must be refused at selection time by the
+    exact-version pin instead of mid-episode on the error path.
+    """
+
+    from typing import Literal
+
+    from pydantic import ValidationError
+
+    from local_operator.evaluation.adapters.rpc import RpcErrorDetail
+
+    class OldDetail(RpcErrorDetail):
+        phase: Literal["unknown", "observation"] = "unknown"  # type: ignore[assignment]
+
+    wire = RpcErrorDetail(
+        exception_type="ActionNotAppliedError",
+        message="m",
+        method="execute",
+        phase="not_applied",
+    ).model_dump(mode="json")
+    with pytest.raises(ValidationError):
+        OldDetail.model_validate(wire)
 
 
 def test_an_adapter_supplied_observation_cause_is_canary_checked() -> None:
