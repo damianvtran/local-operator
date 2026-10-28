@@ -117,8 +117,35 @@ CHANNEL_OPS: tuple[str, ...] = (
     "channel_history",
     "react",
     "channel_thread",
+    "dm",
+    "shared_conversations",
+    "shared_history",
 )
-BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", *CHANNEL_OPS)
+#: ``directory`` is read-only METADATA about the organization (who is on the
+#: team, each person's chief-of-staff endpoint and its current name). It acts
+#: as nobody, so unlike the channel ops it needs no agent endpoint.
+BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", "directory", *CHANNEL_OPS)
+#: The COLLABORATION surface: the ops the user story needs from ANY bridge-
+#: connected session of the enrolled owner ("two people's article-search manager
+#: sessions coordinating on campaigns"). Only these take the outbound fence
+#: (every binding/consent check kept, designation relaxed, because a colleague's
+#: task session is not the account's inbox). Everything else — the mailbox ops
+#: (take_up/ack/send/reply) and the owner-shared reads — keeps the STRICT fence
+#: exactly as it shipped: widening the inbox would change authority that was
+#: reviewed without anyone asking for it, and a session that may not read the
+#: owner's rooms must not gain that by posting in one.
+OUTBOUND_OPS: tuple[str, ...] = ("directory", "dm", "channel_create", "channel_post")
+#: The fetch-shaped ops: admitted while paused/read-only, and approval tier
+#: ``read``. ONE list so the admission gate and the approval tier agree.
+READ_OPS: tuple[str, ...] = (
+    "take_up",
+    "channels",
+    "channel_history",
+    "channel_thread",
+    "directory",
+    "shared_conversations",
+    "shared_history",
+)
 
 #: The server caps a conversation page at 100 (contract §10.1); bounding here
 #: turns an over-wide ask into a typed refusal instead of a server 400.
@@ -227,6 +254,10 @@ class BridgeToolParams(BaseModel):
         "channel_history",
         "react",
         "channel_thread",
+        "directory",
+        "dm",
+        "shared_conversations",
+        "shared_history",
     ]
     message_id: str = ""
     body_sha256: str = ""
@@ -261,6 +292,14 @@ class BridgeToolParams(BaseModel):
     #: channel_post: reply in this root message's thread; channel_thread: the
     #: thread to read. A conversation message id (bcmsg_…).
     thread_root_id: str = ""
+    # dm: the person (account_id) or agent (endpoint_id, from `directory`).
+    # Plain strings, not the `to` recipient object, so a dm can never be
+    # mistaken for a pair-lane `send` destination by the shared validator.
+    account_id: str = ""
+    endpoint_id: str = ""
+    # dm to an account: "agent" (default) reaches that person's chief of
+    # staff, "human" the person themself.
+    target: Literal["agent", "human"] = "agent"
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -368,6 +407,491 @@ def _resolve_reply(
     return {**args, "to": to, "thread_id": row["thread_id"]}, None
 
 
+# -- directory + direct messages ----------------------------------------------
+#
+# WHY THESE EXIST (operator incident, 2026-10-28). A teammate's chief of staff,
+# asked to pass feedback to the operator's Aida, answered "I don't have a route
+# to it ... forward this thread". The hub already published everything needed —
+# GET /messaging/directory carries each member's chief-of-staff endpoint
+# (``agent.endpoint_id``, ``agent.name``, ``agent.state``) — but no tool op read
+# it, so an agent could not discover a teammate's agent, and ``send`` reaches
+# only the legacy pair inbox, which no Team Bridge conversation view shows.
+#
+# THE LANE. ``dm`` uses the SAME conversation DM the desktop opens (POST
+# /messaging/conversations ``kind=dm`` find-or-create, then the ordinary
+# conversation send), acting AS this session's agent (``actor_endpoint_id``).
+# So the message is visible in both people's Team Bridge UI, it is an auditable
+# conversation row, and the recipient's connector delivers it to their
+# designated chief-of-staff session like any conversation message — the
+# recipient's screening, owner consent, receive policy and mute rules apply
+# server-side unchanged (an agent target its owner's policy does not admit
+# stays ``invited``; nothing auto-joins anyone).
+#
+# NOTHING IS CACHED. Names and endpoint ids are fetched per call and never
+# written to the store (store.py's no-name-cache / no-body rules): a renamed
+# agent or a re-enrolled endpoint is correct on the next call by construction.
+
+#: The directory's own cap (agent-server ``bridgeDirectoryMaxMembers``); the hub
+#: has no cursor, so the tool pages that bounded answer locally.
+DIRECTORY_MAX = 200
+
+
+def _directory_rows(result: Any, owner: Any) -> list[dict[str, Any]]:
+    """Project the hub directory into METADATA rows for the model.
+
+    Only identity and reachability: account id, display name, role, bridge
+    state, and the chief-of-staff agent (endpoint id, CURRENT name, state). The
+    hub's profile/avatar fields are dropped: they cost context and carry nothing
+    an agent needs to address someone. The caller's own rows are marked
+    ``you: true`` so the agent never DMs itself by accident.
+    """
+
+    members = result.get("members") if isinstance(result, dict) else None
+    if not isinstance(members, list):
+        return []
+    own_account = str(getattr(owner, "account_id", "") or "")
+    own_endpoint = str(getattr(owner, "endpoint_id", "") or "")
+    rows: list[dict[str, Any]] = []
+    for member in members[:DIRECTORY_MAX]:
+        if not isinstance(member, dict) or not isinstance(member.get("account_id"), str):
+            continue
+        row: dict[str, Any] = {
+            "account_id": member["account_id"],
+            "name": str(member.get("display_label") or ""),
+            "role": str(member.get("role") or ""),
+            "bridge_enabled": member.get("bridge_enabled") is True,
+            "bridge_state": str(member.get("bridge_state") or "none"),
+        }
+        if member["account_id"] == own_account:
+            row["you"] = True
+        agent = member.get("agent")
+        if isinstance(agent, dict) and isinstance(agent.get("endpoint_id"), str):
+            row["chief_of_staff"] = {
+                "endpoint_id": agent["endpoint_id"],
+                "name": str(agent.get("name") or ""),
+                "state": str(agent.get("state") or ""),
+                "reachable": agent.get("state") == "active",
+                **({"you": True} if agent["endpoint_id"] == own_endpoint else {}),
+            }
+        rows.append(row)
+    return rows
+
+
+async def _directory(runtime: "BridgeRuntime", params: "BridgeToolParams") -> dict[str, Any]:
+    if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
+        return _error(f"directory limit must be 1..{CONVERSATION_PAGE_MAX}")
+    start = 0
+    if params.cursor:
+        if not params.cursor.isdigit():
+            return _error("directory cursor is the next_cursor a previous page returned")
+        start = int(params.cursor)
+    try:
+        result = await runtime.client.directory(
+            runtime.tenant_id, expected_account_id=runtime.owner.account_id
+        )
+    except Exception as failure:
+        return _error(f"could not read the team directory: {failure}", code="directory_failed")
+    rows = _directory_rows(result, runtime.owner)
+    page = rows[start : start + int(params.limit)]
+    next_start = start + len(page)
+    payload: dict[str, Any] = {
+        "members": page,
+        "count": len(rows),
+        "hub_limit": DIRECTORY_MAX,
+        "possibly_truncated": len(rows) == DIRECTORY_MAX,
+    }
+    if next_start < len(rows):
+        payload["next_cursor"] = str(next_start)
+    return {
+        "ok": True,
+        "state": "ok",
+        "members": page,
+        "next_cursor": payload.get("next_cursor"),
+        # Display names are member-chosen text: data, never instructions.
+        "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(payload, ensure_ascii=False)}",
+    }
+
+
+def _bridge_word(row: dict[str, Any]) -> str:
+    """``off`` for an opted-out / never-enrolled member, else the state itself."""
+
+    state = str(row.get("bridge_state") or "none")
+    return "off" if state in ("disabled", "none") else state
+
+
+def _recipient_label(recipient: dict[str, str]) -> str:
+    """The pair recipient as its own id, already validated (closed one-key shape)."""
+
+    return next(iter(recipient.values()), "the recipient")
+
+
+def _not_reachable(reason: str, message: str) -> dict[str, Any]:
+    out = _error(message, code="not_reachable")
+    out["reason"] = reason
+    return out
+
+
+async def _resolve_dm_target(
+    runtime: "BridgeRuntime", params: "BridgeToolParams"
+) -> tuple[dict[str, str] | None, str, dict[str, Any] | None]:
+    """``(wire member, display name, refusal)`` for a dm's recipient.
+
+    Resolved from a FRESH directory read, never from the model's word: an
+    ``endpoint_id`` must be some member's CURRENT chief-of-staff endpoint (so a
+    stale or invented id is refused before any write), and an ``account_id``
+    with ``target=agent`` maps to that member's current agent. Reachability is
+    the directory's own fact: an endpoint that is not ``active`` (paused,
+    disabled, or a member who never enrolled) is ``not_reachable`` with the
+    reason. A human target needs the person's bridge enabled for the same
+    reason: an opted-out person has not chosen to be messaged here.
+    """
+
+    account_id = params.account_id.strip()
+    endpoint_id = params.endpoint_id.strip()
+    if bool(account_id) == bool(endpoint_id):
+        return None, "", _error("dm needs exactly one of account_id or endpoint_id")
+    if endpoint_id and params.target != "agent":
+        return None, "", _error("endpoint_id addresses an agent; a human needs account_id")
+    try:
+        directory = await runtime.client.directory(
+            runtime.tenant_id, expected_account_id=runtime.owner.account_id
+        )
+    except Exception as failure:
+        return (None, "", _error(f"could not read the team directory: {failure}", code="dm_failed"))
+    rows = _directory_rows(directory, runtime.owner)
+    own_account = str(getattr(runtime.owner, "account_id", "") or "")
+    if endpoint_id:
+        row = next(
+            (r for r in rows if (r.get("chief_of_staff") or {}).get("endpoint_id") == endpoint_id),
+            None,
+        )
+        if row is None:
+            return (
+                None,
+                "",
+                _not_reachable(
+                    "unknown_endpoint",
+                    "no teammate's chief of staff has that endpoint_id; read op=directory again",
+                ),
+            )
+        kind = "agent"
+    else:
+        row = next((r for r in rows if r["account_id"] == account_id), None)
+        if row is None:
+            return (
+                None,
+                "",
+                _not_reachable(
+                    "not_a_member", "no active member of this organization has that account_id"
+                ),
+            )
+        kind = params.target
+    if row["account_id"] == own_account:
+        # A DM has two identities; one's own person or agent is not a teammate
+        # (the hub refuses it too, rule=self_target). Say so before any write.
+        return (
+            None,
+            "",
+            _error("that is you or your own owner; dm reaches other members", code="self_target"),
+        )
+    if kind == "human":
+        if not row["bridge_enabled"]:
+            return (
+                None,
+                "",
+                _not_reachable(
+                    f"bridge_{row['bridge_state']}",
+                    f"{row['name'] or 'that person'} has Team Bridge {_bridge_word(row)}",
+                ),
+            )
+        return {"account_id": row["account_id"], "kind": "human"}, row["name"], None
+    agent = row.get("chief_of_staff")
+    if not agent:
+        return (
+            None,
+            "",
+            _not_reachable(
+                f"no_agent_{row['bridge_state']}",
+                f"{row['name'] or 'that person'} has no reachable chief of staff "
+                f"(bridge {row['bridge_state']}); dm them with target=human instead",
+            ),
+        )
+    if not agent["reachable"]:
+        return (
+            None,
+            "",
+            _not_reachable(
+                f"agent_{agent['state'] or 'unavailable'}",
+                f"{agent['name'] or 'their chief of staff'} is {agent['state'] or 'unavailable'}; "
+                "try later or dm the person with target=human",
+            ),
+        )
+    return (
+        {"account_id": row["account_id"], "kind": "agent", "endpoint_id": agent["endpoint_id"]},
+        f"{agent['name']} ({row['name']})" if agent["name"] else row["name"],
+        None,
+    )
+
+
+async def _direct_message(
+    runtime: "BridgeRuntime", params: "BridgeToolParams", endpoint_id: str
+) -> dict[str, Any]:
+    if params.to or params.thread_id or params.channel_id or params.members:
+        return _error("dm takes account_id or endpoint_id, not pair/room destinations")
+    if params.body and params.text:
+        return _error("dm takes body or text, not both")
+    text = params.body or params.text
+    if not text.strip():
+        return _error("dm needs non-empty body")
+    thread_root_id = params.thread_root_id.strip()
+    if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
+        return _error("dm thread_root_id must be a message id (bcmsg_…)")
+    target, label, refusal = await _resolve_dm_target(runtime, params)
+    if refusal is not None or target is None:
+        return refusal or _error("dm target unresolved")
+    creator = {
+        "account_id": str(getattr(runtime.owner, "account_id", "") or ""),
+        "kind": "agent",
+        "endpoint_id": endpoint_id,
+    }
+    try:
+        # Find-or-create: the hub keys a DM on its two sorted member keys, so
+        # both directions (A's agent -> B's agent, B's -> A's) land in ONE DM.
+        created = await runtime.client.create_conversation(
+            {"tenant_id": runtime.tenant_id, "kind": "dm", "members": [creator, target]},
+            actor_endpoint_id=endpoint_id,
+            origin_session_id=runtime.session_id,
+            expected_account_id=runtime.owner.account_id,
+        )
+    except Exception as failure:
+        code = getattr(failure, "code", "")
+        if code in ("agent_not_permitted", "member_not_found"):
+            return _not_reachable(str(code), f"the hub refused that recipient: {failure}")
+        return _error(f"the direct message was not opened: {failure}", code="dm_failed")
+    if not isinstance(created, dict):
+        return _error("the hub returned no DM view", code="dm_failed")
+    view = created.get("conversation") if isinstance(created.get("conversation"), dict) else created
+    conversation_id = str(view.get("id") or "") if isinstance(view, dict) else ""
+    if _CONVERSATION_ID.fullmatch(conversation_id) is None:
+        return _error("the hub opened no usable DM id", code="dm_failed")
+    try:
+        result = await runtime.client.conversation_send(
+            conversation_id,
+            client_ref=str(uuid.uuid4()),
+            text=text,
+            tenant_id=runtime.tenant_id,
+            actor_endpoint_id=endpoint_id,
+            origin_session_id=runtime.session_id,
+            thread_root_id=thread_root_id or None,
+            expected_account_id=runtime.owner.account_id,
+        )
+    except Exception as failure:
+        return _error(
+            f"the DM {conversation_id} opened but the post did not confirm: {failure}",
+            code="post_failed",
+        )
+    receipt = _post_receipt(
+        conversation_id, result, thread_root_id=thread_root_id, lead=f"direct message to {label} in"
+    )
+    receipt["destination_type"] = "conversation_dm"
+    # The target's membership state is the server's admission answer: an
+    # ``invited`` agent will not be woken until its owner accepts, and the
+    # sender must know that rather than assume delivery.
+    members = view.get("members") if isinstance(view, dict) else None
+    if target["kind"] == "agent" and isinstance(members, list):
+        state = next(
+            (
+                str(m.get("state") or "")
+                for m in members
+                if isinstance(m, dict)
+                and m.get("kind") == "agent"
+                and m.get("account_id") == target["account_id"]
+            ),
+            "",
+        )
+        if state:
+            receipt["recipient_state"] = state
+            if state != "active":
+                receipt[
+                    "content"
+                ] += f"; recipient agent is {state} (its owner must accept before it is woken)"
+    return receipt
+
+
+# -- owner-shared conversations (the chief-of-staff read grant) --------------
+#
+# WHY. The operator asked their own Aida to draft replies to a question in a
+# Team Bridge DM and a group Aida was not in; it could not read either ("An
+# agent cannot join this conversation"), and owner-audit covers only rooms the
+# owner's agent is ALREADY a member of. The fix is an OPERATOR-CONSENTED read:
+# the human grants their own chief of staff read access to ONE conversation
+# (agent-server ``PUT …/cos-read``, a human act from the desktop; never from
+# this tool), and the agent then reads it here.
+#
+# THE SHAPE, AND WHY PER-CONVERSATION. A blanket "read all my conversations"
+# toggle grows silently with every new conversation; a per-conversation grant
+# discloses exactly what the human chose, is revocable per room, and the hub
+# refuses it on a human-only (agent_capable=false) conversation, keeping §6.1's
+# promise that human-only chat never reaches an agent.
+#
+# SAFETY. Reads only: no op here writes, and nothing can post as the human (the
+# post ops all act as the agent endpoint). The hub derives the human from the
+# signed-in account and checks the endpoint is that account's own chief of
+# staff with an active grant; every refusal is one ``conversation_not_found``.
+# Every page is an audit event on the hub (``cos_read``). Bodies are the HUMAN
+# view — never screened for this agent — so they are wrapped as untrusted data
+# exactly like history, and never cached locally. The desktop bearer and OAuth
+# token never enter the model: the call rides the same client the other ops use.
+
+
+def _shared_read_fence(runtime: "BridgeRuntime") -> dict[str, Any] | None:
+    """A human's share belongs to their actual CoS, never another task session.
+
+    Outbound collaboration does not imply permission to read the owner's rooms.
+    Require both the durable CoS identity and the existing designated-session
+    authority fence; neither a display name nor a model-supplied endpoint grants
+    this access.
+    """
+    from local_operator.aida.state import is_aida_session
+
+    from .authority import authority_fence
+
+    refusal = authority_fence(runtime)
+    if refusal is not None:
+        return _error(refusal["error"], code=refusal["code"])
+    if not is_aida_session(runtime.config_dir, runtime.session_id):
+        return _error(
+            "owner-shared reads belong only to the chief of staff", code="not_chief_of_staff"
+        )
+    return None
+
+
+async def _shared_conversations(
+    runtime: "BridgeRuntime", params: "BridgeToolParams", endpoint_id: str
+) -> dict[str, Any]:
+    refused = _shared_read_fence(runtime)
+    if refused:
+        return refused
+    if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
+        return _error(f"shared_conversations limit must be 1..{CONVERSATION_PAGE_MAX}")
+    try:
+        result = await runtime.client.cos_read_conversations(
+            tenant_id=runtime.tenant_id,
+            actor_endpoint_id=endpoint_id,
+            expected_account_id=runtime.owner.account_id,
+            limit=int(params.limit),
+            cursor=params.cursor or None,
+        )
+    except Exception as failure:
+        return _error(f"could not list shared conversations: {failure}", code="list_failed")
+    return {
+        "ok": True,
+        "state": "ok",
+        "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+    }
+
+
+async def _shared_history(
+    runtime: "BridgeRuntime", params: "BridgeToolParams", endpoint_id: str
+) -> dict[str, Any]:
+    refused = _shared_read_fence(runtime)
+    if refused:
+        return refused
+    channel_id = params.channel_id.strip()
+    if _CONVERSATION_ID.fullmatch(channel_id) is None:
+        return _error("shared_history needs a conversation id (bcv_…)")
+    thread_root_id = params.thread_root_id.strip()
+    if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
+        return _error("shared_history thread_root_id must be a message id (bcmsg_…)")
+    if params.before_seq is not None and params.after_seq is not None:
+        return _error("shared_history takes at most one of before_seq/after_seq")
+    if thread_root_id and params.before_seq is not None:
+        return _error("a thread reads oldest-first: page with after_seq")
+    if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
+        return _error(f"shared_history limit must be 1..{CONVERSATION_PAGE_MAX}")
+    try:
+        result = await runtime.client.cos_read_messages(
+            channel_id,
+            tenant_id=runtime.tenant_id,
+            actor_endpoint_id=endpoint_id,
+            expected_account_id=runtime.owner.account_id,
+            thread_root_id=thread_root_id or None,
+            limit=int(params.limit),
+            before_seq=params.before_seq,
+            after_seq=params.after_seq,
+        )
+    except Exception as failure:
+        if getattr(failure, "code", "") == "conversation_not_found":
+            return _error(
+                "not shared with you: ask your owner to share this conversation with their "
+                "chief of staff in Team Bridge (it cannot be granted from here)",
+                code="not_shared",
+            )
+        return _error(f"could not read the shared conversation: {failure}", code="history_failed")
+    return {
+        "ok": True,
+        "state": "ok",
+        "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+    }
+
+
+def _posted_message(result: Any) -> tuple[str, int | None]:
+    """``(message_id, seq)`` from a conversation-send answer.
+
+    WHY THIS EXISTS. ``POST /messaging/conversations/{id}/messages`` answers
+    ``{msg, result: <BridgeConversationMessageView>}`` (agent-server
+    ``SendHandlerEcho``), and the client unwraps ``result`` — so the message
+    view IS the dict: ``{"id": "bcmsg_…", "seq": 7, …}``. The tool used to
+    read ``result["message"]["id"]``, a wrapper the hub never sends, so every
+    real post reported ``message ?`` and a sender could not confirm or thread
+    on its own message (operator report, 2026-10-28). The nested shape is
+    still accepted so a proxy that wraps the view keeps working; anything
+    else yields an empty id rather than a guess.
+    """
+
+    if not isinstance(result, dict):
+        return "", None
+    view = result.get("message") if isinstance(result.get("message"), dict) else result
+    message_id = view.get("id")
+    seq = view.get("seq")
+    return (
+        message_id if isinstance(message_id, str) else "",
+        seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+    )
+
+
+def _post_receipt(
+    conversation_id: str, result: Any, *, thread_root_id: str = "", lead: str = "posted to"
+) -> dict[str, Any]:
+    """The ONE success receipt for a conversation write (channel_post, dm).
+
+    Carries ``message_id`` and ``seq`` as fields so the sender can confirm the
+    post and pass the id back as ``thread_root_id``. A missing id is reported
+    honestly as unconfirmed rather than rendered as ``?``.
+    """
+
+    message_id, seq = _posted_message(result)
+    content = f"{lead} {conversation_id}: " + (
+        f"message {message_id}" if message_id else "accepted, but the hub returned no message id"
+    )
+    if thread_root_id:
+        content += f" (reply in thread {thread_root_id})"
+    if seq is not None:
+        content += f" at seq {seq}"
+    return {
+        "ok": True,
+        "state": "sent",
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "seq": seq,
+        "destination_type": "conversation",
+        "conversation_history": True,
+        "receipt_stage": "server_accepted",
+        "execution_confirmed": False,
+        "content": content,
+    }
+
+
 def _full_body_text(result: Any) -> str | None:
     message = (result or {}).get("message") or {}
     body = message.get("body") or {}
@@ -463,9 +987,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # credential-row binding / tenant consistency / native designation. It runs
     # BEFORE anything may be scheduled: a drifted or disabled runtime performs
     # NO status fetch (no admit_soon), NO op and NO mutation — typed refusal.
-    from .host import admission_refusal, admit_soon, owner_fence_refusal
+    from .host import admission_refusal, admit_soon, outbound_tool_fence, owner_fence_refusal
 
-    fence = owner_fence_refusal(runtime)
+    # WHICH FENCE — see OUTBOUND_OPS. The collaboration ops take the relaxed
+    # fence; the mailbox ops and the owner-shared reads keep the strict one, so
+    # a colleague's task session can reach teammates without ever acquiring the
+    # owner's inbox or their shared conversations.
+    fence = outbound_tool_fence(runtime) if op in OUTBOUND_OPS else owner_fence_refusal(runtime)
     if fence is not None:
         return _error(fence["error"], code=fence["code"])
     # Refuse unsupported destinations before even scheduling admission I/O.
@@ -491,7 +1019,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     # admit the read, while disabled/signin/pending refuse both directions. The
     # channel reads (list/history) are fetches for the same reason; create and
     # post are mutations.
-    is_read = op in ("take_up", "channels", "channel_history", "channel_thread")
+    is_read = op in READ_OPS
     refusal = admission_refusal(runtime, is_read=is_read)
     if refusal is not None:
         admit_soon(runtime)
@@ -613,6 +1141,16 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             "receipt_stage": "server_accepted",
             "conversation_history": False,
             "execution_confirmed": False,
+            # The model reads this JSON receipt verbatim (``_execute``), so the
+            # lane boundary is said in words too: a pair send is invisible in
+            # every Team Bridge conversation view, and agents kept mistaking it
+            # for a DM (2026-10-28). One path per intent: dm / channel_post.
+            "note": (
+                f"Accepted into {_recipient_label(recipient)}'s peer inbox (legacy pair "
+                "lane). NOT posted in any conversation and not shown in Team Bridge "
+                "conversations. For a visible direct message use op=dm; for a room use "
+                "channel_post."
+            ),
         }
 
     if params.op == "channels":
@@ -687,6 +1225,18 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             "content": json.dumps(summary, ensure_ascii=False),
         }
 
+    if params.op == "directory":
+        return await _directory(runtime, params)
+
+    if params.op == "dm":
+        return await _direct_message(runtime, params, endpoint_id)
+
+    if params.op == "shared_conversations":
+        return await _shared_conversations(runtime, params, endpoint_id)
+
+    if params.op == "shared_history":
+        return await _shared_history(runtime, params, endpoint_id)
+
     if params.op == "channel_post":
         channel_id = params.channel_id.strip()
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
@@ -712,17 +1262,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             )
         except Exception as failure:
             return _error(f"the post did not confirm: {failure}", code="post_failed")
-        message = result.get("message") if isinstance(result, dict) else None
-        if not isinstance(message, dict):
-            message = {}
-        message_id = str(message.get("id") or "")
-        seq = message.get("seq")
-        content = f"posted to {channel_id}: message {message_id or '?'}"
-        if thread_root_id:
-            content += f" (reply in thread {thread_root_id})"
-        if isinstance(seq, int):
-            content += f" at seq {seq}"
-        return {"ok": True, "message_id": message_id, "state": "sent", "content": content}
+        return _post_receipt(channel_id, result, thread_root_id=thread_root_id)
 
     if params.op == "react":
         channel_id = params.channel_id.strip()
@@ -1051,17 +1591,17 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         name="bridge",
         label="Team Bridge",
         description=(
-            "Team Bridge as this session's agent: take_up/ack, send/reply, and "
-            "channel ops (channels, channel_create, channel_post, channel_history, "
-            "channel_thread, react). Cannot approve or deny."
+            "Team Bridge as this session's agent. directory: teammates and their "
+            "chiefs of staff. dm: message a person or their agent directly (a "
+            "relay request means dm, not 'forward this'); channel_post: rooms; "
+            "send/reply: only to answer a pair-inbox (bmsg_) delivery. "
+            "shared_*: conversations your owner shared with you. Cannot approve "
+            "or deny. More: read tool://bridge."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
         call_approval_tier=lambda args: (
-            "read"
-            if str(args.get("op"))
-            in ("take_up", "ack", "channels", "channel_history", "channel_thread")
-            else "write"
+            "read" if str(args.get("op")) in (*READ_OPS, "ack") else "write"
         ),
         concurrency="exclusive",
         interruptible=True,
@@ -1071,6 +1611,7 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
 
 __all__ = [
     "BRIDGE_OPS",
+    "READ_OPS",
     "CHANNEL_OPS",
     "CLAIM_TTL_S",
     "CONVERSATION_PAGE_MAX",

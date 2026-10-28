@@ -357,7 +357,13 @@ async def test_legacy_send_receipt_exposes_only_server_acceptance(
     if op == "reply":
         args["thread_id"] = "bth_1"
     result = await tool.execute("synthetic-call", args, None, None, context)
-    assert result.details == {
+    # The lane note is prose about WHERE the message went (pair inbox, not a
+    # conversation); it is asserted separately, so the closed receipt fields stay
+    # an exact set.
+    closed = dict(result.details or {})
+    note = closed.pop("note", None)
+    assert isinstance(note, str) and "peer inbox" in note and "op=dm" in note
+    assert closed == {
         "ok": True,
         "message_id": "bmsg_9",
         "state": "sent",
@@ -434,7 +440,9 @@ async def test_legacy_receipt_on_frozen_pending_intent_replay(tmp_path, monkeypa
     assert len(pending) == 1
     monkeypatch.setattr(Outbox, "record_send", lambda self, owner_key, **kwargs: pending[0])
     confirmed = await execute_bridge(runtime, args)
-    assert confirmed == {
+    closed = dict(confirmed)
+    assert "op=dm" in closed.pop("note")
+    assert closed == {
         "ok": True,
         "message_id": "bmsg_9",
         "state": "sent",
@@ -571,7 +579,9 @@ async def test_malformed_legacy_receipt_stays_pending_until_frozen_replay_confir
     assert replay_result.is_error is False
     assert isinstance(replay_result.content[0], TextContent)
     assert json.loads(replay_result.content[0].text) == confirmed
-    assert confirmed == {
+    closed = dict(confirmed)
+    assert "op=dm" in closed.pop("note")
+    assert closed == {
         "ok": True,
         "message_id": "bmsg_9",
         "state": "sent",

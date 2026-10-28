@@ -2252,6 +2252,86 @@ async def conversation_join(
     )
 
 
+class ConversationCosReadIn(ConversationOwnerIn):
+    """Share/unshare one conversation with the signed-in person's OWN chief of staff.
+
+    A guarded human mutation: the tenant and the captured owner are REQUIRED,
+    so a renderer holding a stale account can never grant on someone else's
+    behalf. No endpoint field exists on purpose: the hub derives the chief of
+    staff from the signed-in account, so a request cannot name another agent.
+    """
+
+    @model_validator(mode="after")
+    def _guarded(self) -> "ConversationCosReadIn":
+        if self.expected_account_id is None or self.tenant_id is None:
+            raise ValueError("a chief-of-staff share names tenant_id and expected_account_id")
+        return self
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/cos-read",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_cos_read_grant(
+    conversation_id: str,
+    request: Request,
+    body: ConversationCosReadIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Let my chief of staff read THIS conversation (agent-server §17).
+
+    The ONLY grant path: the bridge tool has no grant op, so an agent cannot
+    widen its own reach (pinned in ``tests/unit/team_bridge/test_cos_read_grant.py``).
+    Reads served under the grant are audited on the hub, per page.
+    """
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.cos_read_grant(
+                conversation_id,
+                tenant_id=str(body.tenant_id),
+                expected_account_id=str(body.expected_account_id),
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/cos-read",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_cos_read_revoke(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Withdraw the share; idempotent. Guard fields ride the query (DELETE body rule)."""
+    _require_conversation_id(conversation_id)
+    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
+        _raise_read("invalid_request")
+    try:
+        guard = ConversationCosReadIn(
+            tenant_id=request.query_params.get("tenant_id"),
+            expected_account_id=request.query_params.get("expected_account_id"),
+        )
+    except ValueError:
+        _raise_read("invalid_request")
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.cos_read_revoke(
+                conversation_id,
+                tenant_id=str(guard.tenant_id),
+                expected_account_id=str(guard.expected_account_id),
+            )
+        )
+    )
+
+
 @router.post(
     "/v1/desktop/team-bridge/conversations/{conversation_id}/leave",
     response_model=CRUDResponse[Any],

@@ -20,7 +20,8 @@ WHAT IT CHECKS (all persisted, no network):
 - the runtime's bound binding still matches EXACTLY: canonical base, account,
   tenant, endpoint, credential row, enrollment generation;
 - tenant consistency (``runtime.tenant_id`` == the committed owner's tenant);
-- the runtime's session is still the NATIVE designated session.
+- the runtime's session is non-empty and, except for explicitly outbound
+  operations/admission, still the NATIVE designated session.
 ANY miss returns a typed refusal (``feature_off`` / ``owner_changed`` /
 ``consent_revoked``) and the caller performs NO fetch, NO mutation, NO POST.
 
@@ -43,6 +44,7 @@ from typing import Any
 
 __all__ = [
     "authority_fence",
+    "outbound_authority_fence",
     "scope_from_runtime",
     "scope_matches_runtime",
 ]
@@ -61,7 +63,24 @@ def _owner_changed() -> dict[str, str]:
 
 
 def authority_fence(runtime: Any) -> dict[str, str] | None:
-    """``None`` when this runtime is still authorized; else a typed refusal."""
+    """Strict authority for inbound delivery, asks, and body consumption."""
+
+    return _authority_fence(runtime, require_designation=True)
+
+
+def outbound_authority_fence(runtime: Any) -> dict[str, str] | None:
+    """Authorize outbound operations/admission without granting inbound authority.
+
+    Writer sessions share the enrolled owner but are not the inbox recipient.
+    Only designation is relaxed: every persisted binding and consent check
+    remains shared with the strict fence, including a non-empty session id.
+    """
+
+    return _authority_fence(runtime, require_designation=False)
+
+
+def _authority_fence(runtime: Any, *, require_designation: bool) -> dict[str, str] | None:
+    """Keep the binding checks identical across the two authority scopes."""
 
     from local_operator.config import read_config_values
 
@@ -106,7 +125,9 @@ def authority_fence(runtime: Any) -> dict[str, str] | None:
         if str(getattr(runtime, "tenant_id", "")) != str(owner.tenant_id):
             return _owner_changed()
         session_id = str(getattr(runtime, "session_id", "") or "")
-        if not session_id or store.designated_session_for(owner) != session_id:
+        if not session_id or (
+            require_designation and store.designated_session_for(owner) != session_id
+        ):
             return _owner_changed()
         return None
     except (StoreRefused, sqlite3.Error, OSError, UnicodeDecodeError):

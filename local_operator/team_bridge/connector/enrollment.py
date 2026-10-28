@@ -106,7 +106,10 @@ def commit_settings_enrollment(
 
     DESIGNATION. ``cos_session_id`` is the user's existing ``team_bridge.session``
     choice, or None. None is badge-only per RFC §13.6 — the designation is the
-    wake consent and is never guessed from "the current session".
+    wake consent and is never guessed from "the current session". When the
+    person never chose one, the caller first defaults the SETTING to the
+    account's chief-of-staff session (``settings.record_local_session_if_unset``),
+    so what arrives here is still "the setting", never "the open chat".
     """
 
     store = Store(config_dir)

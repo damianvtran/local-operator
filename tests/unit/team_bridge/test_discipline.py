@@ -1098,7 +1098,12 @@ async def test_the_designation_still_follows_the_settings_row(
     await discipline.check(Boundary.SURFACE_OPEN)
 
     assert store.designated_session_for(owner) is None
-    assert (
-        bridge_runtime_for_session(config_manager=ConfigManager(tmp_path), session_id="sess_cos")
-        is None
+    # Withdrawing wake designation does not withdraw the enrollment receipt:
+    # outbound runtime construction remains available, inbound remains fenced.
+    from local_operator.team_bridge.host import owner_fence_refusal
+
+    runtime = bridge_runtime_for_session(
+        config_manager=ConfigManager(tmp_path), session_id="sess_cos"
     )
+    assert runtime is not None
+    assert owner_fence_refusal(runtime) is not None
