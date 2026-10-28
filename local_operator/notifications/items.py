@@ -276,10 +276,16 @@ def ask_item(
             "deadline_at": int(row.get("expires_at") or 0),
             "question_count": len(questions),
             "dismissible": _ask_dismissible(row),
-            # FOLDED UPDATES (``asks/dedupe.py``): same-topic ``notify`` text
-            # that rides this ask instead of being a second item. ADDITIVE and
-            # OPTIONAL: always a list (empty when none), so a renderer reads one
-            # shape, and an older client that never heard of the key ignores it.
+            # FOLDED UPDATES (``asks/dedupe.py``): ``notify`` text that only
+            # restated this ask, riding it instead of being a second item.
+            # ON THIS ITEM the key is ALWAYS PRESENT, as a list (``[]`` when
+            # none), so a renderer reads one shape; it is a NEW key on the
+            # item, so an older client simply ignores it. Contrast the ask
+            # RECORD and ``pending_row``, where it is ABSENT when empty so the
+            # frozen ask wire stays byte-identical for every older ask.
+            # ``context_dropped`` (always an int here) counts entries the
+            # fold's cap left out.
+            "context_dropped": int(row.get("context_dropped") or 0),
             "context": [
                 {
                     "title": str(entry.get("title") or ""),
@@ -310,6 +316,9 @@ def folded_context_md(item: Mapping[str, Any]) -> str:
         block = "\n\n".join(part for part in (f"**{title}**" if title else "", body) if part)
         if block:
             blocks.append(block)
+    # No "+N earlier" marker here: it would be untranslated product copy inside
+    # agent prose. The count rides ``ask.context_dropped`` for any surface to
+    # localize; the TUI shows it in its catalogued section header.
     return "\n\n".join(blocks)
 
 

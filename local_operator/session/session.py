@@ -16489,7 +16489,7 @@ class Session:
         # ONE TOPIC, ONE ENTRY (``asks/dedupe.py``): an open same-topic ask from
         # this session already notifies the operator, so the update rides it as
         # context instead of becoming a second item they must also clear.
-        folded = await asyncio.to_thread(self._fold_notify_into_open_ask, title, body)
+        folded = await asyncio.to_thread(self._fold_notify_into_open_ask, title, body, priority)
         if folded is not None:
             return folded
         root = Path(self._config_dir)
@@ -16515,7 +16515,7 @@ class Session:
             await self._route_item_banner(root, store, outcome, title=title, body=body)
         return _notify_sentence(outcome)
 
-    def _fold_notify_into_open_ask(self, title: str, body: str) -> str | None:
+    def _fold_notify_into_open_ask(self, title: str, body: str, priority: str) -> str | None:
         """The suppression sentence when ``notify`` duplicates an open ask, else ``None``.
 
         Best-effort by design: any failure (no queue on the blocking arm, an
@@ -16530,13 +16530,17 @@ class Session:
             from local_operator.asks import dedupe
 
             match = dedupe.matching_ask(
-                queue.open_records(), title=title, body=body, now=queue.clock_ms()
+                queue.open_records(),
+                title=title,
+                body=body,
+                now=queue.clock_ms(),
+                priority=priority,
             )
             if match is None:
                 return None
             if not queue.add_context(str(match["ask_id"]), title=title, body=body, source="notify"):
                 return None
-            return dedupe.SUPPRESSED_TEXT
+            return dedupe.SUPPRESSED_TEXT.format(ask_id=match["ask_id"])
         except Exception:  # noqa: BLE001 — fall through to delivering the update
             logger.debug("notify: open-ask dedupe check failed", exc_info=True)
             return None
@@ -16545,9 +16549,10 @@ class Session:
         """After an ask is queued: fold same-topic unread updates into it.
 
         The mirror of :meth:`_fold_notify_into_open_ask` (``asks/dedupe.py``).
-        The text is appended to the ask FIRST and the update is read+dismissed
-        (``via=merged_into_ask``) only once that append landed, so a failure
-        can leave both entries but never neither. Best-effort.
+        The text is appended to the ask FIRST and the update is marked read
+        (``via=merged_into_ask``, never dismissed) only once that append
+        landed, so a failure can leave both entries but never neither.
+        Best-effort.
         """
         try:
             if not outcome.get("ok"):

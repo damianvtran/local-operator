@@ -104,7 +104,8 @@ READ_VIA = ("explicit", "in_view")
 #: The provenance of an update folded into a same-topic ask (``asks/dedupe.py``).
 #: Deliberately NOT in :data:`READ_VIA`: no surface may mint it as a read, and
 #: the row must never claim the operator read something they did not — it
-#: left Unread because its text now rides the ask that notifies them.
+#: left Unread because its text now rides the ask that notifies them. It is a
+#: READ mark only; the row is never dismissed by the merge.
 MERGED_INTO_ASK_VIA = "merged_into_ask"
 
 #: Wire size caps (contract §1.3). The tool's pydantic schema enforces the same
@@ -1051,13 +1052,14 @@ class NotificationStore:
     def merge_into_ask(
         self, ids: Sequence[tuple[str, int]], *, now: int | None = None
     ) -> list[str]:
-        """Read AND dismiss updates whose text was folded into an ask.
+        """Mark READ (never dismiss) updates whose text was folded into an ask.
 
         Token-bound like :meth:`apply` (R10): each id names the revision the
         caller matched, so a keyed update written after the match keeps its new
-        revision unread. Dismissed as well as read so the item leaves the reel
-        entirely (its text is on the ask); it stays in the Dismissed view, and
-        an undismiss restores it. Both marks carry :data:`MERGED_INTO_ASK_VIA`.
+        revision unread. READ so it leaves Unread (the ask now carries it), but
+        NOT dismissed: it stays in All, so a surface that does not render an
+        ask's folded context (the phone's answer sheet, the TUI's narrow
+        layout) can still reach the text (design review D1, #3094).
         """
         stamp = now if now is not None else now_ms()
 
@@ -1072,16 +1074,8 @@ class NotificationStore:
                 if row is None:
                     continue
                 conn.execute(
-                    "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via=?, "
-                    "dismissed_at=?, dismissed_via=? WHERE id=?",
-                    (
-                        self._next_seq(conn),
-                        stamp,
-                        MERGED_INTO_ASK_VIA,
-                        stamp,
-                        MERGED_INTO_ASK_VIA,
-                        item_id,
-                    ),
+                    "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via=? WHERE id=?",
+                    (self._next_seq(conn), stamp, MERGED_INTO_ASK_VIA, item_id),
                 )
                 changed.append(item_id)
             return changed

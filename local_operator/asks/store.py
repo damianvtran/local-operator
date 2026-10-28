@@ -779,6 +779,10 @@ def fold(
             # ABSENT, never empty (the ``surfaced_in`` rule): an ask with no
             # folded update keeps the exact record shape older builds wrote.
             record["context"] = folded[-CONTEXT_MAX_ENTRIES:]
+            # The cap is VISIBLE (review m3): how many older entries it dropped,
+            # so a surface can say "+N earlier" instead of losing them silently.
+            if len(folded) > CONTEXT_MAX_ENTRIES:
+                record["context_dropped"] = len(folded) - CONTEXT_MAX_ENTRIES
         surfaced = surfaced_by_ask.get(ask_id)
         if surfaced:
             # ABSENT, never empty (the ``attachments`` rule below): an ordinary
@@ -1092,6 +1096,9 @@ def pending_row(
         # frozen wire stays byte-identical for every ask without it and older
         # readers (``extra="allow"`` / unknown-key-tolerant) ignore it.
         row["context"] = [dict(item) for item in folded]
+        dropped = record.get("context_dropped")
+        if dropped:
+            row["context_dropped"] = int(dropped)
     by = record.get("answered_by")
     if by:
         row["answered_by"] = dict(by)

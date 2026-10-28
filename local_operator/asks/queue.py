@@ -1619,27 +1619,56 @@ class AskQueue:
         source: str,
         item_id: str = "",
     ) -> bool:
-        """Fold a same-topic update's text into an ask (``asks/dedupe.py``).
+        """Fold an update's text into an ask that is STILL OPEN (``asks/dedupe.py``).
 
         An append-only ``context`` row, never a status change: the ask settles
-        when it settles, and the text settles with it. Refreshes the index so
-        the inbox, the desktop and the phone (which read rows, not sessions)
-        show it at once. ``False`` when the log could not be written, so the
-        caller can fall back to delivering the update rather than lose it.
+        when it settles, and the text settles with it.
+
+        THE STATUS IS RE-CHECKED UNDER THE LOG LOCK (review M1, #3094). The
+        caller matched the ask on an earlier read; another surface (the phone,
+        the desktop, a cold CLI) may have answered it since. Attaching to a
+        settled ask would hide the update on a question nobody looks at again,
+        so the fold is re-read with the lock held and anything but ``open``
+        refuses. A contended lock also refuses: the decision needs it (the
+        keyed bridge door's TB-10 rule). Every ``False`` means "deliver the
+        update normally", so a refusal can never lose it.
         """
-        event: dict[str, Any] = {
-            "v": store.EVENT_SCHEMA,
-            "kind": store.EVENT_CONTEXT,
-            "at": self._now(),
-            "ask_id": str(ask_id),
-            "title": str(title or ""),
-            "body": str(body or "")[: store.CONTEXT_BODY_MAX],
-            "source": source,
-        }
-        if item_id:
-            event["item_id"] = item_id
-        if not store.append_event(self.session_dir, event):
+        try:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(store.asks_log_path(self.session_dir), store.append_flags(), 0o600)
+        except OSError:
+            logger.debug("ask context: could not open the ask log", exc_info=True)
             return False
+        try:
+            lock = store._NonBlockingLock(fd)
+            with lock:
+                if not lock.acquired:
+                    return False
+                now = self._now()
+                record = next((r for r in self.records(now) if r["ask_id"] == str(ask_id)), None)
+                if record is None or record.get("status") != store.STATUS_OPEN:
+                    return False
+                event: dict[str, Any] = {
+                    "v": store.EVENT_SCHEMA,
+                    "kind": store.EVENT_CONTEXT,
+                    "at": now,
+                    "ask_id": str(ask_id),
+                    "title": str(title or ""),
+                    "body": str(body or "")[: store.CONTEXT_BODY_MAX],
+                    "source": source,
+                }
+                if item_id:
+                    event["item_id"] = item_id
+                os.write(
+                    fd,
+                    json.dumps(event, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    + b"\n",
+                )
+        except OSError:
+            logger.debug("ask context: append failed", exc_info=True)
+            return False
+        finally:
+            os.close(fd)
         self._refresh()
         return True
 

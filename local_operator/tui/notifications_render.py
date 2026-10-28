@@ -23,9 +23,6 @@ from rich.text import Text
 
 from local_operator.i18n import keys as i18n_keys
 from local_operator.notifications.items import first_question as inbox_first_question
-from local_operator.notifications.items import (
-    folded_context_md as inbox_folded_context_md,
-)
 from local_operator.resume import format_age
 from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
@@ -166,6 +163,39 @@ def _seen_clause(row: dict[str, Any]) -> str:
     if via == "in_view":
         return _t(_k.seen_in_chat())
     return ""
+
+
+def _append_folded_context(text: Text, item: dict[str, Any], width: int) -> None:
+    """Same-topic updates folded into an ask (``asks/dedupe.py``), one block each.
+
+    Under the existing "Earlier updates" divider, so the operator sees the text
+    came from the agent's updates (design D4) with no new copy to translate. Each
+    entry: its title as a bold line, then its body with paragraph breaks KEPT
+    (a blank source line stays a blank row), one blank row between entries
+    (design D2). The count includes any entries the fold's cap dropped
+    (``context_dropped``, review m3), so a capped list never reads as complete.
+    """
+    ask = item.get("ask") or {}
+    entries = [c for c in (ask.get("context") or []) if isinstance(c, dict)]
+    if not entries:
+        return
+    total = len(entries) + int(ask.get("context_dropped") or 0)
+    text.append("\n")
+    text.append_text(section_header(_t(_k.section_history()), total, width))
+    text.append("\n")
+    for index, entry in enumerate(entries):
+        if index:
+            text.append("\n")
+        title = str(entry.get("title") or "").strip()
+        if title:
+            for line in wrap_cells(title, width - 4):
+                text.append("   " + line + "\n", style=ink("fg", bold=True))
+        for paragraph in str(entry.get("body_md") or "").strip().splitlines():
+            if not paragraph.strip():
+                text.append("\n")
+                continue
+            for line in wrap_cells(paragraph, width - 4):
+                text.append("   " + line + "\n", style=ink("fg"))
 
 
 def wrap_cells(text: str, cells: int) -> list[str]:
@@ -502,14 +532,11 @@ def detail_text(
     # that question — and dropped the context the row already knows. The body is
     # the update's prose; an ask's context is its expiry (in the meta line) and
     # its related projects below.
-    # The one body an ask DOES carry is folded update text (``asks/dedupe.py``):
-    # a same-topic ``notify`` that rides the ask instead of being a second item.
-    # Agent-authored prose like an update's body, so it needs no copy of its own.
-    body = (
-        str(item.get("body_md") or "")
-        if not is_ask
-        else str(item.get("body_md") or "") or inbox_folded_context_md(item)
-    )
+    # An ask's markdown ``body_md`` (folded update text, built for the desktop
+    # and phone renderers) is never drawn here: this pane is plain text and
+    # would print its ``**`` literally (design D2 / QA Q2, #3094). The folded
+    # entries are drawn from ``ask.context`` below instead.
+    body = str(item.get("body_md") or "") if not is_ask else ""
     if body.strip():
         # DT9: a wrapped paragraph lost its inset on every continuation line,
         # because the widget folded the text with no hanging indent. Wrapping
@@ -517,7 +544,9 @@ def detail_text(
         for paragraph in body.strip().splitlines():
             for line in wrap_cells(paragraph, width - 4):
                 text.append("   " + line + "\n", style=ink("fg"))
-    elif not is_ask:
+    if is_ask:
+        _append_folded_context(text, item, width)
+    elif not body.strip():
         # D7: "No details were attached." under an ask read like an ERROR — for
         # an ask the question IS the detail, so the line said the item was
         # broken when it was complete. An ask simply has no body row: its meta
