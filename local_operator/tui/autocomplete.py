@@ -248,7 +248,15 @@ class SlashCommand:
     #: that pass a description positionally keep working unchanged; a locale
     #: move re-materialises the row with ``dataclasses.replace``, so this field
     #: is never mutated in place.
-    description_message: Msg | None = field(default=None, kw_only=True)
+    #:
+    #: ``compare=False`` because this is PROVENANCE, not identity: the class is
+    #: frozen, so the generated ``__hash__`` hashes every compared field, and
+    #: ``Msg.params`` is a dict — including this one made ``hash(row)`` raise
+    #: ``TypeError: unhashable type: 'dict'`` for every catalogued row (all 62,
+    #: latent only because nothing hashes a row today). It is also the honest
+    #: equality: two rows for the same command are the same row whether or not
+    #: one of them still carries the id it was rendered from.
+    description_message: Msg | None = field(default=None, kw_only=True, compare=False)
     aliases: tuple[str, ...] = field(default_factory=tuple)
     #: Whether running the command may write what was typed into the visible
     #: ledger as a user row.

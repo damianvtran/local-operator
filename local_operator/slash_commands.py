@@ -28,6 +28,7 @@ from local_operator.i18n.keys import (
     wire_slash_notifications_page,
 )
 from local_operator.i18n.messages import Msg, render
+from local_operator.i18n.resolve import eligible_locale
 from local_operator.i18n.text import active_locale, register_refresh
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
 from local_operator.tui.librarian_control import VERBS as LIBRARIAN_VERBS
@@ -1052,8 +1053,10 @@ def run_project_slash_op(
 #: * ``description`` is rendered once at import, for the active locale
 #:   (``en`` unless something calls ``set_active_locale``), and RE-rendered
 #:   in place by the refresher at the bottom of this section when the
-#:   locale moves. That is the copy the TUI reads — its picker and ``/help``
-#:   paint the field directly, so they follow ``/language`` live.
+#:   locale moves. That is the copy ``/help`` paints directly, so it follows
+#:   ``/language`` live. The slash picker does NOT: it paints its own copy of
+#:   the rows, and follows only because ``OperatorApp._apply_language``
+#:   re-hands it the refreshed list on every move.
 #: * ``describe(spec, locale)`` renders on demand. That is what a consumer
 #:   resolving a language PER REQUEST uses (``command_catalogue()`` on the
 #:   desktop, the phone's listing), because neither of those processes ever
@@ -1104,13 +1107,16 @@ def describe(spec: SlashCommand, locale: str | None = None) -> str:
     A row with no ``description_message`` (a literal) returns its own words, so
     an un-keyed page still answers instead of raising.
 
-    An unsupported or held tag renders English: ``render`` coerces through
-    ``eligible_locale``, the same contract every other caller gets.
+    An unsupported or held tag renders English: the locale is coerced through
+    ``eligible_locale`` HERE, before it becomes a cache key, so the same
+    contract every other caller gets also governs the memo. Coercing inside
+    ``render`` alone would let a memo of the French string outlive the
+    ``LOP_I18N=0`` kill switch: the switch is read per call, the cache is not.
     """
     message = spec.description_message
     if message is None:
         return spec.description
-    resolved = locale or active_locale()
+    resolved = eligible_locale(locale or active_locale())
     if message.params:
         # Not cached: an ICU parameterised description would need a key policy
         # for its values. None exists today (every description is one static

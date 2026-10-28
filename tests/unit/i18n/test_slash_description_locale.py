@@ -25,6 +25,10 @@ below cannot leak into the English-pinned suites.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
+
 from local_operator.i18n import catalogues
 from local_operator.i18n.messages import render
 from local_operator.i18n.text import active_locale, set_active_locale
@@ -96,6 +100,48 @@ def test_an_unsupported_locale_falls_back_to_english() -> None:
     """
     assert describe(_spec("help"), "zz") == HELP_EN
     assert describe(_spec("help"), "") == HELP_EN
+
+
+def test_the_kill_switch_outranks_a_warmed_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``LOP_I18N=0`` forces English even after a French entry is memoised.
+
+    The memo is keyed on the locale that will ACTUALLY render, never on the tag
+    the caller asked for, so the coerce has to happen before the key: coercing
+    inside ``render`` alone left a warm French entry being served straight
+    through the switch (the RFC §9 control is read per call; an ``lru_cache``
+    entry is not). Both directions are pinned, because a memo that misses the
+    switch on the way in misses it on the way out too.
+    """
+    spec = _spec("help")
+    # Warm French, then flip the switch: English, not the memoised French.
+    assert describe(spec, "fr") == HELP_FR
+    monkeypatch.setenv("LOP_I18N", "0")
+    assert describe(spec, "fr") == HELP_EN
+    # The other direction: warm English under the switch, then lift it.
+    assert describe(spec, "fr") == HELP_EN
+    monkeypatch.delenv("LOP_I18N")
+    assert describe(spec, "fr") == HELP_FR
+
+
+def test_a_catalogued_row_stays_hashable_and_equal_across_its_message() -> None:
+    """The message is provenance, not identity: ``hash(row)`` must not raise.
+
+    ``SlashCommand`` is frozen, so its generated ``__hash__`` hashes every
+    COMPARED field — and ``Msg.params`` is a dict, so carrying the message made
+    ``hash(row)`` raise ``TypeError`` for all 62 catalogued rows the moment the
+    field arrived. Latent only because nothing hashes a row today; excluded from
+    comparison, a set or dict key over rows keeps working, and two rows for the
+    same command stay equal whether or not one of them still carries the id it
+    was rendered from.
+    """
+    row = _spec("help")
+    without_message = replace(row, description_message=None)
+    assert without_message.description_message is None
+    # The regression, in the order it was reported: with the message compared,
+    # this line raised ``TypeError: unhashable type: 'dict'`` for every row.
+    assert hash(row) == hash(without_message)
+    assert without_message == row
+    assert len({row, without_message}) == 1
 
 
 def test_the_registry_refreshes_in_place_when_the_locale_moves() -> None:

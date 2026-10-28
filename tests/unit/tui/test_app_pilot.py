@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import io
 import json
 import os
 import re
@@ -830,9 +831,10 @@ def _repeating_clock(values: Sequence[float]) -> Callable[[], float]:
 
 
 def _renderable_plain(renderable) -> str:
-    """Recursively flatten a Rich renderable (incl. Group/Padding) to text."""
-    from rich.console import Group
+    """Recursively flatten a Rich renderable (incl. Group/Padding/Table) to text."""
+    from rich.console import Console, Group
     from rich.padding import Padding
+    from rich.table import Table
     from rich.text import Text
 
     if isinstance(renderable, Text):
@@ -841,9 +843,46 @@ def _renderable_plain(renderable) -> str:
         return "\n".join(_renderable_plain(child) for child in renderable.renderables)
     if isinstance(renderable, Padding):
         return _renderable_plain(renderable.renderable)
+    if isinstance(renderable, Table):
+        # `/help` lays its command rows out in a grid so a wrapped description
+        # hangs under the description column instead of the command names. A
+        # Table only becomes text through a Console, so render it at a width
+        # wide enough that no row wraps: these callers assert about ROW text,
+        # and wrapping would split one row into several.
+        buffer = io.StringIO()
+        Console(width=200, file=buffer, color_system=None, force_terminal=False).print(
+            renderable
+        )
+        # Trailing cells are the TABLE's padding to its widest row, not content:
+        # callers measure a row's painted width against the 74-cell wrap ceiling,
+        # and a Text row never carried them.
+        return "\n".join(line.rstrip() for line in buffer.getvalue().splitlines())
     if isinstance(renderable, str):
         return renderable
     return ""
+
+
+def _group_rows(group) -> list[str]:
+    """A Group's children as painted ROWS: a Table child contributes its lines.
+
+    ``/help`` carries its command table as a ``rich.table.Table`` grid (a
+    wrapped description has to hang under the description column rather than
+    restart at the command names), and the tests below walk that block row by
+    row — so the grid is flattened here instead of being cast to ``Text`` and
+    losing its rows.
+    """
+    from rich.table import Table
+    from rich.text import Text
+
+    rows: list[str] = []
+    for child in group.renderables:
+        if isinstance(child, Table):
+            rows.extend(_renderable_plain(child).splitlines())
+        elif isinstance(child, Text):
+            rows.append(child.plain)
+        else:
+            rows.append(str(child))
+    return rows
 
 
 def _transcript_text(app) -> str:
@@ -10315,6 +10354,90 @@ def test_help_rows_follow_a_live_language_move() -> None:
     assert "List all commands" in _renderable_plain(app._help_block().renderable)
 
 
+@pytest.mark.asyncio
+async def test_help_wrapped_descriptions_hang_under_the_description_column() -> None:
+    """Design round 1, D1: a wrapped row must not restart at the command names.
+
+    The block used to compose one ``Text`` per command
+    (``names.ljust(name_width) + description``); Rich restarts a wrapped Text at
+    the Text's origin, so at 80 columns every French description over the live
+    budget painted its tail under the command names — `navigateur` and
+    `confirmation` read as commands with no description, 8 continuations in 23
+    rows. Measured here on the painted block, in fr, and asserted as ONE
+    invariant: a line in the command table that is not a row start must hang at
+    the description column, and a row start must sit in the name column.
+
+    The English half is the byte-identity control: every en row that fits the
+    budget must still paint exactly ``label.ljust(name_width) + description``, so
+    a fix for the wrap cannot also move the column or split a row that fit.
+
+    Both halves render the WHOLE block, not just its first child, so the
+    assertion holds whatever the command rows are made of: on a pre-D1 tree that
+    child is one command row and the rest are siblings, while the fix makes it a
+    single grid. The region between the first and last command row is the table
+    in either shape — the notes below it carry their own labels (``ctrl+c``,
+    ``$<skill>``) and are excluded by construction.
+    """
+    from rich.cells import cell_len
+    from rich.console import Console
+
+    from local_operator.i18n.text import set_active_locale
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    labels = [
+        ", ".join(f"/{name}" for name in command.names) for command in SLASH_COMMANDS
+    ]
+    name_width = max(len(label) for label in labels) + 2
+    # `RichBlock` wraps its block in `Padding(renderable, (0, 2))`, and the
+    # block's own measured ceiling is 74 content cells at 80 columns, so a
+    # console 78 wide lays out exactly what an 80-column terminal paints.
+    padding_cells = 2
+    budget = 74 - name_width
+
+    def _lines() -> list[str]:
+        buffer = io.StringIO()
+        Console(width=78, file=buffer, color_system=None, force_terminal=False).print(
+            app._help_block().renderable
+        )
+        return buffer.getvalue().splitlines()
+
+    def _indent(line: str) -> int:
+        return len(line) - len(line.lstrip())
+
+    set_active_locale("fr")
+    try:
+        fr_lines = _lines()
+    finally:
+        set_active_locale("en")
+
+    row_starts = [
+        i
+        for i, line in enumerate(fr_lines)
+        if any(line.lstrip().startswith(label) for label in labels)
+    ]
+    assert row_starts, "no French command row painted at all"
+    continuations = 0
+    for line in fr_lines[row_starts[0] : row_starts[-1] + 1]:
+        if not line.strip():
+            continue
+        if any(line.lstrip().startswith(label) for label in labels):
+            assert _indent(line) == padding_cells, line
+            continue
+        # A wrapped tail: it must hang under the DESCRIPTION column, not
+        # restart in the name column where it reads as another command.
+        assert _indent(line) >= padding_cells + name_width, line
+        continuations += 1
+    assert continuations, "no French row wrapped: the wrap this pins never happened"
+
+    en_lines = _lines()
+    for command, label in zip(SLASH_COMMANDS, labels, strict=True):
+        if cell_len(command.description) > budget:
+            continue
+        row = next(line for line in en_lines if line.lstrip().startswith(label))
+        expected = " " * padding_cells + f"{label.ljust(name_width)}{command.description}"
+        assert row.rstrip() == expected.rstrip(), row
+
+
 def test_help_mentions_the_window_title_toggle() -> None:
     """The title lives outside the app's frame, so the help is where a user who
     notices it and wants it off can discover the toggle without source-diving."""
@@ -13079,7 +13202,6 @@ async def test_help_documents_the_system_clipboard_paste_key() -> None:
     """
     from rich.console import Group
     from rich.padding import Padding
-    from rich.text import Text
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -13090,7 +13212,7 @@ async def test_help_documents_the_system_clipboard_paste_key() -> None:
         # renderable chain is typed as the broad `RenderableType` union.
         padding = cast(Padding, app._help_block().renderable)
         group = cast(Group, padding.renderable)
-        text = "\n".join(cast(Text, row).plain for row in group.renderables)
+        text = "\n".join(_group_rows(group))
 
         assert "ctrl+v" in text, "/help must name the system clipboard paste key"
         line = next(row for row in text.splitlines() if "ctrl+v" in row)
@@ -13115,14 +13237,13 @@ async def test_help_documents_the_composer_copy_key_and_its_release() -> None:
     """
     from rich.console import Group
     from rich.padding import Padding
-    from rich.text import Text
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         padding = cast(Padding, app._help_block().renderable)
         group = cast(Group, padding.renderable)
-        rows = [cast(Text, row).plain for row in group.renderables]
+        rows = _group_rows(group)
         text = "\n".join(rows)
 
         assert "ctrl+c" in text, "/help must name the composer copy key"
@@ -13171,14 +13292,13 @@ async def test_the_help_model_row_is_a_sentence_and_still_fits_at_80() -> None:
     """
     from rich.console import Group
     from rich.padding import Padding
-    from rich.text import Text
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         padding = cast(Padding, app._help_block().renderable)
         group = cast(Group, padding.renderable)
-        rows = [cast(Text, row).plain for row in group.renderables]
+        rows = _group_rows(group)
 
     row = next(r for r in rows if r.startswith("/model, /models"))
     description = row[len("/model, /models") :].strip()
@@ -13215,14 +13335,13 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
     """
     from rich.console import Group
     from rich.padding import Padding
-    from rich.text import Text
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         padding = cast(Padding, app._help_block().renderable)
         group = cast(Group, padding.renderable)
-        rows = [cast(Text, row).plain for row in group.renderables]
+        rows = _group_rows(group)
 
         # Bang-mode's marker is named because the glyph is the
         # colour-independent signal. A row that names ``!`` without

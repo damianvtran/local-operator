@@ -51,6 +51,7 @@ from rich.cells import cell_len
 from rich.console import Group
 from rich.padding import Padding
 from rich.style import Style
+from rich.table import Table
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
 from textual import events
@@ -19423,7 +19424,9 @@ class OperatorApp(App[None]):
         terminal, a peer session) writes the same file, and a cached set would
         make `/unarchive` refuse a conversation the store already holds it for —
         the user's own two windows disagreeing about a file one of them wrote.
-        The read is one small file, only on a command that names the state.
+        The read is one small file, but every composer refresh pays it: a
+        command that names the state, a session bind and a language move all
+        re-filter the offered list (``_offered_commands``).
         """
         from local_operator.paths import config_dir
         from local_operator.session.archived import archived_ids
@@ -46887,8 +46890,10 @@ class OperatorApp(App[None]):
         # ``register_refresh`` hook), which reaches ``/help`` because that block
         # reads ``SLASH_COMMANDS`` per render. The PICKER does not: the editor
         # hands it a plain ``list(...)`` copy, so it would keep painting the boot
-        # language for the rest of the session. Re-handing the rows is the whole
-        # fix, and it is silent when no editor is mounted.
+        # language for the rest of the session. Re-handing the rows is the fix,
+        # and the editor re-derives an ALREADY OPEN list from its buffer on that
+        # call, so the rows on screen repaint rather than waiting for the next
+        # keystroke (QA round 1, Q1). Silent when no editor is mounted.
         self._refresh_offered_commands()
         # Localized transcript furniture is baked into finalized blocks just as
         # theme ink is. Reuse that same rebuild sweep so a locale move repaints
@@ -55803,12 +55808,32 @@ class OperatorApp(App[None]):
         # glued straight onto their descriptions. Derive one shared column and
         # preserve the two-cell gutter for every row.
         name_width = max((len(names) for names, _ in named_commands), default=0) + 2
-        lines = []
+        # The command table is a real GRID, not one composed ``Text`` per row.
+        # A composed row (``names.ljust(name_width) + description``) makes Rich
+        # restart a wrapped line at the Text's origin, i.e. at the name column:
+        # at 80 columns every French description over 54 cells painted its tail
+        # under the command names, where `navigateur` and `confirmation` read as
+        # commands with no description (design round 1, D1 — 8 continuations in
+        # 23 rows, en's `/fork` already one of them). A grid wraps INSIDE its
+        # second cell, so the tail hangs under the description and re-wraps on
+        # resize instead of freezing at the width the command ran at.
+        #
+        # ``padding=0`` keeps the two-cell gutter ``name_width`` already carries
+        # (a grid's default 1-cell column padding would widen the name column by
+        # one and move every description right); ``overflow="fold"`` keeps a
+        # word longer than the cell wrapping rather than ellipsizing, because
+        # this table is a reference and nothing in it may be silently cut.
+        command_rows = Table.grid(padding=0)
+        command_rows.add_column(width=name_width)
+        command_rows.add_column(ratio=1, overflow="fold")
         for names, command in named_commands:
-            line = Text()
-            line.append(names.ljust(name_width), style=muted)
-            line.append(command.description, style=dim)
-            lines.append(line)
+            command_rows.add_row(
+                Text(names, style=muted),
+                Text(command.description, style=dim),
+            )
+        # Rows and notes share one Group, so the list holds renderables rather
+        # than only Texts (the command table is the one non-Text entry).
+        lines: list[Text | Table] = [command_rows]
         # `ctrl+v` documented durably. It is not a slash command so it cannot
         # appear in the table above, and this app shows no key reference in the
         # footer - yet it is the one paste key that works on EVERY terminal.
@@ -56165,7 +56190,12 @@ class OperatorApp(App[None]):
             _t(_x.help_notify_note_more()),
             style=dim,
         )
-        if not lines or lines[-1].plain:
+        # A blank line before the notes, unless one is already there. The row
+        # list holds the command TABLE as well as Texts, so the "already blank"
+        # question only has an answer for a Text: a renderable that is not one
+        # always takes the separator.
+        last = lines[-1] if lines else None
+        if not isinstance(last, Text) or last.plain:
             lines.append(Text())
         lines.append(title_note)
         lines.append(title_note_more)
