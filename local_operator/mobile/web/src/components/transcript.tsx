@@ -56,14 +56,22 @@ const PAGE = 120;
    it, only re-offer it to the merge's id de-dup. */
 const PROJECTION_ROWS = 80;
 
+/** Every row id the LIVE fold mints, which no journal row can ever match. The
+ *  fold creates them for content that is not a journal entry: reasoning
+ *  (`rz-`, never persisted), tool rows (`tc-`), notices (`nt-`, `rt-`, `err-`,
+ *  `rej-`) and compaction (`cx-`) — all timestamp- or call-keyed
+ *  (`local_operator/mobile/projection.py`, the `id=f"<p>-…"` sites). The child
+ *  sheet also synthesises a head row `prompt:<job_id>` (`agent-view.tsx`). A
+ *  cursor naming any of these is answered as end-of-history. */
+const LIVE_ONLY_ROW_PREFIXES = ["rz-", "tc-", "nt-", "rt-", "err-", "rej-", "cx-", "prompt:"];
+
 /** Whether a rendered row's id can name a journal entry — the only kind a
- *  history cursor may use. Reasoning rows live only in the projection (the
- *  fold's own comment: reasoning "is never persisted anywhere"), and the live
- *  fold's tool rows carry `tc-`, while a served page names a tool row
- *  `<message>:call_<call>`. Anything else is a cursor the daemon can only
+ *  history cursor may use. Anything else is a cursor the daemon can only
  *  answer as end-of-history. */
 function journalAddressableRow(entry: TranscriptEntry | undefined): boolean {
-	return entry !== undefined && entry.kind !== "reasoning" && !entry.id.startsWith("tc-");
+	return entry !== undefined
+		&& entry.kind !== "reasoning"
+		&& !LIVE_ONLY_ROW_PREFIXES.some((prefix) => entry.id.startsWith(prefix));
 }
 
 /* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
@@ -470,6 +478,7 @@ export function Transcript({
 	supplements,
 	projectionPid = 0,
 	peerCycles = false,
+	headPinned,
 	tailContent,
 	emptyContent,
 }: {
@@ -490,6 +499,11 @@ export function Transcript({
 	projectionPid?: number;
 	/** Explicit owner-channel negotiation; never inferred from an entry. */
 	peerCycles?: boolean;
+	/** The projection's `transcript_head_pinned`: the head row is the opening
+	 *  user message pinned ahead of a disjoint tail, so the first history cursor
+	 *  must start below it. Absent on an older daemon — the length/kind fallback
+	 *  then applies. */
+	headPinned?: boolean;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -586,7 +600,13 @@ export function Transcript({
 	   would create a hole and make a turn summary claim a shorter run. */
 	const heldMap = new Map<string, TranscriptEntry>();
 	for (const entry of [...older, ...heldLive]) heldMap.set(rowKey(entry), entry);
-	const cappedProjection = entries.length >= PROJECTION_ROWS;
+	/* THE PIN COMES FROM THE WIRE WHEN THE DAEMON SAYS SO. `headPinned` is the
+	   projection's own `transcript_head_pinned`; absent on an older daemon, where
+	   the length-and-kind test is the only signal available. Any user-headed
+	   projection is treated as pinned in that fallback: the opener is held either
+	   way, so the cost of a false positive is one row of overlap in the next
+	   page, which the merge's rowKey de-dup discards. */
+	const cappedProjection = headPinned ?? (entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user");
 	const pinnedOpener = cappedProjection && entries.length > 1 && entries[0]?.kind === "user" ? entries[0] : null;
 	const liveTail = pinnedOpener ? entries.slice(1) : entries;
 	for (const entry of liveTail) heldMap.set(rowKey(entry), entry);
@@ -613,23 +633,22 @@ export function Transcript({
 	   `older[0]` is the oldest row this view actually holds, so the next page is
 	   the one immediately before it and paging is linear in the reader's taps. */
 	/* THE FIRST CURSOR MUST NAME A JOURNAL ROW, and not every rendered row does.
-	   The live fold mints ``rz-`` reasoning rows and ``tc-`` tool rows
-	   (``local_operator/mobile/projection.py``); reasoning is never written to
-	   the journal at all, and a served page names tool rows
-	   ``<message>:call_<call>``. The daemon answers a cursor it cannot locate as
-	   END OF HISTORY (``durable.py:_cursor_candidates`` / ``journal_rows_older_than``),
-	   so a cursor taken from one of these rows stops back-filling for good: the
-	   reader sees the pinned opening message, a gap, and the newest rows.
+	   The live fold mints ids the journal never holds — ``rz-`` reasoning, ``tc-``
+	   tool rows, ``nt-``/``rt-``/``err-``/``rej-`` notices, ``cx-`` compaction —
+	   and a served page names a tool row ``<message>:call_<call>``. The daemon
+	   answers a cursor it cannot locate as END OF HISTORY
+	   (``durable.py:_cursor_candidates`` / ``journal_rows_older_than``), so a
+	   cursor taken from one of these rows stops back-filling for good: the reader
+	   sees the pinned opening message, a gap, and the newest rows.
 
-	   A USER-HEADED PROJECTION IS THE PINNED-OPENER SHAPE, at any length. The
-	   daemon pins the opening user message ahead of a disjoint tail, and the
-	   FRAME CAP can push a pinned projection below ``PROJECTION_ROWS`` (16 rows
-	   at its floor) — where the old length test fell through to
-	   ``merged[0].id``, the opener itself, so every fetch asked for history
-	   older than the first message of the conversation and got nothing. Skipping
-	   the head costs at most one already-held row on a projection that merely
-	   STARTS with a user turn, which the merge's rowKey de-dup discards. */
-	const cursorStart = entries.length > 1 && entries[0]?.kind === "user" ? 1 : 0;
+	   AND THE PINNED HEAD IS NOT THE CURSOR. The daemon pins the opening user
+	   message ahead of a disjoint tail; paging from it asks for history older
+	   than the conversation's first message. The projection states the pin
+	   (``transcript_head_pinned``), which is the only reliable signal: the frame
+	   cap can publish a pinned tail of 16 rows, so length cannot stand in for it.
+	   Skipping the head costs at most one already-held row on a projection that
+	   merely STARTS with a user turn, which the merge's rowKey de-dup discards. */
+	const cursorStart = cappedProjection ? 1 : 0;
 	const oldestId =
 		older.length > 0
 			? older[0].id

@@ -842,6 +842,7 @@ export function AgentConversation({
 				entries={entries}
 				streaming={detail.status === "running"}
 				peerCycles={projection?.peer_cycles === 1}
+				headPinned={projection?.transcript_head_pinned === true}
 				tailContent={
 					<>
 						{/* The notice belongs to the rows it explains, so it sits after them

@@ -248,7 +248,7 @@ FRAME_CAP_PROMPT_CHARS = 120
 FRAME_CAP_RESULT_CHARS = 200
 FRAME_CAP_ERROR_CHARS = 400
 
-#: Floor for the transcript tail under the frame cap. Tier 3 halves the tail
+#: Floor for the transcript tail under the frame cap. Tier 4 halves the tail
 #: toward this bound; below it the phone keeps the opening user message plus
 #: the newest few rows and pages the rest from /history, which is exactly the
 #: scroll contract the 80-row cap already established.
@@ -280,12 +280,15 @@ FRAME_CAP_TODO_TEXT_CHARS = 120
 FRAME_CAP_PENDING_TITLE_CHARS = 2_000
 FRAME_CAP_PENDING_DETAIL_CHARS = 2_000
 
-#: The roster fields that survive everything except the LAST shed tier: each is
-#: a pure derivation of ``parent_job_id``, which is why they can be dropped at
-#: all. ``peer_ids`` is the one that actually grows the frame — it is every
-#: sibling's job id, so a wide fan-out (256 children under one parent) makes
-#: every row list the other 255 and the field becomes O(n^2) in roster WIDTH:
-#: measured at 1,044,480 B of a 1,254,249-byte frame, 83% of it.
+#: The roster fields a "derived graph" shed can take: each is a pure
+#: derivation of ``parent_job_id``, which is why they can be dropped at all.
+#: ``peer_ids`` is the one that actually grows the frame — it is every sibling's
+#: job id, so a wide fan-out (256 children under one parent) makes every row
+#: list the other 255 and the field becomes O(n^2) in roster WIDTH: measured at
+#: 1,044,992 B of a 1,396,444 B frame, 74.8% of it. Their order position is
+#: decided by measurement, not by rank: see ``cap_projection_frame`` tiers 2
+#: and 5 — early only when the graph alone brings the frame under the cap,
+#: otherwise after the cheaper transcript tiers and before row text.
 FRAME_CAP_DERIVED_ROSTER_FIELDS = ("peer_ids", "child_ids", "ancestor_ids", "ancestors")
 
 #: What a roster row keeps in the LAST tier, when even the derived graph is not
@@ -1027,26 +1030,32 @@ def cap_projection_frame(
        The card itself is the loudest thing on the phone and is never dropped;
        only the prose under each option is trimmed.
     2. The DERIVED roster graph is shed (``peer_ids``, ``child_ids``,
-       ``ancestor_ids``, ``ancestors``). This is the MOST recoverable thing in
-       the frame — every field is a derivation of ``parent_job_id``, which
-       stays on every row (see ``FRAME_CAP_DERIVED_ROSTER_FIELDS``) — and the
-       one that scales with roster WIDTH: ``peer_ids`` is O(n^2) across a flat
-       sibling group. It is shed BEFORE the transcript tiers for exactly that
-       reason; shed after them (the order it shipped in), a 435-wide roster's
-       graph spent the reader's messages first and was dropped anyway.
+       ``ancestor_ids``, ``ancestors``) WHEN THAT ALONE BUYS THE FRAME. Each
+       field is a derivation of ``parent_job_id``, which stays on every row
+       (see ``FRAME_CAP_DERIVED_ROSTER_FIELDS``), and the one that scales with
+       roster WIDTH: ``peer_ids`` is O(n^2) across a flat sibling group, so a
+       wide roster's frame is mostly this graph and dropping it is the whole
+       fix. When it is NOT enough on its own it is offered again as tier 5 —
+       after the cheaper transcript tiers and before row text — because a small
+       roster's graph buys the frame nothing and the Agents sheet still reads
+       it. Tiers 3-4 shrink TEXT, so none of them can touch the field that
+       scales with roster WIDTH.
     3. Transcript rows lose their ``details`` expand payload (args/output/
        diff). The collapsed row still renders; expanding an old row is the
        one gesture that can re-fetch from /history.
     4. The transcript tail halves toward ``FRAME_CAP_TRANSCRIPT_FLOOR``,
        keeping the pinned opening user message — the same scroll contract the
-       80-row cap already establishes, just tighter.
-    5. Row TEXT (plus ``summary``/``error``) is truncated, walking down from
+       80-row cap already establishes, just tighter. Pinning here also sets
+       ``transcript_head_pinned``, which is how the client learns the head is
+       not the tail's chronological neighbour.
+    5. The derived roster graph, if tier 2 did not already take it.
+    6. Row TEXT (plus ``summary``/``error``) is truncated, walking down from
        ``FRAME_CAP_ENTRY_TEXT_CHARS`` to ``FRAME_CAP_ENTRY_TEXT_FLOOR``. This
        is last because the text is what the reader came for — but one pasted
-       file can exceed the whole cap by itself, and tiers 1-4 cannot touch it,
+       file can exceed the whole cap by itself, and tiers 1-5 cannot touch it,
        so without this the function returned a frame the socket then dropped
        whole. The full text stays one /history fetch away.
-    6. The roster drops to identity rows (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``).
+    7. The roster drops to identity rows (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``).
        A viewer renders one row per child with its label, lifecycle state and
        parent; per-child detail is fetched on demand, the same trade the
        transcript already makes.
@@ -1214,32 +1223,37 @@ def cap_projection_frame(
     if fits():
         return data, True
 
-    # Tier 2: shed the DERIVED roster graph. Nothing is lost that the reader
-    # cannot rebuild: all four fields are derivations of ``parent_job_id``,
-    # which every tier keeps — the canonical side already reasons this way
-    # (``frontend_state`` rebuilds its parent/peer/child edges from its job
-    # rows, and its ``peers()`` derives what this field precomputes), and the
-    # phone's store treats a missing list as empty rather than unmounting the
-    # session. Empty lists rather than deleted keys: the wire shape stays
-    # uniform, and an absent list and an empty one normalise identically.
+    # Tier 2: shed the DERIVED roster graph WHEN THAT ALONE BUYS THE FRAME.
     #
-    # BEFORE THE TRANSCRIPT TIERS, because this is the MOST recoverable field
-    # in the frame and the transcript is the least. ``peer_ids`` is every
-    # sibling's job id, so a flat fan-out costs O(n^2) and dominates a wide
-    # roster's frame — measured on the operator's own store at 435 children:
-    # 2,076,690 B of a 2,430,078 B frame, 85% of it. Shed after the transcript
-    # (the order this tier shipped in), that dominance made the cap spend the
-    # reader's messages first: text floored to 200 chars and the tail cut to
-    # 16 rows, and THEN the graph was dropped anyway, leaving a frame that
-    # would have fitted with every row and every character intact. A field
-    # rebuilt from ``parent_job_id`` on the reader's own device cannot outrank
-    # the content the reader came for.
-    for row in data.get("subagents") or []:
-        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
-            row[field] = []
-    dirty.add("subagents")
-    if fits():
-        return data, True
+    # The four fields are pure derivations of ``parent_job_id``, which every
+    # tier keeps, so they are the most recoverable thing in the frame — and
+    # ``peer_ids`` is every sibling's job id, so a flat fan-out costs O(n^2).
+    # At 256 siblings it is 1,044,992 B of a 1,396,444 B frame (74.8%).
+    #
+    # MEASURED, NOT UNCONDITIONAL. Shed after the transcript tiers (the order
+    # this tier shipped in), that dominance made the cap spend the reader's
+    # messages first — text floored to 200 chars and the tail cut to 16 rows —
+    # and then drop the graph anyway. Shed unconditionally FIRST, the opposite
+    # failure appears: a small roster's graph costs a few hundred bytes, cannot
+    # bring the frame under the cap by itself, and is still taken away from the
+    # Agents sheet (``agents-sheet.tsx`` reads ``peer_ids``/``ancestor_ids`` and
+    # nothing on the client rebuilds them) while the transcript pays anyway.
+    # So shed it here only when ``total - derived <= cap``: that is the case
+    # where this tier is the WHOLE fix and nothing else has to be spent. When
+    # it is not, the graph is offered again below, after details and the tail
+    # have been tried and before row text — never before the cheaper tiers.
+    derived_bytes = sum(
+        _subtree_bytes(row.get(field))
+        for row in data.get("subagents") or []
+        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS
+    )
+    if derived_bytes and total - derived_bytes <= cap_bytes:
+        for row in data.get("subagents") or []:
+            for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+                row[field] = []
+        dirty.add("subagents")
+        if fits():
+            return data, True
 
     # Tier 3: drop the expand payload of every transcript row.
     for entry in data.get("transcript") or []:
@@ -1257,13 +1271,31 @@ def cap_projection_frame(
         entries = entries[-limit:]
         if first_user is not None and first_user not in entries:
             entries = [first_user, *entries[1:]]
+            # THE PINNED-HEAD FACT reaches the client here, because the client
+            # cannot infer it: a frame-cap tail can be SHORTER than
+            # ``PROJECTION_TRANSCRIPT_LIMIT`` while still pinning the opener,
+            # and length is the only thing it could otherwise test (see
+            # ``ProjectionFold._cap_tail``).
+            data["transcript_head_pinned"] = True
         data["transcript"] = entries
         dirty.add("transcript")
         if fits():
             return data, True
         limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, limit // 2)
 
-    # Tier 5: truncate row text. Tiers 1-4 cannot shrink a single oversized
+    # Tier 5: shed the derived roster graph. Reached only when tier 2 could not
+    # buy the frame with it — so details and the tail have already been spent,
+    # and the remaining choice is the graph or the reader's words. The graph
+    # wins that comparison: it is a derivation of ``parent_job_id``, which stays
+    # on every row, and the transcript is not recoverable without a fetch.
+    for row in data.get("subagents") or []:
+        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+            row[field] = []
+    dirty.add("subagents")
+    if fits():
+        return data, True
+
+    # Tier 6: truncate row text. Tiers 1-5 cannot shrink a single oversized
     # row, so this is the only tier that bounds the pasted-file case.
     text_limit = FRAME_CAP_ENTRY_TEXT_CHARS
     while True:
@@ -1283,7 +1315,7 @@ def cap_projection_frame(
             break
         text_limit = max(FRAME_CAP_ENTRY_TEXT_FLOOR, text_limit // 4)
 
-    # Tier 6: identity rows. What stays is what a reader can neither derive nor
+    # Tier 7: identity rows. What stays is what a reader can neither derive nor
     # fetch per child: the job id, the label, the parent edge and the lifecycle
     # state. What goes is recoverable through the per-child fetch the transcript
     # already relies on — with ONE exception, named rather than glossed:
@@ -4082,8 +4114,7 @@ class ProjectionFold:
                 if row.id in live
             }
 
-    @staticmethod
-    def _cap_tail(entries: list[TranscriptEntry]) -> list[TranscriptEntry]:
+    def _cap_tail(self, entries: list[TranscriptEntry]) -> list[TranscriptEntry]:
         """Trim to the render tail WITHOUT losing the opening user message.
 
         A bare ``[-LIMIT:]`` drops the first user turn on any session longer
@@ -4093,8 +4124,19 @@ class ProjectionFold:
         pinned at the head, then fill the rest from the tail. The web client
         still pages older history on scroll; this is about the projection
         never omitting the conversation's own opening.
+
+        THE PIN IS A WIRE FACT, not something the client can recover. The
+        client's first history cursor must be the oldest row of the TAIL, not
+        the pinned opener (paging from the opener asks for history older than
+        the conversation's first message and gets nothing), and it used to
+        decide that from ``len(transcript) == PROJECTION_TRANSCRIPT_LIMIT``.
+        The frame cap can publish a SHORTER pinned tail —
+        ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows at its floor — so length is not a
+        reliable signal. This flag is set here and by the cap's tail tier, and
+        it rides the projection.
         """
         if len(entries) <= PROJECTION_TRANSCRIPT_LIMIT:
+            self.projection.transcript_head_pinned = False
             return entries
         tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
         first_user = next((e for e in entries if e.kind == "user"), None)
@@ -4108,7 +4150,9 @@ class ProjectionFold:
             # calls I can't see"). Dropping the oldest keeps the bound (one
             # pinned + LIMIT-1 newest = LIMIT) while the newest row always
             # survives. Older rows page back in on scroll via the history API.
+            self.projection.transcript_head_pinned = True
             return [first_user, *tail[1:]]
+        self.projection.transcript_head_pinned = False
         return tail
 
     def _find(self, entry_id: str | None) -> TranscriptEntry | None:

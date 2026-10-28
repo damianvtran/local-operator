@@ -877,10 +877,11 @@ def _cursor_candidates(row_id: str) -> Iterator[str]:
     # mints ``rz-<message id>`` (``projection.py:_reasoning_row``) and reasoning
     # is never written to the journal at all, so a client holding one has a
     # cursor no journal row can ever match — it was answered as end-of-history,
-    # which made the conversation's middle unreachable. The message below it IS
-    # a journal row, and it sits one row further down than the reasoning row the
-    # caller holds, so paging from it serves exactly the rows the caller is
-    # missing and re-offers nothing its de-dup cannot discard.
+    # which made the conversation's middle unreachable. That message IS a
+    # journal row, and the fold renders it directly BELOW the reasoning row, so
+    # the cursor resolves one journal position newer than the row the caller
+    # holds: the page is exactly the rows older than the message, which is what
+    # the caller lacks, and the caller's own rows de-dup.
     if row_id.startswith("rz-"):
         yield row_id[3:]
 
