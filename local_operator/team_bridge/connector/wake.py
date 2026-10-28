@@ -516,50 +516,65 @@ async def ack_read(
     return await _pull.ack(owner, message_id, target, receipt, config_dir=config_dir, access=access)
 
 
-async def recover_pending_read(
+async def recorded_read_verdict(
     owner: Any, message_id: str, item: Any, *, config_dir: Path, access: Any
 ) -> tuple[str | None, Mapping[str, Any] | None]:
-    """Replay a PENDING read-ACK intent before screening.
+    """The read verdict this connector already RECORDED for these bytes.
 
-    Returns ``(hold_code, None)`` to hold, ``(None, receipt)`` when the hub
-    confirmed the stored intent (its receipt is the decision the spine
-    carries, review M3), or ``(None, None)`` when there was nothing to replay.
+    Returns ``(hold_code, None)`` to hold, ``(None, receipt)`` when a recorded
+    ``read`` intent for the fetched body exists and the hub has it confirmed
+    (the spine hands off with that receipt and never screens again), or
+    ``(None, None)`` when there is no such intent and screening decides.
 
-    WHY (PR #3063 review m4; the operator's "unacked messages must catch up
-    after the device was off"): a stop or crash DURING the read-ACK POST
-    leaves the intent ``pending``. Screening's first reconcile (step 5)
-    refuses to admit a message with a pending intent and holds it
-    ``ack_recovery``, and nothing in the connector ever flushed one, so the
-    message was held forever. This replays the STORED intent — its tuple and
-    its ``client_ref``, through ``pull.recover_ack``, never a re-screen or a
-    new ref — so the hub sees the same idempotency key. Once it confirms,
-    screening is no longer blocked, the cached receipt admits again, and
-    ``ack_read`` returns the confirmed intent with no second request.
+    ONE RULE (PR #3063 reviews m4, M3, M4): a recorded read intent IS the
+    screening decision already made and sent for this message. Whatever
+    interrupted the handoff — a stop during the ACK POST (intent ``pending``)
+    or after the hub confirmed it (intent ``confirmed``) — the spine carries
+    that decision to the handoff:
+
+    * ``pending`` is replayed first through ``pull.recover_ack`` with its
+      STORED tuple and ``client_ref`` (same idempotency key; screening's own
+      step 5 would otherwise hold it ``ack_recovery`` forever);
+    * ``confirmed`` needs no I/O at all.
+
+    Re-screening instead is never better and was the round-3/4 defect: under
+    a changed model/template/revision (a ``lop`` update between stop and
+    restart) it mints a second tuple the write-once ledger refuses, while the
+    hub already reads the message as read — nobody is woken.
 
     ONLY FOR THE SAME BYTES, like step 5: an intent whose screened body hash
-    is not the body just fetched is left alone (``None``), so screening holds
-    it ``body_hash_mismatch`` exactly as before — a stale tuple is never
-    acknowledged for different bytes.
+    is not the body just fetched is left alone (``(None, None)``), so
+    screening holds it ``body_hash_mismatch`` exactly as before. A
+    ``conflict`` intent (the hub kept a different first verdict) is left to
+    screening's existing reconcile as well.
 
-    BOUNDED: one replay per re-drive, and a re-drive that cannot confirm
-    returns a hold, which the loop schedules on its ordinary backoff. The
-    caller runs ``_producer_fence`` immediately before this (review m8).
+    BOUNDED: at most one replay per re-drive; a replay that cannot confirm is
+    a hold on the loop's ordinary backoff. The caller runs
+    ``_producer_fence`` immediately before this (review m8).
     """
 
     from local_operator.team_bridge import pull as _pull
     from local_operator.team_bridge.store import Store, StoreRefused
 
-    pending = Store(config_dir).find_pending_intent(owner, message_id, "read")
-    if pending is None:
+    try:
+        recorded = Store(config_dir).recorded_intent(owner, message_id, "read")
+    except StoreRefused as refusal:
+        return f"ack_recovery:{refusal.code}"[:64], None
+    if recorded is None:
         return None, None
-    stored = pending.get("receipt")
+    stored = recorded.get("receipt")
+    state = str(recorded.get("state") or "")
     if stored is None:
-        # No tuple to replay (a pre-screening row): screening's own
+        # No tuple to carry (a pre-screening row): screening's own
         # ``ack_recovery`` hold stays the honest answer.
-        return "ack_recovery", None
+        return ("ack_recovery", None) if state == _pull.ACK_PENDING else (None, None)
     text = _body_text(item)
     fetched = hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else None
     if fetched is None or stored.get("body_sha256") != fetched:
+        return None, None
+    if state == _pull.ACK_CONFIRMED:
+        return None, stored
+    if state != _pull.ACK_PENDING:
         return None, None
     try:
         outcome = await _pull.recover_ack(
@@ -567,9 +582,9 @@ async def recover_pending_read(
         )
     except (_pull.PullRefused, StoreRefused) as refusal:
         return f"ack_recovery:{refusal.code}"[:64], None
-    state = str(getattr(outcome, "state", "") or "")
-    if state != _pull.ACK_CONFIRMED:
-        return f"ack_not_confirmed:{state or 'unknown'}", None
+    replayed = str(getattr(outcome, "state", "") or "")
+    if replayed != _pull.ACK_CONFIRMED:
+        return f"ack_not_confirmed:{replayed or 'unknown'}", None
     return None, stored
 
 
@@ -757,17 +772,15 @@ async def handle_message_available(
         fence_code = _producer_fence(store, owner, access, settings)
         if fence_code:
             return {"action": "hold", "message_id": message_id, "code": fence_code}
-        recovery_code, recovered = await recover_pending_read(
+        recovery_code, recovered = await recorded_read_verdict(
             owner, message_id, item, config_dir=config_dir, access=access
         )
         if recovery_code:
             return {"action": "hold", "message_id": message_id, "code": recovery_code}
         if recovered is not None:
-            # The hub CONFIRMED the stored verdict: that IS the screening
-            # decision for this message, so it is carried to the handoff as
-            # is. Re-screening would gain nothing (the hub already reads the
-            # message as read) and, under a changed model/template/revision,
-            # minted a second tuple the write-once ledger refuses (review M3).
+            # A recorded, confirmed read verdict for these bytes IS the
+            # screening decision: hand off with it, never screen again (see
+            # ``recorded_read_verdict``; reviews M3/M4).
             result = _confirmed_screen_result(recovered)
         else:
             result = await screen_item(

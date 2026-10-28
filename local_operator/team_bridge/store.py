@@ -1059,6 +1059,7 @@ CREATE TABLE IF NOT EXISTS body_reservations (
     terminal_code TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
+    card_posted_at REAL,
     PRIMARY KEY (owner_key, conversation_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS body_reservations_eligible
@@ -2173,6 +2174,68 @@ class Store:
             ).fetchone()
             return str(row["conversation_id"]) if row is not None else None
 
+    @staticmethod
+    def _ensure_card_posted_column(conn: sqlite3.Connection) -> None:
+        """Add ``card_posted_at`` to a carrying table that predates it.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves: an older binary
+        reading this store never names the column, and a row from before it
+        reads NULL — "no card recorded" — which re-posts a card at most once
+        for an admission that was in flight across the upgrade. It is NOT in
+        ``_BODY_RESERVATION_COLUMNS``: a table without it is not damaged.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
+        if "card_posted_at" not in columns:
+            conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
+
+    def body_card_posted(self, owner: OwnerSnapshot, conversation_id: str, message_id: str) -> bool:
+        """Whether this admission's CARD was handed off (PR #3063 review M5).
+
+        WHY ON THE RESERVATION: the reservation proves the hub admitted the
+        message; only this column proves the session was woken for it. A
+        replay therefore owes the card exactly when the reservation exists
+        and this is unset — a fact about THIS admission's card, never inferred
+        from some other row (a hold of any code once read as "card owed" and
+        posted a second card). Live-owner fenced; a fenced owner reads False.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return False
+            self._begin_write(conn)
+            self._ensure_card_posted_column(conn)
+            row = conn.execute(
+                "SELECT card_posted_at FROM body_reservations WHERE owner_key = ? "
+                "AND conversation_id = ? AND message_id = ?",
+                (_owner_key(owner), conversation_id, message_id),
+            ).fetchone()
+            return row is not None and row["card_posted_at"] is not None
+
+    def mark_body_card_posted(
+        self, owner: OwnerSnapshot, conversation_id: str, message_id: str, *, now: float
+    ) -> bool:
+        """Record that this admission's card was handed off (set once).
+
+        Written AFTER the hand-off returns: a stop or crash before it leaves
+        the card owed (re-posted once on the replay — at-least-once, never a
+        loss). Conditional on the column still being unset, so a replay never
+        moves the original time. Live-owner fenced.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_card_posted_column(conn)
+            updated = conn.execute(
+                "UPDATE body_reservations SET card_posted_at = ? WHERE owner_key = ? "
+                "AND conversation_id = ? AND message_id = ? AND card_posted_at IS NULL",
+                (float(now), _owner_key(owner), conversation_id, message_id),
+            )
+            return bool(updated.rowcount)
+
     def pending_body_reservation_for(
         self,
         owner: OwnerSnapshot,
@@ -3134,6 +3197,29 @@ class Store:
                 (_owner_key(owner), message_id, target),
             ).fetchone()
             return None if row is None else str(row["client_ref"] or "") or None
+
+    def recorded_intent(
+        self, owner: OwnerSnapshot, message_id: str, target: str
+    ) -> dict[str, Any] | None:
+        """The ack intent for this exact owner/(message, target), ANY state.
+
+        WHY (PR #3063 review M4): a recorded ``read`` intent IS the screening
+        decision this connector already made and sent for the message. The
+        spine hands off with it whether the hub has confirmed it or a stop cut
+        the POST short (still ``pending``), instead of screening again. A
+        re-screen under a changed model/template/revision mints a second tuple
+        the write-once ledger refuses, and the hub already reads the message
+        as read. ``None`` when nothing is recorded.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT * FROM ack_intents WHERE owner_key = ? AND message_id = ? "
+                "AND target = ?",
+                (_owner_key(owner), message_id, target),
+            ).fetchone()
+            return None if row is None else self._intent_dict(row)
 
     def find_pending_intent(
         self, owner: OwnerSnapshot, message_id: str, target: str
@@ -4770,23 +4856,44 @@ class Store:
             )
             return int(updated.rowcount)
 
-    def advance_hold_retry(self, owner: OwnerSnapshot, message_id: str, *, retry_at: float) -> bool:
+    def advance_hold_retry(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        retry_at: float,
+        hold_code: str | None = None,
+    ) -> bool:
         """Re-schedule ONE still-held message's next attempt (H4 backoff).
 
         CONDITIONAL on the row still existing: a re-screen that succeeded
         commits its receipt and DELETES the hold, so re-scheduling here must
         never resurrect a quarantine for a delivered message (rowcount is the
         answer, not an assumption). Live-owner fenced.
+
+        ``hold_code`` re-codes the row IN PLACE with the same UPDATE (PR #3063
+        review m9): the owner sees how long the message has waited from
+        ``created_at``, and re-coding through ``persist_hold``'s INSERT OR
+        REPLACE reset that age on every flip of reason.
         """
 
+        key = (_owner_key(owner), _contentless_delivery_key(message_id))
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
-            updated = conn.execute(
-                "UPDATE screening_holds SET retry_at = ? " "WHERE owner_key = ? AND message_id = ?",
-                (float(retry_at), _owner_key(owner), _contentless_delivery_key(message_id)),
-            )
+            if hold_code:
+                updated = conn.execute(
+                    "UPDATE screening_holds SET retry_at = ?, hold_code = ? "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (float(retry_at), str(hold_code), *key),
+                )
+            else:
+                updated = conn.execute(
+                    "UPDATE screening_holds SET retry_at = ? "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (float(retry_at), *key),
+                )
             return bool(updated.rowcount)
 
     #: Consecutive provider failures that open the account breaker, and the

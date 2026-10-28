@@ -122,9 +122,6 @@ HOLD_CODES = (
     # Its re-drive: the same message as an ordinary retry, so a stop that
     # interrupts the re-drive can never retire it (PR #3063 review M1).
     "stale_claim_retry",
-    # The conversation lane's card-owed marker (connector.conversation): the
-    # message was admitted and its card has not been handed off yet.
-    "card_pending",
     # A re-drive that waits on something outside the row (review n4): the
     # owner has no designated session, or a session/spine holds the claim.
     "badge_only",

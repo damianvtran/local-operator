@@ -575,19 +575,48 @@ def test_a_replayed_admit_does_not_post_a_second_card(tmp_path, monkeypatch) -> 
     assert len(_reservation_rows(config_dir)) == 1
 
 
+class _Clock:
+    """``time.time`` under the test's control: the claim lease (900 s), the
+    hold schedule and the reservation clock all read it, so passes can cross
+    a lease expiry without waiting."""
+
+    def __init__(self) -> None:
+        self.now = time.time()
+
+    def __call__(self) -> float:
+        return self.now
+
+
+#: One simulated claim lease plus the park margin: any hold a pass leaves is
+#: due again by then, so a pass after it re-drives everything still owed.
+_PAST_A_LEASE = 15 * 60 + 5.0
+
+
+def _drive_across_leases(owner: OwnerSnapshot, config_dir: Path, clock: _Clock) -> None:
+    """Passes spread across more than one lease expiry: ordinary iterations
+    (feed refs) and the retry pass (holds) both run on every one."""
+
+    for _ in range(4):
+        clock.now += _PAST_A_LEASE
+        _run(owner, config_dir)
+
+
 def test_a_stop_between_the_reservation_and_the_card_still_posts_the_card(
     tmp_path, monkeypatch
 ) -> None:
-    """PR #3063 review m6: the reservation proves an admission, not a card. A
-    stop that cancelled the card hand-off left the replay answering
-    ``duplicate`` (terminal), so the card was never posted and nothing woke
-    the session. The card-owed marker survives the stop, and the replay must
-    post the card exactly once; a later replay is then a true duplicate."""
+    """PR #3063 reviews m6/M5: the reservation proves an admission, not a
+    card. A stop that cancelled the card hand-off left every replay
+    answering ``duplicate`` and the card was never posted. The card-posted
+    fact now lives ON the reservation: the replay posts the card, and every
+    later pass — across lease expiries — is a true duplicate. Totals are
+    asserted at the END: an immediate check missed M5's second card."""
 
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
     a = _owner("a", 1)
     config_dir = tmp_path / "a"
     config_dir.mkdir()
-    store = _enroll(config_dir, a, "sess_a")
+    _enroll(config_dir, a, "sess_a")
 
     server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
     transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
@@ -600,21 +629,76 @@ def test_a_stop_between_the_reservation_and_the_card_still_posts_the_card(
     with pytest.raises(asyncio.CancelledError):
         _run(a, config_dir)
     assert transcripts["sess_a"] == []
-    assert [row["state"] for row in _reservation_rows(config_dir)] == ["pending"]
-    _cursor, refs, _resync = project_events_batch(server.events_answer("bep_a"))
-    ref = plan_feed_refs(refs).conversation_deliveries[0]
-    owed = store.screening_hold(a, ref.encode())
-    assert owed is not None and owed["hold_code"] == conversation_mod.HOLD_CARD_PENDING
+    rows = _reservation_rows(config_dir)
+    assert [row["state"] for row in rows] == ["pending"] and rows[0]["card_posted_at"] is None
 
     monkeypatch.setattr(conversation_mod, "deliver_wake", real_deliver)
-    restarted = _run(a, config_dir)
-    assert restarted["handled"][0]["action"] == "delivered"
-    assert len(transcripts["sess_a"]) == 1
-    assert store.screening_hold(a, ref.encode()) is None
-    replayed = _run(a, config_dir)
-    assert replayed["handled"][0]["action"] == "duplicate"
+    _run(a, config_dir)
+    _drive_across_leases(a, config_dir, clock)
     assert len(transcripts["sess_a"]) == 1, "the card is owed once, never twice"
-    assert len(_reservation_rows(config_dir)) == 1
+    rows = _reservation_rows(config_dir)
+    assert len(rows) == 1 and rows[0]["card_posted_at"] is not None
+
+
+def test_a_replay_after_a_posted_card_never_posts_again_across_leases(
+    tmp_path, monkeypatch
+) -> None:
+    """PR #3063 review M5 (the regression r4 measured): a plain replay of an
+    already-delivered message left a card-owed marker behind, and one lease
+    later the marker posted a SECOND card."""
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+
+    first = _run(a, config_dir)
+    assert first["handled"][0]["action"] == "delivered"
+    _drive_across_leases(a, config_dir, clock)  # the rig re-offers the ref every pass
+    assert len(transcripts["sess_a"]) == 1
+    assert _hold_rows(config_dir) == []
+
+
+def test_a_replay_held_before_admission_never_reads_as_card_owed(tmp_path, monkeypatch) -> None:
+    """M5's second leak: a replay of a delivered message that hits a
+    PRE-admission hold (screening unavailable) leaves an ordinary hold row.
+    That row must never be read as "card owed": its re-drive is a duplicate."""
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    assert _run(a, config_dir)["handled"][0]["action"] == "delivered"
+
+    real_screen = conversation_mod.screen_item
+
+    async def screening_down(*args: Any, **kwargs: Any) -> Any:
+        return None  # -> hold ``screening_unavailable`` on the replay
+
+    monkeypatch.setattr(conversation_mod, "screen_item", screening_down)
+    replay = _run(a, config_dir)
+    assert replay["handled"][0]["action"] == "hold"
+    assert len(_hold_rows(config_dir)) == 1
+    monkeypatch.setattr(conversation_mod, "screen_item", real_screen)
+    _drive_across_leases(a, config_dir, clock)
+    assert len(transcripts["sess_a"]) == 1
+    assert _hold_rows(config_dir) == []
+
+
+def _hold_rows(config_dir: Path) -> list[dict[str, Any]]:
+    from local_operator.team_bridge.store import state_db_path
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute("SELECT * FROM screening_holds")]
 
 
 def test_a_missing_receipt_holds_without_a_card_or_a_row(tmp_path, monkeypatch) -> None:

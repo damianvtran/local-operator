@@ -1458,6 +1458,101 @@ def test_a_changed_screening_tuple_after_the_replay_delivers_on_the_stored_verdi
     assert store.drain_feed_refs(owner, 3) == []
 
 
+@pytest.mark.parametrize("change", ["default_model", "template_sha256"])
+def test_a_confirmed_read_with_a_stopped_handoff_delivers_on_its_verdict(
+    tmp_path, monkeypatch, change
+) -> None:
+    """PR #3063 review M4 (the r4 probe): the hub CONFIRMED the read ACK, a
+    stop cancelled the handoff, and an update changed the screening tuple
+    before the restart. With no PENDING intent the spine re-screened, the
+    write-once ledger refused the new tuple, and the message was held
+    ``ack_refused:intent_conflict`` forever. ONE rule now covers pending and
+    confirmed: a recorded read verdict for these bytes is handed off as is.
+    Passes cross a claim lease; totals are asserted at the end."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    wire, access = _real_ack_access(monkeypatch, owner)
+    tuple_now = {"default_model": "qa-default", "template_sha256": "ab" * 32}
+    screens: list[dict[str, str]] = []
+
+    async def screen(owner_, item, *, config_dir, auth_store, settings=None):
+        screens.append(dict(tuple_now))
+        receipt = ScreeningReceipt(
+            verdict="allow",
+            model=tuple_now["default_model"],
+            prompt_version="bridge-screen-v1",
+            template_sha256=tuple_now["template_sha256"],
+            body_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            categories=(),
+        ).validated()
+        return ScreenResult(disposition="deliver", receipt=receipt)
+
+    monkeypatch.setattr(wake_mod, "screen_item", screen)
+    delivered_fake = wake_mod.deliver_wake
+
+    async def stopped_at_the_handoff(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError  # after the CONFIRMED read ACK
+
+    monkeypatch.setattr(wake_mod, "deliver_wake", stopped_at_the_handoff)
+    _one_pending_ref(store, owner)
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(owner, tmp_path, access)
+    recorded = store.recorded_intent(owner, "bmsg_1", "read")
+    assert recorded is not None and recorded["state"] == "confirmed"
+    assert len(screens) == 1 and len(wire.refs) == 1
+
+    tuple_now[change] = "qa-default-v2" if change == "default_model" else "cd" * 32
+    monkeypatch.setattr(wake_mod, "deliver_wake", delivered_fake)
+    for _ in range(4):  # across more than one 15-minute claim lease
+        _iterate(owner, tmp_path, access)
+        clock.now += wake_mod.CLAIM_TTL_S + 5
+    assert len(record["delivered"]) == 1
+    assert len(screens) == 1  # the restart never re-screened
+    assert len(wire.refs) == 1  # and never re-sent the ACK
+    assert store.screening_hold(owner, "bmsg_1") is None
+    assert store.drain_feed_refs(owner, 3) == []
+
+
+def test_recoding_a_hold_keeps_its_age(tmp_path, monkeypatch) -> None:
+    """PR #3063 review m9: re-coding a row (a new hold reason, or a
+    ``badge_only``/``claimed_elsewhere`` outcome) went through INSERT OR
+    REPLACE and reset ``created_at``, so the owner saw an old wait as new."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    _enable_bridge(tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    outcomes = iter(
+        [{"action": "badge_only"}, {"action": "hold", "code": "retry_later"}]
+        + [{"action": "claimed_elsewhere", "code": "claimed"}] * 4
+    )
+
+    async def flipping_spine(owner_, message_id, **kwargs):
+        return {**next(outcomes), "message_id": message_id}
+
+    monkeypatch.setattr(loop_mod, "handle_message_available", flipping_spine)
+    store.persist_hold(owner, "bmsg_1", "screening_hold", retry_at=clock.now - 1)
+    first = store.screening_hold(owner, "bmsg_1")
+    assert first is not None
+    born = first["created_at"]
+    codes = []
+    for _ in range(3):
+        clock.now += loop_mod.RETRY_MAX_S + 1
+        _iterate(owner, tmp_path)
+        hold = store.screening_hold(owner, "bmsg_1")
+        assert hold is not None
+        codes.append(hold["hold_code"])
+        assert hold["created_at"] == born
+    assert codes == ["badge_only", "retry_later", "claimed_elsewhere"]
+
+
 def test_an_ack_ledger_refusal_is_a_visible_hold_never_an_escape(tmp_path, monkeypatch) -> None:
     """M3 defence in depth: any ``StoreRefused`` out of ``ack_read`` (the
     write-once ledger, a fenced owner) is a typed hold on the bounded backoff,

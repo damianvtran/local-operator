@@ -499,15 +499,16 @@ async def retry_due_holds(
             # gets. Leaving ``retry_at`` alone kept the row due on every pass
             # (PR #3063 review M2: 141 re-drives in 200 s). The code becomes
             # the outcome (review n4): the owner sees the REASON it waits, not
-            # the mechanism (``stale_claim_retry``) that re-drove it. Still
-            # conditional on the row existing, like the hold arm below.
+            # the mechanism (``stale_claim_retry``) that re-drove it. In place
+            # (review m9: the row keeps its age) and conditional on the row
+            # existing, like the hold arm below.
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
             reason = str(action or "")[:64]
             try:
-                advanced = store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
-                if advanced and reason and reason != row["hold_code"]:
-                    store.persist_hold(owner, message_id, reason, retry_at=_time.time() + gap)
+                store.advance_hold_retry(
+                    owner, message_id, retry_at=_time.time() + gap, hold_code=reason or None
+                )
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
             _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
@@ -516,14 +517,14 @@ async def retry_due_holds(
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
             new_code = str(outcome.get("code") or "")[:64]
             try:
-                advanced = store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
-                if advanced and new_code and new_code != row["hold_code"]:
-                    # The row's code is what the owner sees (F8): a message
-                    # first held ``open_chief_of_staff`` and then held for a
-                    # NEW reason once the owner messaged the session must not
-                    # keep telling them to message it. Still conditional on the
-                    # row existing (``advanced``), so nothing is resurrected.
-                    store.persist_hold(owner, message_id, new_code, retry_at=_time.time() + gap)
+                # The row's code is what the owner sees (F8): a message first
+                # held ``open_chief_of_staff`` and then held for a NEW reason
+                # once the owner messaged the session must not keep telling
+                # them to message it. One conditional UPDATE: nothing is
+                # resurrected, and the row keeps its ``created_at`` (m9).
+                store.advance_hold_retry(
+                    owner, message_id, retry_at=_time.time() + gap, hold_code=new_code or None
+                )
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
             _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
