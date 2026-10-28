@@ -173,10 +173,32 @@ def test_manual_retry_ignores_the_schedule_and_clears_the_counters() -> None:
 
 
 def test_items_whose_row_is_gone_are_pruned() -> None:
+    """Absence from ``live`` alone drops NOTHING; a confirmed-gone answer does.
+
+    Q4: a row is durable bookkeeping, so "this pass did not list it" is not evidence
+    that its item is gone -- the pass may have failed to read it.
+    """
+
     doc: dict[str, Any] = {}
     _apply(doc)
     st.prune_items(doc, set())
+    assert "agent:a1" in doc["items"], "no predicate means nothing is confirmed gone"
+
+    st.prune_items(doc, set(), lambda _kind, _local_id: True)
     assert doc["items"] == {}
+
+
+def test_a_row_missing_from_a_failed_pass_is_kept() -> None:
+    """The predicate is the whole decision: False keeps the row and its bookkeeping."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc)
+    item["applied_backup"] = "hub/backups/agent-a1.json"
+
+    st.prune_items(doc, set(), lambda _kind, _local_id: False)
+
+    kept = doc["items"]["agent:a1"]
+    assert kept["applied_backup"] == "hub/backups/agent-a1.json"
 
 
 def _hold(root: str, q) -> None:  # runs in a second process

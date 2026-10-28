@@ -23,6 +23,7 @@ check. See :func:`check_hub_skills`.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
@@ -373,7 +374,64 @@ def team_fields_of(team: Any) -> dict[str, Any]:
     )
 
 
-def _team_confirmed_gone(registry: Any, team_id: str) -> bool:
+def agent_inventory_complete(registry: Any) -> bool:
+    """Whether an AGENT listing is authoritative enough to PRUNE status rows.
+
+    ``AgentRegistry`` answers "no agents" for BOTH "there are none" and "I could not
+    read them": a row whose ``agent.yml`` is unreadable is skipped and recorded in
+    ``_incomplete_agent_dirs``, and a vanished ``agents_dir`` scans as empty. Pruning
+    on either would delete the row of an item that still exists -- its retry
+    schedule, timestamps and backup pointer with it -- so the caller asks this first
+    and skips the prune when the answer is no.
+
+    A MISSING ``agents_dir`` is not authoritative here, unlike an empty listing: the
+    registry CREATES that directory when it is constructed, so a live registry that
+    cannot see it is looking at a directory that vanished between the scan and this
+    question, not at a profile that never had agents.
+
+    The row twin of what ``prune``'s ``confirmed_absent`` guard already does for
+    baselines: a listing that could not read an item never authorizes destroying
+    what that item owned.
+    """
+
+    if getattr(registry, "_metadata_complete", True) is False:
+        return False
+    directory = getattr(registry, "agents_dir", None)
+    if directory is None:
+        return False
+    try:
+        # The directory must also be READABLE: ``Path.is_dir`` succeeds on an
+        # unreadable one, and ``Path.exists`` below swallows EACCES, which would
+        # turn "cannot list" into "nothing there".
+        with os.scandir(directory):
+            return True
+    except OSError:  # noqa: BLE001 - an unreadable directory is not an authoritative one
+        return False
+
+
+def agent_confirmed_gone(registry: Any, agent_id: str) -> bool:
+    """True only when ``agents/<id>`` is absent from a directory we could READ.
+
+    The directory, not the baseline, is what proves an agent gone: a delete removes
+    the directory and KEEPS the baseline (round-1 E5), so a baseline-based answer
+    would call a deleted agent live forever. Any doubt answers False -- an
+    unreadable definition (its directory is still there), an id that cannot be a
+    path segment, or a tree that cannot be listed.
+    """
+
+    agents_dir = getattr(registry, "agents_dir", None)
+    if agents_dir is None or not agent_id or "/" in agent_id or agent_id.startswith("."):
+        return False
+    try:
+        if not agents_dir.is_dir() or (agents_dir / agent_id).exists():
+            return False
+        with os.scandir(agents_dir):
+            return True
+    except OSError:
+        return False
+
+
+def team_confirmed_gone(registry: Any, team_id: str) -> bool:
     """True only when ``teams/<id>`` is absent AND no swap-in-progress sibling exists.
 
     Any doubt (an unreadable directory, a hidden ``.<id>.*`` staging/backup entry
@@ -389,6 +447,21 @@ def _team_confirmed_gone(registry: Any, team_id: str) -> bool:
             return False
         return not any(child.name.startswith(f".{team_id}.") for child in teams_dir.iterdir())
     except OSError:
+        return False
+
+
+def skill_confirmed_gone(config_dir: Path, local_id: str) -> bool:
+    """True only when a skill link has NO baseline FILE (existence, not readability).
+
+    ``iter_baselines`` skips a record it cannot read, which looks exactly like a
+    link that is gone. The file still existing is the proof that it is not; only its
+    ABSENCE -- from a directory the caller has already proved listable -- confirms
+    the link was removed.
+    """
+
+    try:
+        return not prov.baseline_path(config_dir, "skill", local_id).exists()
+    except (prov.BaselineError, OSError):
         return False
 
 
@@ -420,7 +493,7 @@ def check_hub_teams(
         config_dir,
         "team",
         {t.id for t in teams},
-        confirmed_absent=lambda team_id: _team_confirmed_gone(registry, team_id),
+        confirmed_absent=lambda team_id: team_confirmed_gone(registry, team_id),
     )
     checks: list[ItemCheck] = []
     for meta in teams:

@@ -9,6 +9,7 @@ helpers.
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1060,3 +1061,55 @@ def test_a_full_check_prunes_a_row_whose_link_is_gone(tmp_path: Path) -> None:
     svc.check_items(ctx)  # the FULL default check: every kind, no scope
 
     assert key not in st.StatusStore(ctx.config_dir).load()["items"]
+
+
+def test_an_unlistable_baselines_dir_never_prunes_a_skill_row(tmp_path: Path) -> None:
+    """m1 for skills: a listing that FAILED is not a link that disappeared."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    _edit_locally(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+    assert st.StatusStore(ctx.config_dir).load()["items"][key]["classification"] == "local-only"
+
+    baselines = ctx.config_dir / "hub" / "baselines"
+    os.chmod(baselines, 0o000)
+    try:
+        svc.check_items(ctx)  # the full check, over a baselines dir it cannot list
+        assert key in st.StatusStore(ctx.config_dir).load()["items"]
+    finally:
+        os.chmod(baselines, 0o700)
+
+
+def test_an_unreadable_baseline_file_keeps_its_row(tmp_path: Path) -> None:
+    """Q4(c): a baseline that cannot be READ is not a link that was removed.
+
+    ``iter_baselines`` skips the unreadable record, so the skill is absent from the
+    check's enumeration; only the file still existing proves the row must stay.
+    """
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+
+    def fold(doc: dict[str, Any]) -> None:
+        item = doc["items"][key]
+        item["last_pulled_at"] = "2026-01-01T00:00:00Z"
+        item["attempts"] = 2
+
+    st.StatusStore(ctx.config_dir).mutate(fold)
+
+    (baseline,) = (ctx.config_dir / "hub" / "baselines").glob("skill-*.json")
+    os.chmod(baseline, 0o000)
+    try:
+        svc.check_items(ctx)  # the full default check
+        item = st.StatusStore(ctx.config_dir).load()["items"].get(key)
+        assert item is not None, "a corrupt baseline is not a removed link"
+        assert item["attempts"] == 2
+        assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
+    finally:
+        os.chmod(baseline, 0o600)

@@ -1155,13 +1155,24 @@ could show "Modified" / "local changes not published". It stays an `up-to-date`
 row and is NEVER an incoming update: `apply`/`apply-all` select on the VERDICT
 (`available`), `auto_will_apply` requires the `available`/`updating` state, and
 nothing reads this field to decide an action. It is retired when the sentence
-stops being true: an accepted publication clears it — a link push (the runner
-tick, `lop skills push`, the desktop `hub.push`) and a manual publish/republish
-(agent publish and republish, team publish, the CLI push commands; all through
-`seed_receipt_after_publish`) — as does a pull that WROTE the hub's bytes and an
-unpull, which leaves no local copy to publish. A write that kept the local side
-(`prefer=local` / `replace=local`) stores it again, and a full default check
-prunes the rows of items that no longer exist.
+stops being true: an accepted publication of THIS link clears it — a link push
+(the runner tick, `lop skills push`, the desktop `hub.push`) and a manual
+publish/republish (agent publish and republish, team publish, the CLI push
+commands; all through `seed_receipt_after_publish`, and only after its origin
+fence proves the hub row is the one this link names) — as does a pull that WROTE
+the hub's bytes and an unpull, which leaves no local copy to publish. A write
+that KEPT the local side (`prefer=local` / `replace=local`, whether it wrote or
+found nothing to write) stores it again. A full default check prunes the rows of
+items that no longer exist, and only when BOTH hold: every inventory it
+enumerated could be read completely (an unreadable `agent.yml`, a vanished
+`agents/` directory or an unlistable baselines directory makes the answer
+partial, not empty), AND the item itself is CONFIRMED gone -- `agents/<id>`
+absent from a tree that can be listed, `teams/<id>` absent with no `.<id>.*`
+swap artifact, a skill with no baseline file at all. A row missing from a
+listing that failed to read its item is KEPT, with its retry schedule, its
+pull/push cadence and its backup pointer: absence from one pass is not evidence.
+(The row-level twin of `provenance.prune`'s `confirmed_absent` guard, which has
+always refused to drop a baseline on an incomplete listing.)
 
 ### B4.3 Failure classes
 

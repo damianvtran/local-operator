@@ -1870,3 +1870,185 @@ def test_a_keep_mine_merge_on_both_changed_stores_the_publish_fact(env) -> None:
     # The check that follows agrees, which is what the stored row now predicts.
     (again,) = svc.check_items(ctx, kinds=("agent",))
     assert again.classification is not None and again.classification.state == "local-only"
+
+
+# -- round-2 remediation: incomplete inventories, the origin fence, keep-mine ------
+
+
+def _local_only_agent(env, *, backup: str | None = None) -> tuple[svc.HubSyncContext, Any, str]:
+    """A linked agent edited locally, checked, so its row reads ``local-only``."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(row.id, BASE + "\n\nLOCAL")
+    svc.check_items(ctx, kinds=("agent",))
+    key = "agent:" + row.id
+    if backup is not None:
+
+        def fold(doc: dict[str, Any]) -> None:
+            item = doc["items"][key]
+            item["applied_backup"] = backup
+            item["last_pulled_at"] = "2026-01-01T00:00:00Z"
+
+        st.StatusStore(root).mutate(fold)
+    return ctx, row, key
+
+
+def test_an_unreadable_agent_definition_never_prunes_its_row(env) -> None:
+    """m1: a full check must not delete the row of an item that failed to LOAD.
+
+    ``AgentRegistry`` skips a row whose ``agent.yml`` is unreadable and records it
+    as incomplete; the item still exists on disk, so its row -- retry schedule,
+    timestamps and backup pointer included -- must survive.
+    """
+
+    ctx, row, key = _local_only_agent(env, backup="hub/backups/agent-x.json")
+    root = ctx.config_dir
+
+    (root / "agents" / row.id / "agent.yml").write_text("name: [unterminated\n", encoding="utf-8")
+    fresh = svc.HubSyncContext(
+        config_dir=root,
+        config_manager=ConfigManager(root),
+        client_for_tenant=ctx.client_for_tenant,
+    )
+    svc.check_items(fresh)  # the full check, over an inventory that could not read one row
+
+    item = st.StatusStore(root).load()["items"].get(key)
+    assert item is not None, "an unreadable definition is not evidence the agent is gone"
+    assert item["applied_backup"] == "hub/backups/agent-x.json"
+    assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
+
+
+def test_a_publish_accepted_for_another_row_keeps_the_mark(env) -> None:
+    """m2: the ORIGIN FENCE runs before the retirement. Another row's acceptance
+    never saw this link's bytes, so it must leave the mark alone -- while this
+    row's own accepted publication still retires it."""
+
+    from local_operator.hub_sync.identity import link_origin
+
+    ctx, row, key = _local_only_agent(env)
+    root = ctx.config_dir
+    record = prov.read_baseline(root, "agent", row.id)
+    assert record is not None and record.identity is not None
+
+    fields = {"instructions": BASE, "description": "d"}
+    local_fields = {"instructions": BASE + "\n\nLOCAL", "description": "d"}
+    assert (
+        svc.seed_receipt_after_publish(
+            root,
+            "agent",
+            row.id,
+            accepted=fields,
+            local_fields=local_fields,
+            revision='"hub-rev-9"',
+            origin=link_origin(
+                record.identity.hub_source,
+                record.identity.visibility,
+                record.identity.tenant_id,
+            ),
+            hub_id="SOME-OTHER-ROW",
+        )
+        is False
+    )
+    assert (
+        st.StatusStore(root).load()["items"][key]["classification"] == "local-only"
+    ), "another row's acceptance must not clear this link's mark"
+
+    # The same publication, fenced to THIS row's origin and hub id, still retires it.
+    assert svc.seed_receipt_after_publish(
+        root,
+        "agent",
+        row.id,
+        accepted=fields,
+        local_fields=local_fields,
+        revision='"hub-rev-9"',
+        origin=link_origin(
+            record.identity.hub_source,
+            record.identity.visibility,
+            record.identity.tenant_id,
+        ),
+        hub_id=record.hub_id,
+    )
+    assert st.StatusStore(root).load()["items"][key]["classification"] is None
+
+
+def test_a_keep_mine_replace_on_both_changed_stores_the_publish_fact(env) -> None:
+    """m3: agent/team ``replace=local`` is a NO-WRITE pass, and must still store it."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(row.id, BASE + "\n\nLOCAL")
+    hub.agents["h1"] = (BASE, "the hub's description")
+
+    (c,) = svc.check_items(ctx, kinds=("agent",))
+    assert c.classification is not None and c.classification.state == "both-changed"
+
+    report = svc.apply_items(ctx, kind="agent", replace="local", allow_llm=False)
+
+    assert report.reports[0].outcome == "unchanged"
+    item = st.StatusStore(root).load()["items"]["agent:" + row.id]
+    assert item["state"] == "up-to-date"
+    assert item["classification"] == "local-only", "the kept-local copy is still unpublished"
+    (again,) = svc.check_items(ctx, kinds=("agent",))
+    assert again.classification is not None and again.classification.state == "local-only"
+
+
+def test_a_keep_mine_replace_on_a_both_changed_team_stores_the_publish_fact(env) -> None:
+    """m3 for teams: the same no-write arm, the same stored fact."""
+
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    teams.update_team(team.id, TeamEditFields(description="a local description"))
+    hub.teams["ht1"] = {**hub.teams["ht1"], "project": "## Goal\nRelease v2."}
+
+    (c,) = svc.check_items(ctx, kinds=("team",))
+    assert c.classification is not None and c.classification.state == "both-changed"
+
+    report = svc.apply_items(ctx, kind="team", replace="local", allow_llm=False)
+
+    assert report.reports[0].outcome == "unchanged"
+    item = st.StatusStore(root).load()["items"]["team:" + str(team.id)]
+    assert item["state"] == "up-to-date" and item["classification"] == "local-only"
+    (again,) = svc.check_items(ctx, kinds=("team",))
+    assert again.classification is not None and again.classification.state == "local-only"
+
+
+def test_a_team_mid_swap_keeps_its_row(env) -> None:
+    """Q4(b): the registry's own documented save gap must not prune the row.
+
+    A save in flight holds the registry lock and parks the row as ``.<id>.*``; the
+    read path then serves its snapshot rather than recovering the row, so the team
+    is absent from the check's enumeration. The row -- retry schedule, pull cadence
+    included -- must survive that pass.
+    """
+
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    svc.check_items(ctx, kinds=("team",))
+    key = "team:" + str(team.id)
+
+    def fold(doc: dict[str, Any]) -> None:
+        item = doc["items"][key]
+        item["last_pulled_at"] = "2026-01-01T00:00:00Z"
+        item["attempts"] = 1
+
+    st.StatusStore(root).mutate(fold)
+
+    teams_dir = root / "teams"
+    live = teams_dir / str(team.id)
+    parked = teams_dir / f".{team.id}.backup.qa"
+    with TeamRegistry(root)._persistence_lock():  # the save in flight
+        live.rename(parked)
+        try:
+            fresh = svc.HubSyncContext(
+                config_dir=root,
+                config_manager=ConfigManager(root),
+                client_for_tenant=ctx.client_for_tenant,
+            )
+            svc.check_items(fresh)  # the full default check, mid-swap
+            item = st.StatusStore(root).load()["items"].get(key)
+            assert item is not None, "a team mid-swap is not a deleted team"
+            assert item["attempts"] == 1
+            assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
+        finally:
+            parked.rename(live)

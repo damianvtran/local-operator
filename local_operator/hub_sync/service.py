@@ -254,8 +254,52 @@ def _state_of(check: chk.ItemCheck) -> str | None:
     return check.classification.state
 
 
+def _differs_from_remote(c: chk.ItemCheck) -> bool:
+    """Whether the local copy still differs from the hub's, by the CHECK's fingerprints.
+
+    For the NO-WRITE arms only: nothing has changed since the check, so its two
+    fingerprints still describe both sides. A missing side (an absent copy) is not a
+    difference -- there are no local bytes to be unpublished.
+    """
+
+    return c.local_fp is not None and c.remote_fp is not None and c.local_fp != c.remote_fp
+
+
+def _confirmed_gone_predicate(
+    *, agents: Any, teams: Any, config_dir: Path
+) -> Callable[[str, str], bool]:
+    """Per-key "is this item really gone?", the second half of the prune gate.
+
+    Every answer is EVIDENCE, never "this pass did not list it" (round-2 Q4):
+
+    * agent -- ``agents/<id>`` absent from a directory that can be listed (a delete
+      removes the directory and keeps the baseline);
+    * team -- ``team_confirmed_gone``: absent AND no ``.<id>.*`` swap artifact, i.e.
+      its registry's documented mid-save gap keeps the row;
+    * skill -- NO baseline file (existence, not readability: an unreadable record is
+      skipped by ``iter_baselines`` and looks exactly like a removed link).
+
+    A kind this predicate does not know is never confirmed gone.
+    """
+
+    def confirmed_gone(kind: str, local_id: str) -> bool:
+        if kind == "agent":
+            return agents is not None and chk.agent_confirmed_gone(agents, local_id)
+        if kind == "team":
+            return teams is not None and chk.team_confirmed_gone(teams, local_id)
+        if kind == "skill":
+            return chk.skill_confirmed_gone(config_dir, local_id)
+        return False
+
+    return confirmed_gone
+
+
 def record_checks(
-    ctx: HubSyncContext, checks: Sequence[chk.ItemCheck], *, live: set[str] | None = None
+    ctx: HubSyncContext,
+    checks: Sequence[chk.ItemCheck],
+    *,
+    live: set[str] | None = None,
+    confirmed_gone: Callable[[str, str], bool] | None = None,
 ) -> None:
     """Fold check results into the status store (one locked write)."""
 
@@ -287,7 +331,7 @@ def record_checks(
             if c.sync_contract is not None and c.served_by:
                 _fold_capability(doc, c.sync_contract, c.served_by)
         if live is not None:
-            st.prune_items(doc, live)
+            st.prune_items(doc, live, confirmed_gone)
 
     ctx.store().mutate(fold)
 
@@ -562,14 +606,14 @@ def seed_receipt_after_publish(
     one the inventory reports as unresolved. It is recorded independently of the
     receipt: a server that answers no ETag still proved where the row went.
 
-    THE UNPUBLISHED-CHANGES MARK IS RETIRED HERE FIRST, before either guard below:
-    the hub's acceptance is what makes that sentence false, and it does not depend
-    on what this machine manages to record afterwards. Leaving it until the next
-    check meant a successful Republish left the copy advertising local changes for
-    up to the whole check interval (round-1 Q2).
+    THE UNPUBLISHED-CHANGES MARK IS RETIRED ON ACCEPTANCE, AFTER the origin fence and
+    BEFORE the receipt guards. The fence comes first because an acceptance for a
+    DIFFERENT hub row never saw this link's bytes: a publish that mints a new
+    listing, or a republish/scope the fence refuses, must not clear the linked
+    row's mark (round-2 m2). The revision guard comes after, because a server that
+    answers no ETag still accepted the publication and the fact does not depend on
+    what this machine manages to record (round-1 Q2).
     """
-
-    _retire_local_only(config_dir, kind, local_id)
 
     if origin is not None:
         # Compatibility is a fence for BOTH mutations. A rejected destination's
@@ -578,6 +622,8 @@ def seed_receipt_after_publish(
             config_dir, kind, local_id, hub_id=hub_id, origin=origin, accepted=accepted
         ):
             return False
+    # ACCEPTED, and (when the caller named one) proven to be THIS row's origin.
+    _retire_local_only(config_dir, kind, local_id)
     if not revision:
         return False
     from dataclasses import replace as dc_replace
@@ -718,19 +764,39 @@ def check_items(
     """Network check of linked items; folds the outcome into the store."""
 
     out: list[chk.ItemCheck] = []
+    # THE PRUNE NEEDS TWO THINGS, and "the enumeration did not mention it" is
+    # neither of them (round-2 Q4). One: a listing that could be read COMPLETELY --
+    # an unreadable ``agent.yml``, a vanished ``agents/`` directory or an
+    # unlistable baselines directory makes the answer partial, not empty. Two: a
+    # per-ITEM answer that the item is really gone (``_confirmed_gone_predicate``),
+    # because a complete listing still omits a team mid-swap and a skill whose
+    # baseline file is corrupt. Both doubts are cheap to honour and expensive to
+    # get wrong: dropping a row also drops the retry schedule, the pull/push
+    # cadence and the ``applied`` backup pointer it was carrying.
+    # The registries are hoisted so the SAME instances the arms enumerated answer
+    # the later questions; a fresh one would re-scan into a second opinion.
+    complete = True
+    agents: Any = None
+    teams: Any = None
     if "agent" in kinds:
+        agents = ctx.agents()
         out.extend(
             chk.check_hub_agents(
-                ctx.agents(),
+                agents,
                 client_for_tenant=ctx.client_for_tenant,
                 names=names,
                 only_ids=only_ids,
             )
         )
+        complete = chk.agent_inventory_complete(agents)
     if "team" in kinds:
+        teams = ctx.teams()
         out.extend(
             chk.check_hub_teams(
-                ctx.teams(), client_for_tenant=ctx.client_for_tenant, names=names, only_ids=only_ids
+                teams,
+                client_for_tenant=ctx.client_for_tenant,
+                names=names,
+                only_ids=only_ids,
             )
         )
     if "skill" in kinds:
@@ -742,6 +808,7 @@ def check_items(
                 only_ids=only_ids,
             )
         )
+        complete = complete and prov.baselines_dir_listable(ctx.config_dir)
     for c in out:
         _adopt_if_equal(ctx, c)
     # THE ORIGIN REPAIR: a baseline written before links carried an origin has
@@ -766,11 +833,19 @@ def check_items(
         # rows lived forever -- invisible until an up-to-date row carrying a
         # ``local-only`` mark became listable (round-1 Q1: deleted agents and
         # teams kept advertising unpublished changes). The kind set is derived
-        # from KIND_ORDER so a new kind cannot reopen that gap.
+        # from KIND_ORDER so a new kind cannot reopen that gap -- AND ONLY WITH
+        # BOTH DOUBTS ANSWERED: a complete listing (``complete``) and a per-item
+        # confirmation that the item is gone (``confirmed_gone``). A row missing
+        # from a listing that could not read it is kept, with all its bookkeeping
+        # (round-2 Q4).
         live: set[str] | None = None
-        if names is None and only_ids is None and set(kinds) == set(KIND_ORDER):
+        confirmed_gone: Any = None
+        if names is None and only_ids is None and set(kinds) == set(KIND_ORDER) and complete:
             live = {st.item_key(c.kind, c.local_id) for c in out}
-        record_checks(ctx, out, live=live)
+            confirmed_gone = _confirmed_gone_predicate(
+                agents=agents, teams=teams, config_dir=ctx.config_dir
+            )
+        record_checks(ctx, out, live=live, confirmed_gone=confirmed_gone)
     return out
 
 
@@ -1416,7 +1491,7 @@ def _apply_skill(
             # a classification that is not a genuine equal pair refuses.
             _mark_integrated(ctx, c, agreement=True)
             _seed_receipt_if_agreed(ctx, c, merged.to_json())
-        fold(st.settle_unchanged)
+        fold(lambda item: st.settle_unchanged(item, remote_differs=_differs_from_remote(c)))
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "unchanged")
     if dry_run:
         return ItemMergeReport(
@@ -1551,7 +1626,7 @@ def _apply_skill_bundle(
         )
 
     def unchanged() -> ItemMergeReport:
-        fold(st.settle_unchanged)
+        fold(lambda item: st.settle_unchanged(item, remote_differs=_differs_from_remote(c)))
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "unchanged")
 
     if record is None or record.identity is None or record.local_alias is None:
@@ -1848,7 +1923,7 @@ def apply_one(
             except (prov.BaselineError, OSError):
                 logger.debug("could not advance baseline", exc_info=True)
             _seed_receipt_if_agreed(ctx, c, c.local)
-            fold(lambda item: st.settle_unchanged(item))
+            fold(lambda item: st.settle_unchanged(item, remote_differs=_differs_from_remote(c)))
         return report
     if dry_run:
         return _with(report, outcome="would-merge")
