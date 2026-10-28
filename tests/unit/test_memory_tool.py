@@ -24,6 +24,7 @@ async def test_store_recall_and_existing_url_correction_share_one_engine(tmp_pat
         "a",
         {
             "op": "store",
+            "scope": "global",
             "text": "Elara Venn lives in Dunedin; contact elara@example.invalid",
         },
         context=context,
@@ -55,6 +56,7 @@ async def test_store_recall_and_existing_url_correction_share_one_engine(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["disabled", "legacy-scope", "quota", "oversize"])
+# Each refusal must leave EVERY bank empty, the default session bank included.
 async def test_refusals_preserve_existing_policy_and_never_truncate(tmp_path, monkeypatch, case):
     import local_operator.memory as memory
 
@@ -66,15 +68,16 @@ async def test_refusals_preserve_existing_policy_and_never_truncate(tmp_path, mo
         monkeypatch.setattr(memory, "MAX_OWNER_OPS", 0)
     args = {
         "op": "store",
-        "text": "word " * 400 if case == "oversize" else "Kestrel release goal",
+        "text": "word " * 700 if case == "oversize" else "Kestrel release goal",
     }
     if case == "legacy-scope":
-        args["scope"] = "global"
+        # Only session|global are tool scopes; team/agent stay URL-only.
+        args["scope"] = "team"
     response = await execute_fact_memory(
         "r", args, context=ToolContext(session_id="s", agent_id="main", memory_config_dir=str(root))
     )
     assert response.is_error
-    assert MemoryStore(root, MemoryIdentity()).inventory()["items"] == []
+    assert MemoryStore(root, MemoryIdentity("s")).inventory()["items"] == []
 
 
 def test_default_advertised_but_explicit_allowlist_not_widened_and_approval_tiers():
@@ -160,6 +163,7 @@ async def test_personal_contract_arguments_replay_in_each_cwd(tmp_path, monkeypa
     args = {
         "i": "Storing Elara Venn facts",
         "op": "store",
+        "scope": "global",
         "text": (
             "Elara Venn lives in Dunedin; colleague Mira Vale is reachable at "
             "mira@example.invalid and https://example.invalid/people/mira"
@@ -217,30 +221,56 @@ async def test_host_denial_prevents_the_named_tool_from_writing(tmp_path):
     assert not (tmp_path / "memory").exists()
 
 
-def test_native_schema_is_explicit_durable_personal_domain_not_a_scope_choice():
+def test_native_schema_offers_two_scopes_defaulting_to_session():
     tool = build_memory_tool()
-    assert set(tool.parameters["properties"]) == {"op", "text"}
+    assert set(tool.parameters["properties"]) == {"op", "text", "scope"}
+    assert tool.parameters["properties"]["scope"]["enum"] == ["session", "global"]
+    # Optional: omitting it is the session default, never a refusal.
     assert tool.parameters["required"] == ["op", "text"]
-    assert "durable personal facts across sessions" in tool.description
-    assert "user/colleague names" in tool.description
+    assert "Default scope=session" in tool.description
+    assert "scope=global ONLY for durable personal facts" in tool.description
     assert tool.describe_approval is not None
-    assert "global memory (across sessions)" in tool.describe_approval({"op": "store"}, "")
+    # The approval line names the bank the write lands in.
+    assert "session memory" in tool.describe_approval({"op": "store"}, "")
+    assert "global memory (across sessions)" in tool.describe_approval(
+        {"op": "store", "scope": "global"}, ""
+    )
 
 
 @pytest.mark.asyncio
 async def test_explicit_global_store_is_recalled_by_a_fresh_identity_without_scope_override(
     tmp_path,
 ):
+    """The #2414 personal-recall fixture, on the new contract: an explicit global store
+    is recalled by a FRESH session with no scope argument (recall searches both)."""
     first = ToolContext(session_id="first", memory_config_dir=str(tmp_path))
     second = ToolContext(session_id="fresh", memory_config_dir=str(tmp_path))
     stored = await execute_fact_memory(
         "s",
-        {"op": "store", "text": "Elara Venn lives in Dunedin"},
+        {
+            "op": "store",
+            "scope": "global",
+            "text": "My colleague Elara lives in Dunedin; email elara@example.invalid",
+        },
         context=first,
     )
-    assert not stored.is_error
-    recall = await execute_fact_memory("r", {"op": "recall", "text": "Elara Venn"}, context=second)
-    assert not recall.is_error and "Dunedin" in str(recall.content)
+    assert not stored.is_error, stored.content
+    receipt = json.loads(str(getattr(stored.content[0], "text", "")))
+    assert receipt["scope"] == "global" and receipt["lifetime"] == "global/across sessions"
+    for query in ("Elara", "Dunedin", "elara email"):
+        recall = await execute_fact_memory("r", {"op": "recall", "text": query}, context=second)
+        assert not recall.is_error and "Dunedin" in str(recall.content), query
+    # The inverse: a work goal with NO scope lands in the writer's session bank,
+    # and a fresh session's recall does not see it.
+    goal = await execute_fact_memory(
+        "g", {"op": "store", "text": "Goal: ship the Kestrel proxy POC"}, context=first
+    )
+    assert not goal.is_error
+    goal_receipt = json.loads(str(getattr(goal.content[0], "text", "")))
+    assert goal_receipt["scope"] == "session"
+    assert goal_receipt["lifetime"] == "session/this conversation"
+    unseen = await execute_fact_memory("u", {"op": "recall", "text": "Kestrel"}, context=second)
+    assert not unseen.is_error and "Kestrel" not in str(unseen.content)
     # Work remains in the explicit current-session URL bank, never promoted by
     # native recall. The old owner's row stays byte-for-byte in its own scope.
     from local_operator.tools.memory_tools import execute_memory
@@ -316,9 +346,13 @@ async def test_relative_sensitive_paths_refused_by_actual_store_and_capture_in_e
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy_scope", ["global", "session", "team", "agent"])
+@pytest.mark.parametrize("legacy_scope", ["team", "agent", "unknown"])
 @pytest.mark.parametrize("op", ["store", "recall"])
-async def test_legacy_native_scope_is_rejected_not_stripped_or_promoted(tmp_path, legacy_scope, op):
+async def test_unsupported_tool_scope_is_rejected_not_stripped_or_promoted(
+    tmp_path, legacy_scope, op
+):
+    """Only session|global are tool scopes; any other value is a contract error that
+    the retained-copy path redacts and execution refuses before any DB access."""
     from local_operator.harness.types import Message, ToolCall
     from local_operator.memory_privacy import retained_arguments, retained_message
 
@@ -346,7 +380,7 @@ async def test_legacy_native_scope_is_rejected_not_stripped_or_promoted(tmp_path
     assert result.is_error and "Dunedin" not in str(result.content)
     assert not (
         tmp_path / "memory"
-    ).exists(), "even legacy global is invalid before any DB write/read"
+    ).exists(), "an unsupported scope is invalid before any DB write/read"
 
 
 @pytest.mark.asyncio
@@ -359,7 +393,9 @@ async def test_existing_session_rows_are_never_promoted_or_rewritten_by_personal
         ]
     context = ToolContext(session_id="fresh-session", memory_config_dir=str(tmp_path))
     stored = await execute_fact_memory(
-        "personal", {"op": "store", "text": "Elara Venn lives in Dunedin"}, context=context
+        "personal",
+        {"op": "store", "scope": "global", "text": "Elara Venn lives in Dunedin"},
+        context=context,
     )
     assert not stored.is_error
     receipt = json.loads(str(getattr(stored.content[0], "text", "")))
@@ -439,8 +475,9 @@ async def test_a_structural_reference_recall_value_is_not_refused_by_the_fact_to
         "r", {"op": "recall", "text": DEVICE_ID}, context=recall_context
     )
     assert not recalled.is_error, str(recalled.content)
+    # No scope: recall searched every authorised bank, and the label says which.
     assert json.loads(str(getattr(recalled.content[0], "text", ""))) == {
-        "bank": "global/across sessions",
+        "bank": "global/across sessions + session/this conversation",
         "items": [],
     }
     # The same call with prose still answers, so the exemption moved no other query.
