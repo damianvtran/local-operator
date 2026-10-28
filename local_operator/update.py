@@ -8313,7 +8313,7 @@ def _collect_daemon_statuses(refreshes: Sequence[Any]) -> tuple[DaemonStatus, ..
     return tuple(status for refresh in refreshes for status in refresh.statuses)
 
 
-def _services_stage(*, wait_s: float | None = None) -> StageReport:
+def _services_stage(*, wait_s: float | None = None, supervised: bool = True) -> StageReport:
     """Bring the non-runtime fleet onto the build the pointer now names.
 
     THE STEP THAT MAKES AN UPDATE ACTUALLY AN UPDATE. Replacing the install used
@@ -8335,6 +8335,11 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
     ``ServiceRefresh`` pass-through. A refusal or a failed stage returns an
     EMPTY report — the warning already carries what happened, and the report
     must not claim moves nobody made.
+
+    ``supervised=False`` is :func:`move_serve_after_upgrade`'s arm (the mesh
+    member pass): the same refusal, the same rolling contract and the same
+    serve reload, minus the supervised units that caller must roll after its
+    reply. See ``services.restart_services`` for why that half cannot run here.
     """
     from local_operator.services import print_refreshes, restart_services
 
@@ -8382,11 +8387,14 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
     # contract, so that is all the argument carries.
     rolling = _is_generation_install()
     try:
-        refreshes = (
-            restart_services(rolling=rolling)
-            if wait_s is None
-            else restart_services(wait_s=wait_s, rolling=rolling)
-        )
+        # Only the arguments a caller set are passed: `restart_services`'s own
+        # defaults stay its own, and the `lop update` call is unchanged.
+        options: dict[str, Any] = {"rolling": rolling}
+        if wait_s is not None:
+            options["wait_s"] = wait_s
+        if not supervised:
+            options["supervised"] = False
+        refreshes = restart_services(**options)
     except Exception as exc:  # noqa: BLE001 — the install already succeeded
         print(
             f"warning: the installed services could not be moved onto the new build: {exc}; "
@@ -8399,6 +8407,35 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
         serve=_serve_moves(before, _live_serve_records()),
         daemons=_collect_daemon_statuses(refreshes),
     )
+
+
+def move_serve_after_upgrade(*, wait_s: float | None = None) -> StageReport:
+    """Move this machine's ``serve`` daemons onto the build just installed.
+
+    THE ROLLOUT'S HALF OF ``lop update``'s SERVICES STAGE, and deliberately
+    that stage itself rather than a copy (2026-10-28, lop-remote-node-2): a
+    mesh rollout installed 0.91.1 and then 0.91.2 on a member, restarted its
+    relay, audited ``update_completed`` — and left ``lop serve`` running the
+    previous build both times, because the member pass rolled only the
+    supervised units. ``lop update`` on the same node moved serve in place.
+    A remote node has no operator watching it, so a serve left behind runs
+    pre-fix code silently until somebody happens to read ``lop services
+    status``; the move has to be the pass's own act.
+
+    Same refusal (:func:`_services_refusal`), same rolling contract and same
+    keep-conversations reload as the ``lop update`` path; only the supervised
+    units are left out, because the member pass runs INSIDE the relay those
+    units include and rolls them after its reply. Never raises; the caller
+    judges the outcome by reading the fleet afterwards
+    (``services.stale_serve_daemons``), never from this report alone — a
+    refused or failed stage returns an empty report, which is not a verdict.
+    """
+    try:
+        report = _services_stage(wait_s=wait_s, supervised=False)
+    except Exception:  # noqa: BLE001 — the install already succeeded
+        logger.warning("the serve move after the update did not run", exc_info=True)
+        return StageReport()
+    return report if report is not None else StageReport()
 
 
 def _run_services_tail(*, services: bool) -> StageReport:

@@ -149,6 +149,11 @@ def _stub_pass(
         lambda root, records, found, *, budget=None: (0, ""),
     )
     monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: calls["rolls"].append(1))
+    # The serve move reads and signals this host's serve fleet; its own cells
+    # (``_serve_fleet``) drive it against a fake one.
+    monkeypatch.setattr(
+        meshupdate, "move_serve", lambda *, budget=None: {"state": "none", "moved": [], "stale": []}
+    )
     return calls
 
 
@@ -1289,13 +1294,20 @@ def test_the_roll_starts_only_after_the_install_sweep_and_reengage(
         log.append("reengage")
         return 0, ""
 
+    def _serve(*, budget: Any = None) -> dict[str, Any]:
+        log.append("serve")
+        return {"state": "current", "moved": [], "stale": []}
+
     monkeypatch.setattr(meshupdate, "install_build", _install)
+    monkeypatch.setattr(meshupdate, "move_serve", _serve)
     monkeypatch.setattr(meshupdate, "refresh_runtimes", _sweep)
     monkeypatch.setattr(meshupdate, "reengage_displaced", _engage)
     monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: log.append("roll"))
     detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert detail["state"] == "done", detail
-    assert log == ["install", "sweep", "reengage", "roll"], log
+    # Serve moves inside the pass, before the receipt; the supervised roll
+    # (which restarts this relay) stays after it.
+    assert log == ["install", "serve", "sweep", "reengage", "roll"], log
 
 
 def test_the_tail_releases_the_shared_install_transaction(
@@ -1340,6 +1352,9 @@ def test_the_tail_releases_the_shared_install_transaction(
         meshupdate, "reengage_displaced", lambda root, records, found, *, budget=None: (0, "")
     )
     monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: None)
+    monkeypatch.setattr(
+        meshupdate, "move_serve", lambda *, budget=None: {"state": "none", "moved": [], "stale": []}
+    )
     detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert detail["state"] == "done", detail
     assert held == [False], held
@@ -1379,6 +1394,9 @@ def test_the_tail_degrades_when_the_slow_budget_is_nearly_spent(
         meshupdate, "reengage_displaced", lambda root, records, found, *, budget=None: (0, "")
     )
     monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: None)
+    monkeypatch.setattr(
+        meshupdate, "move_serve", lambda *, budget=None: {"state": "none", "moved": [], "stale": []}
+    )
 
     monkeypatch.setattr(relay, "slow_op_remaining_s", lambda: 10.0)  # < TAIL_RESERVE_S
     detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
@@ -1387,12 +1405,13 @@ def test_the_tail_degrades_when_the_slow_budget_is_nearly_spent(
     assert "no time remained for the runtime sweep" in detail["message"], detail
 
     # With budget left, the clamp is the reserve-adjusted remainder capped by
-    # the nominal sweep bound: 90 - 30 = 60.
+    # the nominal sweep bound: 90 - 30 = 60, less what the serve move spent
+    # before the sweep (it shares the tail budget; stubbed here, so ~0).
     state["current"] = "0.0.1"
     monkeypatch.setattr(relay, "slow_op_remaining_s", lambda: 90.0)
     detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert detail["state"] == "done", detail
-    assert budgets[-1] == 60.0, budgets
+    assert 59.0 < budgets[-1] <= 60.0, budgets
 
 
 # ---------------------------------------------------------------------------
@@ -1708,3 +1727,209 @@ def test_the_module_imports_and_refuses_by_name_without_fcntl() -> None:
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert proc.stdout.strip() == "ok update_lock_unsupported", proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# The serve move (2026-10-28, lop-remote-node-2: two rollouts left serve STALE)
+# ---------------------------------------------------------------------------
+
+
+class _ServeFleet:
+    """A fake ``serve`` fleet behind the REAL reload path.
+
+    ``services.reload_serve_daemons`` scans, probes, signals and waits for a new
+    ``instance_id``; this stands in for the registry and the process (``kill``
+    republishes the daemon on the pointer's build under a new instance, the
+    shape ``server/reload.py`` produces) and nothing else, so the cell drives
+    the same stage ``lop update`` runs. ``answers=False`` is a daemon that takes
+    the signal and never comes back on the new build.
+    """
+
+    def __init__(self, *, version: str, answers: bool = True) -> None:
+        from types import SimpleNamespace
+
+        self.answers = answers
+        self.target = ""  # the pointer's version at signal time
+        self.signals: list[int] = []
+        self.record = SimpleNamespace(
+            pid=537864,
+            version=version,
+            source_ref="",
+            instance_id="inst-old",
+            reloadable=True,
+            rolling_reload_contract="",
+            host="127.0.0.1",
+            port=8977,
+            prefix="",
+        )
+
+    def scan(self) -> list[Any]:
+        # A COPY per scan, as the registry reads a fresh record from disk each
+        # time: the stage's before/after diff compares two reads, and handing
+        # it one mutable object would hide every move.
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(**vars(self.record))]
+
+    def kill(self, pid: int, _signal: int) -> None:
+        self.signals.append(pid)
+        if self.answers:
+            self.record.version = self.target
+            self.record.instance_id = "inst-new"
+
+
+def _serve_fleet(
+    monkeypatch: pytest.MonkeyPatch, state: dict[str, str], *, answers: bool = True
+) -> _ServeFleet:
+    """Wire ``_ServeFleet`` under the real services stage; the pointer follows ``state``."""
+    import functools
+    from types import SimpleNamespace
+
+    from local_operator import services
+    from local_operator import update as update_mod
+    from local_operator.server import reload as serve_reload
+
+    fleet = _ServeFleet(version=state["current"], answers=answers)
+    # The member owns this install: the refusal is the stage's own question,
+    # and its refused arm has its own cell below.
+    monkeypatch.setattr(update_mod, "_services_refusal", lambda prefix=None: None)
+    monkeypatch.setattr(update_mod, "_is_generation_install", lambda _root=None: True)
+    monkeypatch.setattr(
+        services,
+        "_current_stamp",
+        lambda: SimpleNamespace(
+            version=state["current"], source_ref="", label=lambda: state["current"]
+        ),
+    )
+    fleet.record.rolling_reload_contract = serve_reload.ROLLING_CONTRACT
+
+    def _kill(pid: int, sig: int) -> None:
+        fleet.target = state["current"]
+        fleet.kill(pid, sig)
+
+    monkeypatch.setattr(services, "live_serve_daemons", fleet.scan)
+    monkeypatch.setattr(services, "serve_daemon_reports", lambda: [])
+    monkeypatch.setattr(
+        services,
+        "reload_serve_daemons",
+        functools.partial(
+            services.reload_serve_daemons,
+            scan=fleet.scan,
+            kill=_kill,
+            probe=lambda _record: None,
+            sleep=lambda _s: None,
+            stuck=lambda: [],
+        ),
+    )
+    # The supervised half must NOT run inside the pass: it restarts the relay
+    # the pass runs in. Fail loudly if anything reaches it.
+    monkeypatch.setattr(
+        update_mod,
+        "refresh_daemons_after_upgrade",
+        lambda: pytest.fail("the member pass ran the supervised refresh in-line"),
+    )
+    return fleet
+
+
+def _done_member(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> tuple[Any, Any, dict[str, str]]:
+    """A paired, granted member on 0.91.1 whose install moves it to the target."""
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    state = _concrete_member(monkeypatch, current="0.91.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
+    monkeypatch.setattr(meshupdate, "refresh_runtimes", lambda root, *, budget=None: ([], ""))
+    monkeypatch.setattr(
+        meshupdate, "reengage_displaced", lambda root, records, found, *, budget=None: (0, "")
+    )
+    monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: None)
+
+    def _install(version: str, *, runner: Any = None) -> str:
+        state["current"] = version
+        return meshupdate.METHOD_GENERATION
+
+    monkeypatch.setattr(meshupdate, "install_build", _install)
+    return server_a, server_b, state
+
+
+def test_a_rollout_moves_the_serve_daemon_onto_the_new_build(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The node-2 incident, failing first: the pass used to leave serve STALE.
+
+    Rollouts ro_dac9209751ea and ro_906691b0cd04 completed, restarted the
+    relay — and ``lop services status`` read ``STALE: serving 0.91.1, current
+    is 0.91.2`` for the same serve pid. The pass now runs ``lop update``'s own
+    services stage (serve half) and says so: the receipt, the member's
+    ``update_completed`` row and the origin's answer all carry ``serve: moved``,
+    and the daemon was signalled once, in place (same pid: conversations kept).
+    """
+    server_a, server_b, state = _done_member(devices, monkeypatch)
+    fleet = _serve_fleet(monkeypatch, state)
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+
+    assert detail["state"] == "done", detail
+    assert fleet.signals == [537864], "serve was never asked to move"
+    assert fleet.record.version == "0.99.0" and fleet.record.pid == 537864
+    assert detail["serve"] == {"state": "moved", "moved": [537864], "stale": []}, detail
+    assert "serve moved onto the new build" in detail["message"], detail
+    rows = _member_audit_rows(server_a, "update_completed")
+    assert rows and rows[-1]["detail"].get("serve") == "moved", rows
+
+
+def test_a_serve_that_does_not_move_reads_stale_with_the_remedy(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """A failed move never claims a move: ``done`` still, but serve says STALE.
+
+    The install succeeded, so the pass is ``done``; the serve verdict is read
+    from the fleet afterwards (the ``lop services status`` predicate), so a
+    daemon that took the signal and never came back reads ``stale`` with
+    ``lop services restart`` in the receipt and the audit row.
+    """
+    server_a, server_b, state = _done_member(devices, monkeypatch)
+    fleet = _serve_fleet(monkeypatch, state, answers=False)
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+
+    assert detail["state"] == "done", detail
+    assert fleet.signals == [537864]
+    serve = detail["serve"]
+    assert serve["state"] == "stale" and serve["moved"] == [], serve
+    assert serve["stale"] == [{"pid": 537864, "version": "0.91.1"}], serve
+    assert serve["remedy"] == "lop services restart", serve
+    assert "serve is STALE (pid 537864 on 0.91.1)" in detail["message"], detail
+    assert "`lop services restart`" in detail["message"], detail
+    row = _member_audit_rows(server_a, "update_completed")[-1]["detail"]
+    assert row.get("serve") == "stale", row
+    assert row.get("serve_stale") == ["537864@0.91.1"], row
+    assert row.get("serve_remedy") == "lop services restart", row
+
+
+def test_a_refused_serve_move_reads_stale_never_moved(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The stage's own refusal (a foreign install) signals nothing and claims nothing."""
+    from local_operator import update as update_mod
+
+    server_a, server_b, state = _done_member(devices, monkeypatch)
+    fleet = _serve_fleet(monkeypatch, state)
+    monkeypatch.setattr(
+        update_mod, "_services_refusal", lambda prefix=None: "this install's kind is editable"
+    )
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+
+    assert detail["state"] == "done", detail
+    assert fleet.signals == [], "a refused stage must signal nothing"
+    assert detail["serve"]["state"] == "stale", detail
+    assert detail["serve"]["moved"] == [], detail
+
+
+def test_an_older_member_answer_carries_no_serve_fact() -> None:
+    """Backward compatibility: a member that predates the fact reads ``{}``."""
+    assert meshupdate.serve_audit({}) == {}
+    assert meshupdate.serve_clause({}) == ""

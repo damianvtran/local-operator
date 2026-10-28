@@ -831,6 +831,124 @@ def _engage_successor(record: Any, *, root: Path, deadline_s: float) -> str:
     return ""
 
 
+#: The command a stale serve daemon's receipt names: the verb that moves serve
+#: in place and keeps its conversations (``services.restart_services``).
+SERVE_REMEDY = "lop services restart"
+
+
+def move_serve(*, budget: float | None = None) -> dict[str, Any]:
+    """Move this device's ``lop serve`` daemons onto the new build; say what is true after.
+
+    WHY THE PASS DOES THIS ITSELF (2026-10-28, lop-remote-node-2, rollouts
+    ro_dac9209751ea 0.91.0→0.91.1 and ro_906691b0cd04 0.91.1→0.91.2): the pass
+    installed, audited ``update_completed`` and restarted the relay, and
+    ``lop services status`` then read ``serve daemon … STALE: serving 0.91.0,
+    current is 0.91.1`` — twice. ``lop update`` on the same node moved serve in
+    place. A remote node has no operator watching it, so a serve left behind
+    runs pre-fix code silently until somebody happens to look.
+
+    ONE PATH, NOT A COPY: ``update.move_serve_after_upgrade`` is ``lop
+    update``'s own services stage with the supervised half deferred — the same
+    refusal (a checkout or foreign install moves nothing), the same rolling
+    reload that keeps conversations running. Serve moves BEFORE the supervised
+    units here, where ``lop update`` moves them after: the supervised roll
+    restarts the relay this pass runs in, so it has to wait for the reply
+    (``roll_services_after_reply``), and serve cannot.
+
+    THE VERDICT IS READ, NEVER INFERRED: ``state`` comes from the fleet as it
+    stands afterwards (``services.stale_serve_daemons`` — the predicate ``lop
+    services status`` prints ``STALE:`` from), so a refused, failed or
+    timed-out move reads ``stale`` with the remedy and can never read
+    ``moved``. ``moved`` lists only daemons whose instance changed under the
+    stage. States: ``moved`` (something moved, nothing stale), ``current``
+    (nothing needed moving), ``none`` (no serve running), ``stale`` (at least
+    one still on an older build) and ``unknown`` (no build to compare against).
+    Never raises: the install already succeeded, so a failed move is a clause
+    in a ``done`` receipt, not a failed update.
+
+    ``budget`` is the tail's remaining time (None = the reload's own nominal
+    wait); the wait is clamped to it so the receipt still lands inside the op's
+    deadline, and a move that has not settled by then reads ``stale``.
+    """
+    from local_operator import services
+    from local_operator import update as update_mod
+
+    wait_s = services.RELOAD_WAIT_S if budget is None else min(services.RELOAD_WAIT_S, budget)
+    report = update_mod.move_serve_after_upgrade(wait_s=max(0.0, wait_s))
+    moved = [move.pid for move in report.serve if move.moved]
+    try:
+        live = bool(services.live_serve_daemons())
+        stale_records = services.stale_serve_daemons() if live else []
+    except Exception:  # noqa: BLE001 — an unreadable fleet is "unknown", not "current"
+        logger.debug("serve fleet unreadable after the move", exc_info=True)
+        live, stale_records = True, None
+    stale = [
+        {"pid": int(record.pid), "version": str(getattr(record, "version", "") or "")}
+        for record in (stale_records or [])
+    ]
+    if stale_records is None:
+        state = "unknown"
+    elif stale:
+        state = "stale"
+    elif moved:
+        state = "moved"
+    elif live:
+        state = "current"
+    else:
+        state = "none"
+    fact: dict[str, Any] = {"state": state, "moved": moved, "stale": stale}
+    if state in ("stale", "unknown"):
+        fact["remedy"] = SERVE_REMEDY
+    return fact
+
+
+def serve_clause(serve: Mapping[str, Any]) -> str:
+    """The receipt reason's serve clause: silent when there is nothing to say.
+
+    Only ``moved`` and ``stale`` speak: ``current`` and ``none`` are the
+    ordinary outcomes, and a sentence on every receipt would train the reader
+    to skip the one that matters.
+    """
+    state = str(serve.get("state") or "")
+    if state == "moved":
+        return f"; serve moved onto the new build ({len(serve.get('moved') or [])} daemon(s))"
+    if state == "stale":
+        rows = serve.get("stale") or []
+        named = ", ".join(
+            f"pid {row.get('pid')} on {row.get('version') or 'an older build'}" for row in rows
+        )
+        return (
+            f"; serve is STALE ({named}) and keeps running the old code — "
+            f"run `{SERVE_REMEDY}` on this device"
+        )
+    if state == "unknown":
+        return f"; serve could not be checked against the new build — run `{SERVE_REMEDY}`"
+    return ""
+
+
+def serve_audit(serve: Mapping[str, Any]) -> dict[str, Any]:
+    """A serve fact as the audit log's flat keys (its values are scalars and lists).
+
+    Shared by the member's ``update_completed`` row and the origin's
+    ``update_member_state`` row, so the two read the same. ``{}`` for an empty
+    fact: an older member reported none, and the row must not invent one.
+    """
+    state = str(serve.get("state") or "")
+    if not state:
+        return {}
+    fields: dict[str, Any] = {"serve": state}
+    stale = [
+        f"{row.get('pid')}@{row.get('version') or '?'}"
+        for row in serve.get("stale") or []
+        if isinstance(row, Mapping)
+    ]
+    if stale:
+        fields["serve_stale"] = stale
+    if serve.get("remedy"):
+        fields["serve_remedy"] = str(serve["remedy"])
+    return fields
+
+
 def roll_services_after_reply() -> None:
     """Kick the supervised daemons and THIS relay onto the new build — AFTER the reply.
 
@@ -1170,14 +1288,6 @@ def _execute_validated(
             "sessions": {"moved": 0, "kept": 0},
             "updated_at": time.time(),
         }
-    _audit_member(
-        server,
-        link,
-        "update_completed",
-        target=target,
-        rollout=rollout,
-        detail={"method": method, "from": current, "version": target_version},
-    )
     # Convergence is outside the installation transaction. Reconcile current
     # AFTER it: the promoted generation and this relay's serving image are not
     # necessarily what a fresh process will load when the receipt is composed.
@@ -1191,6 +1301,21 @@ def _execute_validated(
     # (agent review round 1, M2).
     tail_budget = None if remaining is None else max(0.0, remaining - TAIL_RESERVE_S)
     tail_started = time.monotonic()
+    # THE SERVE DAEMON MOVES IN THE PASS, BEFORE THE RECEIPT (2026-10-28). It
+    # rides the update_completed row, so the row that says "installed" also says
+    # whether `lop serve` came along; see `move_serve`.
+    serve = move_serve(budget=tail_budget)
+    _audit_member(
+        server,
+        link,
+        "update_completed",
+        target=target,
+        rollout=rollout,
+        detail={"method": method, "from": current, "version": target_version} | serve_audit(serve),
+    )
+    if tail_budget is not None:
+        tail_budget = max(0.0, tail_budget - (time.monotonic() - tail_started))
+        tail_started = time.monotonic()
     outcomes, sweep_note = refresh_runtimes(root, budget=tail_budget)
     moved, kept = count_pass_outcomes(outcomes)
     left = (
@@ -1222,6 +1347,7 @@ def _execute_validated(
         )
     elif left_behind is None:
         reason += "; this device could not read its session registry to name busy sessions"
+    reason += serve_clause(serve)
     receipt = {
         "state": "done",
         "code": "",
@@ -1242,6 +1368,9 @@ def _execute_validated(
             }
             for r in (left_behind or [])
         ],
+        # Structured twin of the reason's serve clause: whether `lop serve` on
+        # this device is on the new build, and the remedy when it is not.
+        "serve": serve,
         "updated_at": time.time(),
     }
     # THE RECEIPT VALUE IS COMPOSED BEFORE THE ROLL IS STARTED (agent review
@@ -1474,6 +1603,11 @@ def update_peer(server: "RelayServer", device_id: str, *, rollout: str = "") -> 
         "method": str(detail_out.get("method") or ""),
         "version": str(detail_out.get("version") or ""),
         "sessions": detail_out.get("sessions") or {"moved": 0, "kept": 0},
+        # The member's serve fact (2026-10-28): whether `lop serve` there came
+        # along. Absent from an older member's answer — `{}` then, never a guess.
+        "serve": (
+            dict(detail_out["serve"]) if isinstance(detail_out.get("serve"), Mapping) else {}
+        ),
         # The member's structured twin of its "stay on … until they settle"
         # clause (QA round 1 on #3028, Q2): rebuilt field by field above, this
         # answer dropped it, so no `--json` reader and no rollout record ever

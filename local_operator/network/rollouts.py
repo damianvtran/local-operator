@@ -594,6 +594,43 @@ def _left_busy_ids(answer: Mapping[str, Any]) -> list[str]:
     return ids
 
 
+#: The serve states a member's answer may put on the record; anything else is
+#: dropped, because the value comes from a paired peer (the LEFT_BUSY_CAP rule).
+SERVE_STATES = frozenset({"moved", "current", "none", "stale", "unknown"})
+
+
+def _serve_fact(answer: Mapping[str, Any]) -> dict[str, Any]:
+    """The member's serve fact, bounded, or ``{}`` for a member that sent none.
+
+    An older member's answer carries no ``serve``; ``{}`` is the honest value
+    then — the record must not read "moved" or "stale" for a fact nobody
+    reported.
+    """
+    raw = answer.get("serve")
+    if not isinstance(raw, Mapping) or str(raw.get("state") or "") not in SERVE_STATES:
+        return {}
+    fact: dict[str, Any] = {"state": str(raw["state"])}
+    stale = raw.get("stale")
+    if isinstance(stale, list):
+        fact["stale"] = [
+            {"pid": _bounded_pid(row.get("pid")), "version": str(row.get("version") or "")[:40]}
+            for row in stale[:LEFT_BUSY_CAP]
+            if isinstance(row, Mapping)
+        ]
+    if raw.get("remedy"):
+        fact["remedy"] = str(raw.get("remedy"))[:80]
+    return fact
+
+
+def _bounded_pid(value: Any) -> int:
+    """A peer-supplied pid as an int, 0 when it is not one."""
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return pid if 0 < pid < 2**31 else 0
+
+
 def classify_answer(
     answer: Mapping[str, Any], *, fails: int, now: float, waits: int = 0
 ) -> dict[str, Any]:
@@ -651,7 +688,14 @@ def classify_answer(
         # ``left_busy`` rides alongside as data (QA round 1 on #3028, Q2): the
         # sentence can be cut at DETAIL_CAP with two or three named sessions,
         # and the ids are what a `--json` reader and the audit row need.
-        return moved(state) | {"waits": 0, "left_busy": _left_busy_ids(answer)}
+        # ``serve`` rides the same way (2026-10-28): whether the member's
+        # `lop serve` came along, so a STALE one is on the record and its audit
+        # row rather than only in the member's own log.
+        return moved(state) | {
+            "waits": 0,
+            "left_busy": _left_busy_ids(answer),
+            "serve": _serve_fact(answer),
+        }
     if state == "busy" or code == "update_in_progress":
         # Skip-then-retry: parked on the cadence, a FRESH probe each time, and
         # nothing was touched on the member (its own sentence rides `detail`).
@@ -776,6 +820,10 @@ def _audit_member_state(
             # The ids the member deliberately left on its old build (QA Q2):
             # the reason above is capped and may have lost the names.
             detail["left_busy"] = list(update.get("left_busy") or [])
+        if update.get("serve"):
+            from local_operator.network.meshupdate import serve_audit
+
+            detail.update(serve_audit(update.get("serve") or {}))
         event = AuditEvent(
             event=MEMBER_STATE,
             actor="self",
@@ -951,6 +999,8 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             target_member["next_ask_at"] = float(_update.get("next_ask_at") or 0.0)
             if "left_busy" in _update:
                 target_member["left_busy"] = list(_update.get("left_busy") or [])
+            if _update.get("serve"):
+                target_member["serve"] = dict(_update.get("serve") or {})
             note_receipt(
                 target_member,
                 state=str(_update["state"]),

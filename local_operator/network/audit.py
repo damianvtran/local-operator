@@ -598,7 +598,14 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "update_requested": frozenset({"rollout", "target", "capability"}),
     "update_refused": frozenset({"rollout", "target", "code"}),
     "update_started": frozenset({"rollout", "target", "method"}),
-    "update_completed": frozenset({"rollout", "target", "method", "from", "version"}),
+    # ``serve``/``serve_stale``/``serve_remedy`` (2026-10-28): whether this
+    # device's `lop serve` came along with the install — the state token, the
+    # still-stale daemons as short ``pid@version`` strings, and the command that
+    # moves them. Flat, because this log's values are bounded scalars and lists
+    # (``_clean_value`` stringifies a dict). Built by ``meshupdate.serve_audit``.
+    "update_completed": frozenset(
+        {"rollout", "target", "method", "from", "version", "serve", "serve_stale", "serve_remedy"}
+    ),
     "update_failed": frozenset({"rollout", "target", "method"}),
     # The origin's side (S3a): the opening row carries WHO decided (a closed
     # token, never a sentence), under which policy and front end; the member
@@ -614,7 +621,18 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # the names it carries can be lost. A list of short ids, bounded by count at
     # the emitter (``rollouts.LEFT_BUSY_CAP``) and here by ``_clean_value``.
     "update_member_state": frozenset(
-        {"rollout", "state", "code", "reason", "method", "version", "left_busy"}
+        {
+            "rollout",
+            "state",
+            "code",
+            "reason",
+            "method",
+            "version",
+            "left_busy",
+            "serve",
+            "serve_stale",
+            "serve_remedy",
+        }
     ),
     "update_rollout_done": frozenset({"rollout", "counts"}),
     # The suppression row (S3b): which front end moved (``via``), what the key
