@@ -538,11 +538,10 @@ def test_ready_reads_a_populated_closed_store_without_side_effects(tmp_path: Pat
 def _wal_bytes_snapshot(root: Path) -> dict[str, Any]:
     """Every file NAME, plus the database and ``-wal`` bytes, beside a live writer.
 
-    ``-shm`` content is left out on purpose: when the writer shares this
-    process (the relay can hold its own store open), SQLite shares one
-    wal-index mapping per process, and a reader's read-mark in it is ordinary
-    reader coordination, not a credential write. The cross-process case pins
-    ``-shm`` byte-for-byte in tests/unit/providers/test_auth_store.py.
+    ``-shm`` content is left out on purpose: a WAL reader records its read-mark
+    in the existing ``-shm``, which is ordinary reader coordination, not a
+    credential write and not a new file. The same-process writer case is pinned
+    in tests/unit/providers/test_auth_store.py.
     """
     snapshot = _root_file_snapshot(root)
     return {

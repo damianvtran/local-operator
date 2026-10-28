@@ -1490,14 +1490,23 @@ class AuthStore:
         in opposite directions:
 
         * Both ``-wal`` and ``-shm`` exist (any owner with a live writer, i.e.
-          practically every running desktop): ``mode=ro&readonly_shm=1``. This
-          reads the committed WAL, so a busy store answers with its CURRENT
-          rows instead of being declared unknown/stale forever. It creates
-          nothing because both sidecars are there, and ``readonly_shm`` maps
-          the wal-index read-only, so even the ``-shm`` bytes are left alone
-          against a writer in another process (measured: all three files
-          byte-identical). Plain ``mode=ro`` would rewrite read-marks in
-          ``-shm``; that is why the flag is here.
+          practically every running desktop): plain ``mode=ro``. This reads
+          the committed WAL, so a busy store answers with its CURRENT rows
+          instead of being declared unknown/stale forever. It creates no file
+          (both sidecars are there) and never writes ``auth.db`` or ``-wal``;
+          like every WAL reader it records its read-mark in the existing
+          ``-shm``, which is SQLite's reader coordination, not credential data
+          and not a new file (#2894 forbids the latter).
+        * ``readonly_shm=1`` is deliberately NOT used, although it would leave
+          even the ``-shm`` bytes alone. SQLite keeps ONE wal-index mapping per
+          database file per process, and the first connection to map it decides
+          whether it is read-only: while such a reader is open, every writable
+          ``AuthStore`` opened in the same process fails with "attempt to write
+          a readonly database". The relay answers ``ready`` beside the credential
+          sync engine and owner broker, and the mobile daemon serves ``/usage``
+          beside ``/models``, so that broke real writes (PR #3084 review R1-1:
+          26,636 of 26,642 same-process writes failed under readonly_shm, 0 of
+          1,263 under plain ``mode=ro``). A read must never break a write.
         * Otherwise ``mode=ro&immutable=1``: no sidecars means the last writer
           checkpointed and closed, so the main file IS the current state. A
           plain ``mode=ro`` here would CREATE ``-wal``/``-shm`` (measured),
@@ -1506,12 +1515,27 @@ class AuthStore:
           :meth:`read_only_sidecar_present` as possibly stale.
 
         No mkdir, no O_CREAT of the database, no WAL PRAGMA, no schema DDL, no
-        commit, no chmod on either branch; sqlite refuses every write through
-        both handles. The sidecar check precedes the open, so the WAL branch is
-        only ever taken over files that already exist. The one residual window
-        is the last writer deleting its sidecars between the check and the
-        open: the open then fails, and the store falls back to the immutable
-        branch, which that very checkpoint has just made current.
+        commit, no chmod on either branch; sqlite refuses every row write
+        through both handles. A ``-shm`` that is corrupt, truncated or from an
+        older WAL generation with no writer alive is rebuilt from the WAL's own
+        checksummed frames, so it reads as the recovered truth (what the next
+        writer would see), not as unknown; a corrupt ``-wal`` or main file
+        still fails to open and reads as unavailable.
+
+        Two residual effects, both accepted rather than hidden:
+
+        * The sidecar check and the open are not atomic. If the last writer
+          checkpoints and unlinks both sidecars in between, this open recreates
+          them empty (a 0-byte ``-wal`` and a fresh ``-shm``, exactly what the
+          next writer would create) and still reads the right rows, which that
+          checkpoint has just put in the main file. They are NOT unlinked
+          afterwards: by then another process may be using them, and deleting a
+          live ``-shm`` is how WAL coordination gets corrupted. No credential
+          data is written.
+        * A reader open across the last writer's close can make that writer
+          skip its close-time checkpoint and leave ``-wal``/``-shm`` behind.
+          The next read takes this same branch and is correct; the next writer
+          checkpoints them. Read handles here are short-lived.
 
         Returns ``None`` when there is nothing to read: an ABSENT database
         (legitimately empty) or one that will not open. Callers distinguish the
@@ -1521,14 +1545,14 @@ class AuthStore:
         if not self._db_path.exists():
             return None
         if self._wal_sidecars_present():
-            conn = self._open_read_only_uri("mode=ro&readonly_shm=1")
+            conn = self._open_read_only_uri("mode=ro")
             if conn is not None:
                 self._ro_sees_wal = True
                 return conn
         return self._open_read_only_uri("mode=ro&immutable=1")
 
     def _wal_sidecars_present(self) -> bool:
-        """Whether BOTH WAL sidecars already exist, so a WAL read creates nothing."""
+        """Whether BOTH WAL sidecars already exist, so a WAL read creates no file."""
         try:
             return all(
                 self._db_path.with_suffix(self._db_path.suffix + suffix).is_file()
@@ -1624,8 +1648,12 @@ class AuthStore:
         is never stale. Answering from the file size alone made every busy
         owner permanently "could not be read": a live writer's ``-wal`` is
         practically never empty, since SQLite reuses it after a checkpoint
-        rather than truncating it. The name is kept because the phone seam and
-        readiness probe it by name.
+        rather than truncating it.
+
+        The name now reads "may be stale", not "a sidecar exists". It is kept
+        because :class:`UsageCacheStore` exposes the same probe and the phone
+        seam and readiness call it by name on either store, so renaming one
+        side would split that shared shape.
         """
         if self._ro_sees_wal:
             return False

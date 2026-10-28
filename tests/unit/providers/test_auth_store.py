@@ -4304,9 +4304,8 @@ async def test_guard_exit_failure_closes_actual_connection_before_constructor_ra
 def live_wal_writer(db_path: Path, *statements: str) -> Iterator[None]:
     """Hold ``db_path`` open in ANOTHER process with committed, uncheckpointed WAL frames.
 
-    A writer in this process would share SQLite's per-process wal-index mapping
-    with the reader under test, which changes what ``readonly_shm`` does; a
-    running desktop's writer is a separate process, so the fixture is too.
+    A running desktop's writer is a separate process, so the fixture is too (the
+    same-process case has its own regression test below).
     ``wal_autocheckpoint=0`` keeps the committed frames in ``-wal`` for as long
     as the child lives. On exit the child closes, which checkpoints and removes
     the sidecars, as a real writer's shutdown does.
@@ -4345,11 +4344,23 @@ def live_wal_writer(db_path: Path, *statements: str) -> Iterator[None]:
             child.wait()
 
 
-def _file_state(directory: Path) -> dict[str, tuple[int, str]]:
+def _file_state(directory: Path, *, skip_shm: bool = False) -> dict[str, tuple[int, str]]:
+    """Inode and content of every file; ``skip_shm`` keeps only the ``-shm`` inode.
+
+    A WAL reader records its read-mark in the existing ``-shm`` (SQLite's reader
+    coordination), so a live-WAL read pins ``-shm``'s identity, not its bytes.
+    """
     import hashlib
 
     return {
-        item.name: (item.stat().st_ino, hashlib.sha256(item.read_bytes()).hexdigest())
+        item.name: (
+            item.stat().st_ino,
+            (
+                ""
+                if skip_shm and item.name.endswith("-shm")
+                else hashlib.sha256(item.read_bytes()).hexdigest()
+            ),
+        )
         for item in sorted(directory.iterdir())
     }
 
@@ -4379,11 +4390,13 @@ async def test_read_only_store_without_sidecars_creates_no_file(tmp_path: Path) 
 async def test_read_only_store_reads_a_live_writers_wal_without_touching_it(
     tmp_path: Path,
 ) -> None:
-    """A live writer's WAL is read, not declared unknown, and no byte on disk changes.
+    """A live writer's WAL is read, not declared unknown; no file is created or rewritten.
 
     The committed DELETE exists only in ``-wal``. An immutable read (the old
     behaviour) still sees the row and had to call the store stale; the WAL-aware
-    open sees the current, empty answer and is therefore not stale.
+    open sees the current, empty answer and is therefore not stale. ``auth.db``
+    and ``-wal`` are byte-identical afterwards; ``-shm`` keeps its inode (only
+    the reader's read-mark moves in it).
     """
     import sqlite3
 
@@ -4393,7 +4406,7 @@ async def test_read_only_store_reads_a_live_writers_wal_without_touching_it(
     seeder.upsert_credential("anthropic", _oauth(refresh="r2"))
     seeder.close()
     with live_wal_writer(path, "DELETE FROM auth_credentials WHERE provider = 'openai'"):
-        before = _file_state(tmp_path)
+        before = _file_state(tmp_path, skip_shm=True)
         assert {"auth.db", "auth.db-shm", "auth.db-wal"} <= set(before)
         # Control: the immutable snapshot cannot see the committed DELETE.
         with contextlib.closing(
@@ -4412,7 +4425,68 @@ async def test_read_only_store_reads_a_live_writers_wal_without_touching_it(
         finally:
             auth.close()
 
-        assert _file_state(tmp_path) == before
+        assert _file_state(tmp_path, skip_shm=True) == before
+
+
+async def test_a_live_wal_read_never_breaks_a_writer_in_the_same_process(
+    tmp_path: Path,
+) -> None:
+    """PR #3084 review R1-1: a WAL read beside a same-process writer fails no write.
+
+    SQLite keeps one wal-index mapping per database file per process, and the
+    first connection to map it decides whether it is read-only. A
+    ``readonly_shm=1`` reader therefore made concurrent writable ``AuthStore``
+    opens in the same process (the relay answering ``ready`` beside the sync
+    engine, the mobile daemon's ``/usage`` beside ``/models``) fail with
+    "attempt to write a readonly database". A cross-process writer holds the
+    WAL so the reader takes the WAL branch; one thread loops read-only reads
+    while another loops fresh writable stores and upserts, for 3 s.
+    """
+    import threading
+    import time
+
+    path = tmp_path / "auth.db"
+    seeder = AuthStore(db_path=path, config_dir=tmp_path, config_overrides={})
+    seeder.upsert_credential("openai", _oauth())
+    seeder.close()
+    deadline = time.monotonic() + 3.0
+    reads: list[bool] = []
+    wal_reads: list[bool] = []
+    writes: list[int] = []
+    failures: list[str] = []
+
+    def read_loop() -> None:
+        while time.monotonic() < deadline:
+            store = AuthStore.open_read_only(path)
+            try:
+                reads.append(bool(store.list_credentials("openai")))
+                wal_reads.append(store.read_only_sidecar_present() is False)
+            finally:
+                store.close()
+
+    def write_loop() -> None:
+        while time.monotonic() < deadline:
+            try:
+                writer = AuthStore(db_path=path, config_dir=tmp_path, config_overrides={})
+                try:
+                    writer.upsert_credential("openai", _oauth(refresh=f"r-{len(writes)}"))
+                finally:
+                    writer.close()
+                writes.append(1)
+            except Exception as exc:  # noqa: BLE001 — every failure is the finding
+                failures.append(repr(exc))
+
+    with live_wal_writer(path, "UPDATE auth_credentials SET updated_at = updated_at + 1"):
+        threads = [threading.Thread(target=read_loop), threading.Thread(target=write_loop)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+    assert failures == [], f"{len(failures)} writes failed, first: {failures[:1]}"
+    assert writes, "the writer never ran"
+    assert reads and all(reads), "a read lost the row"
+    assert all(wal_reads), "a read fell back to the stale immutable snapshot"
 
 
 async def test_read_only_store_flags_an_orphaned_wal_as_possibly_stale(tmp_path: Path) -> None:
