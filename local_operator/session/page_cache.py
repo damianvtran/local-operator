@@ -26,22 +26,18 @@ WHAT THE KEY IS. File IDENTITY, not a generation counter. Three writers can touc
 one journal from three processes (the desktop server, the TUI, the mobile daemon),
 so a counter that only this process observes would serve a stale page across a
 compaction — and a WRONG page of the right conversation is exactly the failure
-mode this design has to avoid. ``(st_ino, st_size)`` is read from the filesystem,
-which makes the invalidation rules follow from how the journal is written rather
-than from notifications anyone must remember to send:
+mode this design has to avoid. ``(st_ino, st_size, st_mtime)`` is read from the
+filesystem, which makes invalidation follow the journal's existing source witness
+rather than notifications anyone must remember to send:
 
-- an append moves ``st_size``, so the tail page's old entry is never asked for
-  again and ages out of the LRU;
-- a rollback (``os.truncate`` on an append that failed) moves it back, and if it
-  lands on a size that is still cached that is the CORRECT answer — the rollback
-  restores the exact pre-append bytes, so the cached page describes the file that
-  is now there;
+- an append moves ``st_size``; including size as well as mtime is essential for
+  ``preserve_mtime`` batches that deliberately rewind the clock;
+- an equal-size in-place rewrite moves ``mtime``, so an old body cannot be joined
+  to new transcript-index facts with the same inode/size;
 - ``compact_file`` writes a temp file and ``os.replace``s it, which is a NEW
   inode;
-- ``mtime`` is deliberately NOT in the key even though the sibling
-  ``DurableFoldCache`` carries one: an append under ``preserve_mtime`` rewinds the
-  transcript's mtime on purpose, so mtime would serve a stale tail page after a
-  bookkeeping batch while size moves on every append regardless.
+- a rollback may retain its old bytes but gets a fresh read witness, which is
+  what consumers require when pairing pages to immutable index publications.
 
 NO WRITER CALLBACK, NO GENERATION SUBSCRIPTION, and no lock besides the one the
 pool already has (see ``DesktopSessions.session``): the fingerprint IS the
@@ -50,23 +46,14 @@ one that already decides (``desktop_sessions.py``'s ``warm`` docblock is the
 in-tree statement of that rule).
 
 THE RESIDUAL, named here because ``TranscriptPageCache``'s docstring points at
-it. Identity is ``(st_ino, st_size)``, so a file whose bytes change while BOTH
-stay the same is served as a hit. Exactly two shapes reach that:
+it. A rewrite that restores all three fields still preserves the old key. In
+particular an inode can be recycled onto identical byte length and mtime after
+an unlink/replace; strengthening that requires a new end-to-end content witness,
+not a guessed ctime after the page read.
 
-- an IN-PLACE rewrite at an unchanged size. ``_write_entries``'s rebuild branch
-  (``transcript.py``) opens the journal ``"w"`` on the same inode, so it keeps
-  the inode AND can land on an equal byte length;
-- an INODE RECYCLED onto an identical byte length after an ``os.replace`` or an
-  unlink, which is the unbounded one: it is the kernel's business, not this
-  cache's.
-
-Neither is reachable from this codebase's writers today — the rebuild branch
-runs only when the journal is ABSENT (so there are no older bytes to serve), and
-``compact_file`` replaces through a temp file, which is the new-inode path the
-key is built to catch. It stays named rather than assumed because the alternative
-is a reader inferring a guarantee this class does not make: the delta against the
-sibling ``DurableFoldCache`` is that ``mtime`` is excluded here deliberately, so
-``size`` is the only part of the key that moves on an append.
+``compact_file``'s new inode is caught; ordinary equal-size rewrites are caught
+by mtime. The remaining deliberately restored witness is documented rather than
+silently upgraded: consumers and the index share the same protocol.
 
 CROSS-THREAD DISCIPLINE, and this is the one thing a caller must not get wrong.
 The cache and the flight map are mutated ONLY from the event loop: ``get`` in the
@@ -225,8 +212,11 @@ class PageKey:
 
     ``directory`` is the session directory as a string (not a ``Path``, so the
     key is hashable and comparable across the two processes' spellings of the
-    same directory). ``inode`` and ``size`` are the invalidation (see the module
-    docstring); the cursor fields make the key a page's identity rather than
+    same directory). ``inode``, ``size`` and ``mtime`` are the invalidation;
+    equal-size overwrites must not retain old bodies/source witnesses while the
+    index projection already names the new journal. This matches the existing
+    source protocol, not a stronger ctime/mtime-restoration guarantee. The cursor
+    fields make the key a page's identity rather than
     merely its file's.
 
     The anchored mode's fields are the REQUESTED values rather than the defaults
@@ -245,6 +235,7 @@ class PageKey:
     before: int | None
     after: int | None
     limit: int
+    mtime: float = 0.0
 
 
 def page_key(
@@ -266,7 +257,7 @@ def page_key(
     # The PHYSICAL source, archive included: a cache keyed on a stat of the
     # plain name answers ``None`` for every compressed session, which turns
     # every page read into an uncached one rather than a wrong one — but the
-    # archive carries the same inode/size identity the key needs.
+    # archive carries the same inode/size/mtime identity the key needs.
     path, _codec = compression.transcript_source(Path(directory))
     try:
         stat = path.stat()
@@ -276,6 +267,7 @@ def page_key(
         directory=str(Path(directory)),
         inode=stat.st_ino,
         size=stat.st_size,
+        mtime=stat.st_mtime,
         before_id=before_id,
         through_id=through_id,
         around_id=around_id,

@@ -13,6 +13,7 @@ touched.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -404,6 +405,7 @@ async def test_the_first_frame_spends_only_what_is_left_of_its_budget(
 
         # A scan that cannot land inside the budget is not waited on.
         ti._reset_for_tests()
+        ti.index_path(harness.root, harness.session_id).unlink()
 
         def slow_refresh(*_: Any, **__: Any) -> Any:
             time.sleep(2.0)
@@ -471,6 +473,189 @@ async def test_a_warm_reopen_does_not_wait_on_its_own_paused_scan(tmp_path: Path
         assert index is None
         assert elapsed < 0.5, f"waited {elapsed:.2f}s on a scan paused for this very open"
         assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["large_disk", "small_disk", "large_resident"])
+async def test_frame_index_fallback_preserves_ready_facts_without_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache_state: str
+) -> None:
+    """No idle budget wager on large disk HITs; resident/small HITs keep facts.
+
+    Observe the actual wait seam rather than asserting milliseconds: host load
+    may delay any task, but cannot make waiting on a held refresh useful.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=4)
+        previous = ti.refresh_index(harness.root, harness.session_id)
+        assert previous is not None
+        cache = ti.index_path(harness.root, harness.session_id)
+        # Exercise _frame_index itself, not the earlier summary fast path.
+        raw = json.loads(cache.read_text())
+        raw.pop("read_model")
+        cache.write_text(json.dumps(raw, separators=(",", ":")))
+        if cache_state != "small_disk":
+            with cache.open("a", encoding="utf-8") as handle:
+                handle.write(" " * (6 << 20))
+        if cache_state == "large_resident":
+            ti._remember(ti._key(harness.root, harness.session_id), previous, cache.stat().st_mtime)
+        waits = []
+        real_wait = asyncio.wait
+
+        async def record_wait(*args: Any, **kwargs: Any) -> Any:
+            waits.append(kwargs.get("timeout"))
+            return await real_wait(*args, **kwargs)
+
+        release = ti.hold_paint(harness.root, harness.session_id)
+        task = None
+        try:
+            async with harness.pool.session(harness.session_id, read=True) as bridge:
+                with monkeypatch.context() as patch:
+                    patch.setattr(asyncio, "wait", record_wait)
+                    index = await bridge._frame_index(time.monotonic() + 0.12)
+                entry = ti._IN_FLIGHT.get(ti._key(harness.root, harness.session_id))
+                task = entry[1] if entry is not None else None
+                if cache_state == "large_disk":
+                    assert index is not None, "fallback must not strand its own ready answer"
+                else:
+                    assert index is not None
+                    assert index.runs == previous.runs
+                    assert index.checkpoints == previous.checkpoints
+                    assert index.journal_rows == previous.journal_rows
+                    assert index.source_projection_facts == previous.source_projection_facts
+                    assert bool(waits) is (cache_state == "small_disk")
+        finally:
+            release()
+            if task is None:
+                entry = ti._IN_FLIGHT.get(ti._key(harness.root, harness.session_id))
+                task = entry[1] if entry is not None else None
+            if task is not None:
+                assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_held_disk_hit_preserves_first_frame_grouping_without_full_hydration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance companion to the scheduling test: fast but incomplete fails.
+
+    These are semantic inputs to collapse/group rendering, not rendered proof.
+    A bounded witnessed fact slice must retain them if full hydration is held.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=4)
+        previous = ti.refresh_index(harness.root, harness.session_id)
+        assert previous is not None
+        cache = ti.index_path(harness.root, harness.session_id)
+        with cache.open("a", encoding="utf-8") as handle:
+            handle.write(" " * (6 << 20))
+        ti._remember(ti._key(harness.root, harness.session_id), previous, cache.stat().st_mtime)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 50, "open_frame": 1}
+        control_response = await harness.client.get(url, params=params)
+        assert control_response.status_code == 200
+        control = control_response.json()["result"]
+        assert control["runs_state"] == "ready" and control["runs"]
+        ti._reset_for_tests()
+        reads = []
+        real_read = ti._read_raw
+
+        def read_spy(*args: Any, **kwargs: Any) -> Any:
+            reads.append(True)
+            return real_read(*args, **kwargs)
+
+        monkeypatch.setattr(ti, "_read_raw", read_spy)
+        release = ti.hold_paint(harness.root, harness.session_id)
+        try:
+            response = await harness.client.get(url, params=params)
+            assert response.status_code == 200
+            first = response.json()["result"]
+            for field in ("entries", "runs", "runs_state", "head_cut"):
+                assert (
+                    first[field] == control[field]
+                ), f"first-frame {field} regressed under paint hold"
+            assert reads == [], "grouping still depended on whole-index hydration during paint"
+        finally:
+            release()
+            entry = ti._IN_FLIGHT.get(ti._key(harness.root, harness.session_id))
+            if entry is not None:
+                await asyncio.wait_for(entry[1], 30)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["tool", "compacted", "duplicate", "live", "around"])
+async def test_projection_preserves_grouped_frames_and_freshness_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """Non-empty folded spans/compaction stay final, not merely rows present."""
+    async with _Harness(tmp_path) as harness:
+        if shape in {"tool", "live", "duplicate", "around"}:
+            rows: list[Any] = []
+            for turn in range(1, 4):
+                rows.extend(_long_turn(turn, 6))
+            if shape == "live":
+                rows.extend(_long_turn(9, 8)[:-1])
+            directory = harness.root / "sessions" / harness.session_id
+            _write(directory, rows)
+        else:
+            harness.seed(turns=8)
+            directory = harness.root / "sessions" / harness.session_id
+            # The real compaction path replaces the journal inode.
+            await Transcript(directory).compact_file(min_reclaim_bytes=0)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        if shape == "duplicate":
+            from dataclasses import replace
+
+            ti.write_index(
+                harness.root,
+                harness.session_id,
+                replace(index, checkpoints=index.checkpoints + [index.checkpoints[0]]),
+            )
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params: dict[str, Any] = {
+            "limit": 20 if shape == "live" else 50,
+            "open_frame": 1,
+            "journal_order": 1,
+        }
+        if shape == "around":
+            params = {
+                "around_id": "u0003",
+                "before": 5,
+                "after": 5,
+                "open_frame": 1,
+                "journal_order": 1,
+            }
+        control = (await harness.client.get(url, params=params)).json()["result"]
+        assert control["runs_state"] == "ready", control
+        assert control["journal_order_state"] == "ready", control
+        assert any(
+            row["payload"].get("tool_calls") or row["payload"].get("role") == "tool"
+            for row in control["entries"]
+        ) or shape in {"compacted", "around"}
+        ti._reset_for_tests()
+        reads = []
+        original = ti._read_raw
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            reads.append(True)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(ti, "_read_raw", spy)
+        monkeypatch.setattr(
+            DesktopSessionBridge,
+            "_frame_index",
+            lambda *args, **kwargs: pytest.fail("hydrating fallback ran"),
+        )
+        release = ti.hold_paint(harness.root, harness.session_id)
+        try:
+            first = (await harness.client.get(url, params=params)).json()["result"]
+            assert first == control
+            assert reads == []
+        finally:
+            release()
 
 
 @pytest.mark.asyncio
@@ -935,6 +1120,8 @@ async def test_a_frame_whose_index_lands_during_the_hunt_is_the_steady_frame(
         params = {"limit": limit, "open_frame": 1}
 
         original = DesktopSessionBridge._frame_index
+        # Remove the optional summary to exercise the original late-index path.
+        ti.index_path(harness.root, harness.session_id).unlink()
         calls: list[int] = []
 
         async def _lands_during_the_hunt(self: Any, deadline: float) -> Any:
