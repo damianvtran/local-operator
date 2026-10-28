@@ -380,6 +380,53 @@ CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases (
 """
 
 
+def failure_block_window(
+    retry_after_ms: int | None,
+    *,
+    usage_limited: bool,
+    model_id: str = "",
+    floor_ms: int = DEFAULT_BLOCK_MS,
+) -> tuple[str, int]:
+    """``(block_scope, block_ms)`` for a credential that just failed: the ONE rule.
+
+    WHY THIS IS A FUNCTION: the window a failing credential sits out used to be
+    spelled inline in :meth:`AuthStore.rotate_sibling`, so the only credential
+    that obeyed it was a LOCAL row. A row borrowed over the mesh answered the same
+    ``429 … retry in 24h`` and was asked again on the very next request, because
+    nothing on the borrower remembered it (``MeshCredentialClient.report_sync``
+    now calls this too). Both sides read the same rule here so they cannot drift.
+
+    The rule itself is unchanged: the provider's advertised wait, floored at
+    ``floor_ms`` and capped at :data:`MAX_CREDENTIAL_BLOCK_MS` — the ceiling
+    :meth:`AuthStore.block_credential` already applied to every local block, so
+    a ``retry in 24h`` rests a row for an hour and is then re-probed once rather
+    than stranded for a day on one reading. A usage-limit verdict on a model
+    with a parsable family is scoped to that family (see ``rotate_sibling`` for
+    why the family is the under-block side that heals); anything else is
+    account-wide.
+    """
+    from local_operator.model.registry import model_family
+
+    family = model_family(model_id) if model_id else ""
+    scope = f"model:{family}" if (usage_limited and family) else ""
+    window = max(floor_ms, int(retry_after_ms or 0))
+    return scope, min(window, MAX_CREDENTIAL_BLOCK_MS)
+
+
+def block_scope_gates(scope: str, model_id: str) -> bool:
+    """Whether a block written with ``scope`` stops a request for ``model_id``.
+
+    The read half of :func:`failure_block_window`, shared for the same reason:
+    an account-wide block (``""``) gates every model, a ``model:<slug>`` block
+    gates exactly the models whose id contains the slug — the predicate
+    :meth:`AuthStore.is_blocked_for_model` applies to its stored rows.
+    """
+    if not scope:
+        return True
+    lowered = (model_id or "").lower()
+    return bool(lowered) and scope.removeprefix("model:") in lowered
+
+
 class AuthStoreError(Exception):
     """Credential resolution/refresh failure (never a bare sqlite error)."""
 
@@ -2487,7 +2534,7 @@ class AuthStore:
             (credential_id, provider_key),
         ).fetchall()
         now = self._now_ms()
-        return any(until > now and scope.removeprefix("model:") in lowered for scope, until in rows)
+        return any(until > now and block_scope_gates(scope, lowered) for scope, until in rows)
 
     def blocked_remaining_ms(self, credential_id: int, provider: str, model_id: str) -> int:
         """The ms until ``credential_id`` could serve ``model_id`` again, or ``0``.
@@ -5192,15 +5239,17 @@ class AuthStore:
                 # unusable", so it is never written from a family-named
                 # rotation. The family comes from the model the request ran,
                 # via the same parser the usage layer's tier rows key on.
-                from local_operator.model.registry import model_family
-
-                family = model_family(model_id) if model_id else ""
-                scope = f"model:{family}" if (usage_limited and family) else ""
+                scope, window_ms = failure_block_window(
+                    retry_after,
+                    usage_limited=usage_limited,
+                    model_id=model_id,
+                    floor_ms=block_ms,
+                )
                 self.block_credential(
                     failing.id,
                     provider,
                     block_scope=scope,
-                    block_ms=max(block_ms, retry_after or 0),
+                    block_ms=window_ms,
                 )
             if usage_limited:
                 # Sticky preserved: same account stays first after backoff.
