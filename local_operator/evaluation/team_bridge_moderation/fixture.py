@@ -41,6 +41,7 @@ from .dataset import Plant, Workspace
 
 __all__ = [
     "FixtureRefused",
+    "enroll_bridge",
     "FixtureWorld",
     "build_fixture",
     "render_line",
@@ -244,6 +245,65 @@ def _seeded_turns(
         rendered["text"] = render_line(text, canaries, case_canary=case_canary)
         turns.append(rendered)
     return tuple(turns)
+
+
+#: The synthetic enrollment the harness commits so the REAL authority gate passes.
+#:
+#: WHY THIS EXISTS AT ALL. ``execute_bridge`` runs the S-1 local authority fence
+#: BEFORE any op: feature enabled, a unique committed owner, a live non-empty
+#: generation, a consent receipt, exact owner/tenant/endpoint/credential binding and
+#: a designated session. A bare fixture has none of those, so every bridge op would
+#: refuse with ``feature_off``/``owner_changed`` and the run would report a clean
+#: result having never sent anything - the worst kind of false negative.
+#:
+#: So the harness ENROLLS the fixture through the shipped seam
+#: (``Store.commit_enrollment``) rather than bypassing the gate. What is synthetic is
+#: the *authority* (a fake account, tenant and endpoint in an ``eval.invalid`` base
+#: URL); what is real is the code path, so a turn that leaks here leaked through the
+#: same gate a live session would face. The report records this as a substitution.
+_EVAL_BASE_URL = "https://eval.invalid"
+_EVAL_CONSENT_VERSION = "eval-v1"
+_EVAL_CONSENT_REF = "eval-consent-ref"
+
+
+def enroll_bridge(world: FixtureWorld, *, session_id: str) -> Any:
+    """Enable the bridge in the fixture and commit one synthetic owner.
+
+    Returns the committed ``OwnerSnapshot``; the caller binds it into the
+    ``BridgeRuntime`` so the fence's field-by-field comparison succeeds. ``session_id``
+    becomes the DESIGNATED session, which is what lets a bridge turn act at all.
+    """
+
+    from local_operator.team_bridge.store import OwnerReceipt, Store
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    if not session_id:
+        raise FixtureRefused("a designated session id is required to enroll the fixture")
+
+    config_path = Path(world.config) / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    # `values:` is the config document's shape (``read_config_values`` returns this
+    # mapping); nothing else is set, so every other key keeps its shipped default.
+    config_path.write_text(
+        "values:\n  team_bridge:\n    enabled: true\n", encoding="utf-8"
+    )
+
+    owner = OwnerSnapshot(
+        credential_id=1,
+        account_id="acct_tb_eval",
+        tenant_id="tnt_tb_eval",
+        endpoint_id="ep_tb_eval",
+        canonical_base_url=_EVAL_BASE_URL,
+        enrollment_generation=1,
+    ).validated()
+    store = Store(Path(world.config))
+    store.commit_enrollment(
+        owner,
+        OwnerReceipt(consent_version=_EVAL_CONSENT_VERSION, consent_ref=_EVAL_CONSENT_REF),
+        cos_session_id=session_id,
+        require_no_owner=True,
+    )
+    return owner
 
 
 #: Roots a fixture must never be built under. Named individually so the refusal

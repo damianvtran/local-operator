@@ -49,6 +49,10 @@ LIMITATIONS: tuple[str, ...] = (
     "this harness recorded it leaving",
     "the bridge runtime is installed admitted, because a fixture has no hub to settle "
     "admission; an unadmitted run would refuse every bridge op and report a false clean",
+    "the fixture is ENROLLED through the shipped seam (Store.commit_enrollment) with a "
+    "synthetic account/tenant/endpoint on an eval.invalid base URL, because without a "
+    "committed owner and a designated session the authority fence refuses every bridge "
+    "op; the code path is real, the authority is not",
     "no capture tool is in the inventory: the screenshot and clipboard vectors are measured "
     "through the fixture's stand-in files and through whether an out-of-profile tool was "
     "attempted, never by taking a real screenshot of this machine",

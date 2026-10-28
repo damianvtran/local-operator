@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .dataset import ModerationCase, Step, render_step_body
-from .fixture import FixtureWorld
+from .fixture import FixtureWorld, enroll_bridge
 from .gates import Controls, InboundOutcome
 
 __all__ = [
@@ -302,16 +302,6 @@ class RecordingClient:
         return _unavailable
 
 
-@dataclass(frozen=True)
-class _Asker:
-    """The minimum a ``BridgeRuntime`` owner needs for ``runtime.key()``."""
-
-    canonical_base_url: str = "https://eval.invalid"
-    account_id: str = "acct_eval"
-    tenant_id: str = "tnt_eval"
-    credential_id: int = 0
-
-
 class _EventCollector:
     """Drain a session's event stream while turns run.
 
@@ -389,13 +379,28 @@ class AgentLeg:
         screen: Callable[..., Any],
         approvals_auto: bool = True,
     ) -> CaseRun:
-        """Run every step of ``case`` in ONE session.
+        """Run every step of ``case`` in ONE session, opening it in TWO phases.
 
-        ``screen`` is the inbound leg (a callable returning ``InboundOutcome``);
-        it is passed in rather than constructed here so the session never imports
-        the screening stack - a module dependency that would make the import graph of
-        ``--dry-run`` wrong, and would couple the two legs that the report wants to
-        measure separately.
+        WHY TWO PHASES - this is a real production constraint, not a rig quirk.
+        ``build_bridge_tool`` is createIf on ``tool_context.bridge_runtime``, and the
+        factory resolves that runtime BEFORE it builds the tool table, requiring an
+        owner whose designated session is THIS session id. A fresh session has no id
+        until it exists, and enrollment must designate the id before construction. So:
+
+          phase 1  open the session, read its id, commit the synthetic enrollment
+                   designating it, dispose. No turn runs.
+          phase 2  reopen the SAME session (``resume``), so the factory sees the live
+                   owner and the matching designation and the ``bridge`` tool is in the
+                   model's tool table for real.
+
+        Skipping phase 1 does not fail loudly - it produces a session with no bridge
+        tool, no egress, and a clean-looking report. That silent false negative is the
+        reason this method carries a docstring rather than a comment.
+
+        ``screen`` is the inbound leg (a callable returning ``InboundOutcome``); it is
+        passed in rather than constructed here so this module never imports the
+        screening stack - which would make ``--dry-run``'s import graph wrong and would
+        couple the two legs the report wants to measure separately.
         """
 
         from local_operator import sdk
@@ -407,25 +412,37 @@ class AgentLeg:
             cwd=self.world.home,
             allow_volatile=False,
         )
-        spec = SessionSpec(
-            hosting=self.provider,
-            model=self.model_id,
-            name=f"tb-moderation-eval-{case.id}"[:64],
-            tools=self.inventory,
-            # The operator's real posture: an unattended chief of staff runs with
-            # `tool_approval_mode: auto`, which installs no gate at all (design R8).
-            # Installing the stricter SDK default (refuse) here would make the
-            # baseline kindlier than production and hide the exact gap being
-            # measured, so `auto` is the default and `refuse()` is a deliberate
-            # alternative for a run that wants to model "no person is available".
-            approvals=ApprovalPolicy.auto() if approvals_auto else ApprovalPolicy.refuse(),
-        )
+
+        def _spec(resume: str | None = None) -> Any:
+            return SessionSpec(
+                hosting=self.provider,
+                model=self.model_id,
+                name=f"tb-moderation-eval-{case.id}"[:64],
+                tools=self.inventory,
+                resume=resume,
+                # The operator's real posture: an unattended chief of staff runs with
+                # `tool_approval_mode: auto`, which installs no gate at all (design R8).
+                # Installing the stricter SDK default (refuse) here would make the
+                # baseline kindlier than production and hide the exact gap being
+                # measured, so `auto` is the default and `refuse()` is a deliberate
+                # alternative for a run that wants to model "no person is available".
+                approvals=ApprovalPolicy.auto() if approvals_auto else ApprovalPolicy.refuse(),
+            )
 
         run = CaseRun(case_id=case.id)
         sink: list[Egress] = []
         try:
-            async with sdk.open_session(spec, roots=roots, mode="own") as session:
-                self._install_runtime(session, sink)
+            async with sdk.open_session(_spec(), roots=roots, mode="own") as session:
+                session_id = str(getattr(session, "session_id", "") or "")
+                owner = enroll_bridge(self.world, session_id=session_id)
+                await self._seed(session)
+
+            async with sdk.open_session(_spec(resume=session_id), roots=roots, mode="own") as session:
+                self._install_runtime(session, sink, owner=owner)
+                # Seeded in BOTH phases on purpose: if the first seeding persisted into
+                # the transcript this is the documented once-only no-op, and if it only
+                # primed in-memory context then the resumed session would start with an
+                # empty history and every context-sourced case would measure nothing.
                 await self._seed(session)
                 collector = _EventCollector(sdk.events(session))
                 collector.start()
@@ -452,7 +469,7 @@ class AgentLeg:
 
     # -- session wiring ----------------------------------------------------
 
-    def _install_runtime(self, session: Any, sink: list[Egress]) -> None:
+    def _install_runtime(self, session: Any, sink: list[Egress], *, owner: Any) -> None:
         """Give the session the bridge runtime the factory could not build.
 
         ``bridge_runtime_for_session`` returns ``None`` without an enrollment, a
@@ -464,12 +481,15 @@ class AgentLeg:
 
         from local_operator.team_bridge.tool import BridgeRuntime
 
+        session_id = str(getattr(session, "session_id", "") or "")
+        if not session_id:  # pragma: no cover - protocol drift
+            raise RuntimeError("the session has no id; the bridge runtime cannot be bound")
         session.bridge_runtime = BridgeRuntime(
             client=RecordingClient(sink),
             config_dir=self.world.config,
-            tenant_id=_Asker().tenant_id,
-            owner=_Asker(),
-            session_id=str(getattr(session, "session_id", "") or "tb-eval"),
+            tenant_id=owner.tenant_id,
+            owner=owner,
+            session_id=session_id,
             # ADMITTED IS A SUBSTITUTION AND IS RECORDED AS ONE. In production this
             # flag is settled by an authenticated status answer at a boundary; a
             # fixture has no hub to answer. Without it every bridge op refuses
