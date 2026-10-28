@@ -1431,7 +1431,6 @@ async def test_sessions_peek_hides_the_account_notice_and_keeps_cursors_aligned(
                         "provider": "stub",
                         "owner_device": "d_local",
                         "credential_id": 125,
-                        "account_digest": "deadbeef",
                     },
                 ),
                 preserve_mtime=True,

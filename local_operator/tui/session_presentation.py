@@ -1390,19 +1390,20 @@ def project_settled_rows(
         if isinstance(block, (UserBlock, HubMessageBlock)) and block.navigation_anchor_id
     }
     # Only ADJACENT account notices may fold: any other row (a real turn above
-    # all) resets this, so two switches a turn apart both paint. Within a run,
-    # a notice identical to the one just painted tells the reader nothing the
-    # first did not — and that was the flood's exact shape: a subagent's
-    # account misattributed to its parent journaled A->B, B->A pairs whose
-    # sentences were identical because a local row carried no label. The row id
-    # is therefore NOT part of the fold key; the sentence names the account now
-    # (``render_binding_change_notice``), and the row also carries a digest OF
-    # THAT FULL IDENTITY (``details["account_digest"]``), which is what this
-    # key compares. Comparing the displayed string alone was not enough: the
-    # sentence is bounded, so two different long labels could render alike and
-    # a REAL switch folded away with them (design round 1, D1). A row written
-    # before the digest existed has none, and the sentence is then the whole
-    # identity that row carries.
+    # all) resets this, so two switches a turn apart both paint. Within a run, a
+    # notice identical to the one just painted tells the reader nothing the first
+    # did not — and that was the flood's exact shape: a subagent's account
+    # misattributed to its parent, whose resolves fed the parent's binding.
+    #
+    # THE IDENTITY IS THE ROW'S ``credential_id``, never the sentence. The
+    # sentence is a BOUNDED rendering of the account label (middle-elided, see
+    # ``network/credentials/messages.py``), so two labels can render alike and a
+    # genuine switch would fold away behind that collision — which is exactly
+    # what a bare truncation did (design round 1, D1). The row id is a store
+    # fact: stable across restarts, not reversible, and different for two
+    # accounts, so two real accounts always produce two notices whatever the
+    # rendering did. A row written without one falls back to what it does carry:
+    # the sentence and its provenance.
     #
     # The tuple is ``(identity, painted block, reproductions)``: the block and
     # its count are kept so a repeat can say how many rows folded into it
@@ -1706,11 +1707,10 @@ def project_settled_rows(
                     text,
                     details.get("provider"),
                     details.get("owner_device"),
-                    # Absent on a row written before the digest existed, and on
-                    # a row that names no account: then the sentence is the
-                    # whole identity there is, and the count below says how many
-                    # rows it stands for.
-                    str(details.get("account_digest") or ""),
+                    # The account itself (see the fold comment above). Absent only
+                    # on a row that names no credential, where the sentence and
+                    # its provenance are the whole identity there is.
+                    details.get("credential_id"),
                 )
                 if text and last_binding_notice is not None and identity == last_binding_notice[0]:
                     seen = last_binding_notice[2] + 1

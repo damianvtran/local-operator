@@ -616,54 +616,44 @@ def _device_phrase(name: str, fallback: str) -> str:
 #: account reads the same length on both surfaces.
 _NOTICE_LABEL_LIMIT = 64
 
-#: Hex characters in :func:`account_label_discriminator`'s answer. Eight hex is a
-#: 32-bit digest: the suffix costs 9 cells of the display bound (``…`` + 8) and
-#: buys a spelling that two accounts cannot share without also sharing every
-#: character of the visible prefix.
-_ACCOUNT_LABEL_DIGEST = 8
-
 #: How much of a label is sanitised before the display bound is applied. Well
-#: above ``providers/auth_store.IDENTITY_LIMIT`` (256), so a real label is hashed
-#: whole; a label past even this is bounded before hashing, which is a stated
-#: limit rather than a silent one.
+#: above ``providers/auth_store.IDENTITY_LIMIT`` (256), so a real label is
+#: shortened as a whole rather than pre-cut at an arbitrary point; a label past
+#: even this is bounded first, which is a stated limit rather than a silent one.
 _NOTICE_LABEL_SOURCE_LIMIT = 4096
 
 
-def account_label_discriminator(label: str) -> str:
-    """A short, stable, NON-SECRET spelling of ``label``'s full identity.
+def _middle_elide(text: str, limit: int) -> str:
+    """``text`` shortened to ``limit`` cells with its MIDDLE dropped.
 
-    WHY IT EXISTS (design round 1, D1): the display bound truncates, so two
-    DIFFERENT long labels could truncate to the identical 64 cells — and a real
-    account change then rendered the same sentence as the one before it, which
-    the transcript's notice fold collapsed into a single row. The operator was
-    told once about two switches, with no way to see the second.
+    WHY BOTH ENDS SURVIVE (design round 1, D1): a plain tail cut throws away
+    exactly where two labels most often differ — the end of the local part — so
+    two accounts rendered the identical sentence and a genuine account switch
+    could not be seen at all. Keeping a prefix AND a suffix means a difference
+    near either end stays visible.
 
-    A digest of the FULL label, appended after an elision, makes the rendered
-    spelling injective in practice: two labels collide only if their visible
-    prefixes AND their digests match. It is derived from an operator-facing
-    label, so it discloses nothing the sentence does not already disclose — and
-    it is NOT a secret, a token, or a key: nothing here ever sees material, and
-    the same derivation is used for the row's own fold key
-    (``account_label_digest_for_binding``) so the display and the fold agree.
+    The elision is taken INSIDE the local part when the value is an email: two
+    logins on one account provider share the domain, so spending the tail's
+    budget on it would waste the very characters that distinguish them.
+
+    This is a display convenience, never an identity. Sentences can still
+    coincide when two labels differ only in the middle that was cut; the journal
+    row's own ``credential_id`` is what separates accounts for the transcript's
+    fold (``tui/session_presentation.py``), so a real change is never lost to a
+    rendering collision.
     """
-    import hashlib
-
-    return hashlib.blake2s(label.encode("utf-8"), digest_size=4).hexdigest()[:_ACCOUNT_LABEL_DIGEST]
-
-
-def account_label_digest_for_binding(binding: "CredentialBinding") -> str:
-    """The fold key for a notice about ``binding`` — the FULL identity, not the display.
-
-    Written into the journaled row (``details["account"]``) by
-    ``Session.journal_credential_binding_change``. The transcript's fold compares
-    THIS, so a genuine change can never fold even if two rendered sentences
-    happened to coincide; the rendered text is compared too, for the older rows
-    that carry no digest at all.
-
-    Empty when the row names no account: then the sentence is the whole identity
-    the row has, and there is nothing more honest to compare.
-    """
-    return account_label_discriminator(binding.identity_label) if binding.identity_label else ""
+    local, at, domain = text.partition("@")
+    if len(text) <= limit:
+        return text
+    if at and len(domain) + 9 <= limit and len(local) >= 4:
+        room = limit - len(domain) - 2  # the "@" and one ellipsis
+        head = room // 2
+        tail = max(1, room - head)
+        return f"{local[:head]}\u2026{local[-tail:]}@{domain}"
+    room = limit - 1  # one ellipsis
+    head = room // 2
+    tail = max(1, room - head)
+    return f"{text[:head]}\u2026{text[-tail:]}"
 
 
 def _account_label(label: str) -> str:
@@ -676,11 +666,15 @@ def _account_label(label: str) -> str:
     literally": escapes stripped, format characters made visible, whitespace
     collapsed, length bounded.
 
-    WHY ELIDED WITH A DIGEST rather than plainly truncated: see
-    :func:`account_label_discriminator` — truncation made two distinct accounts
-    render identically (design round 1, D1). The visible head is kept because a
-    reader recognises an account by its beginning; the digest carries the rest
-    of the identity that the bound had to drop.
+    WHY MIDDLE-ELIDED rather than truncated: see :func:`_middle_elide` — a tail
+    cut made two distinct accounts render one sentence (design round 1, D1).
+
+    AND NO DIGEST, HASH OR OTHER DERIVED IDENTIFIER IS APPENDED. An unkeyed
+    digest of a low-entropy label (an email) is dictionary-reversible, and
+    recording it in a transcript row would put a linkable pseudonym for the
+    operator's account into the journal, the move copies and every peer replica
+    — the very class of leak this row's operator-only rule exists to stop. The
+    identity a fold needs is the row's own ``credential_id``.
 
     WHERE IT MAY APPEAR: the operator-facing transcript row, and nowhere else —
     the surface list lives on ``SESSION_BINDING_NOTICE_MESSAGE_TYPE`` in
@@ -692,9 +686,7 @@ def _account_label(label: str) -> str:
     text = sanitize_prompt_line(label or "", limit=_NOTICE_LABEL_SOURCE_LIMIT)
     if len(text) <= _NOTICE_LABEL_LIMIT:
         return text
-    digest = account_label_discriminator(text)
-    keep = _NOTICE_LABEL_LIMIT - len(digest) - 1
-    return f"{text[:keep]}…{digest}"
+    return _middle_elide(text, _NOTICE_LABEL_LIMIT)
 
 
 def _login_phrase(label: str, provider: str, owner: str) -> str:

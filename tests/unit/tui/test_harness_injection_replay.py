@@ -478,14 +478,16 @@ async def test_a_legacy_flood_of_binding_notices_folds_to_one_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_alternating_flood_of_identical_notices_folds_to_one_row() -> None:
-    """The live flood: one sentence, the row id flipping 104 <-> 125, paints ONCE.
+async def test_notices_naming_two_accounts_paint_separately() -> None:
+    """Two credential ids, one sentence: each notice paints, never folded.
 
-    Session 17cd3e74c66f journaled thousands of these (a subagent's account
-    misattributed to its parent). Each pair named two different row ids, so a
-    fold keyed on the id never matched its neighbour and every row painted --
-    a wall of identical lines. Adjacent identical sentences now fold whatever
-    the id; a different sentence (the account named differently) still paints.
+    The live flood's rows alternated two store ids with an identical sentence.
+    Round 1 (D1) made the row's own ``credential_id`` the fold identity — it is
+    the only non-reversible, restart-stable thing that separates two accounts —
+    so these cannot be collapsed, and that is deliberate: presentation must not
+    guess that two account ids are one account. What stops the flood is the
+    journal side (the parent-scoped serve sink in #3098's first commit); this
+    cell pins that the fold will not "help" by merging real identities.
     """
     from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
     from local_operator.harness.types import CustomMessage
@@ -517,20 +519,20 @@ async def test_an_alternating_flood_of_identical_notices_folds_to_one_row() -> N
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock)
         ]
-    # Round 1 (D2): one row, carrying how many notices folded into it.
-    assert notices == [f"{same}  \u00d720", named], notices
+    assert notices == [same] * 20 + [named], notices
+    # No run was collapsed, so no count marker appears either.
+    assert not any("\u00d7" in text for text in notices), notices
 
 
 @pytest.mark.asyncio
 async def test_notices_naming_different_accounts_never_fold_into_one_row() -> None:
-    """One sentence, two account identities: BOTH paint.
+    """One sentence, two credential ids: BOTH paint.
 
-    Round 1, D1. The fold compares the row's FULL identity
-    (``details["account_digest"]``, derived by the writer from the whole label),
-    never the bounded sentence — a sentence is a rendering, and comparing
-    renderings is what let a genuine change disappear behind a truncation
-    collision. The sentences here are deliberately EQUAL: exactly the shape a
-    collision produced, and it must not collapse.
+    Round 1, D1. The fold compares the row's own ``credential_id`` — the account
+    identity the row carries — never the bounded sentence: a sentence is a
+    rendering, and comparing renderings is what let a genuine change disappear
+    behind an elision collision. The sentences here are deliberately EQUAL:
+    exactly that shape, and it must not collapse.
     """
     from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
     from local_operator.harness.types import CustomMessage
@@ -538,7 +540,7 @@ async def test_notices_naming_different_accounts_never_fold_into_one_row() -> No
 
     sentence = "[session credential] This session is now using aaaa\u20261111 on my-mac."
 
-    def _notice(digest: str) -> CustomMessage:
+    def _notice(credential_id: int) -> CustomMessage:
         return CustomMessage(
             custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
             attribution="system",
@@ -546,13 +548,12 @@ async def test_notices_naming_different_accounts_never_fold_into_one_row() -> No
                 "text": sentence,
                 "provider": "stub",
                 "owner_device": "d_local",
-                "credential_id": 125,
-                "account_digest": digest,
+                "credential_id": credential_id,
             },
         )
 
     session = FakeSession()
-    session._history = [_notice("aaaaaaaa"), _notice("bbbbbbbb")]
+    session._history = [_notice(104), _notice(125)]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await await_session_boot(app)
@@ -582,6 +583,8 @@ async def test_a_collapsed_run_states_how_many_notices_it_stands_for() -> None:
     sentence = "[session credential] This session is now using the stub login on my-mac."
 
     def _notice() -> CustomMessage:
+        # The SAME identity three times: one account re-announced, which is what
+        # a fold is allowed to collapse.
         return CustomMessage(
             custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
             attribution="system",
@@ -590,7 +593,6 @@ async def test_a_collapsed_run_states_how_many_notices_it_stands_for() -> None:
                 "provider": "stub",
                 "owner_device": "my-mac",
                 "credential_id": 125,
-                "account_digest": "aaaaaaaa",
             },
         )
 

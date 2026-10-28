@@ -2869,7 +2869,6 @@ async def test_peek_never_renders_an_account_change_notice_as_a_step(tmp_path):
                 "provider": "stub",
                 "owner_device": "d_local",
                 "credential_id": 125,
-                "account_digest": "deadbeef",
             },
         ),
         preserve_mtime=True,
@@ -2904,7 +2903,6 @@ async def test_peek_never_renders_an_account_change_notice_as_a_step(tmp_path):
     assert result.is_error is False, rendered
     assert label not in rendered
     assert "session credential" not in rendered
-    assert "deadbeef" not in rendered, "the row's own identity digest is not model text"
 
 
 @pytest.mark.asyncio
