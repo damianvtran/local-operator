@@ -2559,8 +2559,10 @@ identity guard — refuse before any claim, so a gated revise is neither publish
 nor stranded. A runtime run that raised (or handed off) an item banner does not also
 raise its own completion banner; `error` ends always do.
 
-**All means the entire explicitly requested scope, not the first 50 rows.** On
-an explicit mark-all/dismiss-session gesture, clients enumerate every page of
+**All means the entire explicitly requested scope, not the first 50 rows.**
+With `notification_bulk_selection: 1`, use the server-side selection contract
+below. The following enumeration protocol remains supported for legacy clients:
+on an explicit mark-all/dismiss-session gesture, clients enumerate every page of
 that state/source/priority/session scope with progress/count feedback, freeze
 the FIRST response's `high_water`, pass it as `through_seq` on every later GET,
 and union each page's `observed` tokens. Keep the first page's ask refs; do not
@@ -2568,6 +2570,128 @@ refresh them into a later ask set. Then PATCH batches of at most 500 tokens with
 the same boundary. A filtered action must name its filtered scope; it never
 silently widens to the whole inbox. Read/unread applies to observed live ask
 marks as well as notify revisions, without touching ask logs.
+
+#### Filtered bulk selection and guarded Undo (`notification_bulk_selection: 1`)
+
+This additive desktop capability uses the **existing GET and PATCH routes**.
+Legacy bodies and the relay's shared legacy validator retain their exact
+behavior. The CLI has no new command family; its existing observed-id gestures
+are unchanged. Without this capability, a client must not silently treat the
+loaded page as the entire filtered selection.
+
+Preview an entire scope (not just its loaded pages):
+
+```http
+GET /v1/desktop/notifications?preview=true&state=all&kind=all&bulk_priority=normal_up&count_session_ids=aaaaaaaaaaaa&count_session_ids=bbbbbbbbbbbb
+```
+
+Filters: `state=unread|all|dismissed` (default unread),
+`kind=all|asks|updates` (default all),
+`bulk_priority=any|high|normal_up` (default any; normal_up means high OR normal),
+and optional `session_id` (one exact 12-hex session). `all` excludes dismissed
+updates, just like the ordinary list. Open asks remain visible under unread
+regardless of their read mark; they are always high priority. Preview refuses
+legacy `source`/`priority`, cursor, and client `through_seq` rather than widening
+or ambiguously merging the scope. `count_session_ids` is an optional repeated
+query key, at most 50 session ids: it requests aggregates only, never broadens
+the selection. All response examples use the existing CRUDResponse **`result`**
+wrapper, not a new envelope:
+
+```json
+{"selection":{"token":"<43 URL-safe characters>","through_seq":725,
+ "expires_at":1793200000000,"eligible_count":620,"eligible_unread_count":400,
+ "skipped_ask_count":2,"session_counts":{
+   "aaaaaaaaaaaa":{"eligible_count":300,"eligible_unread_count":200},
+   "bbbbbbbbbbbb":{"eligible_count":0,"eligible_unread_count":0}}},
+ "unread_count":700,"waiting_count":2,"waiting_unread_count":1,"high_water":725}
+```
+
+Preview does not change notification or ask state. It stores only bounded
+selection metadata. Its update count and server watermark are captured in one
+SQLite transaction. **Every row write advances `seq`**, including read-state
+changes and delivery claims, so a later arrival, content revision or state ABA
+cycle cannot enter the selected set at commit. A bearer-hash binding plus the
+store-local token namespace prevents reuse after auth rotation or in another
+config/account store. Neither bearer nor notification bodies are stored in the
+selection metadata.
+
+Apply with one request, including any unchecked rows as subtractive exclusions:
+
+```json
+{"op":"dismiss","selection_token":"<token>","excluded_ids":["n_aaaaaaaaaaaaaaaa"]}
+```
+
+`op` is `read|unread|dismiss|undismiss`. `excluded_ids` is optional (0..500
+validated item ids, canonicalized as a sorted set); it can only remove matches,
+never grant access to another row/revision. The token is mutually exclusive
+with all legacy targets. For partial selection, use
+`{op,ids:[{id,revision}],through_seq:<list high_water>,receipt:true}`. This
+opt-in path requires both the list watermark and each observed content revision;
+it excludes asks even for read/unread. Legacy `ids` without `receipt:true`
+keeps its earlier behavior.
+
+Receipts are compact at every result size; they contain no full matching-id list:
+
+```json
+{"changed_count":618,"skipped_count":1,"excluded_count":1,
+ "eligible_count":619,"skipped_ask_count":2,"unread_delta":-399,
+ "session_counts":{"aaaaaaaaaaaa":{"changed_count":299,"unread_delta":-199},
+                   "bbbbbbbbbbbb":{"changed_count":0,"unread_delta":0}},
+ "operation_token":"<token>","through_seq":725,"expires_at":1793200000000,
+ "replayed":false,"unread_count":301,"waiting_count":2,
+ "waiting_unread_count":1,"high_water":1343}
+```
+
+`changed_count` counts actual state transitions only; `skipped_count` counts
+updates that became stale/unavailable or already had the requested state.
+`excluded_count` counts excluded rows still eligible under the frozen boundary
+at commit (a subsequently changed excluded row is stale, not falsely counted
+as changed). `eligible_count` is the original update count minus that exclusion
+count. `unread_delta` is the actual change to the undismissed-update badge;
+per-session deltas cover only the at-most-50 requested scopes. Global badge
+counts are freshly queried after commit and can include concurrent arrivals.
+Replay returns the saved receipt with `replayed:true` and fresh global badges:
+**do not apply its deltas a second time**. The same selection token with a
+different op or exclusion set returns 409 `selection_operation_conflict`.
+
+An optional recount never broadens a frozen selection or extends its expiry:
+
+```http
+GET /v1/desktop/notifications?preview=true&selection_token=<token>&excluded_ids=n_aaaaaaaaaaaaaaaa&excluded_ids=n_bbbbbbbbbbbbbbbb
+```
+
+`excluded_ids` is repeated, at most 500. No new filters are accepted with an
+existing token. Counts reflect the still-eligible subset; the token, watermark,
+expiry and original informational ask count remain unchanged. Recount after
+commit returns 409 `selection_already_committed`.
+
+Undo uses `PATCH {"op":"undo","operation_token":"<receipt token>"}`. Row
+post-images and complete prior read/dismiss state are persisted **atomically
+with the mutation**, and only actually changed rows are recorded. Undo restores
+only rows whose post-write sequence AND content revision still match. It
+restores read provenance too, never undismisses an entire current filter, never
+rewinds the global sequence, and skips intervening content/state/delivery
+writes. Undo itself is atomic and replayable; its response has the same compact
+counts and deltas (no `excluded_count`). A selection replay after Undo remains
+a replay of the original receipt, not permission to redo it.
+
+**Asks are excluded unconditionally on every receipt-backed path.**
+`skipped_ask_count` is informational: preview counts matching live asks, including
+read asks in unread scope; partial selection counts the supplied ask refs. It
+is not settlement authority, nor a durable enumeration of those asks. The UI
+may offer the existing separately confirmed, reasoned per-ask `moot` settlement
+flow, explicitly labelled irreversible. Neither generic notification dismissal
+nor Undo settles/restores an ask. No `include_asks` flag exists.
+
+Bounds: selection handles expire after 10 minutes; committing starts a 10-minute
+Undo/replay lifetime. At most **128 live handles per store** and **100,000 retained
+row snapshots across all receipts**. Preview matching over 100,000 updates
+returns 413 `selection_too_large`, never a truncated success. Capacity exhaustion
+returns 429 `selection_capacity` or `receipt_capacity` before any item mutation.
+Expired metadata is reclaimed opportunistically by preview/apply; active
+receipts are never evicted. An expired, foreign-scope, or unknown token returns
+409 `selection_unavailable` (intentionally indistinguishable). Malformed or
+mixed targets/filters are 422; ordinary desktop auth/origin gates still apply.
 
 `waiting_count` is all pending asks (the group); `waiting_unread_count` is its
 unread subset. The sidebar badge is `unread_count + waiting_unread_count`.

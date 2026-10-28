@@ -341,6 +341,10 @@ def static_feature_flags() -> dict[str, Any]:
         # meaningful answer, which is why this is a plain integer
         # rather than a boolean with a default.
         "notification_contract": 1,
+        # Unlike the original observed-id writes, filtered selections cover
+        # unloaded pages and carry server-side Undo receipts. Clients must not
+        # silently fall back to a first-page action against an older backend.
+        "notification_bulk_selection": 1,
         "mcp": 1,
         "mcp_auth": 1,
         # Sessionless MCP management: `GET/POST /v1/desktop/mcp` and
