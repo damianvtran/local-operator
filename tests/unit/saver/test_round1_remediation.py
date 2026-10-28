@@ -168,7 +168,10 @@ def test_s2_rule3_an_unquoted_any_case_marker_is_refused(marker: str) -> None:
 
 def test_s2_rule3_the_reducers_quoted_spelling_is_accepted() -> None:
     _, rows, _ = _honest()
-    rows[0]["content"][0]["text"] += " [RADIENT:ok 3 lines]"
+    # PREPENDED deliberately: the reducer truncates a long argument and appends
+    # its note after the cut, so a quoted marker placed after the cut would sit
+    # beyond a prefix — the invariant allows only whole, prefix or suffix.
+    rows[0]["content"][0]["text"] = "[RADIENT:ok 3 lines] " + rows[0]["content"][0]["text"]
     encoded = [canonical_bytes(row) for row in rows]
     payload = prepare({"messages": rows, "prior": []})
     _validate(payload, rows, encoded)

@@ -23,7 +23,7 @@ The checks, in the contract's numbering:
 5. marker vocabulary — every ``[radient:`` fullmatches one template of the
    closed set inlined from §3.3; the two role markers are refused;
 6. provenance (MUST before auto) — source-derived record content and multiplicity;
-7. turn binding — the prefetch 4-tuple, checked by the chain at adoption;
+7. turn binding — the prefetch result, checked by the chain at adoption;
 8. framing on the wire — the epoch rides as a user turn, never system;
 9. pairing across the splice — boundaries are tool-pairing-safe cuts of the
    client's own source, and the spliced list has every call answered once.

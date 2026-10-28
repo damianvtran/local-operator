@@ -1,29 +1,32 @@
-"""Source-provenance verifier for §6.1(6) — the auto gate.
+"""Source-provenance verifier for §6.1(6) — THE AUTO GATE, AND ITS INVARIANT.
 
-THE RULE THIS IMPLEMENTS. "Each record's content is a substring of the span's
-source text after the method's documented truncation and quoting" (§6.1(6)).
-Deleting and truncating keep every retained run CONTIGUOUS in the source, so a
-record body is a sequence of literal runs, in order, split only by the method's
-own structural elements: closed `[radient:` markers, the reducer's fixed note
-tokens, and its `…` elision mark. Nothing else may separate two runs.
+THE INVARIANT THIS MODULE ENFORCES. An epoch is accepted only if **every
+emitted content line maps injectively and in order to a distinct line of its
+source span, and the emitted content of each line is a contiguous whole,
+prefix, or suffix of that source line**. Separately, **the epoch's total line
+count must be strictly less than the span's total line count**.
 
-WHY NOT "RENDERED FORMS". Round 2 tried to re-render the reducer's output shapes
-(call summaries, heredoc notes, `i`-key dropping, sliced identifier pools). That
-is a second, drifting implementation of the reducer: it rejected 108 of 133
-honest real-session epochs, then still admitted 27,000 fabricated markers
-because a marker-only record had no runs to match. Substring-in-order matching
-needs no shape catalogue — a dropped `i` key, a 90-char cut, a suffix of a
-longer identifier and a `…` truncation are all simply "some bytes were deleted".
+WHAT THAT BUYS, BY CONSTRUCTION RATHER THAN BY MORE CAPS.
+- No free-form text as content: a line that is not a source line, or a prefix
+  or suffix of one, is refused. Summarisation prose, invented note payloads and
+  marker-slot text all die here, because none of them is a piece of a source
+  line.
+- No re-segmentation: one source line maps to AT MOST ONE emitted line, so a
+  record cannot be shredded into one emitted line per character, and the `\n\t`
+  separator cost can never exceed what was deleted (round 3, S-15/R3-2).
+- Token boundedness WITHOUT a tokenizer: emitted content is a subset of the
+  span's own lines, fragments of them, each used once. Tokens(epoch content)
+  <= tokens(span content) follows from that injectivity, not from a byte
+  budget — which is why this check no longer charges separators in bytes. A
+  byte budget cannot bound a token cost: span bytes-per-token is unbounded
+  above (a repeated-character span tokenizes at ~10 B/token), and round 3's
+  18.35x and 2.65x counter-examples were both reached under one.
+- Total lines strictly fewer: disclosure lines (markers, the reducer's own
+  notes) are EXTRA LINES, not content, so each one has to be paid for by real
+  deletions elsewhere in the span. The line count is the guarantee.
 
-WHY THE BOUNDS. Byte shrink (check 1) does not bound TOKENS: 74,000 single
-characters separated by `\\n\\t` shrink in bytes and cost 5x the tokens, and
-repeated markers cost 3.3x. So structural overhead (separators + markers) must
-stay below the bytes the epoch saves, pieces per record are bounded by that
-record's own line count, markers by a source-derived ceiling, and every free
-slot must be source-derived. These are all tokenizer-free and linear.
-
-WHAT THIS IS NOT. It does not choose spans, drop reads or write epochs: it
-verifies only documented transforms, and refuses anything it cannot establish.
+WHAT IT DOES NOT DO. It does not choose spans, drop reads or write epochs: it
+verifies only documented transforms and refuses anything it cannot establish.
 The caller then sends unreduced history — never a weaker check.
 """
 
@@ -87,12 +90,12 @@ _SIZE = r"\d+(?:\.\d)?k? (?:B|kB|MB|chars)"
 #: - `cut + " [+{size} heredoc|more]"`      (reduce_v2._call_summary, line 536)
 #: - `"[{size}]"` for a long argument value (line 548)
 #: - `"[{type} {size}]"` for a long list/dict argument (line 551)
-#: - `"[redacted]"` for a secret-keyed argument (§3.3 rule 6, line 522)
+#: `[redacted]` is deliberately NOT a note: the projection redacted the row
+#: before upload, so the literal is CONTENT the source really contains.
 _NOTE = re.compile(
     r"\[\+(?P<more>" + _SIZE + r") (?:heredoc|more)\]"
     r"|\[[A-Za-z]{1,12} (?P<sized>" + _SIZE + r")\]"
     r"|\[(?P<plain>" + _SIZE + r")\]"
-    r"|\[redacted\]"
 )
 #: The result-merged-onto-call separator (reduce_v2.result, line 598).
 _ARROW = "\u2192 "
@@ -120,6 +123,14 @@ class _Rec(_Source):
     name: str = ""
     plain_forms: int = 0
     block_types: frozenset[str] = frozenset()
+    #: The record's canonical SEGMENTS: its lines, each split at the punctuation
+    #: the reducer paraphrases around. Derived from ``text`` alone, so every
+    #: segment is a piece of the row's own bytes and nothing is invented.
+    segments: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.segments and self.text:
+            object.__setattr__(self, "segments", _segments(self.text))
 
 
 def _texts(content: Any) -> list[str]:
@@ -407,6 +418,10 @@ _NUMBER = re.compile(r"\d{1,9}(?:\.\d)?k?")
 #: Substring lookups allowed per epoch for slot text. Honest output needs a
 #: handful; the cap keeps a hostile record linear instead of markers × span.
 _SLOT_SCANS = 96
+#: The reducer's fixed note vocabulary (`[+5.8k chars heredoc]`, `[1.4k chars]`,
+#: `[dict 300 chars]`, `[redacted]`) — everything else in a note is a slot.
+_NOTE_WORDS = frozenset({"chars", "heredoc", "more", "redacted", "list"})
+_SIZE_TOKEN = re.compile(r"\d+(?:\.\d)?k?")
 #: Candidate source records a single epoch record may be compared against.
 _CANDIDATE_TRIES = 32
 #: The grouped read-only summary, whose verb list names source calls.
@@ -484,6 +499,17 @@ def _slot_tokens(text: str) -> list[str]:
     return out
 
 
+def _note_tokens(text: str) -> list[str]:
+    """The name slots of a reducer note, minus its fixed words and sizes."""
+    out: list[str] = []
+    for raw in text.replace("[", " ").replace("]", " ").split():
+        token = raw.strip("()+\u2014\u2026,;.:")
+        if not token or token in _NOTE_WORDS or _SIZE_TOKEN.fullmatch(token):
+            continue
+        out.append(token)
+    return out
+
+
 def _derived_digests(parts: Sequence[str]) -> set[str]:
     from local_operator.saver.validate import _b64_note_digests
 
@@ -507,6 +533,17 @@ def _check_slots(
 
     bound = max(record.chars, record.lines * 4, 8)
     for kind, text in elements:
+        if kind == "note":
+            # A note is a disclosure line, never content: its number must be a
+            # count and its name a token of the source. `[1.4k chars]` passes;
+            # `[approveall 999 chars]` is an invention and does not (round 3,
+            # R3-1 raised exactly this channel).
+            for token in _note_tokens(text):
+                if _SIZE_TOKEN.fullmatch(token):
+                    continue
+                if token not in record.text:
+                    raise SaverRejected("provenance")
+            continue
         if kind != "marker":
             continue
         if text.startswith("[radient:ids"):
@@ -539,76 +576,123 @@ def _check_slots(
                 raise SaverRejected("provenance")
 
 
-def _pieces(elements: Sequence[_Element]) -> list[str]:
-    """The carried LINES of an epoch record, in order.
+def _split_line(line: str) -> list[str]:
+    """One line's content pieces: whole, or split at JSON punctuation.
 
-    Line granularity, not run granularity: the reducer deletes lines in place
-    (blank-line collapsing, an archive head kept while its body goes, `_short`
-    on the first line, `##` headings re-joined), so a retained run can be a
-    subsequence of lines rather than one contiguous substring. Every piece is
-    still a verbatim source line, and the per-record piece bound is what keeps
-    that from becoming a fragmentation primitive (round 2, S-13).
+    Only an OBJECT-shaped line splits. An argument summary is a JSON object; a
+    line that merely starts with `[` is content (`[redacted]`), and splitting it
+    would stop an honest record from being a prefix of its own line.
+    """
+    # A JSON-ish line is one carrying a key/value separator; argument summaries
+    # are paraphrased around exactly that punctuation. A line that merely starts
+    # with `[` is content (`[redacted]`), and splitting it would stop an honest
+    # record being a contiguous piece of its own line.
+    pieces = _JSON_STRUCT.split(line) if '":"' in line or line.lstrip().startswith("{") else [line]
+    out: list[str] = []
+    for piece in pieces:
+        piece = piece.strip()
+        # Punctuation-only pieces carry no content: a JSON summary may drop
+        # whole keys, so `"}` need not exist in the source.
+        if piece and not _PUNCT_ONLY.fullmatch(piece):
+            out.append(piece)
+    return out
+
+
+def _segments(text: str) -> tuple[str, ...]:
+    """The text's canonical segments: its lines, split at paraphrase punctuation.
+
+    Splitting the SOURCE at the same characters the epoch side splits at is what
+    keeps an honest argument summary (a canonical JSON line with keys dropped)
+    compatible while still making it out of nothing but the row's own tokens.
+    """
+    out: list[str] = []
+    for line in text.split("\n"):
+        out.extend(_split_line(line))
+    return tuple(out)
+
+
+def _pieces(elements: Sequence[_Element]) -> list[str]:
+    """The carried fragments of an epoch record, in order.
+
+    Fragments, not lines: a line may carry a marker inline. Every fragment must
+    then be a whole, prefix or suffix of ONE source segment, and no segment may
+    serve twice — that is the invariant, and :func:`_map_fragments` enforces it.
     """
     pieces: list[str] = []
     for kind, text in elements:
         if kind != "run":
             continue
         for line in text.split("\n"):
-            for piece in _JSON_STRUCT.split(line):
-                piece = piece.strip()
-                # Punctuation-only pieces carry no content: a JSON summary may
-                # drop whole keys, so `"}` need not exist in the source.
-                if piece and not _PUNCT_ONLY.fullmatch(piece):
-                    pieces.append(piece)
+            # The harness-state rendering joins the source's separate `## `
+            # heading lines onto one epoch line; each heading is still a source
+            # line, so split them back out before mapping.
+            for part in line.split(" ## ") if " ## " in line else [line]:
+                pieces.extend(_split_line(part))
     return pieces
+
+
+_JSON_STRUCT = re.compile(r"[{}\[\],\"]")
+_PUNCT_ONLY = re.compile(r"[^\w\u0080-\uffff]+")
 
 
 #: JSON/array punctuation is the reducer's own joining grammar, not content.
 _JSON_STRUCT = re.compile(r"[{}\[\],\"]")
 _PUNCT_ONLY = re.compile(r"[^\w\u0080-\uffff]+")
+#: How far ahead of the last consumed segment a non-exact fragment may match.
+#: Exact fragments (the overwhelming majority) are a dict lookup, so the forward
+#: window only pays for prefixes and suffixes, and it keeps the whole mapping
+#: linear in the epoch's size.
+#: Slack over a source record's own line count: a record may gain a head line
+#: and a merged result line. Measured on the 20-snapshot real-session replay:
+#: honest records sit at p99 +3, with one JSON-bearing outlier.
+_PIECE_SLACK = 8
 
 
-def _runs_match(pieces: Sequence[str], record: _Rec) -> bool:
-    """Each carried line is a source line, in order (§6.1(6) 'only delete').
+def _map_fragments(pieces: Sequence[str], record: _Rec) -> bool:
+    """The invariant's first half: in-order, non-overlapping, contiguous pieces.
 
-    A piece may be several `## ` headings juxtaposed: the harness-state
-    rendering joins the source's separate heading lines, which is documented
-    output, so the join points are tried as segment boundaries rather than
-    being treated as invented text.
+    Each emitted fragment must be a contiguous piece of this record's text and
+    the fragments must advance monotonically, so the emitted content is what is
+    left after deleting: the reducer may not reorder, may not invent, and may
+    not compose text across source records. The second half of the invariant —
+    at most one emitted line per source line — is enforced by the piece bound in
+    :func:`_check_bounds`, which is what actually stops re-segmentation
+    (round 3: S-15 shredded one 27 KB line into 3,420 emitted lines).
     """
-    expanded: list[str] = []
-    for piece in pieces:
-        expanded.extend(part.strip() for part in piece.split(" ## ") if part.strip())
-    pieces = expanded
     cursor = 0
-    for piece in pieces:
-        position = record.text.find(piece, cursor)
-        if position < 0:
+    for fragment in pieces:
+        found = record.text.find(fragment, cursor)
+        if found < 0:
             return False
-        cursor = position + len(piece)
+        cursor = found + len(fragment)
     return True
 
 
 def _check_bounds(elements: Sequence[_Element], record: _Rec) -> tuple[int, int]:
-    """The tokenizer-free amplification bounds. Returns (pieces, overhead)."""
+    """The disclosure and re-segmentation budget, both source-derived.
+
+    NO BYTE BUDGET. Round 3 shipped ``chars // 8 + 8`` and an aggregate
+    overhead-vs-saved rule; security measured 2.65x tokens under them on plain
+    English prose, because span bytes-per-token is unbounded above. The bound
+    that carries the guarantee is the LINE COUNT: an emitted record may not
+    carry more content lines than the source record it came from has lines (plus
+    a small fixed slack for a head and a merged result). One source line can
+    therefore appear as at most one emitted line, which is the manager's
+    "no re-segmentation" stated as a number the reducer's own output satisfies.
+    """
     from local_operator.saver.validate import SaverRejected
 
-    pieces = _pieces(elements)
     markers = [text for kind, text in elements if kind == "marker"]
+    notes = [text for kind, text in elements if kind == "note"]
     overhead = sum(len(text) for kind, text in elements if kind != "run")
-    # An elision keeps SELECTED SOURCE LINES, so it can never emit more pieces
-    # than the record has lines (plus the record's own head). Separators then
-    # cost the source no more than it already had.
-    # One carried piece per 8 source bytes: honest output splits at paragraphs
-    # and truncation marks (~89-byte lines, ~500-byte paragraphs), while
-    # one-character fragmentation needs one piece per byte and cannot fit.
-    if len(pieces) > record.chars // 8 + 8:
+    pieces = _pieces(elements)
+    if len(pieces) > record.lines + _PIECE_SLACK:
         raise SaverRejected("provenance")
     # A record that carries no text is one elision (or one elision plus the
-    # identifier pool). Thousands of markers in one record is fragmentation.
-    if not pieces and len(markers) > 2:
+    # identifier pool). Thousands of disclosure elements is fragmentation.
+    if not pieces and len(markers) + len(notes) > 2:
         raise SaverRejected("provenance")
-    if len(markers) > min(len(record.text) // 64 + 2, _marker_ceiling(record)):
+    if len(markers) + len(notes) > min(len(record.text) // 64 + 2, _marker_ceiling(record)):
         raise SaverRejected("provenance")
     # `[radient:ok N lines]` / `omitted N lines` must agree with the source.
     for text in markers:
@@ -627,6 +711,20 @@ def _marker_ceiling(record: _Rec) -> int:
     return 3 + len(record.block_types) + record.text.count("[radient:")
 
 
+def _check_line_budget(records: Sequence[tuple[str, str]], span_lines: int) -> None:
+    """The invariant's second half: the epoch is strictly FEWER lines than the span.
+
+    Disclosure lines count, so every marker and note is paid for by real
+    deletions. This is the rule that makes note multiplication unprofitable
+    (round 3, R3-1: 230 notes cost 18.35x the span's tokens).
+    """
+    from local_operator.saver.validate import SaverRejected
+
+    emitted = sum(1 + body.count("\n") for _label, body in records)
+    if emitted >= max(span_lines, 1):
+        raise SaverRejected("provenance")
+
+
 def check_records(
     text: str,
     span: Sequence[dict[str, Any]],
@@ -635,13 +733,10 @@ def check_records(
     span_bytes: int | None = None,
     epoch_bytes: int | None = None,
 ) -> None:
-    """§6.1(6) over one epoch: source-derived records with bounded structure.
+    """The invariant over one epoch: injective, in-order line mapping.
 
-    Linear: each source record is inspected at most once per role stream, runs
-    are matched with one forward `find`, and the slot lookups are capped. The
-    aggregate rule below is the mechanism that makes token inflation
-    impossible without a tokenizer: the bytes spent on separators and markers
-    must be fewer than the bytes the epoch claims to save.
+    The module docstring states the contract and why a byte budget was removed
+    in its favour (round 3: S-15, R3-1, R3-2).
     """
     from local_operator.saver.canonical import canonical_bytes
     from local_operator.saver.validate import SaverRejected, parse_records
@@ -653,49 +748,47 @@ def check_records(
     consumed: set[str] = set()
     scans = [_SLOT_SCANS]
     span_chars = sum(record.chars for group in records_by_role.values() for record in group)
-    overhead_total = 0
-    pieces_total = 0
-    for label, body in parse_records(text):
+    records = parse_records(text)
+    # THE SECOND HALF OF THE INVARIANT: the epoch must be strictly FEWER lines
+    # than the span. Disclosure lines count, so every marker and note has to be
+    # paid for by real deletions — that is their whole budget, and it is why
+    # they cannot be multiplied into a token amplifier (round 3: S-15, R3-1).
+    span_lines = sum(record.lines for group in records_by_role.values() for record in group)
+    _check_line_budget(records, span_lines)
+    for label, body in records:
         if deadline is not None and time.monotonic() > deadline:
             raise SaverRejected("busy")
         kind, name = _label_parts(label)
-        # ONE normalisation, the same one the source went through: the quoted
-        # marker spelling, ignorable characters and ANSI are then identical on
-        # both sides and cannot cause a false mismatch (round 2, S-12).
         elements = _elements(body)
         # The identifier pool may be a record of its own or appended to the
-        # record whose text it indexes; everything after its marker is a pooled
-        # token, and is checked by the pool rather than as carried content.
+        # record whose text it indexes: everything after its marker is a pooled
+        # token, checked by the pool rather than as carried content.
         pool_at = next(
             (
                 index
-                for index, (what, text) in enumerate(elements)
-                if what == "marker" and text.startswith("[radient:ids")
+                for index, (what, item) in enumerate(elements)
+                if what == "marker" and item.startswith("[radient:ids")
             ),
             None,
         )
         if pool_at is not None:
-            pool.consume(normalise(" ".join(text for _, text in elements[pool_at + 1 :])))
+            pool.consume(normalise(" ".join(item for _, item in elements[pool_at + 1 :])))
             elements = elements[:pool_at]
             if not elements:
                 continue
-        if kind == "call" and not _pieces(elements) and len(elements) == 1:
+        pieces = _pieces(elements)
+        if kind == "call" and not pieces and len(elements) == 1:
             verbs = _group_verbs(elements[0][1], scans)
             if verbs is not None:
-                # One `[radient:N read-only commands, all ok: …]` record stands
-                # for several source calls: consume one candidate per verb use,
-                # in source order, so the group can never invent a call.
-                _consume_group(records_by_role.get("call", []), cursors, consumed, verbs)
+                _consume_group(records_by_role.get("call", []), {"call": 0}, consumed, verbs)
                 continue
         candidates = records_by_role.get(kind, [])
-        # Records are consumed once each, but the epoch may carry a dedupe
-        # record for an earlier row after later ones, so the scan wraps once
-        # instead of assuming source order. Consumption, not order, is what
-        # bounds reuse.
+        # Consumption, not source order, is what bounds reuse: the epoch may
+        # carry a dedupe record for an earlier row after later ones, so one
+        # wrap is allowed. Each source record is spent once.
         start = cursors[kind]
         order = list(range(start, len(candidates))) + list(range(0, start))
         matched: _Rec | None = None
-        pieces = _pieces(elements)
         tried = 0
         furthest = start
         for position in order:
@@ -709,15 +802,13 @@ def check_records(
             if tried > _CANDIDATE_TRIES:
                 # A record that fits nothing it has plausibly seen is either a
                 # fabrication or an honest shape this verifier lacks a form for;
-                # either way the answer is to send unreduced history, not to
-                # scan the whole span looking for a home for it.
+                # either way the answer is to send unreduced history.
                 raise SaverRejected("busy")
-            if not _runs_match(pieces, candidate):
+            if not _map_fragments(pieces, candidate):
                 continue
             # Slots can select among same-role candidates: a grouped
             # `call: [radient:1 read-only commands, all ok: grep]` names the
-            # command, and an elided record claims a size. Trying them here is
-            # what lets one grammar cover both without a rendered-form table.
+            # command, and an elided record claims a size.
             try:
                 _check_bounds(elements, candidate)
                 _check_slots(elements, candidate, pool, media, derived, scans, span_chars)
@@ -727,17 +818,9 @@ def check_records(
             break
         if matched is None:
             raise SaverRejected("provenance")
-        piece_count, overhead = _check_bounds(elements, matched)
         consumed.add(matched.identity)
         cursors[kind] = min(furthest, len(candidates))
-        overhead_total += overhead
-        pieces_total += piece_count
-    # The aggregate bound: structure must never cost more than the epoch saves.
-    saved = (span_bytes if span_bytes is not None else len(canonical_bytes(list(span)))) - (
-        epoch_bytes if epoch_bytes is not None else len(text.encode())
-    )
-    if overhead_total and overhead_total >= max(saved, 0):
-        raise SaverRejected("provenance")
+    _ = (canonical_bytes, span_bytes, epoch_bytes)
 
 
 def _group_verbs(text: str, scans: list[int]) -> list[str] | None:

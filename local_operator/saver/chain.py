@@ -424,16 +424,24 @@ class SaverChain:
         offset = 0
         for epoch in epochs:
             self.epochs.append(epoch)
-            # S-14: a PACKED epoch is on the wire. A verbatim epoch indexes
-            # nothing and leaves `prior` empty, so it must not satisfy check 8's
-            # header requirement for the first packed epoch that follows it.
-            self._adopted_any = True
+            self._note_adopted(epoch)
             self._epoch_bytes.append(list(prefetch.encoded[offset : offset + epoch.source_count]))
             offset += epoch.source_count
         self.frontier += advanced
         call_again = result.payload.get("call_again_after")
         if isinstance(call_again, int) and not isinstance(call_again, bool) and call_again > 0:
             self.call_again_after = call_again
+
+    def _note_adopted(self, epoch: Epoch) -> None:
+        """S-14/R3-3: only a PACKED epoch satisfies check 8's header requirement.
+
+        A verbatim epoch contributes no index, so `prior` stays empty and the
+        first packed epoch of the chain must still carry H1. Round 3 set this for
+        every form, which let a verbatim-only first response license a headerless
+        packed epoch (round-3 finding R3-3).
+        """
+        if epoch.form == "packed":
+            self._adopted_any = True
 
     async def _on_rejected(self, prefetch: "_Prefetch", reason: str = "") -> None:
         """A §6.1 rejection: back off, mark, memo the span, maybe pause (R-4/S-6).

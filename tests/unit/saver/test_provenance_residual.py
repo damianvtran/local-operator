@@ -25,17 +25,22 @@ def repetition_fixture(*, invented_repetition: bool):
         # uttered, unlike the adversarial record above; it is extractive.
         record = (token + " ") * 100
         source = record + " ordinary" * 3000
-    rows = [{"role": "user", "content": [{"type": "text", "text": source}]}]
+    # Filler rows: the invariant requires strictly fewer emitted lines than the
+    # span has, and a one-line span cannot be reduced at all.
+    rows = [{"role": "user", "content": [{"type": "text", "text": source}]}] + [
+        {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
+        for n in range(4)
+    ]
     text = HEADER + "\nuser: " + record
     messages = [{"role": "user", "content": [{"type": "text", "text": text}]}]
     payload = {
         "contract": "saver-v1",
-        "advanced": 1,
+        "advanced": len(rows),
         "epochs": [
             {
                 "method": "reduce-v2",
                 "form": "packed",
-                "source_count": 1,
+                "source_count": len(rows),
                 "source_digest": digest(rows),
                 "index": [],
                 "messages": messages,
@@ -56,7 +61,7 @@ def test_extracting_repetition_that_really_occurs_in_source_is_accepted() -> Non
         id_prefix="residual",
         first=True,
     )
-    assert advanced == 1 and len(epochs) == 1
+    assert advanced == len(rows) and len(epochs) == 1
 
 
 def test_invented_multiplicity_is_rejected_despite_byte_shrink() -> None:
@@ -132,11 +137,18 @@ def test_the_pool_is_bounded_by_its_own_size_not_by_repetition_rules() -> None:
 def test_two_text_blocks_have_distinct_source_occurrences() -> None:
     from local_operator.saver.provenance import check_records
 
+    # The invariant requires the epoch to be STRICTLY fewer lines than the span,
+    # so a span whose every line is re-emitted is refused by construction. The
+    # filler rows are elided here, which is what makes this a reduced epoch.
     rows = [
         {
             "role": "user",
             "content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}],
-        }
+        },
+        *[
+            {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
+            for n in range(6)
+        ],
     ]
     check_records(HEADER + "\nuser: first\nuser: second", rows)
 
@@ -146,7 +158,13 @@ def test_a_named_source_record_carries_its_sanitized_prefix() -> None:
 
     check_records(
         HEADER + "\nuser: (alice) actual words",
-        [{"role": "user", "name": "alice", "content": "actual words"}],
+        [
+            {"role": "user", "name": "alice", "content": "actual words"},
+            *[
+                {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
+                for n in range(6)
+            ],
+        ],
     )
 
 

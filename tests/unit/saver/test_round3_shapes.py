@@ -241,3 +241,89 @@ async def test_a_compatibility_rejection_never_pauses_the_process() -> None:
         await link._on_rejected(_Prefetch(), "line_breaker")  # type: ignore[arg-type]
     assert chains._ProcessState.paused is True
     chains._ProcessState.paused = False
+
+
+# --- round 3 findings (R3-1, R3-2, R3-3, S-15) ------------------------------
+
+
+def _reject(source_rows: list[dict], record: str) -> None:
+    with pytest.raises(SaverRejected):
+        check_provenance(HEADER + "\n" + record, source_rows)
+
+
+def test_s15_one_source_line_may_not_become_thousands_of_emitted_lines() -> None:
+    """S-15: 3,420 source-derived single characters cost 2.65x the span's tokens.
+
+    Every fragment is in the source and in order; only the LINE BOUND sees it,
+    because an emitted record may not carry more content lines than its source
+    record has lines.
+    """
+    source = "internationalization " * 1300
+    rows = [{"role": "user", "content": [{"type": "text", "text": source}]}] + [
+        {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
+        for n in range(4)
+    ]
+    characters = [ch for ch in source if ch.strip()][:3400]
+    _reject(rows, "user: a\n\t" + "\n\t".join(characters))
+
+
+def test_r3_1_a_note_may_not_carry_an_invented_name() -> None:
+    """R3-1: `[approveall 999 chars]` rode in through the note's name slot."""
+    rows = [{"role": "user", "content": [{"type": "text", "text": "=" * 8000}]}] + [
+        {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
+        for n in range(4)
+    ]
+    _reject(rows, "user: " + "[approveall 999 chars] " * 100)
+
+
+def test_r3_1_note_multiplication_is_bounded() -> None:
+    """R3-1's multiplier: many notes in one record.
+
+    Caught by the line-count bound rather than by the epoch line budget (the
+    mutation matrix in the PR says which rule fires for each fixture); on a very
+    large source record the same shape is harmless, because 100 notes cost a few
+    hundred tokens against a ten-thousand-token span.
+    """
+    rows = [{"role": "user", "content": [{"type": "text", "text": "=" * 8000}]}] + [
+        {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
+        for n in range(4)
+    ]
+    _reject(rows, "user: " + "[999999999 chars] " * 100)
+
+
+def test_r3_2_a_one_line_record_may_not_be_shredded_into_continuations() -> None:
+    """R3-2: 1,007 tab continuations of a one-line source record cost 2.06x."""
+    rows = [{"role": "user", "content": [{"type": "text", "text": "x" * 8000}]}] + [
+        {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
+        for n in range(4)
+    ]
+    _reject(rows, "user: x\n\t" + "\n\t".join("x" for _ in range(1007)))
+
+
+def test_r3_3_only_a_packed_epoch_satisfies_the_header_requirement() -> None:
+    """R3-3: a verbatim-only first response must NOT license a headerless epoch."""
+    from local_operator.saver.chain import SaverChain
+    from local_operator.saver.validate import Epoch
+
+    chain = SaverChain(client=object(), session_id="r3")  # type: ignore[arg-type]
+    assert chain._adopted_any is False
+    verbatim = Epoch(
+        method="reduce-v2",
+        form="verbatim",
+        source_count=2,
+        source_digest="sha256:" + "0" * 64,
+        index=(),
+        messages=(),
+    )
+    chain._note_adopted(verbatim)
+    assert chain._adopted_any is False, "a verbatim epoch contributes no index"
+    packed = Epoch(
+        method="reduce-v2",
+        form="packed",
+        source_count=2,
+        source_digest="sha256:" + "0" * 64,
+        index=(),
+        messages=(),
+    )
+    chain._note_adopted(packed)
+    assert chain._adopted_any is True
