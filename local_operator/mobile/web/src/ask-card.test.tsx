@@ -636,6 +636,11 @@ describe("AskCard", () => {
 			fireEvent.keyDown(field, { key: "Enter", isComposing: true });
 			expect(document.activeElement).toBe(field);
 
+			/* Safari confirms a composition with `isComposing` already false and the
+			   legacy `keyCode` 229 as the only signal. */
+			fireEvent.keyDown(field, { key: "Enter", keyCode: 229 });
+			expect(document.activeElement).toBe(field);
+
 			fireEvent.keyDown(field, { key: "Enter" });
 			expect(document.activeElement).not.toBe(field);
 			expect(sendCommand).not.toHaveBeenCalled();

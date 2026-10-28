@@ -401,8 +401,15 @@ function QuestionField({
 							onKeyDown={(event) => {
 								/* A single-line field: Enter neither submits nor inserts anything,
 								   it only dismisses the keyboard. An IME confirming a composition
-								   also sends Enter, which must reach the IME untouched. */
-								if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+								   also sends Enter, which must reach the IME untouched — Safari
+								   delivers that keydown with `isComposing` already false and the
+								   legacy `keyCode` 229, so both signals are checked. */
+								if (
+									event.key !== "Enter" ||
+									event.nativeEvent.isComposing ||
+									event.keyCode === 229
+								)
+									return;
 								event.preventDefault();
 								event.currentTarget.blur();
 							}}
