@@ -1312,6 +1312,73 @@ def test_a_non_terminal_redrive_outcome_backs_off(tmp_path, monkeypatch, action)
     assert hold is not None and hold["retry_at"] > clock.now
 
 
+def test_a_stop_during_the_read_ack_post_is_flushed_and_delivered_once(
+    tmp_path, monkeypatch
+) -> None:
+    """PR #3063 review m4 (operator: unacked messages must catch up after the
+    device was off). A stop landing DURING the read-ACK POST leaves a PENDING
+    intent; screening's step 5 then answers ``ack_recovery`` for that message
+    on every re-drive, and no connector path ever flushed the intent, so the
+    message was held forever. The re-drive must replay the STORED intent (its
+    tuple and its ``client_ref``) and continue to the handoff."""
+
+    from local_operator.team_bridge import screening as screening_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    wire, access = _real_ack_access(monkeypatch, owner)
+    screened = wake_mod.screen_item
+
+    async def screening_step_5(owner_, item, *, config_dir, auth_store, settings=None):
+        # The REAL pipeline's first reconcile (screening.py step 5): a pending
+        # read intent is never a fresh admission. The fake screen behind it
+        # stands in for the model call only.
+        if Store(config_dir).find_pending_intent(owner_, "bmsg_1", "read") is not None:
+            return screening_mod.ScreenResult("hold", hold_code="ack_recovery")
+        return await screened(
+            owner_, item, config_dir=config_dir, auth_store=auth_store, settings=settings
+        )
+
+    monkeypatch.setattr(wake_mod, "screen_item", screening_step_5)
+    real_wire_ack = wire.ack
+
+    async def stopped_mid_post(message_id: str, **kwargs: Any) -> dict[str, Any]:
+        # The intent is durable (pull.ack records it first); the POST never
+        # completes. A stop's cancellation lands exactly here.
+        wire.refs.append(str(kwargs["client_ref"]))
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(wire, "ack", stopped_mid_post)
+    _one_pending_ref(store, owner)
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(owner, tmp_path, access)
+    pending = store.find_pending_intent(owner, "bmsg_1", "read")
+    assert pending is not None and record["delivered"] == []
+    original_ref = pending["client_ref"]
+
+    # The restarted connector: the hub is reachable again.
+    wire.refs.clear()
+    monkeypatch.setattr(wire, "ack", real_wire_ack)
+    outcomes = []
+    for _ in range(6):
+        outcomes.append(_iterate(owner, tmp_path, access))
+        clock.now += loop_mod.RETRY_MAX_S
+    held = [o["code"] for out in outcomes for o in out["handled"] if o["action"] == "hold"]
+    held += [
+        o["action"] for out in outcomes for o in out["retries"].get("outcomes", ())
+    ]  # the retry pass reports per-row actions
+    assert len(record["delivered"]) == 1, held
+    assert wire.refs == [original_ref]  # ONE hub ACK, the ORIGINAL ref
+    intent = store.ack_intent(owner, pending["intent_id"])
+    assert intent is not None and intent["state"] == "confirmed"
+    assert store.screening_hold(owner, "bmsg_1") is None
+    assert store.drain_feed_refs(owner, 3) == []
+
+
 def test_a_session_claim_is_never_parked_for_redelivery(tmp_path, monkeypatch) -> None:
     """A session's own ``ack working`` claim proves the message already reached
     a session: the ref is consumed as before, with no parked retry."""

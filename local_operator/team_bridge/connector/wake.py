@@ -516,6 +516,58 @@ async def ack_read(
     return await _pull.ack(owner, message_id, target, receipt, config_dir=config_dir, access=access)
 
 
+async def recover_pending_read(
+    owner: Any, message_id: str, item: Any, *, config_dir: Path, access: Any
+) -> str | None:
+    """Replay a PENDING read-ACK intent before screening; ``None`` to proceed.
+
+    WHY (PR #3063 review m4; the operator's "unacked messages must catch up
+    after the device was off"): a stop or crash DURING the read-ACK POST
+    leaves the intent ``pending``. Screening's first reconcile (step 5)
+    refuses to admit a message with a pending intent and holds it
+    ``ack_recovery``, and nothing in the connector ever flushed one, so the
+    message was held forever. This replays the STORED intent — its tuple and
+    its ``client_ref``, through ``pull.recover_ack``, never a re-screen or a
+    new ref — so the hub sees the same idempotency key. Once it confirms,
+    screening is no longer blocked, the cached receipt admits again, and
+    ``ack_read`` returns the confirmed intent with no second request.
+
+    ONLY FOR THE SAME BYTES, like step 5: an intent whose screened body hash
+    is not the body just fetched is left alone (``None``), so screening holds
+    it ``body_hash_mismatch`` exactly as before — a stale tuple is never
+    acknowledged for different bytes.
+
+    BOUNDED: one replay per re-drive, and a re-drive that cannot confirm
+    returns a hold, which the loop schedules on its ordinary backoff. Returns
+    the hold code when the intent is still not confirmed.
+    """
+
+    from local_operator.team_bridge import pull as _pull
+    from local_operator.team_bridge.store import Store
+
+    pending = Store(config_dir).find_pending_intent(owner, message_id, "read")
+    if pending is None:
+        return None
+    if pending.get("receipt") is None:
+        # No tuple to replay (a pre-screening row): screening's own
+        # ``ack_recovery`` hold stays the honest answer.
+        return "ack_recovery"
+    text = _body_text(item)
+    fetched = hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else None
+    if fetched is None or pending["receipt"].get("body_sha256") != fetched:
+        return None
+    try:
+        outcome = await _pull.recover_ack(
+            owner, message_id, "read", config_dir=config_dir, access=access
+        )
+    except _pull.PullRefused as refusal:
+        return f"ack_recovery:{refusal.code}"[:64]
+    state = str(getattr(outcome, "state", "") or "")
+    if state != _pull.ACK_CONFIRMED:
+        return f"ack_not_confirmed:{state or 'unknown'}"
+    return None
+
+
 async def deliver_wake(
     owner: Any,
     payload: str,
@@ -669,6 +721,11 @@ async def handle_message_available(
         item = await fetch_item(
             owner, message_id, config_dir=config_dir, access=access, auth_store=auth_store
         )
+        recovery_code = await recover_pending_read(
+            owner, message_id, item, config_dir=config_dir, access=access
+        )
+        if recovery_code:
+            return {"action": "hold", "message_id": message_id, "code": recovery_code}
         result = await screen_item(
             owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
