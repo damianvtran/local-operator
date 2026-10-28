@@ -722,6 +722,7 @@ async def test_a_whole_file_update_of_a_long_file_is_refused_through_the_loop(en
 
     await _drive(env, plan)
     assert results[1].startswith("skill-file-too-long-to-replace:"), results[1]
+    assert "cannot be removed here" not in results[1], "N1: a replace gets no removal hint"
     assert "op='edit'" in results[1]
     assert _tree(folder) == before
 
@@ -999,6 +1000,7 @@ async def test_edit_fails_closed_on_masked_text_through_the_loop(env) -> None:
     await _drive(env, plan, masked=True)
     assert results[1].startswith("skill-edit-no-unique-match:"), results[1]
     assert results[2].startswith("skill-marker-introduced:"), results[2]
+    assert "old_text/new_text" in results[2]
     assert results[3].startswith("updated skill"), results[3]
     after = (folder / "SKILL.md").read_text()
     assert "password: changeme123\n" in after and "migration twice" in after
@@ -1016,6 +1018,7 @@ async def test_a_write_that_adds_the_marker_is_refused_but_an_existing_one_is_ke
         files=[{"path": "SKILL.md", "content": _skill_md("fresh", body="key: [redacted]\n")}],
     )
     assert error and text.startswith("skill-marker-introduced:"), text
+    assert "old_text" not in text, "N2: create has no old_text"
     assert not (env.config_dir / "skills" / "fresh").exists()
     folder = _make_local(env)
     error, text = await _call(
@@ -1026,6 +1029,7 @@ async def test_a_write_that_adds_the_marker_is_refused_but_an_existing_one_is_ke
         files=[{"path": "references/new.md", "content": "token [redacted]\n"}],
     )
     assert error and text.startswith("skill-marker-introduced:"), text
+    assert "old_text" not in text, "N2: update has no old_text"
     doc = _skill_md("about", body="The mask reads [redacted].\n")
     writes.create(env.config_dir, "about", files=[{"path": "SKILL.md", "content": doc}])
     about = env.config_dir / "skills" / "about"
@@ -1083,6 +1087,7 @@ async def test_a_long_file_cannot_be_removed_so_remove_then_readd_cannot_replace
         remove_paths=["references/long.md"],
     )
     assert error and text.startswith("skill-file-too-long-to-replace:"), text
+    assert "the operator can remove it on the Skills tab" in text
     assert "cannot be removed whole here" in text
     assert _tree(folder) == before
     error, text = await _call(

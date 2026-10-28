@@ -421,8 +421,7 @@ _HINTS: dict[str, str] = {
     "alias-occupied": "Choose another name, or update the existing skill if it is editable.",
     "skill-not-found": "Check the name with op='list'.",
     "skill-file-too-long-to-replace": (
-        "Show the part you want to change and use op='edit' with exact old_text. A "
-        "long file cannot be removed here; the operator can on the Skills tab."
+        "Show the part you want to change and use op='edit' with exact old_text."
     ),
     "skill-edit-no-unique-match": "Show that part of the file again and copy old_text exactly.",
     "skill-file-masked": (
@@ -430,10 +429,28 @@ _HINTS: dict[str, str] = {
         "value is kept as it is."
     ),
     "skill-marker-introduced": (
-        "Quote only unmasked text in old_text/new_text; the real value cannot be "
-        "written from here."
+        "Write the file's real text, never the marker; a value you saw masked cannot "
+        "be written from here."
     ),
 }
+
+#: Hints that depend on more than the code (QA r3 N1/N2): one code covers refusals
+#: whose remedies differ, and a hint naming a parameter the call did not have, or
+#: a remedy for the other case, sends the model after the wrong fix.
+_REMOVAL_HINT = "A long file cannot be removed here; the operator can remove it on the Skills tab."
+_EDIT_MARKER_HINT = (
+    "Quote only unmasked text in old_text/new_text; the real value cannot be written " "from here."
+)
+
+
+def _hint(code: str, op: str, message: str) -> str | None:
+    if code == "skill-file-too-long-to-replace" and "cannot be removed whole" in message:
+        # The storage message carries the verb ("replaced"/"removed"); it is the
+        # only place that knows which path tripped the bound.
+        return _REMOVAL_HINT
+    if code == "skill-marker-introduced" and op == "edit":
+        return _EDIT_MARKER_HINT
+    return _HINTS.get(code)
 
 
 def _work(params: SkillParams, config_dir: Path, context: ToolContext | None) -> str:
@@ -544,7 +561,7 @@ async def execute_skill(
         text = await asyncio.to_thread(_work, params, config_dir, context)
     except (LinkError, SkillValidationError, TransactionError) as error:
         code = getattr(error, "code", "") or ""
-        hint = _HINTS.get(code)
+        hint = _hint(code, params.op, str(error))
         message = f"{code}: {error}" + (f". {hint}" if hint else "")
         return _error(tool_call_id, _TOOL, message, details={"code": code})
     return _text(tool_call_id, _TOOL, text)
