@@ -56,6 +56,16 @@ const PAGE = 120;
    it, only re-offer it to the merge's id de-dup. */
 const PROJECTION_ROWS = 80;
 
+/** Whether a rendered row's id can name a journal entry — the only kind a
+ *  history cursor may use. Reasoning rows live only in the projection (the
+ *  fold's own comment: reasoning "is never persisted anywhere"), and the live
+ *  fold's tool rows carry `tc-`, while a served page names a tool row
+ *  `<message>:call_<call>`. Anything else is a cursor the daemon can only
+ *  answer as end-of-history. */
+function journalAddressableRow(entry: TranscriptEntry | undefined): boolean {
+	return entry !== undefined && entry.kind !== "reasoning" && !entry.id.startsWith("tc-");
+}
+
 /* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
    Severity was HUE-ONLY on this surface: measured against the theme tokens,
    `danger` and `ink-dim` sit at 1.30:1, and across all 31 themes those two are
@@ -602,12 +612,28 @@ export function Transcript({
 	   reader then scrolls through as a conversation that repeats itself.
 	   `older[0]` is the oldest row this view actually holds, so the next page is
 	   the one immediately before it and paging is linear in the reader's taps. */
+	/* THE FIRST CURSOR MUST NAME A JOURNAL ROW, and not every rendered row does.
+	   The live fold mints ``rz-`` reasoning rows and ``tc-`` tool rows
+	   (``local_operator/mobile/projection.py``); reasoning is never written to
+	   the journal at all, and a served page names tool rows
+	   ``<message>:call_<call>``. The daemon answers a cursor it cannot locate as
+	   END OF HISTORY (``durable.py:_cursor_candidates`` / ``journal_rows_older_than``),
+	   so a cursor taken from one of these rows stops back-filling for good: the
+	   reader sees the pinned opening message, a gap, and the newest rows.
+
+	   A USER-HEADED PROJECTION IS THE PINNED-OPENER SHAPE, at any length. The
+	   daemon pins the opening user message ahead of a disjoint tail, and the
+	   FRAME CAP can push a pinned projection below ``PROJECTION_ROWS`` (16 rows
+	   at its floor) — where the old length test fell through to
+	   ``merged[0].id``, the opener itself, so every fetch asked for history
+	   older than the first message of the conversation and got nothing. Skipping
+	   the head costs at most one already-held row on a projection that merely
+	   STARTS with a user turn, which the merge's rowKey de-dup discards. */
+	const cursorStart = entries.length > 1 && entries[0]?.kind === "user" ? 1 : 0;
 	const oldestId =
 		older.length > 0
 			? older[0].id
-			: entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user"
-				? entries[1]?.id ?? entries[0]?.id ?? null
-				: merged[0]?.id ?? null;
+			: merged.slice(cursorStart).find(journalAddressableRow)?.id ?? merged[0]?.id ?? null;
 
 	/* THE QUIET GROUPS over the rows on hand (design §5, slice S4): pure per
 	   render — rows only append, so a closed group's facts cannot move and the
