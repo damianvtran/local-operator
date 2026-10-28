@@ -563,6 +563,12 @@ class BrokerError:
     #: Which arm produced this refusal, from :data:`BROKER_ERROR_REASONS`; "" when
     #: the producer did not say (every code but ``quota_blocked``, and older owners).
     reason: str = ""
+    #: ``retry_after_ms`` is a FLOOR, not the owner's reset (#3108 review r2 m1): the
+    #: owner stated a longer wait than ``MAX_PEER_RETRY_AFTER_MS``, which the boundary
+    #: clamps. The clamp is a safety bound on this device's cache and retry, not a
+    #: promise about the owner's account — a proven 3 h reopening would otherwise be
+    #: rendered "for another 5 min", and repeated every 5 min. Never on the wire.
+    retry_after_is_floor: bool = False
 
     @property
     def is_holder_exclusion(self) -> bool:
@@ -604,6 +610,7 @@ class BrokerError:
 
     @classmethod
     def from_detail(cls, detail: dict[str, Any]) -> BrokerError:
+        stated = peer_int(detail.get("retry_after_ms"))
         return cls(
             code=str(detail.get("code") or "internal"),
             message=str(detail.get("message") or ""),
@@ -611,6 +618,7 @@ class BrokerError:
             owner_device=str(detail.get("owner_device") or ""),
             owner_device_name=str(detail.get("owner_device_name") or ""),
             retry_after_ms=peer_int(detail.get("retry_after_ms"), maximum=MAX_PEER_RETRY_AFTER_MS),
+            retry_after_is_floor=stated >= MAX_PEER_RETRY_AFTER_MS,
             reason=(
                 str(detail.get("reason"))
                 if str(detail.get("reason") or "") in BROKER_ERROR_REASONS

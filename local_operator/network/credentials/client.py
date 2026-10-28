@@ -54,6 +54,7 @@ from local_operator.network.credentials.placement import (
 from local_operator.network.credentials.state import PlacementState
 from local_operator.network.credentials.types import (
     BROKER_ERROR_TTL_MS,
+    MAX_PEER_RETRY_AFTER_MS,
     NO_RETRY,
     PEER_BROKER_OP,
     QUOTA_REASON_POOL_DEPLETED,
@@ -438,6 +439,7 @@ class MeshCredentialClient:
         ttl = BROKER_ERROR_TTL_MS.get(status, 0)
         if ttl == NO_RETRY:
             ttl = UNSUPPORTED_OBSERVATION_MS
+        floor = False
         row = self.state.observation(key, now=now)
         if row is None:
             return None
@@ -458,6 +460,9 @@ class MeshCredentialClient:
             # that nobody stated. No stated remainder ⇒ 0 ⇒ the sentence keeps
             # "for now", exactly as the fresh one does.
             owner_ms = int(row.get("owner_retry_after_ms") or 0)
+            # A remembered clamped value is still a floor while it counts down: the
+            # owner's reset lies beyond it, so "at least" stays true (#3108 r2 m1).
+            floor = owner_ms >= MAX_PEER_RETRY_AFTER_MS
             if owner_ms:
                 stamp = float(row.get("observed_at") or 0.0)
                 current = time.time() if now is None else now
@@ -469,6 +474,7 @@ class MeshCredentialClient:
             owner_device=str(row.get("owner_device") or self.owner_of(key)),
             owner_device_name=self.owner_label(key),
             retry_after_ms=ttl,
+            retry_after_is_floor=floor,
             # A CACHED ``quota_blocked`` IS ALWAYS THE OWNER'S OWN STATE (#3108 review
             # r2-m1): the holder-exclusion answer is never remembered (``_from_reply``
             # / ``_detail_from_owner`` return it uncached), so whatever reached the
