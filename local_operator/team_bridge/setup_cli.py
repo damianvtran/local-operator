@@ -41,7 +41,15 @@ def confirm_consent(
 
     So acceptance is a HUMAN ACT at a terminal: the full served text is printed,
     the account, organization and chief of staff are named, and an explicit ``y``
-    is required. Refused, never guessed, when:
+    is required. STRENGTH, stated rather than implied: this is a SPEED BUMP, not
+    a security boundary — the agent-shell marker is an environment variable and a
+    TTY can be simulated (measured by review round 2 through ``script``), so an
+    agent that deliberately works around both can still accept. What it reliably
+    stops is the ordinary path (an agent following a convenient instruction, a
+    piped/headless caller) and it makes the act visible in the transcript. A
+    real capability gate needs an authority this process does not hold (the
+    desktop's bearer, or a code the user reads off their own screen) and is a
+    separate decision. Refused, never guessed, when:
 
     * the caller descends from an agent's ``bash`` tool call
       (``agent_shell.in_agent_shell``) — the agent may preview, print the exact

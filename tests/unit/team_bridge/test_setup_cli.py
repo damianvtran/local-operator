@@ -33,10 +33,6 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
     monkeypatch.setattr(setup_cli, "TeamBridgeClient", _production_client)
     monkeypatch.setattr(setup_cli, "StatusDiscipline", _production_discipline)
-    # The acceptance half is a HUMAN gate (agent shell or non-TTY refuses). These
-    # cells are about the write path behind it, so they stand a human in: the
-    # gate's own refusals are pinned separately below.
-    monkeypatch.setattr(setup_cli, "confirm_consent", lambda *a, **k: None)
 
 
 def _production_client(config_dir: Path, **kwargs: Any):
@@ -135,16 +131,37 @@ def _session(root: Path) -> None:
 
 
 def _values(root: Path) -> dict[str, Any]:
+    """The stored ``team_bridge.*`` values, through the production reader.
+
+    ``settings_io.read_setting`` returns the VALUE (a scalar), not a row object —
+    the earlier ``.value`` call here raised AttributeError on every cell that
+    needed a value, which is what made this whole file fail before it was first
+    executed.
+    """
+
     manager = ConfigManager(config_dir=root)
     return {
-        key: settings_io.read_setting(manager, setting).value
-        for key, setting in settings_io.BY_KEY.items()
+        key: settings_io.read_setting(manager, settings_io.BY_KEY[key])
+        for key in settings_io.BY_KEY
         if key.startswith("team_bridge.")
     }
 
 
 def _writes() -> list[httpx.Request]:
     return [r for r in requests if r.method not in {"GET", "HEAD"}]
+
+
+@pytest.fixture
+def human_gate_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand a consenting human in front of the gate, for SOME cells only.
+
+    Requested explicitly by the cells about the write path behind the gate. It is
+    deliberately NOT autouse: an autouse stub also stubbed the gate for the
+    gate's own tests, which then asserted against the stub instead of the
+    behaviour (review round 2, R2-3).
+    """
+
+    monkeypatch.setattr(setup_cli, "confirm_consent", lambda *a, **k: None)
 
 
 async def _preview(root: Path, **kwargs: Any) -> dict[str, Any]:
@@ -164,10 +181,8 @@ async def test_preview_exposes_served_consent_and_never_enrolls(tmp_path: Path) 
     assert _writes() == []
     assert Store(tmp_path).committed_owner_count() == 0
     manager = ConfigManager(config_dir=tmp_path)
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]).value == ""
-    assert (
-        settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]).value is False
-    )
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]) == ""
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]) is False
     assert [r for r in requests if r.url.path.endswith("/messaging/status")]
     assert not any(r.url.path.endswith("/messaging/events") for r in requests)
 
@@ -235,23 +250,30 @@ async def test_stale_consent_version_is_refused_without_write_or_config(tmp_path
     assert _writes() == []
     assert Store(tmp_path).committed_owner_count() == 0
     manager = ConfigManager(config_dir=tmp_path)
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]).value == ""
-    assert (
-        settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]).value is False
-    )
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]) == ""
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]) is False
 
 
-async def test_rejected_served_text_cannot_be_accepted(tmp_path: Path) -> None:
-    # Same-version changed text is a negative control for AcceptedTexts: the
-    # preview must expose no cached/embedded substitute, let alone accept it.
-    original = CONSENT["text"]
-    CONSENT["text"] = "Changed bytes under a version already accepted."
-    try:
-        first = await _preview(tmp_path)
-        assert first["code"] == "served_consent_required"
-        assert _writes() == []
-    finally:
-        CONSENT["text"] = original
+async def test_no_accepted_served_text_means_no_preview_and_no_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard this module owns: only ACCEPTED served bytes may be shown.
+
+    ``consent_for_display`` decides which of served/cached/embedded copy a
+    surface may display (a same-version text change is refused there, inside the
+    client's own ``AcceptedTexts``). What THIS command must guarantee is that it
+    never proceeds on anything but an accepted SERVED answer, so that is what is
+    pinned here: no accepted served text → ``served_consent_required``, no
+    request that writes, no config or store change. The client-side same-version
+    comparison is pre-existing behaviour this PR does not alter and is out of
+    scope for this file.
+    """
+
+    monkeypatch.setattr(setup_cli, "consent_for_display", lambda check: None)
+    result = await _preview(tmp_path)
+    assert result["code"] == "served_consent_required"
+    assert _writes() == []
+    assert Store(tmp_path).committed_owner_count() == 0
 
 
 async def test_nonexistent_session_refuses_before_remote_consent(tmp_path: Path) -> None:
@@ -276,14 +298,12 @@ async def test_no_local_commit_is_not_reported_as_success(tmp_path: Path) -> Non
     assert result["code"] == "local_enrollment_failed"
     assert result["local_enrollment"]["committed"] is False
     manager = ConfigManager(config_dir=tmp_path)
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]).value == ""
-    assert (
-        settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]).value is False
-    )
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]) == ""
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]) is False
 
 
 async def test_explicit_setup_commits_owner_designation_and_wanted_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, human_gate_open: None
 ) -> None:
     _session(tmp_path)
     placed: list[Path] = []

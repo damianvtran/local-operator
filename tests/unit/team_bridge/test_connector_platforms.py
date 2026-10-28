@@ -462,8 +462,15 @@ def test_windows_ownership_uses_the_profile_not_passwd(tmp_path, monkeypatch) ->
     assert install._ownership_refusal(profile / ".local-operator") is None
     refused = install._ownership_refusal(tmp_path / "scratch")
     assert refused is not None and "not the default one" in refused
-    monkeypatch.setenv("HOME", str(tmp_path / "redirected"))
+    # ``$HOME`` is IGNORED on Windows, deliberately: Git Bash, MSYS2 and Cygwin
+    # export it as a POSIX path that means nothing to this product, and refusing
+    # on it denied the receiver to every developer in those shells (review round
+    # 2 fix #1). The identity test is the PROFILE, which is ``Path.home()``.
+    monkeypatch.setenv("HOME", str(tmp_path / "git-bash-style-home"))
+    assert install._ownership_refusal(profile / ".local-operator") is None
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "redirected-profile"))
     assert "redirected" in (install._ownership_refusal(profile / ".local-operator") or "")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: profile))
     monkeypatch.setattr(supervisors, "windows_profile_home", lambda: None)
     assert install._ownership_refusal(profile / ".local-operator") is not None
 

@@ -886,7 +886,16 @@ def _receiver_holds_its_lock(config_dir: Path) -> bool:
     that makes the stop decision below independent of the console language.
 
     A lock we cannot take is treated as "a receiver is running" (the safe
-    direction for the caller, which is about to delete the registration).
+    direction for the caller, which is about to delete the registration). This
+    function is a tie-breaker for an UNREADABLE status only — never an override
+    for a supervisor that positively says the task is running (R2-1), because a
+    receiver waiting for an owner has not taken the lock yet.
+
+    Side effect, recorded because the module elsewhere promises a machine with
+    neither a store nor a service gains no lock file: ``acquire`` creates
+    ``<config>/team_bridge/connector.lock``. Every path that reaches this probe
+    already has a task record and a store, so it cannot be the first thing a
+    fresh machine writes.
     """
 
     from local_operator.team_bridge.connector.lock import ConnectorLock
@@ -929,6 +938,18 @@ def _stop_task(config_dir: Path) -> ServiceOutcome | None:
         return None
     if running is False:
         return None
+    if running is True:
+        # THE SUPERVISOR'S OWN VERDICT WINS OVER THE LOCK (review round 2, R2-1).
+        # The lock probe below is only a way to settle an UNREADABLE status: a
+        # receiver that has not yet resolved an owner sits in
+        # ``__main__``'s no-owner idle loop BEFORE it takes the singleton, so a
+        # free lock is not proof of death — and reporting a stop we did not
+        # achieve is the "cannot turn it off" failure, silently.
+        return ServiceOutcome(
+            CODE_FAILED,
+            "the receiver is still running and could not be stopped: "
+            + (ended.stderr or ended.stdout or detail or "schtasks /End failed").strip()[:200],
+        )
     if not _receiver_holds_its_lock(config_dir):
         # No process holds the store's receiver lock: the /End complaint was
         # about a task that is not running, which is the state we asked for.

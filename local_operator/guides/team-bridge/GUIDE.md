@@ -76,11 +76,15 @@ Check these in order. The receiver is not installed until all of them hold.
 
    The command prints the served consent text in full, names the account,
    organization and chief-of-staff session, and asks for an explicit `y`. It
-   **refuses when it is not run at a terminal** (`human_required`), and it
-   refuses when it descends from an agent's shell, so an agent cannot accept
-   consent on the user's behalf even if asked to. You may run everything up to
-   and including the preview; you may not run the acceptance. If the user asks
-   you to, explain that this one step is theirs and give them the command.
+   refuses when it is not run at a terminal (`human_required`) and when it
+   descends from an agent's shell.
+
+   **That is a speed bump, not a security boundary**, and this guide will not
+   claim otherwise: the marker is an environment variable and a TTY can be
+   simulated, so an agent that deliberately works around both can still run the
+   command. The real control is that the *user* accepts: run everything up to
+   and including the preview, then hand the acceptance command over. Do not run
+   the acceptance yourself, and do not strip the marker to make it "just work".
 
    It re-reads the served consent and refuses if the account, tenant, version
    or existing session differs (`account_mismatch`, `tenant_mismatch`,
