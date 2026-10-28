@@ -4,8 +4,9 @@ Kept OUT of ``local_operator.team_bridge.connector`` on purpose: that package's
 ``__init__`` imports the connector lock (and with it ``wakes.lock``), and
 ``cli.build_parser`` runs this on every invocation, ``--version`` and
 ``--help`` included. The verbs live in
-:mod:`local_operator.team_bridge.connector.cli`, imported only once
-``team-bridge`` is dispatched (the ``tunnels/arguments.py`` split).
+:mod:`local_operator.team_bridge.connector.cli` (``receiver``) and
+:mod:`local_operator.team_bridge.setup_cli` (``setup``), imported only once a
+``team-bridge`` verb is dispatched (the ``tunnels/arguments.py`` split).
 """
 
 from __future__ import annotations
@@ -21,11 +22,12 @@ DEFAULT_LOG_LINES = 50
 
 
 def add_parser(subparsers: Any, parent_parser: argparse.ArgumentParser | None = None) -> None:
-    """Register ``lop team-bridge receiver <verb>``.
+    """Register ``lop team-bridge setup`` and ``lop team-bridge receiver <verb>``.
 
-    ``team-bridge`` is a group with one child today (``receiver``) so a later
-    bridge verb has a home without renaming this one; the help text uses the
-    product name ("agent messages") the rest of the product shows.
+    Two children: ``setup`` (backend-only consent and chief-of-staff selection,
+    :mod:`local_operator.team_bridge.setup_cli`) and ``receiver`` (the service
+    lifecycle, :mod:`local_operator.team_bridge.connector.cli`). The help text
+    uses the product name ("agent messages") the rest of the product shows.
     """
 
     from local_operator.i18n.cli_help import help_locale as resolve_help_locale
