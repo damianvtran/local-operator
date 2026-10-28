@@ -154,12 +154,33 @@ def _replace_posix(argv: list[str], env: dict[str, str]) -> None:
     os.execvpe(argv[0], argv, env)
 
 
+def _flush_evidence() -> None:
+    """Drain deferred per-lane evidence writes before the process is replaced.
+
+    ``execvpe`` and ``os._exit`` both skip ``atexit``, so the evidence writer's
+    exit flush (``session.coalescing_writer``) never runs on a re-exec: the last
+    queued step per lane would be lost exactly as on a hard death (review round
+    1, R1-4). Bounded at 2 s, the same bound as the atexit flush — a wedged disk
+    must not hold the restart hostage. Imported lazily: ``reexec`` is on the
+    CLI's startup path and the writer is only loaded where evidence was written;
+    if it was never imported there is nothing queued.
+    """
+    module = sys.modules.get("local_operator.session.coalescing_writer")
+    if module is None:
+        return
+    try:
+        module.EVIDENCE_WRITER.flush(timeout=2.0)
+    except Exception:  # noqa: BLE001 — a lost breadcrumb never blocks a restart
+        pass
+
+
 def replace_self(plan: RestartPlan) -> None:
     """Never returns on success. POSIX execs; Windows spawns then exits."""
     argv = list(plan.argv)
     if not argv:
         raise RuntimeError("RestartPlan.argv is empty")
     env = without_agent_shell_marker(os.environ)
+    _flush_evidence()
     # A restart is the SESSION re-launching its OWN front end, not a command an
     # agent's tool call started, so the marker must not ride along — otherwise
     # `cli.main` refuses to re-open a session that was deliberately started from

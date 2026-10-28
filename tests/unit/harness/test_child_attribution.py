@@ -1344,12 +1344,19 @@ asyncio.run(main())
 
 
 def test_lane_step_throttles_but_new_commit_can_force_matching_step(tmp_path):
+    from local_operator.session.coalescing_writer import EVIDENCE_WRITER
+
+    # The step write is deferred off the loop (``coalescing_writer``); each
+    # flush lets it land so the throttle is judged against the written stamp.
     ledger.write_lane_receipt(tmp_path, ledger.build_lane_payload(job_id="j"))
     ref = "refs/lop/wip/child/j"
     ledger.note_lane_step(tmp_path, "j", "bash: first", 100, ref)
+    assert EVIDENCE_WRITER.flush()
     ledger.note_lane_step(tmp_path, "j", "bash: second", 101, ref)
+    assert EVIDENCE_WRITER.flush()
     assert ledger.read_lane_receipts(tmp_path)[0]["last_step"] == "bash: first"
     ledger.note_lane_step(tmp_path, "j", "bash: second", 101, ref, force=True)
+    assert EVIDENCE_WRITER.flush()
     lane = ledger.read_lane_receipts(tmp_path)[0]
     assert lane["last_step"] == "bash: second"
     assert lane["last_step_at"] == 101 and lane["wip_ref"] == ref

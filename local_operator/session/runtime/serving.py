@@ -33,6 +33,7 @@ import threading
 import time
 import unicodedata
 import uuid
+import weakref
 from asyncio import InvalidStateError
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -377,6 +378,12 @@ MAX_QUEUED_PROMPTS = 32
 #: as ``RuntimeServer._push_later`` (the repaint it feeds) and
 #: ``Session._schedule_frontend_jobs``; see ``_schedule_roster_refresh``.
 _ROSTER_REFRESH_COALESCE_S = 0.05
+
+#: Floor between two disk re-reads of the ask fold on the ``_notify`` path (see
+#: ``ServingSessionHandle._refresh_ask_projection``). Only another process's
+#: change to this session's ``asks.jsonl`` waits on it; this process's own ask
+#: changes are installed immediately through ``_ask_state_changed``.
+_ASK_REFRESH_MIN_S = 1.0
 
 #: The worker pool a model switch's blocking reads run on, built on first use.
 #:
@@ -1037,6 +1044,12 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.harness.rows import queued_ask_engine_live
 
         self._fold = ProjectionFold(self._projection, queued_engine=queued_ask_engine_live(session))
+        #: ``time.monotonic()`` of the last ask-fold install; ``-inf`` so the
+        #: first ``_refresh_ask_projection`` always reads.
+        self._ask_fold_installed_at = float("-inf")
+        #: One trailing re-read armed for a throttled ``_refresh_ask_projection``
+        #: (see ``_schedule_ask_refresh``).
+        self._ask_refresh_scheduled = False
         #: The broker registration that authorizes THIS process's descendants to
         #: retrieve secrets, or ``None`` (§6). Held so teardown can deregister
         #: promptly rather than waiting for the process's socket to close: a
@@ -1544,6 +1557,9 @@ class ServingSessionHandle(SessionHandle):
         """
         try:
             self._fold.set_asks(list(rows) if rows is not None else None, outstanding_count)
+            # Fresh from the queue itself: the throttled re-read in
+            # ``_refresh_ask_projection`` need not repeat it.
+            self._ask_fold_installed_at = time.monotonic()
         except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
             logger.debug("ask: could not install the wire fold", exc_info=True)
         self._publish_pending_gate()
@@ -7495,9 +7511,32 @@ class ServingSessionHandle(SessionHandle):
         """
         from local_operator.session.frontend_state import ask_wire
 
+        # THROTTLED RE-READ. This runs on EVERY ``_notify`` (every relayed
+        # event), and ``ask_wire`` re-reads ``asks.jsonl`` from disk each time:
+        # ~950 reads per 40 s on a 12-lane manager, each a syscall that costs
+        # the loop a GIL re-acquire behind the lanes (measured ~40 ms apiece
+        # under 12 busy threads; ~1 s of loop wall per 40 s, the top sampled
+        # blocker after the evidence writes moved off-loop). This process's OWN
+        # ask changes do not depend on it: ``_ask_state_changed`` installs the
+        # fresh fold immediately and stamps it. What the re-read catches is a
+        # change made by ANOTHER process, which was only ever noticed when an
+        # unrelated event happened to arrive. A skipped read arms ONE trailing
+        # re-check at the end of the floor (``_schedule_ask_refresh``), so the
+        # bound is a true "at most ``_ASK_REFRESH_MIN_S`` late" even when the
+        # session goes quiet right after the skip (review round 1, R1-2/Q1:
+        # without it a skipped change stayed off the phone fold and the
+        # mirrored card until the next unrelated event, however long).
+        now = time.monotonic()
+        # ``getattr``: a handle built without ``__init__`` (a test double)
+        # has no stamp, and reads as never installed.
+        elapsed = now - getattr(self, "_ask_fold_installed_at", float("-inf"))
+        if elapsed < _ASK_REFRESH_MIN_S:
+            self._schedule_ask_refresh(_ASK_REFRESH_MIN_S - elapsed)
+            return
         try:
             rows, outstanding_count = ask_wire(self._session)
             self._fold.set_asks(rows, outstanding_count)
+            self._ask_fold_installed_at = now
         except Exception:  # noqa: BLE001 -- the card is chrome; the gate is not
             logger.debug("could not publish the ask fold", exc_info=True)
 
@@ -11168,6 +11207,49 @@ class ServingSessionHandle(SessionHandle):
         if running is self._loop:
             return
         raise RuntimeError("this session cannot accept that op right now")
+
+    def _schedule_ask_refresh(self, delay: float) -> None:
+        """Arm one trailing ask re-read ``delay`` from now; coalesced.
+
+        A burst of skipped reads arms a single timer (the flag), mirroring
+        ``_schedule_roster_refresh``. When it fires it republishes through
+        ``_notify``, whose ``_publish_pending_gate`` re-runs
+        ``_refresh_ask_projection`` with the floor elapsed — so the read, the
+        mirrored card and the viewer push happen together. If a fresh install
+        (``_ask_state_changed``) re-stamps the fold meanwhile, that call skips
+        once more and re-arms for the remainder: at most one read per floor.
+        """
+        if getattr(self, "_ask_refresh_scheduled", False):
+            return
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            # A handle built without ``__init__`` (a test double) has no loop
+            # to defer onto; the next ``_notify`` still re-checks.
+            return
+        self._ask_refresh_scheduled = True
+        # WEAKLY, for the same reason as the channel re-check in ``Session``:
+        # the loop's timer must not pin a disposed handle (and its session).
+        ref = weakref.ref(self)
+
+        def fire() -> None:
+            handle = ref()
+            if handle is not None:
+                handle._flush_ask_refresh()
+
+        try:
+            loop.call_later(max(delay, 0.0), fire)
+        except RuntimeError:
+            # A closing loop: nothing left to publish to.
+            self._ask_refresh_scheduled = False
+
+    def _flush_ask_refresh(self) -> None:
+        self._ask_refresh_scheduled = False
+        if getattr(self, "_disposing", False):
+            return
+        try:
+            self._notify()
+        except Exception:  # noqa: BLE001 — a card refresh never fails the loop
+            logger.debug("deferred ask refresh failed", exc_info=True)
 
     def _schedule_roster_refresh(self) -> None:
         """Republish the child roster once per :data:`_ROSTER_REFRESH_COALESCE_S`.

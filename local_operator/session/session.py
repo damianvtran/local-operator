@@ -581,6 +581,10 @@ _FRONTEND_JOBS_FLOOR_S = 0.05
 _FRONTEND_JOBS_MAX_SHARE = 0.25
 _FRONTEND_JOBS_CEILING_S = 1.0
 
+#: Floor between two disk reads of the channel-spend pending sidecar on the
+#: frontend refresh path (see ``Session.pending_channel_records``).
+_CHANNEL_PENDING_MIN_S = 1.0
+
 
 def _frontend_jobs_delay(last_cost_s: float) -> float:
     """How long to wait before the next job-roster tick, given the last one's cost.
@@ -14734,6 +14738,9 @@ class Session:
         """
         store = getattr(self, "_frontend_state_store", None)
         publish = getattr(store, "refresh_spend_channels", None) if store is not None else None
+        # A money edge reads the sidecar fresh; only the per-tick refresh path
+        # is throttled (see ``pending_channel_records``).
+        self._channel_pending_cache = None
         if callable(publish):
             try:
                 publish(self)
@@ -14757,19 +14764,85 @@ class Session:
         one — a lost marker degrades to "nothing pending", never a broken
         publish.
         """
-        try:
-            directory = getattr(self._transcript, "directory", None)
-            if directory is None:
+        # THROTTLED DISK READ. This runs from every jobs tick and every
+        # per-event frontend refresh ON THE SESSION LOOP; even the common
+        # no-sidecar answer is an ``isfile`` syscall, and returning from any
+        # syscall costs the loop a GIL re-acquire behind every busy lane
+        # (measured ~0.5-0.75 s of sampled loop stall per 40 s on a 12-lane
+        # manager). The sidecar is written by ANOTHER process (the voice
+        # routes, ``server/utils/voice_spend.py``) on human timescales, so the
+        # raw entries are re-read at most once per ``_CHANNEL_PENDING_MIN_S``;
+        # the fold exclusion below still runs every call, so a marker the fold
+        # has absorbed retires immediately.
+        # A throttled answer arms ONE trailing re-read at the end of the floor
+        # (``_schedule_channel_pending_recheck``) so a marker written just after
+        # a read still reaches the band within the floor when the session goes
+        # quiet, rather than at the next unrelated tick (review round 1, R1-2).
+        now = time.monotonic()
+        cached = getattr(self, "_channel_pending_cache", None)
+        if cached is not None and now - cached[0] < _CHANNEL_PENDING_MIN_S:
+            entries = cached[1]
+            self._schedule_channel_pending_recheck(_CHANNEL_PENDING_MIN_S - (now - cached[0]))
+        else:
+            try:
+                directory = getattr(self._transcript, "directory", None)
+                if directory is None:
+                    return []
+                entries = read_pending_records(directory)
+            except Exception:  # noqa: BLE001 — a marker read must never break a publish
+                logger.debug("channel pending read failed", exc_info=True)
                 return []
-            entries = read_pending_records(directory)
-        except Exception:  # noqa: BLE001 — a marker read must never break a publish
-            logger.debug("channel pending read failed", exc_info=True)
-            return []
+            self._channel_pending_cache = (now, entries)
         return [
             entry
             for entry in entries
             if not self.channels.has(str(entry.get("record_id", "") or ""))
         ]
+
+    def _schedule_channel_pending_recheck(self, delay: float) -> None:
+        """Arm one trailing sidecar re-read ``delay`` from now; coalesced."""
+        if getattr(self, "_channel_pending_recheck_scheduled", False):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop (a synchronous caller or test host): the next tick re-reads.
+            return
+        self._channel_pending_recheck_scheduled = True
+        # WEAKLY: a pending timer is a loop-owned strong edge, and a disposed
+        # session must stay collectable for up to a floor after its last tick
+        # (``test_launch_subagent``'s retention cells pin that). A collected
+        # session has no band to publish to, so the re-check simply lapses.
+        ref = weakref.ref(self)
+
+        def fire() -> None:
+            session = ref()
+            if session is not None:
+                session._flush_channel_pending_recheck()
+
+        loop.call_later(max(delay, 0.0), fire)
+
+    def _flush_channel_pending_recheck(self) -> None:
+        """Re-read the sidecar; publish the spend band only if it changed.
+
+        Publishing only on a difference keeps the trailing edge free when
+        nothing moved — the common case, a burst of ticks over an unchanged
+        (usually absent) sidecar — so the throttle's saving is kept.
+        """
+        self._channel_pending_recheck_scheduled = False
+        before = getattr(self, "_channel_pending_cache", None)
+        self._channel_pending_cache = None
+        self.pending_channel_records()
+        after = getattr(self, "_channel_pending_cache", None)
+        if before is not None and after is not None and before[1] == after[1]:
+            return
+        store = getattr(self, "_frontend_state_store", None)
+        publish = getattr(store, "refresh_spend_channels", None) if store is not None else None
+        if callable(publish):
+            try:
+                publish(self)
+            except Exception:  # noqa: BLE001 — a publish must never break the loop
+                logger.debug("trailing channel spend publish failed", exc_info=True)
 
     def rebuild_channels_if_needed(self) -> None:
         """The adopt seam for channel history: the legacy backfill.

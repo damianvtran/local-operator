@@ -113,6 +113,11 @@ async def _seed_transcript(directory: Path, megabytes: int) -> None:
 
 
 async def _child_main(args: argparse.Namespace) -> None:
+    # The production runtime (``session/runtime/process.py:main``) starts the
+    # tokenizer warm on a daemon thread before anything else; without it the
+    # FIRST estimate loads cl100k_base inline on the session loop, a stall
+    # production never has (measured 0.3-1.2 s here). Mirror it.
+    from local_operator.compaction.tokens import warm_tokenizer_in_background
     from local_operator.harness.types import ModelSpec, ToolContext
     from local_operator.model import configure
     from local_operator.session.runtime import server as server_module
@@ -122,6 +127,8 @@ async def _child_main(args: argparse.Namespace) -> None:
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.tools.registry import create_tools
+
+    warm_tokenizer_in_background()
 
     marks: list[tuple[str, str, float]] = []
     cpu: dict[str, list[float]] = {}
@@ -254,6 +261,51 @@ async def _child_main(args: argparse.Namespace) -> None:
     ):
         _time_sync(Session, part)
 
+    # ON-LOOP WALL PER SUSPECT (``BENCH_TIME="mod:Owner.attr,mod:func"``): the
+    # sampler above attributes SAMPLED frames, which under GIL contention can
+    # land on a cheap frame that merely happened to be running; this records the
+    # exact wall each named callable spent on the loop thread (calls on worker
+    # threads are counted separately), which is what a disposition needs.
+    loop_thread = threading.get_ident()
+    import importlib
+
+    # ``BENCH_PROFILE=<path>``: cProfile every on-loop call of the timed
+    # suspects and dump the stats there, to find the O(N) inside one.
+    profiler: Any = None
+    if os.environ.get("BENCH_PROFILE"):
+        import cProfile
+
+        profiler = cProfile.Profile()
+    for spec in filter(None, os.environ.get("BENCH_TIME", "").split(",")):
+        module_name, _, attr_path = spec.partition(":")
+        owner: Any = importlib.import_module(module_name)
+        *parents, leaf = attr_path.split(".")
+        for part in parents:
+            owner = getattr(owner, part)
+        import inspect
+
+        # ``getattr_static``: a ``staticmethod``/``classmethod`` must be
+        # re-wrapped as one, or the timer turns it into a bound method.
+        raw = inspect.getattr_static(owner, leaf)
+        rewrap: Any = type(raw) if isinstance(raw, (staticmethod, classmethod)) else None
+        original_fn = raw.__func__ if rewrap else raw
+
+        def _wrap(fn: Any, label: str) -> Any:
+            def timed_fn(*a: Any, **kw: Any) -> Any:
+                c0 = time.perf_counter()
+                try:
+                    if profiler is not None and threading.get_ident() == loop_thread:
+                        return profiler.runcall(fn, *a, **kw)
+                    return fn(*a, **kw)
+                finally:
+                    where = "loop" if threading.get_ident() == loop_thread else "off"
+                    cpu.setdefault(f"{label}@{where}", []).append((time.perf_counter() - c0) * 1000)
+
+            return timed_fn
+
+        wrapped = _wrap(original_fn, attr_path)
+        setattr(owner, leaf, rewrap(wrapped) if rewrap else wrapped)
+
     loop = asyncio.get_running_loop()
     handle = ServingSessionHandle(session, loop, cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
@@ -272,6 +324,7 @@ async def _child_main(args: argparse.Namespace) -> None:
     beat = [time.perf_counter()]
     loop_ident = threading.get_ident()
     offenders: dict[str, float] = {}
+    chains: dict[str, float] = {}
     lags: list[float] = []
 
     async def heartbeat() -> None:
@@ -308,6 +361,14 @@ async def _child_main(args: argparse.Namespace) -> None:
                 f" <- {Path(outer.filename).name}:{outer.name}"
             )
             offenders[key] = offenders.get(key, 0.0) + weight
+            # The innermost frame alone hides WHICH caller put the work on the
+            # loop (``_staged_write`` has a dozen); the innermost three
+            # ``local_operator`` frames name the path to move off-loop.
+            chain = " <- ".join(
+                f"{Path(f.filename).name}:{f.name}"
+                for f in reversed((ours or stack)[-int(os.environ.get("BENCH_CHAIN_DEPTH", "3")) :])
+            )
+            chains[chain] = chains.get(chain, 0.0) + weight
 
     heartbeat_task = asyncio.ensure_future(heartbeat())
     threading.Thread(target=watchdog, daemon=True).start()
@@ -323,17 +384,37 @@ async def _child_main(args: argparse.Namespace) -> None:
     loop.add_signal_handler(signal.SIGTERM, stopped.set)
     await stopped.wait()
     heartbeat_task.cancel()
+    if profiler is not None:
+        profiler.dump_stats(os.environ["BENCH_PROFILE"])
     Path(args.report).write_text(
         json.dumps(
             {
                 "marks": marks,
-                "cpu_ms": {k: base._pcts(v) for k, v in cpu.items()},
+                "cpu_ms": {k: {**base._pcts(v), "sum": round(sum(v), 1)} for k, v in cpu.items()},
                 "loop_lag_ms": base._pcts(lags),
                 "stall_offenders_ms": dict(sorted(offenders.items(), key=lambda kv: -kv[1])[:15]),
+                "stall_chains_ms": dict(sorted(chains.items(), key=lambda kv: -kv[1])[:25]),
             }
         )
     )
     os._exit(0)
+
+
+def _gated_child_env() -> dict[str, str]:
+    """The runtime child's environment, REFUSED unless it carries the gate.
+
+    The child is a real runtime finishing real turns, so an ungated child can
+    put a mock reply on the operator's lock screen. ``bench_send_admission``'s
+    builder sets ``NO_NOTIFY_ENV`` today; checking it here (fail-closed) keeps
+    this script safe if that builder ever changes, and is what the textual
+    isolation sweep (``tests/unit/test_notification_isolation.py``) looks for.
+    """
+    from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+
+    env = base._child_env()
+    if env.get(ENV_DISABLE) != ENV_DISABLE_VALUE:
+        raise SystemExit("bench child env lacks NO_NOTIFY_ENV; refusing to spawn")
+    return env
 
 
 async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
@@ -341,13 +422,6 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
 
     report_path = CONFIG_DIR / "switch-report.json"
     busy = args.condition != "idle"
-    child_env = base._child_env()
-    # The child is a real runtime driving a mock session, so it must never put
-    # the paced stream's text on the operator's lock screen. ``_child_env``
-    # carries the gate today; asserting it here keeps this spawn safe if that
-    # shared builder ever stops doing so (and is what
-    # tests/unit/test_notification_isolation.py sweeps spawners for).
-    assert child_env.get("LOCAL_OPERATOR_NO_NOTIFICATIONS") == "1", "notification gate missing"
     child = subprocess.Popen(
         [
             sys.executable,
@@ -366,7 +440,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        env=child_env,
+        env=_gated_child_env(),
     )
     rows: list[dict[str, Any]] = []
     try:
@@ -471,6 +545,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         "child_cpu_ms": child_report.get("cpu_ms"),
         "loop_lag_ms": child_report.get("loop_lag_ms"),
         "stall_offenders_ms": child_report.get("stall_offenders_ms"),
+        "stall_chains_ms": child_report.get("stall_chains_ms"),
         "errors": [r for r in rows if r["error"]],
         "rows": rows,
     }
