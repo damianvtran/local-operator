@@ -88,8 +88,14 @@ def test_r1_refuses_revocation_lift_and_allow_control_admits_new_phone(
     assert handlers.install_anchor_from(allowed, root) == 0
     assert json.loads(staged.read_bytes())["devices"][-1] == {"device_id": ID_Y}
 
+    # The allow-control staged an ordinary admission; a repeated identical incoming
+    # statement is still accepted (idempotent), while the override keeps R1 bypassable
+    # only when the caller explicitly names it.
     assert handlers.install_anchor_from(source, root, allow_revocation_lift=True) == 0
-    assert json.loads(staged.read_bytes())["devices"] == [{"device_id": ID_Y}]
+    assert json.loads(staged.read_bytes())["devices"] == [
+        {"device_id": ID_X, "revoked": True},
+        {"device_id": ID_Y},
+    ]
 
 
 def test_plant_replaces_existing_list_verbatim(
@@ -212,7 +218,8 @@ def test_authorise_passes_the_admit_purpose_so_stored_password_is_refused(
         "local_operator.operator.pair_handlers.devices.is_revoked_here", lambda *a, **k: True
     )
     monkeypatch.setattr(
-        "local_operator.operator.pair_handlers.devices.clear_revocation", lambda *a, **k: True
+        "local_operator.operator.pair_handlers.devices.forget_revocation",
+        lambda *a, **k: True,
     )
     monkeypatch.setattr(
         "local_operator.operator.pair_handlers.devices.list_devices", lambda *a: []
@@ -272,13 +279,17 @@ def test_admission_command_pins_installed_and_staged_digests(
 
 
 def _run_posix_install(
-    tmp_path: Path, staged: Path, target: Path, old_hex: str
+    tmp_path: Path,
+    staged: Path,
+    target: Path,
+    old_hex: str,
+    staged_hex: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute the real root script with only ownership flags shimmed out."""
     import shutil
 
     shim = tmp_path / "bin"
-    shim.mkdir()
+    shim.mkdir(parents=True)
     real = shutil.which("install")
     assert real is not None
     executable = shim / "install"
@@ -290,7 +301,7 @@ def _run_posix_install(
     )
     executable.chmod(0o755)
     command = trust.install_commands(
-        staged, target, hashlib.sha256(staged.read_bytes()).hexdigest(), old_hex
+        staged, target, staged_hex or hashlib.sha256(staged.read_bytes()).hexdigest(), old_hex
     )[-1]
     assert command[0] == "sudo"
     return subprocess.run(
@@ -304,6 +315,7 @@ def test_privileged_cas_refuses_installed_swap_and_staged_swap(
     original = _anchor()
     _, target = _install(tmp_path, monkeypatch, original)
     staged = tmp_path / "config" / "staged.json"
+    staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_bytes(anchor_bytes(_anchor(admission=trust.ADMISSION_LISTED)))
     old_hex = hashlib.sha256(target.read_bytes()).hexdigest()
 
@@ -313,11 +325,15 @@ def test_privileged_cas_refuses_installed_swap_and_staged_swap(
 
     target.write_bytes(anchor_bytes(original))
     before = target.read_bytes()
-    result = _run_posix_install(tmp_path / "two", staged, target, old_hex)
+    staged_hex = hashlib.sha256(staged.read_bytes()).hexdigest()
+    result = _run_posix_install(tmp_path / "two", staged, target, old_hex, staged_hex)
     # The unchanged control is the discriminating setup: it must be able to pass
     # before its staged-file mutation proves the negative is not a broken rig.
     assert result.returncode == 0, result.stderr
     target.write_bytes(before)
     staged.write_bytes(anchor_bytes(_anchor(devices=({"device_id": ID_Y},))))
-    assert _run_posix_install(tmp_path / "three", staged, target, old_hex).returncode == 3
+    assert (
+        _run_posix_install(tmp_path / "three", staged, target, old_hex, staged_hex).returncode
+        == 3
+    )
     assert target.read_bytes() == before
