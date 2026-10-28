@@ -56,6 +56,7 @@ from local_operator.network.credentials.types import (
     BROKER_ERROR_TTL_MS,
     NO_RETRY,
     PEER_BROKER_OP,
+    QUOTA_REASON_POOL_DEPLETED,
     BrokerError,
     CredentialPlacementEntry,
     Grant,
@@ -468,6 +469,13 @@ class MeshCredentialClient:
             owner_device=str(row.get("owner_device") or self.owner_of(key)),
             owner_device_name=self.owner_label(key),
             retry_after_ms=ttl,
+            # A CACHED ``quota_blocked`` IS ALWAYS THE OWNER'S OWN STATE (#3108 review
+            # r2-m1): the holder-exclusion answer is never remembered (``_from_reply``
+            # / ``_detail_from_owner`` return it uncached), so whatever reached the
+            # cache was the owner's pool. Rebuilt without the marker, a 0-remainder
+            # cached refusal read as the holder's exclusion again and a concurrent
+            # ask rendered the borrower's own cooldowns for it.
+            reason=QUOTA_REASON_POOL_DEPLETED if status == "quota_blocked" else "",
         )
 
     def _remember(self, key: str, error: BrokerError) -> None:

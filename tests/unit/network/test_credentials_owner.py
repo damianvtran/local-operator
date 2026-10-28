@@ -2287,7 +2287,7 @@ def test_a_holder_excluded_healthy_row_and_a_depleted_rest_says_quota_blocked(
     assert refused.get("reason") == "pool_depleted", refused
 
 
-def test_a_holder_excluded_depleted_row_and_an_unknown_rest_says_no_local_credential(
+def test_a_holder_excluded_depleted_row_and_an_unknown_rest_lends_the_unknown_row(
     owner: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#3108 review m3(b): an excluded spent row cannot make the verdict quota."""

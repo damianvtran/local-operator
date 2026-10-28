@@ -656,3 +656,42 @@ def test_an_owner_spent_pool_is_never_rendered_as_the_borrowers_own_rest(
     assert (
         borrowed.client.state.status(STUB_PROVIDER) == "quota_blocked"
     ), "the owner's own refusal must be remembered as the owner's state"
+
+
+def test_a_cached_owner_quota_refusal_keeps_its_pool_depleted_marker(
+    borrowed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3108 review r2-m1: the refusal REBUILT from the cache is still the owner's.
+
+    The owner's whole pool is spent with no stated reset, so it refuses with no
+    remainder and the borrower (which excluded nothing) remembers it. The cache
+    rebuilds the refusal from its observation row; without the marker that
+    0-remainder ``quota_blocked`` read as the holder's own exclusion again, and a
+    concurrent ask rendered this device's cooldowns for the owner's state.
+    """
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    spent = UsageReport(
+        STUB_PROVIDER,
+        fetched_at=int(time.time() * 1000) - 1_000,
+        limits=[
+            UsageLimit(
+                id="synthetic:5h",
+                label="5h",
+                window="5 hour",
+                shared=True,
+                amount=UsageAmount(used_fraction=1.0),
+            )
+        ],
+    )
+    monkeypatch.setattr(borrowed.owner.auth, "_cached_usage_report", lambda row, p: spent)
+    outcome = borrowed.client.request_grant_sync(
+        STUB_PROVIDER, session_id="sess-r2m1", model_id="claude-opus-5-5", provider=STUB_PROVIDER
+    )
+    assert isinstance(outcome, BrokerError) and outcome.code == "quota_blocked", outcome
+
+    cached = borrowed.client.cached_refusal(STUB_PROVIDER)
+
+    assert cached is not None and cached.code == "quota_blocked", cached
+    assert cached.reason == "pool_depleted", cached
+    assert not cached.is_holder_exclusion, cached
