@@ -332,8 +332,19 @@ async def ack(
     access: OAuthAccess | None,
     client_ref: str | None = None,
     client: WireClient | None = None,
+    envelope_digest: str | None = None,
+    recheck_confirmed: bool = False,
 ) -> AckOutcome:
     """Record the intent, then make ONE ack request with the EXACT tuple.
+
+    ``envelope_digest`` binds the intent to the envelope the verdict was made
+    for (with the owner's enrollment generation, which the store stamps), so a
+    later hand-off on this recorded verdict can prove it is still the same
+    decision (PR #3063 review M7). It never travels to the hub.
+
+    ``recheck_confirmed`` is for a hand-off on a RECORDED verdict only: an
+    intent the hub already confirmed is re-sent as a same-state repeat (see
+    :func:`flush_ack`) so the hub's per-ack sender check runs again.
 
     The intent is durable BEFORE dispatch; :func:`flush_ack` maps outcomes
     without ever overwriting the write-once verdict: a definite 409 refusal
@@ -351,8 +362,17 @@ async def ack(
     # then returns without a second request; a pending one re-sends the same
     # key, which the hub answers as a replay.
     ref = client_ref or store.intent_client_ref(owner, message_id, target) or str(uuid.uuid4())
-    intent_id = store.record_ack_intent(owner, message_id, target, receipt, ref)
-    return await flush_ack(owner, intent_id, config_dir=config_dir, access=access, client=client)
+    intent_id = store.record_ack_intent(
+        owner, message_id, target, receipt, ref, envelope_digest=envelope_digest
+    )
+    return await flush_ack(
+        owner,
+        intent_id,
+        config_dir=config_dir,
+        access=access,
+        client=client,
+        recheck_confirmed=recheck_confirmed,
+    )
 
 
 async def flush_ack(
@@ -362,6 +382,7 @@ async def flush_ack(
     config_dir: Path,
     access: OAuthAccess | None,
     client: WireClient | None = None,
+    recheck_confirmed: bool = False,
 ) -> AckOutcome:
     """Replay ONE pending intent with its exact stored tuple (crash recovery).
 
@@ -379,8 +400,12 @@ async def flush_ack(
         # later read (the wire exposes only delivery state/time), so this is
         # a HOLD, never a fabricated tuple.
         raise PullRefused("no_intent", "ack intent is absent or unreadable; hold")
-    if intent["state"] == ACK_CONFIRMED:
+    if intent["state"] == ACK_CONFIRMED and not recheck_confirmed:
         return AckOutcome(intent_id, ACK_CONFIRMED, None, None, None)
+    if intent["state"] == ACK_CONFIRMED:
+        return await _recheck_confirmed(
+            owner, intent, config_dir=config_dir, access=access, client=client
+        )
     if intent["state"] == ACK_CONFLICT:
         return AckOutcome(intent_id, ACK_CONFLICT, None, intent.get("error_code"), None)
     receipt = intent["receipt"]
@@ -463,6 +488,51 @@ async def flush_ack(
         return AckOutcome(intent_id, ACK_PENDING, None, code, None)
     _commit_result(state=ACK_CONFIRMED, error_code=None)
     return AckOutcome(intent_id, ACK_CONFIRMED, delivery_state, None, None)
+
+
+async def _recheck_confirmed(
+    owner: OwnerSnapshot,
+    intent: Mapping[str, Any],
+    *,
+    config_dir: Path,
+    access: OAuthAccess | None,
+    client: WireClient | None,
+) -> AckOutcome:
+    """Re-send a CONFIRMED intent as a same-state repeat: the hub's standing check.
+
+    WHY (PR #3063 round 6 matrix, "owner revokes the sender"): the hub
+    re-evaluates the SENDER on every ack — membership, endpoint, consent
+    binding and any pair deny, BEFORE its state machine (agent-server
+    ``bridge_ack_service.go``) — and that is the only place a revocation is
+    enforced. A connector stopped after the confirmed ACK but before the
+    hand-off used to deliver on restart with no hub I/O, so a sender revoked
+    while the device was down still reached the session. The repeat carries
+    the STORED tuple and ref; the hub answers an agreeing repeat with a 200
+    no-op, so nothing moves on success.
+
+    The intent stays ``confirmed`` whatever happens (a confirmed intent is a
+    fact about the hub and is never downgraded): a refusal RAISES, and the
+    connector holds the message visibly until a later repeat is allowed.
+    """
+
+    receipt = intent["receipt"]
+    if receipt is None:
+        raise PullRefused("no_intent", "intent carries no screening tuple; hold")
+    wire = _client_for(config_dir, client)
+    _guard_destination(owner, wire)
+    result = await wire.ack(
+        intent["message_id"],
+        tenant_id=owner.tenant_id,
+        state=intent["target"],
+        screening=receipt,
+        client_ref=intent["client_ref"],
+        access=access,
+    )
+    delivery = result.get("delivery") if isinstance(result, Mapping) else None
+    state = delivery.get("state") if isinstance(delivery, Mapping) else None
+    if state != intent["target"]:
+        raise PullRefused("result_mismatch", "the standing re-check did not answer the target")
+    return AckOutcome(str(intent["intent_id"]), ACK_CONFIRMED, state, None, None)
 
 
 async def recover_ack(

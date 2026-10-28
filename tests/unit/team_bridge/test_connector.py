@@ -557,7 +557,7 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
 
     deliveries_seen_sender_display: list[object] = []
 
-    async def fake_ack(owner, message_id, target, receipt, *, config_dir, access):
+    async def fake_ack(owner, message_id, target, receipt, *, config_dir, access, **_seam_kwargs):
         record["acks"].append(target)
         # The REAL frozen intent: the confirmed outcome must resolve to THIS
         # row by id (S-12), so the default fake records the real one — the
@@ -643,7 +643,9 @@ def test_spine_ack_pending_holds_without_delivery(tmp_path, monkeypatch) -> None
     store, owner = _enroll(tmp_path)
     record, _ = _wire_spine(monkeypatch, tmp_path)
 
-    async def pending_ack(owner_, message_id, target, receipt, *, config_dir, access):
+    async def pending_ack(
+        owner_, message_id, target, receipt, *, config_dir, access, **_seam_kwargs
+    ):
         record["acks"].append(target)
         # S-12: an ORDINARY return is not a confirmed read — the transport
         # RETURNS pending; the spine must HOLD, never fabricate the ack.
@@ -689,7 +691,9 @@ def test_spine_ack_binding_mismatch_arms_hold_without_delivery(tmp_path, monkeyp
             "connector-test",
         )
 
-        async def bound_ack(owner_, message_id, target, receipt_, *, config_dir, access):
+        async def bound_ack(
+            owner_, message_id, target, receipt_, *, config_dir, access, **_seam_kwargs
+        ):
             record["acks"].append(target)
             return SimpleNamespace(state="confirmed", intent_id=intent_id)
 
@@ -748,7 +752,9 @@ def test_spine_ack_binding_mismatch_arms_hold_without_delivery(tmp_path, monkeyp
             (foreign.endpoint_id,),
         )
 
-    async def foreign_ack(owner_, message_id, target, receipt_, *, config_dir, access):
+    async def foreign_ack(
+        owner_, message_id, target, receipt_, *, config_dir, access, **_seam_kwargs
+    ):
         record["acks"].append(target)
         return SimpleNamespace(state="confirmed", intent_id=foreign_id)
 
@@ -790,7 +796,9 @@ def test_spine_ack_full_tuple_mismatch_arms_hold(tmp_path, monkeypatch) -> None:
     record, body = _wire_spine(monkeypatch, tmp_path)
     altered = replace(_receipt(body), model="model-b").validated()
 
-    async def wrong_tuple_ack(owner_, message_id, target, receipt_, *, config_dir, access):
+    async def wrong_tuple_ack(
+        owner_, message_id, target, receipt_, *, config_dir, access, **_seam_kwargs
+    ):
         record["acks"].append(target)
         from local_operator.team_bridge.store import Store as _AckStore
 
@@ -817,7 +825,9 @@ def test_spine_ack_pending_ledger_with_confirmed_outcome_holds(tmp_path, monkeyp
     store, owner = _enroll(tmp_path)
     record, body = _wire_spine(monkeypatch, tmp_path)
 
-    async def lying_ack(owner_, message_id, target, receipt_, *, config_dir, access):
+    async def lying_ack(
+        owner_, message_id, target, receipt_, *, config_dir, access, **_seam_kwargs
+    ):
         record["acks"].append(target)
         from local_operator.team_bridge.store import Store as _AckStore
 
@@ -1108,6 +1118,9 @@ def test_a_stop_during_the_stale_claim_redrive_never_loses_the_message(
 
 #: Captured at import, before any case's monkeypatch replaces the seam.
 _PRODUCTION_ACK_READ = wake_mod.ack_read
+#: The REAL screening seam, captured before any case patches it: the
+#: recovery matrix drives the production cycle and cache through it.
+_PRODUCTION_SCREEN_ITEM = wake_mod.screen_item
 
 
 class _AckWire:
@@ -1145,6 +1158,7 @@ def test_a_stop_after_the_read_ack_still_delivers_once(tmp_path, monkeypatch, de
     monkeypatch.setattr(pull_mod, "events", _quiet_events)
     wire = _AckWire()
     monkeypatch.setattr(pull_mod, "_client_for", lambda config_dir, client: wire)
+    _hub_status(monkeypatch, owner)  # the recorded-verdict hand-off asks the hub
     # The real ``pull.ack`` guards the owner on a REAL pinned OAuth access.
     access = OAuthAccess(
         access_token="tok",
@@ -1220,6 +1234,7 @@ def test_a_redriven_hold_wakes_once_across_many_passes(tmp_path, monkeypatch, fi
     record, _ = _wire_spine(monkeypatch, tmp_path)
     monkeypatch.setattr(pull_mod, "events", _quiet_events)
     wire, access = _real_ack_access(monkeypatch, owner)
+    _hub_status(monkeypatch, owner)  # the recorded-verdict hand-off asks the hub
     delivered_fake = wake_mod.deliver_wake
     if first_code == "delivery_failed":
 
@@ -1342,7 +1357,6 @@ def test_a_stop_during_the_read_ack_post_is_flushed_and_delivered_once(
         result = await screened(
             owner_, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
-        _commit_screening_receipt(config_dir, owner_, result.receipt)
         return result
 
     monkeypatch.setattr(wake_mod, "screen_item", screening_step_5)
@@ -1375,7 +1389,7 @@ def test_a_stop_during_the_read_ack_post_is_flushed_and_delivered_once(
         o["action"] for out in outcomes for o in out["retries"].get("outcomes", ())
     ]  # the retry pass reports per-row actions
     assert len(record["delivered"]) == 1, held
-    assert wire.refs == [original_ref]  # ONE hub ACK, the ORIGINAL ref
+    assert set(wire.refs) == {original_ref}  # the ORIGINAL ref only, never a second
     intent = store.ack_intent(owner, pending["intent_id"])
     assert intent is not None and intent["state"] == "confirmed"
     assert store.screening_hold(owner, "bmsg_1") is None
@@ -1433,41 +1447,6 @@ def _hub_status(monkeypatch: Any, owner: OwnerSnapshot) -> dict[str, Any]:
     return hub
 
 
-def _commit_screening_receipt(config_dir: Path, owner: OwnerSnapshot, receipt: Any) -> None:
-    """What the REAL screener commits before it answers ``deliver``.
-
-    ``Store.finish_screening`` writes the message's receipt with its
-    ``creator_generation``; the recorded-verdict path reads exactly that to
-    refuse a verdict from before a re-login (review M6, gate 2). Fake screens
-    that stand in for the whole cycle must therefore write it too.
-    """
-
-    from local_operator.team_bridge.store import _owner_key, state_db_path
-
-    with sqlite3.connect(state_db_path(config_dir)) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, "
-            "body_sha256, template_sha256, prompt_version, model, verdict, categories, "
-            "envelope_digest, admission_revision, policy_epoch, creator_generation, "
-            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                _owner_key(owner),
-                "bmsg_1",
-                receipt.body_sha256,
-                receipt.template_sha256,
-                receipt.prompt_version,
-                receipt.model,
-                receipt.verdict,
-                json.dumps(sorted(receipt.categories)),
-                "e" * 64,
-                "rev-1",
-                1,
-                owner.enrollment_generation,
-                time.time(),
-            ),
-        )
-
-
 def _stop_during_the_read_ack_post(monkeypatch, tmp_path) -> tuple[Any, ...]:
     """A connector stopped DURING the read-ACK POST, the m4 shape: the intent
     is durable and pending, the hub never answered, the ref is still due."""
@@ -1499,7 +1478,6 @@ def _stop_during_the_read_ack_post(monkeypatch, tmp_path) -> tuple[Any, ...]:
             body_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             categories=(),
         ).validated()
-        _commit_screening_receipt(config_dir, owner_, receipt)
         return ScreenResult(disposition="deliver", receipt=receipt)
 
     monkeypatch.setattr(wake_mod, "screen_item", screen)
@@ -1542,7 +1520,7 @@ def test_a_changed_screening_tuple_after_the_replay_delivers_on_the_stored_verdi
         clock.now += loop_mod.RETRY_MAX_S
     assert len(record["delivered"]) == 1
     assert screens == []  # delivered on the stored verdict, never re-screened
-    assert wire.refs == [pending["client_ref"]]
+    assert set(wire.refs) == {pending["client_ref"]}  # the ORIGINAL ref only
     assert store.screening_hold(owner, "bmsg_1") is None
     assert store.drain_feed_refs(owner, 3) == []
 
@@ -1579,7 +1557,6 @@ def test_a_confirmed_read_with_a_stopped_handoff_delivers_on_its_verdict(
             body_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             categories=(),
         ).validated()
-        _commit_screening_receipt(config_dir, owner_, receipt)
         return ScreenResult(disposition="deliver", receipt=receipt)
 
     monkeypatch.setattr(wake_mod, "screen_item", screen)
@@ -1604,7 +1581,9 @@ def test_a_confirmed_read_with_a_stopped_handoff_delivers_on_its_verdict(
         clock.now += wake_mod.CLAIM_TTL_S + 5
     assert len(record["delivered"]) == 1
     assert len(screens) == 1  # the restart never re-screened
-    assert len(wire.refs) == 1  # and never re-sent the ACK
+    # Never a second ref: the hand-off's standing re-check re-sends the SAME
+    # stored ref as a same-state repeat (a hub no-op), never a new tuple.
+    assert set(wire.refs) == {wire.refs[0]}
     assert store.screening_hold(owner, "bmsg_1") is None
     assert store.drain_feed_refs(owner, 3) == []
 
@@ -1625,7 +1604,6 @@ def _confirmed_then_stopped_at_the_handoff(monkeypatch, tmp_path) -> tuple[Any, 
     async def screen(owner_, item, *, config_dir, auth_store, settings=None):
         screens.append(int(owner_.enrollment_generation))
         receipt = _receipt(body)
-        _commit_screening_receipt(config_dir, owner_, receipt)
         return ScreenResult(disposition="deliver", receipt=receipt)
 
     monkeypatch.setattr(wake_mod, "screen_item", screen)
@@ -1681,7 +1659,7 @@ def test_a_recorded_verdict_still_passes_the_hubs_current_authority(
         clock.now += _ACROSS_A_LEASE_S
     assert len(record["delivered"]) == 1
     assert screens == [1]  # the only model call is the original screen
-    assert len(wire.refs) == 1  # one hub ACK, the original
+    assert set(wire.refs) == {wire.refs[0]}  # one ref, the original, re-checked
     assert store.screening_hold(owner, "bmsg_1") is None
 
 
@@ -1815,7 +1793,9 @@ def test_a_bounce_whose_blocked_ack_did_not_confirm_is_a_hold(tmp_path, monkeypa
     store, owner = _enroll(tmp_path)
     record, _ = _wire_spine(monkeypatch, tmp_path, disposition="bounce")
 
-    async def pending_ack(owner_, message_id, target, receipt, *, config_dir, access):
+    async def pending_ack(
+        owner_, message_id, target, receipt, *, config_dir, access, **_seam_kwargs
+    ):
         record["acks"].append(target)
         return SimpleNamespace(state="pending", intent_id="i-1")
 
@@ -2700,3 +2680,401 @@ def test_a_held_message_is_redriven_on_the_next_pass_once_the_owner_messages_the
     other = store.screening_hold(owner, "bmsg_other1")
     assert other is not None and other["retry_at"] == later
     loop_mod._RETRY_ATTEMPTS.clear()
+
+
+# -- PR #3063 round 6: the stop/restart recovery MATRIX ------------------------
+#
+# Six rounds each fixed one probe and opened the next defect, because every
+# probe was a hand-built rig. This matrix replaces that: ONE driver, the REAL
+# ``pull.ack`` (intent ledger, stored ``client_ref``, replay), the REAL
+# screening cycle and fingerprint cache (only the model reply is scripted; no
+# helper writes a row production would not write), and a hub that answers
+# like the server's ack state machine. Every cell crosses claim leases and
+# asserts totals at the END.
+
+
+class _MatrixHub:
+    """The hub's ack endpoint, per agent-server ``bridge_ack_service.go``:
+    the counterpart's standing is re-checked on EVERY ack, repeats included
+    (a revoked sender answers 403 ``recipient_unavailable``); a same-state
+    repeat with an agreeing verdict is a 200 no-op; a disagreeing one is 409
+    ``invalid_transition``. Idempotency is the state machine, not the ref."""
+
+    base_url = OWNER.canonical_base_url
+
+    def __init__(self) -> None:
+        self.reads: dict[str, tuple[Any, ...]] = {}
+        self.applied: list[str] = []
+        self.conflicts = 0
+        self.revoked = False
+        self.stop_in_post = False
+
+    @staticmethod
+    def _tuple(screening: Any) -> tuple[Any, ...]:
+        get = (
+            screening.get if isinstance(screening, dict) else (lambda key: getattr(screening, key))
+        )
+        return (
+            get("verdict"),
+            get("model"),
+            get("prompt_version"),
+            get("template_sha256"),
+            get("body_sha256"),
+            tuple(sorted(get("categories") or ())),
+        )
+
+    async def ack(self, message_id: str, **kwargs: Any) -> dict[str, Any]:
+        from local_operator.team_bridge.client import BridgeRefusal
+
+        if self.stop_in_post:
+            # The stop lands DURING the POST: the intent is durable, the hub
+            # never saw the request.
+            self.stop_in_post = False
+            raise asyncio.CancelledError
+        if self.revoked:
+            raise BridgeRefusal("recipient_unavailable", "counterpart", http_status=403)
+        attached = self._tuple(kwargs["screening"])
+        stored = self.reads.get(message_id)
+        if stored is None:
+            self.reads[message_id] = attached
+            self.applied.append(message_id)
+        elif stored != attached:
+            self.conflicts += 1
+            raise BridgeRefusal("invalid_transition", "disagreeing repeat", http_status=409)
+        return {"delivery": {"state": kwargs["state"], "state_at": "t"}}
+
+
+_MATRIX_SOURCES = ("fresh", "cache_hit")
+_MATRIX_INTENTS = ("none", "pending", "confirmed")
+_MATRIX_CHANGES = ("none", "model", "relogin", "status_withdrawn", "sender_revoked")
+_MATRIX_STOPS = ("cancel", "kill")
+#: Changes the hub or the owner's policy REFUSES: the message must sit in a
+#: visible hold while the refusal stands, and clear once it is lifted.
+_REFUSING = ("status_withdrawn", "sender_revoked")
+
+
+def _matrix_config(tmp_path: Path, model: str) -> None:
+    (tmp_path / "config.yml").write_text(
+        json.dumps(
+            {"values": {"hosting": "openai", "model_name": model, "team_bridge": {"enabled": True}}}
+        ),
+        encoding="utf-8",
+    )
+
+
+def _expected_model_calls(source: str, intent: str, change: str) -> int:
+    """One screen before the stop (``bmsg_1`` fresh, or ``bmsg_0`` that the
+    cache then serves). A stop at ANY point after that screen leaves a recorded
+    decision — the message's own receipt (stopped before the ACK), or its read
+    intent — and the restart hands off on it with NO second model call, even
+    under a changed model. Two cases re-screen, by design: a re-login (a new
+    enrollment generation is a new owner, whose decision must be its own; the
+    cache is generation-fenced too), and a CACHE-SERVED message stopped before
+    its ACK under a model change — the cache writes no row for it and the hub
+    was never told, so there is no decision to carry and re-screening under
+    the new model is harmless."""
+
+    rescreen = change == "relogin" or (
+        source == "cache_hit" and intent == "none" and change == "model"
+    )
+    return 1 + (1 if rescreen else 0)
+
+
+def _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop) -> dict[str, Any]:
+    from local_operator.team_bridge import model_boundary as boundary_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+    _matrix_config(tmp_path, "gpt-5.4")
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    hub = _MatrixHub()
+    monkeypatch.setattr(pull_mod, "_client_for", lambda config_dir, client: hub)
+    monkeypatch.setattr(wake_mod, "ack_read", _PRODUCTION_ACK_READ)
+    monkeypatch.setattr(wake_mod, "screen_item", _PRODUCTION_SCREEN_ITEM)
+    status = _hub_status(monkeypatch, owner)
+    access = OAuthAccess(
+        access_token="tok",
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        org_id=owner.tenant_id,
+    )
+
+    async def fetch(owner_, message_id, *, config_dir, access, auth_store):
+        item = _item(body)
+        item["message"]["id"] = message_id
+        return item
+
+    monkeypatch.setattr(wake_mod, "fetch_item", fetch)
+    model_calls: list[str] = []
+
+    def scripted_runner(**kwargs: Any) -> Any:
+        # ONLY the model is scripted; the cycle, cache, ledger and receipts
+        # are the production ones.
+        def runner(prompt: str, *, default_model: str, **_: Any) -> tuple[str, str]:
+            model_calls.append(default_model)
+            return "VERDICT: deliver\nREASON: ordinary.", default_model
+
+        return runner
+
+    monkeypatch.setattr(boundary_mod, "make_screening_runner", scripted_runner)
+
+    def drive(current: OwnerSnapshot) -> None:
+        for _ in range(4):  # across more than one 15-minute claim lease
+            try:
+                _iterate(current, tmp_path, access)
+            except Exception:  # noqa: BLE001 - run_forever's backoff absorbs it
+                pass
+            clock.now += _ACROSS_A_LEASE_S
+
+    if source == "cache_hit":
+        # Another message with the same bytes and envelope screens first; the
+        # REAL cache then serves ``bmsg_1`` with no row of its own.
+        _one_pending_ref(store, owner, "bmsg_0")
+        _iterate(owner, tmp_path, access)
+        assert len(record["delivered"]) == 1 and len(model_calls) == 1
+        record["delivered"].clear()
+
+    delivered_fake = wake_mod.deliver_wake
+    if intent == "none":
+
+        async def stopped_before_the_ack(*args: Any, **kwargs: Any) -> Any:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(wake_mod, "ack_read", stopped_before_the_ack)
+    elif intent == "pending":
+        hub.stop_in_post = True
+    else:
+
+        async def stopped_at_the_handoff(*args: Any, **kwargs: Any) -> str:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(wake_mod, "deliver_wake", stopped_at_the_handoff)
+    store.record_feed_batch(
+        owner, feed_seq(4), ["message_available:message_id=bmsg_1"], resync_required=False
+    )
+    if stop == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            _iterate(owner, tmp_path, access)
+    else:
+        # SIGKILL: no ``finally`` runs, so the claim stays held by a dead
+        # owner until its lease expires; the durable ref is still there.
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                wake_mod.handle_message_available(
+                    owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=access
+                )
+            )
+        store.claim(
+            owner, "bmsg_1", "sess_cos", "connector:killed", expiry=clock.now + wake_mod.CLAIM_TTL_S
+        )
+    monkeypatch.setattr(wake_mod, "ack_read", _PRODUCTION_ACK_READ)
+    monkeypatch.setattr(wake_mod, "deliver_wake", delivered_fake)
+    recorded = store.recorded_intent(owner, "bmsg_1", "read")
+    expected_state = {"none": None, "pending": "pending", "confirmed": "confirmed"}[intent]
+    assert (recorded or {}).get("state") == expected_state
+
+    # -- while the device is down ------------------------------------------
+    if change == "model":
+        _matrix_config(tmp_path, "gpt-5.4-mini")  # a ``lop`` update moved the default
+    elif change == "relogin":
+        owner = OwnerSnapshot(
+            credential_id=owner.credential_id,
+            account_id=owner.account_id,
+            tenant_id=owner.tenant_id,
+            endpoint_id=owner.endpoint_id,
+            canonical_base_url=owner.canonical_base_url,
+            enrollment_generation=store.invalidate(owner),
+        )
+        store.record_feed_batch(
+            owner, feed_seq(9), ["message_available:message_id=bmsg_1"], resync_required=False
+        )
+    elif change == "status_withdrawn":
+        status["available"] = False
+    elif change == "sender_revoked":
+        hub.revoked = True
+
+    out: dict[str, Any] = {}
+    drive(owner)
+    if change in _REFUSING:
+        out["refused_deliveries"] = len(record["delivered"])
+        hold = store.screening_hold(owner, "bmsg_1")
+        out["refused_hold"] = hold["hold_code"] if hold else None
+        status["available"] = True
+        hub.revoked = False
+        drive(owner)
+    hold = store.screening_hold(owner, "bmsg_1")
+    out.update(
+        deliveries=len(record["delivered"]),
+        hub_reads=hub.applied.count("bmsg_1"),
+        conflicts=hub.conflicts,
+        model_calls=len(model_calls),
+        hold=hold["hold_code"] if hold else None,
+        refs=len(store.drain_feed_refs(owner, 10)),
+    )
+    return out
+
+
+@pytest.mark.parametrize("stop", _MATRIX_STOPS)
+@pytest.mark.parametrize("change", _MATRIX_CHANGES)
+@pytest.mark.parametrize("intent", _MATRIX_INTENTS)
+@pytest.mark.parametrize("source", _MATRIX_SOURCES)
+def test_stop_restart_recovery_matrix(tmp_path, monkeypatch, source, intent, change, stop) -> None:
+    """Every (screening source x intent at stop x change while down x stop
+    kind) cell ends with exactly ONE delivery, ONE read applied at the hub,
+    no conflicting ACK, no leftover hold or ref, and only the model calls the
+    change genuinely requires; a refusing change first holds VISIBLY with zero
+    deliveries, then clears once lifted."""
+
+    out = _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop)
+    # One greppable line per cell: the remediation's before/after table.
+    print(f"MATRIX {source}/{intent}/{change}/{stop} {json.dumps(out, sort_keys=True)}")
+    if change in _REFUSING:
+        assert (out["refused_deliveries"], out["refused_hold"] is not None) == (0, True), out
+    assert out["deliveries"] == 1, out
+    assert out["hub_reads"] == 1 and out["conflicts"] == 0, out
+    assert out["hold"] is None and out["refs"] == 0, out
+    assert out["model_calls"] == _expected_model_calls(source, intent, change), out
+
+
+def _request_message_seam(monkeypatch: Any) -> None:
+    """``pull.message`` answering a PENDING request (the ask-carrying kind)."""
+
+    async def request_message(owner_, message_id, *, config_dir, access, client=None):
+        return SimpleNamespace(
+            message_id=message_id,
+            message_type="request",
+            request_state="pending",
+            thread_id="bth_1",
+            request_expires_at="",
+            request_ref="req-1",
+            sender_account_id="acc_sender",
+            sender_endpoint_id="ep_sender",
+            recipient_account_id=OWNER.account_id,
+            recipient_endpoint_id=OWNER.endpoint_id,
+            tenant_id=OWNER.tenant_id,
+        )
+
+    monkeypatch.setattr(pull_mod, "message", request_message)
+
+
+@pytest.mark.parametrize("stop", _MATRIX_STOPS)
+def test_recovery_matrix_request_across_a_policy_republish(tmp_path, monkeypatch, stop) -> None:
+    """QA r4 O3, as a matrix cell. A REQUEST has a confirmed verdict and the
+    connector dies in the handoff. While it is down the default model changes
+    and another message screens first, publishing the new policy, so the
+    request's proof is no longer current and its envelope (which grants the
+    human an ask) refuses ``stale_proof``. That is a VISIBLE hold, with no
+    delivery. Once the original policy is published again (the model change
+    is rolled back and another message screens under it), the hold must clear
+    and the request deliver exactly once, on its recorded verdict, with one
+    read at the hub and no extra model call for it. Totals at the END."""
+
+    from local_operator.team_bridge import model_boundary as boundary_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+    _request_message_seam(monkeypatch)
+    _matrix_config(tmp_path, "gpt-5.4")
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    hub = _MatrixHub()
+    monkeypatch.setattr(pull_mod, "_client_for", lambda config_dir, client: hub)
+    monkeypatch.setattr(wake_mod, "ack_read", _PRODUCTION_ACK_READ)
+    monkeypatch.setattr(wake_mod, "screen_item", _PRODUCTION_SCREEN_ITEM)
+    _hub_status(monkeypatch, owner)
+    access = OAuthAccess(
+        access_token="tok",
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        org_id=owner.tenant_id,
+    )
+
+    def request_item(message_id: str, text: str) -> dict[str, Any]:
+        item = _item(text)
+        item["message"].update(
+            id=message_id, type="request", request={"kind": "approval", "ref": "req-1"}
+        )
+        return item
+
+    async def fetch(owner_, message_id, *, config_dir, access, auth_store):
+        return request_item(message_id, body)
+
+    monkeypatch.setattr(wake_mod, "fetch_item", fetch)
+    model_calls: list[str] = []
+
+    def scripted_runner(**kwargs: Any) -> Any:
+        def runner(prompt: str, *, default_model: str, **_: Any) -> tuple[str, str]:
+            model_calls.append(default_model)
+            return "VERDICT: deliver\nREASON: ordinary.", default_model
+
+        return runner
+
+    monkeypatch.setattr(boundary_mod, "make_screening_runner", scripted_runner)
+
+    def publish_by_screening(message_id: str) -> None:
+        # The REAL publisher: another message's screen runs the cycle, which
+        # publishes the configured policy before it screens.
+        asyncio.run(
+            _PRODUCTION_SCREEN_ITEM(
+                owner,
+                request_item(message_id, f"other {message_id}"),
+                config_dir=tmp_path,
+                auth_store=None,
+            )
+        )
+
+    async def stopped_at_the_handoff(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError
+
+    delivered_fake = wake_mod.deliver_wake
+    monkeypatch.setattr(wake_mod, "deliver_wake", stopped_at_the_handoff)
+    _one_pending_ref(store, owner)
+    if stop == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            _iterate(owner, tmp_path, access)
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                wake_mod.handle_message_available(
+                    owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=access
+                )
+            )
+        store.claim(
+            owner, "bmsg_1", "sess_cos", "connector:killed", expiry=clock.now + wake_mod.CLAIM_TTL_S
+        )
+    monkeypatch.setattr(wake_mod, "deliver_wake", delivered_fake)
+    recorded = store.recorded_intent(owner, "bmsg_1", "read")
+    assert recorded is not None and recorded["state"] == "confirmed"
+    request_calls = len(model_calls)
+
+    _matrix_config(tmp_path, "gpt-5.4-mini")  # an update changes the default model
+    publish_by_screening("bmsg_8")
+    for _ in range(4):
+        _iterate(owner, tmp_path, access)
+        clock.now += _ACROSS_A_LEASE_S
+    refused = len(record["delivered"])
+    held = store.screening_hold(owner, "bmsg_1")
+
+    _matrix_config(tmp_path, "gpt-5.4")  # rolled back
+    publish_by_screening("bmsg_9")
+    for _ in range(4):
+        _iterate(owner, tmp_path, access)
+        clock.now += _ACROSS_A_LEASE_S
+    out = {
+        "refused_deliveries": refused,
+        "refused_hold": held["hold_code"] if held else None,
+        "deliveries": len(record["delivered"]),
+        "hub_reads": hub.applied.count("bmsg_1"),
+        "conflicts": hub.conflicts,
+        "request_model_calls": request_calls,
+        "hold": (store.screening_hold(owner, "bmsg_1") or {}).get("hold_code"),
+    }
+    print(f"MATRIX request/confirmed/policy_republished/{stop} {json.dumps(out, sort_keys=True)}")
+    assert out["refused_deliveries"] == 0 and out["refused_hold"] is not None, out
+    assert out["deliveries"] == 1 and out["hub_reads"] == 1 and out["conflicts"] == 0, out
+    assert out["request_model_calls"] == 1 and out["hold"] is None, out

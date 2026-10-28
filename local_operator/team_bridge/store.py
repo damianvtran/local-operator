@@ -269,6 +269,8 @@ CREATE TABLE IF NOT EXISTS ack_intents (
     error_code TEXT,
     retry_after REAL,
     created_at REAL NOT NULL,
+    creator_generation INTEGER,
+    envelope_digest TEXT,
     UNIQUE (owner_key, message_id, target)
 );
 CREATE TABLE IF NOT EXISTS feed_refs (
@@ -1113,9 +1115,10 @@ _HOLD_UPSERT = (
     "hold_code = excluded.hold_code, retry_at = excluded.retry_at"
 )
 
-#: What a replay owes for an admission's card (PR #3063 reviews M5/m11).
-#: ``owed``: the reservation is still live (pending/claimed) and no card was
-#: recorded — post it. ``posted``: recorded — a duplicate. ``settled``: the
+#: What a replay owes for an admission's card (PR #3063 reviews M5/m11/m15).
+#: ``owed``: the reservation is still ``pending`` and no card was recorded —
+#: post it. ``posted``: recorded, or ``claimed`` (a body turn already took the
+#: body, so the session was woken) — a duplicate. ``settled``: the
 #: reservation is completed/retired with no record — the body was served or
 #: will never be, so a card now would wake the agent for nothing; record it
 #: and stop.
@@ -2217,9 +2220,11 @@ class Store:
         hub admitted the message; only ``card_posted_at`` proves the session
         was woken for it — a fact about THIS admission's card, never inferred
         from some other row (a hold of any code once read as "card owed" and
-        posted a second card). WHY THE STATE TOO (review m11): an unrecorded
-        card is owed only while the reservation is live; a completed or
-        retired one answers :data:`CARD_SETTLED`. Live-owner fenced; a fenced
+        posted a second card). WHY THE STATE TOO (reviews m11/m15): an
+        unrecorded card is owed only while the reservation is ``pending``; a
+        ``claimed`` one was already taken by a body turn (:data:`CARD_POSTED`)
+        and a completed or retired one answers :data:`CARD_SETTLED`.
+        Live-owner fenced; a fenced
         owner reads ``None``.
 
         A READ THAT TAKES THE WRITE LOCK (review n6): the column is additive
@@ -2243,7 +2248,12 @@ class Store:
                 return None
             if row["card_posted_at"] is not None:
                 return CARD_POSTED
-            return CARD_OWED if row["state"] in ("pending", "claimed") else CARD_SETTLED
+            # ``claimed`` (review m15): a body turn already took this body, so
+            # the session was woken for it (a pre-upgrade card, or a mark
+            # that failed). Only a ``pending`` reservation can still owe one.
+            if row["state"] == "claimed":
+                return CARD_POSTED
+            return CARD_OWED if row["state"] == "pending" else CARD_SETTLED
 
     def mark_body_card_posted(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str, *, now: float
@@ -3098,6 +3108,8 @@ class Store:
         target: AckTarget,
         receipt: ScreeningReceipt | None,
         client_ref: str,
+        *,
+        envelope_digest: str | None = None,
     ) -> str:
         """Write-once ack intent, recorded BEFORE any dispatch.
 
@@ -3127,6 +3139,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._ensure_intent_binding_columns(conn)
             existing = conn.execute(
                 "SELECT * FROM ack_intents WHERE owner_key = ? AND message_id = ? AND target = ?",
                 (_owner_key(owner), message_id, target),
@@ -3149,12 +3162,23 @@ class Store:
                     and existing["client_ref"] == client_ref
                 )
                 if same:
+                    # REBIND, never re-tuple (PR #3063 review M7): the SAME
+                    # verdict, re-reached by this generation's own screen of
+                    # this envelope (after a re-login, say), now belongs to the
+                    # decision that just re-made it. The tuple and the ref the
+                    # hub knows are untouched.
+                    conn.execute(
+                        "UPDATE ack_intents SET creator_generation = ?, envelope_digest = "
+                        "COALESCE(?, envelope_digest) WHERE intent_id = ?",
+                        (owner.enrollment_generation, envelope_digest, existing["intent_id"]),
+                    )
                     return str(existing["intent_id"])
                 raise StoreRefused("intent_conflict", "write-once intent tuple differs")
             conn.execute(
                 "INSERT INTO ack_intents (intent_id, owner_key, message_id, target, client_ref, "
                 "verdict, model, prompt_version, template_sha256, body_sha256, categories, "
-                "state, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "state, created_at, creator_generation, envelope_digest) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     intent_id,
                     _owner_key(owner),
@@ -3169,9 +3193,35 @@ class Store:
                     json.dumps(sorted(receipt.categories)),
                     ACK_PENDING,
                     time.time(),
+                    owner.enrollment_generation,
+                    envelope_digest,
                 ),
             )
             return intent_id
+
+    @staticmethod
+    def _ensure_intent_binding_columns(conn: sqlite3.Connection) -> None:
+        """Add the verdict's BINDING columns to an ``ack_intents`` that predates them.
+
+        WHY ON THE INTENT (PR #3063 review M7): the connector hands a message
+        off on a recorded read verdict without screening again, and it may do
+        that only for the decision THIS enrollment generation made about THIS
+        envelope. The intent is the one row every recorded verdict has — a
+        message served from the screening cache has no receipt of its own —
+        so the binding lives here, written in the same transaction as the
+        tuple, before any ACK is sent.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves and an older binary
+        never names them. A pre-upgrade row reads NULL: "binding unknown",
+        which the connector treats as the current generation and envelope —
+        exactly how it treated every intent before.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(ack_intents)")}
+        if "creator_generation" not in columns:
+            conn.execute("ALTER TABLE ack_intents ADD COLUMN creator_generation INTEGER")
+        if "envelope_digest" not in columns:
+            conn.execute("ALTER TABLE ack_intents ADD COLUMN envelope_digest TEXT")
 
     @staticmethod
     def _intent_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -3197,6 +3247,12 @@ class Store:
             "state": row["state"],
             "error_code": row["error_code"],
             "retry_after": row["retry_after"],
+            # NULL on a pre-upgrade row (and absent on a store no write has
+            # migrated yet): the binding is unknown, never "another owner".
+            "creator_generation": (
+                row["creator_generation"] if "creator_generation" in row.keys() else None
+            ),
+            "envelope_digest": row["envelope_digest"] if "envelope_digest" in row.keys() else None,
         }
 
     def ack_intent(self, owner: OwnerSnapshot, intent_id: str) -> dict[str, Any] | None:
@@ -3281,6 +3337,37 @@ class Store:
                 (_owner_key(owner), message_id, target),
             ).fetchone()
             return None if row is None else self._intent_dict(row)
+
+    def supersede_pending_intent(self, owner: OwnerSnapshot, message_id: str, target: str) -> bool:
+        """Remove a STILL-PENDING intent whose binding no longer holds (review M7).
+
+        The connector calls this only for a pending ``read`` intent made by
+        another enrollment generation, or for another envelope: not this
+        owner's decision, and screening's step 5 would otherwise hold the
+        message ``ack_recovery`` forever. Removing it lets the message be
+        screened afresh; the fresh intent carries a fresh ref.
+
+        WHY THAT IS SAFE AT THE HUB: the hub's ack idempotency is its delivery
+        state machine, not the ref (agent-server ``bridge_ack_service.go``).
+        If the old POST did land, an agreeing new tuple is a 200 same-state
+        no-op, and a disagreeing one a 409 the ledger records as a visible
+        ``conflict`` — never a second "read" and never a silent pass.
+
+        CONDITIONAL on ``state = 'pending'``, inside the write lock: a
+        confirmed or conflict intent is a fact about the hub and is never
+        removed. Live-owner fenced. Returns whether a row was removed.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            removed = conn.execute(
+                "DELETE FROM ack_intents WHERE owner_key = ? AND message_id = ? "
+                "AND target = ? AND state = ?",
+                (_owner_key(owner), message_id, target, ACK_PENDING),
+            )
+            return bool(removed.rowcount)
 
     def find_pending_intent(
         self, owner: OwnerSnapshot, message_id: str, target: str
@@ -3675,6 +3762,58 @@ class Store:
                 }
         except (sqlite3.Error, json.JSONDecodeError):
             return None
+
+    def reattest_receipt_epoch(self, owner: OwnerSnapshot, message_id: str) -> bool:
+        """Carry a RECORDED allow forward to the live epoch of an IDENTICAL policy.
+
+        WHY (PR #3063 QA r4 O3): the policy epoch only ever advances, so a
+        policy changed and then changed BACK (a model update rolled back:
+        epochs A=1, B=2, A=3) leaves a receipt minted at epoch 1 stale forever,
+        although the live policy asks for exactly the tuple it proves. A
+        request stopped in its hand-off across that change was held
+        ``envelope_refused:stale_proof`` with no path to delivery, while the
+        hub already reads it as read.
+
+        NARROW BY CONSTRUCTION — this never widens what a proof certifies:
+        it moves ``policy_epoch`` ONLY when, inside one write transaction, the
+        live policy's template hash, default model and admission revision
+        (a digest of version, template, provider, model and approved
+        identities) ALL equal the receipt's, the receipt was minted by the
+        live enrollment generation, and it is an ``allow``. Under any other
+        policy the proof stays stale and the message stays held. The connector
+        calls it only when handing off on a recorded verdict, after the hub's
+        authority gate. Returns whether the epoch moved.
+        """
+
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            policy = conn.execute(
+                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
+                "WHERE owner_key = ?",
+                (key,),
+            ).fetchone()
+            if policy is None:
+                return False
+            moved = conn.execute(
+                "UPDATE screening_receipts SET policy_epoch = ? WHERE owner_key = ? "
+                "AND message_id = ? AND verdict = 'allow' AND template_sha256 = ? "
+                "AND model = ? AND admission_revision = ? AND creator_generation = ? "
+                "AND policy_epoch < ?",
+                (
+                    int(policy["epoch"]),
+                    key,
+                    str(message_id),
+                    policy["template_sha256"],
+                    policy["default_model"],
+                    policy["revision"],
+                    owner.enrollment_generation,
+                    int(policy["epoch"]),
+                ),
+            )
+            return bool(moved.rowcount)
 
     def write_screened_request_delivery(
         self,

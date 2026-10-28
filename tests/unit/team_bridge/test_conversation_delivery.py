@@ -1618,3 +1618,54 @@ def test_the_card_route_names_arguments_the_bridge_tool_accepts(thread_root_id) 
         args["channel_id"] = CONVERSATION_ID
     params = BridgeToolParams.model_validate(args)
     assert getattr(params, key) == fields[route["named"]]
+
+
+@pytest.mark.parametrize("pre_upgrade_state", ["pending", "claimed", "completed", "retired"])
+def test_a_pre_upgrade_reservation_replay_posts_at_most_the_logged_card(
+    tmp_path, monkeypatch, caplog, pre_upgrade_state
+) -> None:
+    """QA r4 O4: EVERY reservation written before ``card_posted_at`` existed
+    reads NULL, so a hub replay of a message already delivered under the old
+    binary posted a second card, unlogged. The bound, per reservation state:
+
+    * ``claimed`` / ``completed`` / ``retired``: a body turn took the body, or
+      it was served, or it never will be — the card is treated as POSTED/
+      SETTLED, so a replay posts NOTHING (marked, ``duplicate``);
+    * ``pending``: the only state where the old binary may have stopped
+      between the reservation and the card, so the card may genuinely be owed.
+      One card at most, and it is LOGGED (``card_unrecorded``).
+
+    The pre-upgrade row is built the way the old binary left it: a real
+    delivery, then the column NULLed. Totals at the END, across leases."""
+
+    from local_operator.team_bridge.store import state_db_path
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    assert _run(a, config_dir)["handled"][0]["action"] == "delivered"
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute(
+            "UPDATE body_reservations SET card_posted_at = NULL, state = ?", (pre_upgrade_state,)
+        )
+
+    with caplog.at_level(logging.WARNING, logger=conversation_mod.logger.name):
+        _drive_across_leases(a, config_dir, clock)  # the hub replays the ref every pass
+    reposts = caplog.text.count("bridge: card re-posted code=card_unrecorded")
+    rows = _reservation_rows(config_dir)
+    print(
+        f"MATRIX conversation/pre_upgrade/{pre_upgrade_state} "
+        f"cards={len(transcripts['sess_a'])} logged_reposts={reposts}"
+    )
+    expected_cards = 2 if pre_upgrade_state == "pending" else 1
+    assert len(transcripts["sess_a"]) == expected_cards
+    assert reposts == expected_cards - 1
+    if pre_upgrade_state != "claimed":
+        # Marked, so it is never re-evaluated as owed again. A ``claimed`` row
+        # reads POSTED from its state alone and needs no mark.
+        assert rows[0]["card_posted_at"] is not None
