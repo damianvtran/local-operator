@@ -11,6 +11,7 @@ import sqlite3
 from collections.abc import Sequence
 from typing import Any
 
+from local_operator.notifications import bulk_asks
 from local_operator.notifications import items as inbox
 from local_operator.notifications.store import NotificationStore, _row_dict, ask_ref
 
@@ -31,6 +32,9 @@ def read_rows(store: NotificationStore, ids: Sequence[str]) -> dict[str, Any]:
         }
         if any(item.startswith("ask:") for item in requested)
         else {}
+    )
+    asks = bulk_asks.current_asks(
+        store.config_dir, {ref: row for ref, row in asks.items() if ref in requested_set}
     )
     sessions = inbox.SessionFacts(store.config_dir)
     projects = inbox.ProjectFacts(store.config_dir)

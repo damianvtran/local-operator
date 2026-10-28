@@ -2805,6 +2805,12 @@ change exclusions, or give an ask settlement authority. It is intentionally
 excluded from replay identity, so a replay may refresh a different bounded set
 of cached rows. The optional `result.reconciliation` carries the existing list
 row projection, not detail bodies or ask answers, and authoritative absent IDs.
+**`reconciliation.items` combines notify rows and pending-ask rows**: ask entries
+use the unchanged waiting-row `ask_item` projection (`source: "ask"`, same
+id/read/seq/ask metadata); there is no separate reconciliation `waiting` array.
+Only requested `reconcile_ids` appear. A settled requested ask is in
+`absent_ids`, including when its local journal has settled before the derived
+index catches up.
 The desktop's existing read authorization is store-wide: a requested row outside
 the selected filter may be read without being changed; unknown and other-store
 IDs are uniformly absent. Receipt expiry/auth/scope checks finish before any

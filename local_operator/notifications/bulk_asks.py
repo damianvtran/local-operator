@@ -80,6 +80,16 @@ def valid_rows(
         for row in rows
         if row["ref"] not in exclusions and live.get(row["ref"]) == row["lifecycle"]
     ]
+    return _journal_valid(root, candidates)
+
+
+def current_asks(root: Path, asks: Mapping[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Keep the ordinary waiting-row projection, but never revive a settled log ref."""
+    candidates = [{"ref": ref, "lifecycle": _lifecycle(row)} for ref, row in asks.items()]
+    return {row["ref"]: asks[row["ref"]] for row in _journal_valid(root, candidates)}
+
+
+def _journal_valid(root: Path, candidates: Sequence[Any]) -> list[Any]:
     # The index can lag a committed settlement (e.g. a crash before publishing
     # its projection). Read each selected session's log once, not once per ref.
     # A session without a local log retains the existing derived-index path

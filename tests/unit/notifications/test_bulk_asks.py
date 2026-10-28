@@ -438,3 +438,26 @@ def test_reconciliation_bounds_and_invalid_token_fail_before_read(client, tmp_pa
         ).status_code
         == 409
     )
+
+
+def test_reconciliation_items_include_read_waiting_row_and_settled_absence(client, tmp_path):
+    refs = queue(tmp_path)
+    selected = select(client, kind="asks")
+    body = {"op": "read", "selection_token": selected["token"], "reconcile_ids": refs}
+    result = patch(client, **body)
+    row = result["reconciliation"]["items"][0]
+    assert row["id"] == refs[0] and row["source"] == "ask" and row["read"] is True
+    assert row["ask"]["status"] == "open" and "answers" not in row["ask"]
+    assert "waiting" not in result["reconciliation"]
+    assert result["waiting_count"] == 1 and result["waiting_unread_count"] == 0
+    ask_store.append_event(
+        ask_store.session_dir(tmp_path, SID), _answered("ask_0", at=ask_store.now_ms())
+    )
+    # Deliberately leave the projection stale: a committed settled log must not
+    # be returned as a pending row merely because the writer crashed mid-publish.
+    before = log_bytes(tmp_path)
+    replay = patch(client, **body)
+    assert replay["replayed"]
+    assert replay["reconciliation"]["items"] == []
+    assert replay["reconciliation"]["absent_ids"] == refs
+    assert log_bytes(tmp_path) == before
