@@ -717,6 +717,14 @@ def _undisclosable(
         # The digest-bound envelope blocks are signed too; the disclosure names only the
         # member's display name from ``device``.
         envelope["device"]["evil"] = "x" * 40
+    elif tamper == "long-name":
+        # #3087 r2, R2-1: ``device.name`` is signed in full, but shown only as ``_plain``'s
+        # 64-character cut, so the tail past the cut was signed unseen.
+        envelope["device"]["name"] = "Alice laptop" + " " * 60 + "HIDDEN-SIGNED-TAIL" + "x" * 300
+    elif tamper == "control-name":
+        # ... and ``_plain`` strips control characters, so an escape sequence was signed
+        # while the operator read a clean label.
+        envelope["device"]["name"] = "Alice\x1b[2K laptop"
     else:  # "requested-by"
         envelope["requested_by"]["evil"] = "x" * 40
     return _record_with_what(envelope, what, rig.root)
@@ -725,7 +733,17 @@ def _undisclosable(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("surface", ["cli", "desktop", "approve-credential", "approve-operation"])
 @pytest.mark.parametrize(
-    "tamper", ["payload", "what", "anchor", "deny-row", "device", "requested-by"]
+    "tamper",
+    [
+        "payload",
+        "what",
+        "anchor",
+        "deny-row",
+        "device",
+        "requested-by",
+        "long-name",
+        "control-name",
+    ],
 )
 async def test_undisclosed_field_is_refused_on_every_approver_before_the_signer(
     rig: Any,  # noqa: F811

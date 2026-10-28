@@ -110,8 +110,17 @@ def exact_shape(record: Mapping[str, Any]) -> bool:
         or set(device) - _DEVICE_KEYS
         or device.get("device_id") != data["recipient_device"]
         or device.get("fingerprint") != data["public_key_fingerprint"]
+        # Signed in full but shown only as ``_plain(name)`` (control characters stripped,
+        # cut to 64): any byte _plain would drop is signed unseen (#3087 review r2, R2-1).
+        # So the SIGNED name must already be its own display form. ``request`` has minted
+        # ``name=_plain(...)`` since the name was added (#3002), so no filed card is refused;
+        # pre-#3002 cards carry no name and stay valid.
+        or ("name" in device and not _is_plain(device["name"]))
     ):
         return False
+    # ``kind`` is digest-bound too but needs no check here (#3087 r2, N2-1): create_request
+    # limits it to ``approvals.KINDS``, and the only other kind with an op payload
+    # (``local_authority``) carries no ``device`` block, which the check above refuses.
     if record.get("requested_by") != {"device_id": data["owner_device"], **_REQUESTED_BY}:
         return False
     if record.get("credential_ref") is not None:
@@ -254,6 +263,11 @@ def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
         raise disclosure_invalid() from exc
     except (KeyError, TypeError, ValueError, AttributeError):
         raise disclosure_invalid() from None
+
+
+def _is_plain(value: Any) -> bool:
+    """True when ``value`` is a str :func:`_plain` would show byte for byte: signed == shown."""
+    return isinstance(value, str) and value == _plain(value)
 
 
 def _plain(text: Any, limit: int = 64) -> str:
