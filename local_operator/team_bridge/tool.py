@@ -758,6 +758,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         }
 
     if params.op == "channel_history":
+        from .history_catchup import catch_up_history_page
+
         channel_id = params.channel_id.strip()
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
             return _error("channel_history needs a conversation id (bcv_…)")
@@ -779,9 +781,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             )
         except Exception as failure:
             return _error(f"could not read the channel history: {failure}", code="history_failed")
-        # Bodies are external content even when the sender is a teammate's
-        # agent: the same untrusted wrap as take_up. Unadmitted messages carry
-        # ``body: null`` — metadata only — and stay that way (no local cache).
+        result = await catch_up_history_page(
+            runtime, channel_id, result, limit=int(params.limit),
+            before_seq=params.before_seq, after_seq=params.after_seq,
+        )
+        # Screening bytes never become output. Only a fresh endpoint-authorized
+        # history read after confirmed admission may fill a previously null body.
         images = await _history_images(runtime, channel_id, result, endpoint_id)
         return {
             "ok": True,

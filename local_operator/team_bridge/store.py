@@ -4486,6 +4486,61 @@ class Store:
             ).fetchone()
             return dict(row) if row is not None else None
 
+    @staticmethod
+    def _ensure_history_cursors(conn: sqlite3.Connection) -> None:
+        # An additive, contentless table follows the reservation-table pattern:
+        # old stores stay readable, and no body/label becomes a local cache.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS history_catchup_cursors ("
+            "owner_key TEXT NOT NULL, enrollment_generation INTEGER NOT NULL, "
+            "conversation_id TEXT NOT NULL, page_window TEXT NOT NULL, "
+            "last_seq INTEGER NOT NULL, "
+            "PRIMARY KEY (owner_key, enrollment_generation, conversation_id, page_window))"
+        )
+
+    def history_catchup_cursor(
+        self, owner: OwnerSnapshot, conversation_id: str, page_window: str
+    ) -> int:
+        """Resume only this owner's generation and this exact requested page."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_history_cursors(conn)
+            row = conn.execute(
+                "SELECT last_seq FROM history_catchup_cursors WHERE owner_key = ? "
+                "AND enrollment_generation = ? AND conversation_id = ? AND page_window = ?",
+                (_owner_key(owner), owner.enrollment_generation, conversation_id, page_window),
+            ).fetchone()
+            return int(row["last_seq"]) if row is not None else 0
+
+    def advance_history_catchup_cursor(
+        self, owner: OwnerSnapshot, conversation_id: str, page_window: str, last_seq: int
+    ) -> None:
+        """Advance after a confirmed hub verdict, never after a hold or timeout.
+
+        A second reader may finish the same page; MAX makes that replay
+        monotonic. Message claims, not this progress marker, arbitrate screening.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_history_cursors(conn)
+            conn.execute(
+                "INSERT INTO history_catchup_cursors "
+                "(owner_key, enrollment_generation, conversation_id, page_window, last_seq) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT "
+                "(owner_key, enrollment_generation, conversation_id, page_window) DO UPDATE "
+                "SET last_seq = MAX(last_seq, excluded.last_seq)",
+                (
+                    _owner_key(owner), owner.enrollment_generation,
+                    conversation_id, page_window, last_seq,
+                ),
+            )
+
     def set_screen_cursor(self, owner: OwnerSnapshot, last_sender: str) -> None:
         """Persist the rotation cursor (metadata only, never message content)."""
 

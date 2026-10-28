@@ -668,8 +668,14 @@ async def handle_conversation_available(
     access: Any,
     settings: Any = None,
     wire: Any = None,
+    admission_only: bool = False,
 ) -> dict[str, Any]:
     """Screen one conversation message and deliver its card (or hold/skip).
+
+    ``admission_only`` serves an explicit history read through this same
+    screening/claim boundary without reserving another turn or waking a session.
+    Its ``admitted`` outcome confirms the hub accepted the verdict, not a body
+    cache: the caller must read history again for context-authorized bytes.
 
     Returns metadata only. ``action`` is one of ``delivered`` (admitted body),
     ``rejected`` (a confirmed moderation refusal: terminal, and it posts NO card
@@ -678,6 +684,13 @@ async def handle_conversation_available(
     """
 
     from ..store import Store, StoreRefused
+
+    # This slice depends on #3063's shared authority gate. An older install
+    # must hold, never turn a missing dependency into an admission bypass.
+    try:
+        from .wake import pre_handoff_gate
+    except ImportError:
+        return {"action": "hold", "message_id": ref.message_id, "code": "handoff_gate_unavailable"}
 
     message_id = ref.message_id
     store = Store(config_dir)
@@ -842,6 +855,19 @@ async def handle_conversation_available(
                 metadata = replace(metadata, attachments_note=attachments_note)
 
         if recovery is not None:
+            gate_code = await pre_handoff_gate(
+                store, owner, access, settings, config_dir=config_dir, auth_store=auth_store
+            )
+            if gate_code:
+                return {"action": "hold", "message_id": message_id, "code": gate_code}
+            if admission_only:
+                # Only the context-route image check proves a hub admission.
+                # A local receipt or a uniform 404 is not a confirmed verdict;
+                # leave this page's cursor in place rather than invent status.
+                if recovery == "images_admitted":
+                    terminal = True
+                    return {"action": "admitted", "message_id": message_id}
+                return {"action": "hold", "message_id": message_id, "code": "admission_unverified"}
             detail = await _deliver_card(
                 owner, metadata, session_id=designation, config_dir=config_dir
             )
@@ -890,6 +916,11 @@ async def handle_conversation_available(
                 "code": getattr(result, "hold_code", None) or "screening_hold",
             }
         receipt = getattr(result, "receipt", None)
+        gate_code = await pre_handoff_gate(
+            store, owner, access, settings, config_dir=config_dir, auth_store=auth_store
+        )
+        if gate_code:
+            return {"action": "hold", "message_id": message_id, "code": gate_code}
         if disposition == "bounce":
             if receipt is None:
                 return {
@@ -943,6 +974,9 @@ async def handle_conversation_available(
             template_sha256=SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else None,
             access=access,
         )
+        if admission_only:
+            terminal = True
+            return {"action": "admitted", "message_id": message_id}
         # THE ADMISSION POINT (seam design, Revision 5): the hub has accepted
         # this message for this endpoint/member/consent tuple, so one
         # designated session now owes it a body. Recorded BEFORE the card —
