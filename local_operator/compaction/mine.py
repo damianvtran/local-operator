@@ -268,7 +268,10 @@ def mine_carry(text: str) -> Carry:
     asks: list[str] = []
     decisions: list[str] = []
 
-    role = "assistant"
+    # Unknown until the first header: the dropped span begins wherever the
+    # archive's head edge ends, usually mid-way through a tool result, and
+    # defaulting to ``assistant`` mined that JSON as decisions (QA round 3, Q12).
+    role = "other"
     in_carry = False
     for raw in text.splitlines():
         header = _ROLE_HEADER.match(raw.strip())

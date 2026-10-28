@@ -390,6 +390,49 @@ def test_the_carry_arm_reaches_new_material_across_passes(store):
     assert len(_live(store, "decision")) == 4  # decisions were never starved
 
 
+def test_a_context_decorated_row_counts_as_stored(store):
+    """Review round 3 m2: with ``capture_locators`` the first carry row is persisted
+    with `` — context: …``; the next pass offers the bare body, which must not mint
+    a second row for the same decision."""
+    from local_operator.compaction.mine import Carry, render_carry
+
+    decisions: list[str] = []
+    for n in range(3):
+        decisions.append(f"we will keep the legacy reader for table {n} until friday")
+        carry = render_carry(
+            Carry(identifiers=[f"src/billing/table_{n}.py"], decisions=list(decisions))
+        )
+        persist(store, f"c{n}", memory_capture._carry_arm(store, carry, True), "ok", committed_at=n)
+    bodies = [f["body"].split(" — context: ")[0] for f in _live(store, "decision")]
+    assert sorted(bodies) == sorted(set(bodies)) and len(bodies) == 3, bodies
+
+
+def test_the_carry_arm_falls_back_when_its_store_read_fails(store, monkeypatch):
+    """Review round 3 m1: the selection read runs inside ``finish``'s budget arm, so
+    a store error must degrade to unfiltered rows, never escape the pass."""
+    import sqlite3
+
+    from local_operator.compaction.mine import Carry, render_carry
+
+    carry = render_carry(Carry(asks=["please migrate billing table number 1 to the v2 schema"]))
+    # A real pass first, so the store file exists and the read is attempted.
+    persist(store, "seed", memory_capture._carry_arm(store, carry, False), "ok", committed_at=0)
+    assert store.path.exists()
+    for error in (
+        sqlite3.OperationalError("database is locked"),
+        memory_capture.MemoryError("quota"),
+    ):
+
+        def broken(*_a, _error=error, **_k):
+            raise _error
+
+        monkeypatch.setattr(store, "connection", broken)
+        rows = memory_capture._carry_arm(store, carry, False)
+        assert [r["body"] for r in rows] == [
+            "please migrate billing table number 1 to the v2 schema"
+        ]
+
+
 def test_decisions_keep_a_share_of_a_full_pass():
     from local_operator.compaction.mine import Carry, render_carry
 
@@ -403,7 +446,7 @@ def test_decisions_keep_a_share_of_a_full_pass():
     )
     rows = carry_rows(carry)
     tags = [r["tags"][0] for r in rows]
-    assert (tags.count("decision"), tags.count("ask")) == (4, 8)
+    assert (tags.count("decision"), tags.count("ask")) == (3, 9)
     # Newest first within each kind.
     assert rows[0]["body"].endswith("table 19 until friday")
     assert any(r["body"] == "please migrate billing table number 19 to the v2 schema" for r in rows)

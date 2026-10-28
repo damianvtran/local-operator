@@ -594,20 +594,21 @@ def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
                     blocks.append(f"[User]\n{text}")
                     continue
                 blocks.append(f"{INJECTED_HEADER}\n{text}")
-                # A queued ask's answer is injected, but its ``answer:`` lines are
-                # the operator's typed words: re-state them under ``[User]`` so the
-                # miner keeps them as asks (review round 2 m1, QA Q8). Placeholders
-                # (``(not answered)``, ``(image attached …)``) are not words.
+                # A queued ask's answer is injected, but the VALUES the operator
+                # typed are their words. The renderer stamped exactly those values
+                # from the row's structured answers (``OPERATOR_ANSWER_KEY``); they
+                # are emitted as written under ``[User]`` and nothing in the
+                # rendered text is scanned (review round 3, M1).
                 payload = message.provider_payload or {}
-                if payload.get(OPERATOR_ANSWER_KEY):
-                    answers = [
-                        line.strip()[len("answer:") :].strip()
-                        for line in text.splitlines()
-                        if line.strip().startswith("answer:")
+                values = payload.get(OPERATOR_ANSWER_KEY)
+                if isinstance(values, list):
+                    # One value is one answer: its own line breaks are joined so
+                    # the miner keeps a multi-line typed answer as ONE ask.
+                    typed = [
+                        " ".join(v.split()) for v in values if isinstance(v, str) and v.strip()
                     ]
-                    answers = [a for a in answers if a and not a.startswith("(")]
-                    if answers:
-                        blocks.append("[User]\n" + "\n".join(answers))
+                    if typed:
+                        blocks.append("[User]\n" + "\n".join(typed))
         elif message.role == "assistant":
             parts: list[str] = []
             text = _content_text(message)
@@ -740,6 +741,30 @@ class Archive(BaseModel):
         file keeps transcript diffs and any external reader honest.
         """
         return created_at.isoformat()
+
+
+def _unwrapped_prefix(text: str, pages: list[str], cols: int) -> str:
+    """The source lines of ``text`` that the leading ``pages`` were wrapped from.
+
+    ``pages`` must be a leading run of ``_paginate(text, …)`` — every drop in
+    :func:`compact_to_archive` takes the OLDEST pages, so it always is. A page
+    boundary can fall inside a wrapped line; that line belongs to the dropped
+    span when its first wrapped segment does, so it is returned whole rather than
+    cut in two (its tail page is still kept and imaged; the miner simply sees the
+    complete sentence once).
+    """
+    wrapped = sum(page.count("\n") + 1 for page in pages)
+    if not wrapped:
+        return ""
+    out: list[str] = []
+    for line in text.split("\n"):
+        if wrapped <= 0:
+            break
+        out.append(line)
+        # ``_wrap_lines`` emits one segment for an empty line and ceil(len/cols)
+        # otherwise; mirror it exactly so the count lines up with the pages.
+        wrapped -= max(1, -(-len(line) // cols))
+    return "\n".join(out)
 
 
 def _paginate(text: str, shape: Shape) -> list[str]:
@@ -947,7 +972,13 @@ def compact_to_archive(
     # readable as pages (text or frames), so mining them too would double the
     # archive's readable payload for no retention gain. Pages dropped by EITHER
     # budget (the frame cap or the token budget) are covered.
-    dropped_text = "\n".join(dropped_pages)
+    #
+    # Mined from the UNWRAPPED source of those pages, never the page strings:
+    # pages are hard-wrapped at the frame width (175 columns for the Anthropic
+    # reader), and the miner reads one line as one item, so a long operator ask
+    # entered the carry as 2-3 mid-word fragments that then used up capture slots
+    # (QA round 3, Q11: 19 of a real carry's 60 asks were continuations).
+    dropped_text = _unwrapped_prefix(image_text, dropped_pages, shape.chars_per_line)
     fresh = mine_carry(dropped_text) if dropped_text else mine_carry("")
     # ``parse_carry`` reads the archive's own ``render_carry`` form (plain
     # headings); the caller always hands this function the archive's exact

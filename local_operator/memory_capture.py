@@ -17,6 +17,7 @@ import io
 import json
 import logging
 import re
+import sqlite3
 import time
 from bisect import bisect_right
 from pathlib import Path
@@ -333,13 +334,17 @@ def carry_rows(
 
     - NEWEST first, because the newest material is what a resumed session lacks;
     - a candidate ``stored`` says the store already holds (or forgot) is passed
-      over WITHOUT charging ``limit`` — re-offering it only refreshes a row;
-    - decisions get up to a THIRD of ``limit`` before asks fill the rest, and slots
-      one kind cannot use flow to the other, so asks cannot starve decisions.
-      A third, not a half: on that transcript (6 passes) half left 5 operator
-      turns uncaptured (20/25, a burst of asks pushed out by later passes), a
-      third gave 24/25 with 15 decisions, a quarter 25/25 with 13. Asks are the
-      operator's own words, so they keep the larger share.
+      over WITHOUT charging ``limit``. Such a row is therefore no longer
+      restamped by the carry, so under ``CAPTURE_SESSION_TOKENS`` pressure an
+      ask the carry keeps restating can be among the first evicted — acceptable
+      because the carry itself still retains it verbatim (review round 3, m3);
+    - decisions get up to a QUARTER of ``limit`` before asks fill the rest, and
+      slots one kind cannot use flow to the other, so asks cannot starve
+      decisions. Measured on the live ``Session.compact_now()`` + ``finish`` path
+      over a real transcript (6 passes, 25 operator turns, 2 of them never on a
+      dropped page): a third covered 19 turns, a quarter 21 with 12 decisions.
+      Raising ``limit`` to 16 reached the 23-turn ceiling but adds a third more
+      captured rows per pass, which is the volume this budget exists to bound.
 
     Returns :class:`CaptureRows` so an admission refusal (the debris rule above
     all: a mis-attributed tool call is exactly what an old carry holds) is
@@ -389,7 +394,7 @@ def carry_rows(
             rows.append(row)
             taken += 1
 
-    take("decision", limit // 3)
+    take("decision", limit // 4)
     take("ask", limit - len(rows))
     take("decision", limit - len(rows))
     if locators and rows and parsed.identifiers:
@@ -1729,13 +1734,43 @@ def _carry_arm(store: MemoryStore, carry: str, locators: bool) -> CaptureRows:
         return CaptureRows()
     if not store.path.exists():
         return carry_rows(carry, locators=locators)
-    with store.connection() as db:
+    session = store.identity.session_id
+    try:
+        with store.connection() as db:
+            # Bodies capture already wrote this session, keyed the way the
+            # entity hash keys them. A locator-decorated row (`` — context: …``,
+            # opt-in ``capture_locators``) is ALSO recorded under its bare body:
+            # the next pass offers the bare form, and treating it as new minted a
+            # second row for the same decision (review round 3, m2). One query
+            # over the session instead of a per-candidate op load (n1).
+            known: set[tuple[str, str]] = set()
+            for body, tags in db.execute(
+                "SELECT json_extract(data,'$.fact.body'), json_extract(data,'$.fact.tags') "
+                "FROM ops WHERE scope='session' AND owner=? "
+                "AND json_extract(data,'$.fact.source.author')='deterministic-capture'",
+                (session,),
+            ):
+                if not isinstance(body, str):
+                    continue
+                tag = _dump(json.loads(tags) if isinstance(tags, str) else tags)
+                known.add((_normalized(body), tag))
+                known.add((_normalized(body.split(" — context: ", 1)[0]), tag))
 
-        def stored(row: dict[str, Any]) -> bool:
-            key = _dump([_normalized(row["body"]), row["tags"]])
-            return bool(store._ops(db, _fact_entity(store, db, key, row)))
+            def stored(row: dict[str, Any]) -> bool:
+                if (_normalized(row["body"]), _dump(row["tags"])) in known:
+                    return True
+                # A tombstone keeps no body; fall back to the entity's ops.
+                key = _dump([_normalized(row["body"]), row["tags"]])
+                return bool(store._ops(db, _fact_entity(store, db, key, row)))
 
-        return carry_rows(carry, locators=locators, stored=stored)
+            return carry_rows(carry, locators=locators, stored=stored)
+    except (MemoryError, sqlite3.Error):
+        # The selection's store read is an optimisation, never a reason to lose
+        # the pass: this runs inside ``finish``'s BudgetExceeded arm too, where an
+        # escaping error skipped persisting the scan rows AND the failure marker
+        # (review round 3, m1). Unfiltered rows only refresh what already exists.
+        logger.debug("memory capture: carry selection read failed; unfiltered", exc_info=True)
+        return carry_rows(carry, locators=locators)
 
 
 async def finish(

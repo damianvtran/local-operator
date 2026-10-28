@@ -30,7 +30,8 @@ import here cannot put the leak back unnoticed.
 
 from __future__ import annotations
 
-from typing import TypeGuard
+from collections.abc import Mapping
+from typing import Any, TypeGuard
 
 from local_operator.compaction.cutpoint import (
     OPERATOR_ANSWER_KEY,
@@ -117,6 +118,48 @@ def _injected_user_message(
         message = Message(role="user", content=[TextContent(text=text)], id=entry_id)
     message.provider_payload = {RENDERED_INJECTION_KEY: True}
     return message
+
+
+def _operator_answer_values(details: Mapping[str, Any]) -> list[str]:
+    """The operator-TYPED answer values of an ``ask_response`` row, or ``[]``.
+
+    Compaction's carry miner keeps these as operator asks (``OPERATOR_ANSWER_KEY``),
+    so only words the operator actually supplied qualify:
+
+    - only an ``answered`` or ``late`` row (a late answer is still the operator's
+      answer); a decline, timeout or dismissal carries none;
+    - never a SECRET question: its cell holds a key name and, for ``persist``,
+      the harness's promotion sentence — never the operator's words;
+    - never a BRIDGE request (any question with a ``question_id``): its picks are
+      the sender's, which ``_ask_report`` deliberately does not frame as the human's;
+    - never a placeholder (``<not provided>``) or an empty value.
+
+    A picked option is included: choosing it IS the operator's answer. A
+    multi-line typed answer is kept whole (the serializer emits it as written).
+    """
+    if str(details.get("status") or "") not in ("answered", "late"):
+        return []
+    # Lazy: ``tools.builtin`` costs ~1 s to import and this module sits on every
+    # render; ``asks.queue`` reads the same constant the same way.
+    from local_operator.tools.builtin import ASK_SECRET_NOT_PROVIDED
+
+    questions = [q for q in (details.get("questions") or []) if isinstance(q, Mapping)]
+    if any(str(q.get("question_id") or "") for q in questions):
+        return []
+    secret = {str(q.get("id") or "") for q in questions if q.get("secret")}
+    answers = details.get("answers")
+    if not isinstance(answers, Mapping):
+        return []
+    values: list[str] = []
+    for question in questions:
+        question_id = str(question.get("id") or "")
+        if question_id in secret:
+            continue
+        for value in answers.get(question_id) or []:
+            text = str(value).strip()
+            if text and text != ASK_SECRET_NOT_PROVIDED:
+                values.append(text)
+    return values
 
 
 def _ask_response_images(message: CustomMessage) -> list[ImageContent]:
@@ -302,9 +345,17 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
                 message.id,
                 _ask_response_images(message),
             )
-            # Still injected (the envelope is harness text), but its ``answer:``
-            # lines are the operator's words: see ``OPERATOR_ANSWER_KEY``.
-            answer.provider_payload = {**(answer.provider_payload or {}), OPERATOR_ANSWER_KEY: True}
+            # Still injected (the envelope is harness text). The operator's own
+            # typed VALUES ride beside the stamp, taken from the row's structured
+            # ``answers`` rather than re-parsed from the rendered report: that text
+            # also carries the model's question prompts and harness sentences, and
+            # a line-scan restated those as operator words (review round 3, M1).
+            values = _operator_answer_values(message.details)
+            if values:
+                answer.provider_payload = {
+                    **(answer.provider_payload or {}),
+                    OPERATOR_ANSWER_KEY: values,
+                }
             out.append(answer)
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the
