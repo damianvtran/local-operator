@@ -35,7 +35,7 @@
  * wording of one rule. The card renders `error.message` verbatim, and only
  * falls back to a plain line when the daemon said nothing usable.
  */
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
 import { Disclosure } from "./ui/disclosure";
@@ -128,6 +128,76 @@ function contextLine(row: PendingAsk): string | null {
  *  apart when the refusal comes FROM THE WIRE, which this branch never does.
  *  The sentence itself is `relay.asks.card.gone`. */
 
+/** The wire's own cap on one string in `answers`. The `Other` field stops there
+    rather than letting the daemon refuse a longer paste after the tap. */
+const ANSWER_MAX_CHARS = 32768;
+
+/** The card's own record of its `Other` row: whether it is the selected one, and
+ *  what its field holds (UNTRIMMED).
+ *
+ *  KEPT BESIDE THE DRAFT CELL, NOT DERIVED FROM IT, for the two reasons the
+ *  desktop panel learned the hard way. The cell is trimmed on the way in, so a
+ *  field fed from it would eat a space typed between two words on the keystroke.
+ *  And a text equal to an option's label is indistinguishable from that option in
+ *  the cell, so a field whose visibility followed the cell would close mid-
+ *  sentence the moment `No` was typed beside an option `No`. Single-select keeps
+ *  `text` while `open` is false, so choosing an option and coming back does not
+ *  make the user type it again. */
+interface OtherState {
+	open: boolean;
+	text: string;
+}
+
+/** The marker the cell holds for an `Other` that is open but EMPTY: the empty
+ *  string, exactly (the desktop's own spelling). It is what lets the open state
+ *  survive an unmount through the store-backed draft, and what keeps the
+ *  question incomplete — see `filled`. It is never sent. */
+const isOtherPending = (value: string): boolean => value === "";
+
+/** The `Other` state on mount: open, with the text, when the cell already holds a
+ *  value the options did not offer, or the blank marker. Seeded open but never
+ *  focused — a mount takes no focus, only the user's own press does.
+ *
+ *  More than one out-of-list value cannot come from this card (it writes at most
+ *  one); they are joined rather than hidden so a draft written by something else
+ *  loses nothing the user could see. */
+function otherSeed(cell: readonly string[], labels: readonly string[]): OtherState {
+	const values = cell.filter((value) => value.trim() !== "" && !labels.includes(value));
+	return { open: values.length > 0 || cell.some(isOtherPending), text: values.join(", ") };
+}
+
+/** The option labels ticked in the cell. A typed `Other` equal to an option's
+ *  label sits in the cell as that label, so the LAST such entry is the Other's,
+ *  not a tick — otherwise typing `No, thanks` through `No` would tick an option
+ *  the user never chose. */
+function otherTicks(
+	cell: readonly string[],
+	labels: readonly string[],
+	other: OtherState,
+): string[] {
+	const labelled = cell.filter((value) => labels.includes(value));
+	const entry = other.open ? other.text.trim() : "";
+	if (entry === "" || !labels.includes(entry)) return labelled;
+	const at = labelled.lastIndexOf(entry);
+	return labelled.filter((_, index) => index !== at);
+}
+
+/** The cell for a set of ticks and an `Other` state. The Other entry goes LAST,
+ *  after the ticked labels, which is the order the answer travels in. */
+function cellWith(ticks: readonly string[], multi: boolean, other: OtherState): string[] {
+	if (!other.open) return multi ? [...ticks] : [];
+	const entry = other.text.trim();
+	return multi ? [...ticks, entry] : [entry];
+}
+
+/** What travels for one cell: every value trimmed, blanks dropped, the first of
+ *  any duplicate kept, tick order preserved with the `Other` text last. A blank
+ *  string must never reach `answers` — the runtime would store it as a deliberate
+ *  empty answer — and the open-but-empty marker is exactly such a string. */
+function answerValues(cell: readonly string[]): string[] {
+	return Array.from(new Set(cell.map((value) => value.trim()).filter((value) => value !== "")));
+}
+
 /** One question's control, plus whether it currently holds a complete answer. */
 function QuestionField({
 	question,
@@ -144,7 +214,32 @@ function QuestionField({
 	disabled: boolean;
 }) {
 	const options = Array.isArray(question.options) ? question.options : [];
-	const chosen = new Set(value);
+	const labels = options.map((option) => option.label);
+	const multi = question.multi === true;
+	/* The free-text door is on every option question except a secret one: a
+	   secret's value is a credential the agent asked for by name, and an arbitrary
+	   typed string beside its options would not be one. A question with no options
+	   already IS a text field. */
+	const offersOther = !question.secret && options.length > 0;
+	const [other, setOther] = useState<OtherState>(() => otherSeed(value, labels));
+	const ticks = otherTicks(value, labels, other);
+	const otherField = useRef<HTMLInputElement>(null);
+	/* FOCUS IS TAKEN ONLY INSIDE THE USER'S PRESS ON THE ROW, never on mount: a
+	   seeded-open field (a draft restored after a collapse) must not pull the
+	   keyboard up under a thumb that did nothing. The flag is raised by the press
+	   and spent here, once the field it points at is mounted. The dependency is
+	   the trigger (the field mounting), not a value read in the body. */
+	const focusOther = useRef(false);
+	useLayoutEffect(() => {
+		if (!focusOther.current) return;
+		focusOther.current = false;
+		otherField.current?.focus();
+	}, [other.open]);
+	const writeOther = (next: OtherState) => {
+		setOther(next);
+		onChange(cellWith(ticks, multi, next));
+	};
+	const chosen = new Set(ticks);
 	if (options.length === 0) {
 		/* A free-text or secret question: the answer IS the typed string. */
 		return (
@@ -193,16 +288,23 @@ function QuestionField({
 						type="button"
 						disabled={disabled}
 						onClick={() => {
-							if (!question.multi) {
+							if (!multi) {
+								/* An option and `Other` are one choice in single-select, so
+								   picking an option CLOSES `Other` — its typed text stays in
+								   card state (the user need not retype it on coming back) but
+								   is no longer the answer. */
+								setOther({ ...other, open: false });
 								onChange([option.label]);
 								return;
 							}
 							/* Multi-select toggles; the answer map holds a list either
-							   way, so the wire shape does not depend on `multi`. */
+							   way, so the wire shape does not depend on `multi`. `Other`
+							   is additive here and is rebuilt LAST, so a tick never
+							   reorders the typed text ahead of the labels. */
 							const next = new Set(chosen);
 							if (next.has(option.label)) next.delete(option.label);
 							else next.add(option.label);
-							onChange(Array.from(next));
+							onChange(cellWith(Array.from(next), true, other));
 						}}
 						aria-pressed={on}
 						className={cn(
@@ -236,7 +338,67 @@ function QuestionField({
 					</button>
 				);
 			})}
-			{question.multi ? (
+			{offersOther ? (
+				<>
+					{/* THE `Other` ROW: the free-text door on every non-secret option
+					    question (the desktop and the terminal already have it), so how
+					    to give an answer the list did not offer is on the card rather
+					    than something the user has to know. The hint is the same
+					    "your answer" the field's placeholder says; it goes while the
+					    field is open, where it would print the same words twice.
+					    A real button with `aria-pressed`, like the option rows. */}
+					<button
+						type="button"
+						data-ask-option-other=""
+						disabled={disabled}
+						aria-pressed={other.open}
+						onClick={() => {
+							/* A single-select `Other` is the selected one of a radio-like
+							   group, which does not deselect: pressing it again re-focuses
+							   the field. A multi-select one is a checkbox and unticks. */
+							if (multi && other.open) {
+								writeOther({ ...other, open: false });
+								return;
+							}
+							focusOther.current = true;
+							if (other.open) {
+								focusOther.current = false;
+								otherField.current?.focus();
+							} else {
+								writeOther({ ...other, open: true });
+							}
+						}}
+						className={cn(
+							"flex min-h-11 items-baseline gap-2 rounded-sm border-s-2 border-s-accent px-3 py-2 text-start",
+							other.open ? "bg-accent-wash" : "bg-surface active:bg-accent-wash",
+							"disabled:opacity-50",
+						)}
+					>
+						<span className="text-body-sm font-medium text-ink">
+							{messageRuntime.t("relay.asks.card.other")}
+						</span>
+						{other.open ? null : (
+							<span className="text-body-sm text-ink-dim">
+								{messageRuntime.t("relay.asks.card.placeholder_answer")}
+							</span>
+						)}
+					</button>
+					{other.open ? (
+						<input
+							ref={otherField}
+							type="text"
+							value={other.text}
+							maxLength={ANSWER_MAX_CHARS}
+							onChange={(event) => writeOther({ open: true, text: event.target.value })}
+							disabled={disabled}
+							aria-label={question.question}
+							placeholder={messageRuntime.t("relay.asks.card.placeholder_answer")}
+							className="min-h-11 w-full rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim disabled:opacity-50"
+						/>
+					) : null}
+				</>
+			) : null}
+			{multi ? (
 				<span className="text-meta text-ink-dim">
 					{messageRuntime.t("relay.asks.card.choose_any")}
 				</span>
@@ -386,6 +548,10 @@ export function AskCard({
 	const filled = (id: string): boolean => {
 		if (skipped.has(id)) return true;
 		const cell = draft.answers[id] ?? [];
+		/* AN OPEN, EMPTY `Other` HOLDS THE QUESTION OPEN even beside ticked
+		   options: the user pressed a row that promises a field to type in, and
+		   sending without it would drop what they were about to say. */
+		if (cell.some(isOtherPending)) return false;
 		return cell.some((value) => value.trim() !== "");
 	};
 	const complete = open_questions.length > 0 && open_questions.every((q) => filled(String(q.id)));
@@ -458,7 +624,7 @@ export function AskCard({
 			for (const question of questions) {
 				const id = String(question.id);
 				if (skipped.has(id)) answers[id] = [];
-				else answers[id] = (draft.answers[id] ?? []).map((value) => value.trim());
+				else answers[id] = answerValues(draft.answers[id] ?? []);
 			}
 			return sendCommand(sessionId, { op: "ask_respond", ask_id: row.ask_id, answers });
 		});

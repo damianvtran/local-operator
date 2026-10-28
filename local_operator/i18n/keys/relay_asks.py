@@ -34,6 +34,10 @@ def card_nothing_left() -> Msg:
     return Msg("relay.asks.card.nothing_left", {})
 
 
+def card_other() -> Msg:
+    return Msg("relay.asks.card.other", {})
+
+
 def card_placeholder_answer() -> Msg:
     return Msg("relay.asks.card.placeholder_answer", {})
 
