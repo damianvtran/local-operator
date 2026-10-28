@@ -35,16 +35,12 @@ def _question(text: str, *options: str, qid: str = "q") -> dict[str, Any]:
     ).model_dump()
 
 
-def _ask_text(text: str, *options: str, qid: str = "q") -> str:
-    return dedupe.ask_text({"questions": [_question(text, *options, qid=qid)]})
-
-
 ASK_QUESTION = "Drop the staging orders table before the migration?"
 ASK_OPTIONS = ("Drop it", "Keep it")
 ASK_ID = "drop_staging_orders"
-#: Restates the ask: only shared words plus framing ("waiting", "decision").
-SAME_TITLE = "Waiting on you: drop the staging orders table"
-SAME_BODY = "Decision needed before the migration."
+#: A realistic exact repetition; paraphrases deliberately do not merge.
+SAME_TITLE = ASK_QUESTION
+SAME_BODY = ASK_QUESTION
 OTHER_TITLE = "Nightly backup finished: 42 GB in 7 minutes"
 
 
@@ -55,7 +51,29 @@ OTHER_TITLE = "Nightly backup finished: 42 GB in 7 minutes"
 #: The reviewer's probe (review 6475197793) and QA's cases (6475414560):
 #: (ask question, notify title, notify body, priority, merges?).
 PAIRS = [
-    # The four round 1 merged WRONGLY: an outcome about the same subject.
+    # Additional reviewer round-3 probes; retain these as explicit regressions.
+    (
+        "Fraud campaign Q4: block IP range?",
+        "Fraud campaign Q4: 3 new attempts",
+        "",
+        "normal",
+        False,
+    ),
+    ("Merge PR #3094?", "Merged #3094, but CI is red", "", "normal", False),
+    (
+        "Deploy release 1.2.3?",
+        "Deploy release 1.2.3 only after the freeze lifts",
+        "",
+        "normal",
+        False,
+    ),
+    ("Delete branch feat/x?", "Should I also delete feat/y?", "", "normal", False),
+    ("Delete branch feat/x?", "Branch feat/x nicht löschen", "", "normal", False),
+    ("Delete branch feat/x?", "Ne pas supprimer branch feat/x", "", "normal", False),
+    ("Delete branch feat/x?", "Delete branch feat/x? Don’t", "", "normal", False),
+    ("Deploy release 1.2.3?", "Deploy release 1.2.3 tomorrow", "", "normal", False),
+    ("Delete branch feat/x?", "Branch feat/x already deleted", "", "normal", False),
+    ("Delete branch feat/x?", "Keep branch feat/x", "", "normal", False),
     (
         "Deploy core to production?",
         "Core production deploy failed",
@@ -79,7 +97,6 @@ PAIRS = [
         "normal",
         False,
     ),
-    # The three round 1 got right stay non-merges.
     ("Merge PR #3094?", "CI failed on #3094", "", "normal", False),
     (
         "Block IP range 10.0.0.0/8?",
@@ -89,26 +106,29 @@ PAIRS = [
         False,
     ),
     ("Release local-operator v1.2.3?", "local-operator v1.2.3 publish failed", "", "normal", False),
-    # QA case 3: the update carries the failure the ask is about — news.
     (
-        "Should I roll back the production deploy of the billing service that failed "
-        "health checks?",
+        "Should I roll back the production deploy of the billing service "
+        "that failed health checks?",
         "Production deploy rollback decision",
         "Production deploy of billing service failed health checks; rollback recommended.",
         "normal",
         False,
     ),
-    # The intended restatements.
-    ("Delete branch feat/x?", "Waiting on you: branch feat/x", "", "normal", True),
+    ("Delete branch feat/x?", "Waiting on you: branch feat/x", "", "normal", False),
     (
         "Should I drop the staging orders table now?",
         "Drop staging orders table decision",
         "Should I drop the staging orders table now? Waiting on your decision.",
         "normal",
-        True,
+        False,
     ),
-    (ASK_QUESTION, SAME_TITLE, SAME_BODY, "normal", True),
-    # Round 2 B1: polarity, reversal, condition and a question back are NEW.
+    (
+        "Drop the staging orders table before the migration?",
+        "Waiting on you: drop the staging orders table",
+        "Decision needed before the migration.",
+        "normal",
+        False,
+    ),
     ("Delete branch feat/x?", "Do not delete branch feat/x", "", "normal", False),
     ("Deploy core to production?", "Deploy core to production? No - wait", "", "normal", False),
     ("Delete branch feat/x?", "Don't delete branch feat/x", "", "normal", False),
@@ -122,19 +142,77 @@ PAIRS = [
     ("Delete branch feat/x?", "Delete branch feat/x? Should I keep feat/y", "", "normal", False),
     ("Deploy core to production?", "Rollback core production deploy", "", "normal", False),
     ("Delete branch feat/x?", "Delete branch feat/x, but keep the tag", "", "normal", False),
-    # A signal word the ask's question already carries is not new.
     (
         "Should I delete branch feat/x?",
         "Waiting on you: should I delete branch feat/x",
         "",
         "normal",
-        True,
+        False,
     ),
-    # A non-English update is new words, so it is delivered.
     ("Delete branch feat/x?", "Ne supprimez pas la branche feat/x", "", "normal", False),
-    # ...but never at high priority, and never on one shared word.
     ("Delete branch feat/x?", "Waiting on you: branch feat/x", "", "high", False),
     ("Delete branch feat/x?", "Waiting on branch", "", "normal", False),
+    ("Do not delete branch feat/x until backup?", "Delete branch feat/x now", "", "normal", False),
+    (
+        "Delete branch feat/x but not feat/y?",
+        "Delete branch feat/y but not feat/x",
+        "",
+        "normal",
+        False,
+    ),
+    ("Copy source to target?", "Copy target to source?", "", "normal", False),
+    ("Deploy core after backup?", "Deploy core?", "", "normal", False),
+    ("Set x < y?", "Set y < x?", "", "normal", False),
+    ("Set x <= y?", "Set x >= y?", "", "normal", False),
+    ("Allocate 5 GB?", "Allocate 5 MB?", "", "normal", False),
+    ("Allocate 5 GB?", "Allocate 50 GB?", "", "normal", False),
+    ("Delete branch feat/X?", "Delete branch feat/x?", "", "normal", False),
+    ("Delete branch feat/x?", "Delete branch feat/y?", "", "normal", False),
+    ("Set key K?", "Set key K?", "", "normal", False),
+    (
+        "Delete branch feat/x?",
+        "Delete branch feat/x?",
+        "Do not delete branch feat/x",
+        "normal",
+        False,
+    ),
+    (
+        "Delete branch feat/x?",
+        "Delete branch feat/x?",
+        "https://example.org/rollback",
+        "normal",
+        False,
+    ),
+    ("Copy A  B?", "Copy A B?", "", "normal", False),
+    ("Delete branch feat/x?", "Delete branch feat/x", "", "normal", False),
+    (
+        "Drop the staging orders table before the migration?",
+        "Drop the staging orders table before the migration?",
+        "",
+        "normal",
+        True,
+    ),
+    (
+        "Drop the staging orders table before the migration?",
+        "Drop the staging orders table before the migration?",
+        "Drop the staging orders table before the migration?",
+        "normal",
+        True,
+    ),
+    (
+        "Drop the staging orders table before the migration?",
+        "  Drop the staging orders table before the migration?  ",
+        "\nDrop the staging orders table before the migration?\n",
+        "normal",
+        True,
+    ),
+    (
+        "Drop the staging orders table before the migration?",
+        "Drop the staging orders table before the migration?",
+        "Drop the staging orders table before the migration?",
+        "high",
+        False,
+    ),
 ]
 
 
@@ -142,36 +220,20 @@ PAIRS = [
 def test_only_an_update_that_adds_nothing_is_merged(
     ask: str, title: str, body: str, priority: str, merges: bool
 ) -> None:
-    text = _ask_text(ask, "Yes", "No")
-    assert dedupe.adds_nothing(title, body, text, priority=priority) is merges, sorted(
-        dedupe.novel_words(title, body, text)
-    )
+    record = {"questions": [_question(ask, "Yes", "No")]}
+    assert dedupe.repeats_question(title, body, record, priority=priority) is merges
 
 
-def test_short_tokens_and_numbers_count_as_new_information() -> None:
-    """``ci``/``pr``/``ip``, single letters and digit runs are kept."""
-    assert {"pr", "ci", "ip", "3", "y"} <= dedupe.tokens("PR CI IP 3 feat/y")
-    assert dedupe.novel_words("CI red", "", _ask_text("Merge the PR?", "Yes", "No")) == {
-        "ci",
-        "red",
+def test_only_individual_question_sentences_can_match() -> None:
+    record = {
+        "questions": [
+            _question("Deploy core?", "Yes", "No", qid="deploy_core"),
+            _question("Keep backup?", "Keep", "Delete", qid="backup"),
+        ]
     }
-
-
-def test_ask_text_reads_the_fields_a_real_ask_carries() -> None:
-    text = _ask_text("Roll back now?", "Roll back", "Hold", qid="rollback_decision")
-    assert dedupe.tokens(text) == {"roll", "back", "hold", "rollback", "decision"}
-
-
-def test_option_labels_do_not_license_a_negation() -> None:
-    """An ask offering "No" must not let "No - wait" read as a restatement."""
-    record = {"questions": [_question("Deploy core to production?", "Yes", "No")]}
-    assert "no" in dedupe.tokens(dedupe.ask_text(record))
-    assert not dedupe.adds_nothing(
-        "Deploy core to production? No",
-        "",
-        dedupe.ask_text(record),
-        question=dedupe.question_text(record),
-    )
+    for text in ("Yes", "deploy_core", "Deploy core? Keep backup?"):
+        assert not dedupe.repeats_question(text, "", record, priority="normal")
+    assert dedupe.repeats_question("Keep backup?", "Keep backup?", record, priority="normal")
 
 
 def test_matching_ask_honours_status_window_relay_and_priority() -> None:
@@ -588,3 +650,31 @@ def test_the_relay_serves_the_folded_context(session: Any) -> None:
     assert waiting["ask"]["context"][0]["body_md"] == SAME_BODY
     one = client.get(f"/api/notifications/{waiting['id']}").json()
     assert SAME_BODY in one["item"]["body_md"]
+
+
+@pytest.mark.parametrize(
+    ("question", "title"),
+    [
+        ("Do not delete branch feat/x until backup?", "Delete branch feat/x now"),
+        ("Delete branch feat/x but not feat/y?", "Delete branch feat/y but not feat/x"),
+    ],
+)
+@pytest.mark.parametrize("notify_first", [False, True])
+def test_round3_polarity_failures_deliver_in_both_orders(
+    session: Any, question: str, title: str, notify_first: bool
+) -> None:
+    if notify_first:
+        assert _notify(session, title).startswith("Notified (id n_")
+    outcome = session._enqueue_ask([_question(question, "Yes", "No")], 3600, tool_call_id="r3")
+    assert outcome["ok"]
+    if not notify_first:
+        assert _notify(session, title).startswith("Notified (id n_")
+    [row] = NotificationStore(session._test_root).list_items(state="unread")[0]
+    assert row["title"] == title and not row["read"] and not row["dismissed"]
+    assert "context" not in _open_record(session)
+
+
+def test_exact_title_with_contradictory_body_delivers(session: Any) -> None:
+    _ask(session)
+    assert _notify(session, SAME_TITLE, "Do not drop the table.").startswith("Notified (id n_")
+    assert "context" not in _open_record(session)

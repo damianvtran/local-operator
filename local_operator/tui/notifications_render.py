@@ -142,7 +142,9 @@ def section_header(label: str, count: int, width: int) -> Text:
     header = Text(no_wrap=True)
     header.append(" ── ", style=ink("dim"))
     header.append(label, style=ink("muted", bold=True))
-    header.append(f" · {count} ", style=ink("dim"))
+    # Counts carry information, unlike decorative rules; muted clears 4.5:1
+    # in light mode where dim does not (design round 3 D7).
+    header.append(f" · {count} ", style=ink("muted"))
     pad = width - cell_len(header.plain)
     if pad > 0:
         header.append(RULE_GLYPH * pad, style=ink("dim"))
