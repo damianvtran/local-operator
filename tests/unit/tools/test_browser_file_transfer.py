@@ -1235,6 +1235,40 @@ def test_upload_refuses_the_whole_call_when_one_path_is_refused(tmp_path: Path) 
     assert host.calls == []
 
 
+@pytest.mark.parametrize(
+    ("relative", "label"),
+    [
+        ("attachments/" + "a" * 32 + ".bin", "shared attachment store"),
+        ("uploads/12345678-1234-1234-1234-123456789abc.png", "shared user-upload store"),
+        ("browser/downloads/20261028-abc123de/icon.png", "browser download store"),
+    ],
+)
+def test_upload_shared_store_refusal_guidance(
+    isolated_config: Path, relative: str, label: str
+) -> None:
+    """A class-specific explanation must not become permission to attach a shared file."""
+    target = isolated_config / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"non-sensitive synthetic fixture")
+    host = FakeHost(methods=("upload",))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="shared-refusal",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(target)]),
+        context=_ctx(),
+    )
+    assert result.is_error
+    assert label in result.text
+    assert "already authorized for this session" in result.text
+    assert "non-sensitive" in result.text
+    assert "filesystem path" in result.text
+    assert "other-session" in result.text
+    assert result.text.count("refused:") == 1
+    assert host.calls == []
+
+
 def test_upload_refuses_more_files_than_the_cap(tmp_path: Path) -> None:
     paths = [
         str(_uploadable(tmp_path, f"file-{index}.pdf")) for index in range(bf.UPLOAD_MAX_FILES + 1)

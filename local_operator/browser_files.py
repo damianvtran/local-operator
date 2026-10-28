@@ -1036,6 +1036,43 @@ def _unopenable_reason(raw_path: Path, exc: BaseException) -> str:
     return f"refused: could not be opened: {shown} ({_echo_path(detail)})"
 
 
+def _config_upload_refusal(raw_path: Path, resolved: Path, config_root: Path) -> str:
+    """Explain a denied shared-store class without treating its location as ownership.
+
+    This changes ONLY the explanation after the config gate has denied the file. Shared
+    stores have no directory-level session ownership: a digest, UUID or truncated session
+    suffix is not authorization. Provenance-based upload remains unimplemented. Require
+    both original and resolved spellings within the same class before offering conditional
+    guidance, so a link from another session or to a credential gets no relocation advice.
+    Lexical matching here is deliberately conservative; the actual refusal already uses
+    filesystem identity, so an unrecognised alias stays denied with the generic reason.
+    """
+    # i18n: ignore model-facing upload-policy refusal and recovery instructions
+    reason = (
+        "refused: that file is inside Local Operator's own config directory, which holds "
+        "credentials"
+    )
+    if _credential_refusal(raw_path) or _credential_refusal(resolved):
+        return reason
+    original = Path(os.path.abspath(raw_path))
+    for subdir, label in (
+        ("attachments", "shared attachment store"),
+        ("uploads", "shared user-upload store"),
+        ("browser/downloads", "browser download store"),
+    ):
+        root = config_root / subdir
+        if is_within(original, root) and is_within(resolved, root):
+            return (
+                f"{reason}. Direct upload from the {label} is unsupported: its location "
+                "does not establish ownership. Only for a non-sensitive file already "
+                "authorized for this session, use existing verified materialization or "
+                "copy to this session's own scratchpad/workspace, then upload its filesystem "
+                "path. Never relocate credentials, config files, keychains or other-session "
+                "files to bypass this refusal."
+            )
+    return reason
+
+
 def check_upload(
     raw: str, *, cwd: str, policy: Policy = DEFAULT, session_id: str = ""
 ) -> tuple[Path | None, str]:
@@ -1078,10 +1115,7 @@ def check_upload(
         if own_pad is None or not is_within(resolved, own_pad):
             # Unconditional and first: this is where the encrypted secret store and
             # config.yml live (§9.2's step 1, "the cheapest high-value rule").
-            return None, (
-                "refused: that file is inside Local Operator's own config directory, which holds "
-                "credentials"
-            )
+            return None, _config_upload_refusal(raw_path, resolved, config_root)
     try:
         mode = resolved.stat().st_mode
     except OSError:

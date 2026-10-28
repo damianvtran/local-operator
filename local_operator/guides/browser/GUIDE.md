@@ -520,6 +520,15 @@ upload selector=e7 paths=["/Users/me/Deck.pptx", "/Users/me/notes.pdf"]
   a credential file (`~/.ssh/id_rsa`, `*.pem`, `.env`, `secrets/…`), a symlink to
   one, a directory, or anything over 256 MB is refused, and a refusal attaches
   **nothing at all**. Say which rule fired to the user rather than retrying.
+- Direct uploads from the shared `attachments/`, `uploads/`, and
+  `browser/downloads/` stores remain **unsupported and denied**. A digest, UUID,
+  or shortened session ID in a path does not establish authorization. Broader
+  artifact/attachment support requires separate provenance design; the own-scratchpad
+  exception does not implement it. Only for a non-sensitive file already authorized
+  for this session, use existing verified materialization or copy it to this session's
+  own scratchpad/workspace, then upload its filesystem path. Never relocate credentials,
+  config files, keychains, or another session's files to bypass a refusal. A mention
+  in a file listing alone is not ownership evidence.
 - The result names each attached file with its byte count and sha256, and reports
   the input's `accept=` attribute — which is deliberately NOT applied as a filter.
 - An `upload` call asks for `exec` approval: the file leaves the machine, and the

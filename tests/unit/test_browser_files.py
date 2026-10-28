@@ -1358,6 +1358,45 @@ def test_check_upload_still_refuses_another_sessions_directory_with_a_session_id
     assert "config directory" in reason
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "config.yml",
+        "auth.db",
+        "secrets/store.enc",
+        "sessions/other-session/scratchpad/icon.png",
+        "attachments/.env",
+        "uploads/id_rsa",
+        "browser/downloads/stamp/login.keychain-db",
+    ],
+)
+def test_shared_guidance_never_suggests_relocating_sensitive_paths(
+    isolated_config: Path, relative: str
+) -> None:
+    target = _png(isolated_config / relative)
+    resolved, reason = bf.check_upload(str(target), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason or "credential" in reason
+    assert "materializ" not in reason and "copy" not in reason
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_shared_guidance_never_crosses_other_session_symlinks(
+    isolated_config: Path, reverse: bool
+) -> None:
+    shared = isolated_config / "uploads/icon.png"
+    other = _pad(isolated_config, "other-session") / "icon.png"
+    # Either spelling can look harmless. Neither resolving a shared link into another
+    # session nor disguising that session's link into the shared store grants guidance.
+    target, link = (shared, other) if reverse else (other, shared)
+    _png(target)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    resolved, reason = bf.check_upload(str(link), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "materializ" not in reason and "copy" not in reason
+
+
 # --- honest refusals: the cause is named, never collapsed to "does not exist" --
 
 
