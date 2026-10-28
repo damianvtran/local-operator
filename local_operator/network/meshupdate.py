@@ -376,8 +376,9 @@ def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
 
     Match the PyPI/snapshot promotion freeze: discovery is a census, not a
     lifetime lease. An absent record cannot prove that a live process will
-    never read another resource from its loaded generation. Capacity reporting
-    may remain read-only; promotion must not trigger destructive collection.
+    never read another resource from its loaded generation, so promotion must
+    not trigger destructive collection. Retention is an explicit
+    ``lop install prune``, not a tail of this install.
     """
     capture = _CapturedInstall()
     try:

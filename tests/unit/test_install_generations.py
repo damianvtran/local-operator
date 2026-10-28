@@ -2218,42 +2218,82 @@ class TestPruning:
 
         assert [record.session_id for record, _state in parsed] == ["ok"]
 
-    def test_a_kept_reference_has_no_marker_when_other_removals_fail(self, home: Path) -> None:
-        """A kept late reference is never attested, including a failed-removal pass."""
+    def test_a_late_reference_is_vetoed_and_a_failed_removal_still_withdraws(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One pass, two properties, driven by spies so no tree is ever removed.
+
+        * DISCRIMINATING AGAINST THE BASE: a boot record published after the
+          caller's ``referenced`` snapshot names generation A. The fresh census
+          must keep it, so A reaches neither ``note_doomed_runtimes`` nor
+          ``_remove_tree``. Before the veto A was attested and then removed.
+        * PRESERVED, NOT NEW: for every other candidate whose removal fails after
+          an attestation was staged, ``withdraw_involuntary_stops`` must be called
+          with that attestation and ``MECHANISM_GENERATION_PRUNE``. The branch
+          needs a non-empty attestation, which the census veto now makes
+          unreachable with real records, so the spy supplies one. This half passes
+          on the base too; it is here so the branch keeps a test.
+        """
         from local_operator.session.runtime import registry
         from local_operator.session.runtime.journal import BootRecord
         from local_operator.session.runtime.types import HOST_RUN_DIRNAME, session_dir
 
-        generations = [_install(f"0.55.{index}") for index in range(3)]
-        doomed = generations[0]
+        generations = [_install(f"0.55.{index}") for index in range(4)]
+        late, others = generations[0], generations[1:-1]
+        assert others, "precondition: at least one non-pointer candidate besides the late one"
         root = home / ".local-operator"
         session_dir(root, "kept1").mkdir(parents=True)
-        # A late reference is protected by the fresh census, independently of
-        # whether removal of the unrelated candidates succeeds.
         referenced = update_mod.referenced_install_roots()
         registry.publish(
             BootRecord(
                 pid=4243,
                 session_id="kept1",
-                install_root=str(doomed / "tools" / "local-operator"),
+                install_root=str(late / "tools" / "local-operator"),
             ),
             root,
             HOST_RUN_DIRNAME,
         )
-        monkeypatch = pytest.MonkeyPatch()
-        try:
-            monkeypatch.setattr(update_mod, "_remove_tree", lambda _path: False)
-            plan = update_mod.prune_generations(
-                keep=0, referenced=referenced, actor=update_mod.ACTOR_PRUNE
-            )
-        finally:
-            monkeypatch.undo()
+        attested_for: list[Path] = []
+        removal_attempts: list[Path] = []
+        withdrawn: list[tuple[Any, str]] = []
+        staged = [("record", root)]
 
+        def _note(tree: Path, **_kwargs: Any) -> list[tuple[Any, Path]]:
+            attested_for.append(tree)
+            return staged
+
+        def _remove(tree: Path) -> bool:
+            removal_attempts.append(tree)
+            return False
+
+        monkeypatch.setattr(update_mod, "note_doomed_runtimes", _note)
+        monkeypatch.setattr(update_mod, "_remove_tree", _remove)
+        monkeypatch.setattr(
+            update_mod,
+            "withdraw_involuntary_stops",
+            lambda attested, *, mechanism: withdrawn.append((attested, mechanism)),
+        )
+
+        plan = update_mod.prune_generations(
+            keep=0, referenced=referenced, actor=update_mod.ACTOR_PRUNE
+        )
+
+        # The veto: the late reference's tree was never attested and never touched.
+        assert late not in attested_for and late not in removal_attempts, plan.decisions
+        assert late.is_dir()
+        assert registry.read_stop_marker(session_dir(root, "kept1")) is None
+        assert any(
+            decision.path == late and not decision.removed and "names it" in decision.reason
+            for decision in plan.decisions
+        ), plan.decisions
+        # The preserved branch: every failed removal withdrew exactly what it staged.
+        assert set(others) <= set(removal_attempts), "the unreferenced candidates were attempted"
+        assert len(withdrawn) == len(removal_attempts)
+        assert all(
+            attested is staged and mechanism == update_mod.MECHANISM_GENERATION_PRUNE
+            for attested, mechanism in withdrawn
+        )
         assert plan.removed == ()
-        assert doomed in {decision.path for decision in plan.decisions}
-        assert (
-            registry.read_stop_marker(session_dir(root, "kept1")) is None
-        ), "a marker for a removal that did not happen is a false attribution"
 
     def test_prune_reports_what_it_kept_and_why(self, home: Path) -> None:
         """D3: the one command whose whole job is a retention decision must explain it."""
