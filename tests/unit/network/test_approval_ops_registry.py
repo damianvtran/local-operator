@@ -593,3 +593,71 @@ async def test_bodiless_approve_answers_credential_cards_through_the_registry(
     assert blind.status_code == 200, blind.text
     assert counters["signer"] == 1
     assert A.load_record(aid, root=rig.root)["state"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Q3 (QA round 1, folded in agent review round 2): the CLI approver runs the credential
+# family scan too, so it never signs a ``credential_*`` key it cannot disclose.
+# ---------------------------------------------------------------------------
+
+
+def _cli_credential_record(
+    rig: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> dict[str, Any]:
+    from tests.unit.network.test_finite_share import _record_with_what
+
+    template = _finite(rig, monkeypatch)
+    anchor = copy.deepcopy(template["what"]["anchor"])
+    if shape == "bogus-alone":
+        what = {"anchor": anchor, "credential_bogus": {"payload": "unknown"}}
+    elif shape == "bogus-beside-finite":
+        what = copy.deepcopy(template["what"])
+        what["credential_bogus"] = {"payload": "unknown"}
+    else:  # "malformed-inheritance": the op key is present, its payload does not parse
+        what = {"anchor": anchor, inheritance.OP: "not-a-dict"}
+    return _record_with_what(template, what, rig.root)
+
+
+@pytest.mark.parametrize("shape", ["bogus-alone", "bogus-beside-finite", "malformed-inheritance"])
+def test_cli_approve_refuses_an_undisclosable_credential_key_before_the_signer(
+    rig: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    shape: str,
+) -> None:
+    """Q3: the CLI refuses with the desktop's own family code and sentence, signer untouched."""
+    record = _cli_credential_record(rig, monkeypatch, shape)
+    counters = _counted(monkeypatch)
+    aid = record["approval_id"]
+    capsys.readouterr()
+    rc = _lop_network("approvals", "approve", aid, "--json")
+    out = capsys.readouterr()
+    assert counters["signer"] == 0
+    assert rc != 0
+    refusal = approval_ops.credential_unsupported(record, aid)
+    body = json.loads(out.out)
+    assert body["code"] == refusal.code == "credential_approval_unsupported"
+    assert refusal.sentence in json.dumps(body)
+    assert A.load_record(aid, root=rig.root)["state"] == "requested"
+
+
+def test_cli_approve_still_signs_a_valid_finite_share_after_disclosing_it(
+    rig: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Q3 CONTROL: the CLI's own ``cli_approvable`` op signs exactly as before the fold."""
+    record = _finite(rig, monkeypatch)
+    counters = _counted(monkeypatch)
+    aid = record["approval_id"]
+    capsys.readouterr()
+    rc = _lop_network("approvals", "approve", aid, "--json")
+    out = capsys.readouterr()
+    assert rc == 0, out
+    assert counters["signer"] == 1
+    assert json.loads(out.out)["state"] == "approved"
+    # The full disclosure precedes the signature on stderr, as on base.
+    assert finite_share.details(record)[0].split()[0] in out.err
+    assert A.load_record(aid, root=rig.root)["state"] == "approved"

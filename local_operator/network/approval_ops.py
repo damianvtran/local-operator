@@ -120,8 +120,12 @@ _OPS: dict[str, ApprovalOp] = {}
 _FAMILIES: dict[str, Any] = {}
 _loaded = False
 #: Set once the providers have imported: from then on the registry only answers lookups.
-#: Providers register DURING their import, which :func:`_ensure_loaded` finishes before it
-#: seals, so the seal can never land between a provider's registrations.
+#: Providers register DURING their import. RULE THAT MAKES THE SEAL SAFE: a provider module
+#: performs ALL its registrations before its first registry lookup. A provider imported
+#: directly (not via :func:`_ensure_loaded`) reaches ``_ensure_loaded`` from its own first
+#: lookup (``desktop_approval``'s module-level ``file_only_signing()``) while still partly
+#: initialised, so the seal lands DURING that import -- harmless only because every
+#: ``register``/``register_family`` call already ran (agent review round 2, R2-1).
 _sealed = False
 
 
@@ -167,10 +171,14 @@ def _ensure_loaded() -> None:
     global _loaded, _sealed
     if _loaded:
         return
+    # The imports run OUTSIDE ``_LOCK``: a provider's ``register`` takes it, and its first
+    # lookup re-enters here, so holding the (non-reentrant) lock would deadlock. Only the
+    # flag flip is locked, the same discipline ``_unsealed_for_tests`` uses (R2-2).
     for name in _PROVIDERS:
         importlib.import_module(name)
-    _loaded = True
-    _sealed = True
+    with _LOCK:
+        _loaded = True
+        _sealed = True
 
 
 @contextlib.contextmanager
@@ -231,9 +239,10 @@ def require_generic_approvable(
     """THE ONE CHECK both generic approvers run BEFORE any signer call.
 
     Raises the claiming op's refusal when ``record`` carries a registered typed op that
-    ``surface`` may not sign; on the desktop, an unregistered member of a registered
-    family refuses too. Returns ``None`` when the record is the generic approver's to sign.
-    Deny/withdraw never call this.
+    ``surface`` may not sign; a key of a registered family refuses too unless this surface
+    discloses it (on the CLI, a ``cli_approvable`` op whose payload parses). Returns
+    ``None`` when the record is the generic approver's to sign. Deny/withdraw never call
+    this.
     """
     what = record.get("what")
     if not isinstance(what, dict):
@@ -254,14 +263,29 @@ def require_generic_approvable(
         if refusal is not None:
             raise refusal
         unanswered = True
-    if surface == SURFACE_DESKTOP:
-        with _LOCK:
-            families = dict(_FAMILIES)
-        for prefix, unsupported in families.items():
-            if any(isinstance(key, str) and key.startswith(prefix) for key in what):
-                raise unsupported(record, approval_id)
-    # (The CLI never refused UNREGISTERED family keys, and skips ``cli_approvable`` ops
-    # entirely: that pre-S4a CLI behaviour is unchanged here and is its own PR.)
+    # The family scan runs on BOTH surfaces (QA round 1, Q3): before it, the CLI signed an
+    # unknown ``credential_*`` key -- alone, or beside a valid finite share whose disclosure
+    # was the only one printed -- and a malformed ``credential_inheritance``, all blind. The
+    # CLI exempts exactly the keys its verb DISCLOSES before signing: a ``cli_approvable``
+    # op whose payload parses (``intent`` is what the verb's disclosure branches test), so
+    # the credential ops still sign there exactly as before. This must hold before any
+    # build ships another ``credential_*`` op, or a signature this build gave blind could be
+    # honoured by a later build that knows the op.
+    disclosed_here: set[str] = set()
+    if surface == SURFACE_CLI:
+        disclosed_here = {
+            operation.op
+            for operation in registered()
+            if operation.cli_approvable and operation.intent(dict(record)) is not None
+        }
+    with _LOCK:
+        families = dict(_FAMILIES)
+    for prefix, unsupported in families.items():
+        if any(
+            isinstance(key, str) and key.startswith(prefix) and key not in disclosed_here
+            for key in what
+        ):
+            raise unsupported(record, approval_id)
     if unanswered:
         raise typed_required(approval_id)
 
