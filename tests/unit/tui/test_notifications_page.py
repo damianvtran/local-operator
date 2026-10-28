@@ -9,13 +9,14 @@ refactor that keeps the pixels but loses the rule fails here.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
-from textual.worker import WorkerCancelled
+from textual.worker import WorkerState
 
 from local_operator.notifications import items as inbox
 from local_operator.notifications.store import NotificationStore
@@ -376,11 +377,22 @@ async def test_the_sidebar_note_counts_the_badge_and_hides_when_unknown(
         # so a resize landing after the swap raised `AttributeError` (CI run
         # 40555547851). Production never holds anything but a mounted
         # `SessionSidebar` there, so the stand-in was the defect, not the read.
-        monkeypatch.setattr(app._session_sidebar, "set_notifications_total", painted.append)
+        # Record, then CALL THROUGH (review R3), so the sidebar's own clamp and
+        # store are exercised rather than stubbed out.
+        sidebar = app._session_sidebar
+        original = sidebar.set_notifications_total
+
+        def record(total: int) -> None:
+            painted.append(total)
+            original(total)
+
+        monkeypatch.setattr(sidebar, "set_notifications_total", record)
         app._paint_notifications_total({"unread_count": 2, "waiting_unread_count": 1})
         assert painted == [3], "the badge's own figure"
+        assert sidebar._notifications_total == 3
         app._paint_notifications_total(None)
         assert painted == [3, 0], "an unreadable store paints nothing, not a stale count"
+        assert sidebar._notifications_total == 0
 
 
 @pytest.mark.asyncio
@@ -966,34 +978,115 @@ async def _page_idle(app, pilot) -> None:
     painted result lay out. The deadline is a backstop for a wedged worker, not
     the assertion.
     """
-    deadline = time.monotonic() + BOOT_DEADLOCK_GUARD_S
+    # POLLED, NEVER AWAITED WITH A TIMEOUT (review R1). ``asyncio.wait_for``
+    # over ``workers.wait_for_complete`` cancels the inner gather on timeout, the
+    # cancel reaches each worker's own task, and Textual's ``wait_for_complete``
+    # swallows the ``CancelledError``: the wedged worker came back CANCELLED, the
+    # next pass saw nothing pending, and the helper returned success, with the
+    # write under test silently killed. Reading worker states touches nothing,
+    # so a hang stays a hang until the deadline names it.
+    started = time.monotonic()
+    deadline_s = BOOT_DEADLOCK_GUARD_S
+    seen: dict[int, Any] = {}
     while True:
         await pilot.pause()
         view = app._notifications_view
         assert view is not None, "/notifications did not mount the page"
-        pending = [w for w in app.workers if w.node is view and not w.is_finished]
+        page_workers = [w for w in app.workers if w.node is view]
+        seen.update((id(w), w) for w in page_workers)
+        # Textual drops a worker from ``app.workers`` once it ends, so its end
+        # state is read off the workers this helper has already seen.
+        for worker in seen.values():
+            if worker.state == WorkerState.ERROR:
+                pytest.fail(
+                    f"page worker {worker.name!r} ({worker.group}) raised: {worker.error!r}"
+                )
+            # ``reload`` runs ``exclusive=True``, so a newer read cancelling an
+            # older ``notifications-load`` is the page working (review R2: that
+            # is the ONLY cancel tolerated). The page never cancels a write, a
+            # detail read or an arm, so one ending CANCELLED means something
+            # killed the action under test and an assertion after it is vacuous.
+            if worker.state == WorkerState.CANCELLED and worker.group != "notifications-load":
+                pytest.fail(
+                    f"page worker {worker.name!r} ({worker.group}) was cancelled; "
+                    "an assertion after it would pass vacuously"
+                )
+        pending = [w for w in page_workers if not w.is_finished]
         # A Timer exposes no public "has it fired" signal; its task is the only
         # one, and a one-shot timer's task finishes once its callback has run.
+        # Coupled to textual's private ``Timer._task`` (8.2.8, review R4).
         timer = view._detail_timer
         task = getattr(timer, "_task", None)
         debouncing = task is not None and not task.done()
         if view.is_mounted and view.snapshot is not None and not pending and not debouncing:
             break
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, ("the notifications page never went quiet", pending, debouncing)
-        if pending:
-            try:
-                await asyncio.wait_for(app.workers.wait_for_complete(pending), remaining)
-            except WorkerCancelled:
-                # ``reload`` runs ``exclusive=True``: a newer read cancels the
-                # older one, and that is the page working, not failing. Loop
-                # and wait on whatever replaced it.
-                pass
-        else:
-            # Mount, the first load's spawn and the debounce are message-pump
-            # and timer events with no awaitable handle: yield, then re-check.
-            await asyncio.sleep(0.02)
+        elapsed = time.monotonic() - started
+        if elapsed >= deadline_s:
+            stuck = ", ".join(f"{w.name!r} group={w.group} state={w.state.name}" for w in pending)
+            pytest.fail(
+                f"the notifications page never went quiet after {elapsed:.1f}s: "
+                f"workers [{stuck or 'none'}], debouncing={debouncing}, "
+                f"mounted={view.is_mounted}, loaded={view.snapshot is not None}"
+            )
+        # Mount, spawns and the debounce are message-pump and timer events with
+        # no awaitable handle, and a worker's own handle cannot be awaited with a
+        # timeout without cancelling it (above): yield, then re-check.
+        await asyncio.sleep(0.02)
     await _settle(pilot)
+
+
+@pytest.mark.asyncio
+async def test_page_idle_fails_loudly_naming_a_wedged_worker(tmp_path: Path, monkeypatch) -> None:
+    """Review R1: the helper's backstop must FAIL on a hang, never pass it.
+
+    The first ``_page_idle`` awaited the workers under ``asyncio.wait_for``; on
+    timeout that cancelled the wedged worker, Textual swallowed the cancel, and
+    the next pass found nothing pending and returned success. Every assertion
+    after a hang then read a page whose action had been killed. Here a write is
+    held on an event past a shortened guard: the helper must fail within it and
+    name the worker, and the worker must still be alive (not cancelled) after.
+    """
+    import threading
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed(tmp_path, 3)
+    release = threading.Event()
+    real_write = model.write
+
+    def wedged_write(*args: Any, **kwargs: Any) -> Any:
+        # Bounded so a failing assertion below cannot leak a thread forever.
+        release.wait(30)
+        return real_write(*args, **kwargs)
+
+    app = _app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        app._cmd_notifications_page("", app._system_notice)
+        await _page_idle(app, pilot)
+        view = _page(app)
+        monkeypatch.setattr(model, "write", wedged_write)
+        try:
+            await pilot.press("e")
+            started = time.monotonic()
+            # Shortened only around the wedge, so a slow first open is not the hang.
+            with monkeypatch.context() as guard:
+                guard.setattr(sys.modules[__name__], "BOOT_DEADLOCK_GUARD_S", 1.0)
+                with pytest.raises(pytest.fail.Exception) as failure:
+                    await _page_idle(app, pilot)
+            elapsed = time.monotonic() - started
+            message = str(failure.value)
+            assert "never went quiet" in message, message
+            assert "'_write'" in message and "state=RUNNING" in message, message
+            assert elapsed < 10.0, f"the 1 s guard took {elapsed:.1f}s to fire"
+            writes = [w for w in app.workers if w.node is view and w.name == "_write"]
+            assert writes and all(not w.is_finished for w in writes), (
+                "the helper cancelled the wedged worker instead of leaving it to the test",
+                writes,
+            )
+        finally:
+            release.set()
+        await _page_idle(app, pilot)
+        assert view.undo_live, "released, the write completes normally"
 
 
 @pytest.mark.asyncio
