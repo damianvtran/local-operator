@@ -65,8 +65,8 @@ Check these in order. The receiver is not installed until all of them hold.
    their existing chief-of-staff session (plain `lop sessions` shows session
    ids; `lop sessions --help` documents the listing filters). The consent
    version is data, not approval by itself.
-4. **Only after the user explicitly accepts that exact text**, run the same
-   command with every identity pin and the chosen session:
+4. **Acceptance is the user's, at their own terminal.** Prepare the exact
+   command from the preview and hand it to them to run:
 
    ```bash
    lop team-bridge setup --credential-id <id> \
@@ -74,11 +74,19 @@ Check these in order. The receiver is not installed until all of them hold.
      --accept-consent-version <preview.consent.version> --session <session-id>
    ```
 
-   The command re-reads the served consent and refuses if the account, tenant,
-   version or existing session differs. It then uses the same production
-   enrollment and designation functions as the desktop flow. Never silently
-   default these values or perform the acceptance on the user's behalf. This
-   path does not need a desktop bearer or a running desktop app.
+   The command prints the served consent text in full, names the account,
+   organization and chief-of-staff session, and asks for an explicit `y`. It
+   **refuses when it is not run at a terminal** (`human_required`), and it
+   refuses when it descends from an agent's shell, so an agent cannot accept
+   consent on the user's behalf even if asked to. You may run everything up to
+   and including the preview; you may not run the acceptance. If the user asks
+   you to, explain that this one step is theirs and give them the command.
+
+   It re-reads the served consent and refuses if the account, tenant, version
+   or existing session differs (`account_mismatch`, `tenant_mismatch`,
+   `served_consent_required`, `consent_version_mismatch`, `session_not_found`).
+   It then uses the same production enrollment and designation functions as the
+   desktop flow. This path needs no desktop bearer and no running desktop app.
 5. The switch `team_bridge.enabled` is set by that explicit setup. Check
    current state with `lop team-bridge receiver status` or `lop config list`.
 6. **The default configuration folder** (`~/.local-operator`). The receiver is
@@ -173,6 +181,9 @@ back** and never assumes it worked:
 
 - `installed`, `current` or `registered`: success. `registered` means the
   registration was already correct and was only started again.
+- `human_required` (from `setup`): the acceptance command must be run by the
+  user at their own terminal, not from an agent. Have them run the exact command
+  printed in the preview.
 - `not_wanted` (`--json`: `not_wanted: true`): agent messages are not set up or
   are off. Nothing was installed. Follow the printed steps.
 - `source_checkout`: this `lop` runs from a source checkout and will not point

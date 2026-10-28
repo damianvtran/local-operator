@@ -33,6 +33,10 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
     monkeypatch.setattr(setup_cli, "TeamBridgeClient", _production_client)
     monkeypatch.setattr(setup_cli, "StatusDiscipline", _production_discipline)
+    # The acceptance half is a HUMAN gate (agent shell or non-TTY refuses). These
+    # cells are about the write path behind it, so they stand a human in: the
+    # gate's own refusals are pinned separately below.
+    monkeypatch.setattr(setup_cli, "confirm_consent", lambda *a, **k: None)
 
 
 def _production_client(config_dir: Path, **kwargs: Any):
@@ -321,3 +325,77 @@ async def test_explicit_setup_commits_owner_designation_and_wanted_state(
     # The real client wrote the wanted state through settings_io, not a direct
     # config or enrollment-store shortcut in setup_cli.
     assert settings_io.BY_KEY["team_bridge.session"].key == "team_bridge.session"
+
+
+# -- the human gate on accepting consent (review MAJOR-3) ------------------------
+
+
+def test_acceptance_is_refused_from_an_agent_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent may preview and hand over the command; it may not consent.
+
+    This is the backend-only replacement for the desktop consent dialog, which
+    is bearer-gated and whose bearer agent children have stripped. Without this
+    gate, a prompt injection reads the version from the read-only preview and
+    self-consents in a second command.
+    """
+
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_AGENT_SHELL", "1")
+    assert (
+        setup_cli.confirm_consent(
+            "bridge_consent_v2", "text", account_id="acc_42", tenant_id="tnt_42", session="s1"
+        )
+        == "human_required"
+    )
+
+
+def test_acceptance_is_refused_without_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.delenv("LOCAL_OPERATOR_AGENT_SHELL", raising=False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
+    assert (
+        setup_cli.confirm_consent(
+            "bridge_consent_v2", "text", account_id="acc_42", tenant_id="tnt_42", session="s1"
+        )
+        == "human_required"
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [("y", None), ("yes", None), ("", "consent_not_accepted"), ("n", "consent_not_accepted")],
+)
+def test_acceptance_at_a_terminal_needs_an_explicit_yes(
+    monkeypatch: pytest.MonkeyPatch, answer: str, expected: str | None
+) -> None:
+    import sys
+
+    monkeypatch.delenv("LOCAL_OPERATOR_AGENT_SHELL", raising=False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda *a: answer, raising=False)
+    assert (
+        setup_cli.confirm_consent(
+            "bridge_consent_v2", "text", account_id="acc_42", tenant_id="tnt_42", session="s1"
+        )
+        == expected
+    )
+
+
+async def test_a_refused_gate_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _session(tmp_path)
+    monkeypatch.setattr(setup_cli, "confirm_consent", lambda *a, **k: "human_required")
+    result = await _preview(
+        tmp_path, accept_consent_version=CONSENT["version"], session="session-42"
+    )
+    assert result["code"] == "human_required"
+    assert _writes() == []
+    assert Store(tmp_path).committed_owner_count() == 0
+    assert _values(tmp_path).get("team_bridge.enabled") is not True

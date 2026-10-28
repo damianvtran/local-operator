@@ -853,7 +853,7 @@ def _install_task(config_dir: Path) -> ServiceOutcome:
         if refusal is not None:
             return ServiceOutcome(CODE_SOURCE_CHECKOUT, refusal)
     if record.exists():
-        stopped = _stop_task()
+        stopped = _stop_task(config_dir)
         if stopped is not None:
             return stopped
     log_path(config_dir).parent.mkdir(parents=True, exist_ok=True)
@@ -876,24 +876,68 @@ def _install_task(config_dir: Path) -> ServiceOutcome:
     return ServiceOutcome(CODE_REGISTERED if current == wanted else CODE_INSTALLED)
 
 
-def _stop_task() -> ServiceOutcome | None:
-    """End the running action before deleting/replacing its registration.
+def _receiver_holds_its_lock(config_dir: Path) -> bool:
+    """Whether a connector is ACTUALLY running for ``config_dir`` right now.
 
-    Task deletion does not terminate the action. Keep the registration record
-    on a failed End so the next attempt can still find and stop this receiver.
-    A positively idle or missing task needs no termination.
+    The connector takes its machine-wide singleton lock for its whole life
+    (``lock.ConnectorLock``), and the kernel drops it when the process dies. So a
+    successful non-blocking acquire here means no receiver is running, whatever
+    Task Scheduler's localized status word says — the decidable liveness probe
+    that makes the stop decision below independent of the console language.
+
+    A lock we cannot take is treated as "a receiver is running" (the safe
+    direction for the caller, which is about to delete the registration).
     """
+
+    from local_operator.team_bridge.connector.lock import ConnectorLock
+
+    probe = ConnectorLock(Path(config_dir), deadline_s=0)
+    try:
+        probe.acquire()
+    except Exception:  # noqa: BLE001 — busy, unopenable or refused all mean "assume alive"
+        return True
+    probe.release()
+    return False
+
+
+def _stop_task(config_dir: Path) -> ServiceOutcome | None:
+    """End the running action before deleting/upgrading its registration.
+
+    ``/End`` on a task that is not running exits NON-ZERO, and Task Scheduler's
+    status word is LOCALIZED (so ``supervisors.task_state`` answers ``None`` for
+    a word it does not know). Failing on that alone made Turn off and ``receiver
+    remove`` fail permanently on a non-English Windows whose receiver was idle —
+    the "cannot turn it off" state this command exists to prevent. The decision
+    is therefore made on EVIDENCE, in this order: a positively idle task needs no
+    ``/End``; a failed ``/End`` is re-checked, and the connector's own singleton
+    lock (language-independent) decides whether anything is still running. Only
+    a receiver that is provably still alive fails the stop.
+    """
+
     registered, running, detail = supervisors.task_state(task_name(), runner=_schtasks)
     if registered and running is False:
         return None
     if not registered and "cannot find" in detail.lower():
         return None
     ended = _schtasks(*supervisors.task_end_args(task_name()))
-    if ended.returncode:
-        return ServiceOutcome(
-            CODE_FAILED, (ended.stderr or ended.stdout or "task stop failed").strip()
-        )
-    return None
+    if ended.returncode == 0:
+        return None
+    # Re-read the state the way the arm does everywhere else: only what the
+    # supervisor positively says, plus the lock, is evidence.
+    registered, running, detail = supervisors.task_state(task_name(), runner=_schtasks)
+    if not registered and "cannot find" in detail.lower():
+        return None
+    if running is False:
+        return None
+    if not _receiver_holds_its_lock(config_dir):
+        # No process holds the store's receiver lock: the /End complaint was
+        # about a task that is not running, which is the state we asked for.
+        return None
+    return ServiceOutcome(
+        CODE_FAILED,
+        "the receiver is still running and could not be stopped: "
+        + (ended.stderr or ended.stdout or detail or "schtasks /End failed").strip()[:200],
+    )
 
 
 def _remove_task(config_dir: Path) -> ServiceOutcome:
@@ -905,7 +949,7 @@ def _remove_task(config_dir: Path) -> ServiceOutcome:
     if supervisors.task_scheduler_is_addressable(Path(config_dir)):
         # ``/End`` before ``/Delete``: deleting the definition does not stop the
         # program it started (the wake installer's measured lesson).
-        stopped = _stop_task()
+        stopped = _stop_task(config_dir)
         if stopped is not None:
             return stopped
         ok, detail = supervisors.delete_task(task_name(), runner=_schtasks)
@@ -988,10 +1032,14 @@ def _ownership_refusal(config_dir: Path) -> str | None:
     try:
         expected = (home / DEFAULT_CONFIG_DIRNAME).resolve()
         root = Path(config_dir).resolve()
+        # ``Path.home()`` on Windows IS the profile (USERPROFILE), so this is the
+        # identity test. ``$HOME`` is deliberately NOT consulted on Windows: Git
+        # Bash, MSYS2 and Cygwin export HOME as a POSIX path that means nothing
+        # to this product, and refusing on it would deny the receiver to every
+        # developer who starts lop from one of those shells — the guard would
+        # refuse the user it exists to protect.
         if Path.home().resolve() != home.resolve():
             return "this process's profile is redirected; the shared task is left alone"
-        if os.environ.get("HOME") and Path(os.environ["HOME"]).resolve() != home.resolve():
-            return "this process's HOME is redirected; the shared task is left alone"
     except (OSError, ValueError):
         return f"the config dir {config_dir} cannot be resolved; the shared task is left alone"
     if root != expected:

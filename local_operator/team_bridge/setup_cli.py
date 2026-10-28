@@ -26,6 +26,57 @@ from local_operator.team_bridge.client import (
 )
 
 
+def confirm_consent(
+    version: str, text: str, *, account_id: str, tenant_id: str, session: str
+) -> str | None:
+    """THE human gate on accepting the served consent, or ``None`` to proceed.
+
+    WHY A COMMAND THAT CAN CONSENT NEEDS ONE (code review MAJOR-3). The desktop
+    equivalent is bearer-gated, and agent child processes have that bearer
+    stripped precisely so an agent cannot self-consent. This command is the
+    backend-only replacement for that consent dialog, so it must not be a way
+    around the gate: otherwise a prompt injection — or an agent following a
+    convenient instruction — reads the version out of the read-only preview and
+    accepts on the user's behalf in a second command.
+
+    So acceptance is a HUMAN ACT at a terminal: the full served text is printed,
+    the account, organization and chief of staff are named, and an explicit ``y``
+    is required. Refused, never guessed, when:
+
+    * the caller descends from an agent's ``bash`` tool call
+      (``agent_shell.in_agent_shell``) — the agent may preview, print the exact
+      command for the user, and nothing more;
+    * stdin or stdout is not a terminal — there is nobody to ask, or the answer
+      would be read from something that already captured this text.
+
+    Returns a stable machine code (``human_required`` /
+    ``consent_not_accepted``) or ``None``. Never raises: a terminal that goes
+    away is not consent.
+    """
+
+    import sys
+
+    from local_operator.agent_shell import in_agent_shell
+
+    if in_agent_shell():
+        return "human_required"
+    stdin_tty = bool(sys.stdin and sys.stdin.isatty())
+    stdout_tty = bool(sys.stdout and sys.stdout.isatty())
+    if not (stdin_tty and stdout_tty):
+        return "human_required"
+    print(text)
+    print()
+    print(f"Consent version: {version}")
+    print(f"Account: {account_id}")
+    print(f"Organization: {tenant_id}")
+    print(f"Chief of staff session: {session}")
+    try:
+        answer = input("Accept this consent for this machine, as the account owner? [y/N] ")
+    except (EOFError, KeyboardInterrupt, OSError):
+        return "consent_not_accepted"
+    return None if answer.strip().lower() in ("y", "yes") else "consent_not_accepted"
+
+
 def main(args: argparse.Namespace) -> int:
     """Dispatch only this command; all results are JSON, including refusals."""
 
@@ -127,6 +178,15 @@ async def setup(
         or owner.credential_id != credential_id
     ):
         return {"ok": False, "code": "local_owner_conflict"}
+    refusal = confirm_consent(
+        version,
+        text,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        session=session,
+    )
+    if refusal is not None:
+        return {**preview, "ok": False, "code": refusal}
     answer = await client.put_settings(
         state="active",
         tenant_id=tenant_id,
