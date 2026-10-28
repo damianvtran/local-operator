@@ -476,6 +476,49 @@ async def test_a_legacy_flood_of_binding_notices_folds_to_one_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_alternating_flood_of_identical_notices_folds_to_one_row() -> None:
+    """The live flood: one sentence, the row id flipping 104 <-> 125, paints ONCE.
+
+    Session 17cd3e74c66f journaled thousands of these (a subagent's account
+    misattributed to its parent). Each pair named two different row ids, so a
+    fold keyed on the id never matched its neighbour and every row painted --
+    a wall of identical lines. Adjacent identical sentences now fold whatever
+    the id; a different sentence (the account named differently) still paints.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    same = "[session credential] This session is now using the anthropic login on my-mac."
+    named = "[session credential] This session is now using b@example.test on my-mac."
+
+    def _notice(text: str, row: int) -> CustomMessage:
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "provider": "anthropic",
+                "owner_device": "d_local",
+                "credential_id": row,
+            },
+        )
+
+    session = FakeSession()
+    session._history = [_notice(same, (104, 125)[i % 2]) for i in range(20)] + [_notice(named, 125)]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    assert notices == [same, named], notices
+
+
+@pytest.mark.asyncio
 async def test_identical_genuine_account_switch_sentences_survive_real_turns() -> None:
     from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
     from local_operator.harness.types import CustomMessage

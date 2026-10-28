@@ -1388,8 +1388,15 @@ def project_settled_rows(
         for block in transcript.blocks()
         if isinstance(block, (UserBlock, HubMessageBlock)) and block.navigation_anchor_id
     }
-    # Only adjacent duplicate bookkeeping for the SAME recorded identity may
-    # fold. A real turn resets this; identical prose is not account identity.
+    # Only ADJACENT account notices may fold: any other row (a real turn above
+    # all) resets this, so two switches a turn apart both paint. Within a run,
+    # a sentence identical to the one just painted tells the reader nothing the
+    # first did not — and that was the flood's exact shape: a subagent's
+    # account misattributed to its parent journaled A->B, B->A pairs whose
+    # sentences were identical because a local row carried no label. The row
+    # id is therefore NOT part of the fold key; the sentence now names the
+    # account (``render_binding_change_notice``), so a genuinely different
+    # account renders a different sentence and is never folded away.
     last_binding_notice: tuple[Any, ...] | None = None
     with batch:
         for message in history:
@@ -1684,12 +1691,7 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()
-                identity = (
-                    text,
-                    details.get("provider"),
-                    details.get("owner_device"),
-                    details.get("credential_id"),
-                )
+                identity = (text, details.get("provider"), details.get("owner_device"))
                 if text and identity == last_binding_notice:
                     continue
                 if text:

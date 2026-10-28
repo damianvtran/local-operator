@@ -611,6 +611,27 @@ def _device_phrase(name: str, fallback: str) -> str:
     return name.strip() or fallback
 
 
+#: Display bound for a sign-in label inside a notice, in characters — the same
+#: bound the offer frame puts on the label (``offers.MAX_OFFER_LABEL``), so one
+#: account reads the same length on both surfaces.
+_NOTICE_LABEL_LIMIT = 64
+
+
+def _account_label(label: str) -> str:
+    """The sign-in label as it may appear in a notice: one printable line.
+
+    WHY SANITISED: a borrowed row's label is the grant's identity, i.e. text a
+    PEER device chose, and the notice is painted verbatim into the operator's
+    terminal on every replay. ``sanitize_prompt_line`` is the tree's one
+    helper for "untrusted text rendered as one line a person must read
+    literally": escapes stripped, format characters made visible, whitespace
+    collapsed, length bounded.
+    """
+    from local_operator.ansi import sanitize_prompt_line
+
+    return sanitize_prompt_line(label or "", limit=_NOTICE_LABEL_LIMIT)
+
+
 def _login_phrase(label: str, provider: str, owner: str) -> str:
     """The serving login as the row knows it: label first, else provider+owner.
 
@@ -619,7 +640,8 @@ def _login_phrase(label: str, provider: str, owner: str) -> str:
     operator-facing account string, when the row carries one) is what answers
     "which of my two logins" when both belong to the same owner.
     """
-    if label.strip():
+    label = _account_label(label)
+    if label:
         return f"{label} on {owner}"
     return f"the {provider} login on {owner}"
 
@@ -661,6 +683,12 @@ def render_binding_change_notice(
     change is never silent) is what the cells pin.
     """
     provider = binding.provider or "credential"
+    # THE ACCOUNT IS NAMED in every arm that has a label: two logins on one
+    # device rendered the identical sentence, so a genuine switch and a
+    # spurious one (a subagent's account misattributed to its parent) were
+    # indistinguishable on screen. The label is what tells them apart.
+    now_label = _account_label(binding.identity_label)
+    was_label = _account_label(previous.identity_label)
     owner_changed = binding.owner_device != previous.owner_device
     id_changed = binding.credential_id != previous.credential_id
     if not owner_changed and not id_changed:
@@ -672,15 +700,12 @@ def render_binding_change_notice(
         # cascade took the session onto it. Names the account it came FROM and
         # the device it landed on (the row's own name field).
         where = _device_phrase(previous.owner_device_name, "another device")
-        was = (
-            f"using {previous.identity_label} on {where}"
-            if previous.identity_label
-            else f"using the {provider} login on {where}"
-        )
+        was = f"using {_login_phrase(was_label, provider, where)}"
         landed = _device_phrase(binding.owner_device_name, "the recording device")
+        which = f" ({now_label})" if now_label else ""
         return (
             f"{_BINDING_NOTICE_HEAD}This session was {was}; "
-            f"it moved onto {landed}'s own {provider} login."
+            f"it moved onto {landed}'s own {provider} login{which}."
         )
 
     if owner_changed and previous.owner_device == self_device:
@@ -688,10 +713,10 @@ def render_binding_change_notice(
         # or no longer resolvable), so the borrow rung answers now.
         was_local = _device_phrase(previous.owner_device_name, "the recording device")
         who = _device_phrase(binding.owner_device_name, "another device")
-        now = _login_phrase(binding.identity_label, provider, who)
+        now = _login_phrase(now_label, provider, who)
         return (
-            f"{_BINDING_NOTICE_HEAD}This session was running on the {provider} "
-            f"login on {was_local}; it is now served by {now}."
+            f"{_BINDING_NOTICE_HEAD}This session was running on "
+            f"{_login_phrase(was_label, provider, was_local)}; it is now served by {now}."
         )
 
     if owner_changed:
@@ -699,7 +724,7 @@ def render_binding_change_notice(
         # the NEW owner once, with the old one as context.
         was_owner = _device_phrase(previous.owner_device_name, "another device")
         now_owner = _device_phrase(binding.owner_device_name, "another device")
-        now = _login_phrase(binding.identity_label, provider, now_owner)
+        now = _login_phrase(now_label, provider, now_owner)
         return (
             f"{_BINDING_NOTICE_HEAD}This session is now using {now} "
             f"(previously served by {was_owner})."
@@ -709,7 +734,8 @@ def render_binding_change_notice(
         # Same device, different row: the local walk re-picked (a re-login, or a
         # sibling the operator added). Rare, and still an account change.
         landed = _device_phrase(binding.owner_device_name, "the recording device")
-        return f"{_BINDING_NOTICE_HEAD}This session is now using the {provider} login on {landed}."
+        now = _login_phrase(now_label, provider, landed)
+        return f"{_BINDING_NOTICE_HEAD}This session is now using {now}."
 
     # M3 — the owner-side sibling pick: same owner, a different row. States the
     # FACT of the rotation, never its cause (the row cannot tell the four
@@ -718,7 +744,7 @@ def render_binding_change_notice(
     # logins is unknown, and a third sibling would make "other" a lie
     # (design round 2, N2).
     owner = _device_phrase(previous.owner_device_name, "the owner device")
-    landed_on = f" ({binding.identity_label})" if binding.identity_label.strip() else ""
+    landed_on = f" ({now_label})" if now_label else ""
     return (
         f"{_BINDING_NOTICE_HEAD}The {provider} login on {owner} went out of "
         f"rotation, and the next turn ran on another {provider} login{landed_on}."
