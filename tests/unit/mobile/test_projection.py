@@ -1425,6 +1425,49 @@ def test_the_derived_roster_graph_is_what_fits_a_cliff_width_roster() -> None:
     assert all(row["label"] for row in rows)
 
 
+def test_a_wide_roster_never_costs_the_transcript() -> None:
+    """435 flat siblings: shed the DERIVED graph, never the reader's messages.
+
+    ``peer_ids`` is every sibling's job id, so a flat group of width n costs
+    O(n^2) — measured on the operator's own store at 435 children: 2,076,690 B
+    of a 2,430,078 B frame, 85% of it. While that graph was shed AFTER the
+    transcript tiers, the cap spent the transcript first (text floored to 200
+    chars, tail cut to 16 rows) and dropped the graph anyway, so a frame that
+    would have fitted with every row and character intact reached the phone
+    cut short. The field is a pure derivation of ``parent_job_id`` (kept on
+    every row), which is what makes it the right thing to give up first.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = _flat_roster_fold(435)
+    fold.projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(id=f"answer-{index}", kind="assistant", text="evidence " * 160)
+            for index in range(PROJECTION_TRANSCRIPT_LIMIT - 1)
+        ],
+    ]
+
+    data, degraded = cap_projection_frame(fold.projection)
+
+    assert degraded is True
+    assert all(row.get("peer_ids") == [] for row in data["subagents"]), (
+        "the derivable graph has to be shed to fit a 435-wide roster"
+    )
+    assert all("parent_job_id" in row for row in data["subagents"])
+    assert len(data["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT, (
+        "the cap cut the reader's rows to make room for a field it then dropped"
+    )
+    assert not any(str(row.get("text") or "").endswith("…") for row in data["transcript"]), (
+        "a message was truncated to fit a field it then dropped"
+    )
+    assert all(row.get("text_complete") is True for row in data["transcript"])
+    assert len(data["transcript"][0]["text"]) == len("open the conversation"), (
+        "the opening row is the one row the phone must always read in full"
+    )
+
+
 def test_the_roster_falls_back_to_identity_rows_when_shedding_is_not_enough() -> None:
     """The last tier before the honest warning: identity rows only.
 
