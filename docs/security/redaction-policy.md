@@ -131,7 +131,15 @@ is **not** a redaction toggle:
   lives. There is no directory rule and no extension rule for either checkout;
   adding a root is an amendment under §5, and the commit-clean/`HEAD`-blob and
   audit-record requirements below apply identically in both.
-* The UI roots are keyed to **checkout identity, not path shape**: a
+* `repo_root` is an optional per-call checkout selector. Omitted or null keeps
+  the session's cwd as the root; selecting a root changes neither session cwd nor
+  configuration/approval state. Explicit roots must be exact checkout or linked
+  worktree roots whose origin names `damianvtran/local-operator` or
+  `damianvtran/local-operator-ui` **on github.com** (SSH or HTTPS), and only that
+  repository's existing path family is exposed. Local origins, other hosts,
+  unrelated repositories and core/UI path-family mismatches refuse. Relative
+  selectors resolve against the session cwd, never the process cwd.
+* The default-root UI roots are keyed to **checkout identity, not path shape**: a
   `src/i18n/...` path is served only when the workspace root is the checkout
   root and the **last two path components** of `git remote get-url origin`,
   compared case-insensitively, are `damianvtran/local-operator-ui`. The host is
@@ -143,14 +151,24 @@ is **not** a redaction toggle:
   refused with a sentence naming the expected identity (never the raw URL,
   which can embed a credential).
 * It serves **the committed blob only**: the file must be tracked and its
-  working tree clean against `HEAD` (`git ls-files --error-unmatch` plus
-  `git diff --quiet HEAD --`). A working-tree difference or an untracked file is
-  refused, and the bytes returned are `HEAD`'s blob — so a clean CRLF checkout
+  working tree clean against one captured `HEAD` commit (`git ls-files
+  --error-unmatch` plus `git diff --quiet <commit> --`). The immutable commit
+  is used for both comparison and blob retrieval: a concurrent branch switch
+  can cause refusal, never misattribute the returned bytes. A working-tree
+  difference or an untracked file is refused, and the bytes returned are that
+  commit's blob — so a clean CRLF checkout
   still reads correctly. Commit the public copy before auditing it; that keeps
   the route from becoming a two-call bypass (write a secret into a catalogue,
   read it back). The route requires `git` on `PATH`.
 * Git runs with `--no-replace-objects`, so a `git replace` ref cannot substitute
   the served blob while the index/worktree comparison still looks clean.
+  Inherited Git redirection variables are removed, external diff/textconv and
+  fsmonitor hooks are disabled, and optional index writes are disabled.
+* A trusted session confinement applies to the selected root and resolved copy
+  path **before any Git/content read**. Confined Git commands use the existing
+  kernel sandbox or refuse; the path check alone cannot constrain a linked
+  worktree's external common Git directory or object alternates. No root
+  selector broadens confinement or creates a persistent permission grant.
 * The resolved workspace root must equal `git rev-parse --show-toplevel`:
   `ls-files` and `diff` are cwd-relative while `show HEAD:<path>` is
   toplevel-relative, so a workspace below the checkout root could validate one
@@ -160,8 +178,10 @@ is **not** a redaction toggle:
   and no key was given.
 * Every successful read appends a JSON line to
   `<config dir>/audit/public-copy-reads.jsonl` **before** the content is
-  returned: timestamp, session, path, key, character count, SHA-256 and this
-  document. If the record cannot be written, the read is refused. On POSIX the
+  returned: timestamp, session, path, key, character count, selected-content
+  SHA-256, canonical repository root, normalized repository identity, pinned
+  commit SHA and this document. The same provenance accompanies the result;
+  the audit store remains the caller's, not the selected repository's. If the record cannot be written, the read is refused. On POSIX the
   log is opened without following links (`O_NOFOLLOW`, relative to a directory
   opened the same way, and `O_NONBLOCK` so a FIFO fails the open instead of
   blocking it), must be a regular file, lives in a `0700` directory and is

@@ -70,25 +70,27 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import _resolve_workspace_path
+from local_operator.tools.confinement import ToolConfinement, confinement_of
 
 #: The tool name the loop exempts from result redaction.  Kept here and in
 #: ``harness/redaction.py`` so the two cannot drift silently: a test asserts the
 #: set is exactly this name.
 TOOL_NAME = "read_public_copy"
 
-#: Public-copy roots, relative to the session working directory (the checkout).
+#: Public-copy roots, relative to the selected checkout (session cwd by default).
 #: These are the only paths this reader will open.  No directory rule and no
 #: extension rule: an exact glob list, so adding a root is a reviewed policy
 #: change rather than an accident.  The list spans two checkouts — this
 #: repository and the companion UI repository — because both publish committed
-#: product copy; a session resolves the roots against its own working directory,
-#: so each checkout only ever exposes its own copy.
+#: product copy. Explicit selectors additionally bind the checkout to the
+#: reviewed GitHub origin and corresponding core/UI path family.
 #:
 #: The `src/` roots additionally require checkout IDENTITY (:data:`UI_REPOSITORY`):
 #: a path shape is not an identity, and any repository — including one the agent
@@ -112,6 +114,7 @@ PUBLIC_COPY_GLOBS: tuple[str, ...] = (
 #: (review S-1).  A fork that wants the same treatment belongs in this list, in
 #: review — not in a path rule.
 UI_REPOSITORY = "damianvtran/local-operator-ui"
+CORE_REPOSITORY = "damianvtran/local-operator"
 
 #: The same list as anchored patterns. ``fnmatch``'s ``*`` crosses ``/``, which
 #: would admit ``catalogues/a/b/c.json``; these do not. Kept beside the globs so
@@ -161,6 +164,10 @@ class ReadPublicCopyParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(description="Repository-relative public i18n copy path.")
+    repo_root: str | None = Field(
+        default=None,
+        description="Core/UI checkout root; default session cwd. Does not move the session.",
+    )
     key: str | None = Field(
         default=None,
         description="Catalogue/message key; required for key modules and maps.",
@@ -218,6 +225,32 @@ def _origin_identity(url: str) -> str:
     if len(parts) < 2:
         return ""
     return "/".join(parts[-2:]).lower()
+
+
+def _trusted_origin_identity(url: str) -> str:
+    """Known-host origin for explicit selectors; never return credentials/URLs.
+
+    Origin is a repository-policy assertion, not cryptographic attestation. The
+    same-UID residual remains, but a lookalike path on an arbitrary host or on
+    disk must not borrow the reviewed GitHub repository's identity.
+    """
+    value = url.strip()
+    if "://" in value:
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return ""
+        if parsed.scheme not in ("ssh", "https") or parsed.hostname != "github.com":
+            return ""
+        path = parsed.path.strip("/")
+    else:
+        match = re.fullmatch(r"git@github\.com:([^\s]+)", value, flags=re.IGNORECASE)
+        if match is None:
+            return ""
+        path = match.group(1).rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return path.lower() if re.fullmatch(r"[^/]+/[^/]+", path) else ""
 
 
 #: The audit log's open flags.  ``O_NONBLOCK`` is for the FIFO case: with
@@ -299,6 +332,7 @@ def _record_read(
     chars: int,
     digest: str,
     context: ToolContext,
+    provenance: dict[str, str],
 ) -> Path:
     """Append one audit record; raise when it cannot be written.
 
@@ -317,6 +351,7 @@ def _record_read(
         "chars": chars,
         "sha256": digest,
         "policy": POLICY_DOCUMENT,
+        **provenance,
     }
     line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
     # O_APPEND keeps concurrent readers' records whole without a lock file; a
@@ -359,8 +394,13 @@ def _read_key_source(text: str, key: str) -> str:
 
 
 def _committed_public_copy(
-    root: Path, relative: str, *, requires_ui_identity: bool = False
-) -> tuple[bytes, str | None]:
+    root: Path,
+    relative: str,
+    *,
+    requires_ui_identity: bool = False,
+    explicit_root: bool = False,
+    confinement: ToolConfinement | None = None,
+) -> tuple[bytes, dict[str, str], str | None]:
     """The committed blob for ``relative``, or a refusal sentence.
 
     ``HEAD`` is the committed copy, and this reader serves THAT blob rather than
@@ -386,52 +426,83 @@ def _committed_public_copy(
     """
 
     def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            ["git", "-C", str(root), "--no-replace-objects", *args],
-            capture_output=True,
-            check=False,
-            timeout=10,
+        argv = ["git", "-C", str(root), "--no-replace-objects", "-c", "core.fsmonitor=false", *args]
+        if confinement is not None:
+            wrapped = confinement.wrap(argv)
+            if wrapped is None:
+                raise PermissionError(confinement.spawn_refusal())
+            argv = wrapped
+        # A caller's Git environment must not redirect -C to another index,
+        # object store or worktree. Reads also must not invoke configured diff
+        # helpers, credential helpers, fsmonitor hooks or optional index writes.
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_TERMINAL_PROMPT="0",
+            GIT_OPTIONAL_LOCKS="0",
         )
+        return subprocess.run(argv, capture_output=True, check=False, timeout=10, env=env)
 
     try:
         inside = _git("rev-parse", "--is-inside-work-tree")
         if inside.returncode != 0 or inside.stdout.strip() != b"true":
-            return b"", "the workspace is not a git checkout"
+            return b"", {}, "the workspace is not a git checkout"
         top = _git("rev-parse", "--show-toplevel")
         if top.returncode != 0 or not top.stdout.strip():
-            return b"", "the workspace is not a git checkout"
+            return b"", {}, "the workspace is not a git checkout"
         checkout_root = Path(top.stdout.decode("utf-8", "replace").strip()).resolve()
         if checkout_root != root:
-            return b"", (
-                f"the workspace root {root} is not the checkout root {checkout_root}; "
-                "run read_public_copy from the checkout root"
+            return (
+                b"",
+                {},
+                (
+                    f"the workspace root {root} is not the checkout root {checkout_root}; "
+                    "run read_public_copy from the checkout root"
+                ),
             )
-        if requires_ui_identity:
-            origin = _git("remote", "get-url", "origin")
-            identity = (
-                _origin_identity(origin.stdout.decode("utf-8", "replace"))
-                if origin.returncode == 0
-                else ""
-            )
-            if identity != UI_REPOSITORY:
-                return b"", (
+        origin = _git("remote", "get-url", "origin")
+        origin_url = origin.stdout.decode("utf-8", "replace") if origin.returncode == 0 else ""
+        identity = _origin_identity(origin_url)
+        if explicit_root:
+            identity = _trusted_origin_identity(origin_url)
+            expected = UI_REPOSITORY if requires_ui_identity else CORE_REPOSITORY
+            if identity != expected:
+                return b"", {}, "public_copy_repository_not_allowed"
+        elif requires_ui_identity and identity != UI_REPOSITORY:
+            return (
+                b"",
+                {},
+                (
                     f"{relative} is the companion UI checkout's copy; this workspace"
                     f" is not {UI_REPOSITORY} (origin: {identity or 'unusable'})"
-                )
+                ),
+            )
+        # Capture once: a concurrent branch switch may make the cleanliness
+        # comparison refuse, but can never relabel bytes from another commit.
+        head = _git("rev-parse", "--verify", "HEAD^{commit}")
+        commit = head.stdout.decode("ascii", "replace").strip()
+        if head.returncode != 0 or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
+            return b"", {}, "public_copy_commit_unavailable"
+        provenance = {"repository_root": str(root), "repository": identity, "commit": commit}
         tracked = _git("ls-files", "--error-unmatch", "--", relative)
         if tracked.returncode != 0:
-            return b"", f"{relative} is not committed at HEAD; commit the public copy first"
-        clean = _git("diff", "--quiet", "HEAD", "--", relative)
+            return b"", {}, f"{relative} is not committed at HEAD; commit the public copy first"
+        clean = _git("diff", "--no-ext-diff", "--no-textconv", "--quiet", commit, "--", relative)
         if clean.returncode == 1:
-            return b"", (f"{relative} differs from HEAD; commit the public copy before auditing it")
+            return (
+                b"",
+                {},
+                (f"{relative} differs from HEAD; commit the public copy before auditing it"),
+            )
         if clean.returncode != 0:
-            return b"", f"could not compare {relative} with HEAD"
-        blob = _git("show", f"HEAD:{relative}")
+            return b"", {}, f"could not compare {relative} with HEAD"
+        blob = _git("show", f"{commit}:{relative}")
         if blob.returncode != 0:
-            return b"", f"{relative} is not committed at HEAD; commit the public copy first"
-        return blob.stdout, None
+            return b"", {}, f"{relative} is not committed at HEAD; commit the public copy first"
+        return blob.stdout, provenance, None
     except (OSError, subprocess.SubprocessError) as exc:
-        return b"", f"could not read the committed copy of {relative} ({exc})"
+        return b"", {}, f"could not read the committed copy of {relative} ({exc})"
 
 
 async def execute_read_public_copy(
@@ -462,8 +533,31 @@ async def execute_read_public_copy(
             is_error=True,
         )
 
-    root = Path(context.cwd).expanduser().resolve()
-    resolved, inside, resolvable = _resolve_workspace_path(path_arg, context.cwd)
+    selected = arguments.get("repo_root")
+    explicit_root = selected is not None
+    if explicit_root and (not isinstance(selected, str) or not selected.strip()):
+        return _text(tool_call_id, "public_copy_invalid_repo_root", is_error=True)
+    if explicit_root and Path(path_arg).is_absolute():
+        return _text(
+            tool_call_id, "path must be a non-empty repository-relative path", is_error=True
+        )
+    try:
+        candidate = Path(str(selected)).expanduser() if explicit_root else Path(context.cwd)
+        if explicit_root and not candidate.is_absolute():
+            candidate = Path(context.cwd) / candidate
+        root = candidate.resolve(strict=explicit_root)
+    except (OSError, ValueError):
+        return _text(tool_call_id, "public_copy_invalid_repo_root", is_error=True)
+    confinement = confinement_of(context)
+    if confinement is not None:
+        denial = confinement.path_denial(root)
+        if denial is not None:
+            return _text(tool_call_id, denial, is_error=True)
+    resolved, inside, resolvable = _resolve_workspace_path(path_arg, str(root))
+    if confinement is not None:
+        denial = confinement.path_denial(resolved, resolvable=resolvable)
+        if denial is not None:
+            return _text(tool_call_id, denial, is_error=True)
     if not resolvable or not inside:
         return _text(
             tool_call_id,
@@ -490,8 +584,13 @@ async def execute_read_public_copy(
     # verbatim. ``_committed_public_copy`` serves the HEAD blob and refuses a
     # working-tree difference or an untracked file; it is also why a CRLF
     # checkout works (Git's comparison, not raw byte equality).
-    blob, refusal = await asyncio.to_thread(
-        _committed_public_copy, root, relative, requires_ui_identity=_requires_ui_checkout(relative)
+    blob, provenance, refusal = await asyncio.to_thread(
+        _committed_public_copy,
+        root,
+        relative,
+        requires_ui_identity=_requires_ui_checkout(relative),
+        explicit_root=explicit_root,
+        confinement=confinement,
     )
     if refusal is not None:
         return _text(tool_call_id, f"refused: {refusal}", is_error=True)
@@ -523,7 +622,12 @@ async def execute_read_public_copy(
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     try:
         audit_file = _record_read(
-            relative=relative, key=key, chars=len(body), digest=digest, context=context
+            relative=relative,
+            key=key,
+            chars=len(body),
+            digest=digest,
+            context=context,
+            provenance=provenance,
         )
     except OSError as exc:
         # FAIL CLOSED. A route whose use is not recorded is not this route.
@@ -540,6 +644,7 @@ async def execute_read_public_copy(
         "policy": POLICY_DOCUMENT,
         "audit_log": str(audit_file),
         "sha256": digest,
+        **provenance,
     }
     return _text(tool_call_id, body, details=details)
 
