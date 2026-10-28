@@ -2036,6 +2036,14 @@ RESUME_PAGE_TRIGGER_ROWS = 4
 #: Hidden-only pages still advance through yielded bursts until real content
 #: fills the reserve, the cursor stops advancing, or the reader takes over.
 RESUME_FILL_MAX_PAGES = 16
+# ...and the TOTAL a single reveal may mount, across every burst. The
+# per-burst cap alone bounded nothing: reaching it re-armed the fill, which
+# restarted the attempt counter at zero, so a view whose scroll never reaches
+# the goal kept mounting until the pending head emptied — one warm legacy
+# revisit mounted 20,200 blocks (the whole 27,003-message history) before
+# settling to 38. Four bursts is far more than any viewport needs (the
+# reserve is one screenful, ~2-3 pages) while still bounding the worst case.
+RESUME_FILL_TOTAL_PAGES = RESUME_FILL_MAX_PAGES * 4
 
 #: The row that stands in for the un-rendered head of a resumed conversation.
 #: It exists because the failure mode of a display bound is a user believing
@@ -5904,6 +5912,10 @@ class OperatorApp(App[None]):
         #: reads as the notice changing its mind (review round 2, R6).
         self._resume_fill_active = False
         self._resume_fill_serial = 0
+        #: The view a fill stood down on because it could not be laid out.
+        #: Held so the extent hook can re-arm the reserve once the view is
+        #: on screen again — standing down is only safe if showing it resumes.
+        self._resume_fill_deferred_view: Any = None
         #: SINGLE-FLIGHT guard for the deferred page check: while set, a check
         #: is already scheduled and `_transcript_scrolled` must not queue a
         #: second. See that method for why unbounded requeues were a cascade.
@@ -14880,7 +14892,7 @@ class OperatorApp(App[None]):
             if not chained:
                 self._start_resume_fill()
 
-    def _start_resume_fill(self, *, target: float | None = None) -> None:
+    def _start_resume_fill(self, *, target: float | None = None, attempt: int = 0) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
 
         Raw-event tail bounds are deliberately cheap first paint, not geometry:
@@ -14908,7 +14920,7 @@ class OperatorApp(App[None]):
                 self._reconcile_head_notice()
                 return
             if self._resume_fill_active:
-                self._fill_resume_until_scrollable(target=target)
+                self._fill_resume_until_scrollable(attempt, target=target)
 
         if not view.call_after_refresh(start):
             # SAME UNKEPT PROMISE as the insert seam, one screen away: the
@@ -14957,6 +14969,25 @@ class OperatorApp(App[None]):
         finished. Only exhaustion, non-advancing cursors or user input stop it.
         """
         view = self._transcript_view()
+        if not view.display or not view.size.height:
+            # A VIEW THAT CANNOT BE LAID OUT HAS NO GOAL TO MEASURE. Its
+            # `container_size` keeps the last real height, but nothing lays it
+            # out while it is hidden, so `scroll_y` stays 0 and `virtual_size`
+            # does not move however many blocks are mounted — while
+            # `settled()` measures progress by the pending head, which always
+            # shrinks. Every page therefore reads as progress, the goal is
+            # never reached, and the fill runs blind until the head empties:
+            # 1,123 pages / 20,254 blocks on the legacy fixture, invisible, and
+            # returned to the reader on reveal (review round 1, M1 — the
+            # subagent view, org chart, settings and file viewer all hide the
+            # transcript). Standing down here PREVENTS the chain;
+            # `RESUME_FILL_TOTAL_PAGES` stays as the backstop. Showing the view
+            # lays it out, which fires the extent hook that re-arms this.
+            self._resume_fill_active = False
+            self._resume_fill_deferred_view = view
+            self._release_resume_tail_hold()
+            self._reconcile_head_notice()
+            return
         viewport = view.container_size.height or view.size.height
         notice = self._resume_head_notice
         prefix = notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
@@ -14992,11 +15023,21 @@ class OperatorApp(App[None]):
                 if not progressed:
                     self._resume_fill_active = False
                     self._reconcile_head_notice()
+                elif _attempt + 1 >= RESUME_FILL_TOTAL_PAGES:
+                    # The total budget, not the burst cap, is what ends a chain.
+                    # Pages past the viewport are the reader's to ask for; the
+                    # fill must not keep mounting them while a view refuses to
+                    # scroll (see RESUME_FILL_TOTAL_PAGES).
+                    self._resume_fill_active = False
+                    self._release_resume_tail_hold()
+                    self._reconcile_head_notice()
                 elif _attempt + 1 >= RESUME_FILL_MAX_PAGES:
                     # A long hidden prefix is not a reason to strand the
                     # reader. Yield an additional idle frame between bursts;
                     # _start_resume_fill fences the new callback to this view.
-                    self._start_resume_fill(target=target)
+                    # The RUNNING count is carried in, so the burst boundary
+                    # cannot be mistaken for the end of the budget.
+                    self._start_resume_fill(target=target, attempt=_attempt + 1)
                 else:
                     self._fill_resume_until_scrollable(_attempt + 1, target=target)
 
@@ -16006,6 +16047,13 @@ class OperatorApp(App[None]):
         copy already matches (R8), so a window drag pays two integer
         comparisons per frame rather than a rebuild and a spacing pass.
         """
+        deferred, self._resume_fill_deferred_view = self._resume_fill_deferred_view, None
+        if deferred is not None and deferred is self._transcript:
+            # The reserve a hidden fill declined to mount is still owed. Shown
+            # and laid out is exactly the state it needs, and this hook is the
+            # one place told about every geometry change.
+            if deferred.display and deferred.size.height and not self._resume_paging:
+                self._start_resume_fill()
         if self._resume_head_notice is None:
             return
         self._reconcile_head_notice()
