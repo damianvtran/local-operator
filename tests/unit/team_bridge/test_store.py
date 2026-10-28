@@ -158,3 +158,58 @@ def test_unsupported_schema_is_no_authority(tmp_path: Path) -> None:
     assert store.active_owner() is None
     with pytest.raises(StoreRefused):
         store.merge_page(owner, [_ref()], None)
+
+
+def test_concurrent_settings_commits_never_create_two_owners(tmp_path: Path) -> None:
+    """R2-2: the one-owner rule is enforced INSIDE the store transaction.
+
+    The seam under test is the one the client calls
+    (``connector.enrollment.commit_settings_enrollment``), driven from two
+    threads — as it now runs, in a worker thread, since R1-1 moved it off the
+    event loop. Count-then-commit was atomic only while both steps shared the
+    loop: two enables on a fresh store both saw zero owners and both inserted,
+    and a two-row store answers ``active_owner() is None`` for ever — a dark
+    bridge that never heals (the reviewer measured 3/40).
+
+    Forty rounds, a fresh store each, two different endpoints per round: every
+    round must end with AT MOST one committed owner, and at least one, since
+    ``BEGIN IMMEDIATE`` serialises the pair rather than dropping both.
+    """
+
+    import concurrent.futures
+
+    from local_operator.team_bridge.connector.enrollment import (
+        commit_settings_enrollment,
+    )
+    from local_operator.team_bridge.store import Store
+
+    for round_index in range(40):
+        root = tmp_path / f"round-{round_index}"
+        # INITIALISE THE SCHEMA FIRST, single-threaded. Two connections
+        # bootstrapping a brand-new database race on ``schema_meta`` (a
+        # pre-existing, separate concern), and on a real machine the store
+        # exists long before two enables race — the status read and the
+        # enrolment gate both open it. What this test pins is the OWNER rule.
+        Store(root).committed_owner_count()
+
+        def attempt(index: int) -> bool:
+            return commit_settings_enrollment(
+                config_dir=root,
+                credential_id=1,
+                account_id=f"acc_{round_index}_{index}",
+                tenant_id=f"tnt_{index}",
+                endpoint_id=f"bep_{index}",
+                consent_version="bridge_consent_v1",
+                canonical_base_url="https://hub.example/v1",
+                cos_session_id=None,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(attempt, (0, 1)))
+
+        committed = Store(root).committed_owner_count()
+        assert committed <= 1, f"round {round_index}: {committed} committed owners"
+        assert committed == 1, f"round {round_index}: neither enable committed"
+        assert results.count(True) == 1, (round_index, results)
+        owner = Store(root).active_owner()
+        assert owner is not None, f"round {round_index}: an owner was committed but is unusable"

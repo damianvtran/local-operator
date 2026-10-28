@@ -357,7 +357,11 @@ def _sync_exclusive(config_dir: Path) -> Iterator[None]:
     handle = None
     try:
         if not acquired:
-            logger.debug("bridge connector: another sync holds the lock; proceeding serially")
+            # Say what actually happens: the process lock was NOT taken, and
+            # only the flock still serializes this call — and only on a POSIX
+            # host, which every caller of this module already is (the entry
+            # point refuses non-launchd platforms first).
+            logger.debug("bridge connector: the process lock timed out; relying on the file lock")
         try:
             import fcntl
 
@@ -389,7 +393,7 @@ def _install(config_dir: Path) -> ServiceOutcome:
     wanted = render_plist(config_dir)
     current = launchd.load(path)
     addressable = launchd.is_own_plist(path, LABEL)
-    _register_only = False
+    register_only = False
     if current == wanted:
         if not addressable:
             return ServiceOutcome(CODE_NOT_ADDRESSABLE, "plist current; launchd not addressed")
@@ -399,7 +403,7 @@ def _install(config_dir: Path) -> ServiceOutcome:
         # ever loaded, a hand bootout): fall through to the bootstrap, which
         # re-registers the SAME bytes — so the answer is ``registered``, not
         # ``installed`` (QA Q-6: the log claimed an install nothing wrote).
-        _register_only = True
+        register_only = True
     else:
         refusal = _source_checkout_refusal()
         if refusal is not None:
@@ -418,7 +422,7 @@ def _install(config_dir: Path) -> ServiceOutcome:
         return ServiceOutcome(
             CODE_FAILED, f"launchctl could not load the connector: {reloaded.detail}"
         )
-    return ServiceOutcome(CODE_REGISTERED if _register_only else CODE_INSTALLED)
+    return ServiceOutcome(CODE_REGISTERED if register_only else CODE_INSTALLED)
 
 
 def _remove() -> ServiceOutcome:
@@ -460,10 +464,28 @@ def sync_connector_service(config_dir: Path) -> ServiceOutcome:
         if refusal is not None:
             logger.info("bridge connector: %s", refusal)
             return ServiceOutcome(CODE_ISOLATED, refusal)
+        # CHEAP PRE-CHECK, deliberately OUTSIDE the lock and side-effect free:
+        # a machine that never enrolled has nothing to install and nothing to
+        # remove, and taking the lock would mkdir ``<config>/team_bridge`` and
+        # leave a ``connector-service.lock`` there (review R2-5). One read-only
+        # owner read plus one ``exists()`` is the whole cost of an app start on
+        # such a machine.
         wanted = _wanted(Path(config_dir))
         if wanted is None:
             return ServiceOutcome(CODE_UNKNOWN, "enrolment or settings unreadable; left as is")
+        if not wanted and not plist_path().exists():
+            return ServiceOutcome(CODE_ABSENT)
         with _sync_exclusive(Path(config_dir)):
+            # DECIDE AGAIN, INSIDE THE LOCK (review R2-1). The pre-check above
+            # is only a filter: a Turn off that lands while this call waits for
+            # the lock must WIN, or the catch-up installs a connector for an
+            # opted-out machine and leaves it loaded until the next serve start
+            # — the mirror of the outage the lock was added to close. "Losers
+            # observe the winner's result" only holds when both callers want
+            # the same state, so the state is re-read under the lock.
+            wanted = _wanted(Path(config_dir))
+            if wanted is None:
+                return ServiceOutcome(CODE_UNKNOWN, "enrolment became unreadable; left as is")
             outcome = _install(Path(config_dir)) if wanted else _remove()
     except Exception as exc:  # noqa: BLE001 — NEVER raises: the caller already won
         logger.debug("bridge connector service sync failed", exc_info=True)

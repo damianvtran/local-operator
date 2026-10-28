@@ -1671,10 +1671,19 @@ class TeamBridgeClient:
             # -> ``commit_settings_enrollment`` -> the connector sync), so
             # reconciling again here was a second launchctl round trip for one
             # click (code review R1-1 / QA Q-1 measured 5 subprocesses across
-            # the two). A resume of an EXISTING endpoint commits nothing, and
-            # needs nothing: this machine installed the unit at its original
-            # commit, and the app-start catch-up re-checks every enrolled
-            # machine on the next boot.
+            # the two).
+            #
+            # WHAT A RESUME THEREFORE RELIES ON (review R2-4). A PUT that
+            # resumes an existing endpoint commits no owner, so it makes no
+            # launchctl call of its own — and after a Turn off the unit was
+            # REMOVED, so nothing is in place at that instant. The install is
+            # the surface's follow-up ``team_bridge.enabled = true`` write,
+            # which every shipped enable path sends (the desktop UI's
+            # ``enable()`` and its consent dialog both do, and that route
+            # reconciles), with the app-start catch-up as the backstop for a
+            # machine whose surface never wrote the key. Adding a second sync
+            # here instead would restore the double round trip this comment
+            # exists to explain.
             #
             # OFF THE EVENT LOOP: this runs launchctl, whose budget is a 15 s
             # subprocess timeout plus the shared reload's release and bootstrap
@@ -3469,7 +3478,13 @@ class StatusDiscipline:
         so a timeout must not blank a surface the user can still reach.
         """
 
-        if boundary is Boundary.APP_START:
+        # ``Boundary.parse`` FIRST, and it is not a formality: the desktop route
+        # takes ``boundary`` from the query string, so it arrives as
+        # ``"app_start"``, never as the enum member — an ``is`` test against the
+        # enum silently never fired for the one caller that matters (QA round 2,
+        # out-of-scope note; the lifespan task hid it). Parse is lenient by its
+        # own contract and preserves the boundary recorded later in ``_check``.
+        if Boundary.parse(boundary) is Boundary.APP_START:
             # CATCH-UP for machines enrolled before D2a existed: an app-start
             # boundary is an existing, event-driven moment with no new poller.
             # A machine with no committed owner answers absent without creating

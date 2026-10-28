@@ -102,10 +102,6 @@ def commit_settings_enrollment(
     """
 
     store = Store(config_dir)
-    # NOT ``active_owner() is not None``: None means zero OR ambiguous, and an
-    # ambiguous store must never receive a third row from any write path.
-    if store.committed_owner_count() != 0:
-        return False
     owner = OwnerSnapshot(
         credential_id=credential_id,
         account_id=account_id,
@@ -114,11 +110,25 @@ def commit_settings_enrollment(
         canonical_base_url=canonical_base_url,
         enrollment_generation=1,
     ).validated()
-    store.commit_enrollment(
-        owner,
-        OwnerReceipt(consent_version=consent_version, consent_ref=endpoint_id),
-        cos_session_id=cos_session_id or None,
-    )
+    try:
+        # The one-owner rule is enforced INSIDE the store's immediate
+        # transaction (review R2-2), never by a count taken out here: the two
+        # steps were atomic only while both ran on the event loop, and two
+        # concurrent enables from worker threads produced a two-owner store
+        # (3/40) that reads as "no owner" for ever.
+        store.commit_enrollment(
+            owner,
+            OwnerReceipt(consent_version=consent_version, consent_ref=endpoint_id),
+            cos_session_id=cos_session_id or None,
+            require_no_owner=True,
+        )
+    except StoreRefused as refusal:
+        if refusal.code == "already_owned":
+            # NOT an error: the answer to "may this machine own another
+            # endpoint" was no. Ambiguity is included — a store with two rows
+            # must never receive a third.
+            return False
+        raise
     _connector_after_commit(config_dir)
     return True
 

@@ -338,3 +338,79 @@ async def test_a_forgotten_label_is_reported_as_registered_not_installed(service
     assert install.sync_connector_service(root).code == install.CODE_REGISTERED
     assert install.plist_path().stat().st_mtime_ns == before, "the plist was rewritten"
     assert fake.loaded
+
+
+async def test_a_turn_off_that_races_the_catch_up_wins(service, monkeypatch) -> None:
+    """R2-1: the wanted state must be decided INSIDE the lock.
+
+    The reviewer's interleaving: the catch-up reads "wanted", the user turns the
+    feature off, the off event takes the lock and removes, then the catch-up
+    takes the lock holding a STALE decision and installs anyway — leaving an
+    opted-out machine with a loaded, KeepAlive connector until the next serve
+    start. The hook below reproduces the ordering deterministically instead of
+    hoping for it: ``_wanted`` answers True once (the stale read), then False
+    (the state the lock-holder must see).
+    """
+
+    fake, home, root = service
+    _commit(root)
+    answers = iter([True, False])
+
+    def stale_then_fresh(_config_dir):
+        try:
+            return next(answers)
+        except StopIteration:
+            return False
+
+    monkeypatch.setattr(install, "_wanted", stale_then_fresh)
+    outcome = install.sync_connector_service(root)
+
+    assert outcome.code == install.CODE_ABSENT, outcome
+    assert not install.plist_path().exists(), "an opted-out machine was given a connector"
+    assert not fake.loaded
+    assert fake.calls == [] or all(call[0] == "print" for call in fake.calls), fake.calls
+
+
+def test_an_unenrolled_machine_gets_no_lock_artifact(tmp_path, monkeypatch) -> None:
+    """R2-5: the cheap ``absent`` answer must not create ``<config>/team_bridge``.
+
+    A never-enrolled machine reaches this twice per session today (app start and
+    a status boundary), and the lock's ``mkdir`` + file left a directory behind
+    on a store that has none — contradicting the docstring's "no store created
+    at every app start".
+    """
+
+    home = tmp_path / "home"
+    root = home / ".local-operator"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(launchd, "shared_label_refusal", lambda config_dir: None)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(install, "_launchctl", lambda *args: calls.append(args))
+
+    assert install.sync_connector_service(root).code == install.CODE_ABSENT
+    assert not (root / "team_bridge").exists(), "a never-enrolled store gained a lock file"
+    assert calls == []
+
+
+async def test_a_string_app_start_boundary_reaches_the_catch_up(tmp_path, monkeypatch) -> None:
+    """The desktop route sends ``boundary=app_start`` as a STRING.
+
+    ``StatusDiscipline.check`` used to compare with ``is`` against the enum, so
+    the route's app-start read never reached the catch-up — only the lifespan
+    task did, and it hid the dead trigger (QA round 2, out-of-scope note). The
+    parse is lenient and preserves the boundary, so both spellings work.
+    """
+
+    seen: list[str] = []
+    monkeypatch.setattr(install, "sync_connector_service", lambda root: seen.append(str(root)))
+
+    discipline = _discipline(Hub(endpoint=_default_on_endpoint("active", "settings")), tmp_path)
+    await discipline.check("app_start")
+    assert len(seen) == 1, "a string app-start boundary did not reach the catch-up"
+
+    discipline.invalidate()
+    await discipline.check("surface_open")
+    assert len(seen) == 1, "a surface-open read must not install anything"

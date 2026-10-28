@@ -54,9 +54,11 @@ def _connector_never_reaches_launchd(monkeypatch: pytest.MonkeyPatch) -> None:
     installer tests. A test that deliberately opens that guard (as the D2a
     lifecycle tests do) still cannot reach launchd through this.
 
-    ``raising=False`` and the function-local import keep the fixture from being
-    itself the failure on a tree that predates the seam, and from paying the
-    import on every test that never touches the bridge.
+    ``raising=False`` keeps the fixture from being itself the failure on a tree
+    that predates the seam. The import is function-local anyway, so this module
+    stays importable from ``tests/unit`` without the bridge stack at module
+    scope; because the fixture is autouse, the FIRST test of every worker pays
+    it once and the rest read ``sys.modules``.
     """
 
     from local_operator.team_bridge.connector import install
