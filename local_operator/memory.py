@@ -40,6 +40,18 @@ from local_operator.supplements.denylist import is_sensitive
 logger = logging.getLogger(__name__)
 
 SESSION_EXPORT_NAME = "memory-session.jsonl"
+#: ``source.author`` of an automatic capture (``memory_capture.persist``). Such a
+#: fact is UNREVIEWED only while it is still a ``candidate`` in the session that
+#: captured it; any deliberate act on it (an edit through ``put``, a move) makes
+#: it a deliberate fact, and deliberate facts never auto-expire (decision D2).
+CAPTURE_AUTHOR = "deterministic-capture"
+#: ``meta`` key prefix recording that a capture entity was tombstoned BY EXPIRY,
+#: valued with the tombstone's op id. Capture reads it to re-admit the same text
+#: under a fresh, chained entity (a resumed session must be able to re-learn what
+#: merely went stale), while an entity forgotten any other way — by a person or
+#: an agent — carries no mark and stays forgotten. Local by design: tombstones
+#: have no reason field on the wire, and capture runs on the host of the session.
+CAPTURE_EXPIRED_KEY = "capture-expired:"
 SCOPES = ("global", "session", "team", "agent")
 DEFAULT_EXCLUDED_DEVICES: tuple[str, ...] = ()
 # One protocol definition shared by publication, execution and pre-journal retention.
@@ -749,6 +761,24 @@ def _suggestion_key(fact: Mapping[str, Any]) -> str:
     # ASCII, so this is the correctness of the collapse rule, not a behaviour
     # change for existing rows.
     return " ".join(text.casefold().split())
+
+
+def unreviewed_capture(fact: dict[str, Any] | None, owner: str) -> bool:
+    """Whether ``fact`` is an automatic capture nobody has acted on yet.
+
+    The one definition the expiry pass, the session-delete forget and capture's
+    own refresh guard share, so "deliberate" cannot drift between them. The
+    ``source.session == owner`` clause is what makes a MOVED capture deliberate
+    even though the move keeps its provenance byte-for-byte.
+    """
+    if not fact:
+        return False
+    source = fact.get("source") or {}
+    return (
+        fact.get("status") == "candidate"
+        and source.get("author") == CAPTURE_AUTHOR
+        and source.get("session") == owner
+    )
 
 
 def _id() -> str:
@@ -1705,6 +1735,14 @@ class MemoryStore:
         # Retention creation is not verification; unknown external source time
         # stays null. Every writer uses the same pure, value-free validator.
         clean = None if forget else self.prepare_fact(fact)
+        if clean is not None and clean["source"].get("author") == CAPTURE_AUTHOR:
+            # EVERY ``put`` revision is deliberate: capture writes its ops itself
+            # (``memory_capture.persist``) and never comes through here. An agent
+            # that edits a captured fact as read would otherwise carry the
+            # capture's author forward, so its correction would still expire on
+            # the capture's schedule and the next capture refresh could overwrite
+            # it. The writer becomes the author, as the CLI edit already does.
+            clean["source"] = dict(clean["source"], author=self.identity.agent_id or "anonymous")
         if clean is not None:
             # Scope-fit refusal BEFORE any DB/index/oplog write (and before the
             # session export): global is for durable personal facts, not work state.
@@ -1753,9 +1791,22 @@ class MemoryStore:
                         "Memory revision cap reached; consolidate into a new "
                         "explicitly linked fact."
                     )
+                selected = next(head for head in heads if head["op_id"] == expected_version)
                 if clean and "created_at" not in fact:
-                    selected = next(head for head in heads if head["op_id"] == expected_version)
                     clean["created_at"] = selected["fact"]["created_at"]
+                previous = selected["fact"] or {}
+                if (
+                    clean
+                    and previous.get("source", {}).get("author") == CAPTURE_AUTHOR
+                    and previous.get("expires_at") is not None
+                    and clean["expires_at"] == previous["expires_at"]
+                ):
+                    # The deadline belonged to the capture being UNREVIEWED (D2);
+                    # this revision is deliberate (see above), so a deadline merely
+                    # carried over from the read would hide the fact from every
+                    # read path 14 days after capture. A NEW deadline the writer
+                    # chose is kept.
+                    clean["expires_at"] = None
                 # Editing the displayed head does not silently resolve unseen
                 # concurrent siblings. Only that explicitly read revision parents
                 # the correction; all other heads stay inspectable conflicts.
@@ -1854,7 +1905,9 @@ class MemoryStore:
             result["compatibility"] = legacy_log_note(1)
         return result
 
-    def forget_many(self, scope: str, expected: dict[str, str]) -> dict[str, Any]:
+    def forget_many(
+        self, scope: str, expected: dict[str, str], *, capture_reason: str | None = None
+    ) -> dict[str, Any]:
         """Forget a set of facts in ONE transaction, refusing if any revision moved.
 
         WHY this exists: the human bulk-forget preview is only honest if the
@@ -1869,7 +1922,19 @@ class MemoryStore:
         re-read, which closes the window between a caller's SELECT and commit; a
         concurrent correction therefore surfaces as a refusal, never as a
         silently forgotten fact under a filter that merely still matched it.
+
+        ``capture_reason`` (``expired`` | ``session-deleted``) is the unattended callers' mode
+        (:mod:`local_operator.memory_maintenance`). It additionally SKIPS (counted in ``skipped``)
+        any entity that is not, inside this transaction, ONE head that is an
+        :func:`unreviewed_capture`: a tombstone ends the whole entity, so a concurrent deliberate
+        revision (a peer's correction beside a local capture refresh) must never be closed by an
+        automatic pass — the same all-heads rule compaction keeps. ``expired`` also marks the entity
+        (:data:`CAPTURE_EXPIRED_KEY`) so capture may re-learn the text later.
         """
+        if capture_reason not in (None, "expired", "session-deleted"):
+            raise MemoryError("Unknown capture forget reason.")
+        if capture_reason is not None and scope != "session":
+            raise MemoryError("Only session captures are forgotten automatically.")
         if not isinstance(expected, dict) or not expected:
             raise MemoryError("Bulk forget needs at least one memory ID and revision.")
         if len(expected) > MAX_BULK_FORGET:
@@ -1886,6 +1951,7 @@ class MemoryStore:
             raise MemoryError("Memory not found in the authorized scope.")
         forgotten: list[dict[str, Any]] = []
         tokens = 0
+        skipped = 0
         with self.connection() as db:
             try:
                 db.execute("BEGIN IMMEDIATE")
@@ -1894,6 +1960,21 @@ class MemoryStore:
                 clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
                 for entity in sorted(expected):
                     ops = self._ops(db, entity)
+                    heads = self._heads(ops) if ops else []
+                    if capture_reason is not None and (
+                        any(op["scope"] != scope or op["owner_key"] != owner for op in ops)
+                        or any(op["kind"] == "tombstone" for op in ops)
+                        or len(heads) != 1
+                        or heads[0]["op_id"] != expected[entity]
+                        or not unreviewed_capture(heads[0]["fact"], owner)
+                    ):
+                        # The unattended mode SKIPS rather than refuses: one entity
+                        # that a person, an agent or a peer touched since the pass
+                        # read it must neither be forgotten nor hold back the rest
+                        # of the batch (a refused chunk would refuse again on every
+                        # pass while that conflict stands).
+                        skipped += 1
+                        continue
                     if not ops or any(
                         op["scope"] != scope or op["owner_key"] != owner for op in ops
                     ):
@@ -1903,7 +1984,6 @@ class MemoryStore:
                             "Memory was forgotten concurrently. Read the current set and "
                             "retry; no fact in this bulk forget was changed."
                         )
-                    heads = self._heads(ops)
                     if not heads or heads[0]["op_id"] != expected[entity]:
                         raise MemoryError(
                             "Memory changed concurrently. Read its current revision and retry; "
@@ -1933,6 +2013,11 @@ class MemoryStore:
                         (op["op_id"], entity, origin, seq, scope, owner, op["kind"], _dump(op)),
                     )
                     db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+                    if capture_reason == "expired":
+                        db.execute(
+                            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+                            (CAPTURE_EXPIRED_KEY + entity, op["op_id"]),
+                        )
                     row = db.execute(
                         "SELECT tokens FROM current WHERE entity_id=?", (entity,)
                     ).fetchone()
@@ -1961,6 +2046,8 @@ class MemoryStore:
             db.commit()
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         result: dict[str, Any] = {"forgotten": forgotten, "tokens": tokens, "quota": quota}
+        if capture_reason is not None:
+            result["skipped"] = skipped
         if warning:
             result["warning"] = warning
         return result
@@ -2632,6 +2719,12 @@ class MemoryStore:
                         "Memory changed concurrently. Read its current revision and retry."
                     )
                 fact = dict(head["fact"])
+                if fact["source"].get("author") == CAPTURE_AUTHOR:
+                    # Moving a capture is a deliberate act (D2), so its expiry
+                    # deadline goes; provenance is otherwise kept as-is, and
+                    # ``unreviewed_capture`` treats a capture outside its own
+                    # session as deliberate.
+                    fact["expires_at"] = None
                 # A move must never be a route around the guards ``put`` enforces.
                 # The strongest of them is scope-fit: work/lane/progress content is
                 # refused in the global bank, and moving it there would defeat it.

@@ -27,21 +27,26 @@ WHAT IT RUNS, IN ORDER (one pass, at most every :data:`PASS_INTERVAL_S`):
 
 WHERE IT RUNS, AND WHERE IT MUST NOT. The wake supervisor seats it (one
 long-lived process beside every runtime, so no session pays the 212 MB plan
-RSS); each ``lop`` process start and ``lop memory status`` also offer it once,
-off-thread, because the supervisor retires when no wake is fireable. NEVER in
-``MemoryStore.connection()``: a 0.7 s plan on every store open would tax every
-tool call.
+RSS); each session RUNTIME process also offers it once, off-thread, after its
+record is published, because the supervisor retires when no wake is fireable.
+Only long-lived hosts offer it (QA round 1, Q1/Q2): a one-shot process
+(``lop exec``, ``lop memory status``) would either hold its exit for the pass
+or kill it mid-plan on every invocation, re-paying the plan's RSS without ever
+converging. NEVER in ``MemoryStore.connection()``: a 0.7 s plan on every store
+open would tax every tool call.
 
-SAFETY. One pass at a time across processes (``fcntl`` lock
-``memory/.compact.lock``, non-blocking: a second caller skips rather than
-queues). ``compact`` takes ``BEGIN IMMEDIATE`` before planning, so concurrent
-writers wait on the store's 5 s ``busy_timeout`` — measured lock hold 1.28 s —
-rather than fail. A hard :data:`PASS_TIMEOUT_S` bounds the caller; a worker
-that overruns is abandoned (SQLite rolls back an uncommitted transaction when
-its connection closes) and keeps the lock until it ends, so no second pass can
-overlap it. VACUUM is skipped when free disk is below
-``max(1 GiB, 2 × db bytes)``: it rewrites the whole file, and the DELETE
-already returns pages to the freelist that every table reuses.
+SAFETY. One pass at a time across processes (``fcntl`` lock ``memory/.compact.lock``, non-blocking:
+a second caller skips rather than queues). ``compact`` takes ``BEGIN IMMEDIATE`` before planning, so
+concurrent writers wait on the store's 5 s ``busy_timeout`` — measured lock hold 1.28 s — rather
+than fail. A hard :data:`PASS_TIMEOUT_S` bounds how long the CALLER waits, not the work: a worker
+that overruns is abandoned by the caller but, in a long-lived process, keeps running to completion
+and commits — Python cannot stop a thread inside SQLite. It holds the lock until it ends, so no
+second pass can overlap it. Only if the whole process exits first is its open transaction rolled
+back by SQLite (the session exports it rewrites are replaced atomically, ``tmp`` + ``os.replace``,
+so they are never half-written either). Expiry gets its own smaller budget (:data:`EXPIRE_BUDGET_S`)
+so compaction still fits. VACUUM is skipped when free disk is below ``max(1 GiB, 2 × db bytes)``: it
+rewrites the whole file, and the DELETE already returns pages to the freelist that every table
+reuses.
 
 MERGE ORDER: this must not ship before the peer-echo ingress filter (B0) —
 without it a peer pushes the dropped ops straight back on its next sync.
@@ -80,7 +85,15 @@ PASS_TIMEOUT_S = 60.0
 
 #: Expired candidates tombstoned per pass; the rest wait for the next pass.
 #: Read paths hide them meanwhile, so the bound costs bytes, never correctness.
-EXPIRE_LIMIT = 2000
+#: 500, not the design's 2,000: review round 1 measured ~7 ms per forgotten
+#: fact on the live clone (each per-owner chunk re-imports and re-exports that
+#: session and checkpoints), so 2,000 took 19.1 s of a 60 s pass on a fast disk.
+EXPIRE_LIMIT = 500
+
+#: Wall-clock budget for the expiry step inside one pass. Checked between
+#: per-owner chunks, so the overrun is one chunk; what is left waits for the next
+#: pass and compaction always starts with most of :data:`PASS_TIMEOUT_S` left.
+EXPIRE_BUDGET_S = 15.0
 
 #: VACUUM needs about the file's size again in free space; below this it is
 #: skipped (D6). The 1 GiB floor keeps a small store from consuming the last
@@ -93,9 +106,15 @@ STAMP_NAME = ".compact.stamp"
 
 #: Captured candidates whose deadline has passed. ``expires_at`` when stamped,
 #: else the legacy deadline derived from the row's own time (see module doc).
+#: ``current`` holds only ``heads[0]``; ``forget_many(capture_reason=...)``
+#: re-checks EVERY head inside its transaction and skips a conflicted entity.
+#: ``source.session = owner`` mirrors ``memory.unreviewed_capture``: a capture
+#: moved into another session is deliberate and must not be re-selected (and
+#: then skipped) on every pass.
 _EXPIRED_SQL = (
     "SELECT entity_id, owner, op_id FROM current "
     "WHERE scope='session' "
+    "AND json_extract(fact,'$.source.session')=owner "
     "AND json_extract(fact,'$.source.author')=? "
     "AND json_extract(fact,'$.status')='candidate' "
     "AND coalesce(json_extract(fact,'$.expires_at'), "
@@ -119,13 +138,16 @@ def _store(config_dir: Path, owner: str = "") -> Any:
     return store
 
 
-def _forget(config_dir: Path, rows: list[tuple[str, str, str]], deadline: float) -> int:
+def _forget(
+    config_dir: Path, rows: list[tuple[str, str, str]], deadline: float, reason: str
+) -> int:
     """Tombstone ``(entity, owner, head op)`` rows, grouped per owner, bounded.
 
-    Goes through ``forget_many`` (optimistic on the head revision) rather than
-    writing tombstones here, so the quota relief, export rewrite and op shape
-    are the store's own. A row edited since it was read is a concurrency
-    refusal for its chunk only; the next pass re-reads it.
+    Goes through ``forget_many(capture_reason=reason)`` rather than writing
+    tombstones here, so the quota relief, export rewrite and op shape are the
+    store's own, and so the "still ONE unreviewed capture head" check runs
+    inside the write transaction: a row edited, promoted or conflicted since it
+    was read is skipped there, never forgotten (review round 1, M2).
     """
     from local_operator.memory import MAX_BULK_FORGET, MemoryError
 
@@ -141,7 +163,9 @@ def _forget(config_dir: Path, rows: list[tuple[str, str, str]], deadline: float)
                 return forgotten
             chunk = dict(items[start : start + MAX_BULK_FORGET])
             try:
-                forgotten += len(store.forget_many("session", chunk)["forgotten"])
+                forgotten += len(
+                    store.forget_many("session", chunk, capture_reason=reason)["forgotten"]
+                )
             except MemoryError:
                 logger.info("memory maintenance: a capture chunk changed concurrently; next pass")
     return forgotten
@@ -163,11 +187,17 @@ def forget_session_captures(config_dir: Path, session_id: str) -> int:
     with store._reader() as db:
         rows = db.execute(
             "SELECT entity_id, owner, op_id FROM current WHERE scope='session' AND owner=? "
+            "AND json_extract(fact,'$.source.session')=owner "
             "AND json_extract(fact,'$.source.author')=? "
             "AND json_extract(fact,'$.status')='candidate'",
             (session_id, CAPTURE_AUTHOR),
         ).fetchall()
-    return _forget(config_dir, [tuple(row) for row in rows], time.monotonic() + PASS_TIMEOUT_S)
+    return _forget(
+        config_dir,
+        [tuple(row) for row in rows],
+        time.monotonic() + PASS_TIMEOUT_S,
+        "session-deleted",
+    )
 
 
 def _last_pass(db: sqlite3.Connection, root: Path) -> float:
@@ -253,7 +283,10 @@ def _run(config_dir: Path, now: float, deadline: float, report: dict[str, Any]) 
             tuple(row)
             for row in db.execute(_EXPIRED_SQL, (CAPTURE_AUTHOR, CAPTURE_TTL_S, now, EXPIRE_LIMIT))
         ]
-    report["expired"] = _forget(config_dir, expired, deadline) if expired else 0
+    started = time.monotonic()
+    budget = min(deadline, started + EXPIRE_BUDGET_S)
+    report["expired"] = _forget(config_dir, expired, budget, "expired") if expired else 0
+    report["expiry_seconds"] = round(time.monotonic() - started, 3)
     reading = probe(config_dir)
     report["probe"] = reading
     if not reading.get("triggers") and not report["expired"]:
@@ -358,10 +391,11 @@ def run_pass(
 def start_background(config_dir: Path) -> threading.Thread | None:
     """Offer one pass on a daemon thread, at most once per process.
 
-    The opportunistic door for ``lop`` starts and ``lop memory status``: the
-    supervisor is the primary seat but retires when no wake is fireable. The
-    pass itself is gated by the cross-process lock and the 6 h interval, so a
-    fleet of starts costs one stamp read each.
+    The opportunistic door for long-lived session runtimes only (see the module
+    doc for why one-shot processes do not offer it): the supervisor is the
+    primary seat but retires when no wake is fireable. The pass itself is gated
+    by the cross-process lock and the 6 h interval, so a fleet of runtime starts
+    costs one stamp read each.
     """
     global _background
     with _background_guard:
@@ -372,13 +406,6 @@ def start_background(config_dir: Path) -> threading.Thread | None:
         )
         _background.start()
         return _background
-
-
-def join_background(timeout: float = PASS_TIMEOUT_S) -> None:
-    """Let a short-lived CLI finish an offered pass after its output is printed."""
-    thread = _background
-    if thread is not None:
-        thread.join(timeout)
 
 
 def last_auto_pass(config_dir: Path) -> dict[str, Any] | None:

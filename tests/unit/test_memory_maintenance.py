@@ -404,3 +404,200 @@ def test_delete_session_forgets_captures_and_keeps_deliberate_facts(tmp_path: Pa
         "Deliberate fact of the deleted session",
         "Captured fact of a neighbour session",
     }
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: M1 (promotion/move), M2 (all heads), M3 (re-capture), m1
+# ---------------------------------------------------------------------------
+
+
+def _edit_through_tool(config: Path, session: str, path: str, version: str, new: str) -> Any:
+    """The AGENT's edit path (``memory`` tool), not the CLI's."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.memory_tools import execute_memory
+
+    context = ToolContext(
+        session_id=session,
+        memory_config_dir=str(config),
+        session_dir=str(config / "sessions" / session),
+    )
+    result = asyncio.run(
+        execute_memory("e", "edit", {"path": path, "old_text": version, "new_text": new}, context)
+    )
+    assert not result.is_error, result.content
+    return json.loads(str(getattr(result.content[0], "text", "")))
+
+
+def _only_row(config: Path) -> tuple[str, str, dict[str, Any]]:
+    db = sqlite3.connect(config / "memory" / "memory.db")
+    try:
+        rows = db.execute("SELECT entity_id, op_id, fact, scope FROM current").fetchall()
+    finally:
+        db.close()
+    assert len(rows) == 1, rows
+    return rows[0][0], rows[0][1], json.loads(rows[0][2])
+
+
+def _at_day_15(monkeypatch: pytest.MonkeyPatch, start: float) -> float:
+    later = start + 15 * DAY
+    monkeypatch.setattr(time, "time", lambda: later)
+    return later
+
+
+@pytest.mark.parametrize("status", ["active", "candidate"])
+def test_an_agent_edit_through_the_tool_makes_a_capture_deliberate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """M1 + m1: an agent's edit (promotion OR a body correction that keeps
+    ``candidate``) is deliberate: no carried deadline, no capture author, and it
+    survives day 15 in search and in the pass."""
+    session = "a" * 12
+    start = time.time()
+    _capture(_store(tmp_path), "m1", "Ship the context reduction POC this week", start)
+    entity, version, fact = _only_row(tmp_path)
+    edited = dict(fact, status=status, body="Ship the context reduction POC by Friday")
+    _edit_through_tool(tmp_path, session, f"memory://session/{entity}", version, json.dumps(edited))
+    _, _, now_fact = _only_row(tmp_path)
+    assert now_fact["expires_at"] is None
+    assert now_fact["source"]["author"] != "deterministic-capture"
+    _at_day_15(monkeypatch, start)
+    assert _store(tmp_path).search("context reduction POC")
+    assert mm.run_pass(tmp_path)["expired"] == 0
+    assert "Ship the context reduction POC by Friday" in _facts(tmp_path)
+
+
+def test_a_capture_moved_to_global_survives_day_15(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: a move is deliberate; the moved fact keeps no deadline."""
+    session = "a" * 12
+    start = time.time()
+    _capture(_store(tmp_path), "m1", "Damian prefers conventional commit messages", start)
+    entity, version, _ = _only_row(tmp_path)
+    _edit_through_tool(
+        tmp_path, session, f"memory://session/{entity}", version, '{"move":"global"}'
+    )
+    _, _, moved = _only_row(tmp_path)
+    assert moved["expires_at"] is None
+    _at_day_15(monkeypatch, start)
+    assert _store(tmp_path).search("conventional commit messages")
+    assert mm.run_pass(tmp_path)["expired"] == 0
+
+
+def _peer_correction(store: MemoryStore, entity: str, parent: dict[str, Any]) -> None:
+    """A deliberate correction of ``parent`` from another device (concurrent head)."""
+    import hashlib
+
+    from local_operator.memory import _dump
+
+    fact = dict(
+        parent["fact"],
+        status="active",
+        body="Confirmed by the operator on the peer",
+        source=dict(parent["fact"]["source"], author="main"),
+        expires_at=None,
+    )
+    op = dict(
+        parent,
+        op_id="peer-correction-op",
+        origin_device="device-b",
+        seq=1,
+        hlc=[parent["hlc"][0] + 1, 0, "device-b"],
+        parents=[parent["op_id"]],
+        fact=fact,
+        body_sha=hashlib.sha256(_dump(fact).encode()).hexdigest(),
+    )
+    store.apply_ops([op])
+
+
+@pytest.mark.parametrize("door", ["expiry", "session-delete"])
+def test_a_capture_with_a_concurrent_deliberate_head_is_never_forgotten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, door: str
+) -> None:
+    """M2, the reviewer's repro: capture rev1, a local capture refresh rev2, and a
+    peer's deliberate correction of rev1 -> two heads. Neither unattended door may
+    tombstone the entity."""
+    store = _store(tmp_path)
+    old = time.time() - 20 * DAY
+    _capture(store, "m1", "Captured goal that a peer confirmed", old)
+    entity, _, _ = _only_row(tmp_path)
+    with store.connection() as db:
+        first = store._ops(db, entity)[0]
+    _capture(store, "m2", "Captured goal that a peer confirmed", old + 1)
+    _peer_correction(store, entity, first)
+    with store.connection() as db:
+        assert len(store._heads(store._ops(db, entity))) == 2
+    if door == "expiry":
+        report = mm.run_pass(tmp_path)
+        assert report["expired"] == 0
+    else:
+        assert mm.forget_session_captures(tmp_path, "a" * 12) == 0
+    with store.connection() as db:
+        ops = store._ops(db, entity)
+    assert not any(op["kind"] == "tombstone" for op in ops)
+    assert any(op["op_id"] == "peer-correction-op" for op in ops)
+
+
+def test_an_expired_capture_is_recaptured_but_an_explicit_forget_is_not(tmp_path: Path) -> None:
+    """M3: a resumed session re-learns text that merely expired; text a person or
+    an agent forgot stays forgotten."""
+    store = _store(tmp_path)
+    old = time.time() - 15 * DAY
+    _capture(store, "m1", "Standing goal of the long lane", old)
+    _capture(store, "m1b", "Text the operator deliberately forgot", old)
+    forgotten = next(
+        (eid, op)
+        for eid, op, fact, _ in [
+            (r[0], r[1], json.loads(r[2]), None)
+            for r in sqlite3.connect(tmp_path / "memory" / "memory.db").execute(
+                "SELECT entity_id, op_id, fact FROM current"
+            )
+        ]
+        if fact["body"] == "Text the operator deliberately forgot"
+    )
+    store.put("session", {}, entity=forgotten[0], expected_version=forgotten[1], forget=True)
+    assert mm.run_pass(tmp_path)["expired"] == 1
+    assert _facts(tmp_path) == {}
+
+    now = time.time()
+    _capture(store, "m2", "Standing goal of the long lane", now)
+    _capture(store, "m2b", "Text the operator deliberately forgot", now)
+    facts = _facts(tmp_path)
+    assert set(facts) == {"Standing goal of the long lane"}
+    assert facts["Standing goal of the long lane"]["expires_at"] == int(now) + 14 * 86400
+    assert _store(tmp_path).search("Standing goal long lane")
+    # Deterministic: a second pass over the same text lands on the same entity.
+    _capture(store, "m3", "Standing goal of the long lane", now + 60)
+    assert len(_facts(tmp_path)) == 1
+
+
+def test_the_expiry_step_stops_at_its_budget_and_leaves_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m2: expiry has its own wall-clock budget; leftovers wait for the next pass."""
+    monkeypatch.setattr(mm, "EXPIRE_BUDGET_S", 0.0)
+    old = time.time() - 15 * DAY
+    for index in range(3):
+        _capture(_store(tmp_path, f"{index:012x}"), "m1", f"Old capture number {index}", old)
+    report = mm.run_pass(tmp_path)
+    assert report["expired"] == 0
+    assert "expiry_seconds" in report
+    assert len(_facts(tmp_path)) == 3
+
+
+def test_lop_memory_status_does_not_start_a_maintenance_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q1/Q2: a one-shot command never offers (or waits on) the pass."""
+    from local_operator.memory_cli import configure_parser, execute
+
+    calls: list[Any] = []
+    monkeypatch.setattr(mm, "start_background", lambda *a: calls.append(a))
+    monkeypatch.setattr(mm, "run_pass", lambda *a, **k: calls.append(a))
+    _store(tmp_path).put("session", {"title": "t", "body": "a fact"})
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    configure_parser(parser)
+    execute(parser.parse_args(["status"]), config=tmp_path)
+    assert calls == []

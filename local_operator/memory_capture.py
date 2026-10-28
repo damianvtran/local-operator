@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, NamedTuple
 
 from local_operator.memory import (
+    CAPTURE_AUTHOR,
+    CAPTURE_EXPIRED_KEY,
     MAX_REVISIONS,
     MAX_TOMBSTONES,
     MemoryError,
@@ -1485,7 +1487,7 @@ def persist(
                         "session": store.identity.session_id,
                         "entry": marker_id,
                         "kind": "compaction",
-                        "author": "deterministic-capture",
+                        "author": CAPTURE_AUTHOR,
                     },
                 )
             )
@@ -1579,8 +1581,25 @@ def persist(
             # never fuzzy consolidation. Stable entities prevent repeated
             # compactions filling the ACTIVE bank; each committed marker still has
             # a distinct idempotent causal op.
-            operation_id = hashlib.sha256((entity + "|" + marker_id).encode()).hexdigest()
             ops = store._ops(db, entity)
+            # A capture entity that EXPIRED (and only that: the expiry pass marks
+            # it, see ``CAPTURE_EXPIRED_KEY``) is re-admitted under a chained,
+            # still-deterministic entity ``sha256(entity|expiry tombstone)``, so a
+            # session resumed after its captures went stale can re-learn the same
+            # text, and two passes over it still land on one entity. A tombstone
+            # with no mark — a person or an agent forgot it — keeps the text out.
+            # Bounded: each link needs a 14-day expiry of the previous one. State
+            # chains need none of this: ``_state_entity`` already rolls a
+            # forgotten generation to a fresh one.
+            while entity not in chains and any(op["kind"] == "tombstone" for op in ops):
+                expired = db.execute(
+                    "SELECT value FROM meta WHERE key=?", (CAPTURE_EXPIRED_KEY + entity,)
+                ).fetchone()
+                if expired is None:
+                    break
+                entity = hashlib.sha256((entity + "|" + str(expired[0])).encode()).hexdigest()
+                ops = store._ops(db, entity)
+            operation_id = hashlib.sha256((entity + "|" + marker_id).encode()).hexdigest()
             if any(op["kind"] == "tombstone" for op in ops):
                 continue
             if any(op["op_id"] == operation_id for op in ops):
@@ -1596,6 +1615,10 @@ def persist(
                     len(heads) != 1
                     or current["status"] != "candidate"
                     or current["source"].get("kind") != "compaction"
+                    # An agent's correction that kept status ``candidate`` is
+                    # still deliberate: ``put`` rewrites the author on every
+                    # revision it writes, so only capture's own rows match.
+                    or current["source"].get("author") != CAPTURE_AUTHOR
                     or (current["source_time"] or 0) > timestamp
                     or len(ops) >= MAX_REVISIONS
                 ):

@@ -1967,11 +1967,11 @@ class _MemoryMaintenanceSeat:
     beside every runtime: a ``journal_plan`` loads every op (measured +212 MB
     RSS), which is fine once per machine and not fine once per session.
 
-    **IT DOES NOT BOUND THE SLEEP**, for :class:`_TriggerSweep`'s reason: the
-    possibility of a compaction must never keep the supervisor resident. ``lop``
-    starts and ``lop memory status`` offer the same pass for the hours this
-    process is retired. The pass gates itself (6 h interval, cross-process lock),
-    so this cadence only decides how often the cheap gate is read.
+    **IT DOES NOT BOUND THE SLEEP**, for :class:`_TriggerSweep`'s reason: the possibility of a
+    compaction must never keep the supervisor resident. Each session runtime offers the same pass
+    once at boot for the hours this process is retired (one-shot commands deliberately do not). The
+    pass gates itself (6 h interval, cross-process lock), so this cadence only decides how often the
+    cheap gate is read.
 
     **THE PASS IS DETACHED, ON A WORKER THREAD**, and bounded by its own 60 s
     timeout; a pass already in flight is left alone and a failing one is a
@@ -2026,9 +2026,10 @@ class _MemoryMaintenanceSeat:
     async def shutdown(self) -> None:
         """Drop an in-flight pass on the way out.
 
-        The worker thread finishes or is rolled back on its own: an uncommitted
-        compaction transaction is discarded when its connection closes, and the
-        pass's lock is held by that thread until it ends.
+        Cancelling stops the LOOP waiting; it does not stop the worker thread,
+        which runs to completion and commits (Python cannot interrupt a thread
+        inside SQLite) while holding the pass's lock. Only if the process exits
+        first does SQLite roll back its open transaction.
         """
         if self._task is not None and not self._task.done():
             self._task.cancel()

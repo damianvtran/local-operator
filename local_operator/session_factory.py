@@ -4545,19 +4545,6 @@ def _start_store_maintenance(
         _STORE_MAINTENANCE_STOP = None
         _STORE_MAINTENANCE_DONE = None
         logger.debug("store maintenance worker could not start", exc_info=True)
-    # The memory store's own maintenance (journal compaction + capture expiry)
-    # is offered once per process here, on its own daemon thread: the wake
-    # supervisor is its primary seat but retires when nothing is fireable. The
-    # pass gates itself (6 h interval, cross-process lock, 60 s bound), so most
-    # starts cost one stamp read. Not inside the store-maintenance worker above:
-    # that one waits for an idle window and holds its own lock through eight
-    # passes, and a 3 s compaction must not stretch it.
-    try:
-        from local_operator.memory_maintenance import start_background
-
-        start_background(config_dir)
-    except Exception:  # noqa: BLE001 — housekeeping never fails session start
-        logger.debug("memory maintenance offer could not start", exc_info=True)
 
 
 async def _prepare(
