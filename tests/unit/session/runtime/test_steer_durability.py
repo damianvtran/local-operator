@@ -28,8 +28,14 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import ImageContent, NoticeEvent, StreamEvent
-from local_operator.session.errors import RuntimeRetiring
+from local_operator.harness.types import (
+    ImageContent,
+    Message,
+    MessageStartEvent,
+    NoticeEvent,
+    StreamEvent,
+    TurnEndEvent,
+)
 from local_operator.session.runtime import process as process_mod
 from local_operator.session.runtime.inbox import (
     SOURCE_USER,
@@ -267,32 +273,182 @@ async def test_a_lost_spool_removal_still_delivers_the_message_once(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_an_attachment_steer_is_refused_rather_than_accepted_and_dropped(
+async def test_an_attachment_steer_keeps_its_pre_change_in_memory_carriage(
     tmp_path: Path,
 ) -> None:
-    """Req 3: the one message an inbox row cannot carry fails visibly.
+    """Attachments are accepted into the live queue, and deliberately not spooled.
 
-    An ``InboxLine`` is text, so an image/audio/document steer cannot be held for
-    a successor. Accepting it would reintroduce the silent loss this change
-    exists to end, so it takes the typed refusal the update window already uses
-    for the same reason — and the identity stays retryable.
+    DECISION (2026-10-28, final): an ``InboxLine`` is text, so an image/recording/
+    document steer has no durable copy. Refusing it would be a new failure on a
+    door that works (and was: the refusal broke the tree's own mid-turn ``/goal``
+    e2e and told a healthy session it was leaving), so the steer keeps exactly its
+    pre-change behaviour — accepted into the live queue, still lossy on a runtime
+    swap, and listed under "not addressed" on the PR.
     """
     _, handle, stream, directory = await _live_turn_with_a_queued_steer(tmp_path, "steer-image-0")
     try:
-        with pytest.raises(RuntimeRetiring):
+        assert (
             await handle.steer(
                 "look at this",
                 images=[ImageContent(data="AAAA", mime_type="image/png")],
                 command_id="steer-image-1",
             )
+            == "steering queued"
+        )
         assert [row.command_id for row in peek_inbox(directory)] == [
             "steer-image-0"
-        ], "the refused steer left a spool row"
-        assert _rows_produced_by(directory, "steer-image-1") == []
+        ], "an attachment steer was spooled: a successor would drop its image"
 
-        # The identity a refusal releases must be reusable, or the producer's
-        # retry without the attachment would answer "already admitted".
-        assert await handle.steer("look at this", command_id="steer-image-1") == "steering queued"
+        delivered = await handle._session._drain_steering()  # type: ignore[attr-defined]
+        assert [message.text for message in delivered] == [STEER_TEXT, "look at this"]
+        rows = _rows_produced_by(directory, "steer-image-1")
+        assert len(rows) == 1, rows
+        content = rows[0]["payload"]["content"]
+        assert "AAAA" in json.dumps(content), content
+    finally:
+        stream.release.set()
+        await _stop_quietly(handle)
+
+
+@pytest.mark.asyncio
+async def test_an_idle_steer_is_announced_and_carried_once(tmp_path: Path) -> None:
+    """Req 5: the first-turn drain must not re-steer the row it just spooled.
+
+    An idle steer opens its own turn (``_ensure_steering_wake``), and that turn's
+    first pipeline pass also runs the once-per-lifetime spool drain. The drain
+    used to find the row the steer door had JUST written and steer it a second
+    time — ``has_admitted_command`` cannot answer yet because a queued steer only
+    becomes durable at the next boundary. Two queue entries with one id, two
+    ``MessageStartEvent``s and the text twice in the model request followed.
+    """
+    directory = tmp_path / "session"
+    stream = ScriptedStream([text_turn("done")])
+    session = build_session(directory, stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle._maybe_name_conversation = lambda text: None
+    starts: list[MessageStartEvent] = []
+    ended = asyncio.Event()
+
+    def observe(event: Any) -> None:
+        if isinstance(event, MessageStartEvent):
+            starts.append(event)
+        elif isinstance(event, TurnEndEvent):
+            ended.set()
+
+    session.subscribe(observe)
+    try:
+        assert await handle.steer(STEER_TEXT, command_id="steer-idle-1") == "steering queued"
+        # Wait for the turn the idle steer opens, rather than polling ``is_busy``:
+        # the spawn has not started when ``steer`` returns, so a busy poll can see
+        # an idle gap before that turn exists.
+        await asyncio.wait_for(ended.wait(), 10)
+        assert stream.exhausted_at is None, "the tape ran out on a call the test did not script"
+        announced = [
+            event.message.text
+            for event in starts
+            if isinstance(event.message, Message) and event.message.role == "user"
+        ]
+        assert announced == [STEER_TEXT], announced
+        carried = [
+            message.text
+            for request in stream.requests
+            for message in request.messages
+            if isinstance(message, Message)
+            and message.role == "user"
+            and STEER_TEXT in message.text
+        ]
+        assert carried == [STEER_TEXT], "the model request carried the steer more than once"
+    finally:
+        await _stop_quietly(handle)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_steer_is_not_stranded_half_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Req 5: cancelling during the spool write must not leak the admission.
+
+    The message is owed once the spool write lands. Cancelling there used to
+    leave the queue untouched and the reservation pending forever: the producer's
+    retry answered "already admitted" for a message the live turn would never
+    see, and the row sat in the spool until some successor booted.
+    """
+    import threading
+
+    from local_operator.session.runtime import inbox as inbox_mod
+
+    _, handle, stream, directory = await _live_turn_with_a_queued_steer(
+        tmp_path, "steer-before-cancel"
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    real_append = inbox_mod.append_for_successor
+
+    def slow_append(*args: Any, **kwargs: Any) -> bool:
+        entered.set()
+        assert release.wait(10), "the test never released the blocked spool write"
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(inbox_mod, "append_for_successor", slow_append)
+    try:
+        task = asyncio.ensure_future(handle.steer(STEER_TEXT, command_id="steer-cancelled-1"))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        queued = [
+            message
+            for message in handle._session.queued_steering()  # type: ignore[attr-defined]
+            if str(getattr(message, "id", "")) == "steer-cancelled-1"
+        ]
+        assert len(queued) == 1, "the cancelled steer never reached the live queue"
+
+        delivered = await handle._session._drain_steering()  # type: ignore[attr-defined]
+        assert [message.text for message in delivered] == [STEER_TEXT, STEER_TEXT]
+        assert len(_rows_produced_by(directory, "steer-cancelled-1")) == 1
+        assert (
+            handle._command_reservations._pending_steers == 0
+        ), "the cancelled steer left a pending reservation"
+
+        _, successor, _ = await _boot_successor(tmp_path)
+        try:
+            assert (
+                len(_rows_produced_by(directory, "steer-cancelled-1")) == 1
+            ), "the successor delivered the cancelled steer a second time"
+        finally:
+            await _stop_quietly(successor)
+    finally:
+        release.set()
+        stream.release.set()
+        await _stop_quietly(handle)
+
+
+@pytest.mark.asyncio
+async def test_a_recalled_steer_is_not_delivered_by_the_successor(tmp_path: Path) -> None:
+    """Req 5: recall retracts the spooled half, not just the live queue entry.
+
+    Every accepted steer is spooled before it is acknowledged, so dropping only
+    the queue entry left the successor a row to deliver — the user retracted the
+    message and it arrived anyway. The probe that found this watched a successor
+    write a transcript row for a recalled steer.
+    """
+    _, handle, stream, directory = await _live_turn_with_a_queued_steer(tmp_path, "steer-recall-1")
+    try:
+        assert await handle.recall_steer("steer-recall-1") == "steering recalled"
+        assert [
+            row.command_id for row in peek_inbox(directory)
+        ] == [], "the spool kept the retracted steer; a successor would replay it"
+
+        _, successor, _ = await _boot_successor(tmp_path)
+        try:
+            assert (
+                _rows_produced_by(directory, "steer-recall-1") == []
+            ), "a successor delivered a steer the user recalled"
+        finally:
+            await _stop_quietly(successor)
     finally:
         stream.release.set()
         await _stop_quietly(handle)

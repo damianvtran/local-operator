@@ -10466,7 +10466,10 @@ class Session:
         append-only, and a retried prompt must not land twice. ``seen`` covers
         what the index cannot — two rows of one batch with the same id, where
         the first steer is still queued and has therefore not reached the index
-        yet (agent review round 1, R3).
+        yet (agent review round 1, R3). ``_steer_is_live_queued`` covers the
+        other live case: the steer this very row was spooled from is still on
+        the queue (an idle steer opens its own turn and meets its own row here),
+        and steering it again would double-deliver one message.
         """
         command_id = str(getattr(line, "command_id", "") or "")
         if command_id and command_id in seen:
@@ -10474,6 +10477,15 @@ class Session:
             return
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
+            return
+        if command_id and self._steer_is_live_queued(command_id):
+            # THE SAME MESSAGE, ALREADY OWED BY THIS PROCESS. ``has_admitted_command``
+            # only answers once the row is durable, and a queued steer is not
+            # durable until its next boundary drain — so without this check an
+            # idle steer that opened its own turn found its own just-spooled row
+            # here and was steered a SECOND time: two queue entries with one id,
+            # two ``MessageStartEvent``s, the text twice in the model request.
+            logger.info("spooled prompt is already on the steering queue; not steering it twice")
             return
         self.steer(
             line.text,
@@ -10487,6 +10499,25 @@ class Session:
         # 2, MINOR-2).
         if command_id:
             seen.add(command_id)
+
+    def _steer_is_live_queued(self, command_id: str) -> bool:
+        """Whether a steer with this producer id is already owed by this process.
+
+        The first-turn drain's duplicate gate, checked BEFORE ``Session.steer``
+        would queue the spooled row again. ``_steering_producers`` is where the
+        handle keeps the producer id of an admitted steer, and the queue itself
+        carries the id as the message id for the callers that supply one without
+        a producer entry. ``queued_steering`` drains and rebuilds in one
+        synchronous step, so this reads the live order without disturbing it.
+        """
+        if not command_id:
+            return False
+        if command_id in self._steering_producers.values():
+            return True
+        return any(
+            str(getattr(message, "id", "") or "") == command_id
+            for message in self.queued_steering()
+        )
 
     async def receive_peer_message(
         self,

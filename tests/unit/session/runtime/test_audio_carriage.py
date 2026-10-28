@@ -10,10 +10,9 @@ and the ``ChatRequest`` the turn builds carries the ``AudioContent`` — the
 "Prompt -> durable row -> live event -> ChatRequest" round trip of design §5,
 minus only the HTTP hop QA exercises separately.
 
-The steer case used to be the same carriage on the other op. It is now a
-REFUSAL instead (see the last cell): the serving handle spools every accepted
-steer for a successor before it acknowledges, an inbox row is text, and a
-recording therefore has no durable home on that door.
+The steer case is the same carriage on the other op: a mid-turn recording lands
+on the queued row when the boundary drain persists it, so nothing is lost at a
+hop whose signature takes the keyword.
 """
 
 from __future__ import annotations
@@ -145,36 +144,36 @@ async def test_a_wire_recording_reaches_the_row_and_the_request_with_its_sniffed
 
 
 @pytest.mark.asyncio
-async def test_a_steered_recording_is_refused_rather_than_accepted_and_dropped(
-    tmp_path: Path,
-) -> None:
-    """A recording cannot ride a steer any more, and the refusal says so.
+async def test_a_steered_recording_lands_on_the_queued_row(tmp_path: Path) -> None:
+    """The steer op carries the recording too, through the same decode.
 
-    The steer door now spools every accepted correction for a successor before it
-    acknowledges (``ServingSessionHandle.steer``), because the in-memory steering
-    queue dies with the runtime that holds it. An ``InboxLine`` is TEXT, so a
-    recording has no durable home on that vehicle — accepting it would be the
-    silent loss the spool exists to end. It takes the same typed refusal the
-    update window uses for the same reason, and the producer identity stays
-    retryable.
-
-    The carriage itself is unchanged one door over: ``prompt`` still decodes,
-    stores and sends the blocks (the cells above), and ``Session.steer`` still
-    takes a recording from an in-process caller that owns its durability.
+    Steers persist at the next boundary drain rather than at the ack; the drain
+    is called directly here because that is exactly the call the loop makes, and
+    it keeps this test off a tool-scripted turn.
     """
-    from local_operator.session.errors import RuntimeRetiring
-
     stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream, model=AUDIO_MODEL)
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
 
-    with pytest.raises(RuntimeRetiring):
+    assert (
         await handle.steer(
             "mid-turn recording",
             audio=[{"data_b64": WEBM, "mime_type": "audio/webm"}],
             command_id="steer-audio-1",
         )
+        == "steering queued"
+    )
 
-    assert _message_rows(tmp_path) == [], "the refused steer left a durable row"
+    delivered = await session._drain_steering()
+    assert [m.text for m in delivered if isinstance(m, Message)] == ["mid-turn recording"]
+
+    user_rows = [
+        r["payload"] for r in _message_rows(tmp_path) if r["payload"].get("role") == "user"
+    ]
+    assert len(user_rows) == 1
+    block = user_rows[0]["content"][-1]
+    assert block["type"] == "audio"
+    assert block["mime_type"] == "audio/webm"
+    assert user_rows[0]["input_path"] == "model_audio_sidecar"
 
     await session.dispose()

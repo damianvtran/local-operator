@@ -971,6 +971,11 @@ class PromptHost(DrainHost):
     # The admission half the steer door now delegates to, so the borrow above
     # runs the production body rather than failing on a missing attribute.
     _admit_steer = ServingSessionHandle._admit_steer
+    # The join that completes an admission even when the caller is cancelled,
+    # and the deferred supervisor raise the admission runs after its lock: both
+    # are part of the production ``steer`` body this host borrows.
+    _await_steer_admission = ServingSessionHandle._await_steer_admission
+    _raise_successor_reader = ServingSessionHandle._raise_successor_reader
     is_busy = ServingSessionHandle.is_busy
     # The admitted path's own queue drain, bound for the same reason the latch is: a
     # release that let a prompt through the refusal check but stalled in a re-implemented

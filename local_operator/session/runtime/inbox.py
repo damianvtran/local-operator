@@ -809,11 +809,23 @@ def _parse(raw: bytes) -> list[InboxLine]:
     return lines
 
 
-def append_for_successor(root: Path, session_dir: Path, line: InboxLine, *, cwd: str = "") -> bool:
+def append_for_successor(
+    root: Path,
+    session_dir: Path,
+    line: InboxLine,
+    *,
+    cwd: str = "",
+    raise_reader: bool = True,
+) -> bool:
     """Persist obligation BEFORE append under one mutex, and raise only after unlock.
 
     An append failure retains its marker for reconciliation. Its receipt is a
     refusal, never exactly-once delivery; existing message IDs remain authority.
+
+    ``raise_reader=False`` is for a caller that holds a lock the ``launchctl``
+    hop must not sit under (``ServingSessionHandle._admit_steer``'s arrival-order
+    mutex): the obligation record is durable either way, and that caller raises
+    the reader itself once its lock is released.
     """
     from local_operator.wakes.spooled import (
         SpoolWriteError,
@@ -827,7 +839,7 @@ def append_for_successor(root: Path, session_dir: Path, line: InboxLine, *, cwd:
         if owes and not _note_locked(root, session_dir.name, cwd=cwd):
             raise SpoolWriteError("could not persist successor obligation")
         written = append_inbox(session_dir, line)
-    if owes:
+    if owes and raise_reader:
         _raise_reader(root, session_dir.name)
     return written
 
