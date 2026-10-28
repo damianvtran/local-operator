@@ -862,14 +862,36 @@ def move_serve(*, budget: float | None = None) -> dict[str, Any]:
     ``moved``. ``moved`` lists only daemons whose instance changed under the
     stage. States: ``moved`` (something moved, nothing stale), ``current``
     (nothing needed moving), ``none`` (no serve running), ``stale`` (at least
-    one still on an older build) and ``unknown`` (no build to compare against).
-    Never raises: the install already succeeded, so a failed move is a clause
-    in a ``done`` receipt, not a failed update.
+    one still on an older build) and ``unknown`` (no build to compare against,
+    or a daemon that is alive but not serving its address).
+
+    A STUCK DAEMON IS NEVER "none" (QA round 1 on #3093, Q1; review m3): a serve
+    that stopped heartbeating is not ``live`` to the registry, so a verdict read
+    from the live set alone said "no serve running" about a process still
+    holding the old build — while ``lop services status`` flagged it. The stuck
+    set is read from ``services.serve_daemon_reports`` (the reports that status
+    renders its rows from), carried as ``stuck`` and given status's own remedy
+    (``lop services reclaim <pid>``); a report that answers as its own instance
+    is SERVING and joins the stale check like any live daemon.
+
+    NEVER RAISES, THE WHOLE BODY (Q2; review m1): the install already succeeded
+    and ``update_completed`` is written from this fact, so anything raised here
+    — prologue included — would turn a promoted build into ``failed`` and lose
+    that row. It reads ``unknown`` with the remedy instead.
 
     ``budget`` is the tail's remaining time (None = the reload's own nominal
     wait); the wait is clamped to it so the receipt still lands inside the op's
     deadline, and a move that has not settled by then reads ``stale``.
     """
+    try:
+        return _move_serve(budget)
+    except Exception:  # noqa: BLE001 — the install already succeeded; see Q2 above
+        logger.warning("the serve move after the update could not be judged", exc_info=True)
+        return {"state": "unknown", "moved": [], "stale": [], "remedy": SERVE_REMEDY}
+
+
+def _move_serve(budget: float | None) -> dict[str, Any]:
+    """:func:`move_serve`'s body; it may raise, and its caller turns that into ``unknown``."""
     from local_operator import services
     from local_operator import update as update_mod
 
@@ -877,53 +899,98 @@ def move_serve(*, budget: float | None = None) -> dict[str, Any]:
     report = update_mod.move_serve_after_upgrade(wait_s=max(0.0, wait_s))
     moved = [move.pid for move in report.serve if move.moved]
     try:
-        live = bool(services.live_serve_daemons())
-        stale_records = services.stale_serve_daemons() if live else []
+        reports = services.serve_daemon_reports()
+        # A ``stale`` report's pid is gone (nothing to move or reclaim) and a
+        # SERVING one is judged by the stale check below, so the stuck set is
+        # exactly the rows status prints a `reclaim` remedy for.
+        stuck_reports = [r for r in reports if r.verdict not in (services.SERVING, services.STALE)]
+        answering = [r.record for r in reports if r.verdict == services.SERVING]
+        fleet = _union_by_pid(services.live_serve_daemons(), answering)
+        stale_records = services.stale_serve_daemons(fleet) if fleet else []
     except Exception:  # noqa: BLE001 — an unreadable fleet is "unknown", not "current"
         logger.debug("serve fleet unreadable after the move", exc_info=True)
-        live, stale_records = True, None
+        fleet, stuck_reports, stale_records = [None], [], None
     stale = [
         {"pid": int(record.pid), "version": str(getattr(record, "version", "") or "")}
         for record in (stale_records or [])
     ]
+    stuck = [{"pid": int(r.record.pid), "verdict": str(r.verdict)} for r in stuck_reports]
     if stale_records is None:
         state = "unknown"
     elif stale:
         state = "stale"
+    elif stuck:
+        state = "unknown"
     elif moved:
         state = "moved"
-    elif live:
+    elif fleet:
         state = "current"
     else:
         state = "none"
     fact: dict[str, Any] = {"state": state, "moved": moved, "stale": stale}
-    if state in ("stale", "unknown"):
+    if stuck:
+        fact["stuck"] = stuck
+    if state == "unknown" and stuck and stale_records is not None:
+        # Status's own remedy for a daemon that is not serving its address: a
+        # restart cannot move it (the stage reported it "cannot be asked to move").
+        fact["remedy"] = f"lop services reclaim {stuck[0]['pid']}"
+    elif state in ("stale", "unknown"):
         fact["remedy"] = SERVE_REMEDY
     return fact
+
+
+def _union_by_pid(*groups: Sequence[Any]) -> list[Any]:
+    """Records from several reads, one per pid, first read wins, in pid order."""
+    seen: dict[int, Any] = {}
+    for group in groups:
+        for record in group:
+            seen.setdefault(int(record.pid), record)
+    return [seen[pid] for pid in sorted(seen)]
 
 
 def serve_clause(serve: Mapping[str, Any]) -> str:
     """The receipt reason's serve clause: silent when there is nothing to say.
 
-    Only ``moved`` and ``stale`` speak: ``current`` and ``none`` are the
-    ordinary outcomes, and a sentence on every receipt would train the reader
-    to skip the one that matters.
+    Only ``moved``, ``stale`` and ``unknown`` speak: ``current`` and ``none``
+    are the ordinary outcomes, and a sentence on every receipt would train the
+    reader to skip the one that matters.
+
+    SHORT AND PLACED FIRST (QA round 1 on #3093, Q4): the origin keeps
+    ``rollouts.DETAIL_CAP`` characters of the reason, and a clause appended
+    after named busy sessions was cut mid-word through its own remedy. The
+    receipt puts this clause straight after the version sentence, it names at
+    most :data:`SERVE_NAMED` pids (the structured ``stale``/``stuck`` lists
+    carry every one), and "when checked" is literal: with no tail budget left a
+    signalled daemon may still move after the receipt (review n1).
     """
     state = str(serve.get("state") or "")
+    remedy = str(serve.get("remedy") or SERVE_REMEDY)
     if state == "moved":
         return f"; serve moved onto the new build ({len(serve.get('moved') or [])} daemon(s))"
     if state == "stale":
-        rows = serve.get("stale") or []
-        named = ", ".join(
-            f"pid {row.get('pid')} on {row.get('version') or 'an older build'}" for row in rows
+        named = _name_pids(
+            serve.get("stale") or [],
+            lambda row: f"pid {row.get('pid')} on {row.get('version') or 'an older build'}",
         )
-        return (
-            f"; serve is STALE ({named}) and keeps running the old code — "
-            f"run `{SERVE_REMEDY}` on this device"
-        )
+        return f"; serve is STALE ({named}), not moved when checked — run `{remedy}`"
+    if state == "unknown" and serve.get("stuck"):
+        named = _name_pids(serve.get("stuck") or [], lambda row: f"pid {row.get('pid')}")
+        return f"; serve {named} is not serving and was not moved — run `{remedy}`"
     if state == "unknown":
-        return f"; serve could not be checked against the new build — run `{SERVE_REMEDY}`"
+        return f"; serve could not be checked against the new build — run `{remedy}`"
     return ""
+
+
+#: How many pids the serve clause names before "+N more" (Q4: the sentence is
+#: capped; the structured lists are not).
+SERVE_NAMED = 2
+
+
+def _name_pids(rows: Sequence[Any], name: Callable[[Mapping[str, Any]], str]) -> str:
+    """``a, b`` for the first :data:`SERVE_NAMED` rows, then ``+N more``."""
+    shown = [name(row) for row in rows[:SERVE_NAMED] if isinstance(row, Mapping)]
+    extra = len(rows) - SERVE_NAMED
+    return ", ".join(shown) + (f" +{extra} more" if extra > 0 else "")
 
 
 def serve_audit(serve: Mapping[str, Any]) -> dict[str, Any]:
@@ -944,6 +1011,13 @@ def serve_audit(serve: Mapping[str, Any]) -> dict[str, Any]:
     ]
     if stale:
         fields["serve_stale"] = stale
+    stuck = [
+        f"{row.get('pid')}@{row.get('verdict') or '?'}"
+        for row in serve.get("stuck") or []
+        if isinstance(row, Mapping)
+    ]
+    if stuck:
+        fields["serve_stuck"] = stuck
     if serve.get("remedy"):
         fields["serve_remedy"] = str(serve["remedy"])
     return fields
@@ -1304,6 +1378,13 @@ def _execute_validated(
     # THE SERVE DAEMON MOVES IN THE PASS, BEFORE THE RECEIPT (2026-10-28). It
     # rides the update_completed row, so the row that says "installed" also says
     # whether `lop serve` came along; see `move_serve`.
+    #
+    # THE TAIL IS NOW serve -> sweep -> re-engage, ONE BUDGET (review m2). Serve
+    # takes at most `services.RELOAD_WAIT_S` (45 s) of it, first, so on an
+    # install that lands near the deadline the runtimes get what is left. That
+    # is a deliberate order, not a partition: the total still fits the slow-op
+    # deadline by construction, a sweep short of time degrades to its notes, and
+    # a per-phase reservation would be a budget design of its own (deferred).
     serve = move_serve(budget=tail_budget)
     _audit_member(
         server,
@@ -1331,6 +1412,9 @@ def _execute_validated(
             f"this pass promoted {target_version}; current is now "
             f"{now_current or 'unconfirmed'}; serving relay is {serving or 'unconfirmed'}"
         )
+    # Serve's clause FIRST, before the session clauses (Q4): the origin caps the
+    # reason, and the remedy is the part a reader of a remote node must not lose.
+    reason += serve_clause(serve)
     if outcomes:
         reason += f"; {moved} session(s) retired for the new build, {kept} kept"
         if other > 0:
@@ -1347,7 +1431,6 @@ def _execute_validated(
         )
     elif left_behind is None:
         reason += "; this device could not read its session registry to name busy sessions"
-    reason += serve_clause(serve)
     receipt = {
         "state": "done",
         "code": "",

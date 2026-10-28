@@ -600,11 +600,22 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "update_started": frozenset({"rollout", "target", "method"}),
     # ``serve``/``serve_stale``/``serve_remedy`` (2026-10-28): whether this
     # device's `lop serve` came along with the install — the state token, the
-    # still-stale daemons as short ``pid@version`` strings, and the command that
-    # moves them. Flat, because this log's values are bounded scalars and lists
+    # still-stale daemons as short ``pid@version`` strings, the alive-but-not-
+    # serving ones as ``pid@verdict`` (#3093 QA Q1), and the command that moves
+    # them. Flat, because this log's values are bounded scalars and lists
     # (``_clean_value`` stringifies a dict). Built by ``meshupdate.serve_audit``.
     "update_completed": frozenset(
-        {"rollout", "target", "method", "from", "version", "serve", "serve_stale", "serve_remedy"}
+        {
+            "rollout",
+            "target",
+            "method",
+            "from",
+            "version",
+            "serve",
+            "serve_stale",
+            "serve_stuck",
+            "serve_remedy",
+        }
     ),
     "update_failed": frozenset({"rollout", "target", "method"}),
     # The origin's side (S3a): the opening row carries WHO decided (a closed
@@ -631,6 +642,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "left_busy",
             "serve",
             "serve_stale",
+            "serve_stuck",
             "serve_remedy",
         }
     ),

@@ -130,6 +130,25 @@ RECEIPT_CAP = 20
 #: member's sentence (chars; the audit detail value cap is 200).
 DETAIL_CAP = 200
 
+
+def cap_sentence(text: str, cap: int = DETAIL_CAP) -> str:
+    """``text`` within ``cap`` characters, cut on a word boundary with an ellipsis.
+
+    A plain slice cut a member's receipt mid-word through its own remedy (QA
+    round 1 on #3093, Q4: ``run `lop services restart` on this d``). A cut
+    that lands inside a word steps back to the last space when one is near
+    (the ``resume`` clipping rule), so the reader sees whole words and a mark
+    that the sentence goes on; the structured fields carry what was cut.
+    """
+    if len(text) <= cap:
+        return text
+    cut = text[: cap - 1]
+    spaced = cut.rsplit(" ", 1)[0]
+    if len(spaced) >= cap - 40:
+        cut = spaced
+    return cut.rstrip(" ,.;:") + "…"
+
+
 #: The member states that mean "nothing more will happen to this member
 #: without a new rollout" (the §3 vocabulary map's record column). ``failed``
 #: is NOT terminal: the window is its bound. ``refused`` SPLITS (round 2,
@@ -617,6 +636,19 @@ def _serve_fact(answer: Mapping[str, Any]) -> dict[str, Any]:
             for row in stale[:LEFT_BUSY_CAP]
             if isinstance(row, Mapping)
         ]
+    # ``stuck`` (QA Q1 on #3093): alive-but-not-serving daemons, named by pid and
+    # the status verdict word. ``moved`` (review n2): which pids moved, so a
+    # `--json` reader of a ``moved`` member can tell. Both bounded like ``stale``.
+    stuck = raw.get("stuck")
+    if isinstance(stuck, list):
+        fact["stuck"] = [
+            {"pid": _bounded_pid(row.get("pid")), "verdict": str(row.get("verdict") or "")[:20]}
+            for row in stuck[:LEFT_BUSY_CAP]
+            if isinstance(row, Mapping)
+        ]
+    moved = raw.get("moved")
+    if isinstance(moved, list):
+        fact["moved"] = [_bounded_pid(pid) for pid in moved[:LEFT_BUSY_CAP]]
     if raw.get("remedy"):
         fact["remedy"] = str(raw.get("remedy"))[:80]
     return fact
@@ -664,7 +696,7 @@ def classify_answer(
             "next_ask_at": now + floor,
             "cause": cause,
             "outcome": outcome,
-            "detail": message[:DETAIL_CAP],
+            "detail": cap_sentence(message),
             "version": version,
             "method": method,
             # CONSECUTIVE-failure count, so every non-failure answer resets it
@@ -820,7 +852,7 @@ def _audit_member_state(
             # The ids the member deliberately left on its old build (QA Q2):
             # the reason above is capped and may have lost the names.
             detail["left_busy"] = list(update.get("left_busy") or [])
-        if update.get("serve"):
+        if "serve" in update:
             from local_operator.network.meshupdate import serve_audit
 
             detail.update(serve_audit(update.get("serve") or {}))
@@ -999,7 +1031,11 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             target_member["next_ask_at"] = float(_update.get("next_ask_at") or 0.0)
             if "left_busy" in _update:
                 target_member["left_busy"] = list(_update.get("left_busy") or [])
-            if _update.get("serve"):
+            # Replaced on key PRESENCE, as ``left_busy`` is (review m4): a later
+            # answer that carries no fact (an older member, a re-probed
+            # ``already_on_target``) must clear an earlier one, not leave a
+            # STALE verdict standing beside a newer receipt.
+            if "serve" in _update:
                 target_member["serve"] = dict(_update.get("serve") or {})
             note_receipt(
                 target_member,

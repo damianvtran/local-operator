@@ -371,19 +371,25 @@ class _ServeOutcome:
     state: dict[str, Any] = field(default_factory=dict)
 
 
-def stale_serve_daemons() -> list[Any] | None:
-    """The live ``serve`` daemons NOT on the build the pointer names, or ``None``.
+def stale_serve_daemons(records: Sequence[Any] | None = None) -> list[Any] | None:
+    """The ``serve`` daemons NOT on the build the pointer names, or ``None``.
 
     The same verdict ``lop services status`` prints as ``STALE:`` — the same
     stamp and the same version-and-ref predicate — so a receipt that says
     "serve is stale" and the status line an operator runs next can never
     disagree. ``None`` when no stamp can be read: without a build to compare
     against there is no verdict, and "none stale" would be a claim.
+
+    ``records`` defaults to the live set. The mesh pass passes the fleet as
+    status sees it (live records plus any whose address answers as their own
+    instance, which status lists as serving although the beat is late), so the
+    predicate is applied to the same rows status prints it on.
     """
     stamp = _current_stamp()
     if stamp is None:
         return None
-    return [record for record in live_serve_daemons() if not _serves_current_build(record, stamp)]
+    fleet = live_serve_daemons() if records is None else records
+    return [record for record in fleet if not _serves_current_build(record, stamp)]
 
 
 def live_serve_daemons() -> list[Any]:

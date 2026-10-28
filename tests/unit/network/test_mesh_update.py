@@ -1903,6 +1903,11 @@ def test_a_serve_that_does_not_move_reads_stale_with_the_remedy(
     assert serve["remedy"] == "lop services restart", serve
     assert "serve is STALE (pid 537864 on 0.91.1)" in detail["message"], detail
     assert "`lop services restart`" in detail["message"], detail
+    # Q4: the clause rides straight after the version sentence, ahead of the
+    # session clauses the origin's cap would otherwise cut it behind.
+    assert detail["message"].startswith(
+        "this device moved from 0.91.1 to 0.99.0; serve is STALE"
+    ), detail
     row = _member_audit_rows(server_a, "update_completed")[-1]["detail"]
     assert row.get("serve") == "stale", row
     assert row.get("serve_stale") == ["537864@0.91.1"], row
@@ -1933,3 +1938,123 @@ def test_an_older_member_answer_carries_no_serve_fact() -> None:
     """Backward compatibility: a member that predates the fact reads ``{}``."""
     assert meshupdate.serve_audit({}) == {}
     assert meshupdate.serve_clause({}) == ""
+
+
+def _wedged_fleet(
+    monkeypatch: pytest.MonkeyPatch, fleet: _ServeFleet, *, verdict_probe: str
+) -> None:
+    """The pre-update serve as the registry sees a daemon whose beat stopped.
+
+    Not ``live`` (so the live set and the reload's scan are empty), but its
+    pid is alive and ``serve_daemon_reports`` probes it: ``verdict_probe`` is
+    what its address answers — DEAF (nobody: the report's verdict stays
+    ``wedged``) or SERVING (its own instance: status lists it as serving).
+    """
+    import functools
+
+    from local_operator import services
+
+    report = services.ServeDaemonReport(
+        record=fleet.record,
+        state="wedged",
+        probe=services.AddressProbe(
+            verdict_probe, "" if verdict_probe == services.SERVING else "x"
+        ),
+    )
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [])
+    monkeypatch.setattr(services, "serve_daemon_reports", lambda: [report])
+    monkeypatch.setattr(
+        services,
+        "reload_serve_daemons",
+        functools.partial(
+            services.reload_serve_daemons,
+            scan=lambda: [],
+            kill=fleet.kill,
+            probe=lambda _record: None,
+            sleep=lambda _s: None,
+            stuck=lambda: [report],
+        ),
+    )
+
+
+def test_a_wedged_serve_reads_unknown_with_reclaim_never_none(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """QA round 1 on #3093, Q1 (review m3), failing first: a stuck serve is not "none".
+
+    QA's cell 5b: a serve SIGSTOPped past the wedged threshold left the receipt
+    and both audit rows reading ``serve: none`` while ``lop services status``
+    printed the daemon with ``lop services reclaim <pid>`` — and after SIGCONT
+    it was STALE. The fact now carries the stuck daemon and status's remedy.
+    """
+    from local_operator import services
+
+    server_a, server_b, state = _done_member(devices, monkeypatch)
+    fleet = _serve_fleet(monkeypatch, state)
+    _wedged_fleet(monkeypatch, fleet, verdict_probe=services.DEAF)
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+
+    assert detail["state"] == "done", detail
+    assert fleet.signals == [], "a daemon that is not serving cannot be asked to move"
+    serve = detail["serve"]
+    assert serve["state"] == "unknown", serve
+    assert serve["stuck"] == [{"pid": 537864, "verdict": "wedged"}], serve
+    assert serve["remedy"] == "lop services reclaim 537864", serve
+    assert "serve pid 537864 is not serving" in detail["message"], detail
+    row = _member_audit_rows(server_a, "update_completed")[-1]["detail"]
+    assert row.get("serve") == "unknown", row
+    assert row.get("serve_stuck") == ["537864@wedged"], row
+    assert row.get("serve_remedy") == "lop services reclaim 537864", row
+
+
+def test_a_late_beat_serve_that_answers_is_judged_stale_not_none(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Q1's neighbour: a wedged record whose address answers as itself is SERVING.
+
+    Status lists it as an ordinary daemon (``STALE:`` when behind), so the fact
+    must judge it by the same build predicate rather than dropping it.
+    """
+    from local_operator import services
+
+    server_a, server_b, state = _done_member(devices, monkeypatch)
+    fleet = _serve_fleet(monkeypatch, state)
+    _wedged_fleet(monkeypatch, fleet, verdict_probe=services.SERVING)
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+
+    assert detail["state"] == "done", detail
+    serve = detail["serve"]
+    assert serve["state"] == "stale", serve
+    assert serve["stale"] == [{"pid": 537864, "version": "0.91.1"}], serve
+    assert "stuck" not in serve, serve
+    assert serve["remedy"] == "lop services restart", serve
+
+
+def test_a_raise_anywhere_in_the_serve_move_keeps_the_install_done(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """QA round 1 on #3093, Q2 (review m1), failing first: QA's own injection.
+
+    ``RELOAD_WAIT_S = "injected-m1"`` raised in the move's unguarded prologue:
+    the member answered ``failed`` for a build it had promoted and wrote no
+    ``update_completed`` row. The whole move is guarded now.
+    """
+    from local_operator import services
+
+    server_a, server_b, state = _done_member(devices, monkeypatch)
+    _serve_fleet(monkeypatch, state)
+    monkeypatch.setattr(services, "RELOAD_WAIT_S", "injected-m1")
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+
+    assert detail["state"] == "done", detail
+    assert detail["serve"] == {
+        "state": "unknown",
+        "moved": [],
+        "stale": [],
+        "remedy": "lop services restart",
+    }, detail
+    rows = _member_audit_rows(server_a, "update_completed")
+    assert rows and rows[-1]["detail"].get("serve") == "unknown", rows
