@@ -16,7 +16,7 @@ def _ignore(_result: object) -> None:
     """``mutate`` wants a ``-> None`` callback; ``_apply`` returns the item for readers."""
 
 
-def _apply(doc, verdict="available", remote="fp1", reason="", **kw):
+def _apply(doc, verdict="available", remote="fp1", reason="", classification="remote-only", **kw):
     return st.apply_check(
         doc,
         kind="agent",
@@ -25,7 +25,7 @@ def _apply(doc, verdict="available", remote="fp1", reason="", **kw):
         hub_id="h",
         tenant_id=None,
         verdict=verdict,
-        classification="remote-only",
+        classification=classification,
         baseline="known",
         local_fp="l",
         remote_fp=remote,
@@ -303,3 +303,74 @@ def test_pull_and_push_due_times_are_independent() -> None:
     assert st.push_due(item, 30, now) is False
     # Never serviced -> both due.
     assert st.pull_due({}, 30, now) and st.push_due({}, 30, now)
+
+
+# -- the publish-side fact survives the pull-side verdict (Q14) ------------------------
+
+
+def test_a_local_only_check_keeps_its_classification() -> None:
+    """ONE VERDICT, TWO FACTS: up to date to PULL, unpublished on the PUSH side.
+
+    ``local-only`` folds onto the ``up-to-date`` verdict because there is nothing
+    to fetch; blanking the classification with it made a locally edited copy read
+    clean-too after one check, so no client could show "Modified".
+    """
+
+    item = _apply({}, verdict="up-to-date", classification="local-only")
+
+    assert item["state"] == "up-to-date"
+    assert item["classification"] == "local-only"
+    # It stays an up-to-date row, which is what keeps it out of every apply arm.
+    assert st.effective_state(item) == "up-to-date"
+
+
+def test_an_equal_pair_leaves_no_classification_behind() -> None:
+    """Equality is the absence of a fact: nothing to report, nothing to keep."""
+
+    item = _apply({}, verdict="up-to-date", classification="up-to-date")
+
+    assert item["state"] == "up-to-date"
+    assert item["classification"] is None
+
+
+def test_a_check_that_stops_being_local_only_clears_the_stale_mark() -> None:
+    """The classification is the CHECK's answer, never a sticky past one."""
+
+    doc: dict[str, Any] = {}
+    _apply(doc, verdict="up-to-date", classification="local-only")
+    item = _apply(doc, verdict="up-to-date", classification="up-to-date")
+
+    assert item["classification"] is None
+
+
+def test_an_accepted_push_retires_the_local_only_mark() -> None:
+    """Once the hub HAS seen the bytes the sentence is false, not merely stale."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, verdict="up-to-date", classification="local-only")
+
+    st.clear_local_only(item)
+    assert item["classification"] is None
+
+    # It retires ONLY that classification: any other stays for the next check.
+    other_doc: dict[str, Any] = {}
+    other = _apply(other_doc)
+    st.clear_local_only(other)
+    assert other["classification"] == "remote-only"
+
+
+def test_a_no_write_inbound_pass_keeps_the_local_only_mark() -> None:
+    """ "Keep my side" publishes nothing, so the copy is still unpublished."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, verdict="up-to-date", classification="local-only")
+
+    st.settle_unchanged(item)
+
+    assert item["state"] == "up-to-date"
+    assert item["classification"] == "local-only"
+
+    # A classification the pass DOES settle is still cleared.
+    other = _apply({})
+    st.settle_unchanged(other)
+    assert other["classification"] is None

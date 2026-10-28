@@ -1116,7 +1116,7 @@ plus retry bookkeeping, never a source of truth for content).
       "remote_fingerprint": "<sha256 or null>",
       "local_fingerprint": "<sha256>",
       "baseline": "known | unknown",
-      "classification": "remote-only | both-changed | baseline-unknown | null",
+      "classification": "remote-only | both-changed | baseline-unknown | local-only | null",
       "summary": {"taken-remote": 2, "kept-local": 1, "combined": 0,
                   "removal-honored": 1, "unresolved": 0},
       "attempts": 0,
@@ -1144,6 +1144,19 @@ sentence, ≤ 300 chars, credential-scrubbed (`public_data`/`redact_secrets`
 precedent: `routes/desktop_radient.py:547`, `clients/_http.py` `scrub_details`).
 Items whose local row was deleted or whose baseline link vanished are pruned at
 the next tick.
+
+`classification` is the CHECK's answer about which side moved, and it is stored
+whenever the check reported one the row still needs — NOT only when the row is
+`available`. `local-only` (L≠B, R==B) is the one that rides an `up-to-date` row:
+the verdict answers the PULL (nothing to fetch), while the classification is the
+PUBLISH-side fact (the hub has not seen these bytes). Blanking it with the
+verdict made a locally edited copy read clean-too after one check, so no client
+could show "Modified" / "local changes not published". It stays an `up-to-date`
+row and is NEVER an incoming update: `apply`/`apply-all` select on the VERDICT
+(`available`), `auto_will_apply` requires the `available`/`updating` state, and
+nothing reads this field to decide an action. It is retired when the sentence
+stops being true — an accepted push clears it, and every arm that writes hub
+content or finds an equal pair stores none.
 
 ### B4.3 Failure classes
 
@@ -1245,11 +1258,15 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 }
 ```
 
-Only items with `state != "up-to-date"` are listed, PLUS any item carrying the
-`no-credential` class — an org-linked row the local session has no login for never
-becomes `available`, and that class is the one fact the sidebar's sign-in sentence
-is drawn from (UX round 2, U11) — plus a `counts` roll-up (the sidebar polls this
-constantly; keep it small). Names are the profile/team
+Only items with `state != "up-to-date"` are listed, PLUS any up-to-date item that
+carries a fact the client cannot get anywhere else: the `no-credential` class (an
+org-linked row the local session has no login for never becomes `available`, and
+that class is the one fact the sidebar's sign-in sentence is drawn from — UX round
+2, U11), and `classification == "local-only"` (up to date to PULL, but the hub has
+not seen the person's edits; listed with its own state and classification so a
+client can say "Modified" / "local changes not published" after a check — never as
+`available`, and `auto_will_apply` stays false for it) — plus a `counts` roll-up
+(the sidebar polls this constantly; keep it small). Names are the profile/team
 **names** because they are the UI's attachment keys ("Names deliberately remain
 the runtime's attachment keys", `server/utils/desktop_profiles.py:1-6`).
 `auto_will_apply` = `auto_update.<kind> && state=="available" &&

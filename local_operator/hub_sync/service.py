@@ -231,7 +231,25 @@ def build_clients_sync(config_manager: Any) -> tuple[chk.ClientFor, str]:
 
 
 def _state_of(check: chk.ItemCheck) -> str | None:
-    if check.classification is None or check.verdict != "available":
+    """The classification to persist, or None when the verdict leaves no fact to keep.
+
+    ``local-only`` SURVIVES an ``up-to-date`` verdict, and that is the whole point
+    of this gate: the verdict answers the PULL (there is nothing to fetch), while
+    the classification is the PUBLISH-side fact (the hub has not seen these
+    bytes). Dropping it here meant one check was enough to make a locally edited
+    copy read clean-too, so no projection could say "Modified" / "local changes
+    not published" until the hub moved by itself. Nothing downstream may read
+    this as an incoming update: the row is stored ``up-to-date``, apply and
+    apply-all select on ``verdict == "available"``, and ``auto_will_apply``
+    requires the ``available``/``updating`` state.
+
+    Every other up-to-date result keeps nothing: an equal pair is the absence of a
+    fact, not a fact to report.
+    """
+
+    if check.classification is None:
+        return None
+    if check.verdict != "available" and check.classification.state != "local-only":
         return None
     return check.classification.state
 
@@ -1960,10 +1978,20 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
         if error_class and error_class != "no-credential" and state != "updating":
             state = "failed"
         counts[state] = counts.get(state, 0) + 1
-        # An up-to-date item is listed only when it carries the sign-in fact
-        # (``no-credential``): the user has no login for an item they have linked, and
-        # this list is the only place the UI can learn it (UX round 2, U11).
-        if state == "up-to-date" and item.get("error_class") != "no-credential":
+        # An up-to-date item is listed only when it carries a fact the client
+        # cannot learn anywhere else. Two such facts exist (UX round 2, U11):
+        # no sign-in (``no-credential`` -- this list is the only place the UI can
+        # learn that a linked item is unreachable without it), and unpublished
+        # local edits (``local-only`` -- up to date to PULL, but the hub has not
+        # seen the person's bytes, and this row is how the sidebar can say so
+        # after a check). The second rides the row's OWN state and classification:
+        # it is never counted or worded as an available update, and the apply
+        # eligibility above/below stays false for it because the state is not
+        # ``available``.
+        listed_up_to_date = (
+            item.get("error_class") == "no-credential" or item.get("classification") == "local-only"
+        )
+        if state == "up-to-date" and not listed_up_to_date:
             continue
         auto = settings.auto_for(kind)
         items.append(
@@ -2761,6 +2789,7 @@ def record_push_outcome(ctx: HubSyncContext, c: Any, outcome: Any) -> None:
             if item is not None:
                 item["last_pushed_at"] = st.now_iso()
                 st.clear_push_skipped(item)
+                st.clear_local_only(item)
 
         ctx.store().mutate(fold)
         return
@@ -5779,6 +5808,7 @@ def _reconcile_landed_commit(
         if item is not None:
             item["last_pushed_at"] = st.now_iso()
             st.clear_push_skipped(item)
+            st.clear_local_only(item)
 
     ctx.store().mutate(fold)
     if not is_this_proposal:
@@ -5808,7 +5838,12 @@ def _push_answer(identity: LinkIdentity, check: chk.ItemCheck, outcome: Any) -> 
             "applied": outcome.state == "pushed",
             "backup": None,
             "error_class": outcome.reason or None,
-            "classification": None,
+            # The check's own classification, never a blank: a push is computed
+            # AGAINST that check, and ``local-only`` is the fact that makes the
+            # push meaningful in the first place (the hub has not seen these
+            # bytes). Hardcoding None here is why core never reported local-only
+            # on the publish side.
+            "classification": check.classification.state if check.classification else None,
             "skipped_reason": outcome.reason if outcome.state == "skipped" else None,
             "fields": [],
             "link_id": identity.link_id,

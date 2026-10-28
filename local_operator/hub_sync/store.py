@@ -331,9 +331,21 @@ def apply_check(
         # next one settles to ``up-to-date``. Without the stamp it was sticky.
         keep_applied = item.get("state") == "applied" and not item.get("applied_seen")
         item["applied_seen"] = keep_applied
+        # ONE VERDICT, TWO INDEPENDENT FACTS. ``local-only`` (L != R, R == B) folds
+        # onto the ``up-to-date`` verdict because there is nothing to FETCH -- the
+        # pull side owns nothing here. The classification is the PUBLISH side's
+        # fact: the hub has not seen these bytes. Blanking it with the verdict
+        # made a locally edited copy read clean-too after one check, so no client
+        # could show "Modified" / "local changes not published" until the hub
+        # happened to move on its own. It is kept while the row stays
+        # ``up-to-date``, which is exactly what keeps it out of apply/auto-push:
+        # those select on the verdict (``available``) and on ``auto_will_apply``,
+        # never on this field. An equal pair keeps nothing: equality is the absence
+        # of a fact, and every arm that publishes or writes hub content clears it.
+        local_only = classification == "local-only"
         item.update(
             state="applied" if keep_applied else "up-to-date",
-            classification=None,
+            classification="local-only" if local_only else None,
             error_class=None,
             last_error=None,
             attempts=0,
@@ -381,9 +393,16 @@ def settle_applied(
 def settle_unchanged(item: dict[str, Any]) -> None:
     """The merge produced exactly the local text: nothing to write, nothing pending."""
 
+    # A NO-WRITE INBOUND PASS SAYS NOTHING ABOUT THE PUBLISH SIDE. "Keep my side"
+    # (an explicit ``replace=local``), a bundle whose remote already equalled the
+    # local tree, and a both-changed merge resolved to local all land here, and
+    # none of them published anything: a row whose bytes the hub has not seen
+    # keeps its ``local-only`` mark so the copy still reads Modified. Every other
+    # classification IS settled by the pass and is cleared below.
+    if item.get("classification") != "local-only":
+        item["classification"] = None
     item.update(
         state="up-to-date",
-        classification=None,
         error_class=None,
         error_subclass=None,
         last_error=None,
@@ -423,6 +442,20 @@ def clear_push_skipped(item: dict[str, Any]) -> None:
 
     item.pop("push_blocked_reason", None)
     item.pop("push_blocked_at", None)
+
+
+def clear_local_only(item: dict[str, Any]) -> None:
+    """An ACCEPTED publication retires the unpublished-changes mark.
+
+    ``local-only`` says "the hub has not seen these bytes". The moment a push the
+    hub ACCEPTED lands, that sentence is false, and the row would otherwise keep
+    claiming unpublished changes until the next check happened to reclassify it --
+    a wrong fact, not a stale one. Only this classification is retired; anything
+    else stays for the next check to overwrite.
+    """
+
+    if item.get("classification") == "local-only":
+        item["classification"] = None
 
 
 def record_failure(
