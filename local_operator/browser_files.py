@@ -941,11 +941,14 @@ def own_scratchpad_root(session_id: str) -> Path | None:
     * the id must be a single safe path component (:data:`_SESSION_ID_RE`) — ``../x``,
       ``a/b``, ``""`` and anything with a NUL or whitespace give no allow, so a malformed id
       can never be steered at ``<config>`` itself, ``<config>/sessions`` or a neighbour;
-    * the result is the path AFTER resolving the config root, and it is returned only when
-      resolving the scratchpad itself lands on the very same location. A ``scratchpad`` (or
-      ``sessions/<id>``) that is a symlink pointing at another session's pad, at
-      ``config.yml``'s directory, or anywhere else would otherwise turn "the allowed root"
-      into "wherever the link points", so a link anywhere along the way means no allow;
+    * the root is built from the RESOLVED config root and returned UNRESOLVED, and the caller
+      compares a fully RESOLVED candidate against it. That asymmetry is the symlink guard: a
+      ``scratchpad`` (or ``sessions/<id>``) that is a link to another session's pad, to the
+      config root or anywhere else resolves to its target, and a resolved target is never
+      inside the unresolved link path, so such a pad admits nothing (re-resolving the root
+      here and comparing would be redundant: it could never fire). The allow is also
+      CASE-EXACT: ``Sessions/<ID>/SCRATCHPAD`` is a different spelling from the one built
+      here, so it is refused (fail closed) even on a case-folding volume;
     * both sides are compared resolved (the caller resolves the candidate, this resolves the
       root), and by path COMPONENTS via :func:`is_within` — never a string prefix, so session
       ``abc`` does not admit ``abcdef`` or ``abc-evil``.
@@ -965,18 +968,7 @@ def own_scratchpad_root(session_id: str) -> Path | None:
         config_root = config_dir().resolve()
     except (OSError, RuntimeError):
         return None
-    expected = config_root / SESSIONS_DIRNAME / session_id / SCRATCHPAD_DIRNAME
-    try:
-        # Non-strict: the pad may not exist yet, in which case no candidate can be inside it
-        # and the comparison below is simply a no-op.
-        actual = expected.resolve()
-    except (OSError, RuntimeError):
-        return None
-    if actual != expected:
-        # A symlink somewhere in sessions/<id>/scratchpad: the allowed root would be wherever
-        # it points. No allow.
-        return None
-    return expected
+    return config_root / SESSIONS_DIRNAME / session_id / SCRATCHPAD_DIRNAME
 
 
 def _echo_path(path: str) -> str:
@@ -1015,13 +1007,25 @@ def _unopenable_reason(raw_path: Path, exc: BaseException) -> str:
         where = (
             f" (nearest existing folder: {_echo_path(str(parent))})" if parent is not None else ""
         )
+        message = f"refused: does not exist: {shown}{where}"
         # The hint is about the one cause the tool cannot see for itself: calls issued in the
         # same turn run at the same time, so a file that a sibling call is still creating
-        # (a `cp`, a screenshot) is genuinely absent when this gate looks.
-        return (
-            f"refused: does not exist: {shown}{where}. If a call in the same turn is still "
-            "creating it, issue this call in the next turn: calls in one turn run at the same time"
-        )
+        # (a `cp`, a screenshot — the screenshot file is written only AFTER the awaited host
+        # capture returns, while a sibling call in the batch is already running) is genuinely
+        # absent when this gate looks. It is shown only when the file's own folder exists: a
+        # missing folder is far more often a typo in a directory component than a folder a
+        # sibling call is about to create, and the hint there would send the model waiting
+        # for a file that is never coming.
+        try:
+            parent_exists = raw_path.parent.is_dir()
+        except OSError:
+            parent_exists = False
+        if parent_exists:
+            message += (
+                ". If a call in the same turn is still creating it, issue this call in the "
+                "next turn: calls in one turn run at the same time"
+            )
+        return message
     if isinstance(exc, RuntimeError):
         # Python < 3.13 reports a symlink loop as RuntimeError rather than OSError(ELOOP).
         detail = "too many levels of symbolic links"
@@ -1049,6 +1053,13 @@ def check_upload(
     default means no allow, so every caller that does not name a session keeps the strict
     behaviour. Nothing else is relaxed: the credential name/component deny-list, the
     regular-file, size and empty checks all still run on the resolved path.
+
+    What this is, and is not: a guard against the MODEL's mistakes and against injected
+    paths, not a boundary against an agent that has a shell. The path is judged now and the
+    host attaches it by name a moment later, so a file swapped for a symlink in between
+    would be followed; and an agent that can run ``ln``/``cp`` can put a copy or hardlink of
+    ``config.yml`` anywhere in the workspace, where it is an ordinary file. Both hold on
+    ``main`` for any workspace path and are not widened by the scratchpad allow.
     """
     if not (raw or "").strip():
         return None, "refused: no path given"
@@ -1062,7 +1073,7 @@ def check_upload(
     except (OSError, RuntimeError) as exc:
         return None, _unopenable_reason(raw_path, exc)
     config_root = config_dir().resolve()
-    if is_within(resolved, config_root):
+    if is_inside_config(resolved, config_root):
         own_pad = own_scratchpad_root(session_id) if session_id else None
         if own_pad is None or not is_within(resolved, own_pad):
             # Unconditional and first: this is where the encrypted secret store and
@@ -1107,6 +1118,39 @@ def is_within(path: Path, root: Path) -> bool:
     paths, it does not resolve them.
     """
     return path == root or root in path.parents
+
+
+def is_inside_config(path: Path, root: Path) -> bool:
+    """Whether ``path`` is ``root`` or under it, by spelling OR by filesystem identity.
+
+    :func:`is_within` compares spellings, and ``Path.resolve`` does not canonicalise case or
+    Unicode form: on a case-insensitive volume (macOS APFS default, Windows NTFS)
+    ``<home>/.LOCAL-OPERATOR/config.yml`` is the very same file as
+    ``<home>/.local-operator/config.yml`` yet shares no path components with it, so a
+    spelling-only config-root refusal let ``config.yml``, ``auth.db`` and another session's
+    pad attach. Each ancestor of ``path`` is therefore also compared to ``root`` by
+    ``(st_dev, st_ino)``, which follows the filesystem's own notion of "same directory"
+    (case variants, normalisation variants, any alias). Both the spelling test and the
+    identity test must say "outside" for this to be False, and an unreadable ancestor or a
+    ``root`` that does not exist yet simply drops back to the spelling test.
+
+    Use this for REFUSALS (credential protection). Do not use it for an ALLOW — the
+    scratchpad allow stays a case-exact :func:`is_within`, so a spelling the filesystem
+    happens to fold is never promoted to "the agent's own folder".
+    """
+    if is_within(path, root):
+        return True
+    try:
+        root_stat = os.stat(root)
+    except OSError:
+        return False
+    for candidate in (path, *path.parents):
+        try:
+            if os.path.samestat(os.stat(candidate), root_stat):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 #: What happened to a refused ENTRY, as a value rather than a sentence.
@@ -1330,7 +1374,7 @@ def intake_landed(
             # snapshot will pick it up.
             moved.append(source.name)
             continue
-        if any(is_within(source, candidate) for candidate in roots):
+        if any(is_inside_config(source, candidate) for candidate in roots):
             refused.append(
                 IntakeRefusal(
                     name,
@@ -1348,7 +1392,7 @@ def intake_landed(
         # is refused and LEFT ALONE (it is our own store, so deleting it would be the
         # destructive half of the same mistake).
         resolved = Path(os.path.realpath(source))
-        if any(is_within(resolved, candidate) for candidate in roots):
+        if any(is_inside_config(resolved, candidate) for candidate in roots):
             refused.append(
                 IntakeRefusal(
                     name,

@@ -672,6 +672,35 @@ def test_intake_refuses_a_path_inside_our_own_config_root(tmp_path: Path) -> Non
     assert "config directory" in outcome.refused[0].reason
 
 
+def test_intake_refuses_an_alias_spelling_of_our_own_config_root(tmp_path: Path) -> None:
+    """A case-variant (or symlinked) spelling of the config dir is still the config dir.
+
+    Intake MOVES then deletes the host-named source, so a spelling-only refusal would let a
+    host relocate `config.yml` out of the config directory. On a case-folding volume the
+    alias is the upper-case spelling; elsewhere it is a symlink to the same directory.
+    """
+    directory = _quarantine(tmp_path)
+    cfg = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
+    cfg.mkdir(parents=True, exist_ok=True)
+    ours = cfg / "config.yml"
+    ours.write_text("models: {}\n")
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if (tmp_path / "caseprobe").exists():
+        alias = cfg.parent / cfg.name.upper()
+    else:
+        alias = tmp_path / "config-alias"
+        alias.symlink_to(cfg)
+
+    outcome = _intake(
+        [{"name": "config.yml", "path": str(alias / "config.yml"), "state": "complete"}], directory
+    )
+
+    assert outcome.moved == ()
+    assert ours.read_text() == "models: {}\n"
+    assert "config directory" in outcome.refused[0].reason
+
+
 def test_intake_refuses_a_name_the_session_already_holds(tmp_path: Path) -> None:
     """No silent overwrite (§11.4): both files survive and the caller is told."""
     directory = _quarantine(tmp_path)
@@ -1041,6 +1070,153 @@ def test_check_upload_refuses_a_sibling_whose_name_shares_the_id_prefix(
     resolved, reason = bf.check_upload(str(theirs), cwd="/", session_id=own)
     assert resolved is None
     assert "config directory" in reason
+
+
+def test_check_upload_refuses_siblings_inside_the_same_session_dir(
+    isolated_config: Path,
+) -> None:
+    """Neighbours that a STRING-prefix test on the pad would admit must stay refused.
+
+    The pad's own path is ``.../sessions/<id>/scratchpad``, so only a sibling INSIDE the
+    session directory (``scratchpad-evil``, ``scratchpad.bak``) or an id-prefix sibling
+    (``<id>x/scratchpad``) shares its string prefix. Mutation-checked: replacing
+    ``is_within`` by ``str.startswith`` in the allow makes the first two fail.
+    """
+    _png(_pad(isolated_config) / "own.png")
+    for evil in (
+        isolated_config / "sessions" / SESSION / "scratchpad-evil" / "x.png",
+        isolated_config / "sessions" / SESSION / "scratchpad.bak" / "x.png",
+        isolated_config / "sessions" / (SESSION + "x") / "scratchpad" / "x.png",
+    ):
+        _png(evil)
+        resolved, reason = bf.check_upload(str(evil), cwd="/", session_id=SESSION)
+        assert resolved is None, evil
+        assert "config directory" in reason
+
+
+def test_check_upload_refuses_the_config_dir_reached_through_a_symlink(
+    tmp_path: Path, isolated_config: Path
+) -> None:
+    """The root is compared RESOLVED: an alias of the config dir is still the config dir.
+
+    Mutation-checked: dropping ``.resolve()`` on the config root lets this through when the
+    configured root is itself a symlink.
+    """
+    real = tmp_path / "real-config"
+    (real / "sessions").mkdir(parents=True)
+    (real / "config.yml").write_text("api_key: nope\n")
+    isolated_config.symlink_to(real)  # the configured root is an alias of the real directory
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+    for candidate in (real / "config.yml", alias / "config.yml", isolated_config / "config.yml"):
+        resolved, reason = bf.check_upload(str(candidate), cwd="/", session_id=SESSION)
+        assert resolved is None, candidate
+        assert "config directory" in reason
+
+
+def test_check_upload_allows_the_own_pad_when_the_configured_root_is_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The allow root is derived from the RESOLVED config root, like the candidate.
+
+    Mutation-checked: building it from the unresolved root leaves a resolved candidate that
+    is never "inside" it, so the session's own pad would be refused again.
+    """
+    real = tmp_path / "real-config"
+    icon = _png(real / "sessions" / SESSION / "scratchpad" / "icon.png")
+    link = tmp_path / "link-config"
+    link.symlink_to(real)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(link))
+    resolved, reason = bf.check_upload(
+        str(link / "sessions" / SESSION / "scratchpad" / "icon.png"), cwd="/", session_id=SESSION
+    )
+    assert reason == ""
+    assert resolved == icon.resolve()
+
+
+def _folds_case(directory: Path) -> bool:
+    """Whether this volume treats ``Name`` and ``NAME`` as one entry (APFS/NTFS default)."""
+    probe = directory / "CaseProbe"
+    probe.mkdir()
+    return (directory / "caseprobe").exists()
+
+
+def test_check_upload_refuses_a_case_variant_spelling_of_the_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``<home>/.LOCAL-OPERATOR/config.yml`` IS ``.local-operator/config.yml`` on APFS.
+
+    The refusal used to compare spellings, so the upper-case spelling attached
+    ``config.yml`` and ``auth.db``. On a case-sensitive volume there is no such alias, so the
+    test builds the same situation with a symlinked spelling instead of skipping, which
+    exercises the same identity rule.
+    """
+    home = tmp_path / "ci-home"
+    home.mkdir()
+    cfg = home / ".local-operator"
+    (cfg / "sessions" / SESSION / "scratchpad").mkdir(parents=True)
+    (cfg / "config.yml").write_text("api_key: nope\n")
+    (cfg / "auth.db").write_bytes(b"SQLite format 3\x00" + b"0" * 64)
+    _png(cfg / "sessions" / "other-session" / "scratchpad" / "theirs.png")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    if _folds_case(tmp_path):
+        variant = home / ".LOCAL-OPERATOR"
+    else:
+        variant = home / "alias-config"
+        variant.symlink_to(cfg)
+    assert variant.exists()
+    for name in (
+        "config.yml",
+        "auth.db",
+        "sessions/other-session/scratchpad/theirs.png",
+    ):
+        resolved, reason = bf.check_upload(str(variant / name), cwd="/", session_id=SESSION)
+        assert resolved is None, name
+        assert "config directory" in reason
+
+
+def test_check_upload_own_scratchpad_allow_is_case_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spelling the filesystem merely folds is not promoted to "the agent's own folder".
+
+    The exact spelling attaches; the same file reached via ``SCRATCHPAD`` is refused (fail
+    closed). Only meaningful where the volume folds case, otherwise that spelling is a
+    different, non-existent path and the gate's "does not exist" answers instead.
+    """
+    cfg = tmp_path / "home" / ".local-operator"
+    icon = _png(cfg / "sessions" / SESSION / "scratchpad" / "icon.png")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    assert bf.check_upload(str(icon), cwd="/", session_id=SESSION)[1] == ""
+    if not _folds_case(tmp_path):
+        pytest.skip("case-sensitive volume: no folded spelling of the pad exists")
+    folded = cfg / "sessions" / SESSION / "SCRATCHPAD" / "icon.png"
+    resolved, reason = bf.check_upload(str(folded), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_is_inside_config_matches_by_identity_and_by_spelling(tmp_path: Path) -> None:
+    root = tmp_path / "cfg"
+    (root / "a").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(root)
+    assert bf.is_inside_config(root / "a", root)
+    assert bf.is_inside_config(root, root)
+    assert bf.is_inside_config(alias / "a", root)  # same directory, different spelling
+    assert not bf.is_inside_config(tmp_path / "elsewhere", root)
+    # A root that does not exist yet falls back to the spelling rule instead of raising.
+    assert bf.is_inside_config(tmp_path / "gone" / "x", tmp_path / "gone")
+    assert not bf.is_inside_config(tmp_path / "x", tmp_path / "gone")
+
+
+def test_check_upload_does_not_exist_hint_only_when_the_folder_exists(tmp_path: Path) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    _, same_turn = bf.check_upload(str(folder / "late.png"), cwd="/")
+    assert "does not exist" in same_turn and "same turn" in same_turn
+    _, typo = bf.check_upload(str(tmp_path / "wrok" / "late.png"), cwd="/")
+    assert "does not exist" in typo and "same turn" not in typo
 
 
 def test_check_upload_refuses_another_sessions_scratchpad(isolated_config: Path) -> None:

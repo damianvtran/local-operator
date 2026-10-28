@@ -514,8 +514,9 @@ upload selector=e7 paths=["/Users/me/Deck.pptx", "/Users/me/notes.pdf"]
 
 - `paths` takes one or more **local** files. Relative paths resolve against the
   session's working directory; a file inside the harness's own config directory
-  (EXCEPT this session's own `scratchpad://` folder, which is where you put files
-  you made — it attaches fine, and a hidden `display:none` file input works too),
+  (EXCEPT this session's own scratchpad folder, which is where you put files you
+  made — pass its **absolute filesystem path**, never a `scratchpad://` URL, which
+  `upload` does not resolve and refuses; a hidden `display:none` file input works too),
   a credential file (`~/.ssh/id_rsa`, `*.pem`, `.env`, `secrets/…`), a symlink to
   one, a directory, or anything over 256 MB is refused, and a refusal attaches
   **nothing at all**. Say which rule fired to the user rather than retrying.

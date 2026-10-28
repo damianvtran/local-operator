@@ -1151,6 +1151,8 @@ def test_upload_of_a_file_a_sibling_call_is_still_creating_says_so(tmp_path: Pat
     identical call succeeds.
     """
     late = tmp_path / "workspace" / "icons" / "slack-icon-1024.png"
+    # The folder exists (a `cp` into an existing folder); a missing folder gets no hint.
+    late.parent.mkdir(parents=True)
     host = FakeHost(methods=("upload",))
     kwargs: dict[str, Any] = {
         "tool_call_id": "t1",
@@ -1164,11 +1166,55 @@ def test_upload_of_a_file_a_sibling_call_is_still_creating_says_so(tmp_path: Pat
     assert "same turn" in result.text
     assert host.calls == []
 
-    late.parent.mkdir(parents=True)
     late.write_bytes(b"\x89PNG\r\n\x1a\n" + b"3" * 64)
     host.result = _upload_ok([late.resolve()])
     again = _flow("upload", host, **kwargs)
     assert not again.is_error, again.text
+
+
+@pytest.mark.parametrize(
+    "raw", ["scratchpad://icon.png", "SCRATCHPAD://sub/icon.png", "file:///tmp/icon.png", "x://y"]
+)
+def test_upload_refuses_a_url_scheme_instead_of_reading_it_as_a_relative_path(
+    tmp_path: Path, raw: str
+) -> None:
+    """`upload` resolves no scheme: `scratchpad://x` used to become `<cwd>/scratchpad:/x`.
+
+    That read as "does not exist" plus a same-turn-race hint for a race that was not there.
+    The refusal names the absolute path to use, prints the pad root when the context has one,
+    and never reaches the gate or the host.
+    """
+    pad = tmp_path / "pad"
+    pad.mkdir()
+    ctx = _ctx()
+    ctx.scratchpad_dir = str(pad)
+    host = FakeHost(methods=("upload",))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=ctx.browser,
+        params=_params(action="upload", selector="#f", paths=[raw]),
+        context=ctx,
+    )
+    assert result.is_error
+    assert "ABSOLUTE" in result.text and "nothing was touched" in result.text
+    assert str(pad) in result.text
+    assert "same turn" not in result.text and "does not exist" not in result.text
+    assert host.calls == []
+
+
+def test_upload_refusal_does_not_double_the_refused_prefix(tmp_path: Path) -> None:
+    host = FakeHost(methods=("upload",))
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(tmp_path / "nope.png")]),
+        context=_ctx(),
+    )
+    assert result.text.count("refused:") == 1, result.text
 
 
 def test_upload_refuses_the_whole_call_when_one_path_is_refused(tmp_path: Path) -> None:
