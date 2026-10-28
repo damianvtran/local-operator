@@ -95,8 +95,13 @@ def test_whole_filtered_result_exclusions_and_undo_beyond_pages(client, tmp_path
     assert result["excluded_count"] == 1
     assert result["unread_delta"] == -624
     assert result["session_counts"][SID] == {"changed_count": 624, "unread_delta": -624}
-    assert not store.get(ids[0])["dismissed"]
-    assert all(not store.get(item)["dismissed"] for item in unrelated)
+    # Missing fixture rows must fail these assertions rather than weaken them.
+    excluded = store.get(ids[0])
+    assert excluded is not None and not excluded["dismissed"]
+    assert all(
+        (item_row := store.get(item)) is not None and not item_row["dismissed"]
+        for item in unrelated
+    )
     assert store.counts()[0] == 4
     undo = patch(client, op="undo", operation_token=result["operation_token"])
     assert undo["changed_count"] == 624
@@ -142,8 +147,10 @@ def test_new_content_and_state_revisions_are_not_swept_in(client, tmp_path):
     result = patch(client, op="dismiss", selection_token=selection["token"])
     assert result["changed_count"] == 1 and result["skipped_count"] == 2
     for item in (keyed.item_id, ids[0], fresh):
-        assert not store.get(item)["dismissed"]
-    assert store.get(ids[1])["dismissed"]
+        row = store.get(item)
+        assert row is not None and not row["dismissed"]
+    dismissed = store.get(ids[1])
+    assert dismissed is not None and dismissed["dismissed"]
 
 
 def test_replay_binds_op_and_exclusions_even_after_undo(client, tmp_path):
@@ -161,7 +168,8 @@ def test_replay_binds_op_and_exclusions_even_after_undo(client, tmp_path):
     again = patch(client, op="undo", operation_token=first["operation_token"])
     assert again == {**undo, "replayed": True}
     patch(client, **body)
-    assert not NotificationStore(tmp_path).get(ids[2])["dismissed"]
+    excluded = NotificationStore(tmp_path).get(ids[2])
+    assert excluded is not None and not excluded["dismissed"]
 
 
 def test_undo_restores_read_state_but_never_intervening_writes(client, tmp_path):
@@ -176,9 +184,11 @@ def test_undo_restores_read_state_but_never_intervening_writes(client, tmp_path)
     store.apply("dismiss", ids=[(ids[2], 1)])
     undo = patch(client, op="undo", operation_token=result["operation_token"])
     assert undo["changed_count"] == 2 and undo["skipped_count"] == 2
-    assert store.get(ids[0])["read"] and not store.get(ids[0])["dismissed"]
-    assert not store.get(ids[3])["read"] and not store.get(ids[3])["dismissed"]
-    assert store.get(ids[1])["dismissed"] and store.get(ids[2])["dismissed"]
+    restored, intervening, skipped, written = (store.get(item) for item in ids)
+    assert restored is not None and restored["read"] and not restored["dismissed"]
+    assert intervening is not None and intervening["dismissed"]
+    assert skipped is not None and skipped["dismissed"]
+    assert written is not None and not written["read"] and not written["dismissed"]
 
 
 @pytest.mark.parametrize("op", ["read", "unread", "dismiss", "undismiss"])
@@ -203,6 +213,7 @@ def test_operations_and_partial_receipts_exclude_asks(client, tmp_path, op):
     assert result["changed_count"] == 1 and result["skipped_ask_count"] == 1
     patch(client, op="undo", operation_token=result["operation_token"])
     after = store.get(ids[0])
+    assert before is not None and after is not None
     assert all(before[key] == after[key] for key in bulk._STATE)
     assert ask_path.read_bytes() == before_ask
 
@@ -320,7 +331,8 @@ def test_partial_receipt_checks_watermark_and_revision(client, tmp_path):
         receipt=True,
     )
     assert result["changed_count"] == 0 and result["skipped_count"] == 2
-    assert not store.get(ids[0])["dismissed"]
+    unchanged = store.get(ids[0])
+    assert unchanged is not None and not unchanged["dismissed"]
 
 
 def test_auth_and_legacy_contract_unchanged(client, tmp_path):
@@ -356,7 +368,8 @@ def test_v1_store_upgrades_without_losing_rows(client, tmp_path):
     ids = seed(tmp_path)
     selection = preview(client)
     assert selection["eligible_count"] == 1
-    assert store.get(ids[0])["revision"] == 1
+    upgraded = store.get(ids[0])
+    assert upgraded is not None and upgraded["revision"] == 1
     with sqlite3.connect(store.path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         assert conn.execute("SELECT count(*) FROM bulk_tokens").fetchone()[0] == 1
@@ -375,7 +388,9 @@ def test_failed_receipt_write_rolls_back_all_state(client, tmp_path):
     response = client.patch(URL, json={"op": "dismiss", "selection_token": selection["token"]})
     assert response.status_code == 500
     assert response.json()["detail"]["code"] == "store_unavailable"
-    assert all(not store.get(item)["dismissed"] for item in ids)
+    assert all(
+        (item_row := store.get(item)) is not None and not item_row["dismissed"] for item in ids
+    )
     with sqlite3.connect(store.path) as conn:
         assert conn.execute("SELECT op FROM bulk_tokens").fetchone()[0] is None
         assert conn.execute("SELECT count(*) FROM bulk_rows").fetchone()[0] == 0
