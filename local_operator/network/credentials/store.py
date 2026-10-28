@@ -122,6 +122,13 @@ class _LentRow:
     org_id: str | None = None
 
 
+#: The stand-in ``org_id`` a restarted borrower gives the row behind a
+#: ``codex:responses`` receipt that this process did not borrow (``_anchor``).
+#: Resolvers test only its presence (``OpenAICompatClient._codex_responses_mode``);
+#: it is never sent, and the owner's real org id is never persisted here.
+_RECEIPT_ORG = "receipt:codex"
+
+
 def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | None = None) -> Any:
     """The session's local-first resolver, hot-capable when placement arrives.
 
@@ -191,9 +198,11 @@ class MeshAwareAuthStore:
         #: other construction site — reads as "no row", the pre-slice behaviour.
         self._binding_reader: Callable[[str], Any] | None = None
         #: The OWNER row last lent per ``(key, session_id)``: ``_LentRow``. The
-        #: borrowed access carries only a synthetic id, so this is how a success
-        #: receipt and a failure are attributed to the owner's real row. Memory
-        #: only, like the grants it describes.
+        #: borrowed access carries only a synthetic id, so this names the
+        #: owner's real row for the session's latest borrow. Memory only, like
+        #: the grants it describes — so nothing that must survive a restart (the
+        #: anchor) may depend on it, and a request's own outcome is attributed
+        #: through ``_lent_access`` below, never through this latest pointer.
         self._lent: dict[tuple[str, str], _LentRow] = {}
         # Completion can race another resolve in the SAME conversation. Bind the
         # owner's immutable identity to the actual access object, not the latest
@@ -709,12 +718,30 @@ class MeshAwareAuthStore:
         )
         if receipt is None:
             return None
+        # The endpoint rule needs the row's credential metadata, and the only
+        # field a resolver reads from an OAuth lend is ``org_id`` (Codex mode is
+        # credential-derived). ``_lent`` holds it for THIS process's borrows
+        # only, so after a restart it is rebuilt from what was persisted: the
+        # receipt names the immutable owner row (id + ``created_at``), and
+        # ``org_id`` is that row's identity key, never rewritten by a refresh —
+        # an org change re-creates the row — so a ``codex:responses`` receipt
+        # can only have been recorded on an org-carrying row. The CURRENT
+        # client still judges the endpoint, and the owner still refuses a
+        # re-created, excluded, blocked or depleted row on its side.
         lent = self._lent.get((key, session_id))
+        if (
+            lent is not None
+            and lent.credential_id == receipt.account_id
+            and lent.account_created_at == receipt.account_created_at
+        ):
+            org_id = lent.org_id
+        else:
+            org_id = _RECEIPT_ORG if receipt.endpoint_mode == "codex:responses" else None
         identity = OAuthAccess(
             access_token="",
             credential_id=receipt.account_id,
             kind="oauth",
-            org_id=lent.org_id if lent and lent.credential_id == receipt.account_id else None,
+            org_id=org_id,
         )
         if not receipt_endpoint_matches(receipt, identity, current_selection_endpoint()):
             return None
@@ -749,8 +776,22 @@ class MeshAwareAuthStore:
         lent = self._lent.get(pair)
         if api_key and (lent is None or lent.access_token != api_key):
             # The FAILING bearer names the row; the session's record may already
-            # describe a newer borrow. No match means nothing to attribute.
+            # describe a newer borrow (a late 529 for A after this session
+            # resolved B). The failed request's access is still held by the
+            # failover driver, so ``_lent_access`` maps that bearer to the row it
+            # was actually lent from — no latest-session pointer involved, so
+            # overlapping requests cannot attribute each other's failure. Its
+            # synthetic id pins the match to this key's owner. No match means
+            # nothing to attribute.
             lent = next(
+                (
+                    row
+                    for access, row in list(self._lent_access.items())
+                    if row.access_token == api_key
+                    and access.credential_id == synthetic_credential_id(pair[0], row.owner_device)
+                ),
+                None,
+            ) or next(
                 (
                     row
                     for (key, _sid), row in self._lent.items()

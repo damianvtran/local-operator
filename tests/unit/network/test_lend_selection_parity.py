@@ -487,3 +487,122 @@ def test_lend_context_is_scoped_and_does_not_mutate_owner(borrowed: Any) -> None
     assert not current_lend_demotions()
     assert not rig.owner.auth._active_demotions(STUB_PROVIDER)
     _owner_untouched(rig)
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation: affinity survives a restart; a late 529 keeps its row
+# ---------------------------------------------------------------------------
+
+
+def _codex_rig(rig: Any) -> Any:
+    """Re-create A as a Codex (org-carrying) row; returns the new owner row."""
+    return rig.owner.auth.upsert_credential(
+        STUB_PROVIDER, dict(rig.row_a.data, org_id="org-synthetic")
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_codex_receipt_anchors_after_a_restart(borrowed: Any) -> None:
+    """R1: the receipt is on disk; the anchor must not depend on process memory.
+
+    ``_lent`` (which carried ``org_id``) is gone after a restart, and without it
+    the real client classified the row as public OpenAI and refused the valid
+    ``codex:responses`` receipt, so the session walked accounts across restarts.
+    """
+    from local_operator.network.credentials.store import MeshAwareAuthStore
+    from local_operator.providers.account_affinity import (
+        CacheAffinityHint,
+        endpoint_mode_resolver,
+        request_compatibility,
+        selection_context,
+    )
+
+    rig = borrowed
+    codex = _codex_rig(rig)
+    _usage(rig.owner.root, {EMAIL_A: HOUR_MS, EMAIL_B: 4 * HOUR_MS})
+    access = await rig.store.get_oauth_access(STUB_PROVIDER, "cx", model_id=MODEL)
+    req = _request("cx")
+    endpoint = endpoint_mode_resolver(
+        OpenAICompatClient("https://api.openai.com/v1", openai_api="chat_completions"), req
+    )
+    assert endpoint(access) == "codex:responses"
+    hint = CacheAffinityHint(
+        "codex:responses", request_compatibility(req), 300_000, "bounded-heuristic"
+    )
+    rig.store.record_account_success(
+        STUB_PROVIDER, "cx", access, req, hint, int(time.time() * 1000), time.monotonic()
+    )
+    with selection_context(req, endpoint_mode=endpoint):
+        warm = rig.store._anchor(STUB_PROVIDER, "cx", MODEL)
+    assert warm == (codex.id, codex.created_at)
+
+    # A fresh process: same on-disk receipts, empty ``_lent``.
+    fresh_local = AuthStore(db_path=rig.root / "auth.db", config_dir=rig.root)
+    try:
+        fresh = MeshAwareAuthStore(fresh_local, mesh=rig.client, config_dir=rig.root)
+        assert not fresh._lent
+        with selection_context(req, endpoint_mode=endpoint):
+            assert fresh._anchor(STUB_PROVIDER, "cx", MODEL) == warm
+        # The current client still judges the endpoint: a wire that is not
+        # Codex (here, Anthropic Messages) does not reuse a Codex lease.
+        with selection_context(req, endpoint_mode=lambda _access: "anthropic:messages"):
+            assert fresh._anchor(STUB_PROVIDER, "cx", MODEL) is None
+
+        # End to end: the evidence moved to B, yet the restarted session's ask
+        # carries the anchor and the owner keeps it on its warm row.
+        _usage(rig.owner.root, {EMAIL_A: 4 * HOUR_MS, EMAIL_B: HOUR_MS})
+        with selection_context(req, endpoint_mode=endpoint):
+            again = await fresh.get_oauth_access(STUB_PROVIDER, "cx", model_id=MODEL)
+        assert rig.relay.grant_frames[-1]["affinity"] == {
+            "account_id": codex.id,
+            "account_created_at": codex.created_at,
+        }
+        assert again.access_token == access.access_token
+        # A and the Codex row share bearer-a; the audit row names which one.
+        assert _grants(rig)[-1]["credential_id"] == codex.id
+        assert _grants(rig)[-1]["anchored"] is True
+    finally:
+        fresh_local.close()
+    # The owner still refuses that anchor once the row is blocked: the rebuilt
+    # identity widens nothing on the owner's side.
+    rig.owner.auth.block_credential(codex.id, STUB_PROVIDER, block_ms=60_000)
+    detail = _lend(rig, "cx", affinity=warm)
+    assert detail["credential_ref"]["credential_id"] != codex.id
+    assert _grants(rig)[-1]["anchored"] is False
+    _owner_untouched(rig)
+
+
+@pytest.mark.asyncio
+async def test_a_late_529_demotes_the_row_that_request_was_lent(borrowed: Any) -> None:
+    """R2: the same session resolved B while its A request was still in flight.
+
+    The 529 belongs to A (the bearer that failed), not to the session's latest
+    borrow; it must demote A so the next ask is not lent A again, and B's own
+    standing must be unaffected.
+    """
+    from local_operator.providers.failover import ProviderError
+
+    rig = borrowed
+    _usage(rig.owner.root, {EMAIL_A: HOUR_MS, EMAIL_B: 4 * HOUR_MS})
+    first = await rig.store.get_oauth_access(STUB_PROVIDER, "late", model_id=MODEL)
+    _usage(rig.owner.root, {EMAIL_A: 4 * HOUR_MS, EMAIL_B: HOUR_MS})
+    second = await rig.store.get_oauth_access(STUB_PROVIDER, "late", model_id=MODEL)
+    assert (first.access_token, second.access_token) == ("bearer-a", "bearer-b")
+
+    rig.store.rotate_sibling(
+        STUB_PROVIDER,
+        "late",
+        ProviderError(529, "synthetic overload", retryable=True),
+        first.access_token,
+        model_id=MODEL,
+    )
+    assert rig.store._demoted(STUB_PROVIDER) == [rig.row_a.id]
+
+    # Evidence back on A: another session's first ask carries the demotion and
+    # is lent B, exactly as a local 529 deprioritizes A for the next pick.
+    _usage(rig.owner.root, {EMAIL_A: HOUR_MS, EMAIL_B: 4 * HOUR_MS})
+    other = await rig.store.get_oauth_access(STUB_PROVIDER, "next", model_id=MODEL)
+    assert rig.relay.grant_frames[-1]["demote_credential_ids"] == [rig.row_a.id]
+    assert other.access_token == "bearer-b"
+    assert not rig.owner.auth.is_blocked(rig.row_a.id, STUB_PROVIDER)
+    _owner_untouched(rig)
