@@ -5976,6 +5976,16 @@ async def _run_amain(operator_cap: bytes | None) -> int:
 
 
 def main() -> int:
+    # A WAKE MARKER IS THIS PROCESS'S IDENTITY, NOT ITS CHILDREN'S. Drop it from
+    # the live environment before anything can spawn, so a tool child (or a
+    # `lop serve` started from this session's shell) never carries the
+    # supervisor's token into runtimes no supervisor forked (#3028 review r4,
+    # MAJOR-2). The stop sweep reads this process's EXEC-TIME environment, which
+    # this does not rewrite. Stdlib-only import, so it costs nothing at boot.
+    from local_operator.wakes.owned_runtimes import forget_inherited_marker
+
+    forget_inherited_marker()
+
     # THE TOKENIZER WARM STARTS FIRST, before the log file, the imports and the
     # lease: it is the only piece of boot work that nothing else on this path
     # touches until the user's first message has already been sent, so

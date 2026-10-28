@@ -303,6 +303,10 @@ _AMBIENT_VARS = (
     # stop sweep could match a test's child in a shared store.
     "LOP_WAKE_SUPERVISOR_ACTIVE",
     "LOP_WAKE_SUPERVISOR_OWNER",
+    # The supervisor's own pid, the stamp gate (#3028 review r4). Inherited from
+    # a live supervisor it is harmless on its own (no test process shares that
+    # pid), but it belongs to the same live-machine state as the token.
+    "LOP_WAKE_SUPERVISOR_PID",
     # The engage claim (``session/runtime/types.ENGAGED_ENV``), written by
     # ``launch._spawn_runtime`` for a warm and read at boot by
     # ``RuntimeServer``, which stamps ``SessionRecord.engaged_at`` from it. This

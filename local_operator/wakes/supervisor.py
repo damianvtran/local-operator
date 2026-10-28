@@ -2408,7 +2408,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     pass or the next one (≤ ``SLICE_S``). ``--once`` awaits the pass inline for
     the same reason.
     """
-    from local_operator.wakes.owned_runtimes import OWNER_ENV, spawn_token, sweep
+    from local_operator.wakes.owned_runtimes import (
+        OWNER_ENV,
+        SUPERVISOR_PID_ENV,
+        spawn_token,
+        sweep,
+    )
 
     # This token belongs to THIS supervisor invocation, not to the store. It is
     # propagated only to candidates launch actually forks for this process;
@@ -2417,7 +2422,9 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     # path runs the ownership sweep in serve()'s finally (see ``stop_requested``).
     owner_token = spawn_token()
     os.environ[OWNER_ENV] = owner_token
-    os.environ["LOP_WAKE_SUPERVISOR_ACTIVE"] = "1"
+    # The stamp gate: ``launch`` stamps only where os.getpid() equals this, so
+    # the token cannot travel past the runtimes this process forks itself.
+    os.environ[SUPERVISOR_PID_ENV] = str(os.getpid())
     # A UNIT STOP MUST REACH THE SWEEP. Under KillMode=process systemd signals
     # only this process, and SIGTERM's default action terminates without running
     # any cleanup: measured on a real store, `systemctl stop` exited -15 and the

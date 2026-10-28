@@ -1,4 +1,4 @@
-"""End the session runtimes one wake-supervisor invocation actually owns.
+"""End the session runtimes a wake supervisor spawned in this store.
 
 WHY THIS EXISTS (#3028, real-systemd QA Q-S1). ``KillMode=process`` stops only
 the supervisor, deliberately: systemd's cgroup SIGTERM also kills a running
@@ -8,19 +8,34 @@ one alive for its day-long gate. The unit's signal must therefore be FORWARDED
 to owned runtimes, which then drain their own turns (and deny parked gates)
 rather than being cut.
 
-OWNERSHIP IS A FACT OF THE SPAWN, NOT OF THE STORE. ``launch`` gives every new
-candidate a unique token for this supervisor invocation. It is scrubbed from
-other spawn paths, so a runtime this process merely adopted or an unrelated
-runtime in the same store is not claimed. This also lets a scratch/rig
-supervisor stop without touching the live install's sessions. The token is
-not a secret and grants no runtime authority; it only narrows a local SIGTERM
-sweep.
+THE MARKER IS A FACT OF THE SPAWN, NOT OF THE STORE. Each supervisor
+invocation mints a token (:data:`OWNER_ENV`) and records its own pid
+(:data:`SUPERVISOR_PID_ENV`). ``launch._spawn_runtime`` stamps the token ONLY
+when the process building the child environment IS that supervisor (pid
+equality), and strips every marker variable otherwise. A runtime also drops
+the inherited marker from its own environment at boot
+(:func:`forget_inherited_marker`). Together these keep the invariant the sweep
+relies on — a marker means "a wake supervisor forked this runtime directly" —
+so a session a wake turn messaged or spawned, or one started from a wake
+runtime's shell, is never swept (#3028 review r4, MAJOR-2).
+
+WHAT A STOP REACHES. Both production callers (the supervisor's stop handler and
+uninstall) sweep with ``any_owner=True``: every runtime in THIS config root that
+carries a marker, whichever invocation minted it. A runtime outlives the
+invocation that spawned it, so the long-lived parked one usually holds an
+EARLIER token (review r3, MAJOR-1). A process without a marker — the `lop
+serve` daemon's runtimes, interactive and mesh-created sessions — is never
+signalled, and another root's runtimes are out of reach, so a scratch/rig
+supervisor cannot touch the live install's sessions. ``owner=`` (one exact
+token) remains for inventory and tests. The token is not a secret and grants
+no runtime authority; it only narrows a local SIGTERM sweep.
 
 Every candidate is re-identified immediately before ``os.kill`` by exact pid:
 argv must still be a session runtime, age must not have gone backwards (pid
-recycling), and its environment must still name the same owner token, config
-root and session. Never match processes by name. Unknown or changed identity
-means no signal. SIGKILL is deliberately absent.
+recycling), and its EXEC-TIME environment (``/proc/<pid>/environ``, ``ps -E``)
+must still carry a marker, this config root and a session. Never match
+processes by name. Unknown or changed identity means no signal. SIGKILL is
+deliberately absent.
 """
 
 from __future__ import annotations
@@ -36,6 +51,54 @@ logger = logging.getLogger(__name__)
 #: environment fact because adoption may replace the forked candidate's pid;
 #: recording only that pid would miss the process that actually took the lease.
 OWNER_ENV = "LOP_WAKE_SUPERVISOR_OWNER"
+
+#: The supervisor's own pid, set in ITS environment beside the token. The
+#: stamp is applied only where ``os.getpid()`` equals it: every descendant
+#: inherits the variable but none shares the pid, which is what makes "only
+#: the supervisor itself stamps" hold without trusting a child to scrub.
+SUPERVISOR_PID_ENV = "LOP_WAKE_SUPERVISOR_PID"
+
+#: The pre-#3028-r4 stamp gate ("1" meant "stamp"). Nothing reads it now; it is
+#: still stripped so a runtime started under an older supervisor cannot pass it
+#: to a newer launch path.
+LEGACY_ACTIVE_ENV = "LOP_WAKE_SUPERVISOR_ACTIVE"
+
+#: Every variable the marker scheme uses: stripped from a child environment
+#: unless the supervisor itself is stamping, and from a runtime's own
+#: environment at boot.
+MARKER_ENVS: tuple[str, ...] = (OWNER_ENV, SUPERVISOR_PID_ENV, LEGACY_ACTIVE_ENV)
+
+
+def stamp_child_env(env: dict[str, str]) -> None:
+    """Stamp ``env`` (a child's environment, edited in place) or strip the marker.
+
+    The token is copied ONLY when THIS process is the supervisor that minted
+    it. Any other process — a wake runtime starting a session it messaged, a
+    `lop` run from its shell — gets every marker variable removed, so the
+    child it starts is not swept as the supervisor's (review r4, MAJOR-2).
+    The pid itself is never passed on.
+    """
+    owner = os.environ.get(OWNER_ENV) or ""
+    supervisor_pid = os.environ.get(SUPERVISOR_PID_ENV) or ""
+    for name in MARKER_ENVS:
+        env.pop(name, None)
+    if owner and supervisor_pid == str(os.getpid()):
+        env[OWNER_ENV] = owner
+
+
+def forget_inherited_marker() -> None:
+    """Drop the marker from THIS runtime's environment, so no child inherits it.
+
+    Called once at runtime boot. Spawn paths other than ``launch`` (the
+    `lop serve` daemon a tool might start, any subprocess) copy
+    ``os.environ`` wholesale, and a marked runtime's tool children would carry
+    its token into runtimes no supervisor started. The sweep is unaffected: it
+    reads the EXEC-TIME environment (``/proc/<pid>/environ`` on Linux,
+    ``ps -E`` on macOS), which unsetting a variable in a running process does
+    not rewrite.
+    """
+    for name in MARKER_ENVS:
+        os.environ.pop(name, None)
 
 
 def owner_of(env_text: str) -> str:
@@ -77,14 +140,15 @@ def sweep(
     any_owner: bool = False,
     why: str = "supervisor stop",
 ) -> list[int]:
-    """SIGTERM this store's wake-owned runtimes; return the pids actually signalled.
+    """SIGTERM this store's wake-marked runtimes; return the pids actually signalled.
 
-    ``owner`` is the running invocation's own token — the precise case, used by
-    the supervisor's own stop. ``any_owner`` sweeps every runtime in THIS store
-    that any wake supervisor spawned, which is the uninstall case: the store is
-    being removed and a dead supervisor cannot name its own token. Both are
-    scoped to ``config_dir``, so a rig root's sweep can never reach the live
-    install's runtimes (the parent lane's binding condition 2).
+    ``any_owner=True`` is what production uses — the supervisor's stop and
+    uninstall alike: every runtime in THIS config root that carries a marker,
+    whichever invocation minted it (see the module docstring for why that is
+    the right reach). ``owner`` restricts the sweep to one exact token, for
+    inventory and tests. Both are scoped to ``config_dir``, so a rig root's
+    sweep can never reach the live install's runtimes (the parent lane's
+    binding condition 2), and neither touches a process without a marker.
 
     Best-effort and non-raising: a failed sweep must not turn a supervisor's
     exit into a crash, and each runtime remains stoppable through ``lop stop``.

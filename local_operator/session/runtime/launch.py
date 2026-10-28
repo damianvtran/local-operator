@@ -451,17 +451,15 @@ def _spawn_runtime(
     # ownership stamp below then ADDS a value this supervisor means to set, and a
     # later scrub would be the only thing that could undo it by accident.
     without_daemon_bearer(env)
-    # ONLY the wake supervisor's children carry its ownership token. The token
-    # is scrubbed here for every other spawn, so a runtime it merely adopted,
-    # a relay child, or a later supervisor invocation is never swept as its
-    # own (#3028 Q-S1). The token is routing/ownership data, not a credential.
-    from local_operator.wakes.owned_runtimes import OWNER_ENV
+    # ONLY the wake supervisor ITSELF stamps its ownership token, and only on a
+    # runtime it forks directly. Gated on pid equality, not on the variable
+    # being present: a wake runtime inherits the variables, so a presence
+    # check made every session it messaged or spawned look supervisor-owned,
+    # and a stop then cut their turns (#3028 review r4, MAJOR-2). Every other
+    # spawn has the marker stripped. Routing/ownership data, not a credential.
+    from local_operator.wakes.owned_runtimes import stamp_child_env
 
-    owner = os.environ.get(OWNER_ENV) or ""
-    if os.environ.get("LOP_WAKE_SUPERVISOR_ACTIVE") == "1" and owner:
-        env[OWNER_ENV] = owner
-    else:
-        env.pop(OWNER_ENV, None)
+    stamp_child_env(env)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
     env["LOP_MOBILE_CHILD_RESUME"] = session_id
     # A viewer's birth sample seeds only a new conversation. It is NOT a
