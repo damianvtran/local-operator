@@ -2065,28 +2065,50 @@ def check_report(c: chk.ItemCheck) -> ItemMergeReport:
     )
 
 
-def clear_failure(ctx: HubSyncContext, kind: str, name: str) -> None:
+def _store_items_for(
+    doc: dict[str, Any], kind: str, name: str | None, local_id: str | None
+) -> list[dict[str, Any]]:
+    """The status-store rows one retry addresses: by ``local_id`` exactly, else by name.
+
+    Display names are NOT unique (two agents ``Coder`` and ``coder`` are both
+    legal), so the name arm can match several rows and the desktop's per-row
+    actions address by ``local_id`` instead. The id arm reads the store key
+    directly (``kind:local_id``), so it can never select a row of another kind
+    or a second row that happens to share the name.
+    """
+
+    items = doc.get("items", {})
+    if local_id is not None:
+        item = items.get(st.item_key(kind, local_id))
+        return [item] if item is not None else []
+    wanted = (name or "").strip().casefold()
+    return [
+        item
+        for item in items.values()
+        if item.get("kind") == kind and str(item.get("name", "")).casefold() == wanted
+    ]
+
+
+def clear_failure(
+    ctx: HubSyncContext, kind: str, name: str | None, *, local_id: str | None = None
+) -> None:
     """Retire an item's stale failure after a manual retry proved it computes (U10)."""
 
-    wanted = name.strip().casefold()
-
     def fold(doc: dict[str, Any]) -> None:
-        for item in doc.get("items", {}).values():
-            if item.get("kind") == kind and str(item.get("name", "")).casefold() == wanted:
-                st.clear_failure(item)
+        for item in _store_items_for(doc, kind, name, local_id):
+            st.clear_failure(item)
 
     ctx.store().mutate(fold)
 
 
-def clear_retry(ctx: HubSyncContext, kind: str, name: str) -> None:
+def clear_retry(
+    ctx: HubSyncContext, kind: str, name: str | None, *, local_id: str | None = None
+) -> None:
     """Manual Retry: user intent outranks the schedule (B4.3). Clears attempts and the timer."""
 
-    wanted = name.strip().casefold()
-
     def fold(doc: dict[str, Any]) -> None:
-        for item in doc.get("items", {}).values():
-            if item.get("kind") == kind and str(item.get("name", "")).casefold() == wanted:
-                st.clear_retry(item)
+        for item in _store_items_for(doc, kind, name, local_id):
+            st.clear_retry(item)
 
     ctx.store().mutate(fold)
 

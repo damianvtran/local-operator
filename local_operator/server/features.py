@@ -117,6 +117,15 @@ def static_feature_flags() -> dict[str, Any]:
         # no network) plus check/apply/apply-all/retry. A renderer gates the
         # sidebar indicator on this so it never polls a backend that lacks it.
         "hub_updates": 1,
+        # ADDRESSING ONE HUB ITEM BY ITS LOCAL ID: check/apply/retry under
+        # `/v1/desktop/hub/updates/*` accept `local_id` (with `kind`) beside
+        # `name`. Display names are not unique, and the name arm matches
+        # case-insensitively, so `name: "coder"` reaches both `Coder` and
+        # `coder`; a renderer that sees this key sends the `local_id` its
+        # `/hub/links` row carries and touches exactly one item. Its OWN key
+        # rather than a bump of `hub_updates`: older cores refuse the field as
+        # an unknown key (422), so a renderer must keep sending `name` there.
+        "hub_items_by_id": 1,
         # The full local-only LINKS inventory: GET /v1/desktop/hub/links plus
         # PATCH /v1/desktop/hub/links/{link_id} (independent subscribe/auto_push
         # with a policy-revision CAS). Its OWN key rather than a bump of
