@@ -8456,6 +8456,16 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 }
             )
+            # Restart authority belongs to the receiver and is unknowable while
+            # it is offline. Keep an honest unknown plus a conditional remedy.
+            checks.append(
+                readiness_mod.peer_restart_row(
+                    member,
+                    {},
+                    record=record,
+                    peer_label=member.name or member.device_id,
+                )
+            )
             checks.extend(
                 readiness_mod.not_asked_rows(
                     member,

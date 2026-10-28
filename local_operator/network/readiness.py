@@ -73,6 +73,9 @@ CAPABILITY_MCP_SERVERS = "mcp_servers"
 CAPABILITY_MODEL_CREDENTIAL = "model_credential"
 CAPABILITY_MCP_CREDENTIAL = "mcp_credential"
 CAPABILITY_TOOLING = "tooling"
+#: Local recovery authority: whether this device may ask the peer to restart
+#: its relay. This predicts the net_restart grant check; it never widens it.
+CAPABILITY_PEER_RESTART = "peer_restart"
 #: (h) memory resilience: whether the peer has the RAM/swap headroom to host
 #: offloaded sessions without the kernel OOM killer reaching its mesh relay
 #: (2026-10-21: a 2 GB, swapless cloud-node-1 OOM-killed its own relay).
@@ -120,6 +123,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # remedy, and the admission gate (``memory_guard.admission_check``) is
         # its point of use.
         CAPABILITY_RESILIENCE,
+        # Restart authority is deliberately least-privilege. Its absence is a
+        # recovery limitation to name, not a peer-offload readiness failure.
+        CAPABILITY_PEER_RESTART,
         # A stale or unsupervised serve daemon is a device that IS onboarded and
         # will run work — on the wrong build, or until the next reboot. Warn with
         # the remedy; the update/restart path is its point of use.
@@ -169,6 +175,9 @@ CODE_NOT_ON_PATH = "not_on_path"
 CODE_NOT_AUTHENTICATED = "not_authenticated"
 #: Resilience (2026-10-21): under :data:`RESILIENCE_MIN_RAM_MB` of RAM and no swap.
 CODE_LOW_MEMORY = "low_memory"
+#: The peer has not granted this device the lifecycle capability net_restart
+#: requires. The remedy is a grant ON THE PEER, never a local gate bypass.
+CODE_UPDATE_GRANT_MISSING = "update_grant_missing"
 #: Serve daemon (2026-10-28): its build differs from the install's, or nothing
 #: but a login session holds it (Linux: a ``session-*.scope``, not a unit).
 CODE_SERVE_STALE = "serve_stale"
@@ -1064,7 +1073,27 @@ def default_model_fact(root: Path) -> dict[str, Any]:
         "model_name": _safe_text(model_name, limit=200),
         "resolved": True,
         "reason": "",
+        "credential_required": _default_needs_credential(hosting),
     }
+
+
+def _default_needs_credential(hosting: str) -> bool:
+    """Whether a create on this device would demand a credential for ``hosting``.
+
+    THE CREATE PREFLIGHT'S OWN EXEMPTION, answered on the device that runs it:
+    ``relay._model_credential_refusal`` never refuses a keyless provider (a local
+    server, ``allows_missing_api_key``) or the mock wire, so a readiness row that
+    demanded a login for one predicted a refusal the create never makes. Read
+    from THIS device's registry, not the viewer's: the two builds may differ, and
+    the create runs here. An unknown id still needs a credential (fail toward the
+    row that names the gap, never toward a silent pass).
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition(hosting)
+    return not (
+        definition is not None and (definition.allows_missing_api_key or definition.wire == "mock")
+    )
 
 
 def has_local_provider_credential(
@@ -1302,6 +1331,13 @@ def collect_peer_facts(
             "model_name": model["model_name"],
             "resolved": model["resolved"],
             "reason": model["reason"],
+            # Absent on an unresolved default and on every older peer; the row
+            # reads its absence as "legacy sentences", never as a pass.
+            **(
+                {"credential_required": model["credential_required"]}
+                if "credential_required" in model
+                else {}
+            ),
         },
         "selected_model_access": (
             selected_model_fact(root, selector, session_id=session_id) if selector else None
@@ -1407,6 +1443,96 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
         ),
         source=SOURCE_PEER,
         observed={"total_mb": total, "swap_total_mb": swap},
+    )
+
+
+def restart_authority_fact(root: Path, *, network_id: str, viewer_device_id: str) -> dict[str, Any]:
+    """The RECEIVER's current restart grant for one authenticated viewer.
+
+    `net_restart` reads the sender's row from the receiver's store on every use.
+    A viewer-local self row cannot answer that question: grants are deliberately
+    receiver-local. The link supplies both ids, never the request frame. An
+    unreadable store is `None` (unknown); a readable record with no active grant
+    is `False`, the same closed answer the authorizer gives.
+    """
+    from local_operator.network import store as store_mod
+    from local_operator.network.types import OP_CAPABILITY
+
+    try:
+        record = store_mod.load(network_id, root)
+    except Exception:  # noqa: BLE001 — a diagnostic fact degrades to unknown, never denial
+        record = None
+    granted: bool | None = None
+    if record is not None:
+        member = record.member(viewer_device_id)
+        granted = bool(
+            member is not None
+            and member.active
+            and OP_CAPABILITY["net_restart"] in member.capabilities
+        )
+    return {
+        "network_id": network_id,
+        "device_id": viewer_device_id,
+        "update_granted": granted,
+    }
+
+
+def peer_restart_row(
+    member: Any, facts: Mapping[str, Any], *, record: Any, peer_label: str
+) -> dict[str, Any]:
+    """Can THIS device ask this peer to restart its relay for recovery?
+
+    Only the receiver's authenticated answer may assert permission or denial.
+    Offline peers and older builds that omit the fact stay UNKNOWN: their
+    remedy is conditional recovery guidance, never a claim about the grant.
+    """
+    from local_operator.network.types import OP_CAPABILITY
+
+    required = OP_CAPABILITY["net_restart"]
+    network_id = str(getattr(record, "network_id", "") or "")
+    viewer_device_id = str(getattr(record, "self_device_id", "") or "")
+    authority = facts.get("restart_authority")
+    granted: Any = None
+    if isinstance(authority, Mapping):
+        same_scope = (
+            bool(network_id and viewer_device_id)
+            and authority.get("network_id") == network_id
+            and authority.get("device_id") == viewer_device_id
+        )
+        if same_scope:
+            candidate = authority.get("update_granted")
+            granted = candidate if isinstance(candidate, bool) else None
+    known = isinstance(granted, bool)
+    remedy = (
+        f"on {peer_label}, run `lop network member grant "
+        f"{network_id or '<network>'} {viewer_device_id or '<this-device-id>'} {required}`"
+    )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_PEER_RESTART,
+        ok=granted is True,
+        code="" if granted is True else CODE_UPDATE_GRANT_MISSING if known else CODE_UNKNOWN,
+        detail=(
+            f"{peer_label} grants this device {required!r}; peer relay restart is permitted"
+            if granted is True
+            else (
+                f"this device cannot restart {peer_label}'s relay because it lacks "
+                f"the {required!r} grant there"
+                if known
+                else f"cannot confirm whether {peer_label} grants this device "
+                f"{required!r} for relay restart"
+            )
+        ),
+        remedies=(
+            [] if granted is True else [remedy if known else f"if restart is refused, {remedy}"]
+        ),
+        source=SOURCE_PEER if known else SOURCE_UNKNOWN,
+        observed={
+            "network_id": network_id,
+            "device_id": viewer_device_id,
+            "update_granted": granted,
+        },
     )
 
 
@@ -2840,7 +2966,69 @@ def model_credential_row(
     viewer: Viewer,
     peer_label: str,
 ) -> dict[str, Any]:
-    """(e) Can the peer's default model be served — own login or a borrow?"""
+    """(e) Can the peer's default model be served — own login or a borrow?
+
+    THIS ROW PREDICTS THE CREATE PREFLIGHT (``relay._model_credential_refusal``),
+    which refuses ``model_credential_missing`` before minting anything when a
+    create without ``--model`` resolves to a default the peer cannot serve. Two
+    things kept the row from saying so: it demanded a login for a keyless default
+    the create accepts, and its negative sentences named a provider, never the
+    peer's DEFAULT or the refusal the operator would actually meet. A peer that
+    publishes ``credential_required`` gets both; an older peer's facts lack it and
+    keep the legacy sentences byte-for-byte (nothing about them is inferred).
+
+    Deliberately NOT changed: an unreadable store stays UNKNOWN. The create treats
+    "cannot tell" as no accusation, which is not proof the default is servable.
+    No decline is asserted either — no decision is persisted to read one from, so
+    a missing holder is reported as the fact it is, with a model-choice remedy
+    and never a re-offer of the share.
+    """
+    raw_model = facts.get("default_model")
+    # Normalize once so the framing below retains a Mapping type. Missing or
+    # malformed facts still take the legacy path: an empty mapping is unresolved.
+    model: Mapping[str, Any] = raw_model if isinstance(raw_model, Mapping) else {}
+    framed = bool(model.get("resolved")) and isinstance(model.get("credential_required"), bool)
+    if framed and model.get("credential_required") is False:
+        pair = _default_pair(model)
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=True,
+            detail=f"{peer_label}'s default model {pair} needs no credential",
+            source=SOURCE_PEER,
+        )
+    row = _model_credential_verdict(member, facts, viewer=viewer, peer_label=peer_label)
+    if framed and not row["ok"] and row.get("code") in (CODE_NOT_SHARED, CODE_NO_CREDENTIAL):
+        # The default is the subject, the refusal is the consequence, and the first
+        # remedy changes the DEFAULT — the thing that is wrong. Sharing is never
+        # offered (a withheld credential may be deliberate, and nothing persisted
+        # says otherwise), and no config is written by a report.
+        row["detail"] = (
+            f"{peer_label}'s default model {_default_pair(model)} cannot be served "
+            f"({row['detail']}); a create there without --model is refused"
+        )
+        row["remedies"] = [
+            f"set {peer_label}'s default to a model it holds (`/model default` in its "
+            "window), or " + str(row["remedies"][0])
+        ]
+    return row
+
+
+def _default_pair(model: Mapping[str, Any]) -> str:
+    hosting = _bounded(model.get("hosting") or "", 120)
+    name = _bounded(model.get("model_name") or "", 200)
+    return f"{hosting}/{name}" if name else hosting
+
+
+def _model_credential_verdict(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    viewer: Viewer,
+    peer_label: str,
+) -> dict[str, Any]:
+    """The provider-level verdict chain :func:`model_credential_row` frames."""
     model = facts.get("default_model")
     if not isinstance(model, Mapping):
         return _capability_row(
@@ -4459,6 +4647,11 @@ def _peer_checks(
     rows, link = _reachability_rows(
         member, record=record, server=server, deadline=deadline, since=since
     )
+    # Keep an UNKNOWN row on every early return. Only the peer's authenticated
+    # answer may replace it with a grant verdict; the viewer's own row is not
+    # evidence of what this receiver permits.
+    restart_index = len(rows)
+    rows.append(peer_restart_row(member, {}, record=record, peer_label=peer_label))
     selected_row: dict[str, Any] | None = None
     if selector:
         selected_row = selected_model_row(
@@ -4519,6 +4712,7 @@ def _peer_checks(
     if facts is None:
         rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
         return rows
+    rows[restart_index] = peer_restart_row(member, facts, record=record, peer_label=peer_label)
     rows.append(operator_row(member, facts, peer_label=peer_label))
     rows.append(git_row(member, facts, peer_label=peer_label))
     rows.append(repository_row(member, facts, peer_label=peer_label))
@@ -4873,11 +5067,10 @@ def make_handler(server: "RelayServer") -> Any:
     """The ``net_readiness`` peer-op handler: THIS device's facts, read-only."""
 
     def _handle(link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
-        # The link is unused: every fact is this device's own, and the handler
-        # never sends a request over the link it is serving (the deadlock guard
-        # ``PeerLink.request`` states).
-        del link
-        return collect_peer_facts(
+        # Equipment facts are this device's own. Restart authority is different:
+        # it is THIS RECEIVER's grant for the authenticated sender, read from
+        # the link's network/member ids rather than anything the request claims.
+        facts = collect_peer_facts(
             server.root,
             selector=_bounded(frame.get("selector") or "", 240),
             session_id=_bounded(frame.get("session_id") or "", 80),
@@ -4885,6 +5078,12 @@ def make_handler(server: "RelayServer") -> Any:
                 frame.get("repository") if isinstance(frame.get("repository"), Mapping) else None
             ),
         )
+        facts["restart_authority"] = restart_authority_fact(
+            server.root,
+            network_id=link.network_id,
+            viewer_device_id=link.device_id,
+        )
+        return facts
 
     return _handle
 
