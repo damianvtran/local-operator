@@ -369,10 +369,11 @@ def test_a_giant_source_line_keeps_the_policy_replay_gate():
     assert estimate_archive_tokens(archive) > 0
 
 
-def test_a_rendered_compaction_marker_is_not_mined_as_operator_history():
-    """QA round 5 Q16: archive replay is already folded through ``previous_text``;
-    its hard-wrapped text pages must not become new operator asks or duplicate
-    the archive. The real marker renderer supplies the provenance stamp."""
+def test_a_rendered_compaction_marker_is_not_an_operator_turn():
+    """QA round 5 Q16 / round 6 Q17: production lifts the marker before this
+    serializer, so ``previous_text`` folds its archive exactly once. If a marker
+    is passed here anyway, its top-level header is not ``[User]``. Embedded role
+    headers in its replay text remain the miner's input, not a skip guarantee."""
     from local_operator.compaction.marker import (
         build_compaction_marker,
         render_compaction_marker,
@@ -413,8 +414,10 @@ def test_partial_kept_lines_preserve_the_actual_rendered_pages(provider, model_i
             context_window=400_000,
         )
         assert _policy_pages(archive) is not None
-        assert [_page_digest(page) for page in _middle_pages(archive)] == archive.page_digests
-        assert len(_middle_pages(archive)) == len(archive.frames)
+        pages = _middle_pages(archive)
+        assert pages is not None
+        assert [_page_digest(page) for page in pages] == archive.page_digests
+        assert len(pages) == len(archive.frames)
 
 
 def test_a_long_operator_ask_on_a_dropped_page_is_mined_whole():

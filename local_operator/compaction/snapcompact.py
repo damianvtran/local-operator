@@ -595,8 +595,10 @@ def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
                 # turn. Its text-kind pages are hard-wrapped and its archive is
                 # already folded through ``previous_text``; serializing it as
                 # [User] re-mined wrap pieces and double-folded the archive
-                # (QA round 5, Q16). Provenance is the renderer's marker stamp,
-                # never the message's text shape.
+                # (QA round 5, Q16). Both production callers lift the marker
+                # first; this is only a header guard, not a promise that nested
+                # role headers in replay text are skipped (QA round 6, Q17).
+                # Provenance is the renderer's stamp, never the text shape.
                 if not is_rendered_injection(message) and marker_details(message) is None:
                     blocks.append(f"[User]\n{text}")
                     continue

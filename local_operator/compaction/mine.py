@@ -262,7 +262,8 @@ def _clip_item(text: str, limit: int) -> str:
 
     Tagged digest rows are skipped when re-mined, so this clip cannot create a
     continuation ask; the ellipsis distinguishes a shortened item from a
-    page-wrap fragment without weakening the per-item bound.
+    page-wrap fragment. The result is always at most ``limit`` characters,
+    including the ellipsis and the unbroken-string fallback.
     """
     if len(text) <= limit:
         return text
