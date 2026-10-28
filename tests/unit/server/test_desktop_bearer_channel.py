@@ -338,9 +338,7 @@ def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
         # ``__main__`` is a script FILE named ``lop``, which is exactly what
         # ``bin/lop`` is to the interpreter.
         entry = tmp_path / "lop"
-        entry.write_text(
-            "import sys\n\nfrom local_operator.cli import main\n\nsys.exit(main())\n"
-        )
+        entry.write_text("import sys\n\nfrom local_operator.cli import main\n\nsys.exit(main())\n")
         target = [str(entry)]
     elif leading == [] and label.startswith("-m"):
         target = ["-mlocal_operator.cli"]
