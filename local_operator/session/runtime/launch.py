@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, cast
 
+from local_operator.agent_shell import without_daemon_bearer
 from local_operator.harness.approval import (
     mint_operator_cap,
     open_operator_cap_handoff,
@@ -443,6 +444,10 @@ def _spawn_runtime(
     exactly the leak the scrub below exists to prevent (review round 1, M4).
     """
     env = dict(os.environ)
+    # The session runtime never reads the daemon's desktop bearer, and anything it
+    # holds its tool children can read (``ps -E`` showed it in cell 14 on #3002), so
+    # it is never handed one (operator ask a-772b; ``agent_shell.DAEMON_BEARER_ENVS``).
+    without_daemon_bearer(env)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
     env["LOP_MOBILE_CHILD_RESUME"] = session_id
     # A viewer's birth sample seeds only a new conversation. It is NOT a

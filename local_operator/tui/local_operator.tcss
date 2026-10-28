@@ -984,11 +984,12 @@ Editor .text-area--at-reference {
  * The `$name` member of the same family as `/command` and `@path`, and it
  * takes the same two rulings. RESOLVED takes `signal` + bold, exactly
  * `slash-command`'s rule: the ink asserts "this token WILL fire", which is
- * what the submit-side resolver's case-insensitive exact-membership test
- * decides, and — unlike the unknown arm below — it is painted even while the
- * skill list is open, because a full name is an answer, not a prefix in
- * progress. `string` would be wrong here: that is the resolved-ARGUMENT role
- * (`slash-argument`), while a leading `$skill` is a structured TOKEN, and
+ * what the submit-side trigger decides, and — unlike the unknown arm below —
+ * it is painted even while the skill list is open, because a full name is an
+ * answer, not a prefix in progress. It is painted only on lines the submit
+ * path scans (`skill_scan_region`). `string` would be wrong here: that is the
+ * resolved-ARGUMENT role (`slash-argument`), while an accepted `$skill` is a
+ * structured TOKEN, and
  * `accent` stays reserved for "a turn is live". The same hue as the chip and
  * the reference token is not a collision — they are the same sentence
  * ("structure that will not be sent as message text") about different
@@ -996,8 +997,8 @@ Editor .text-area--at-reference {
  *
  * UNKNOWN is the slash-unknown treatment again — `dim`, the typo register,
  * and the same ~2.9:1-below-prose degrade — for the ONE shape whose sentence
- * ("inert text that will be sent as prose") is exactly true: a leading,
- * whole-draft, settled, unresolved `$word` with lowercase evidence (see
+ * ("inert text that will be sent as prose") is exactly true: a whole-draft,
+ * settled, unresolved `$word` with lowercase evidence (see
  * `Editor._compute_skill_runs`). Below AA on this ground, as `slash-unknown`
  * already is and as the design round re-measures — it is a de-emphasis, not
  * body text.
@@ -1010,7 +1011,7 @@ Editor .text-area--skill {
     text-style: bold;
 }
 
-/* A leading `$word` that doesn't name a discovered skill: dimmed so the user
+/* A lone `$word` that doesn't name a discovered skill: dimmed so the user
  * sees it is inert text that WILL be sent, not an invocation. Suppressed
  * while the skill list is still choosing the word — a prefix under an open
  * list is in progress, not wrong (see `Editor._compute_skill_runs`). */
@@ -2555,6 +2556,78 @@ Screen.settings #input-dock #prompt-chevron {
  * one line, so the taller page layout does not shift. */
 .schedule-view .settings-view-detail {
     height: auto;
+}
+
+
+/* ── full-page notifications view (`/notifications`, lane L2) ────────────── *
+ *
+ * A sibling of the schedule and library modes: same title/rule/columns/notice/
+ * hints skeleton, the transcript hidden and the dock greyed. Narrow (< 120
+ * columns) shows ONE of the list or the detail; wide splits 55/45 with a
+ * one-cell `edge` rule between them (design §8.3). Row ink is painted as rich
+ * spans in Python (`notifications_render`), not here, for `/review`'s reason:
+ * a widget class cannot reach inside one Static's spans. */
+.notifications-view .settings-view-columns {
+    /* The header row already separates title and list; the settings page's
+     * quiet top row would cost the 80x24 frame one of its few list rows. */
+    padding: 0;
+}
+
+.notifications-view-text {
+    width: 1fr;
+    height: auto;
+}
+
+.notifications-view-list {
+    width: 1fr;
+}
+
+.notifications-view-detail {
+    width: 1fr;
+}
+
+.notifications-view.-wide .notifications-view-list {
+    width: 55fr;
+}
+
+.notifications-view.-wide .notifications-view-detail {
+    width: 45fr;
+    padding: 0 0 0 1;
+}
+
+.notifications-view-edge {
+    width: 1;
+    height: 1fr;
+    background: $lo-edge;
+}
+
+/* One row: a receipt, a refusal or the y/n confirm. Fixed so a notice that
+ * appears does not move the list under the cursor. */
+.notifications-view .settings-view-detail {
+    height: 1;
+    padding: 0;
+}
+
+/* ...EXCEPT the combined receipt, which is PROSE (vi audit). `dismissed` +
+ * `asks_stay` + `stale_skipped` compose to 95 cells in English and 121 in
+ * Vietnamese against the 76-cell notice, and the rendered frame stopped
+ * mid-sentence. `auto` with a 2-row ceiling keeps the rule above for every
+ * short notice — the list still does not move — and lets the one sentence
+ * that cannot fit take its second line. No catalogue string is shortened for
+ * a width limit. Same specificity as the rule above, declared after it. */
+.notifications-view .notifications-view-notice {
+    height: auto;
+    max-height: 2;
+    padding: 0;
+}
+
+/* The settings skeleton's hint row is 2 tall with a 1-row top pad; here the
+ * notice row above already separates it, and the 80x24 frame needs that row
+ * for the list. One row, no pad (measured: the inherited pad clipped the
+ * hints to a 0-row content box). */
+.notifications-view .notifications-view-hints {
+    height: 1;
+    padding: 0;
 }
 
 

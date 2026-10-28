@@ -446,6 +446,51 @@ def tail_head_reachable(
     return rows_above_head <= limit + extra_rows + 1
 
 
+def late_index_stop(
+    page_rows: Sequence[int],
+    collected: Sequence[Mapping[str, Any]],
+    *,
+    index: TranscriptIndex | None,
+    limit: int,
+    supplements: bool = False,
+) -> int | None:
+    """How many of the hunt's pages a read WITH the index would have kept, or ``None``.
+
+    WHY THIS EXISTS (#3037 QA, O1). The open frame asks for the index after its
+    first page, and a cold index answers ``None`` there: the refresh is only
+    started (the relay never waits; the desktop waits only what is left of its
+    120 ms budget). The hunt then runs blind to its row budget — and the read's
+    FINAL index fetch, by which time the refresh has often landed, labels the
+    result ``ready``. Measured on the real fixture at limit 20 after 50 appends:
+    102 rows with ``head_cut: false`` on that first read, 20 rows with
+    ``head_cut: true`` on every read after it. A ``ready`` frame is final by
+    contract, so the client painted the long page and then replaced it — the
+    shift on reopen this function removes.
+
+    THE SAME FRAME, NOT A RELABELLED ONE. Labelling the late frame ``building``
+    would be honest, but it still paints rows the next frame takes away. The
+    rows the index-backed read would serve are already in hand — it reads the
+    same fixed-size pages and stops at the first one where
+    :func:`tail_head_reachable` says no and ``limit`` paintable rows are held —
+    so replaying that stop over the pages this read took costs one
+    :func:`paintable` pass per page and no I/O, and the caller trims to it.
+
+    ``page_rows`` is the row count each attempt PREPENDED, in attempt order
+    (``collected`` is those pages, oldest first). ``None`` means keep everything:
+    no index, a head the index calls reachable (the hunt was owed), or no page
+    that held ``limit`` paintable rows (the read was short either way). Only a
+    TAIL read may ask: the shortcut is about the journal's end.
+    """
+    if index is None or tail_head_reachable(index, limit=limit):
+        return None
+    taken = 0
+    for pages, rows in enumerate(page_rows, start=1):
+        taken += rows
+        if taken and len(paintable(collected[-taken:], supplements=supplements)) >= limit:
+            return pages
+    return None
+
+
 def _is_chrome_text(payload: Mapping[str, Any]) -> bool:
     """Whether a user row's TEXT is harness chrome the client never shows.
 

@@ -1,0 +1,83 @@
+"""One-key, read-only round-2 audit; mutate only in-memory negative controls."""
+import hashlib
+import json
+from pathlib import Path
+import unicodedata
+from local_operator.i18n.runtime import parse_message, message_arguments, render_message
+
+CORE = Path('/Users/damian/workspace/repos/lo-notifications-l1')
+UI = Path('/Users/damian/local-operator-ui/.worktrees/notifications-ui')
+NS = 'wire.slash.notifications_page'
+KEY = NS + '.help'
+PREVIOUS = CORE / f'i18n/audits/evidence/vi/{NS}/nt25a1'
+sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+old = json.loads((PREVIOUS / 'record.json').read_text())
+old_receipt = json.loads((PREVIOUS / 'receipt.json').read_text())
+for name, expected in old_receipt['hashes'].items():
+    assert sha(PREVIOUS / name) == expected
+print('PASS prior nt25a1 companion hashes')
+retained = []
+for scope, rec in [('slash', old), ('errors', json.loads((CORE / 'i18n/audits/evidence/vi/wire.errors.notifications/nt25a1/record.json').read_text()))]:
+    for role, ref in rec['input_hashes'].items():
+        if scope == 'slash' and role == 'target':
+            continue
+        actual = sha(CORE / ref['path'])
+        assert actual == ref['sha256'], (scope, role, 'changed')
+        retained.append((scope, role, actual))
+ui = json.loads((UI / 'i18n/receipts/nt-vi-cfdff5945838.json').read_text())
+for role, path, expected in [('en', 'en/ui.notifications.json', ui['en_sha256']), ('target', 'vi/ui.notifications.json', ui['target_sha256']), ('context', 'en/ui.notifications.context.json', ui['context_sha256'])]:
+    actual = sha(UI / 'src/i18n/catalogues' / path)
+    assert actual == expected, ('UI', role, 'changed')
+    retained.append(('UI', role, actual))
+for scope, role, actual in retained:
+    print('RETAINED', scope, role, actual)
+print('PASS 8 prior input hashes unchanged; no re-audit of retained namespaces')
+base = CORE / 'local_operator/i18n/catalogues'
+en = json.loads((base / 'en' / f'{NS}.json').read_text())
+vi = json.loads((base / 'vi' / f'{NS}.json').read_text())
+context = json.loads((base / 'en' / f'{NS}.context.json').read_text())
+assert set(en) == set(vi) == set(context) == {KEY}
+text = vi[KEY]
+assert text == old['findings'][0]['proposed_text']
+assert text != old['findings'][0]['current_text']
+assert text == unicodedata.normalize('NFC', text)
+
+def cell_width(s):
+    # This scope is NFC Vietnamese and ASCII: no combining/control or wide
+    # codepoints. Validate those assumptions instead of installing a dependency.
+    assert all(not unicodedata.combining(c) and unicodedata.category(c)[0] != 'C' for c in s)
+    return sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in s)
+
+def contract(s):
+    parse_message(s)
+    assert 'read:' in s, 'literal read command token missing'
+    assert 'tất cả' in s, 'bulk all scope missing'
+    assert cell_width(s) <= context[KEY]['maxCells'], 'maxCells exceeded'
+
+parse_message(en[KEY])
+contract(text)
+assert message_arguments(en[KEY]) == message_arguments(text) == ()
+rendered = render_message(text, {}, 'vi')
+assert rendered == text
+print('EN', en[KEY])
+print('VI', text)
+print('PASS V3 repair exactly matches previous proposed text; 1 key reviewed')
+print('PASS core parser: 2 messages; placeholder parity: (); NFC; literal read; explicit all scope')
+print('RENDER', rendered)
+print('WIDTH', cell_width(rendered), 'maxCells', context[KEY]['maxCells'])
+for label, damaged in [
+    ('original missing-all defect', old['findings'][0]['current_text']),
+    ('dropped read token', text.replace('read:', 'đọc:')),
+    ('overwidth label', text + ' thêm nội dung dài'),
+    ('malformed ICU', text + ' {broken'),
+]:
+    try:
+        contract(damaged)
+    except (AssertionError, ValueError) as exc:
+        print('NEGATIVE CONTROL PASS', label, 'rejected:', type(exc).__name__, str(exc))
+    else:
+        raise AssertionError('negative control accepted: ' + label)
+for loc, suffix in [('en', '.json'), ('en', '.context.json'), ('vi', '.json')]:
+    p = base / loc / (NS + suffix)
+    print('SHA256', str(p.relative_to(CORE)), sha(p))
+print('PASS round 2: V3 fixed; unresolved blocker=0 major=0 minor=0 nit=0')

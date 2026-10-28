@@ -1,0 +1,6 @@
+{
+  "wire.errors.notifications.store_busy": "اطلاعات کا اسٹور اس وقت مصروف ہے، اس لیے کچھ نہیں بدلا۔ تھوڑی دیر بعد دوبارہ کوشش کریں۔",
+  "wire.errors.notifications.store_full": "اس کمپیوٹر کی ڈسک میں جگہ ختم ہو گئی ہے، اس لیے کچھ نہیں بدلا۔ {where} والے والیوم پر کچھ جگہ خالی کریں، پھر دوبارہ کوشش کریں۔",
+  "wire.errors.notifications.store_unavailable": "اطلاعات کا اسٹور پڑھا یا لکھا نہیں جا سکا۔ دوبارہ کوشش سے فائدہ نہیں ہوگا؛ {where} اور اس کی ڈسک کو چیک کریں۔",
+  "wire.errors.notifications.unknown_item": "یہ اطلاع اب “اطلاعات” میں نہیں ہے۔"
+}

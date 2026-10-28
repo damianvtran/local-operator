@@ -1301,10 +1301,14 @@ class ServingSessionHandle(SessionHandle):
             )
             self._notify()
             self._announce_pending("approval", tool_name, description)
+            # Read ONCE, here: `asyncio.wait_for` fixes its deadline when the
+            # wait begins, so this is the wait that applies even if a surface
+            # attaches later and flips the policy (see `_record_gate_timeout`).
+            timeout_s = self._gate_timeout_s()
             try:
-                return await asyncio.wait_for(future, timeout=self._gate_timeout_s())
+                return await asyncio.wait_for(future, timeout=timeout_s)
             except TimeoutError:
-                await self._record_gate_timeout(tool_name, description)
+                await self._record_gate_timeout(tool_name, description, waited_s=timeout_s or 0.0)
                 return False
             finally:
                 self._pending_futures.pop(request_id, None)
@@ -1379,10 +1383,15 @@ class ServingSessionHandle(SessionHandle):
                 # ``BODIES["ask"]`` vocabulary is the right fallback for it.
                 announced = "" if getattr(question, "secret", False) else prose
                 self._announce_pending("ask", prose, announced)
+                # Read once per question, for the same reason as the approval
+                # gate: the deadline `wait_for` enforces is fixed right here.
+                timeout_s = self._gate_timeout_s()
                 try:
-                    answer = await asyncio.wait_for(future, timeout=self._gate_timeout_s())
+                    answer = await asyncio.wait_for(future, timeout=timeout_s)
                 except TimeoutError:
-                    await self._record_gate_timeout("ask", prose, kind="ask")
+                    await self._record_gate_timeout(
+                        "ask", prose, kind="ask", waited_s=timeout_s or 0.0
+                    )
                     # A timed-out question ends the whole ask: report whatever
                     # earlier questions collected (partial, like the terminal's
                     # Escape) rather than blocking forever on the next one.
@@ -4410,13 +4419,13 @@ class ServingSessionHandle(SessionHandle):
         and run the call as a background task so the title arrives ALONGSIDE
         the turn rather than after it.
 
-        ``text`` is the SENT message, and for a ``$skill`` invocation that is
-        the EXPANDED payload rather than the line the user typed: expansion is
-        the CLIENT's duty (a desktop renders ``skills.invoke.render_invocation``'s
-        payload itself, in ``local-operator-ui``'s ``skill-invocation.ts``), so
-        the harness never sees the typed line on its own. Naming from the
-        payload titles the conversation "The user invoked the `research`
-        skill…" and puts the whole SKILL.md body in the list row — the defect
+        ``text`` is the SENT message, and a ``$skill`` invocation is the line
+        the user typed followed by a tail block carrying the bodies. Expansion
+        is the CLIENT's duty, so the harness sees that payload rather than the
+        typed line alone; ``harness.rows.user_row_text`` strips complete blocks,
+        which is what keeps the title on the user's words instead of titling the
+        thread "The user invoked the `research` skill…" and putting the whole
+        SKILL.md body in the list row — the defect
         ``docs/design/history-fold-convergence.md`` row D8 calls out.
 
         Collapsed HERE rather than at the one call site today, because this is
@@ -6405,6 +6414,17 @@ class ServingSessionHandle(SessionHandle):
             self._session._aida_attended_probe = lambda: bool(self._attended_surfaces())
         except Exception:  # noqa: BLE001 — a session without the slot keeps its default
             logger.debug("could not install the attended probe", exc_info=True)
+        # R2-2: the item ladder's rung-4 stand-down reads the same surface table,
+        # through the session's own `_notify_tui_evidence` seam. A TUI ATTACHED to
+        # this session is a TUI RENDERING it (an attach names the one conversation
+        # the front end shows), which is the watched half of the predicate; the
+        # ACTIVE half needs the TUI's input evidence, and with none reported the
+        # probe answers None — unknown, which notifies rather than suppresses
+        # (contract §6.3). Installed here so the answer is live, not captured.
+        try:
+            self._session._notify_tui_probe = self._tui_viewer_active
+        except Exception:  # noqa: BLE001 — an unsettable slot keeps its default
+            logger.debug("could not install the inbox TUI probe", exc_info=True)
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
@@ -6412,6 +6432,41 @@ class ServingSessionHandle(SessionHandle):
             holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
+
+    def _tui_viewer_active(self) -> bool | None:
+        """Is a TUI showing THIS conversation with the operator active in it?
+
+        ``None`` when the answer cannot be established — no TUI attached, or a
+        TUI that reports no input evidence — and the caller treats that as "raise
+        the banner" (contract §6.3: every unknown fails toward notifying).
+
+        THE TWO HALVES ARE DELIBERATELY SEPARATE. An attach proves a terminal is
+        RENDERING this session; it says nothing about whether anyone is at the
+        keyboard. The activity half is the TUI's own ``activity`` report (its
+        Key/MouseDown edges, throttled, contract §6.1); a runtime that predates
+        it, or a TUI that has sent none, leaves the answer unknown — which
+        suppresses nothing.
+        """
+        reader = getattr(self._registrant, "tui_input_age_s", None)
+        if not callable(reader):
+            return None
+        watching = "attach" in self._attached_surfaces() or "tui" in self._watching_surfaces()
+        if not watching:
+            return None
+        try:
+            age = reader()
+        except Exception:  # noqa: BLE001 — an unreadable probe is unknown
+            return None
+        if not isinstance(age, (int, float)) or isinstance(age, bool):
+            # A registrant whose probe answers something other than a number is
+            # "cannot tell", not "active": the fail-open direction is to notify.
+            return None
+        # Imported here, not at module scope: `tui.attention` is a UI-tier
+        # module and this file must stay importable without it (same rule as
+        # every other server→tui read).
+        from local_operator.tui.attention import ATTENTION_INPUT_EVIDENCE_S
+
+        return float(age) <= float(ATTENTION_INPUT_EVIDENCE_S)
 
     def _attended_surfaces(self) -> frozenset[str]:
         """Local human front ends on this runtime (``RuntimeServer.attended_surfaces``).
@@ -6528,7 +6583,7 @@ class ServingSessionHandle(SessionHandle):
             return 0
 
     async def _record_gate_timeout(
-        self, tool: str, description: str, kind: str = "approval"
+        self, tool: str, description: str, kind: str = "approval", *, waited_s: float
     ) -> None:
         """Append the row that says NOBODY WAS THERE.
 
@@ -6536,6 +6591,15 @@ class ServingSessionHandle(SessionHandle):
         are different facts: one is the user's decision, the other is the
         absence of one. Without this row the next turn reads "the user denied
         this" and adjusts its plan around a choice nobody made.
+
+        ``waited_s`` IS THE CALLER'S, never re-derived here. It must be the
+        timeout the gate passed to ``asyncio.wait_for`` when its wait began.
+        This used to call ``_gate_timeout_s()`` again at write time, and that
+        policy is live: a gate that opened with nothing attached waited the
+        short cap, a phone attaching mid-wait flipped the policy to the
+        day-long park, and a 30-second expiry was recorded — and replayed to
+        the model and the phone — as ``waited_s: 86400`` (PR #3030 QA, X1).
+        Keyword-only and required so no caller can fall back to the re-read.
         """
         transcript = getattr(self._session, "transcript", None)
         append = getattr(transcript, "append_message", None)
@@ -6561,7 +6625,7 @@ class ServingSessionHandle(SessionHandle):
                         # and describing it in the approval gate's vocabulary
                         # told the user something that did not happen (D12).
                         "kind": kind,
-                        "waited_s": self._gate_timeout_s() or 0.0,
+                        "waited_s": waited_s,
                     },
                 )
             )

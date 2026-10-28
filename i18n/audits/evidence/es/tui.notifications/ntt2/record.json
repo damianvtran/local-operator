@@ -1,0 +1,203 @@
+{
+  "schema": 1,
+  "audit_id": "ntt2",
+  "audit_round": 2,
+  "supersedes": "ntt1",
+  "supersedes_scope": "delta only: hint_unread string change, hint_answer/hint_dismiss_all maxCells widening, and the two expanded context notes. ntt1 remains the audit of record for the unchanged 71 strings.",
+  "audit_id_assigned_by": "translation-auditor, assigned by delegation on 2026-10-25",
+  "audit_kind": "independent_delta_byte_namespace_audit",
+  "locale": "es",
+  "namespace": "tui.notifications",
+  "audit_date": "2026-10-25",
+  "audited_revision": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+  "audited_revision_note": "English source read from the committed tip. The es catalogue is UNTRACKED at this tip and the English context sidecar is MODIFIED in the working tree (git status: '?? es/tui.notifications.json', ' M en/tui.notifications.context.json'); the committed sidecar still carries maxCells 8 and 12 with the old notes. The audit binds the on-disk bytes named in input_hashes and keeps the committed sidecar as a control, because only the working-tree versions carry the changes under review.",
+  "attestation_revision": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+  "key_count": {
+    "en": 72,
+    "target": 72,
+    "context": 72
+  },
+  "verdict": "passed",
+  "result": "clean_of_blocker_and_major",
+  "verdict_reason": "Delta audit. hint_unread 'sin leer' is the correct state term, measures exactly 8 cells against an 8-cell budget, and now matches filter_unread, header_counts, nothing_unread and the audited desktop (filter.unread / flag.unread / drawer.group.unread all 'Sin leer'), with 'no leida(s)' retained only where a participle is required, exactly as the desktop does. The two widened budgets equal the measured need (hint_answer 9, hint_dismiss_all 14) and every other key retains its note, role and tone; the en message file is byte-identical to the round-1 pin, so no source string moved. The es text delta is exactly one key: 71/72 byte-identical. The two remaining over-budget chips (seen_live, seen_in_chat at 13/12) were re-measured on these bytes and remain harmless: absorbed by the title column, dropped wholesale below width 45, nothing clips.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, tui-audit-es)",
+    "instance": "288dd1136395",
+    "session": "288dd1136395",
+    "model": "radient/auto",
+    "actual_model_source": "Latest session model-switch notice: radient/auto after provider quota failures; the requested anthropic/claude-opus-5-5 and the intermediate anthropic/claude-sonnet-5-5 and openai/gpt-6.1-sol were not the model performing this audit.",
+    "date": "2026-10-25",
+    "independence": "Independent agent and context; authored none of the English source or the Spanish catalogue and applied none of this round's changes. No catalogue, code, generated file, git state or ledger was edited, staged, stashed, moved or deleted; the worktree was read-only and all work ran on scratchpad copies."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.json",
+      "revision": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+      "sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+      "unchanged_vs_round_1_pin": true,
+      "no_message_string_changed": true
+    },
+    "en_context_sidecar_on_disk": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+      "sha256": "9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6",
+      "state": "modified in working tree, NOT committed at the audited revision",
+      "used_for": "budgets under review (the shipped version if committed)"
+    },
+    "en_context_sidecar_committed": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+      "revision": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+      "sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+      "state": "committed tip",
+      "content": "still maxCells 8 / 12 with the round-1 notes; byte-identical to the round-1 pin",
+      "used_for": "control"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.notifications.json",
+      "sha256": "c4c2c502cd3805687bdaeb505b579c629a259bdbee3c453ba72539cca4588ac4",
+      "state": "untracked in the working tree",
+      "previous_target_sha256": "559d097210d68f5a15e3da4c584ba613360d63e3a2a4667602be7bcc1758f783"
+    }
+  },
+  "delta": {
+    "es_message_strings_changed": 1,
+    "es_message_strings_byte_identical": 71,
+    "es_changes": [
+      {
+        "key": "tui.notifications.hint_unread",
+        "old": "no leída",
+        "new": "sin leer",
+        "cells": 8,
+        "budget": 8,
+        "verdict": "accepted; resolves T-02"
+      }
+    ],
+    "context_field_changes_committed_to_disk": 4,
+    "context_changes": [
+      {"key": "tui.notifications.hint_answer", "field": "maxCells", "old": 8, "new": 9, "matches_measured_need": true},
+      {"key": "tui.notifications.hint_answer", "field": "note", "old_len": 36, "new_len": 334, "unrequested_but_accurate": true},
+      {"key": "tui.notifications.hint_dismiss_all", "field": "maxCells", "old": 12, "new": 14, "matches_measured_need": true},
+      {"key": "tui.notifications.hint_dismiss_all", "field": "note", "old_len": 34, "new_len": 390, "unrequested_but_accurate": true}
+    ],
+    "context_integrity": "72/72 keys both sides; every key retains note, role and tone; maxCells count unchanged at 53",
+    "unexpected_bytes": "none in the es or en message files; the two note fields moved beyond the two values the coordinator described, and the whole sidecar change is uncommitted at the audited tip"
+  },
+  "findings": [
+    {
+      "id": "T-01",
+      "severity": "minor",
+      "status": "open, drift-recorded",
+      "keys": ["tui.notifications.kind_updates", "tui.notifications.update_kind"],
+      "current": "novedad",
+      "proposed": "keep (budget-forced) or raise the 8-cell kind budget to 12 to allow actualización",
+      "reason": "Same English term 'update' maps to novedad in the two 8-cell kind slots and to actualización/actualizaciones elsewhere in this same file and in the audited desktop. Precedent for novedad exists in audited core es wire.slash.notifications_page. No completion/update mislabel. Kind budgets were not widened this round, so the forcing constraint is unchanged."
+    },
+    {
+      "id": "T-03",
+      "severity": "minor",
+      "status": "partially resolved (2 of 4 keys); remaining 2 confirmed acceptable",
+      "keys": ["tui.notifications.seen_live", "tui.notifications.seen_in_chat"],
+      "current": "visto en vivo (13/12), visto en chat (13/12)",
+      "proposed": "keep",
+      "reason": "Re-measured on the round-2 bytes: chip is a whole unit inside row_line, absorbed by the title column (4 and 1 cells at width 80) and dropped wholesale below width 45 (en 41/44). Nothing clips, wraps or overflows; the row arithmetic keeps the total at width. The other two keys of this finding closed by the budget widening to 9 and 14."
+    },
+    {
+      "id": "T-04",
+      "severity": "nit",
+      "status": "open, accepted deviation",
+      "keys": ["tui.notifications.updates_since"],
+      "current": "desde {time}",
+      "proposed": "keep",
+      "reason": "Desktop says desde las {time}; both are grammatical, and the desktop's form adds 4 cells and would break the 30-cell budget. Unaffected by this round."
+    },
+    {
+      "id": "T-05",
+      "severity": "nit",
+      "status": "open, accepted deviation",
+      "keys": ["tui.notifications.hint_select"],
+      "current": "elegir",
+      "proposed": "keep",
+      "reason": "Desktop Seleccionar is 11 cells against an 8-cell budget; elegir is a correct terse infinitive label."
+    },
+    {
+      "id": "T-06",
+      "severity": "nit",
+      "status": "open",
+      "keys": ["tui.notifications.seen_in_chat", "tui.notifications.seen_live"],
+      "current": "visto en chat / visto en vivo",
+      "proposed": "keep",
+      "reason": "Same concepts as audited desktop Visto en la conversación / Visto al llegar; 'chat' is a loanword where this file otherwise says conversación (four times). No <=12-cell form contains conversación (visto en conversación is 21 cells)."
+    },
+    {
+      "id": "T-07",
+      "severity": "nit",
+      "status": "open, unaddressed",
+      "keys": ["tui.notifications.banner_digest_title"],
+      "current": "{# notificaciones más de prioridad alta}",
+      "proposed": "{# notificaciones más, de prioridad alta} (39 cells at count 5, budget 60)",
+      "reason": "Without the comma, 'más de' reads first as the comparative 'more than'; the OS banner has 21 cells of headroom."
+    },
+    {
+      "id": "T-08",
+      "severity": "nit",
+      "status": "open",
+      "keys": ["tui.notifications.header_counts", "tui.notifications.section_waiting_here"],
+      "current": "{# por responder} / Por responder en esta conversación",
+      "proposed": "keep",
+      "reason": "Three renderings of 'waiting on you' across surfaces (en espera / Esperando tu respuesta / por responder); the desktop's section form is 48 cells against a 40-cell budget, so the shorter wording is forced."
+    },
+    {
+      "id": "T-09",
+      "severity": "nit",
+      "status": "open, accepted deviation",
+      "keys": ["tui.notifications.priority_normal_up"],
+      "current": "normal+",
+      "proposed": "keep",
+      "reason": "Audited desktop uses Normal y alta (13 cells) against an 8-cell header budget; the compact token is the only fit."
+    }
+  ],
+  "resolved_this_round": [
+    {"id": "T-02", "was": "minor", "key": "tui.notifications.hint_unread", "resolution": "changed to sin leer; 8 cells against budget 8; now consistent with filter_unread, header_counts, nothing_unread and the audited desktop state term"},
+    {"id": "T-03 (part)", "was": "minor", "key": "tui.notifications.hint_answer", "resolution": "maxCells widened 8 -> 9, the measured minimum; now 9/9"},
+    {"id": "T-03 (part)", "was": "minor", "key": "tui.notifications.hint_dismiss_all", "resolution": "maxCells widened 12 -> 14, the measured minimum; now 14/14"}
+  ],
+  "noted_outside_scope": [
+    {
+      "surface": "packaging",
+      "note": "The context sidecar change is uncommitted at the audited tip (git shows ' M'); as committed, maxCells are still 8/12 with the round-1 notes, and the es catalogue is untracked ('??'). If the branch merged as-is the widening this round approves would not ship. Both files must be committed for ntt2 to bind the shipped bytes.",
+      "severity": "note"
+    },
+    {
+      "surface": "packaging",
+      "note": "Four context fields changed, not the two the coordinator described: the two maxCells values plus both notes (36 -> 334 and 34 -> 390 characters), each gaining an audit rationale. The added prose is accurate against this audit's measurements (responder/contestar 9, responde 8 breaking the infinitive rule, French calibration, the 92-103 column band, the rejected ignorar todo). Named because the task asked for anything that moved.",
+      "severity": "note"
+    },
+    {
+      "surface": "core es wire.slash.notifications_page",
+      "note": "Carried from round 1: the one-liner 'Preguntas y novedades; read marca todo como leído' uses masculine singular where this file says 'como leídas' and the desktop says 'Marcar todo como leído'. Cross-surface inconsistency, not this file's defect.",
+      "severity": "note"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 6,
+    "rejected": 0,
+    "findings_total": 8,
+    "resolved_this_round": 3
+  },
+  "decisions": {
+    "hint_unread": "accepted and verified: correct Spanish state term, 8/8 cells, consistent with the audited desktop pattern (state term sin leer; participle no leída(s) only after marcar)",
+    "widened_budgets": "confirmed: hint_answer 9 and hint_dismiss_all 14 each equal the measured minimum for the Spanish string; no other key gained or lost a budget",
+    "seen_live_seen_in_chat": "confirmed still acceptable at 13 against 12: chip absorbed by the title column and dropped wholesale below width 45, nothing clips",
+    "es_delta": "exactly one message string changed, 71/72 byte-identical to the ntt1 set",
+    "verdict_binding": "the es ledger row may ship at c4c2c502cd3805687bdaeb505b579c629a259bdbee3c453ba72539cca4588ac4 provided the context sidecar is committed with it"
+  },
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Fit conclusions are arithmetic from the pinned renderer functions and rich.cells.cell_len at 8976104b83b; no live TUI capture, so no pixel-level claim.",
+    "The audit binds the on-disk bytes above. The es file is untracked and the context file is modified; if either changes before commit, this audit no longer applies to the shipped bytes."
+  ]
+}

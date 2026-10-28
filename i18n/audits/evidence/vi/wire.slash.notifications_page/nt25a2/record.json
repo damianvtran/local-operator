@@ -1,0 +1,175 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a2",
+  "audit_id_assigned_by": "manager delta-only remediation brief, 2026-10-25",
+  "audit_kind": "independent_current_byte_namespace_delta_audit",
+  "locale": "vi",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "audited_revision": null,
+  "audited_revision_note": "One-key remediation is uncommitted; input_hashes identify actual audited working-tree bytes. English/context match nt25a1; no commit attribution is inferred.",
+  "attestation_revision": null,
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "passed",
+  "verdict_reason": "V3 fixed: explicit tất cả restores bulk read scope; literal read, idiom, core ICU rendering and 47/50-cell limit pass.",
+  "auditor": {
+    "agent": "translation-auditor (audit-vi, lopdev team)",
+    "instance": "cfdff5945838",
+    "session": "cfdff5945838",
+    "model": "openai/gpt-6-astra",
+    "actual_model_source": "Explicit environment session-state update for this resumed turn: Model openai/gpt-6-astra. Previous round model is retained in its immutable record.",
+    "date": "2026-10-25",
+    "independence": "Same independent auditing session/context as nt25a1, distinct from L1-core-notify coder and UI translator; authored neither original nor repaired catalogue."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25",
+    "source": "delegation brief"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/wire.slash.notifications_page.json",
+      "sha256": "3cbc1d280d381eebbfc05436aafbb33b67ab15af7f3c2c61db71f35b4b64e9d5"
+    }
+  },
+  "artifacts": [
+    "audit.log",
+    "report.md",
+    "audit-script.py.txt",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "provenance": "Actual successful stdout captured during independent round-two execution; exit code 0.",
+    "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/vi-nt25a2-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/vi-nt25a2-home/config\" PATH=\"$PATH\" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=~/workspace/repos/lo-notifications-l1 ~/local-operator/.venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/notifications-vi-nt25a2.py\""
+  },
+  "findings": [],
+  "resolved_findings": [
+    {
+      "id": "V3",
+      "previous_record": "i18n/audits/evidence/vi/wire.slash.notifications_page/nt25a1/record.json",
+      "status": "fixed",
+      "key": "wire.slash.notifications_page.help",
+      "previous_text": "Câu hỏi và tin tác nhân; read: đánh dấu đã đọc",
+      "current_text": "Câu hỏi, cập nhật; read: đánh dấu tất cả đã đọc",
+      "resolution_evidence": "Current value equals previous proposed repair; contains tất cả and literal read; core render passes, width 47/50; original defect rejected by negative control.",
+      "commit": null,
+      "commit_note": "Coder has not committed unified remediation yet."
+    }
+  ],
+  "previous_audit": {
+    "record": "i18n/audits/evidence/vi/wire.slash.notifications_page/nt25a1/record.json",
+    "record_sha256": "97e20e3ac72ac3f1a664c542828d897ef171725a4d04a44d73be63b672e84801",
+    "receipt": "i18n/audits/evidence/vi/wire.slash.notifications_page/nt25a1/receipt.json",
+    "receipt_sha256": "f11e782c899ffb6db8c26cf1ad1c6215e5237ca865b383f8822874ff7c13b3d5",
+    "model": "openai/gpt-6.1-sol"
+  },
+  "retained_compatibility": [
+    {
+      "scope": "slash",
+      "role": "en",
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594",
+      "previous_sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594",
+      "unchanged": true
+    },
+    {
+      "scope": "slash",
+      "role": "en_context_sidecar",
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0",
+      "previous_sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0",
+      "unchanged": true
+    },
+    {
+      "scope": "errors",
+      "role": "en",
+      "path": "local_operator/i18n/catalogues/en/wire.errors.notifications.json",
+      "sha256": "f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c",
+      "previous_sha256": "f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c",
+      "unchanged": true
+    },
+    {
+      "scope": "errors",
+      "role": "en_context_sidecar",
+      "path": "local_operator/i18n/catalogues/en/wire.errors.notifications.context.json",
+      "sha256": "07ad1e5da403a5fccde5648f04cd10bf1263cabc50f5e1804644630c7ce13106",
+      "previous_sha256": "07ad1e5da403a5fccde5648f04cd10bf1263cabc50f5e1804644630c7ce13106",
+      "unchanged": true
+    },
+    {
+      "scope": "errors",
+      "role": "target",
+      "path": "local_operator/i18n/catalogues/vi/wire.errors.notifications.json",
+      "sha256": "57e1ee92a42b1ee80b1de3c13d7236feba902e19b8cffe60dac6200df948cb4d",
+      "previous_sha256": "57e1ee92a42b1ee80b1de3c13d7236feba902e19b8cffe60dac6200df948cb4d",
+      "unchanged": true
+    },
+    {
+      "scope": "UI",
+      "role": "en",
+      "path": "src/i18n/catalogues/en/ui.notifications.json",
+      "sha256": "ce0c8d6d9af80980667741dd6d289ab7312d04aaea0e717e5cef4cf55c2b37ae",
+      "previous_sha256": "ce0c8d6d9af80980667741dd6d289ab7312d04aaea0e717e5cef4cf55c2b37ae",
+      "unchanged": true
+    },
+    {
+      "scope": "UI",
+      "role": "target",
+      "path": "src/i18n/catalogues/vi/ui.notifications.json",
+      "sha256": "1234696a29eb8c99c828a11b2d920f95358f700fb96a32e95d8e031391e86dd6",
+      "previous_sha256": "1234696a29eb8c99c828a11b2d920f95358f700fb96a32e95d8e031391e86dd6",
+      "unchanged": true
+    },
+    {
+      "scope": "UI",
+      "role": "context",
+      "path": "src/i18n/catalogues/en/ui.notifications.context.json",
+      "sha256": "3804068c75073ce9663f73539b508cbb46e495488dc47e5dd97aa80fd1a6918e",
+      "previous_sha256": "3804068c75073ce9663f73539b508cbb46e495488dc47e5dd97aa80fd1a6918e",
+      "unchanged": true
+    }
+  ],
+  "retained_verdicts": {
+    "wire.errors.notifications": {
+      "status": "passed",
+      "keys_previously_read": 4,
+      "record": "i18n/audits/evidence/vi/wire.errors.notifications/nt25a1/record.json"
+    },
+    "ui.notifications": {
+      "status": "clean-with-findings",
+      "keys_previously_read": 130,
+      "receipt_repository": "local-operator-ui",
+      "receipt": "i18n/receipts/nt-vi-cfdff5945838.json",
+      "unresolved_minor": 2
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 0
+  },
+  "limitations": [
+    "Delta-only one-key audit; retained namespaces proved byte-compatible rather than re-audited.",
+    "LLM linguistic judgment, not human native-speaker review.",
+    "Cell-width check is not native rendered-fit proof."
+  ]
+}

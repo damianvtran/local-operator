@@ -1,0 +1,39 @@
+advisory: local_operator/compaction/snapcompact.py: 11 literal(s) against a ceiling of 10
+advisory: local_operator/evaluation/runner/provider_client.py: 11 literal(s) against a ceiling of 9
+advisory: local_operator/harness/subagent.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/harness_import/mapping.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/service.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/claude.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/codex.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/hub_sync/service.py: 4 literal(s) against a ceiling of 1
+advisory: local_operator/librarian/proactive.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/metadata.py: 8 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/store.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_cli.py: 78 literal(s) against a ceiling of 39
+advisory: local_operator/monitors/delivery.py: 19 literal(s) against a ceiling of 14
+advisory: local_operator/network/cli.py: 252 literal(s) against a ceiling of 228
+advisory: local_operator/network/meshupdate.py: 3 literal(s) against a ceiling of 2
+advisory: local_operator/network/relay.py: 32 literal(s) against a ceiling of 31
+advisory: local_operator/notifications/store.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/providers/auth_cli.py: 23 literal(s) against a ceiling of 20
+advisory: local_operator/server/routes/desktop_imports.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_librarian.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_team_bridge.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/catalog.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/delegated_retention.py: 12 literal(s) against a ceiling of 6
+advisory: local_operator/session_factory.py: 16 literal(s) against a ceiling of 15
+advisory: local_operator/supervisors.py: 7 literal(s) against a ceiling of 6
+advisory: local_operator/supplements/sweep.py: 6 literal(s) against a ceiling of 5
+advisory: local_operator/supplements/validate.py: 22 literal(s) against a ceiling of 21
+advisory: local_operator/team_bridge/connector/conversation.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/store.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/tool.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/agent_tool.py: 5 literal(s) against a ceiling of 4
+advisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/builtin.py: 134 literal(s) against a ceiling of 118
+advisory: local_operator/tui/session_move.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+local_operator/tui/notifications_render.py: 1 literal(s) against a ceiling of 0
+check.py: FAILED — 1 ratchet finding(s) in the enforced scope, 0 catalogue problem(s) (37 advisory finding(s) outside it). Extract the string, add `# i18n: ignore <reason>`, or (for a file-level exemption) record it in i18n/allowlist.toml with a reason.

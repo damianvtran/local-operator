@@ -84,6 +84,12 @@ def render_plist(config_dir: Path) -> dict[str, object]:
         # contract; the connector has no empty-index exit, so it keeps the
         # plain dictionary form.
         "KeepAlive": True,
+        # Belt and braces for whatever still exits (a lock loser, a crash):
+        # launchd's default 10 s throttle relaunches an always-on job six
+        # times a minute. The connector no longer exits on no-owner or on a
+        # refusal (it idles in-process), so this only paces real failures, at
+        # the loop's own backoff cap (loop.BACKOFF_MAX_S).
+        "ThrottleInterval": 60,
         "EnvironmentVariables": {"LOCAL_OPERATOR_CONNECTOR": "1"},
         # LATENT: nothing in production rewrites the connector plist yet, so an
         # already-installed LaunchAgent keeps launchd's /dev/null. The

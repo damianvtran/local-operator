@@ -284,6 +284,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # so no id can contribute a separator or a ``..`` and none of these can name a path
     # under ``sessions/``. The files are DERIVED — the transcript is the truth, and a
     # deleted index is rebuilt by the next scan.
+    # -- notifications inbox store ------------------------------------------------------
+    # The quarantine renames a corrupt store ONE DIRECTORY OVER: the target is
+    # ``<config>/notifications.db.corrupt-<stamp>``, a sibling of the file it moves, and
+    # neither path is derived from a session id or can name anything under ``sessions/``.
+    # It runs only after sqlite has refused the file as a database, and the alternative to
+    # moving it is leaving a file every later open fails on.
+    # moving it is leaving a file every later open fails on (R5-1).
+    (
+        "local_operator/notifications/store.py::NotificationStore._quarantine",
+        "os.replace",
+        "Renames a corrupt <config>/notifications.db beside itself; no session path involved",
+    ),
     (
         "local_operator/code_requests/ledger.py::_write_json",
         "<path>.replace",
@@ -2603,6 +2615,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Textual TeamFormPage.remove unmounts the page; no filesystem path",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_notifications_view",
+        "<path>.remove",
+        "Textual NotificationsView.remove unmounts the page; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_review_view",
         "<path>.remove",
         "Textual ReviewView.remove unmounts the page; no filesystem path",
@@ -3343,11 +3360,41 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # the staged->destination swap; ``_recover_one``'s replace restores a
     # crash-gap backup and its rmtree removes ONLY the crashed transaction's own
     # prepared staging tree.
+    # THE SHARED SWAP (``_swap``, called by ``apply`` and ``author``). It used
+    # to live inline in ``apply``; the three replaces moved here unchanged: the
+    # old-dir rename into the transaction backup, the concurrent-edit RESTORE of
+    # that backup, and the staged->destination swap. ``destination`` comes only
+    # from ``_locations``/``path``, i.e. ``<config_dir>/skills/<alias>`` with the
+    # alias authenticated by ``validate_name`` (one kebab-case segment: no
+    # ``/``, ``..``, dot-lead, backslash or colon) and the root and the alias
+    # refused if either is a symlink; ``staged`` and ``backup`` are fixed
+    # ``<config_dir>/hub/staging|backups/<operation>`` names with every
+    # scaffold directory symlink-checked. A skill directory the user chose to
+    # edit is therefore the only thing displaced, and always with its backup
+    # made first. Evidence the ratchet leans on:
+    # tests/unit/hub_sync/test_skill_storage_author.py::
+    # test_a_crafted_alias_cannot_aim_author_or_remove_at_sessions,
+    # test_a_symlink_into_sessions_is_refused_by_every_rename and
+    # test_a_forged_journal_alias_cannot_aim_the_swap_at_sessions -- each aims
+    # the call at a real <config_dir>/sessions/<id> and asserts a typed refusal
+    # with sessions/ byte-identical.
     (
-        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.apply",
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._swap",
         "os.replace",
-        "Old-dir rename, concurrent-edit restore and staged swap under <config_dir>/skills + hub/",
+        "Old-dir backup, edit restore and staged swap of <config_dir>/skills/<validated alias>",
         3,
+    ),
+    # LOCAL REMOVE. Same path construction as above: the source is
+    # ``path(alias)`` (validated alias under <config_dir>/skills, symlinks
+    # refused) and the destination is <config_dir>/hub/backups/skill-local-
+    # <alias>-<uuid4 hex> with ``hub`` and ``backups`` symlink-checked first. It
+    # is a single same-filesystem rename that KEEPS the bytes -- never an rmtree
+    # -- and a linked alias is refused before it is reached. The same three
+    # tests above drive ``remove_local`` at sessions/ and show it refused.
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.remove_local",
+        "os.replace",
+        "Moves <config_dir>/skills/<validated alias> to its own hub/backups/skill-local-* copy",
     ),
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_one",

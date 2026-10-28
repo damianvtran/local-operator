@@ -84,6 +84,11 @@ async def _allow_quiet() -> None:
     return None
 
 
+async def _allow_notify(**_kwargs: Any) -> str:
+    """Presence-only inbox door for ``notify``; the builder reads no more."""
+    return "Notified."
+
+
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
@@ -127,6 +132,9 @@ def _engine_context(**kwargs) -> ToolContext:
         # same rule as the doors above, so the fully-capable surface is the
         # one DEFAULT_TOOL_NAMES describes.
         bridge_runtime=object(),
+        # The inbox door (docs/design/notifications-inbox.md §3.2): presence-
+        # only, the ONE fact ``build_notify_tool``'s createIf gate reads.
+        notify_inbox=_allow_notify,
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -287,6 +295,22 @@ def test_default_set_drops_no_reply_without_the_quiet_end_door() -> None:
     assert without == [name for name in withdoor if name != "no_reply"]
 
 
+def test_notify_follows_the_inbox_door_and_nothing_else() -> None:
+    """The door is the session's ONE availability fact for ``notify``.
+
+    The session binds it to ``None`` for a delegated child, a session the
+    listings hide, a one-shot host, an output-contract session and under
+    ``LOP_NOTIFY=0`` (``Session._notify_inbox_callable``), so from the
+    registry's point of view those are one predicate, asserted here as a delta
+    against the fully-capable surface. The session-side binding of each case is
+    pinned in tests/unit/notifications/test_notify_tool.py.
+    """
+    withdoor = [tool.name for tool in create_tools(_engine_context())]
+    without = [tool.name for tool in create_tools(_engine_context(notify_inbox=None))]
+    assert "notify" in withdoor
+    assert without == [name for name in withdoor if name != "notify"]
+
+
 def test_the_newest_appends_stay_last_in_both_tables() -> None:
     """Appending never shifts a provider-visible array prefix — the prompt
     cache keys on that array — so both tables must END with the newest
@@ -303,23 +327,27 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     session-tag category tool, unconditional because the store sits beside
     every config root) appended after that — and ``artifact_data`` (the
     claude.ai artifact data store, createIf-gated on a stored anthropic OAuth
-    grant) is the newest append and now ends both tables."""
-    assert DEFAULT_TOOL_NAMES[-1] == "artifact_data"
-    assert list(TOOL_BUILDERS)[-1] == "artifact_data"
-    assert DEFAULT_TOOL_NAMES[-2] == "tags"
-    assert list(TOOL_BUILDERS)[-2] == "tags"
-    assert DEFAULT_TOOL_NAMES[-4:-2] == ["generate_voiceover", "generate_sound_effect"]
-    assert list(TOOL_BUILDERS)[-4:-2] == ["generate_voiceover", "generate_sound_effect"]
-    assert DEFAULT_TOOL_NAMES[-5] == "bridge"
-    assert list(TOOL_BUILDERS)[-5] == "bridge"
-    assert DEFAULT_TOOL_NAMES[-6] == "setting"
-    assert list(TOOL_BUILDERS)[-6] == "setting"
-    assert DEFAULT_TOOL_NAMES[-7] == "video_status"
-    assert list(TOOL_BUILDERS)[-7] == "video_status"
-    assert DEFAULT_TOOL_NAMES[-8] == "generate_video"
-    assert list(TOOL_BUILDERS)[-8] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-9] == "no_reply"
-    assert list(TOOL_BUILDERS)[-9] == "no_reply"
+    grant) appended after that — and ``notify`` (the operator's inbox,
+    createIf-gated on the session's inbox door) is the newest append and now
+    ends both tables."""
+    assert DEFAULT_TOOL_NAMES[-1] == "notify"
+    assert list(TOOL_BUILDERS)[-1] == "notify"
+    assert DEFAULT_TOOL_NAMES[-2] == "artifact_data"
+    assert list(TOOL_BUILDERS)[-2] == "artifact_data"
+    assert DEFAULT_TOOL_NAMES[-3] == "tags"
+    assert list(TOOL_BUILDERS)[-3] == "tags"
+    assert DEFAULT_TOOL_NAMES[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
+    assert list(TOOL_BUILDERS)[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
+    assert DEFAULT_TOOL_NAMES[-6] == "bridge"
+    assert list(TOOL_BUILDERS)[-6] == "bridge"
+    assert DEFAULT_TOOL_NAMES[-7] == "setting"
+    assert list(TOOL_BUILDERS)[-7] == "setting"
+    assert DEFAULT_TOOL_NAMES[-8] == "video_status"
+    assert list(TOOL_BUILDERS)[-8] == "video_status"
+    assert DEFAULT_TOOL_NAMES[-9] == "generate_video"
+    assert list(TOOL_BUILDERS)[-9] == "generate_video"
+    assert DEFAULT_TOOL_NAMES[-10] == "no_reply"
+    assert list(TOOL_BUILDERS)[-10] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:

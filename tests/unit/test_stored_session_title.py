@@ -32,6 +32,7 @@ from local_operator.resume import (
 )
 from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
 from local_operator.session.transcript import Transcript
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 
 
 def _session(tmp_path: Path, opener: str, *titles: tuple[str, bool]) -> Path:
@@ -124,25 +125,13 @@ def test_the_newest_title_wins(tmp_path: Path):
 
 
 def _skill_payload(typed: str) -> str:
-    """A ``$skill`` invocation in its PERSISTED form.
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    The real ``Skill`` and the real renderer, because the payload written to the
-    transcript is what this fallback reads — a hand-spelled tag would pin a
-    shape the product never produces.
+    The reader is kept forever (old transcripts never migrate), so this pins the
+    shape it must keep reading; ``legacy_skill_payload`` reproduces the deleted
+    writer's attribute escaping.
     """
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
-
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    return legacy_skill_payload(typed)
 
 
 def test_a_session_with_no_stored_title_falls_back_to_its_opener(tmp_path: Path):

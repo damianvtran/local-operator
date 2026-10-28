@@ -126,7 +126,13 @@ from local_operator.media import sniff_image_file
 # :func:`_reference_tokens`, which is resolver logic and stayed behind: the
 # submit side reads where a token ends from the leaf rather than reimplementing
 # it, which is precisely what ``sigils.py`` exists for.
-from local_operator.sigils import _token_end, at_token, is_boundary, split_token
+from local_operator.sigils import (
+    _token_end,
+    at_token,
+    is_boundary,
+    skill_block_spans,
+    split_token,
+)
 from local_operator.tools.builtin import (
     _BINARY_PEEK_BYTES,
     _GREP_PRUNE_DIRS,
@@ -975,8 +981,9 @@ class _Resolved(NamedTuple):
 def _attribute(value: str) -> str:
     """Escape a value for an XML-ish attribute, reversibly.
 
-    Character-for-character ``skills/invoke.py::_escape_attr`` (``:210-224``),
-    and the completeness is load-bearing rather than tidy. Escaping only ``"``
+    The same escape set the legacy ``$skill`` writer used for its ``invocation``
+    attribute (deleted with that writer; the reader is kept), and the
+    completeness is load-bearing rather than tidy. Escaping only ``"``
     is not enough: a value carrying ``<`` and ``>`` can spell
     ``</operator-references>`` inside the attribute, which terminates the block
     EARLY for :func:`_block_spans`. Every ``typed=`` after the forgery then
@@ -1148,9 +1155,21 @@ def _reference_tokens(text: str) -> tuple[list[_Token], int]:
     disable references for the rest of a message with no trace. Every other
     non-expansion in this module emits a notice; the count is returned so this
     one can too.
+
+    A token inside a SKILL block is skipped for the same reason but is NOT
+    counted: there is no reference block to report, and the skill body is
+    expected to quote paths (`reference files, if any, are listed…`) so every
+    attachment would otherwise raise a warning about a marker that is not
+    there.
     """
-    skip = _block_spans(text)
-    resolved = _already_expanded(text, skip)
+    reference_spans = _block_spans(text)
+    # A SKILL body is a file's content, so an `@path` inside one is prose the
+    # skill documents, not a reference the operator made. Measured before this:
+    # a body containing `@notes.txt` read that file into the message, and with
+    # several bodies attached the leak multiplies — and can raise an approval
+    # prompt for a file nobody referenced (design D7).
+    skip = reference_spans + skill_block_spans(text)
+    resolved = _already_expanded(text, reference_spans)
     tokens: list[_Token] = []
     suppressed = 0
     index = 0
@@ -1165,7 +1184,8 @@ def _reference_tokens(text: str) -> tuple[list[_Token], int]:
             line_stop = text.find("\n", index)
             line_stop = len(text) if line_stop == -1 else line_stop
             _end, query = _token_end(text[index:line_stop], 0)
-            if query and text[index : index + _end] not in resolved:
+            in_reference = any(start <= index < end for start, end in reference_spans)
+            if in_reference and query and text[index : index + _end] not in resolved:
                 suppressed += 1
             index += 1
             continue
@@ -1452,11 +1472,11 @@ def _render(
     for one of them — which is precisely what happened to the overflow tail.
     See :func:`_render_listed`.
 
-    ``typed=`` carries the token EXACTLY as written, mirroring
-    ``render_invocation``'s ``invocation=`` attribute
-    (``skills/invoke.py:198-201``) and for the same reason: the payload is what
-    gets PERSISTED, so a resumed session replays this string and the surfaces
-    recover the short row by reading the attribute back out of it.
+    ``typed=`` carries the token EXACTLY as written, the same recovery the
+    legacy ``$skill`` payload's ``invocation=`` attribute provides and for the
+    same reason: the payload is what gets PERSISTED, so a resumed session
+    replays this string and the surfaces recover the short row by reading the
+    attribute back out of it.
 
     Attributes are escaped and the body is defused, because BOTH are attacker
     controlled — a path and a file's content are whatever is on disk. See

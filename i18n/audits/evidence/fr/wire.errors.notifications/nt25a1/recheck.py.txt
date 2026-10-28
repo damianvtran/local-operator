@@ -1,0 +1,57 @@
+"""Read-only current-byte verification with the core's actual ICU runtime."""
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1])
+namespace = sys.argv[2]
+sys.path.insert(0, str(root))
+from local_operator.i18n.runtime import parse_message, message_arguments, plural_selectors, render_message, MessageSyntaxError
+from rich.cells import cell_len as wcswidth
+
+pin = '3c16a9e77c63dce7082af6137e151421b6cbf2be'
+head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+print('HEAD', head, 'REQUESTED_PIN', pin)
+loaded = {}
+for role, relative in [('en', f'local_operator/i18n/catalogues/en/{namespace}.json'), ('fr', f'local_operator/i18n/catalogues/fr/{namespace}.json'), ('context', f'local_operator/i18n/catalogues/en/{namespace}.context.json')]:
+    current = (root / relative).read_bytes()
+    pinned = subprocess.check_output(['git', '-C', str(root), 'show', f'{pin}:{relative}'])
+    assert current == pinned
+    print('INPUT', role, relative, hashlib.sha256(current).hexdigest(), 'PIN_BYTE_MATCH PASS')
+    loaded[role] = json.loads(current)
+assert loaded['en'].keys() == loaded['fr'].keys() == loaded['context'].keys()
+for key, source in loaded['en'].items():
+    target = loaded['fr'][key]
+    parse_message(source)
+    parse_message(target)
+    assert sorted(message_arguments(source)) == sorted(message_arguments(target))
+    assert plural_selectors(source) == plural_selectors(target) == ()
+    params = {'where': '/synthetic/config/[alerts] & {literal}'} if message_arguments(source) else {}
+    output = render_message(target, params, 'fr')
+    if params:
+        assert params['where'] in output
+    print('PARSE_ARGS_PASS', key, repr(message_arguments(target)))
+    print('FR_RENDER', key, output)
+    assert not any('\u202a' <= c <= '\u202e' or '\u2066' <= c <= '\u2069' for c in target)
+    if 'maxCells' in loaded['context'][key]:
+        budget = loaded['context'][key]['maxCells']
+        width = wcswidth(output)
+        assert 0 <= width <= budget
+        assert output.count('read') == 1
+        print('LITERAL_READ PASS', 'CELL_WIDTH', width, 'MAX', budget)
+        proposal = 'Demandes et mises à jour d’agents\u202f; read\u202f: tout lu'
+        proposed_width = wcswidth(proposal)
+        assert proposed_width <= budget and proposal.count('read') == 1
+        print('PROPOSED_MINOR_REPAIR', proposal, 'CELL_WIDTH', proposed_width, 'MAX', budget)
+try:
+    parse_message('{where')
+except MessageSyntaxError:
+    print('NEGATIVE_CONTROL malformed_ICU PASS')
+else:
+    raise AssertionError('Malformed ICU was accepted')
+assert message_arguments('{where}') != message_arguments('texte sans paramètre')
+print('NEGATIVE_CONTROL dropped_placeholder PASS')
+print('SUMMARY', namespace, 'key_count', len(loaded['en']), 'parsed_messages', len(loaded['en']) * 2, 'rendered_fr', len(loaded['fr']), 'PASS')
+print('LIMITATION source/parser proof only; no browser/native/rendered-fit claim')

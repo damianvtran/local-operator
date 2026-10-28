@@ -10,8 +10,9 @@ are ordinary characters in a sentence, and ``costs$5`` is money, not a skill.
 Two layers are asserted separately because they regress independently:
 
 - the GRAMMAR (:func:`skill_token_spans`): every boundary ``$name`` on a line,
-  with the RESOLVER's extent — pinned against ``skills.invoke._INVOCATION_RE``
-  itself, so the ink cannot claim a token the submit-side parser would read
+  with the resolver's extent — pinned against
+  :func:`local_operator.sigils.skill_name_spans`, the scan the trigger itself
+  trims, so the ink cannot claim a token the submit-side parser would read
   differently;
 - the RENDER PATH (``Editor._skill_runs`` and the strip ``render_line``
   produces): the state gates on the real ``OperatorApp``, read off the finished
@@ -22,7 +23,8 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.skills.invoke import _INVOCATION_RE
+from local_operator.sigils import skill_mentions, skill_name_spans
+from local_operator.slash_commands import SLASH_COMMANDS
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.command_picker import PickerMode, skill_token_spans
@@ -94,24 +96,21 @@ def test_the_scan_reads_every_boundary_token(
         "研究",
     ],
 )
-def test_the_scan_agrees_with_the_submit_resolver(name: str) -> None:
-    """The extent is the RESOLVER's, pinned against the resolver itself.
+def test_the_ink_scan_is_the_submit_trigger_s_scan(name: str) -> None:
+    """One span scanner, two readers.
 
-    ``command_picker`` does not import ``skills.invoke`` — that module pulls
-    the discovery tree in, and the widget tree is on the app's boot path — so
-    the name class is reproduced there. This is the pin that keeps the two
-    from drifting: whatever ``_INVOCATION_RE`` will read on submit, the scan
-    spans the same characters.
+    ``skill_token_spans`` is a delegate to :func:`sigils.skill_name_spans`, the
+    same scan :func:`sigils.skill_mentions` trims and resolves, so the characters
+    the ink paints cannot differ from the characters the trigger reads. And a
+    mention that fires always STARTS on a scanned span: the trim only ever
+    shortens the tail.
     """
     line = "$" + name
-    match = _INVOCATION_RE.match(line)
     spans = skill_token_spans(line)
-    if match is None:
-        assert spans == [], "the scan claimed a token the resolver rejects"
-        return
-    assert spans, "the resolver reads a token the scan missed"
-    start, end, read = spans[0]
-    assert (start, end, read) == (match.start(), match.end(), match.group(1))
+    assert spans == skill_name_spans(line)
+    for mention in skill_mentions(line, {name}):
+        assert any(start == mention.start for start, _end, _read in spans)
+        assert spans[0][0] <= mention.start < spans[0][1]
 
 
 # --- the state matrix (no I/O: the gate reads only its own inputs) -----------
@@ -128,13 +127,22 @@ def _editor(text: str, names: frozenset[str] | set[str] | None) -> Editor:
 @pytest.mark.parametrize(
     ("text", "names", "expected"),
     [
-        # RESOLVED: exact case-insensitive membership, whole buffer scannable.
+        # RESOLVED: the trigger accepts the token, wherever it sits.
         ("$research fix this", {"research"}, {0: [(0, 9, SKILL)]}),
         ("$Research", {"research"}, {0: [(0, 9, SKILL)]}),
         ("$research,", {"research"}, {0: [(0, 9, SKILL)]}),
+        # A trailing dot is trimmed OFF the token, not claimed as part of it.
+        ("$research.", {"research"}, {0: [(0, 9, SKILL)]}),
+        ("fix this $research", {"research"}, {0: [(9, 18, SKILL)]}),
+        # EVERY resolved token on a line is inked, not just the first.
+        (
+            "$research and $code-review",
+            {"research", "code-review"},
+            {0: [(0, 9, SKILL), (14, 26, SKILL)]},
+        ),
+        ("\n$research", {"research"}, {1: [(0, 9, SKILL)]}),
         # ATTEMPTED: leading, whole trimmed draft, lowercase, unresolved.
         ("$zzz", {"research"}, {0: [(0, 4, SKILL_UNKNOWN)]}),
-        ("$research.", {"research"}, {0: [(0, 10, SKILL_UNKNOWN)]}),
         # An EMPTY-but-settled vocabulary resolves nothing and still dims.
         ("$zzz", set(), {0: [(0, 4, SKILL_UNKNOWN)]}),
         # ...but a vocabulary that was never pushed claims NOTHING at all.
@@ -143,12 +151,10 @@ def _editor(text: str, names: frozenset[str] | set[str] | None) -> Editor:
         # No lowercase evidence: money and shell stay prose.
         ("$5", {"research"}, {}),
         ("$PATH", {"research"}, {}),
+        ("do $RESEARCH", {"research"}, {}),
         # Not the whole draft: the muted sentence would be about the wrong thing.
         ("$zzz fix this", {"research"}, {}),
         ("$research $other", {"research"}, {0: [(0, 9, SKILL)]}),
-        # INLINE: only the buffer's first token can be leading.
-        ("fix this $research", {"research"}, {}),
-        ("\n$research", {"research"}, {1: [(0, 9, SKILL)]}),
         # Glued and headless forms open no span at all.
         ("costs$5 for it", {"research"}, {}),
         ("$_private", {"research"}, {}),
@@ -168,6 +174,13 @@ def test_the_state_matrix(
     carries which spans, which is the shape the paint consumes.
     """
     assert _editor(text, names)._compute_skill_runs() == expected
+
+
+def test_an_inline_token_is_inked_before_acceptance() -> None:
+    """The ink claims "this will fire", and the trigger now says it does."""
+    assert _editor("fix this $research", {"research"})._compute_skill_runs() == {
+        0: [(9, 18, SKILL)]
+    }
 
 
 def test_a_resolved_token_on_a_later_line_still_resolves() -> None:
@@ -380,6 +393,151 @@ async def test_an_unresolved_word_dims_once_the_word_stops_matching() -> None:
         assert _ink_on(_segment_inks(editor), "$zzz") == dim, "the inert ink"
 
 
+def _push_vocabulary(app: OperatorApp, editor: Editor) -> None:
+    """Publish the real command and skill vocabularies, so ink tests are honest.
+
+    `_skill_names is None` suppresses every span, and an empty command
+    vocabulary makes every leading `/word` prose — either would make a
+    "no ink here" test pass for the wrong reason.
+    """
+    editor.set_commands(list(SLASH_COMMANDS))
+    editor.set_skill_names(frozenset(app._discovered_skills()))
+    assert editor._skill_names, "premise: the vocabulary is published"
+    assert "btw" in editor._command_names, "premise: the command list is published"
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!echo $research",
+        "! $research",
+        "! echo $research and more",
+        "/btw $research",
+        "/help $research",
+        "/model $research",
+    ],
+)
+async def test_no_ink_where_submit_never_expands(text: str) -> None:
+    """The ink must not claim a skill fires on a line submit never scans.
+
+    Round 1, M1: bang/shell lines, the `/btw` aside and every leading command
+    whose handler does not expand a skill all painted the resolved ink.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    dim = theme_mod.semantic_color("dim").lower()
+    prose = theme_mod.semantic_color("fg").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, text)
+        _push_vocabulary(app, editor)
+        # Scoped to the TOKEN: a leading command word carries its own slash ink,
+        # which is a different claim and not the one under test.
+        ink = _ink_on(_segment_inks(editor), "$research")
+        assert ink == prose, f"{text!r} inked the token {ink!r}"
+        assert _ink_on(_segment_inks(editor), "$research") != dim
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_shell_MODE_is_not_inked_either() -> None:
+    """`set_shell_mode(True)` with no `!` is still a shell line."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.set_shell_mode(True)
+        editor = await _draft(app, pilot, "echo $research")
+        _push_vocabulary(app, editor)
+        assert signal not in [_ink for _text, _ink in _segment_inks(editor)]
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_leaving_bang_mode_recomputes_the_ink_for_the_kept_line() -> None:
+    """Esc out of bang mode keeps the text, and the same text now attaches.
+
+    The memo key read every input except the shell state, so the empty runs
+    computed under `!` survived the mode change until the next keystroke: the
+    ink still said "prose" for a line Enter would now send as a prompt that
+    expands (review round 2, m2). Both directions are asserted, so a key that
+    merely forgot to clear cannot pass.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "echo $research")
+        _push_vocabulary(app, editor)
+        await pilot.pause()
+        assert _ink_on(_segment_inks(editor), "$research") == signal, "premise: prose inks"
+        editor.set_shell_mode(True)
+        await pilot.pause()
+        assert _ink_on(_segment_inks(editor), "$research") != signal, "shell mode inks nothing"
+        editor.set_shell_mode(False)
+        await pilot.pause()
+        assert _ink_on(_segment_inks(editor), "$research") == signal, "the kept line inks again"
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_a_draft_opening_with_a_blank_line_inks_its_command_tail() -> None:
+    """The claim is read from its own line, not line 0 (review round 2, n1)."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "\n/team backend fix $research")
+        _push_vocabulary(app, editor)
+        assert _ink_on(_segment_inks(editor, 1), "$research") == signal
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_an_open_aside_does_not_ink_a_skill() -> None:
+    """The aside borrows the composer but never expands a skill (M1)."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        assert app._open_aside() is not None, "premise: the aside opened"
+        await pilot.pause()
+        editor = await _draft(app, pilot, "what about $research here")
+        _push_vocabulary(app, editor)
+        assert editor._skill_names is not None
+        assert signal not in [_ink for _text, _ink in _segment_inks(editor)]
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_a_command_argument_tail_IS_inked() -> None:
+    """`/team backend $…` reaches `_submit_command_prompt`, so it fires."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "/team backend $research")
+        _push_vocabulary(app, editor)
+        assert _ink_on(_segment_inks(editor), "$research") == signal
+
+
+@pytest.mark.usefixtures("skill_root")
+@pytest.mark.asyncio
+async def test_a_leading_token_IN_THE_ARGUMENT_gets_the_legacy_case_rule() -> None:
+    """`/team backend $RESEARCH` is leading IN THE ARGUMENT, so submit fires it.
+
+    Round 1, m4: the ink scanned the whole line, where the token is not leading,
+    so it painted nothing while submit attached the body.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "/team backend $RESEARCH fix it")
+        _push_vocabulary(app, editor)
+        assert _ink_on(_segment_inks(editor), "$RESEARCH") == signal
+
+
 @pytest.mark.usefixtures("skill_root")
 @pytest.mark.asyncio
 async def test_money_and_shell_stay_prose_in_the_real_composer() -> None:
@@ -396,25 +554,24 @@ async def test_money_and_shell_stay_prose_in_the_real_composer() -> None:
 
 @pytest.mark.usefixtures("skill_root")
 @pytest.mark.asyncio
-async def test_an_inline_token_gets_nothing_until_acceptance() -> None:
-    """`fix this $res` is not the anchored shape yet — acceptance makes it one.
+async def test_an_inline_token_is_inked_where_it_was_typed() -> None:
+    """`fix this $res` is inked AS a token before any acceptance.
 
-    Enter on the offered row reassembles the token to the FRONT (the existing
-    picker contract: the submit parser is anchored), and that is the moment the
-    resolved ink becomes true.
+    The trigger fires mid-sentence, so the ink must say so immediately; and
+    accepting the offered row edits only the token, leaving the draft in place.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     signal = theme_mod.semantic_color("signal").lower()
     async with app.run_test(size=(100, 30)) as pilot:
-        editor = await _draft(app, pilot, "fix this $res")
+        editor = await _draft(app, pilot, "fix this $research")
         assert editor.picker.is_open(), "premise: the inline evidence gate opened the list"
-        assert signal not in [ink for _text, ink in _segment_inks(editor)], "not yet"
+        assert _ink_on(_segment_inks(editor), "$research") == signal
 
         await pilot.press("enter")
         for _ in range(6):
             await pilot.pause()
-        assert editor.text == "$research fix this ", editor.text
-        assert _ink_on(_segment_inks(editor), "$research") == signal, "after acceptance"
+        assert editor.text == "fix this $research ", editor.text
+        assert _ink_on(_segment_inks(editor), "$research") == signal
 
 
 @pytest.mark.usefixtures("skill_root")
@@ -436,11 +593,14 @@ async def test_a_slash_claimed_token_stays_prose() -> None:
         assert _ink_on(_segment_inks(editor), "$5") == prose, _segment_inks(editor)
 
         # The TUI's RELAXED claim (a prompt command past its name slot) makes
-        # `$research` a live skill token — and the ink still stays off it,
-        # because a leading token this is not.
+        # `$research` a live skill token — and it IS inked, because a submit
+        # would attach it.
         editor = await _draft(app, pilot, "/team delivery $research")
         assert editor.picker.mode is PickerMode.SKILL, "premise: the relaxed claim keeps it one"
-        assert _ink_on(_segment_inks(editor), "$research") == prose, _segment_inks(editor)
+        assert (
+            _ink_on(_segment_inks(editor), "$research")
+            == theme_mod.semantic_color("signal").lower()
+        ), _segment_inks(editor)
 
 
 @pytest.mark.asyncio

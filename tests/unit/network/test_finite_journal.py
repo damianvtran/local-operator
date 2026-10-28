@@ -255,6 +255,9 @@ def test_complete_disclosure_is_before_signer_and_stdout_stays_one_object(
             assert error.code == "not_a_holder"
     rec = F.request(N, rig.own.device_id, rig.peer.device_id, P, "session", rig.root)
     expected = F.details(rec)
+    # Logical lines are compared, so the terminal is wide enough not to wrap them (the CLI
+    # word-wraps to the terminal since design review #3002 r1, D3).
+    monkeypatch.setenv("COLUMNS", "1000")
     software = A.sign_decision
     observed = []
 
@@ -317,12 +320,16 @@ def test_finite_refusal_keeps_codes_and_exact_recovery_not_onboarding(
     )
     output = capsys.readouterr()
     payload = json.loads(output.out)
-    assert (
-        "--request-approval" in payload["message"]
-        and "approvals approve" in payload["message"]
-        and "--approval" in payload["message"]
-    )
+    # The recipe rides as whole commands beside the sentence since #3002 r2 (UX U8a, design
+    # D9): the sentence is the plain reason + next step every surface shows, with no syntax.
+    # Only the request command: it prints the new card's Approve/Apply with the real id (U12).
+    (request,) = payload["commands"]
+    assert request.endswith("--request-approval") and request.startswith("lop network ")
+    assert "<new-approval-id>" not in output.err
+    assert "a new request is needed" in payload["message"] and "lop " not in payload["message"]
     assert "new onboarding" not in payload["message"] and "setup" not in payload["message"]
+    # stderr prints each command whole on its own line (design D6).
+    assert all(command in output.err.splitlines() for command in payload["commands"])
 
 
 @pytest.mark.parametrize(

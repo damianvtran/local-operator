@@ -1090,6 +1090,12 @@ def _spawn_standby(
     env = dict(os.environ)
     for key in CONTRACT_KEYS + ("LOP_RUNTIME_ADOPT_SESSION",):
         env.pop(key, None)
+    # A warm is a future session runtime: it never holds the daemon's desktop bearer
+    # either (operator ask a-772b). Adoption then installs the requester's environment,
+    # which ``launch._spawn_runtime`` already built without it.
+    from local_operator.agent_shell import without_daemon_bearer
+
+    without_daemon_bearer(env)
     # Pinned, because the child resolves its root from the environment and a
     # warmer's own environment is the only one it should serve. Safe to pin: the
     # config dir is read at call time, not by the warm, and adoption replaces

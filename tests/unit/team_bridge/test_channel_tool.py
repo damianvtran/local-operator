@@ -211,6 +211,11 @@ def test_the_schema_names_the_channel_ops_and_never_decide() -> None:
     assert "decide" not in op_enum
     assert set(CHANNEL_OPS) <= set(BRIDGE_OPS)
     assert tool.parameters["additionalProperties"] is False
+    # No `status` option: the agent sees live conversations only, and publishing one optional
+    # field costs ~22 billed tokens against a child-arm ratchet with 2 tokens of headroom
+    # (see the `channels` paragraph of local_operator/team_bridge/tool.py). Adding it is a
+    # deliberate budget decision, so this fails until that decision is taken.
+    assert "status" not in tool.parameters["properties"]
     # The model cannot name an actor: identity is runtime state only.
     assert "actor_endpoint_id" not in schema
     assert "origin_session_id" not in schema

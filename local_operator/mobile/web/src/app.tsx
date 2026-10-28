@@ -9,6 +9,8 @@ import { PairScreen } from "./screens/pair";
 import { AccountRoutingScreen } from "./screens/account-routing";
 import { LibraryScreen } from "./screens/library";
 import { LibraryAssetScreen } from "./screens/library-asset";
+import { NotificationDetailScreen } from "./screens/notification-detail";
+import { NotificationsScreen } from "./screens/notifications";
 import { PastSessionsScreen } from "./screens/past-sessions";
 import { SessionListScreen } from "./screens/session-list";
 import { SessionScreen } from "./screens/session-view";
@@ -29,6 +31,10 @@ export function App() {
 			return <LibraryScreen />;
 		case "library-asset":
 			return <LibraryAssetScreen key={route.assetId} assetId={route.assetId} />;
+		case "notifications":
+			return <NotificationsScreen />;
+		case "notification":
+			return <NotificationDetailScreen key={route.itemId} itemId={route.itemId} />;
 		case "pair":
 			return <PairScreen />;
 		case "session":

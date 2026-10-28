@@ -615,4 +615,10 @@ def child_environment(
         )
     for name in policy.exclude:
         env.pop(name, None)
+    # LAST, and in BOTH modes: the daemon's desktop bearer never reaches a tool child,
+    # however the policy or an injection named it (operator ask a-772b; see
+    # ``agent_shell.DAEMON_BEARER_ENVS`` for the demonstrated path and the limit).
+    from local_operator.agent_shell import without_daemon_bearer
+
+    without_daemon_bearer(env)
     return env

@@ -420,26 +420,19 @@ def test_a_paired_call_still_settles_done() -> None:
 
 
 def test_a_skill_invocation_shows_the_typed_line_not_the_payload() -> None:
-    """D8: a ``$skill`` persists as its EXPANDED payload, and painting it
-    verbatim put the whole SKILL.md body in the user's bubble — and titled
-    the session after it."""
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import SkillInvocation, render_invocation
+    """A ``$skill`` persists as a payload, and painting it verbatim put the
+    whole SKILL.md body in the user's bubble — and titled the session after it.
 
-    # The REAL Skill type and the REAL renderer: a stub here would test a
-    # payload shape the product never produces, and it is the product's own
-    # ``invocation`` attribute that ``typed_line_of`` reads back.
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
+    Written in the LEGACY shape on purpose: that is the persisted form's reader
+    this test pins, and old transcripts never migrate.
+    """
     typed = "$research the widget market"
-    payload = render_invocation(
-        SkillInvocation(skill=skill, request="the widget market", token="$research", typed=typed),
-        "# Research\n\n" + "a very long skill body\n" * 50,
+    payload = (
+        "The user invoked the `research` skill directly. Follow it for this "
+        "request. Its reference files, if any, are listed at the end of the "
+        "body.\n"
+        f'<skill name="research" invocation="{typed}">\n'
+        "# Research\n\n" + "a very long skill body\n" * 50 + "\n</skill>"
     )
     assert len(payload) > 500
 
@@ -1218,6 +1211,89 @@ def test_a_block_followed_by_non_whitespace_does_not_fuse_two_words(
     # The ordinary shape is untouched: the tail's own whitespace is enough, and
     # no second separator is inserted on top of it.
     assert user_row_text(expanded + "\n\nand next") == "first @a.txt\n\nand next"
+
+
+# --- the inline-skill block --------------------------------------------------
+
+
+def _skill_payload(text: str, entries: list[tuple[str, str]], *, block: str = "") -> str:
+    """A payload in the shape ``skills.invoke.render_skill_block`` writes."""
+    from local_operator.skills.invoke import render_skill_block
+
+    return f"{text}\n\n{block or render_skill_block(entries)}"
+
+
+def test_both_surfaces_strip_the_skill_block() -> None:
+    """`$skill` bodies are model-facing payload, not the user's words.
+
+    A new-shape invocation persists as the verbatim text plus a tail block, so a
+    row that did not strip it would paint the whole SKILL.md — on both surfaces,
+    because both go through `user_row_text`.
+    """
+    typed = "go $research fix the login bug"
+    sent = _skill_payload(typed, [("research", "Read primary sources.")])
+
+    row = user_row_text(sent)
+
+    assert row == typed
+    assert "Read primary sources." not in row
+    assert "<operator-skills>" not in row
+    # The token SURVIVES: it is what the operator typed.
+    assert "$research" in row
+
+
+def test_a_skill_block_and_a_reference_block_both_go() -> None:
+    """The ordinary shape: `Session.prompt` appends the reference block AFTER
+    ours, so a strip that handled only the trailing block would leak the skill
+    body."""
+    from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
+
+    typed = "read @auth.py with $research"
+    skill = _skill_payload(typed, [("research", "SKILL_BODY_MARKER")])
+    reference = (
+        f"{REFERENCE_BLOCK_OPEN}\n\n"
+        "The operator's message references these paths. "
+        "Content is included below.\n\n"
+        '<reference path="auth.py" typed="@auth.py">\nAUTH_BODY\n</reference>\n\n'
+        f"{REFERENCE_BLOCK_CLOSE}"
+    )
+
+    row = user_row_text(skill + "\n\n" + reference)
+
+    assert row == typed
+    assert "SKILL_BODY_MARKER" not in row
+    assert "AUTH_BODY" not in row
+
+
+def test_a_message_that_QUOTES_the_skill_marker_keeps_its_words() -> None:
+    """Quoting the tag is ordinary prose: no preamble follows it, so no span."""
+    quoted = "why does my message contain <operator-skills> in it?"
+    assert user_row_text(quoted) == quoted
+
+
+def test_an_unclosed_skill_opener_does_not_swallow_the_real_block() -> None:
+    """The forged-span failure the reference scanner records, mirrored here."""
+    real = _skill_payload("go $research", [("research", "A_BODY")])
+    forged = (
+        "truncated history\n\n<operator-skills>\n\n" "MIDDLE PROSE THE OPERATOR TYPED\n\n" + real
+    )
+
+    row = user_row_text(forged)
+
+    assert "MIDDLE PROSE THE OPERATOR TYPED" in row
+    assert "A_BODY" not in row
+    assert "<operator-skills>" in row, "the unclosed opener is not a block"
+
+
+def test_a_legacy_skill_payload_still_replays_as_the_typed_line() -> None:
+    """Old transcripts carry the typed line in `invocation=`; the reader is kept."""
+    legacy = (
+        "The user invoked the `research` skill directly. Follow it for this "
+        "request.\n"
+        '<skill name="research" invocation="$research fix it">\n'
+        "SKILL_BODY_MARKER\n</skill>"
+    )
+    assert user_row_text(legacy) == "$research fix it"
 
 
 # --- the quiet pair (docs/design/quiet-turns.md §5, slice S1) -----------------

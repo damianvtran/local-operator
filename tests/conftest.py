@@ -89,6 +89,13 @@ _AMBIENT_VARS = (
     # rather than by each test remembering.
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
+    # The DESCRIPTOR channel for the same bearer (``server/desktop.TOKEN_FD_ENV``,
+    # #3039): a number naming an inherited pipe the daemon reads its bearer from at
+    # serve start-up. Scrubbed, not explained as harmless: an inherited value names a
+    # real descriptor of the parent process (a desktop-launched shell carries one), so
+    # a test calling ``adopt_spawn_bearer`` would read -- and close or ``dup2`` over --
+    # whatever that fd is in pytest, and open the plane on a token no test chose.
+    "LOCAL_OPERATOR_DESKTOP_TOKEN_FD",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
     # The static-route root allowlist (``server/utils/static_roots.ROOTS_ENV``),
     # a directory list that WIDENS what the server will serve. An inherited value
@@ -138,6 +145,9 @@ _AMBIENT_VARS = (
     # paths untested. The kill-switch cell sets the resolved constant through
     # ``monkeypatch`` explicitly, which is where that reason is written down.
     "LOP_NO_REPLY",
+    # Inbox kill switch is sampled at import; inherited off must not disable
+    # every test of the shipped tool. Explicit tests patch the resolved flag.
+    "LOP_NOTIFY",
     # The turn-supplement kill switch (``supplements/policy.SUPPLEMENTS``, read from
     # ``LOP_SUPPLEMENTS``). The same ESCAPE-HATCH class as the ask gate: the feature is the
     # shipped default, and an inherited kill value would silently move every cell that

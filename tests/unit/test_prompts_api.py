@@ -141,6 +141,10 @@ async def _fake_ask_for_blocks(questions: list[Any]) -> dict[str, list[str]] | N
     return None
 
 
+async def _notify_door_for_blocks() -> str:
+    return "Notified."
+
+
 async def _quiet_door_for_blocks() -> None:
     """Minimal quiet-end door so create_tools includes no_reply for ordering
     checks (docs/design/quiet-turns.md §4; presence-only, like the ask hook
@@ -733,6 +737,10 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
             # above, so the inventory below includes it and the assertion
             # compares like-for-like against DEFAULT_TOOL_NAMES.
             bridge_runtime=object(),
+            # ``notify`` (docs/design/notifications-inbox.md §3.2) is
+            # createIf-gated on the inbox door a top-level session binds —
+            # presence-only here, same rule as the gates above.
+            notify_inbox=_notify_door_for_blocks,
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)

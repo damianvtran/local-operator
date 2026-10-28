@@ -120,13 +120,14 @@ read.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import time
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 from uuid import uuid4
@@ -739,9 +740,11 @@ def source_projection_fact(entry: Any, seq: int) -> dict[str, Any]:
 
 def valid_source_projection_facts(facts: Any, scan: ScanState, rows: dict[str, Any]) -> bool:
     """Cache structure/origins are validated, not silently repaired/truncated."""
-    # ScanState.rows counts the most recent reader's segment, NOT total rows
-    # after suffix re-derivation. Contiguous fact ordinals plus last-ID origins
-    # validate the complete table without mistaking a valid append for corruption.
+    # ``ScanState.rows`` is NOT cross-checked against ``len(facts)``: documents
+    # written before the total was recorded on the incremental path hold a
+    # suffix-only count, and rejecting them would force a rescan of every such
+    # cache. Contiguous fact ordinals plus last-ID origins validate the complete
+    # table without mistaking a valid append for corruption.
     if not isinstance(facts, list) or not 0 <= scan.window_rows <= len(facts):
         return False
     allowed = {
@@ -942,6 +945,13 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     facts = raw.get("source_projection_facts")
     if not isinstance(facts, list) or not valid_source_projection_facts(facts, scan, raw_rows):
         return None
+    # A document an incremental refresh wrote before ``scan.rows`` recorded the
+    # journal's total holds a suffix-only count (O1, #3034 QA). The validated
+    # facts table has exactly one entry per scanned row on both scan paths, so
+    # its length IS the total: restating it here heals those caches on read,
+    # with no version bump and no forced rescan of every session's index.
+    if scan.rows != len(facts):
+        scan = replace(scan, rows=len(facts))
     size = sig.get("size")
     if type(size) is not int or any(
         not isinstance(id_, str)
@@ -1005,14 +1015,22 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         # with the version this build writes, and reading it back compares
         # against the same live constant (see ``_index_from_raw``).
         "version": TRANSCRIPT_INDEX_VERSION,
+        # THE RESUME HEAD: ``version``, ``sig``, ``scan`` and
+        # ``journal_generation`` come FIRST and in this order, so that
+        # :func:`_read_resume_head` can say how many bytes the next refresh would
+        # re-read from a few KB at the top of the file, with no parse of the
+        # whole multi-MB document (the paint hold decides that on the event
+        # loop). Readers of the document are order-blind (``json.loads``); only
+        # the head reader depends on this, and it falls back to the pre-head
+        # rule for any file laid out otherwise.
         "sig": index.sig,
+        "scan": index.scan.to_payload(),
+        "journal_generation": index.journal_generation,
         "coverage": index.coverage,
         "checkpoints": [c.to_payload() for c in index.checkpoints],
         "messages": [m.to_payload() for m in index.messages],
         "runs": [r.to_payload() for r in index.runs],
         "naming": index.naming,
-        "scan": index.scan.to_payload(),
-        "journal_generation": index.journal_generation,
         "journal_rows": index.journal_rows,
         "journal_ranges": index.journal_ranges,
         "source_projection_facts": index.source_projection_facts,
@@ -1024,6 +1042,103 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         tmp.replace(path)
     except OSError:
         logger.warning("could not write the transcript index for %s", session_id, exc_info=True)
+
+
+#: How much of the cache file :func:`_read_resume_head` reads. The head holds
+#: four small fields (an id, a uuid and a handful of integers: ~300 bytes
+#: measured on the 51.7 MB fixture), so 4 KiB is generous; a head that does not
+#: fit simply answers "unknown" and the caller keeps the pre-head rule.
+_RESUME_HEAD_BYTES = 4096
+
+_HEAD_KEYS = ("version", "sig", "scan", "journal_generation")
+
+
+def _read_resume_head(
+    config_dir: str | Path, session_id: str
+) -> tuple[dict[str, Any], ScanState, str] | None:
+    """``(sig, scan, journal_generation)`` from the cache file's first bytes.
+
+    WHY (conversation-first-paint R2): the paint hold must decide whether a
+    refresh is payable by the bytes it will RE-READ, and that is
+    ``journal size - scan.window_offset`` -- a figure that lives inside a cache
+    document of up to several MB. Parsing it on the event loop would be the very
+    cost the hold exists to keep off the first frame, so :func:`write_index`
+    puts these fields first and this decodes only them, value by value, from a
+    bounded read.
+
+    ``None`` for anything it cannot vouch for: no file, an unreadable one, the
+    wrong version, or a head laid out otherwise (every cache written before
+    this). The caller then keeps its pre-head answer, so an old cache costs the
+    old behaviour until its next write, never a wrong deferral.
+    """
+    try:
+        with index_path(config_dir, session_id).open("rb") as handle:
+            head = handle.read(_RESUME_HEAD_BYTES)
+    except OSError:
+        return None
+    # A cut multibyte character can only sit at the END of the read, past the
+    # fields this decodes; ``ignore`` keeps the prefix intact.
+    text = head.decode("utf-8", errors="ignore")
+    decoder = json.JSONDecoder()
+    values: dict[str, Any] = {}
+    position = 1 if text.startswith("{") else -1
+    try:
+        for expected in _HEAD_KEYS:
+            if position < 0:
+                return None
+            key, position = decoder.raw_decode(text, position)
+            if key != expected or text[position : position + 1] != ":":
+                return None
+            values[key], position = decoder.raw_decode(text, position + 1)
+            if text[position : position + 1] != ",":
+                return None
+            position += 1
+    except ValueError:
+        return None
+    sig = values["sig"]
+    scan = ScanState.from_payload(values["scan"])
+    generation = values["journal_generation"]
+    if (
+        values["version"] != TRANSCRIPT_INDEX_VERSION
+        or not isinstance(sig, dict)
+        or scan is None
+        or not isinstance(generation, str)
+    ):
+        return None
+    return sig, scan, generation
+
+
+def _rederive_bytes(
+    st: os.stat_result, sig: dict[str, Any], scan: ScanState, generation: str
+) -> int:
+    """How many journal bytes :func:`refresh_index` would read for this cache.
+
+    The same ladder, in the same order, minus the one check that needs the
+    journal's bytes (``_verify_tail``; a tail that fails it rescans, which this
+    reports as the cheaper incremental figure -- the pre-R2 direction, and rare):
+    current -> nothing; grown on the same inode -> from the resume WINDOW, not
+    from the old end, because the incremental path re-derives the window's run
+    whole; anything else -> the whole journal.
+    """
+    if generation and _sig_matches(sig, st):
+        return 0
+    if generation and st.st_ino == sig.get("inode") and st.st_size > scan.offset:
+        return max(0, st.st_size - scan.window_offset)
+    return st.st_size
+
+
+def _cached_refresh_cost(
+    config_dir: str | Path, session_id: str, journal: os.stat_result
+) -> tuple[bool, int | None]:
+    """``(has_previous, rederive_bytes)`` for the paint-path payability rule.
+
+    ``has_previous`` is "a cache file exists" exactly as before; the byte figure
+    is ``None`` when the head cannot state it (see :func:`_read_resume_head`).
+    """
+    head = _read_resume_head(config_dir, session_id)
+    if head is not None:
+        return True, _rederive_bytes(journal, *head)
+    return _stat_or_none(index_path(config_dir, session_id)) is not None, None
 
 
 def _sweep_missing(config_dir: str | Path) -> None:
@@ -2234,10 +2349,31 @@ class _Derivation:
         """
         self._close_run()
         runs = list(prior_runs) + self.runs
+        carried = len(prior_runs)
         out: list[RunRecord] = []
         for position, run in enumerate(runs):
             is_tail = position == len(runs) - 1
             outcome: str | None = None
+            if position < carried and run.settled and not is_tail:
+                # A SETTLED PRIOR RUN'S OUTCOME IS FINAL, and this region cannot
+                # recompute it. ``_scan_incremental`` keeps only runs whose last
+                # row lies above the re-derived region, so their markers and
+                # ``attention_started`` rows were consumed by an EARLIER scan and
+                # are absent from ``self.markers``/``self.starts``: recomputing
+                # here resolved nothing and overwrote every settled run's
+                # error/complete with None after any append (measured on a real
+                # journal: error,error,complete -> None,None,None) until a full
+                # rescan. Settled means the earlier scan already decided the
+                # outcome from every marker inside the run's own rows, and a kept
+                # run gains no rows, so the stored value is what a full scan
+                # derives. An UNSETTLED kept run is the previous scan's open tail
+                # (a user-less hub/wake run the window moved past): its stored
+                # ``open`` is provisional and its closing marker may sit in this
+                # region, so it keeps the recompute below. The tail is excluded
+                # defensively: a region with no run of its own leaves a kept run
+                # as the tail, and that one must still take the open-tail rule.
+                out.append(run)
+                continue
             # The run before this one: a marker's ``attention_started`` is written
             # BEFORE its user row, so the start row legitimately lies ABOVE the
             # run's opening user row — requiring ``start >= first_seq`` dropped
@@ -2391,13 +2527,20 @@ def _verify_tail(path: Path, end: int, last_id: str) -> bool:
 
 
 def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex:
-    """A first read (or a rewrite's forced rescan) of the whole journal."""
+    """A first read (or a rewrite's forced rescan) of the whole journal.
+
+    Pauses between rows when run as a background refresh (``_YIELD_TO``, see
+    "Yielding to other opens"); the rows and their order are unaffected.
+    """
+    yield_to = _YIELD_TO.get()
     reader = _RowReader(path, 0, 0)
     state = _Derivation()
     journal_rows: dict[str, int] = {}
     journal_ranges: dict[str, tuple[int, int]] = {}
     source_facts = []
     for row in reader:
+        if yield_to is not None:
+            yield_to()
         source_facts.append(row.source_fact or source_projection_fact(None, row.ordinal))
         if row.id:
             journal_rows[row.id] = row.ordinal
@@ -2440,6 +2583,7 @@ def _scan_incremental(
     path: Path, previous: TranscriptIndex, naming_raw: dict[str, Any] | None
 ) -> TranscriptIndex:
     """Re-derive from the resume window and extend through the appended bytes."""
+    yield_to = _YIELD_TO.get()
     window_offset = previous.scan.window_offset
     window_rows = previous.scan.window_rows
     keep_checkpoints = [c for c in previous.checkpoints if c.seq < window_rows]
@@ -2472,6 +2616,8 @@ def _scan_incremental(
     }
     source_facts = [fact for fact in previous.source_projection_facts if fact["seq"] < window_rows]
     for row in reader:
+        if yield_to is not None:
+            yield_to()
         source_facts.append(row.source_fact or source_projection_fact(None, row.ordinal))
         if row.id:
             journal_rows[row.id] = row.ordinal
@@ -2507,7 +2653,14 @@ def _scan_incremental(
         naming=naming,
         runs=runs,
         scan=ScanState(
-            rows=reader.rows,
+            # THE JOURNAL'S TOTAL, NOT THIS READ'S: the reader re-read only the
+            # suffix starting at ordinal ``window_rows``, so the rows before it
+            # (kept, not re-read) are added back. ``open_frame.tail_head_reachable``
+            # subtracts a run's ``first_seq`` from this count, and the
+            # suffix-only count (6,973 against 10,377 on the 51.7 MB fixture)
+            # made the head hunt run on, so the frame depended on how the
+            # index was refreshed (O1, #3034 QA). Same total ``_scan_full`` records.
+            rows=window_rows + reader.rows,
             offset=reader.last_end,
             window_offset=new_window_offset,
             window_rows=new_window_rows,
@@ -2543,6 +2696,13 @@ def _sig_matches(sig: dict[str, Any], st: os.stat_result) -> bool:
 def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     """Bring one session's cache up to date; ``None`` when there is no journal.
 
+    A background refresh started by :func:`start_refresh` runs with
+    :data:`_YIELD_TO` set, and this calls it at every pause point -- between rows
+    and before each whole-document JSON step -- so a CPU-bound scan in a worker
+    thread steps aside while another conversation's first frame is being built
+    (see "Yielding to other opens"). It never changes what is built, only when
+    the thread holds the GIL. A synchronous caller sees no pause at all.
+
     The whole invalidation ladder, in order: an exact (size, mtime, inode)
     match reuses; a GROWN file from the SAME inode whose recorded tail still
     verifies increments; anything else — including a compact rewrite, whose
@@ -2551,7 +2711,13 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
     read).
     """
     path = _journal_path(config_dir, session_id)
+    yield_to = _YIELD_TO.get()
     for attempt in (0, 1):
+        # Pause BEFORE the stat (review round 1, MINOR-3): a pause between them
+        # would let ``st`` age by up to the yield budget before it is compared
+        # with the cache's signature.
+        if yield_to is not None:
+            yield_to()
         try:
             st = path.stat()
         except OSError:
@@ -2578,6 +2744,14 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             if attempt:
                 raise
             continue
+        if yield_to is not None:
+            # The last pause sits ABOVE the naming re-read, never between it and
+            # the write (review round 1, MAJOR-1): a name saved during a pause
+            # there would be overwritten by the document below, reopening the
+            # lost-write window the merge exists to close. Pausing here also
+            # keeps the ``json.dumps`` (one uninterruptible C call, ~20-60 ms for
+            # the 51.7 MB fixture's 4.5 MB index) out of another open's frame.
+            yield_to()
         # A naming write can land WHILE this scan runs, and that pairing is by
         # design rather than by accident: the daemon refreshes a stale cache
         # for the manifest route while the session's owner writes a freshly
@@ -2666,20 +2840,37 @@ def _key(config_dir: str | Path, session_id: str) -> tuple[str, str]:
     return (str(config_dir), session_id)
 
 
-def scan_payable_in_budget(journal_bytes: int | None, *, has_previous: bool, wait_s: float) -> bool:
+def scan_payable_in_budget(
+    journal_bytes: int | None,
+    *,
+    has_previous: bool,
+    wait_s: float,
+    rederive_bytes: int | None = None,
+) -> bool:
     """Whether a refresh can plausibly land inside a first-paint wait of ``wait_s``.
 
     THE ONE RULE for "is this scan worth paying for on the paint path", shared
     by :func:`checkpoints_view`'s first-paint wager and the paint hold below so
-    the two can never disagree about which journals are small enough. A usable
-    previous index makes the refresh incremental (milliseconds), so it is always
-    payable; otherwise the journal's size is planned against
-    :data:`_FIRST_PAINT_SCAN_BYTES_PER_S` (see that constant for the
-    measurement and why it is not a fraction of it).
+    the two can never disagree about which journals are small enough. Every
+    byte figure is planned against :data:`_FIRST_PAINT_SCAN_BYTES_PER_S` (see
+    that constant for the measurement and why it is not a fraction of it).
+
+    WITH A PREVIOUS INDEX THE FIGURE IS THE RE-READ, NOT ZERO
+    (conversation-first-paint R2, 2026-10-27). The incremental path re-derives
+    from the resume window -- the start of the run holding the last user turn --
+    so a long agent run puts the window arbitrarily far back: on the 51.7 MB
+    fixture a ONE-ROW append re-read 37.9 MB / 6,973 rows at 304-637 ms CPU,
+    more than its cold scan, and the old "a previous index is always payable"
+    let that run straight through the paint hold (append opens 351-375 ms under
+    load; 101 ms with the scan deferred). ``rederive_bytes`` is that re-read;
+    ``None`` means the caller could not state it (a cache laid out before the
+    resume head) or chose not to (the manifest wager -- see the note at its call
+    in :func:`checkpoints_view`), which keeps the old answer: payable.
     """
-    return has_previous or (
-        journal_bytes is not None and journal_bytes <= _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
-    )
+    budget = _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
+    if has_previous:
+        return rederive_bytes is None or rederive_bytes <= budget
+    return journal_bytes is not None and journal_bytes <= budget
 
 
 # ---------------------------------------------------------------------------
@@ -2723,6 +2914,10 @@ _PAINT_HOLD_CEILING_S = 15.0
 
 #: Live hold counts per session key. LOOP-ONLY MUTATION, like ``_IN_FLIGHT``.
 _PAINT_HOLDS: dict[tuple[str, str], int] = {}
+#: When each live hold's count last rose from zero (``time.monotonic``). Only
+#: :func:`_yield_to_other_opens` reads it, to ignore a hold too old to be a first
+#: frame still being built. Loop-only mutation, like ``_PAINT_HOLDS``.
+_PAINT_HOLD_SINCE: dict[tuple[str, str], float] = {}
 #: The event a deferred refresh waits on, set when the key's count reaches zero.
 #: Keyed with its loop so a torn-down test loop reads as absent.
 _PAINT_RELEASED: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
@@ -2741,6 +2936,8 @@ def hold_paint(config_dir: str | Path, session_id: str) -> Callable[[], None]:
     """
     key = _key(config_dir, session_id)
     loop = asyncio.get_running_loop()
+    if not _PAINT_HOLDS.get(key):
+        _PAINT_HOLD_SINCE[key] = time.monotonic()
     _PAINT_HOLDS[key] = _PAINT_HOLDS.get(key, 0) + 1
     entry = _PAINT_RELEASED.get(key)
     if entry is None or entry[0] is not loop or entry[1].is_set():
@@ -2757,11 +2954,180 @@ def hold_paint(config_dir: str | Path, session_id: str) -> Callable[[], None]:
             _PAINT_HOLDS[key] = remaining
             return
         _PAINT_HOLDS.pop(key, None)
+        _PAINT_HOLD_SINCE.pop(key, None)
         current = _PAINT_RELEASED.pop(key, None)
         if current is not None:
             current[1].set()
 
     return release
+
+
+# ---------------------------------------------------------------------------
+# Yielding to other opens: a background scan never starves another first frame
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS (conversation-first-paint, residual 2, 2026-10-27). The paint
+# hold above protects an open from ITS OWN cold scan. It does nothing for the
+# NEXT conversation: switching from the 51.7 MB journal to the 8 MB legacy one
+# released the first hold at its snapshot, the deferred scan started 0.2 ms
+# later in a worker thread, and the legacy open -- loop-thread Python the whole
+# way (facade build, attention, page reads) -- then fought that thread for the
+# GIL: 298-306 ms back-to-back (5/5, real ``lop serve``) against 28-40 ms opened
+# first or after a 3 s gap. Attribution, same rig, injected in place of the
+# scan's first 0.5 s: ``time.sleep`` (thread and executor slot occupied, GIL
+# free) -> legacy 29-32 ms; a busy loop (GIL held) -> 707-739 ms. The executor
+# is not the contended resource, and no lock is: the GIL is. Python's 5 ms
+# switch interval hands the loop thread only a share of the interpreter, so
+# every millisecond of the open stretched by the scan's share. With this rule:
+# legacy-after-real 76-122 ms (median 103) against base 308-417 (median 347),
+# 6/6 interleaved reps at load ~38; the real open and the frames unchanged, and
+# the real index reaches ``ready`` ~50 ms later (median 402 vs 350 ms after its
+# snapshot) because it gave way. The open's own ``a.acquire`` fell from 143-182
+# to 16-22 ms. The residual above the 28-40 ms floor lies BEFORE the route takes
+# its hold: previous snapshot to this route's entry is 51-86 ms (base 117-144),
+# which includes the client's new request and the server's parse of it, both
+# still sharing the GIL with the scan -- nothing marks an open as in flight
+# earlier than ``hold_paint``.
+#
+# THE RULE. A background refresh pauses at row boundaries (and before the cache
+# read and the naming merge + document write) while a paint hold younger than
+# :data:`_YIELD_HOLD_STALE_S` is live for a session OTHER than its own,
+# sleeping in short slices that release the GIL. Its own session's hold never
+# pauses it: an open that waits on its own refresh would otherwise wait on
+# itself.
+#
+# ONLY UNPAYABLE SCANS YIELD (review round 1, MAJOR-2). ``checkpoints_view``
+# awaits a refresh it starts for up to ``_FIRST_PAINT_WAIT_S`` when the scan is
+# PAYABLE in that budget, and its consumers do not re-read a ``building``
+# answer (d560b2ec6a8 removed exactly that regression). A payable scan that
+# paused would turn those ``ready`` answers into ``building`` or stale ones, so
+# a scan yields only when :func:`scan_payable_in_budget` -- the same rule the
+# view and the paint hold use -- says no wait could have paid for it anyway. A
+# payable scan is short by that rule's own definition; the contention this
+# exists for is the cold multi-MB scan (the 51.7 MB journal's deferred one).
+# Decided lazily, in the worker, the first time another hold is seen: two
+# ``stat`` calls there, none on the loop and none when nobody is opening.
+#
+# WHAT IT NEVER CHANGES. The rows consumed, their order and the document
+# written are identical; only wall time moves, and only while another open is
+# mid-first-frame. The task still settles exactly once, through ``_wrapped``.
+# It does REORDER work: the next conversation's own deferred scan now starts
+# while this one is still running, so this one's ``ready`` lands later (QA
+# round 1: cache written ~470 ms later, polled ``ready`` ~280 ms later) while
+# both conversations' indexes finish at the same time as before.
+#
+# HOW IT CANNOT WEDGE. Paint holds are released on every exit of the events
+# route, but a leaked one (or a user switching conversations nonstop) must not
+# stall indexing: a scan's cumulative pause is capped at :data:`_YIELD_BUDGET_S`,
+# and a hold older than :data:`_YIELD_HOLD_STALE_S` is ignored outright, so a
+# leak costs at most the scans started inside its first seconds, never every
+# later scan until restart (review round 1, MINOR-2).
+#
+# THREAD SAFETY. The check runs in the worker thread and only READS the hold
+# tables: ``len``/``in`` on ``_PAINT_HOLDS`` and a ``dict.copy()`` of
+# ``_PAINT_HOLD_SINCE`` -- each a single C-level operation that holds the dict
+# for its whole duration, so the loop's concurrent mutation can never be seen
+# mid-iteration. It never writes them.
+
+#: Sleep slice while yielding: short enough that the scan resumes within a few
+#: ms of the other open's snapshot, long enough to hand the GIL over outright.
+_YIELD_SLICE_S = 0.002
+#: Ceiling on one refresh's total pause. A desktop first frame is tens to a few
+#: hundred ms; this only bounds a leaked hold or a nonstop run of opens.
+_YIELD_BUDGET_S = 2.0
+#: A hold older than this is not a first frame still being built (a cold one on
+#: a loaded host is a few seconds at worst); it is ignored, not yielded to.
+_YIELD_HOLD_STALE_S = 5.0
+
+
+#: The pause callable the CURRENT background refresh honours; ``None`` (every
+#: synchronous caller: the TUI, peer cycle display, tests) means never pause.
+_YIELD_TO: contextvars.ContextVar[Callable[[], None] | None] = contextvars.ContextVar(
+    "transcript_index_yield_to", default=None
+)
+
+
+def _yield_to_other_opens(
+    own: tuple[str, str], config_dir: str | Path, session_id: str
+) -> Callable[[], None]:
+    """The ``yield_to`` callable for one background refresh of ``own``."""
+    spent = 0.0
+    #: ``None`` until another hold is first seen; then whether this scan may yield.
+    unpayable: bool | None = None
+
+    def another_open_is_young() -> bool:
+        return _young_hold_besides(own)
+
+    def may_yield() -> bool:
+        nonlocal unpayable
+        if unpayable is None:
+            journal = _stat_or_none(_journal_path(config_dir, session_id))
+            if journal is None:
+                unpayable = False
+            else:
+                has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+                unpayable = not scan_payable_in_budget(
+                    journal.st_size,
+                    has_previous=has_previous,
+                    rederive_bytes=rederive,
+                    wait_s=_FIRST_PAINT_WAIT_S,
+                )
+        return unpayable
+
+    def pause() -> None:
+        nonlocal spent
+        while spent < _YIELD_BUDGET_S and another_open_is_young() and may_yield():
+            # Measured, not counted: on a loaded host a 2 ms sleep can overrun
+            # several-fold, and the budget is a wall-clock promise.
+            started = time.monotonic()
+            time.sleep(_YIELD_SLICE_S)
+            spent += time.monotonic() - started
+
+    return pause
+
+
+def _young_hold_besides(own: tuple[str, str] | None) -> bool:
+    """Whether a paint hold younger than the staleness cap is live for any key but ``own``."""
+    holds = _PAINT_HOLDS
+    if len(holds) <= (1 if own is not None and own in holds else 0):
+        return False  # the common case: one len, no copy
+    cutoff = time.monotonic() - _YIELD_HOLD_STALE_S
+    return any(k != own and t > cutoff for k, t in _PAINT_HOLD_SINCE.copy().items())
+
+
+def yield_to_any_open() -> Callable[[], None]:
+    """A pause for work that NO first frame waits on: the library indexer (R3).
+
+    WHY (conversation-first-paint, residual tail R3, 2026-10-27). The library
+    indexer's thread reacts to a journal's FSEvents by scanning it at once --
+    which is precisely when the user is opening it (a conversation that just
+    synced, was copied in, or finished a turn). It is not a ``start_refresh``
+    task, so the per-refresh rule above never applied: on a real ``lop serve``
+    at load 30-80 it spent a median 264 ms of GIL-holding CPU inside the open
+    of the 51.7 MB journal it was scanning (miss shape, 301 ms median; with this
+    pause, spike ``libyield``, 166 ms).
+
+    THE SAME RULE, MINUS TWO EXEMPTIONS. Same slice, same cumulative
+    :data:`_YIELD_BUDGET_S` per returned pause (one indexer batch), same
+    :data:`_YIELD_HOLD_STALE_S` cap on a leaked hold. The two exemptions of the
+    refresh rule do not apply, deliberately: "own conversation" -- nothing on
+    the paint path awaits the library scan, so the open of the very journal
+    being scanned must win too (that is the measured case); "payable" -- no
+    caller holds a budget on this thread's progress (the request-path ledger
+    reads never install a pause, and a lock they lose to a paused batch answers
+    from the last published scan, its documented non-blocking behaviour).
+    Content is unaffected: lines are consumed in the same order, only later.
+    """
+    spent = 0.0
+
+    def pause() -> None:
+        nonlocal spent
+        while spent < _YIELD_BUDGET_S and _young_hold_besides(None):
+            started = time.monotonic()
+            time.sleep(_YIELD_SLICE_S)
+            spent += time.monotonic() - started
+
+    return pause
 
 
 def refresh_deferred(config_dir: str | Path, session_id: str) -> bool:
@@ -2791,13 +3157,18 @@ def _defer_for_paint(config_dir: str | Path, session_id: str) -> asyncio.Event |
     journal = _stat_or_none(_journal_path(config_dir, session_id))
     if journal is None:
         return None
-    # A cache file on disk stands in for "a previous index": parsing it here would
-    # be the very work this defers. A cache that exists but does not parse makes
-    # this answer "payable" and the scan run now -- today's behaviour, never a
-    # deferral the manifest's own rule would not have made.
-    has_previous = _stat_or_none(index_path(config_dir, session_id)) is not None
+    # A cache file on disk stands in for "a previous index", and its HEAD for
+    # what the refresh will re-read: parsing the whole document here would be
+    # the very work this defers. A cache that exists but whose head does not
+    # state the figure makes this answer "payable" and the scan run now --
+    # today's behaviour, never a deferral the manifest's own rule would not have
+    # made.
+    has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
     if scan_payable_in_budget(
-        journal.st_size, has_previous=has_previous, wait_s=_FIRST_PAINT_WAIT_S
+        journal.st_size,
+        has_previous=has_previous,
+        rederive_bytes=rederive,
+        wait_s=_FIRST_PAINT_WAIT_S,
     ):
         return None
     return entry[1]
@@ -3072,6 +3443,10 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
             # route's ``a.wire.frame kind=snapshot`` row says whether the scan
             # started before or after the first frame was written.
             open_trace.mark("index.refresh_start", session=session_id, deferred=hold is not None)
+        # Set in THIS task's own context, which ``to_thread`` copies into the
+        # worker: only this refresh yields, and ``refresh_index``'s signature
+        # (which tests and callers substitute) stays two-argument.
+        _YIELD_TO.set(_yield_to_other_opens(key, config_dir, session_id))
         return await asyncio.to_thread(refresh_index, config_dir, session_id)
 
     async def _wrapped() -> TranscriptIndex | None:
@@ -3232,6 +3607,15 @@ async def checkpoints_view(
         # `ready` — which the consumer does not re-read. So the size gate is for
         # the COLD case only, where the build is a full scan and the wait really
         # does cost the whole budget.
+        #
+        # NO `rederive_bytes` HERE, DELIBERATELY (conversation-first-paint R2).
+        # The paint hold judges an incremental refresh by its re-read, because
+        # there a wrong "payable" puts a 300-640 ms scan on the GIL beside a
+        # first frame. This wager's errors run the other way: an over-generous
+        # wait is an idle `await` (no CPU, no paint) that answers `building` at
+        # the budget, while a refused wait answers `building` where the scan
+        # might have landed — the regression QA Q1 pinned. And a refresh the
+        # hold deferred is already never awaited (`refresh_deferred` below).
         payable = scan_payable_in_budget(
             probe.journal_bytes, has_previous=probe.index is not None, wait_s=wait_s
         )
@@ -3294,5 +3678,6 @@ def _reset_for_tests() -> None:
     _RESIDENT_STAMP.clear()
     _FAILURES.clear()
     _PAINT_HOLDS.clear()
+    _PAINT_HOLD_SINCE.clear()
     _PAINT_RELEASED.clear()
     _DEFERRED.clear()

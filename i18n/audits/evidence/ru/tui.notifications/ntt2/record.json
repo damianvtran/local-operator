@@ -1,0 +1,186 @@
+{
+  "schema": 1,
+  "audit_id": "ntt2",
+  "audit_id_assigned_by": "translation-auditor, assigned by delegation on 2026-10-25 (remediation round 2)",
+  "audit_kind": "independent_remediation_delta_audit",
+  "locale": "ru",
+  "namespace": "tui.notifications",
+  "audit_date": "2026-10-25",
+  "round": 2,
+  "predecessor": "ntt1 — same namespace, 2026-10-25, verdict passed (0 blocker, 0 major, 5 minor, 2 nit)",
+  "audited_revision": "77b3c2cf45ea5a21e316c11e1fd7a56c9a135aa6",
+  "audited_revision_note": "English source, context sidecar and style guide read at this commit; the target catalogue is an UNTRACKED working-tree file with no committed revision and is bound by its sha256 only (re-verified unchanged after the audit).",
+  "attestation_revision": "77b3c2cf45ea5a21e316c11e1fd7a56c9a135aa6",
+  "source_audit_revision": "77b3c2cf45ea5a21e316c11e1fd7a56c9a135aa6",
+  "current_bytes_match_audited_hashes": true,
+  "key_count": {
+    "en": 72,
+    "target": 72,
+    "context": 72,
+    "semantically_reaudited": 3
+  },
+  "verdict": "passed",
+  "result": "passed_with_doc_nit",
+  "verdict_reason": "The delta is exactly the three accepted copy changes; each carries the agreed bytes, unchanged argument tuple, complete ru plural set rendered correctly at every required count, intact literal and met budget. The style-guide exception note records T1/T3 with correct keys and widths; one documentation nit about the mechanism/threshold wording does not affect the exception.",
+  "delta": {
+    "round1_target_sha256": "03cdb4d6fc69764229a5dd15611a0d64e1856dca54107904bfdca223f8b947c1",
+    "target_sha256": "eee1186170a1856f4e59528b4769b8b834c0c928ce7cad325ceedccc789058fc",
+    "changed_keys": [
+      "tui.notifications.chip_high",
+      "tui.notifications.pointer_unread",
+      "tui.notifications.stale_skipped"
+    ],
+    "changed_key_count": 3,
+    "unexpected_changes": [],
+    "byte_diff": "6 unified-diff +/- lines: three lines replaced, nothing else",
+    "file_size": {
+      "round1": 7136,
+      "target": 7031
+    },
+    "byte_hygiene": "no CR, no tab, no trailing whitespace, UTF-8, NFC, ends with }\\n"
+  },
+  "changes": [
+    {
+      "key": "tui.notifications.chip_high",
+      "old": "важно",
+      "new": "выс.",
+      "finding": "T2",
+      "cells": 4,
+      "budget": 6,
+      "status": "resolved"
+    },
+    {
+      "key": "tui.notifications.pointer_unread",
+      "old": "Отчёты о завершении сессий перенесены в /unread.",
+      "new": "Завершённые сессии перенесены в /unread.",
+      "finding": "T4",
+      "cells": 40,
+      "budget": null,
+      "status": "resolved"
+    },
+    {
+      "key": "tui.notifications.stale_skipped",
+      "old": "… с момента просмотра — оставлено/оставлены как есть …",
+      "new": "… после просмотра — не тронуто/не тронуты …",
+      "finding": "T5",
+      "cells_at_count_3": 54,
+      "cells_round1_at_count_3": 66,
+      "budget": null,
+      "status": "resolved"
+    }
+  ],
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, tui-audit-ru)",
+    "instance": "ca5d33d6f6aa",
+    "session": "ca5d33d6f6aa",
+    "model": "radient/auto",
+    "actual_model_source": "Session model-switch notices: anthropic/claude-opus-5-5 -> anthropic/claude-sonnet-5-5 → openai/gpt-6.1-sol → radient/auto on provider quota failures; radient/auto served this round (and round 1). Neither the requested Opus nor the intermediate fallbacks performed it.",
+    "date": "2026-10-25",
+    "independence": "Independent agent and context. I authored none of the English or Russian copy, applied none of the remediation bytes, and edited no catalogue, code, generated file, git state or ledger. The target bytes were copied out before reading; all runs used a scratch `git archive` of the audited commit."
+  },
+  "translator": {
+    "agent": "not disclosed to this auditor (PR #2943 lane; remediation applied by the coder per the manager's delegation)",
+    "date": "2026-10-25",
+    "source": "Manager delegation only; not inferred from git, because the target file is untracked."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.json",
+      "sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+      "matches_supplied_frozen_source_sha256": true
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+      "sha256": "9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6",
+      "matches_supplied_branch_sha256": true,
+      "moved_budgets": [
+        {
+          "key": "tui.notifications.hint_answer",
+          "from": 8,
+          "to": 9
+        },
+        {
+          "key": "tui.notifications.hint_dismiss_all",
+          "from": 12,
+          "to": 14
+        }
+      ],
+      "audited_keys_budgets_moved": []
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/tui.notifications.json",
+      "sha256": "eee1186170a1856f4e59528b4769b8b834c0c928ce7cad325ceedccc789058fc",
+      "matches_current_working_tree": true,
+      "tracked": false
+    },
+    "round1_target": {
+      "sha256": "03cdb4d6fc69764229a5dd15611a0d64e1856dca54107904bfdca223f8b947c1"
+    },
+    "round1_context": {
+      "sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907"
+    },
+    "style_guide_ru": {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "89b459c54bf10b2d3efa9d9b28de4c7a0d57f3b6cf8afc56019f2931d31e0efc",
+      "revision": "77b3c2cf45ea5a21e316c11e1fd7a56c9a135aa6"
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json",
+    "harness.py.txt",
+    "delta.py.txt",
+    "delta.out",
+    "harness.out",
+    "inputs/"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "run_by": "ca5d33d6f6aa",
+    "note": "Actual stdout of both commands (full harness over the remediated tree, then the delta script), not reconstructed notes."
+  },
+  "reproduction": {
+    "harness": "harness.py.txt — ntt1 harness with ntt2 pins and the remediated stale_skipped grammar probes; run against a scratch git archive of the audited commit with the on-disk ru file dropped in",
+    "delta": "delta.py.txt — byte-level delta, agreed-text comparison arm by arm, CLDR renders, widths, context budget diff, chip thresholds, four negative controls"
+  },
+  "findings": [
+    {
+      "id": "D1",
+      "severity": "nit",
+      "key": "n/a — i18n/style-guides/ru.md (wave-3 exception note, lines 91-96)",
+      "current": "«…both exceed their chip budgets (8 and 12) … the chip is absorbed by the title column and drops wholesale below ~45 columns»",
+      "proposed": "«…their budgets (8 for the header read-filter segment, 12 for the row chip)… the row chip is dropped wholesale at ≤48 columns (≤43 alone)…»",
+      "reason": "The 8-cell slot is the header's right-edge segment, not a row chip, and the measured drop thresholds are 43/44 (lone seen_in_chat chip) and 48/49 (with the priority chip); the numbers the note cites for the two strings are correct, so this is documentation precision only and does not gate."
+    }
+  ],
+  "decisions_signed_off": [
+    {
+      "key": "T1 / T3 resolution",
+      "text": "filter_unread keeps «новые», seen_in_chat keeps «было в чате», recorded as a budget exception in the ru guide",
+      "decision": "signed off",
+      "reason": "This is the resolution I proposed in round 1: the faithful forms are 13 cells against budgets 8 and 12, no shorter synonym is both accurate and standard, and the guide records the call instead of silently widening the budget — exactly the rule the guide sets for itself."
+    }
+  ],
+  "noted_outside_scope": [
+    "At 77b3c2cf45e the ledger has tui.notifications rows for es, fr, vi, hi, ur and zh-CN but no ru row, so the ru row still has to be written; the sibling pattern puts the audit id and an 8-hex target prefix in the note, so the ru note should cite ntt2 and target eee11861.",
+    "Round-1 outside-scope items stand: the detail header paints the raw Latin priority value; the session sidebar footer mixes «уведомлений: N» with the English-only «asks: N»; ask_expires can render the now sentinel in every locale."
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1,
+    "rejected": 0,
+    "findings_total": 1
+  },
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Delta-scoped semantic audit: the 69 unchanged keys were not re-judged for idiom in this round, only re-run through the mechanical harness.",
+    "Static copy plus committed render-function geometry; no live TUI frame and no release claim.",
+    "The audited bytes are an untracked working-tree file; editing them after this audit voids the binding."
+  ]
+}
