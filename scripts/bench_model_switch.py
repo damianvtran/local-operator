@@ -341,6 +341,13 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
 
     report_path = CONFIG_DIR / "switch-report.json"
     busy = args.condition != "idle"
+    child_env = base._child_env()
+    # The child is a real runtime driving a mock session, so it must never put
+    # the paced stream's text on the operator's lock screen. ``_child_env``
+    # carries the gate today; asserting it here keeps this spawn safe if that
+    # shared builder ever stops doing so (and is what
+    # tests/unit/test_notification_isolation.py sweeps spawners for).
+    assert child_env.get("LOCAL_OPERATOR_NO_NOTIFICATIONS") == "1", "notification gate missing"
     child = subprocess.Popen(
         [
             sys.executable,
@@ -359,7 +366,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        env=base._child_env(),
+        env=child_env,
     )
     rows: list[dict[str, Any]] = []
     try:
