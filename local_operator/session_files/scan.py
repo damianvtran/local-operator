@@ -39,8 +39,9 @@ caller). Every rule here is therefore unit-testable against a list of lines, and
 persisted shape (:meth:`FileScan.to_payload`) is a plain JSON-able dict.
 
 STDLIB PLUS TWO LEAVES: ``local_operator.ansi`` (control-sequence stripping for the call
-intent) and ``local_operator.supplements.{candidates,contract}`` (the output grammar and the
-reader rule for callouts). Nothing here imports the session runtime.
+intent) and ``local_operator.supplements.{candidates,contract,listing}`` (the output
+grammar, the reader rule for callouts, and the directory-listing grammar). Nothing here
+imports the session runtime.
 """
 
 from __future__ import annotations
@@ -64,12 +65,15 @@ from local_operator.supplements.contract import (
     is_digest,
     reader_disposition,
 )
+from local_operator.supplements.listing import directory_listing
 
 #: Bumped on an incompatible change to the record shape OR to what the scanner admits (a new
 #: tool, a changed rule): a cache written under another version is discarded and rebuilt, so a
 #: rule change is never half-applied to an old session. Also covers the denylist's verdicts,
 #: which are baked into the stored records.
-SCAN_SCHEMA: Final = 4
+#: 5: assistant directory listings (``supplements.listing``) are admitted as mentions; the bump
+#: is what makes an existing session's cached ledger rescan and gain them on its next read.
+SCAN_SCHEMA: Final = 5
 
 #: ``origin`` vocabulary, strongest evidence first. A file seen under several origins keeps the
 #: strongest (``write`` then a later ``bash > same`` is still "written"), so the filter chips are
@@ -179,6 +183,30 @@ _MENTION_ARG_KEYS: Final = (
     "cwd",
 )
 _TRAILING_PUNCTUATION: Final = ".,;:!?)]}'\""
+
+# -- assistant directory listings ----------------------------------------------------------
+# The grammar itself (the idiom, the renderer contract, why it is narrow) lives in
+# :mod:`local_operator.supplements.listing`, a leaf shared with every other Python reader of it.
+# Every candidate it returns still goes through `_note_mention`, whose stat IS the renderer's
+# evidence oracle: a listed name is admitted only when `<dir>/<name>` exists as a regular file,
+# and the denylist and dedupe apply unchanged.
+#
+# COST. Assistant prose is the bulk of a journal, so a row is JSON-parsed only when its RAW
+# bytes hold the idiom's seam: a ":" ending a line, then (after optional blank lines and
+# indent) a list marker. It is a seam probe, not a listing detector: ANY reply with a
+# colon-terminated line before a list is parsed. Measured by review round 1 over the
+# operator's 400 largest journals (6.5 GiB): 14,044 extra parses, 14 of which resolved a
+# listing, and 5.1 s of probe time in total. In compact JSON (``ensure_ascii``) a newline is
+# the two bytes `\n`, and the other whitespace the grammar's JS `\s` admits (tab, CR, FF, VT,
+# NBSP, U+2000-U+200A, U+3000, ...) is either a literal space or a `\t`/`\r`/`\f`/`\u....`
+# escape; the gap class spells them all out, so the probe is never NARROWER than the grammar
+# (pinned by test_byte_probe_sees_every_listing_seam). A row without the seam costs one regex
+# scan, zero parses.
+_PROBE_GAP: Final = rb"(?:[ ]|\\[trf]|\\u(?:000b|00a0|1680|200[0-9a]|202[89f]|205f|3000|feff))"
+_DIR_LISTING_PROBE: Final = re.compile(
+    rb":" + _PROBE_GAP + rb"*(?:\\n" + _PROBE_GAP + rb"*)+(?:[-*+]|[0-9]{1,9}[.)])(?:[ ]|\\t)"
+)
+_ASSISTANT_ROW_PROBE: Final = re.compile(rb'"role"\s*:\s*"assistant"')
 
 
 @dataclass(slots=True)
@@ -384,6 +412,19 @@ class FileScan:
             return
         if b'"role"' in line and _USER_ROW_PROBE.search(line):
             self._on_user_row(seq, line)
+            return
+        # The listing seam is probed FIRST (a memchr-backed regex over the row) and the role
+        # second, so a reply without a colon-then-list seam is never parsed. Both probes are
+        # byte tests that can fire inside a NESTED value (a `sessions` result quoting another
+        # session's assistant rows, a bash result's structured details), so the decoded row's
+        # own top-level role decides: only a genuine assistant reply is consumed here; any
+        # other row falls through to the handlers below (review round 1, F1).
+        if (
+            b":" in line
+            and _DIR_LISTING_PROBE.search(line)
+            and _ASSISTANT_ROW_PROBE.search(line)
+            and self._on_assistant_text_row(seq, line)
+        ):
             return
         if b'"tool_name"' in line:
             match = _TOOL_NAME_PROBE.search(line)
@@ -870,6 +911,40 @@ class FileScan:
             if not is_known_extension(os.path.basename(raw)):
                 continue
             self._note_mention(raw, "prose", None, seq, ts, seen=seen)
+
+    def _on_assistant_text_row(self, seq: int, line: bytes) -> bool:
+        """Admit the files an assistant reply lists under a directory (``supplements.listing``).
+
+        Reached only after :meth:`feed`'s byte probes saw the listing seam and an assistant
+        role SOMEWHERE in the row. Returns whether the row was an assistant reply and is
+        therefore consumed; ``False`` hands it back to :meth:`feed`'s other handlers, because
+        a tool result carrying a nested ``"role":"assistant"`` must keep its write/command
+        evidence and must not have its OUTPUT admitted as if the agent had said it.
+        Only the directory-listing idiom is read here: ordinary assistant prose paths stay
+        unadmitted, because the agent narrates paths it merely considered far more often than
+        a user names a file.
+        """
+        row = _row(line)
+        payload = row.get("payload") if row else None
+        if not isinstance(payload, dict) or payload.get("role") != "assistant":
+            return False
+        content = payload.get("content")
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            ]
+        else:
+            return True
+        ts = _row_ts(line)
+        seen: set[str] = set()
+        for text in texts:
+            for raw in directory_listing(text):
+                self._note_mention(raw, "prose", None, seq, ts, seen=seen)
+        return True
 
     def _note_argument_mentions(
         self,
