@@ -1456,23 +1456,23 @@ def test_a_wide_roster_never_costs_the_transcript() -> None:
     data, degraded = cap_projection_frame(fold.projection)
 
     assert degraded is True
-    assert all(row.get("peer_ids") == [] for row in data["subagents"]), (
-        "the derivable graph has to be shed to fit a 256-wide roster"
-    )
+    assert all(
+        row.get("peer_ids") == [] for row in data["subagents"]
+    ), "the derivable graph has to be shed to fit a 256-wide roster"
     assert all("parent_job_id" in row for row in data["subagents"])
-    assert len(data["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT, (
-        "the cap cut the reader's rows to make room for a field it then dropped"
-    )
-    assert not any(str(row.get("text") or "").endswith("…") for row in data["transcript"]), (
-        "a message was truncated to fit a field it then dropped"
-    )
+    assert (
+        len(data["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
+    ), "the cap cut the reader's rows to make room for a field it then dropped"
+    assert not any(
+        str(row.get("text") or "").endswith("…") for row in data["transcript"]
+    ), "a message was truncated to fit a field it then dropped"
     assert all(row.get("text_complete") is True for row in data["transcript"])
-    assert len(data["transcript"][0]["text"]) == len("open the conversation"), (
-        "the opening row is the one row the phone must always read in full"
-    )
-    assert len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000, (
-        "the transcript survived by spending a different field, not by breaking the cap"
-    )
+    assert len(data["transcript"][0]["text"]) == len(
+        "open the conversation"
+    ), "the opening row is the one row the phone must always read in full"
+    assert (
+        len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000
+    ), "the transcript survived by spending a different field, not by breaking the cap"
     assert len(json.dumps({"op": "projection", "data": data}).encode()) < _MAX_LINE_BYTES
 
 
@@ -1506,12 +1506,12 @@ def test_a_small_rosters_graph_is_not_spent_to_save_a_transcript() -> None:
     data, degraded = cap_projection_frame(fold.projection)
 
     assert degraded is True
-    assert any(row.get("peer_ids") for row in data["subagents"]), (
-        "a five-child graph cannot buy this frame; shedding it only costs the sheet"
-    )
-    assert all(row.get("details") == {} for row in data["transcript"]), (
-        "the expand payload is the cheaper thing to spend"
-    )
+    assert any(
+        row.get("peer_ids") for row in data["subagents"]
+    ), "a five-child graph cannot buy this frame; shedding it only costs the sheet"
+    assert all(
+        row.get("details") == {} for row in data["transcript"]
+    ), "the expand payload is the cheaper thing to spend"
     assert len(data["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
     assert len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000
 
@@ -1602,9 +1602,9 @@ def test_the_graph_is_offered_again_after_details() -> None:
 
     assert degraded is True
     assert all(row.get("peer_ids") == [] for row in frame["subagents"])
-    assert len(frame["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT, (
-        "the tail was halved to make room for a graph it then dropped"
-    )
+    assert (
+        len(frame["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
+    ), "the tail was halved to make room for a graph it then dropped"
     assert all(row.get("details") == {} for row in frame["transcript"])
     assert measure(frame) <= cap
 
