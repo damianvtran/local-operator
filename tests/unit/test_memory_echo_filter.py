@@ -2,17 +2,17 @@
 
 `apply_ops` dedups by op id, so an op `compact` deleted looks new to it. On the
 10-24 store one peer re-sent 22,551 of the 25,192 dropped ops within ~100
-minutes. `MemoryStore._compacted_echo` now drops, as accepted no-ops, the two
-shapes compaction removes: puts under a stored tombstone, and revisions that
-already have a stored descendant.
+minutes; 22,403 of them were puts under a tombstone. `MemoryStore._compacted_echo`
+now drops exactly that shape, as an accepted no-op: a put for an entity with a
+STORED tombstone.
 
 The filter is only correct if dropping an op cannot change what any reader
-sees, so most tests here are about what it must NOT drop:
+sees, now or after a later op. Most tests here are about what it must NOT drop:
 
-* a concurrent sibling (no stored descendant) stays a visible conflict;
-* an op whose drop would turn a stored parent into a fabricated head;
-* an op that is the endpoint of a cross-entity `replaces` edge, which
-  `search` reads to hide the replaced fact.
+* a superseded revision of a LIVE entity: a later `replaces` edge or move
+  tombstone may name it by op id (review round 1 on PR #3058, M1 and M2);
+* a concurrent sibling stays a visible conflict;
+* a dead put that may be one half of a cross-entity edge.
 
 Plus the bookkeeping: a dropped op still raises its origin's sequence floor,
 so neither a peer's next contiguous op nor a local allocation is refused or
@@ -28,6 +28,7 @@ import pytest
 
 from local_operator.memory import (
     SESSION_EXPORT_NAME,
+    MemoryError,
     MemoryIdentity,
     MemoryStore,
     _dump,
@@ -133,29 +134,34 @@ def test_compacted_history_pushed_back_by_a_peer_is_not_readmitted(store, caplog
     receipt = _compacted(store)
     assert receipt["ops"]["dropped"] == 4  # two superseded, two under a tombstone
     kept, state = _all_ops(store), _state(store)
+    superseded = {live["version"], second["version"]}
 
     with caplog.at_level(logging.INFO, logger="local_operator.memory"):
-        changed = _replay(store, history)
+        _replay(store, history)
 
-    assert changed == 0
-    assert _all_ops(store) == kept, "a peer's echo undid the compaction"
+    held = {op["op_id"] for op in _all_ops(store)}
+    assert held == {op["op_id"] for op in kept} | superseded, "a forgotten put came back"
     assert _state(store) == state
-    assert "dropped_compacted=4 (forgotten=2 superseded=2)" in caplog.text
-    assert store.journal_plan()["ops"]["dropped"] == 0
+    assert "dropped_compacted=2 of" in caplog.text
+    # Only the two superseded revisions of the live fact are left for the next pass.
+    assert store.journal_plan()["ops"]["dropped"] == 2
 
 
 def test_a_stale_session_export_does_not_resurrect_compacted_ops(store):
     """`import_session` goes through the same filter: a pre-compaction export is inert."""
     first = store.put("session", fact())
-    _edit_session = store.put(
+    edited = store.put(
         "session", fact("Edited body"), entity=first["id"], expected_version=first["version"]
+    )
+    store.put(
+        "session", fact(), entity=first["id"], expected_version=edited["version"], forget=True
     )
     export = store.session_dir / SESSION_EXPORT_NAME
     stale = export.read_text()
-    assert len(stale.splitlines()) == 2
+    assert len(stale.splitlines()) == 3
     _compacted(store)
     kept = _all_ops(store)
-    assert [op["op_id"] for op in kept] == [_edit_session["version"]]
+    assert [op["kind"] for op in kept] == ["tombstone"]
 
     export.write_text(stale)  # what a crash between delete and export rewrite leaves
     store.import_session()
@@ -186,73 +192,202 @@ def test_a_concurrent_peer_edit_is_still_admitted_and_shown_as_a_conflict(store)
     assert len(view["conflicts"]) == 1
 
 
-def test_an_op_whose_drop_would_turn_a_stored_parent_into_a_head_is_admitted(store):
-    """Stored descendant AND a stored parent it alone covers: dropping it forks the entity.
+def _push(source: MemoryStore, target: MemoryStore, vector, scopes=("global",)):
+    """One real `network.memory.batch()` frame applied the way `receive()` applies it."""
+    from local_operator.network.memory import batch
 
-    Arrival order across origins makes this real: device-c's child of device-b's
-    edit lands before the edit itself. Until the edit arrives the entity shows
-    a conflict; dropping it as "superseded" would leave that conflict forever.
+    origins = {"device-a", "device-b", "device-c", "device-z"}
+    payload = batch(source, dict(vector), list(scopes), origins)
+    target.apply_ops(payload["ops"] + payload["proofs"], origins=origins, contiguous=False)
+    return payload["after"]
+
+
+def _ids(store: MemoryStore) -> set[str]:
+    return {op["op_id"] for op in _all_ops(store)}
+
+
+def test_a_superseded_revision_a_later_replacement_names_is_kept(tmp_path):
+    """Review round 1, M1: a `replaces` edge arriving AFTER the revision must still hide it.
+
+    C relays A's ``v1``/``v2`` together with its own ``v3`` (``device-c`` sorts
+    before ``device-z``, so ``v3`` lands first). A then replaces the fact while its
+    head is still ``v2``. `_NOT_REPLACED_SQL` joins the edge's parent ROW, so if
+    ``v2`` had been dropped as superseded, B would keep showing the replaced fact.
     """
-    first = store.put("global", fact())
-    with store.connection() as db:
-        base = store._ops(db, first["id"])[0]
-    edit = _peer_put(base, "peer-edit", 1, [first["version"]], "Peer's edit")
-    child = dict(
-        _peer_put(base, "third-edit", 1, ["peer-edit"], "Third device's follow-up"),
-        origin_device="device-c",
-        hlc=[base["hlc"][0] + 9, 0, "device-c"],
+    a = _store(tmp_path, "a", "device-z")
+    c = _store(tmp_path, "c", "device-c")
+    b = _store(tmp_path, "b", "device-b")
+    v1 = a.put("global", fact("Deploy mercury on friday"))
+    v2 = _edit(a, v1["id"], v1["version"], "Deploy mercury on saturday")
+    a.put("global", fact("Unrelated later fact"))
+    _push(a, c, {})
+    _edit(c, v1["id"], v2["version"], "Deploy mercury on monday")
+    _push(c, b, {})
+    cursor_ab = _push(a, b, {})
+    replacement = a.put("global", fact("Deploy mercury on sunday", replaces=v1["id"]))
+    _push(a, b, cursor_ab)
+    _push(c, a, {})
+
+    assert {v1["version"], v2["version"]} <= _ids(b)
+    assert sorted(h["id"] for h in b.search("mercury")) == [replacement["id"]]
+    assert sorted(h["id"] for h in b.search("mercury")) == sorted(
+        h["id"] for h in a.search("mercury")
     )
-    store.apply_ops([child], origins={"device-c"}, contiguous=False)
-    assert len(store.show("global", first["id"])["conflicts"]) == 1
-
-    assert store.apply_ops([edit], origins={"device-b"}, contiguous=False) == 1
-
-    view = store.show("global", first["id"])
-    assert view["version"] == "third-edit"
-    assert view["conflicts"] == []
 
 
-def test_an_op_with_an_unknown_parent_is_admitted_so_that_parent_cannot_fork_later(store):
-    """An unknown parent may arrive in a later batch; only this op can bury it."""
-    first = store.put("global", fact())
-    with store.connection() as db:
-        base = store._ops(db, first["id"])[0]
-    late = _peer_put(base, "late-parent", 1, [first["version"]], "Late parent")
-    middle = _peer_put(base, "middle", 2, ["late-parent"], "Middle")
-    tip = _peer_put(base, "tip", 3, ["middle"], "Tip")
-    store.apply_ops([tip], origins={"device-b"}, contiguous=False)
-    store.apply_ops([middle], origins={"device-b"}, contiguous=False)
-    store.apply_ops([late], origins={"device-b"}, contiguous=False)
+def test_a_move_naming_a_revision_this_peer_superseded_is_still_refused(tmp_path):
+    """Review round 1, M2: the unseen-revision guard needs the mover's parent row.
 
-    view = store.show("global", first["id"])
-    assert view["version"] == "tip"
-    assert view["conflicts"] == []
-
-
-def test_the_endpoint_of_a_replacement_edge_is_never_dropped(tmp_path, store):
-    """`search` hides a replaced fact by joining the edge's PARENT row; it must exist.
-
-    ``v2`` is a superseded revision of the target with a stored descendant, so
-    without the cross-entity check it would be dropped as an echo and the
-    replaced fact would reappear in search on this peer only.
+    B syncs only ``global``, so the move's destination never arrives and the
+    marker is "a second, unresolvable parent beside a covered one". If ``v2`` had
+    been dropped, nothing is covered and the move erases C's correction on B only.
     """
-    target = store.put("global", fact("Deploy mercury on friday"))
-    v2 = _edit(store, target["id"], target["version"], "Deploy mercury on saturday")
-    store.put("global", fact("Deploy mercury on sunday", replaces=target["id"]))
-    _edit(store, target["id"], v2["version"], "Deploy mercury on monday")
-    assert len(store.search("mercury")) == 1
-    history = sorted(_all_ops(store), key=lambda op: op["seq"])
-    assert [op["op_id"] for op in history][:2] == [target["version"], v2["version"]]
+    a = _store(tmp_path, "a", "device-z")
+    b = _store(tmp_path, "b", "device-b")
+    c = _store(tmp_path, "c", "device-c")
+    v1 = a.put("global", fact("v1"))
+    v2 = _edit(a, v1["id"], v1["version"], "v2")
+    _push(a, c, {})
+    v3 = _edit(c, v1["id"], v2["version"], "C's correction v3")
+    _push(c, b, {})
+    assert v2["version"] in _ids(b)
+    a.move(v1["id"], "team", expected_version=v2["version"], scope="global")
 
-    peer = _store(tmp_path, "b", "device-b")
-    # Gap fill: the replacement and the latest edit arrive before the two old revisions.
-    peer.apply_ops(history[2:], origins={"device-a"}, contiguous=False)
-    peer.apply_ops(history[:2], origins={"device-a"}, contiguous=False)
+    for peer in (b, c):
+        with pytest.raises(MemoryError, match="move refused"):
+            _push(a, peer, {"device-z": 2})
+        assert peer.show("global", v1["id"])["version"] == v3["version"]
 
-    assert v2["version"] in {op["op_id"] for op in _all_ops(peer)}
-    assert [hit["id"] for hit in peer.search("mercury")] == [
-        hit["id"] for hit in store.search("mercury")
-    ]
+
+def test_a_forgotten_replacement_still_hides_its_target_whatever_the_arrival_order(tmp_path):
+    """A dead put whose parent this store cannot place may be half of a `replaces` edge.
+
+    A writes Y, then X replacing Y (X's parent is Y's head), then forgets X. Search
+    keeps hiding Y on A: `_NOT_REPLACED_SQL` needs only the child ROW, and a
+    forget redacts the put without deleting it. B gets X's tombstone first, then
+    X's put before Y's head. The put is redacted, so its `replaces` is
+    unreadable and only the unplaceable parent says it may be an edge; dropping it
+    leaves Y visible on B alone.
+    """
+    a = _store(tmp_path, "a", "device-a")
+    b = _store(tmp_path, "b", "device-b")
+    target = a.put("global", fact("Deploy mercury on friday"))
+    replacement = a.put("global", fact("Deploy mercury on sunday", replaces=target["id"]))
+    a.put(
+        "global",
+        fact(),
+        entity=replacement["id"],
+        expected_version=replacement["version"],
+        forget=True,
+    )
+    history = {op["op_id"]: op for op in _all_ops(a)}
+    tomb = next(op for op in history.values() if op["kind"] == "tombstone")
+    put = history[replacement["version"]]
+    origins = {"device-a"}
+    b.apply_ops([tomb], origins=origins, contiguous=False)
+    b.apply_ops([put], origins=origins, contiguous=False)
+    b.apply_ops([history[target["version"]]], origins=origins, contiguous=False)
+
+    assert replacement["version"] in _ids(b)
+    assert a.search("mercury") == []
+    assert b.search("mercury") == a.search("mercury")
+
+
+@pytest.mark.parametrize("order", ["move_first", "same_frame", "destination_last"])
+def test_a_moved_facts_source_revision_arriving_after_the_move_is_admitted(tmp_path, order):
+    """`show().moved_from` reads the source revision through the destination's parent edge.
+
+    Z writes the fact; C moves it. B receives C's source tombstone before Z's put,
+    so the put lands on an entity with a STORED tombstone. It is still half of a
+    live cross-entity edge, so it must be stored or B loses the "moved from" link.
+    Each order is caught by a different check: the stored edge (``move_first``),
+    the in-batch child (``same_frame``), or only the move-shaped tombstone when
+    the destination has not arrived yet (``destination_last``).
+    """
+    z = _store(tmp_path, "z", "device-z")
+    c = _store(tmp_path, "c", "device-c")
+    b = _store(tmp_path, "b", "device-b")
+    scopes = ("global", "team")
+    source = z.put("global", fact("Moved fact"))
+    _push(z, c, {}, scopes)
+    receipt = c.move(source["id"], "team", expected_version=source["version"], scope="global")
+    destination = receipt["moved"][0]["to"].split("/", 1)[1]
+    if order == "same_frame":
+        _push(c, b, {}, scopes)
+    elif order == "move_first":
+        _push(c, b, {"device-z": 1}, scopes)
+        _push(z, b, {}, scopes)
+    else:
+        # B syncs only `global` first: the tombstone arrives, the destination does not.
+        _push(c, b, {"device-z": 1}, ("global",))
+        _push(z, b, {}, ("global",))
+        assert source["version"] in _ids(b)
+        _push(c, b, {"device-z": 1}, scopes)
+
+    assert source["version"] in _ids(b)
+    assert b.show("team", destination)["moved_from"] == c.show("team", destination)["moved_from"]
+    assert b.show("team", destination)["moved_from"] == {"scope": "global", "id": source["id"]}
+
+
+def test_an_echo_through_the_real_receive_path_stays_compacted(tmp_path, monkeypatch):
+    """Review round 1, m1: the property the PR exists for, over `batch()` -> `receive()`.
+
+    The peer holds the full history; the receiver compacted. Every frame goes
+    through the receiver's real `receive()` (vector validation, cursor commit) and
+    must leave the journal compacted, the cursor at the sender's vector, and
+    `stream-generation` untouched (a bump makes every peer resend everything).
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network import memory as network_memory
+
+    receiver = _store(tmp_path, "receiver", "device-a")
+    # Live facts carry one revision: a re-admitted superseded revision is genuine
+    # gap-filling under the current rule and bumps the generation, which would
+    # hide whether the DROPPED ops did.
+    for index in range(30):
+        item = receiver.put("global", fact(f"Fact {index} at docs/{index}.md"))
+        if index % 3:
+            edited = _edit(receiver, item["id"], item["version"], f"Edited {index}")
+            receiver.put(
+                "global",
+                fact(),
+                entity=item["id"],
+                expected_version=edited["version"],
+                forget=True,
+            )
+    peer = _store(tmp_path, "peer", "device-b")
+    origins, scopes = {"device-a", "device-b"}, ["global"]
+    vector: dict[str, int] = {}
+    while True:
+        payload = network_memory.batch(receiver, vector, scopes, origins)
+        if payload["after"] == vector:
+            break
+        peer.apply_ops(payload["ops"] + payload["proofs"], origins=origins, contiguous=False)
+        vector = payload["after"]
+    _compacted(receiver)
+    kept = _ids(receiver)
+    with receiver.connection() as db:
+        generation = db.execute("SELECT value FROM meta WHERE key='stream-generation'").fetchone()
+    monkeypatch.setattr(network_memory, "_store", lambda root: receiver)
+    server = SimpleNamespace(root=receiver.root.parent)
+
+    frames, cursor = 0, network_memory.cursor(receiver, "device-b", scopes)
+    while True:
+        payload = network_memory.batch(peer, cursor, scopes, origins)
+        if payload["after"] == cursor:
+            break
+        network_memory.receive(server, "device-b", payload, scopes, origins)
+        cursor, frames = network_memory.cursor(receiver, "device-b", scopes), frames + 1
+
+    assert frames >= 1
+    assert cursor == {"device-a": 70}  # 30 puts + 20 edits + 20 forgets
+    assert _ids(receiver) == kept, "40 forgotten puts were pushed back and re-admitted"
+    with receiver.connection() as db:
+        assert (
+            db.execute("SELECT value FROM meta WHERE key='stream-generation'").fetchone()
+            == generation
+        )
 
 
 def test_a_dropped_op_still_raises_its_origin_floor_and_leaves_no_gap(store):
@@ -354,5 +489,10 @@ def test_two_stores_converge_through_edits_forgets_conflicts_and_compaction(tmp_
     for entity in ids[:3]:
         assert len(state["heads"][entity]) == 2, "a concurrent edit stopped being a conflict"
         assert len(left.show("global", entity)["conflicts"]) == 1
-    # And left really stayed compacted: nothing it dropped came back.
-    assert dropped.isdisjoint(op["op_id"] for op in _all_ops(left))
+    # Nothing left dropped under a tombstone came back. Superseded revisions of
+    # live facts may (a later op can name them; see the M1/M2 tests).
+    # Only ids[3] was forgotten on left when it compacted. ids[5]'s tombstone came
+    # from right in the SAME batch as the echo, which deliberately does not count.
+    back = [op for op in _all_ops(left) if op["op_id"] in dropped]
+    assert back, "fixture no longer exercises the echo of superseded revisions"
+    assert all(op["entity_id"] != ids[3] for op in back)
