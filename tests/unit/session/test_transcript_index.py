@@ -2550,6 +2550,37 @@ async def test_a_running_unpayable_refresh_pauses_while_its_own_open_is_held(tmp
 
 
 @pytest.mark.asyncio
+async def test_a_running_unpayable_refresh_reads_as_paused_for_its_own_open(tmp_path):
+    """The open frame's question once the scan pauses for its own open: awaiting
+    it from inside that open can only idle out the snapshot budget. Mutant:
+    ``refresh_paused_for_paint`` answers only ``refresh_deferred`` -> False here."""
+    _big_journal(tmp_path)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    assert not ti.refresh_paused_for_paint(tmp_path, SID), "no hold: nothing to pause for"
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert not ti.refresh_deferred(tmp_path, SID), "already running: not deferred"
+        assert ti.refresh_paused_for_paint(tmp_path, SID)
+    finally:
+        release()
+    assert not ti.refresh_paused_for_paint(tmp_path, SID)
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_running_payable_refresh_is_never_paused_for_paint(tmp_path):
+    """A payable scan never pauses (``may_yield``), so waiting on it may pay."""
+    _three_turns(tmp_path)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert not ti.refresh_paused_for_paint(tmp_path, SID)
+    finally:
+        release()
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
 async def test_a_cold_payable_view_is_ready_while_its_own_open_is_held(tmp_path):
     """No self-wait: the view's 0.2 s wait on a payable refresh, under its own
     open's hold, still answers ``ready``. Mutant: ``may_yield`` dropped -> ``building``."""

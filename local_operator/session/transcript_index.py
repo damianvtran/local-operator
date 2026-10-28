@@ -3158,6 +3158,44 @@ def refresh_deferred(config_dir: str | Path, session_id: str) -> bool:
     return _key(config_dir, session_id) in _DEFERRED
 
 
+def refresh_paused_for_paint(config_dir: str | Path, session_id: str) -> bool:
+    """Whether awaiting this session's refresh from inside its own open is futile.
+
+    :func:`refresh_deferred`, plus the case "ITS OWN OPEN TOO" created: a refresh
+    ALREADY RUNNING when the same conversation is re-opened. Its scan pauses for
+    as long as this open's paint hold is young, so it cannot land inside the
+    snapshot budget, and the open frame's ``asyncio.wait`` would idle the whole
+    remaining budget for the same ``building`` answer -- measured on a real
+    ``lop serve`` as 112-119 ms of the 120 ms budget, the bulk of what the warm
+    re-open still cost once the scan stopped taking its GIL.
+
+    Mirrors the pause's own predicate, so the two cannot disagree: a live hold
+    for this key younger than :data:`_YIELD_HOLD_STALE_S`, and a scan that
+    :func:`scan_payable_in_budget` says no first-paint wait could have paid for
+    (a payable scan never pauses, and waiting on it still pays). Loop thread; two
+    ``stat`` calls, and only while this session holds a paint.
+    """
+    if refresh_deferred(config_dir, session_id):
+        return True
+    key = _key(config_dir, session_id)
+    since = _PAINT_HOLD_SINCE.get(key)
+    if since is None or time.monotonic() - since > _YIELD_HOLD_STALE_S:
+        return False
+    entry = _IN_FLIGHT.get(key)
+    if entry is None or entry[0] is not asyncio.get_running_loop() or entry[1].done():
+        return False
+    journal = _stat_or_none(_journal_path(config_dir, session_id))
+    if journal is None:
+        return False
+    has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+    return not scan_payable_in_budget(
+        journal.st_size,
+        has_previous=has_previous,
+        rederive_bytes=rederive,
+        wait_s=_FIRST_PAINT_WAIT_S,
+    )
+
+
 def _defer_for_paint(config_dir: str | Path, session_id: str) -> asyncio.Event | None:
     """The hold event a NEW refresh must wait on, or ``None`` to start now.
 
