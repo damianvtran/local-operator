@@ -16573,7 +16573,7 @@ class Session:
             # Measured from the ask's own creation stamp: "was this update raised
             # within the window before the question" is the duplicate pattern.
             matches = dedupe.matching_updates(
-                rows, ask=dedupe.ask_text(record), now=int(record.get("created_at") or 0)
+                rows, ask=record, now=int(record.get("created_at") or 0)
             )
             for row in matches:
                 if not queue.add_context(

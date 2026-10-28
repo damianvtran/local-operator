@@ -1622,17 +1622,48 @@ class AskQueue:
         """Fold an update's text into an ask that is STILL OPEN (``asks/dedupe.py``).
 
         An append-only ``context`` row, never a status change: the ask settles
-        when it settles, and the text settles with it.
+        when it settles, and the text settles with it. Every ``False`` means
+        "deliver the update normally", so no outcome of this method loses it.
 
-        THE STATUS IS RE-CHECKED UNDER THE LOG LOCK (review M1, #3094). The
-        caller matched the ask on an earlier read; another surface (the phone,
-        the desktop, a cold CLI) may have answered it since. Attaching to a
-        settled ask would hide the update on a question nobody looks at again,
-        so the fold is re-read with the lock held and anything but ``open``
-        refuses. A contended lock also refuses: the decision needs it (the
-        keyed bridge door's TB-10 rule). Every ``False`` means "deliver the
-        update normally", so a refusal can never lose it.
+        FAIL-SAFE AGAINST A CONCURRENT SETTLE (review M1, rounds 1 and 2). The
+        caller matched the ask on an earlier read, and another surface (phone,
+        desktop, a cold CLI) may answer it at any moment. Three guards:
+
+        1. The ask-log lock must be ACTUALLY acquired; a contended lock refuses
+           rather than deciding on a read it cannot prove exclusive (the keyed
+           bridge door's TB-10 rule).
+        2. Under that lock the fold is re-read and anything but ``open`` refuses.
+        3. After the append the fold is read AGAIN, still under the lock, and a
+           settled ask returns ``False`` so the update is delivered as well.
+
+        Guard 3 exists because the lock is advisory for the settling writers:
+        ``store.append_event`` gives up after its ~95 ms retry budget and appends
+        UNLOCKED (deliberately — an answer must never be lost to a busy log), so
+        a settle can land while this method holds the lock. Making settles wait
+        or fail instead would change every answer path's contract to fix a
+        dedupe edge, so the cheaper and safer fix is here: detect it and deliver.
+        A settle that lands only after guard 3 is the ordinary "context settles
+        with its ask" case (part c of the design). The cost of a detected race
+        is a duplicate (the context row plus the delivered update), never a
+        loss. Everything is prepared before the lock so the hold stays short.
         """
+        event: dict[str, Any] = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_CONTEXT,
+            "ask_id": str(ask_id),
+            "title": str(title or ""),
+            "body": str(body or "")[: store.CONTEXT_BODY_MAX],
+            "source": source,
+        }
+        if item_id:
+            event["item_id"] = item_id
+
+        def is_open() -> bool:
+            for record in self.records(self._now()):
+                if record["ask_id"] == str(ask_id):
+                    return record.get("status") == store.STATUS_OPEN
+            return False
+
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
             fd = os.open(store.asks_log_path(self.session_dir), store.append_flags(), 0o600)
@@ -1642,35 +1673,22 @@ class AskQueue:
         try:
             lock = store._NonBlockingLock(fd)
             with lock:
-                if not lock.acquired:
+                if not lock.acquired or not is_open():
                     return False
-                now = self._now()
-                record = next((r for r in self.records(now) if r["ask_id"] == str(ask_id)), None)
-                if record is None or record.get("status") != store.STATUS_OPEN:
-                    return False
-                event: dict[str, Any] = {
-                    "v": store.EVENT_SCHEMA,
-                    "kind": store.EVENT_CONTEXT,
-                    "at": now,
-                    "ask_id": str(ask_id),
-                    "title": str(title or ""),
-                    "body": str(body or "")[: store.CONTEXT_BODY_MAX],
-                    "source": source,
-                }
-                if item_id:
-                    event["item_id"] = item_id
+                event["at"] = self._now()
                 os.write(
                     fd,
                     json.dumps(event, separators=(",", ":"), sort_keys=True).encode("utf-8")
                     + b"\n",
                 )
+                still_open = is_open()
         except OSError:
             logger.debug("ask context: append failed", exc_info=True)
             return False
         finally:
             os.close(fd)
         self._refresh()
-        return True
+        return still_open
 
     def _settled(self, ask_id: str) -> None:
         """Post-write bookkeeping common to every terminal transition.

@@ -41,10 +41,26 @@ subset test over content words:
 
 One new word — ``failed``, ``released``, ``ctr``, a number — keeps the update.
 No stemming, on purpose: stemming would make "released" equal the ask's
-"release" and turn an outcome back into a restatement. Tokens of 2+ characters
-are kept (``pr``, ``ci``, ``ip``) and every digit run counts, so "PR #3094: CI
-failed" adds ``ci``/``failed`` and is delivered. The failure mode left is a
-missed merge (today's behaviour: one extra click), never a hidden result.
+"release" and turn an outcome back into a restatement. Tokens of ANY length are
+kept (``pr``, ``ci``, the ``y`` of ``feat/y``) and the tokenizer is Unicode
+(``[^\\W_]+``), so a non-English update is a run of words the ask does not
+contain and is delivered rather than read as empty.
+
+POLARITY IS MEANING, NOT NOISE (review round 2, B1). Round 1 dropped ``not``,
+``no`` and ``do`` as stopwords, so "Do not delete branch feat/x" was a subset of
+"Delete branch feat/x?" and was swallowed — a warning against the very action
+being proposed. Bag-of-words containment cannot see polarity, so polarity is
+checked SEPARATELY and fails open: if the update carries any
+:data:`_SIGNAL_WORDS` word — a negation (``not``, ``don``/``t`` of "don't",
+``never``), a reversal (``stop``, ``wait``, ``hold``, ``cancel``, ``revert``,
+``instead``), a condition (``if``, ``unless``, ``only``, ``until``) or a
+question word (``which``, ``should``, ``whether``) — that the ask's QUESTION
+SENTENCES do not, the update is delivered. Option labels deliberately do not
+license a signal: an ask offering "Yes"/"No" must not let "No - wait" read as
+a restatement. The list is English; for any other language the subset rule
+already delivers, because those words are new tokens the English ask lacks.
+When in doubt the rule delivers — the failure mode left is a missed merge
+(today's behaviour: one extra click), never a hidden instruction or result.
 
 WHERE THE TEXT GOES. A suppressed update is never written; its text rides the
 ask as context. On the ask-after-update path the earlier update is marked READ
@@ -87,32 +103,61 @@ SUPPRESSED_TEXT = (
     "it with that news in the title."
 )
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+_TOKEN = re.compile(r"[^\W_]+")
 
 #: Function words that carry no topic. Short on purpose: every word removed
-#: here makes an update look more like a restatement, never less.
+#: here makes an update look more like a restatement, never less. Nothing that
+#: can flip or condition meaning belongs here — see :data:`_SIGNAL_WORDS`.
 _STOPWORDS = frozenset(
-    "the and for you your are was were this that with from have has had not but "
-    "can will should would could did does into onto about what which when where "
-    "who why how all any now then than them they its our out use is it to of on "
-    "in at be do or an as by if so we me my no".split()
+    "the and for you your are was were this that with from have has had "
+    "will would could did does into onto about all any now then than them they "
+    "its our out use is it to of on in at be do or an as by so we me my a i s".split()
 )
 
 #: Words that only restate THAT a question is pending. Removing them is what
 #: lets "Waiting on you: branch feat/x" count as adding nothing to "Delete
-#: branch feat/x?". Never an outcome or state word.
+#: branch feat/x?". Never an outcome, state, polarity or condition word.
 _FRAMING = frozenset(
-    "waiting wait question decision decide needed need needs input approval "
+    "waiting question decision decide needed need needs input approval "
     "approve answer reply pending please choose choice call confirm".split()
+)
+
+#: Words that negate, reverse, condition or question. One in the update that the
+#: ask's question does not carry means the update says something the ask does
+#: not (see the module docstring), so it is delivered. ``t`` and the ``n``-stems
+#: catch contractions the tokenizer splits ("don't" -> ``don`` ``t``).
+_SIGNAL_WORDS = frozenset(
+    # negation
+    "not no nor never none nothing neither don doesn didn won wouldn shouldn "
+    "couldn isn aren wasn weren hasn haven cannot cant dont t "
+    # reversal / stop
+    "stop wait hold pause halt cancel abort revert rollback undo reverse "
+    "instead skip avoid without but however although except "
+    # condition / timing
+    "if unless only until after before when once whether otherwise "
+    # question back to the user
+    "which what who whom whose where why how should shall may might can".split()
 )
 
 
 def tokens(text: str) -> frozenset[str]:
-    """Content tokens: lower-case, 2+ chars (any digit run counts), no stopwords."""
+    """Content tokens: [redacted] Unicode word runs, no stopwords."""
     return frozenset(
-        word
-        for word in _TOKEN.findall(str(text or "").lower())
-        if (len(word) >= 2 or word.isdigit()) and word not in _STOPWORDS
+        word for word in _TOKEN.findall(str(text or "").lower()) if word not in _STOPWORDS
+    )
+
+
+def signal_words(text: str) -> frozenset[str]:
+    """The negation/reversal/condition/question words in ``text``."""
+    return frozenset(w for w in _TOKEN.findall(str(text or "").lower()) if w in _SIGNAL_WORDS)
+
+
+def question_text(record: Mapping[str, Any]) -> str:
+    """Only the ask's question SENTENCES — the text a signal word must appear in."""
+    return " ".join(
+        str(q.get("question") or "")
+        for q in (record.get("questions") or ())
+        if isinstance(q, Mapping)
     )
 
 
@@ -140,11 +185,26 @@ def novel_words(title: str, body: str, ask: str) -> frozenset[str]:
     return tokens(f"{title} {body}") - tokens(ask) - _FRAMING
 
 
-def adds_nothing(title: str, body: str, ask: str, *, priority: str = "normal") -> bool:
-    """Whether this update only restates the ask (see the module docstring)."""
+def adds_nothing(
+    title: str,
+    body: str,
+    ask: str,
+    *,
+    priority: str = "normal",
+    question: str | None = None,
+) -> bool:
+    """Whether this update only restates the ask (see the module docstring).
+
+    ``ask`` is the full topic text (:func:`ask_text`); ``question`` is the
+    question sentences alone (:func:`question_text`), against which polarity is
+    judged. Omitted, it defaults to ``ask``.
+    """
     if priority == "high":
         return False
-    shared = (tokens(f"{title} {body}") - _FRAMING) & tokens(ask)
+    update = f"{title} {body}"
+    if signal_words(update) - signal_words(ask if question is None else question):
+        return False
+    shared = (tokens(update) - _FRAMING) & tokens(ask)
     return len(shared) >= MIN_SHARED and not novel_words(title, body, ask)
 
 
@@ -168,7 +228,9 @@ def matching_ask(
         created = int(record.get("created_at") or 0)
         if now - created > WINDOW_MS:
             continue
-        if not adds_nothing(title, body, ask_text(record), priority=priority):
+        if not adds_nothing(
+            title, body, ask_text(record), priority=priority, question=question_text(record)
+        ):
             continue
         if best is None or created >= int(best.get("created_at") or 0):
             best = dict(record)
@@ -176,9 +238,10 @@ def matching_ask(
 
 
 def matching_updates(
-    rows: Iterable[Mapping[str, Any]], *, ask: str, now: int
+    rows: Iterable[Mapping[str, Any]], *, ask: Mapping[str, Any], now: int
 ) -> list[dict[str, Any]]:
-    """Unread, undismissed updates touched within the window that only restate the ask."""
+    """Unread, undismissed updates touched within the window that only restate ``ask``."""
+    text, question = ask_text(ask), question_text(ask)
     found: list[dict[str, Any]] = []
     for row in rows:
         if row.get("read") or row.get("dismissed"):
@@ -188,8 +251,9 @@ def matching_updates(
         if adds_nothing(
             str(row.get("title") or ""),
             str(row.get("body_md") or ""),
-            ask,
+            text,
             priority=str(row.get("priority") or "normal"),
+            question=question,
         ):
             found.append(dict(row))
     return found

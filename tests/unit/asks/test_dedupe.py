@@ -108,6 +108,30 @@ PAIRS = [
         True,
     ),
     (ASK_QUESTION, SAME_TITLE, SAME_BODY, "normal", True),
+    # Round 2 B1: polarity, reversal, condition and a question back are NEW.
+    ("Delete branch feat/x?", "Do not delete branch feat/x", "", "normal", False),
+    ("Deploy core to production?", "Deploy core to production? No - wait", "", "normal", False),
+    ("Delete branch feat/x?", "Don't delete branch feat/x", "", "normal", False),
+    ("Delete branch feat/x?", "Never delete branch feat/x", "", "normal", False),
+    ("Deploy core to production?", "Hold deploy core to production", "", "normal", False),
+    ("Deploy core to production?", "Cancel the core production deploy", "", "normal", False),
+    ("Deploy core to production?", "Deploy core to production instead", "", "normal", False),
+    ("Delete branch feat/x?", "Delete branch feat/x unless CI is green", "", "normal", False),
+    ("Delete branch feat/x?", "Delete branch feat/x only after review", "", "normal", False),
+    ("Delete branch feat/x?", "Which branch: feat/x?", "", "normal", False),
+    ("Delete branch feat/x?", "Delete branch feat/x? Should I keep feat/y", "", "normal", False),
+    ("Deploy core to production?", "Rollback core production deploy", "", "normal", False),
+    ("Delete branch feat/x?", "Delete branch feat/x, but keep the tag", "", "normal", False),
+    # A signal word the ask's question already carries is not new.
+    (
+        "Should I delete branch feat/x?",
+        "Waiting on you: should I delete branch feat/x",
+        "",
+        "normal",
+        True,
+    ),
+    # A non-English update is new words, so it is delivered.
+    ("Delete branch feat/x?", "Ne supprimez pas la branche feat/x", "", "normal", False),
     # ...but never at high priority, and never on one shared word.
     ("Delete branch feat/x?", "Waiting on you: branch feat/x", "", "high", False),
     ("Delete branch feat/x?", "Waiting on branch", "", "normal", False),
@@ -125,8 +149,8 @@ def test_only_an_update_that_adds_nothing_is_merged(
 
 
 def test_short_tokens_and_numbers_count_as_new_information() -> None:
-    """``ci``/``pr``/``ip`` and digit runs are kept, so they can keep an update."""
-    assert {"pr", "ci", "ip", "3"} <= dedupe.tokens("PR CI IP 3")
+    """``ci``/``pr``/``ip``, single letters and digit runs are kept."""
+    assert {"pr", "ci", "ip", "3", "y"} <= dedupe.tokens("PR CI IP 3 feat/y")
     assert dedupe.novel_words("CI red", "", _ask_text("Merge the PR?", "Yes", "No")) == {
         "ci",
         "red",
@@ -136,6 +160,18 @@ def test_short_tokens_and_numbers_count_as_new_information() -> None:
 def test_ask_text_reads_the_fields_a_real_ask_carries() -> None:
     text = _ask_text("Roll back now?", "Roll back", "Hold", qid="rollback_decision")
     assert dedupe.tokens(text) == {"roll", "back", "hold", "rollback", "decision"}
+
+
+def test_option_labels_do_not_license_a_negation() -> None:
+    """An ask offering "No" must not let "No - wait" read as a restatement."""
+    record = {"questions": [_question("Deploy core to production?", "Yes", "No")]}
+    assert "no" in dedupe.tokens(dedupe.ask_text(record))
+    assert not dedupe.adds_nothing(
+        "Deploy core to production? No",
+        "",
+        dedupe.ask_text(record),
+        question=dedupe.question_text(record),
+    )
 
 
 def test_matching_ask_honours_status_window_relay_and_priority() -> None:
@@ -280,6 +316,23 @@ def test_an_outcome_on_the_same_subject_is_delivered(session: Any) -> None:
     assert "context" not in _open_record(session)
 
 
+@pytest.mark.parametrize(
+    ("question", "options", "title"),
+    [
+        ("Delete branch feat/x?", ("Delete it", "Keep it"), "Do not delete branch feat/x"),
+        ("Deploy core to production?", ("Yes", "No"), "Deploy core to production? No - wait"),
+    ],
+)
+def test_a_negated_or_held_update_is_delivered_through_the_door(
+    session: Any, question: str, options: tuple[str, ...], title: str
+) -> None:
+    """B1 round 2, through the real notify door (not only the predicate)."""
+    session._enqueue_ask([_question(question, *options)], 3600, tool_call_id="c")
+    sentence = _notify(session, title)
+    assert sentence.startswith("Notified (id n_"), sentence
+    assert "context" not in _open_record(session)
+
+
 def test_a_high_priority_restatement_is_still_delivered(session: Any) -> None:
     _ask(session)
     sentence = _notify(session, SAME_TITLE, SAME_BODY, priority="high")
@@ -369,6 +422,74 @@ def test_an_ask_settled_after_the_match_refuses_the_context_and_delivers(
     [record] = [r for r in queue.records() if r["ask_id"] == ask_id]
     assert record["status"] == "withdrawn" and "context" not in record
     assert queue.add_context(ask_id, title="t", body="b", source="notify") is False
+
+
+def test_a_contended_lock_refuses_the_context_and_delivers(session: Any) -> None:
+    """M1 round 2: a lock held past the retry budget is NOT exclusive, so refuse.
+
+    Another fd holds ``flock`` on the log for the whole call (longer than
+    ``_NonBlockingLock``'s ~95 ms budget). ``add_context`` must refuse and the
+    door must deliver the update, rather than append on an unproven read.
+    """
+    import fcntl
+    import os
+
+    _ask(session)
+    queue = session.ask_queue()
+    holder = os.open(ask_store.asks_log_path(queue.session_dir), os.O_RDWR)
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        sentence = _notify(session, SAME_TITLE, SAME_BODY)
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+    assert sentence.startswith("Notified (id n_"), sentence
+    assert "context" not in _open_record(session)
+
+
+def test_a_settle_landing_between_attach_and_recheck_delivers_the_update(
+    session: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1 round 2: a settling writer appends UNLOCKED after its retry budget.
+
+    Simulated exactly: the moment ``add_context`` writes its context row, an
+    ``answered`` row is appended with the plain ``os.write`` a lock-starved
+    ``append_event`` uses. The post-append re-check must see the settle and
+    return False, so the update is delivered too (duplicate, never a loss).
+    """
+    import json
+    import os
+
+    outcome = _ask(session)
+    ask_id = outcome["details"]["ask_id"]
+    queue = session.ask_queue()
+    log = ask_store.asks_log_path(queue.session_dir)
+    real_write = os.write
+
+    def write_then_settle(fd: int, data: bytes) -> int:
+        written = real_write(fd, data)
+        if b'"kind":"context"' in data:
+            settle = {
+                "v": 1,
+                "kind": ask_store.EVENT_ANSWERED,
+                "at": ask_store.now_ms(),
+                "ask_id": ask_id,
+                "answers": {"q": ["Drop it"]},
+            }
+            other = os.open(log, ask_store.append_flags())
+            try:
+                real_write(other, json.dumps(settle).encode() + b"\n")
+            finally:
+                os.close(other)
+        return written
+
+    monkeypatch.setattr(os, "write", write_then_settle)
+    sentence = _notify(session, SAME_TITLE, SAME_BODY)
+    monkeypatch.setattr(os, "write", real_write)
+    assert sentence.startswith("Notified (id n_"), sentence
+    [record] = [r for r in queue.records() if r["ask_id"] == ask_id]
+    assert record["status"] == "answered"
+    assert NotificationStore(session._test_root).counts()[0] == 1, "delivered, not lost"
 
 
 def test_the_context_cap_is_counted_not_silent(session: Any) -> None:
