@@ -16359,10 +16359,10 @@ class SessionsParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "info", "spawn", "resume", "stop", "peek", "help"] = Field(
+    op: Literal["list", "info", "spawn", "resume", "stop", "peek", "move", "help"] = Field(
         description=(
             "list; info; spawn (USER-requested work; listed by default); resume;"
-            " stop; peek; help (per-op reference)."
+            " stop; peek; move; help (per-op reference)."
         )
     )
     session: str | None = Field(
@@ -16395,6 +16395,13 @@ class SessionsParams(BaseModel):
     prompt: str | None = Field(
         default=None,
         description="spawn/resume: message to run (required).",
+    )
+    cwd: str | None = Field(
+        default=None,
+        description=(
+            "move: destination for this session; absolute or relative to its "
+            "cwd; must exist."
+        ),
     )
     name: str | None = Field(default=None, description="spawn: title.")
     tags: list[str] | None = Field(
@@ -16497,6 +16504,9 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
     ),
     "stop": frozenset({"op", "session", "target", "pid", "peer"}),
     "peek": frozenset({"op", "session", "target", "pid", "query", "peer"}) | _SESSIONS_PEEK_FIELDS,
+    # ``move`` comes after ``peek`` so the reference and the op list read
+    # stop; peek; move; help, the order the enum text states.
+    "move": frozenset({"op", "session", "target", "pid", "peer", "cwd"}),
     # ``help`` reads nothing: the reference is static, so an address or a
     # `prompt` beside it is a misspelled intent like any other stray field.
     "help": frozenset({"op"}),
@@ -16711,6 +16721,17 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
             # renderer (agent review round 1, M3) — a surface whose selling
             # point is "everything enumerable is generated" must not keep the
             # last hard copy of a constant; see ``_sessions_peek_bounds_refusal``.
+        ),
+    ),
+    "move": _SessionsOpDoc(
+        summary="queue a move of THIS session's own working directory; returns"
+        " stage=queued, and the effective cwd is unchanged until a successor boots"
+        " there.",
+        example="sessions(op='move', cwd='~/work/project')",
+        refusals=(
+            "own session only: a foreign `session`, any `pid` but your own, `peer`"
+            " and a delegated/background child are refused by code; the destination"
+            " must already exist and be enterable.",
         ),
     ),
     "help": _SessionsOpDoc(
@@ -17119,7 +17140,7 @@ def _sessions_tier(args: dict[str, Any]) -> Literal["read", "write", "exec"]:
     op = str(args.get("op") or "")
     if op in ("list", "info", "peek", "help"):
         return "read"
-    if op in ("spawn", "resume"):
+    if op in ("spawn", "resume", "move"):
         return "write"
     return "exec"
 
@@ -20229,6 +20250,79 @@ def _sessions_params_error(
     )
 
 
+async def _sessions_move(
+    tool_call_id: str, params: SessionsParams, context: "ToolContext | None"
+) -> ToolResult:
+    """Queue a move of THIS session's own working directory.
+
+    ONLY ITS OWN. A move is a lifecycle act on the runtime that is running the
+    call, so every other address is refused as a technical code rather than
+    quietly resolved to the caller: a foreign id, an explicit pid, and ``peer``
+    (another device's session has its own owner, and the mesh carries no move
+    frame yet) are all ``sessions_move_*`` refusals.
+
+    STAGE ``queued`` ONLY. Nothing here retires a runtime or spawns a successor;
+    slice 2 does that. Reporting ``applied`` from this call would claim a boot
+    that has not happened, so the result's stage is the durable intent's stage.
+    """
+    from local_operator.session import cwd_move
+    from local_operator.paths import config_dir
+
+    def refuse(code: str, **fields: Any) -> ToolResult:
+        return _error(
+            tool_call_id,
+            "sessions",
+            f"refused: {code}",
+            details={"op": "move", "code": code, **fields},
+        )
+
+    if str(params.peer or "").strip():
+        return refuse("sessions_move_peer_unsupported", peer=str(params.peer))
+    if params.pid is not None and params.pid != os.getpid():
+        # The caller's OWN pid is allowed as a synonym for "me"; any other pid is
+        # somebody else's runtime and is not this call's to move.
+        return refuse("sessions_move_pid_not_self", pid=params.pid)
+    own_session_id = str(getattr(context, "session_id", "") or "")
+    if not own_session_id:
+        return refuse("sessions_move_no_owner_identity")
+    if params.session and params.session != own_session_id:
+        return refuse(
+            "sessions_move_foreign_session",
+            session=str(params.session),
+            own_session_id=own_session_id,
+        )
+    if str(params.target or "").strip():
+        return refuse("sessions_move_target_unsupported", target=str(params.target))
+    child_job_id = str(getattr(context, "job_id", "") or "")
+    if child_job_id:
+        # A call executing on behalf of a background job or a delegated child has
+        # no standalone runtime of its own to move, and moving the PARENT on its
+        # behalf would relocate a session the user did not ask to move.
+        return refuse("sessions_move_child_has_no_runtime", job_id=child_job_id)
+    effective_cwd = str(getattr(context, "cwd", "") or ".")
+    session_dir_value = str(getattr(context, "session_dir", "") or "")
+    root = Path(session_dir_value).parent.parent if session_dir_value else config_dir()
+    try:
+        intent = cwd_move.enqueue_self_move(
+            root,
+            own_session_id,
+            requested_cwd=str(params.cwd or ""),
+            effective_cwd=effective_cwd,
+            owner_pid=os.getpid(),
+        )
+    except cwd_move.CwdMoveRefused as refused:
+        return refuse(refused.code, **refused.fields)
+    # The effective cwd is the context's, read back rather than assumed: this call
+    # must not (and cannot) mutate it, so the field proves the intent is queued and
+    # not applied.
+    return _text(
+        tool_call_id,
+        "sessions",
+        f"queued: {intent.request_id}",
+        details={"op": "move", **intent.as_fields(effective_cwd=effective_cwd)},
+    )
+
+
 async def execute_sessions(
     tool_call_id: str,
     args: dict[str, Any],
@@ -20258,6 +20352,8 @@ async def execute_sessions(
         return await _sessions_peek(tool_call_id, params, context)
     if params.op == "stop":
         return await _sessions_stop(tool_call_id, params, context)
+    if params.op == "move":
+        return await _sessions_move(tool_call_id, params, context)
     if params.op == "resume" and (params.paused or params.failed or params.all):
         # The SET form: enumerate once and reopen each session as its own
         # bounded child (see ``_sessions_resume_batch``). Checked before the

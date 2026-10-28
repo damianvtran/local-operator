@@ -531,7 +531,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # moves 819 -> 840. That sentence is the ONLY thing that moved; every other
     # count above is byte-identical, re-measured through this test's own
     # printed table rather than pasted.
-    "sessions": 840,
+    # RE-MEASURED (own-cwd slice 1): 840 -> 880. The delta is the `move` op
+    # and its `cwd` field in the sessions schema. Measured through this test's
+    # own assertion table after trimming the prose to fit the start-context
+    # budget; no other entry moved.
+    "sessions": 880,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
