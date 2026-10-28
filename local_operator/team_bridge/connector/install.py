@@ -1034,9 +1034,6 @@ def _reconcile(config_dir: Path, *, force_off: bool) -> ServiceOutcome:
             and not _store_exists(Path(config_dir))
         ):
             return ServiceOutcome(CODE_ABSENT)
-        source_refusal = _source_checkout_refusal()
-        if source_refusal is not None:
-            return ServiceOutcome(CODE_SOURCE_CHECKOUT, source_refusal)
         with _sync_exclusive(Path(config_dir)):
             # DECIDE AGAIN, INSIDE THE LOCK (review R2-1). The pre-check above
             # is only a filter: a Turn off that lands while this call waits for
@@ -1048,6 +1045,16 @@ def _reconcile(config_dir: Path, *, force_off: bool) -> ServiceOutcome:
             wanted = False if force_off else _wanted(Path(config_dir))
             if wanted is None:
                 return ServiceOutcome(CODE_UNKNOWN, "enrolment became unreadable; left as is")
+            if wanted:
+                # THE SOURCE-CHECKOUT GUARD APPLIES TO INSTALLING ONLY (review
+                # finding, source re-read): it exists so a worktree venv is never
+                # named in the user's unit. Refusing REMOVAL with it would strand
+                # an opted-out developer machine with a running receiver it could
+                # never take down — the exact "Turn off does not turn it off"
+                # failure the removal path exists to prevent.
+                source_refusal = _source_checkout_refusal()
+                if source_refusal is not None:
+                    return ServiceOutcome(CODE_SOURCE_CHECKOUT, source_refusal)
             outcome = _install(Path(config_dir)) if wanted else _remove(Path(config_dir))
     except Exception as exc:  # noqa: BLE001 — NEVER raises: the caller already won
         logger.debug("bridge connector service sync failed", exc_info=True)

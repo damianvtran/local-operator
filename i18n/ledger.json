@@ -7500,7 +7500,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. No minors or nits assigned to fr; select.count 17/16 at a four-digit count is a declared out-of-domain overrun. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail-level widths measured with rich cell_len over every plural/select arm (counts 0\u2013999; age.* over their real domains). Over budget: select.count 17/16 only at a four-digit count (1,234 s\u00e9lections). fr age.* use the compact feed form (\u00ab 5 min \u00bb, \u00ab 3 h \u00bb, \u00ab 2 j \u00bb) because \u00ab il y a 5 min \u00bb exceeds 12 cells at two digits."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. No minors or nits assigned to fr; select.count 17/16 at a four-digit count is a declared out-of-domain overrun. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 517fdffc6a2a324e2b6189ab5139ef277fa260994b2954eafa39cddb436d89c8). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail-level widths measured with rich cell_len over every plural/select arm (counts 0–999; age.* over their real domains). Over budget: select.count 17/16 only at a four-digit count (1,234 sélections). fr age.* use the compact feed form (« 5 min », « 3 h », « 2 j ») because « il y a 5 min » exceeds 12 cells at two digits."
     },
     {
       "locale": "es",
@@ -7519,7 +7519,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read uses status form \"Le\u00eddo\"); IA-X-N1 NIT (age.days 15/14 only at >=1000 days, undeclared); detail.mark_unread 15/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_unread 'Marcar no le\u00eddo' 15/14 (keeps the merged relay.chrome 'Marcar como le\u00eddo' verb family; 'No le\u00eddo' alone reads as a status, not an action); select.dismiss 15/14 only at a four-digit count."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read uses status form \"Leído\"); IA-X-N1 NIT (age.days 15/14 only at >=1000 days, undeclared); detail.mark_unread 15/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e3983025fbc8a4345b5dd5d3ce6b89fa93f21b89f69282878b0c13e9ba89177f). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_unread 'Marcar no leído' 15/14 (keeps the merged relay.chrome 'Marcar como leído' verb family; 'No leído' alone reads as a status, not an action); select.dismiss 15/14 only at a four-digit count."
     },
     {
       "locale": "zh-CN",
@@ -7538,7 +7538,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read \"\u5df2\u8bfb\" status form; \"\u6807\u4e3a\u5df2\u8bfb\" 8/10 fits); IA-ZH-M1 MINOR (11 strings put spaces around digit runs against the zh-CN style guide; merged relay.asks.duration.* has the same deviation, so it is a style-owner consistency question). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio row.repeat 6/6)."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read \"已读\" status form; \"标为已读\" 8/10 fits); IA-ZH-M1 MINOR (11 strings put spaces around digit runs against the zh-CN style guide; merged relay.asks.duration.* has the same deviation, so it is a style-owner consistency question). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio row.repeat 6/6)."
     },
     {
       "locale": "ru",
@@ -7557,7 +7557,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-RU-M1 MINOR (detail.mark_unread \"\u041e\u0442\u043c\u0435\u0442\u0438\u0442\u044c \u043d\u043e\u0432\u044b\u043c\" synonym; \"\u041e\u0442\u043c. \u043d\u0435\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u043d\u043d\u044b\u043c\" is 18 and does not fit, accepted as is); IA-RU-N1 NIT (filter.unread overrun starts at count 100, 17/16, not at two digits; corrected in this note); IA-X-N1 NIT (age.days overrun only at >=1000 days). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: filter.unread 17/16 from count 100, 19/16 at four \u2014 kept byte-identical to the merged relay.chrome.list.filter.unread ('\u041d\u0435\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u043d\u043e \u00b7 {count}', same 16-cell budget, already audited); shortening would split one chip term across two screens."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-RU-M1 MINOR (detail.mark_unread \"Отметить новым\" synonym; \"Отм. непрочитанным\" is 18 and does not fit, accepted as is); IA-RU-N1 NIT (filter.unread overrun starts at count 100, 17/16, not at two digits; corrected in this note); IA-X-N1 NIT (age.days overrun only at >=1000 days). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 caf5b24e691507cc49e94142fe58afa8ff11f968ee7a2b771224b0ef9b234980). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: filter.unread 17/16 from count 100, 19/16 at four — kept byte-identical to the merged relay.chrome.list.filter.unread ('Непрочитано · {count}', same 16-cell budget, already audited); shortening would split one chip term across two screens."
     },
     {
       "locale": "vi",
@@ -7576,7 +7576,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read and confirm.read use status form \"\u0110\u00e3 \u0111\u1ecdc\"; action form is 15/14); IA-X-N1 NIT (age.days overrun only at >=1000 days); detail.mark_read 15/14 and detail.mark_unread 17/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_read 15/14 and detail.mark_unread 17/14 \u2014 '\u0110\u00e1nh d\u1ea5u \u0111\u00e3 \u0111\u1ecdc'/'\u0110\u00e1nh d\u1ea5u ch\u01b0a \u0111\u1ecdc' keep the merged relay.chrome.row.mark_read verb; the bare '\u0110\u00e3 \u0111\u1ecdc'/'Ch\u01b0a \u0111\u1ecdc' fit but read as statuses, not actions. age.minutes uses the established 'ph' abbreviation (relay.asks.duration.minutes) to fit 12 cells."
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read and confirm.read use status form \"Đã đọc\"; action form is 15/14); IA-X-N1 NIT (age.days overrun only at >=1000 days); detail.mark_read 15/14 and detail.mark_unread 17/14 accepted as declared. Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 4d3a1db432bcf93697cb899957e7b852b87afe0315c1fa3e298c4e24931f2c5a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: detail.mark_read 15/14 and detail.mark_unread 17/14 — 'Đánh dấu đã đọc'/'Đánh dấu chưa đọc' keep the merged relay.chrome.row.mark_read verb; the bare 'Đã đọc'/'Chưa đọc' fit but read as statuses, not actions. age.minutes uses the established 'ph' abbreviation (relay.asks.duration.minutes) to fit 12 cells."
     },
     {
       "locale": "ur",
@@ -7595,7 +7595,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Accepted NIT IA-UR-N2 and optional ur select.read form left as follow-ups. Round 1 audit FAILED at the previous target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-UR-1 MAJOR fixed: detail.mark_read and confirm.read \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627\" (status) -> \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627 \u06a9\u0631\u06cc\u06ba\" (action, 13/14). Same-pass MINOR: receipt.read/receipt.unread aligned to the feminine of \u0627\u0637\u0644\u0627\u0639 (\"# \u067e\u0691\u06be\u06cc \u06c1\u0648\u0626\u06cc \u0646\u0634\u0627\u0646 \u0632\u062f\", \"# \u0646\u0627\u067e\u0691\u06be\u06cc \u0646\u0634\u0627\u0646 \u0632\u062f\"; both plural arms and # kept), matching receipt.dismissed/restored/stale/already and filter.unread \"\u0646\u0627\u067e\u0691\u06be\u06cc\". Not applied: IA-X-M1 select.read action form \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627 \u06a9\u0631\u06cc\u06ba\" is 13/10 and does not fit, so it stays \"\u067e\u0691\u06be\u0627 \u06c1\u0648\u0627\". New target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: select.dismiss 15/14 only at a four-digit count. age.* use '\u0642\u0628\u0644' (not '\u067e\u06c1\u0644\u06d2') so two-digit hours fit 12 cells; receipt.undo '\u0648\u0627\u067e\u0633 \u0644\u06cc\u06ba' 8/8."
+      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Accepted NIT IA-UR-N2 and optional ur select.read form left as follow-ups. Round 1 audit FAILED at the previous target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-UR-1 MAJOR fixed: detail.mark_read and confirm.read \"پڑھا ہوا\" (status) -> \"پڑھا ہوا کریں\" (action, 13/14). Same-pass MINOR: receipt.read/receipt.unread aligned to the feminine of اطلاع (\"# پڑھی ہوئی نشان زد\", \"# ناپڑھی نشان زد\"; both plural arms and # kept), matching receipt.dismissed/restored/stale/already and filter.unread \"ناپڑھی\". Not applied: IA-X-M1 select.read action form \"پڑھا ہوا کریں\" is 13/10 and does not fit, so it stays \"پڑھا ہوا\". New target SHA-256 7136acd07a3ac277e07e48db1d2dc765497367d24df6ec2a4bcbb152068f3180. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 e723f0d19d63103540e27b57e15c051e8873a42f5223bead41baebe1821ea52a). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: select.dismiss 15/14 only at a four-digit count. age.* use 'قبل' (not 'پہلے') so two-digit hours fit 12 cells; receipt.undo 'واپس لیں' 8/8."
     },
     {
       "locale": "hi",
@@ -7614,7 +7614,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Round 1 audit FAILED at the previous target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315 (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-HI-1 MAJOR fixed: detail.mark_read and confirm.read \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906\" (status) -> \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u0915\u0930\u0947\u0902\" (action, 8/14). Same-pass MINORs: mark_all -> \"\u0938\u092d\u0940 \u0915\u094b \u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u091a\u093f\u0939\u094d\u0928\u093f\u0924 \u0915\u0930\u0947\u0902\" (18/20, plural agreement); IA-X-M1 select.read -> \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u0915\u0930\u0947\u0902\" (8/10). New target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio receipt.undo 8/8)."
+      "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Round 1 audit FAILED at the previous target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315 (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-HI-1 MAJOR fixed: detail.mark_read and confirm.read \"पढ़ा हुआ\" (status) -> \"पढ़ा हुआ करें\" (action, 8/14). Same-pass MINORs: mark_all -> \"सभी को पढ़ा हुआ चिह्नित करें\" (18/20, plural agreement); IA-X-M1 select.read -> \"पढ़ा हुआ करें\" (8/10). New target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio receipt.undo 8/8)."
     },
     {
       "locale": "fr",
@@ -7755,18 +7755,18 @@
       "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
       "translator": {
         "agent": "receiver-i18n-translator",
-        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "model": "openai/gpt-6-astra (37 keys) + anthropic/claude-opus-5-5 (6 setup keys)",
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "receiver-i18n-audit",
-        "model": "identity confirmation pending",
+        "agent": "receiver-i18n-final-audit (reviewer role, session f83ef3d81f44)",
+        "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 9
       },
-      "status": "held",
-      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+      "status": "passed",
+      "note": "New namespace for the backend-only receiver CLI and setup command. Independent audit (reviewer role, distinct agent and context from both the implementer and the translator) read all 43 keys in all seven locales at source_sha256 67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581: verdict clean, 0 blocker/0 major, 5 minor + 4 nit. Applied: fr/es/ru chief-of-staff persona aligned to the merged catalogues (cheffe de cabinet / jefa de gabinete / глава аппарата — agreement fixed in all three keys); ur setup.consent restored the 'only' restriction (صرف); ur not_wanted_hint no longer repeats the same instruction for two different commands; ur no_supervisor_note uses the foreground wording (پیش منظر); ur default/configuration vocabulary aligned with the rest of the ur catalogue (ڈیفالٹ / کنفیگریشن) and preview rendered پیش منظر. Deferred nits, recorded here rather than fixed: zh-CN/hi 'this machine' vs the Team Bridge setting label's 本机/इस डिवाइस, and fr/es drift between 'service du récepteur' and 'service de réception'. English source is unchanged by the remediation, so this row's hash covers the audited bytes. Independence limit, disclosed: the auditor shares a model with the follow-up translator wave; separation is agent and context, and there was no native-speaker pass. receiver-i18n-translator authored the initial 37-key wave on openai/gpt-6-astra and the follow-up 6 setup keys on anthropic/claude-opus-5-5 (resume receipt, 2026-10-28); the interrupted run's own final identity line was not captured before a host restart, so the model above is the harness-recorded one, not a self-report."
     },
     {
       "locale": "es",
@@ -7774,18 +7774,18 @@
       "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
       "translator": {
         "agent": "receiver-i18n-translator",
-        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "model": "openai/gpt-6-astra (37 keys) + anthropic/claude-opus-5-5 (6 setup keys)",
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "receiver-i18n-audit",
-        "model": "identity confirmation pending",
+        "agent": "receiver-i18n-final-audit (reviewer role, session f83ef3d81f44)",
+        "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 9
       },
-      "status": "held",
-      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+      "status": "passed",
+      "note": "New namespace for the backend-only receiver CLI and setup command. Independent audit (reviewer role, distinct agent and context from both the implementer and the translator) read all 43 keys in all seven locales at source_sha256 67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581: verdict clean, 0 blocker/0 major, 5 minor + 4 nit. Applied: fr/es/ru chief-of-staff persona aligned to the merged catalogues (cheffe de cabinet / jefa de gabinete / глава аппарата — agreement fixed in all three keys); ur setup.consent restored the 'only' restriction (صرف); ur not_wanted_hint no longer repeats the same instruction for two different commands; ur no_supervisor_note uses the foreground wording (پیش منظر); ur default/configuration vocabulary aligned with the rest of the ur catalogue (ڈیفالٹ / کنفیگریشن) and preview rendered پیش منظر. Deferred nits, recorded here rather than fixed: zh-CN/hi 'this machine' vs the Team Bridge setting label's 本机/इस डिवाइस, and fr/es drift between 'service du récepteur' and 'service de réception'. English source is unchanged by the remediation, so this row's hash covers the audited bytes. Independence limit, disclosed: the auditor shares a model with the follow-up translator wave; separation is agent and context, and there was no native-speaker pass. receiver-i18n-translator authored the initial 37-key wave on openai/gpt-6-astra and the follow-up 6 setup keys on anthropic/claude-opus-5-5 (resume receipt, 2026-10-28); the interrupted run's own final identity line was not captured before a host restart, so the model above is the harness-recorded one, not a self-report."
     },
     {
       "locale": "zh-CN",
@@ -7793,18 +7793,18 @@
       "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
       "translator": {
         "agent": "receiver-i18n-translator",
-        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "model": "openai/gpt-6-astra (37 keys) + anthropic/claude-opus-5-5 (6 setup keys)",
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "receiver-i18n-audit",
-        "model": "identity confirmation pending",
+        "agent": "receiver-i18n-final-audit (reviewer role, session f83ef3d81f44)",
+        "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 9
       },
-      "status": "held",
-      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+      "status": "passed",
+      "note": "New namespace for the backend-only receiver CLI and setup command. Independent audit (reviewer role, distinct agent and context from both the implementer and the translator) read all 43 keys in all seven locales at source_sha256 67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581: verdict clean, 0 blocker/0 major, 5 minor + 4 nit. Applied: fr/es/ru chief-of-staff persona aligned to the merged catalogues (cheffe de cabinet / jefa de gabinete / глава аппарата — agreement fixed in all three keys); ur setup.consent restored the 'only' restriction (صرف); ur not_wanted_hint no longer repeats the same instruction for two different commands; ur no_supervisor_note uses the foreground wording (پیش منظر); ur default/configuration vocabulary aligned with the rest of the ur catalogue (ڈیفالٹ / کنفیگریشن) and preview rendered پیش منظر. Deferred nits, recorded here rather than fixed: zh-CN/hi 'this machine' vs the Team Bridge setting label's 本机/इस डिवाइस, and fr/es drift between 'service du récepteur' and 'service de réception'. English source is unchanged by the remediation, so this row's hash covers the audited bytes. Independence limit, disclosed: the auditor shares a model with the follow-up translator wave; separation is agent and context, and there was no native-speaker pass. receiver-i18n-translator authored the initial 37-key wave on openai/gpt-6-astra and the follow-up 6 setup keys on anthropic/claude-opus-5-5 (resume receipt, 2026-10-28); the interrupted run's own final identity line was not captured before a host restart, so the model above is the harness-recorded one, not a self-report."
     },
     {
       "locale": "ru",
@@ -7812,18 +7812,18 @@
       "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
       "translator": {
         "agent": "receiver-i18n-translator",
-        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "model": "openai/gpt-6-astra (37 keys) + anthropic/claude-opus-5-5 (6 setup keys)",
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "receiver-i18n-audit",
-        "model": "identity confirmation pending",
+        "agent": "receiver-i18n-final-audit (reviewer role, session f83ef3d81f44)",
+        "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 9
       },
-      "status": "held",
-      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+      "status": "passed",
+      "note": "New namespace for the backend-only receiver CLI and setup command. Independent audit (reviewer role, distinct agent and context from both the implementer and the translator) read all 43 keys in all seven locales at source_sha256 67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581: verdict clean, 0 blocker/0 major, 5 minor + 4 nit. Applied: fr/es/ru chief-of-staff persona aligned to the merged catalogues (cheffe de cabinet / jefa de gabinete / глава аппарата — agreement fixed in all three keys); ur setup.consent restored the 'only' restriction (صرف); ur not_wanted_hint no longer repeats the same instruction for two different commands; ur no_supervisor_note uses the foreground wording (پیش منظر); ur default/configuration vocabulary aligned with the rest of the ur catalogue (ڈیفالٹ / کنفیگریشن) and preview rendered پیش منظر. Deferred nits, recorded here rather than fixed: zh-CN/hi 'this machine' vs the Team Bridge setting label's 本机/इस डिवाइस, and fr/es drift between 'service du récepteur' and 'service de réception'. English source is unchanged by the remediation, so this row's hash covers the audited bytes. Independence limit, disclosed: the auditor shares a model with the follow-up translator wave; separation is agent and context, and there was no native-speaker pass. receiver-i18n-translator authored the initial 37-key wave on openai/gpt-6-astra and the follow-up 6 setup keys on anthropic/claude-opus-5-5 (resume receipt, 2026-10-28); the interrupted run's own final identity line was not captured before a host restart, so the model above is the harness-recorded one, not a self-report."
     },
     {
       "locale": "vi",
@@ -7831,18 +7831,18 @@
       "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
       "translator": {
         "agent": "receiver-i18n-translator",
-        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "model": "openai/gpt-6-astra (37 keys) + anthropic/claude-opus-5-5 (6 setup keys)",
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "receiver-i18n-audit",
-        "model": "identity confirmation pending",
+        "agent": "receiver-i18n-final-audit (reviewer role, session f83ef3d81f44)",
+        "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 9
       },
-      "status": "held",
-      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+      "status": "passed",
+      "note": "New namespace for the backend-only receiver CLI and setup command. Independent audit (reviewer role, distinct agent and context from both the implementer and the translator) read all 43 keys in all seven locales at source_sha256 67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581: verdict clean, 0 blocker/0 major, 5 minor + 4 nit. Applied: fr/es/ru chief-of-staff persona aligned to the merged catalogues (cheffe de cabinet / jefa de gabinete / глава аппарата — agreement fixed in all three keys); ur setup.consent restored the 'only' restriction (صرف); ur not_wanted_hint no longer repeats the same instruction for two different commands; ur no_supervisor_note uses the foreground wording (پیش منظر); ur default/configuration vocabulary aligned with the rest of the ur catalogue (ڈیفالٹ / کنفیگریشن) and preview rendered پیش منظر. Deferred nits, recorded here rather than fixed: zh-CN/hi 'this machine' vs the Team Bridge setting label's 本机/इस डिवाइस, and fr/es drift between 'service du récepteur' and 'service de réception'. English source is unchanged by the remediation, so this row's hash covers the audited bytes. Independence limit, disclosed: the auditor shares a model with the follow-up translator wave; separation is agent and context, and there was no native-speaker pass. receiver-i18n-translator authored the initial 37-key wave on openai/gpt-6-astra and the follow-up 6 setup keys on anthropic/claude-opus-5-5 (resume receipt, 2026-10-28); the interrupted run's own final identity line was not captured before a host restart, so the model above is the harness-recorded one, not a self-report."
     },
     {
       "locale": "ur",
@@ -7850,18 +7850,18 @@
       "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
       "translator": {
         "agent": "receiver-i18n-translator",
-        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "model": "openai/gpt-6-astra (37 keys) + anthropic/claude-opus-5-5 (6 setup keys)",
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "receiver-i18n-audit",
-        "model": "identity confirmation pending",
+        "agent": "receiver-i18n-final-audit (reviewer role, session f83ef3d81f44)",
+        "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 9
       },
-      "status": "held",
-      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+      "status": "passed",
+      "note": "New namespace for the backend-only receiver CLI and setup command. Independent audit (reviewer role, distinct agent and context from both the implementer and the translator) read all 43 keys in all seven locales at source_sha256 67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581: verdict clean, 0 blocker/0 major, 5 minor + 4 nit. Applied: fr/es/ru chief-of-staff persona aligned to the merged catalogues (cheffe de cabinet / jefa de gabinete / глава аппарата — agreement fixed in all three keys); ur setup.consent restored the 'only' restriction (صرف); ur not_wanted_hint no longer repeats the same instruction for two different commands; ur no_supervisor_note uses the foreground wording (پیش منظر); ur default/configuration vocabulary aligned with the rest of the ur catalogue (ڈیفالٹ / کنفیگریشن) and preview rendered پیش منظر. Deferred nits, recorded here rather than fixed: zh-CN/hi 'this machine' vs the Team Bridge setting label's 本机/इस डिवाइस, and fr/es drift between 'service du récepteur' and 'service de réception'. English source is unchanged by the remediation, so this row's hash covers the audited bytes. Independence limit, disclosed: the auditor shares a model with the follow-up translator wave; separation is agent and context, and there was no native-speaker pass. receiver-i18n-translator authored the initial 37-key wave on openai/gpt-6-astra and the follow-up 6 setup keys on anthropic/claude-opus-5-5 (resume receipt, 2026-10-28); the interrupted run's own final identity line was not captured before a host restart, so the model above is the harness-recorded one, not a self-report."
     },
     {
       "locale": "hi",
@@ -7869,18 +7869,18 @@
       "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
       "translator": {
         "agent": "receiver-i18n-translator",
-        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "model": "openai/gpt-6-astra (37 keys) + anthropic/claude-opus-5-5 (6 setup keys)",
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "receiver-i18n-audit",
-        "model": "identity confirmation pending",
+        "agent": "receiver-i18n-final-audit (reviewer role, session f83ef3d81f44)",
+        "model": "anthropic/claude-opus-5-5",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 9
       },
-      "status": "held",
-      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+      "status": "passed",
+      "note": "New namespace for the backend-only receiver CLI and setup command. Independent audit (reviewer role, distinct agent and context from both the implementer and the translator) read all 43 keys in all seven locales at source_sha256 67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581: verdict clean, 0 blocker/0 major, 5 minor + 4 nit. Applied: fr/es/ru chief-of-staff persona aligned to the merged catalogues (cheffe de cabinet / jefa de gabinete / глава аппарата — agreement fixed in all three keys); ur setup.consent restored the 'only' restriction (صرف); ur not_wanted_hint no longer repeats the same instruction for two different commands; ur no_supervisor_note uses the foreground wording (پیش منظر); ur default/configuration vocabulary aligned with the rest of the ur catalogue (ڈیفالٹ / کنفیگریشن) and preview rendered پیش منظر. Deferred nits, recorded here rather than fixed: zh-CN/hi 'this machine' vs the Team Bridge setting label's 本机/इस डिवाइस, and fr/es drift between 'service du récepteur' and 'service de réception'. English source is unchanged by the remediation, so this row's hash covers the audited bytes. Independence limit, disclosed: the auditor shares a model with the follow-up translator wave; separation is agent and context, and there was no native-speaker pass. receiver-i18n-translator authored the initial 37-key wave on openai/gpt-6-astra and the follow-up 6 setup keys on anthropic/claude-opus-5-5 (resume receipt, 2026-10-28); the interrupted run's own final identity line was not captured before a host restart, so the model above is the harness-recorded one, not a self-report."
     }
   ]
 }

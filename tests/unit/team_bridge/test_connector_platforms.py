@@ -309,6 +309,29 @@ def test_linux_source_checkout_never_writes_the_unit(linux, monkeypatch) -> None
     assert not _unit(home).exists() and fake.calls == []
 
 
+def test_a_source_checkout_can_still_turn_the_receiver_off(linux, monkeypatch) -> None:
+    """The checkout guard refuses to INSTALL; it must never strand a removal.
+
+    A developer whose install became a checkout after the receiver was placed
+    (or who runs from a worktree) has to be able to turn agent messages off.
+    Refusing ``remove`` with the install refusal is the "Turn off does not turn
+    it off" failure this path exists to prevent.
+    """
+
+    fake, home, root = linux
+    from local_operator import update
+
+    _commit(root)
+    install.sync_connector_service(root)
+    assert _unit(home).exists() and fake.active
+    monkeypatch.setattr(procname, "supervised_image", lambda: None)
+    monkeypatch.setattr(update, "install_kind", lambda: update.InstallKind.EDITABLE)
+    assert install.remove_connector_service(root).code == install.CODE_REMOVED
+    assert not _unit(home).exists() and not fake.active
+    _set_enabled(root, False)
+    assert install.sync_connector_service(root).code != install.CODE_SOURCE_CHECKOUT
+
+
 def test_linux_isolated_store_is_refused_before_anything(tmp_path, user_home, monkeypatch) -> None:
     """Guards SHUT: the real ``launchd.shared_label_refusal`` decides."""
 
