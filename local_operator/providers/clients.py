@@ -4604,6 +4604,7 @@ class AnthropicClient:
             main_min_context_tokens=self._cache_ttl_1h_min_context_tokens,
             subagent_min_context_tokens=self._subagent_cache_ttl_1h_min_context_tokens,
             context_size=size,
+            after_long_call=request.cache_after_long_call,
         )
 
     @classmethod

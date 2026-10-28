@@ -67,6 +67,29 @@ UNIFIED_STATUS_HEADER = "anthropic-ratelimit-unified-status"
 UNIFIED_OVERAGE_STATUS_HEADER = "anthropic-ratelimit-unified-overage-status"
 _OVERAGE_SERVING = frozenset({"allowed", "allowed_warning"})
 
+#: A subagent conversation turn that ran at least this long, request start to
+#: stream end, moves the REST of that subagent's turns to the 1h TTL.
+#:
+#: Why a duration and not a size: the 5m TTL is refreshed when a request STARTS
+#: (the prefix is read/written then), so a call that streams for more than five
+#: minutes (30-70k output tokens) lets its own prefix expire before the next
+#: request goes out. On the ledger since v0.90.18 (scout analysis, 2026-10-28)
+#: all 19 ``unchanged``-diagnosed subagent breaks — misses with no prefix
+#: divergence, i.e. pure expiry — had start-to-start gaps of 315-684 s.
+#:
+#: Why "after the first one" is a usable predictor: long calls cluster. Once a
+#: session has had one call >= 240 s, 5.0% of its later calls are long, against
+#: 0.1% in sessions that never had one. Replaying the rule "after a subagent
+#: session's first call >= 240 s, send its later requests at 1h" avoided 4.58M
+#: of 4.78M rewrite tokens and paid the 1h premium on 2.94M writes: about
+#: +3.3M base-equivalent tokens/day net. 240 s rather than 300 s leaves headroom
+#: for the gap between one call's end and the next one's start.
+#:
+#: A module constant, not a config key: it is a measured property of the
+#: workload, not an operator preference, and the kill switch already exists
+#: (``cache_ttl_1h_min_context_tokens: 0`` turns every subscription 1h off).
+SUBAGENT_LONG_CALL_1H_THRESHOLD_S = 240.0
+
 
 def cache_role(purpose: str, delegated: bool) -> CacheRole:
     """Classify a request for the TTL policy from facts the request carries."""
@@ -83,6 +106,7 @@ def decide_cache_ttl(
     main_min_context_tokens: int,
     subagent_min_context_tokens: int,
     context_size: Callable[[], int],
+    after_long_call: bool = False,
 ) -> str | None:
     """``"1h"`` or None (the 5m default) for one request.
 
@@ -93,11 +117,30 @@ def decide_cache_ttl(
     subagent key is an independent opt-in. ``subagent_min_context_tokens`` is
     ``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`` (0 =
     never). ``context_size`` is called only when a size gate applies.
+
+    ``after_long_call`` is ``ChatRequest.cache_after_long_call``: this
+    conversation already had a turn of at least
+    ``SUBAGENT_LONG_CALL_1H_THRESHOLD_S``. It moves a SUBSCRIPTION subagent
+    (not in overage) to 1h, the one subagent case where the expiry it prevents
+    outweighs the 2x write (see the constant). Overage and API-key traffic keep
+    the API-key rules below, so the overage fallback still lands on 5m under
+    the size threshold; the main thread is already 1h on a subscription.
     """
     if role == "auxiliary":
         return None
     if role == "main" and subscription and not overage:
         return "1h" if main_min_context_tokens > 0 else None
+    if (
+        role == "subagent"
+        and after_long_call
+        and subscription
+        and not overage
+        # The main-thread ``0`` is the operator's global "no 1h" switch; it
+        # must keep meaning that for this rule too. Falling through (rather
+        # than returning None) keeps an explicit subagent size opt-in working.
+        and main_min_context_tokens > 0
+    ):
+        return "1h"
     threshold = main_min_context_tokens if role == "main" else subagent_min_context_tokens
     if threshold <= 0:
         return None
