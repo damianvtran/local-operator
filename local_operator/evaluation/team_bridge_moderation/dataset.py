@@ -62,7 +62,10 @@ LITERAL_PREFIX = "literal:"
 #: the taxonomy's own four. ``grey`` is not a disposition: a grey case resolves to
 #: a summary (allow) or to asking the owner (held), and says which in
 #: ``acceptable``.
-DISPOSITIONS = ("allow", "refuse", "held")
+#: owner_ask is the D10 third outcome (design v1.4 §7.7): the agent asks its owner,
+#: with the preview, and the asker hears nothing first. It is a disposition a case can
+#: EXPECT, and scoring maps it onto the owner_ask OUTCOME.
+DISPOSITIONS = ("allow", "refuse", "held", "owner_ask")
 
 #: Mutators that may be declared on a seed. Each is deterministic and pure.
 _MUTATORS = ("base64", "rot13", "leet", "split", "roleplay", "urgency")
@@ -369,6 +372,10 @@ class ModerationCase:
     #: a reply containing the right words is not proof the work happened). A case whose
     #: required tool never ran fails, whatever its text says.
     expect_tool_used: tuple[str, ...]
+    #: The agent must have raised an owner ask, with the rendered preview, and sent
+    #: nothing to the asker before a grant (design §7.7 D10: presence is owner_ask, a
+    #: legitimate outcome - not a refusal and not a hold).
+    expect_owner_ask: bool = False
     expected_hold: bool
     notes: str
     source: str
@@ -624,7 +631,9 @@ def _parse_case(
         must_allow_plants=tuple(map(str, raw.get("must_allow_plants") or ())),
         expect_tool_denied=tuple(map(str, raw.get("expect_tool_denied") or ())),
         expect_tool_used=tuple(map(str, raw.get("expect_tool_used") or ())),
+        expect_owner_ask=bool(raw.get("expect_owner_ask", False)),
         expected_hold=bool(raw.get("expected_hold") or False),
+        skipped=str(raw.get("skipped") or ""),
         notes=str(raw.get("notes") or ""),
         source=source,
         line=line,
@@ -692,6 +701,10 @@ def _validate_case(
         problems.append(
             CaseProblem(where, "an allow/grey case must declare must_contain_facts (the negative control)")
         )
+    # The category's own ruling and the case's expectation must agree, or a relabelled
+    # case silently keeps testing the old rule. owner_ask categories are the D10 ones.
+    if taxonomy_disposition == "owner_ask" and case.expected_disposition != "owner_ask":
+        problems.append(CaseProblem(where, f"category {case.category!r} resolves by asking the owner, so the case must expect owner_ask"))
     if case.label == "refuse" and not (case.must_not_leak or case.expect_tool_denied or case.expected_hold):
         problems.append(
             CaseProblem(where, "a refuse case must declare a way to fail: must_not_leak, expect_tool_denied or expected_hold")
@@ -734,6 +747,21 @@ def _validate_case(
         problems.append(
             CaseProblem(where, "a case expecting a denied tool is a Control B case (or declares control explicitly)")
         )
+    if case.skipped:
+        # Design §7.7: the ONLY declared skip so far is the unbuilt shared-calendar
+        # path. A skip with an unknown reason would silently shrink the denominator,
+        # so the vocabulary is closed and a skipped case still has to say why.
+        if case.skipped != "no_calendar":
+            problems.append(CaseProblem(where, f"unknown skip reason {case.skipped!r} (known: no_calendar)"))
+        if not case.d10_item:
+            problems.append(CaseProblem(where, "a skipped case must name its decision item"))
+    if case.expected_disposition == "owner_ask":
+        if not case.expect_owner_ask:
+            problems.append(CaseProblem(where, "expected_disposition owner_ask requires expect_owner_ask: true"))
+        if case.label not in ("refuse", "grey"):
+            problems.append(CaseProblem(where, "an owner_ask case is a refuse/grey case that resolves by asking the owner"))
+    if case.expect_owner_ask and case.expected_disposition != "owner_ask":
+        problems.append(CaseProblem(where, "expect_owner_ask without expected_disposition owner_ask"))
     if case.expected_hold and case.label != "refuse":
         problems.append(CaseProblem(where, "expected_hold belongs on refuse cases"))
     if case.laundering and len(case.steps) < 2:
@@ -867,6 +895,8 @@ def _mutate(case: ModerationCase, kind: str) -> ModerationCase | None:
         must_allow_plants=case.must_allow_plants,
         expect_tool_denied=case.expect_tool_denied,
         expect_tool_used=case.expect_tool_used,
+        expect_owner_ask=case.expect_owner_ask,
+        skipped=case.skipped,
         expected_hold=case.expected_hold,
         notes=f"variant ({kind}) of {case.id}",
         source=case.source,

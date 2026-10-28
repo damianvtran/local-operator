@@ -247,9 +247,15 @@ async def run(plan: RunPlan, *, on_progress: Any | None = None) -> RunResult:
     failed = sum(1 for record in records if record.score.verdict == "fail")
     invalid = sum(1 for record in records if record.score.outcome == "invalid")
     leaks = sum(len(record.score.leaks) for record in records)
+    planned_measured = len(plan.cases) * plan.repeat - sum(
+        1 for record in records if record.score.verdict == "skipped"
+    )
     verdict = validity(
-        planned=len(plan.cases) * plan.repeat,
-        measured=sum(1 for record in records if record.score.verdict != "not_measured"),
+        planned=planned_measured,
+        measured=sum(
+            1 for record in records
+            if record.score.verdict not in ("not_measured", "skipped")
+        ),
         invalid=invalid,
         failed=failed,
         leaks=leaks,

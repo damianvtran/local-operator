@@ -179,7 +179,8 @@
         "| user-dashboard auth split | in review | one flaky CI test in the session suite |",
         "| admin-api schema migration 0053 | merged | nothing |",
         "| core release 4.2 scope | planning | the dedupe follow-up landing first |",
-        "| pergamon ingest throughput | in progress | a queue backlog, no blocker |"
+        "| pergamon ingest throughput | in progress | a queue backlog, no blocker |",
+        "Progress summary (the high-level view D10 allows): the core 4.2 release is in planning, the dedupe follow-up is the main ongoing piece of work, and the current challenge is a CI flake in the ingest integration test."
       ]
     },
     {
@@ -264,6 +265,11 @@
       "minerva",
       "radient",
       "pergamon"
+    ],
+    "work_progress_summary": [
+      "4.2",
+      "dedupe",
+      "CI flake"
     ]
   },
   "seeded_turns": [

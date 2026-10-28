@@ -307,11 +307,15 @@ def _group_summary(records: Iterable[CaseRecord]) -> Mapping[str, Any]:
 
     items = list(records)
     total = len(items)
+    # Skips are OUTSIDE the measured denominator (design §7.7): they are reported for
+    # visibility, never counted as passes, failures or invalid cases.
+    measured_items = [record for record in items if record.score.verdict != "skipped"]
+    total = len(measured_items)
     verdicts = {"pass": 0, "fail": 0, "not_measured": 0}
     outcomes: dict[str, int] = {}
     stages: dict[str, int] = {}
     leaks = 0
-    for record in items:
+    for record in measured_items:
         verdicts[record.score.verdict] = verdicts.get(record.score.verdict, 0) + 1
         outcomes[record.score.outcome] = outcomes.get(record.score.outcome, 0) + 1
         stages[record.score.stage] = stages.get(record.score.stage, 0) + 1
@@ -321,13 +325,14 @@ def _group_summary(records: Iterable[CaseRecord]) -> Mapping[str, Any]:
     # CONTROL B's evidence, aggregated: the tools a case expected to be refused, and
     # whether they actually were. Reported per group so a control row is a measurement.
     denied = attempted = 0
-    for record in items:
+    for record in measured_items:
         for assertion in (record.score.tool_assertions or {}).values():
             if assertion.get("attempted"):
                 attempted += 1
                 denied += 1 if assertion.get("refused") else 0
     return {
         "cases": total,
+        "skipped": len(items) - total,
         "measured": measured,
         "pass": verdicts["pass"],
         "fail": verdicts["fail"],
@@ -417,6 +422,10 @@ def build_report(
         "dataset_balance": dict(balance or {}),
         "leaking_cases": [r.case_id for r in leak_records],
         "invalid_cases": [r.case_id for r in records if r.score.outcome == "invalid"],
+        "skipped_cases": [
+            {"id": r.case_id, "reason": r.score.detail}
+            for r in records if r.score.verdict == "skipped"
+        ],
         "failed_cases": [r.case_id for r in records if r.score.verdict == "fail"],
         "hedged_cases": [r.case_id for r in records if r.score.outcome == "hedged"],
         "not_measured_cases": [r.case_id for r in records if r.score.verdict == "not_measured"],
@@ -475,7 +484,8 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
         for reason in verdict["reasons"]:
             lines.append(f"- {reason}")
         lines.append("")
-    lines.append(f"- cases: {summary.get('cases')} run, {summary.get('measured')} measured, "
+    lines.append(f"- cases: {summary.get('cases')} run, {summary.get('skipped', 0)} skipped, "
+                 f"{summary.get('measured')} measured, "
                  f"{summary.get('pass')} pass / {summary.get('fail')} fail / "
                  f"{summary.get('not_measured')} not measured / {summary.get('invalid')} invalid")
     lines.append(f"- **canary hits: {summary.get('leaks')}** "
@@ -517,6 +527,12 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
             ])
         lines.append(_table(rows, ["group", "cases", "pass", "fail", "n/m", "invalid", "leaks",
                                    "pass rate", "outcomes"]))
+        lines.append("")
+    if report.get("skipped_cases"):
+        lines.append("## Declared skips (outside the measured denominator)")
+        lines.append("")
+        for entry in report["skipped_cases"]:
+            lines.append(f"- `{entry['id']}` - {entry['reason']}")
         lines.append("")
     if report.get("invalid_cases"):
         lines.append("## Invalid cases (not measured, never a pass)")
