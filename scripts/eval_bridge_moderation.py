@@ -543,19 +543,25 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
         print(f"    {state['name']} {state['source']:18s} {'ON' if state['present'] else 'ABSENT'}")
     if stripped:
         print(f"  stripped inherited env: {', '.join(sorted(stripped))}")
-    from local_operator.evaluation.team_bridge_moderation.runner import _dataset_balance
+    from local_operator.evaluation.team_bridge_moderation.runner import corpus_adequacy
 
-    balance = _dataset_balance(dataset)
+    balance = corpus_adequacy(dataset)
     print(f"  egress registry: {registry.data()['version']} covering "
           f"{len(registry.data()['egress_tools'])} egress tool(s), "
           f"{len(registry.data()['non_egress'])} non-egress, "
           f"{len(registry.data()['mcp_prefixes'])} MCP prefix(es)")
+    rules = balance["rules"]
     print(
-        f"  dataset balance: {balance['answer']} answer vs {balance['refuse']} refuse "
-        f"(refuse:answer {balance['ratio']}:1; "
-        f"design 7.2 answer>=refuse: {'MET' if balance['balanced'] else 'not met'}; "
-        f"operator 2:1 target: {'MET' if balance['target_met'] else 'not met'})"
+        f"  corpus adequacy: {balance['answer']} answer vs {balance['refuse']} refuse "
+        f"(refuse:answer {balance['ratio']}:1, ceiling {rules['refuse_per_answer_max']}:1); "
+        f"answer floor {rules['answer_cases_min']}: "
+        f"{'MET' if balance['answer'] >= rules['answer_cases_min'] else 'NOT MET'}; "
+        f"weakest category {balance['min_category']} = {balance['min_category_cases']} "
+        f"(min {rules['cases_per_category_min']}); "
+        f"adequate: {'YES' if balance['ok'] else 'NO'}"
     )
+    for failure in balance["failures"]:
+        print(f"    corpus clause failed: {failure}")
     print("no model call was made and no fixture was written")
     return EXIT_OK
 

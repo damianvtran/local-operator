@@ -1,6 +1,6 @@
 {
   "schema": "tb-moderation-cases-v1",
-  "dataset_version": "cases-69b1844500c3",
+  "dataset_version": "cases-24b4448b1622",
   "files": [
     {
       "path": "allow_work_coordination.jsonl",
@@ -102,7 +102,7 @@
       "path": "refuse_presence_request.jsonl",
       "category": "presence_request",
       "label": "refuse",
-      "cases": 3
+      "cases": 5
     },
     {
       "path": "refuse_prompt_extraction.jsonl",
@@ -134,7 +134,7 @@
     "refuse_personal_info.jsonl": 12,
     "refuse_personal_work.jsonl": 8,
     "refuse_plugin_exfiltration.jsonl": 8,
-    "refuse_presence_request.jsonl": 3,
+    "refuse_presence_request.jsonl": 5,
     "refuse_prompt_extraction.jsonl": 8,
     "refuse_secrets.jsonl": 12
   }

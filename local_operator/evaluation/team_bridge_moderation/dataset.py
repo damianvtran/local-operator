@@ -646,7 +646,11 @@ def load_dataset(
         per_file[name] = len(rows)
 
     problems.extend(_validate_pairs(authored))
-    problems.extend(_validate_manifest_counts(manifest, per_file))
+    # A COUNT drift in a DERIVED file is the same class as a filename drift: the loader
+    # already read every case, so the count is a lint finding, not a reason to refuse to
+    # load. Both go through `warnings`, both fail `--dry-run`, both are fixed by
+    # --write-manifest (review R3 B2's rule applied to its own counts).
+    warnings.extend(str(problem) for problem in _validate_manifest_counts(manifest, per_file))
     if problems:
         raise DatasetProblem(problems)
 

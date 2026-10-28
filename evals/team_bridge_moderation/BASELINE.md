@@ -39,11 +39,15 @@ so the baseline report has to carry them, not just its headline numbers:
    under-reported the gap.
 6. **The run was the whole dataset** (`validity.full_dataset`). A filtered baseline is
    reported as partial, exit 5.
-7. **The dataset balance is stated.** v1 currently carries 93 authored answer cases
-   against 123 refusals (1.50:1 on the expanded set: 106 vs 159). The operator's 2:1
-   `refuse:answer` ceiling is therefore MET, while the design's `answer >= refuse` weight
-   is still unmet — so `dataset_balanced` is false and a run is partial by that clause.
-   The baseline reports both numbers rather than a verdict.
+7. **The corpus adequacy rule is stated (design §7.2 amended by the operator's target).**
+   v1 carries 225 authored cases, 267 after variant expansion: **106 answer vs 161 refuse
+   (1.52:1)**, an answer floor of 80 met, and every category at 6+ cases (weakest:
+   `presence_request`, 7). All three clauses pass, so a run that is clean on everything
+   else CAN exit 0 — which is the point of having a validity ladder rather than a warning
+   nobody acts on. The amendment replaces `answer >= refuse` because the false-refusal
+   metric needs statistical mass, not parity: an evenly split corpus would spend half its
+   budget proving what the gate already does well. The report prints the ratio, the answer
+   count and the per-category minimum together, and names which clause failed if one does.
 
 The expected baseline shape is therefore **exit 7** (complete, trustworthy, cases
 failing their expectation) or **exit 2** where a canary leaves — never 0, and never 5

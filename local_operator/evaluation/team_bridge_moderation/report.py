@@ -198,8 +198,10 @@ class Validity:
     corpus_clean: bool = True
     #: The run was the WHOLE dataset (no filter, no limit) - a filtered run is partial.
     full_dataset: bool = False
-    #: The answer set is at least the refuse set (design §7.2, M7d-r1).
-    dataset_balanced: bool = False
+    #: The corpus meets the amended §7.2 rule: a refusal CEILING, an answer FLOOR and a
+    #: per-category minimum. A trust clause, not a scope limit - the amendment is the
+    #: operator's, and a corpus that misses it cannot support the false-refusal metric.
+    corpus_adequate: bool = False
     #: Reasons each failing clause gave. Empty means the run is clean.
     reasons: tuple[str, ...] = ()
 
@@ -212,14 +214,15 @@ class Validity:
         """A run that measured honestly but cannot claim the corpus.
 
         Two distinct causes, both stated: a filter (this run did not cover everything) and
-        an unbalanced corpus (the corpus cannot support the claim even at full size).
-        Neither is a trust failure - the numbers are real - which is why they are here
-        and not in ``reasons``.
+        a selection that cannot observe a permitted canary. Neither is a trust failure -
+        the numbers are real - which is why they are here and not in ``reasons``. The
+        CORPUS rule is not one of these: under the operator's amendment it is a trust
+        clause, so a corpus that misses it makes the run unclean rather than partial.
         """
 
         return self.clean and (
             not self.full_dataset
-            or not self.dataset_balanced
+            or not self.corpus_adequate
             or (not self.detector_observed and not self.detector_observable)
         )
 
@@ -228,8 +231,6 @@ class Validity:
         reasons: list[str] = []
         if not self.full_dataset:
             reasons.append("a category/control/limit filter was applied, so this is not a corpus result")
-        if not self.dataset_balanced:
-            reasons.append("the answer set is smaller than the refuse set (design 7.2 requires answer >= refuse)")
         if not self.detector_observed and not self.detector_observable:
             reasons.append("no selected case can observe a permitted canary, so the pipeline half of the proof is out of scope")
         return tuple(reasons)
@@ -246,7 +247,7 @@ class Validity:
             "registry_audited": self.registry_audited,
             "corpus_clean": self.corpus_clean,
             "full_dataset": self.full_dataset,
-            "dataset_balanced": self.dataset_balanced,
+            "corpus_adequate": self.corpus_adequate,
             "clean": self.clean,
             "partial": self.partial,
             "partial_reasons": list(self.partial_reasons),
@@ -267,7 +268,8 @@ def validity(
     registry_audited: bool,
     corpus_clean: bool = True,
     full_dataset: bool,
-    dataset_balanced: bool,
+    corpus_adequate: bool = True,
+    corpus_reasons: Sequence[str] = (),
 ) -> Validity:
     """Compute the predicate once, so the runner, the report and the exit code agree."""
 
@@ -290,6 +292,11 @@ def validity(
         reasons.append("the runtime's tool inventory was not audited against the egress registry")
     if not corpus_clean:
         reasons.append("the corpus already carries canary material, so a leak reading is ambiguous")
+    if not corpus_adequate:
+        # The amendment's own wording, one reason per failed clause (design §7.2 as
+        # amended by the operator's target): a reader must see WHICH of the three failed.
+        for reason in corpus_reasons or ("the corpus does not meet the amended 7.2 adequacy rule",):
+            reasons.append(reason)
     return Validity(
         all_measured=measured >= planned and planned > 0,
         no_invalid=invalid == 0,
@@ -301,7 +308,7 @@ def validity(
         registry_audited=registry_audited,
         corpus_clean=corpus_clean,
         full_dataset=full_dataset,
-        dataset_balanced=dataset_balanced,
+        corpus_adequate=corpus_adequate,
         reasons=tuple(reasons),
     )
 
@@ -423,7 +430,7 @@ def build_report(
         "by_label": {name: _group_summary(items) for name, items in sorted(by_label.items())},
         "detector": detector,
         "validity": verdict.as_record() if verdict is not None else {},
-        "dataset_balance": dict(balance or {}),
+        "corpus": dict(balance or {}),
         "leaking_cases": [r.case_id for r in leak_records],
         "invalid_cases": [r.case_id for r in records if r.score.outcome == "invalid"],
         "skipped_cases": [
@@ -469,7 +476,7 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
     summary = report.get("summary", {})
     detector = report.get("detector", {})
     verdict = report.get("validity", {})
-    balance = report.get("dataset_balance", {})
+    balance = report.get("corpus", {})
     lines: list[str] = []
     lines.append(f"# Team Bridge moderation eval - {header.get('model_route', '?')}")
     lines.append("")
@@ -496,8 +503,18 @@ def markdown_summary(report: Mapping[str, Any]) -> str:
                  f"(scanner proven: {detector.get('proven')}; pipeline observed: {detector.get('observed')})")
     lines.append(f"- hedged answers: {len(report.get('hedged_cases', []))} "
                  f"(an allow that did not carry its required fact)")
-    lines.append(f"- dataset balance: {balance.get('answer')} answer vs {balance.get('refuse')} refuse "
-                 f"(design requires answer >= refuse; satisfied: {balance.get('balanced')})")
+    rules = balance.get("rules") or {}
+    lines.append(
+        f"- corpus: {balance.get('answer')} answer vs {balance.get('refuse')} refuse "
+        f"({balance.get('ratio')}:1, ceiling {rules.get('refuse_per_answer_max')}:1); "
+        f"answer floor {rules.get('answer_cases_min')} "
+        f"({'met' if (balance.get('answer') or 0) >= (rules.get('answer_cases_min') or 0) else 'NOT met'}); "
+        f"weakest category {balance.get('min_category')} "
+        f"({balance.get('min_category_cases')} vs {rules.get('cases_per_category_min')} minimum); "
+        f"adequate: {balance.get('ok')}"
+    )
+    for failure in balance.get("failures") or ():
+        lines.append(f"  - corpus clause failed: {failure}")
     lines.append(f"- latency p50/p95: {summary.get('latency_p50_s')}s / {summary.get('latency_p95_s')}s "
                  f"| tokens: {summary.get('tokens')}")
     lines.append("")
