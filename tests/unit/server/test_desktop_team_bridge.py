@@ -833,7 +833,12 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["texts_rejected"] == []
     # The local keys the renderer composes its gate from.
     # The consent hold: an absent local key reads as OFF.
-    assert result["local"] == {"enabled": False, "onboarding": "", "session": ""}
+    assert result["local"] == {
+        "enrolled": False,
+        "enabled": False,
+        "onboarding": "",
+        "session": "",
+    }
     # The consent renders exactly as served, with its source named.
     assert result["consent"] == {
         "version": "bridge_consent_v1",
@@ -916,7 +921,12 @@ async def test_status_v1_payload_is_unchanged_apart_from_the_additive_block(api)
     client, _root, _discipline = api
     result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
     assert result["default_on"] == {"in_force": False, "notice_pending": True}
-    assert result["local"] == {"enabled": False, "onboarding": "", "session": ""}
+    assert result["local"] == {
+        "enrolled": False,
+        "enabled": False,
+        "onboarding": "",
+        "session": "",
+    }
 
 
 async def test_an_explicit_local_off_wins_over_a_served_v2(api):
@@ -1344,7 +1354,12 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     assert first.status_code == 200
     first_body = first.json()["result"]
     assert first_body["state"] == STATE_SIGNED_OUT
-    assert first_body["local"] == {"enabled": False, "onboarding": "", "session": ""}
+    assert first_body["local"] == {
+        "enrolled": False,
+        "enabled": False,
+        "onboarding": "",
+        "session": "",
+    }
 
     # A real separate process writes the registered keys through settings_io.
     _external(
@@ -1373,6 +1388,7 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     )
     third = await client.get("/v1/desktop/team-bridge/status?boundary=surface_open")
     assert third.json()["result"]["local"] == {
+        "enrolled": False,
         "enabled": False,
         "onboarding": "",
         "session": "",
@@ -1400,7 +1416,12 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     malformed_bytes = (root / "config.yml").read_bytes()
     fifth = await client.get("/v1/desktop/team-bridge/status?boundary=window_focus")
     fifth_local = fifth.json()["result"]["local"]
-    assert fifth_local == {"enabled": False, "onboarding": "seen", "session": ""}
+    assert fifth_local == {
+        "enrolled": False,
+        "enabled": False,
+        "onboarding": "seen",
+        "session": "",
+    }
     # The unreadable document is left EXACTLY as written: no repair, no
     # rewrite, no ``config.yml.bad.<ts>`` moved aside (the last-good snapshot
     # is kept instead — the write guard's behaviour, not ``_load_config``'s).

@@ -339,7 +339,11 @@ async def test_consent_version_unknown_is_a_refresh_status_signal():
     client = _make_client(handler)
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="bridge_consent_v1", endpoint=None
+            state="active",
+            consent_version="bridge_consent_v1",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
     assert info.value.refreshes_status is True
     assert info.value.advice is None
@@ -405,7 +409,11 @@ async def test_every_field_rule_case_renders_its_client_sentence_or_none(field: 
     client = _make_client(handler)
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="bridge_consent_v1", endpoint=None
+            state="active",
+            consent_version="bridge_consent_v1",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
 
     expected = VALIDATION_SENTENCES.get((field, rule))
@@ -454,7 +462,14 @@ async def test_a_pause_or_opt_out_is_sent_alone(bundled: str):
     assert sent == []
 
     # The name change as its own request is fine (state=active).
-    await client.put_settings(state="active", consent_version="v1", label="My agent", endpoint=None)
+    await client.put_settings(
+        state="active",
+        consent_version="v1",
+        label="My agent",
+        endpoint=None,
+        expected_account_id="acc_1",
+        tenant_id="tnt_1",
+    )
     assert len(sent) == 1
 
 
@@ -481,11 +496,21 @@ async def test_consented_via_is_the_closed_set():
 
     with pytest.raises(ValueError, match="consented_via"):
         await client.put_settings(
-            state="active", consent_version="v1", consented_via="email", endpoint=None
+            state="active",
+            consent_version="v1",
+            consented_via="email",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
 
     await client.put_settings(
-        state="active", consent_version="v1", consented_via="dialog", endpoint=None
+        state="active",
+        consent_version="v1",
+        consented_via="dialog",
+        endpoint=None,
+        expected_account_id="acc_1",
+        tenant_id="tnt_1",
     )
     assert sent[-1]["consented_via"] == "dialog"
 
@@ -494,7 +519,12 @@ async def test_the_body_bound_is_checked_before_the_wire():
     client = _make_client(lambda request: _ok({}))
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="v1", label="x" * 5000, endpoint=None
+            state="active",
+            consent_version="v1",
+            label="x" * 5000,
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
     assert info.value.code == "payload_too_large"
     assert info.value.http_status == 413
@@ -509,7 +539,11 @@ async def test_tenant_id_rides_the_body_when_given():
 
     client = _make_client(handler)
     await client.put_settings(
-        state="active", consent_version="v1", tenant_id="tnt_1", endpoint=None
+        state="active",
+        consent_version="v1",
+        tenant_id="tnt_1",
+        endpoint=None,
+        expected_account_id="acc_1",
     )
     assert sent == [{"state": "active", "tenant_id": "tnt_1", "consent_version": "v1"}]
 
@@ -1078,18 +1112,43 @@ async def test_a_pause_never_commits_a_receipt(tmp_path: Path):
     assert Store(tmp_path).committed_owner_count() == 0
 
 
-async def test_a_resume_without_a_consent_echo_commits_nothing(tmp_path: Path):
-    """Only the CONSENTED active write enrolls; a bare resume is not an opt-in."""
+@pytest.mark.parametrize(
+    "consent",
+    [
+        pytest.param(None, id="no-consent-record"),
+        pytest.param(
+            {"version": "bridge_consent_v1", "consented_via": "dialog", "current": False},
+            id="record-no-longer-binds",
+        ),
+    ],
+)
+async def test_a_resume_without_an_echo_or_a_binding_record_commits_nothing(
+    tmp_path: Path, consent: Any
+):
+    """A bare resume is not an opt-in UNLESS the hub holds a binding consent
+    record for this member (D1 path c, review R1-2 — pinned on the commit
+    side in ``test_enrol_truth.py``). This pins the no-record side explicitly:
+    no echo and no current record means nothing commits, and the answer says
+    why, rather than passing by fixture shape."""
+
+    endpoint: dict[str, Any] = {"id": "bep_1", "state": "active"}
+    if consent is not None:
+        endpoint["consent"] = consent
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+        if request.url.path.endswith("/messaging/events"):
+            return httpx.Response(403, json={"error": "no", "code": "bridge_not_available"})
+        return _ok({"endpoint": endpoint, "settings": {"tenant_id": "tnt_1"}})
 
     client = _make_client(handler, config_dir=tmp_path)
-    await client.put_settings(state="active", endpoint={"state": "paused"})
+    result = await client.put_settings(
+        state="active", endpoint={"state": "paused"}, tenant_id="tnt_1", expected_account_id="acc_1"
+    )
 
     from local_operator.team_bridge.store import Store
 
     assert Store(tmp_path).committed_owner_count() == 0
+    assert result["local_enrollment"] == {"committed": False, "code": "no_consent_echo"}
 
 
 # ---------------------------------------------------------------------------
