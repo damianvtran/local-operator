@@ -58,6 +58,7 @@ from local_operator.evaluation.protocol import (
 from local_operator.evaluation.runner.action_tool import (
     _HINT_SHAPE,
     _NO_PENDING_OBSERVATION_REFUSAL,
+    ACTION_TOOL_DESCRIPTION,
     ACTION_TOOL_NAME,
     REJECTION_CLASS_KEY,
     PendingObservationToken,
@@ -337,7 +338,6 @@ def test_projection_only_rephrases_owned_nonblank_patterns() -> None:
         ("double_click", "frame_id"),
         ("drag", "frame_id"),
         ("scroll", "frame_id"),
-        ("type", "text"),
         ("finish", "reason"),
         ("ask_user", "request_id"),
         ("ask_user", "question"),
@@ -346,10 +346,16 @@ def test_projection_only_rephrases_owned_nonblank_patterns() -> None:
     assert Draft202012Validator(frame).is_valid("x" * 256)
     assert not Draft202012Validator(frame).is_valid("x" * 257)
     # A search without the anchors retries a greedy prefix at every position:
-    # a valid-length whitespace-only type payload would become quadratic work.
+    # a valid-length whitespace-only reason would become quadratic work.
+    reason = fields[("finish", "reason")]
+    assert reason["pattern"].startswith("^") and reason["pattern"].endswith("$")
+    assert not Draft202012Validator(reason).is_valid(" " * reason["maxLength"])
+    # ``type.text`` is keystrokes, not a label: whitespace is valid input there
+    # (a newline presses Return), so the offer carries no nonblank pattern.
     text = fields[("type", "text")]
-    assert text["pattern"].startswith("^") and text["pattern"].endswith("$")
-    assert not Draft202012Validator(text).is_valid(" " * text["maxLength"])
+    assert "pattern" not in text
+    assert Draft202012Validator(text).is_valid("\n")
+    assert not Draft202012Validator(text).is_valid("")
     assert Draft202012Validator(text).is_valid("\n" + "x" * (text["maxLength"] - 2) + "\n")
 
 
@@ -1338,7 +1344,47 @@ _PLACEMENT_REPAIRS = [
     (
         "duplicate-keys",
         {"actions": [{"kind": "key", "keys": ["down", "down"]}]},
-        ['"keys" in a "key" action was refused', "cannot contain duplicate keys"],
+        [
+            '"keys" in a "key" action was refused',
+            "cannot contain duplicate keys",
+            'send 2 separate actions, each {"kind": "key", "keys": ["down"]}',
+        ],
+    ),
+    # The 2026-10-28 session-arm refusals, each with the repair it now carries.
+    (
+        "page-up-twice",
+        {"actions": [{"kind": "key", "keys": ["Page_Up", "Page_Up"]}]},
+        ['each {"kind": "key", "keys": ["pageup"]}'],
+    ),
+    (
+        "chord-spells-text",
+        {"actions": [{"kind": "key", "keys": ["e", "c", "h", "o", " ", "A"]}]},
+        ["pressed together as one chord", '{"kind": "type", "text": "echo A"}'],
+    ),
+    (
+        "word-as-a-key",
+        {"actions": [{"kind": "key", "keys": ["comp.scm"]}]},
+        ["'comp.scm' is not an accepted key name", '{"kind": "type", "text": "comp.scm"}'],
+    ),
+    (
+        "plus-joined-chord",
+        {"actions": [{"kind": "key", "keys": ["ctrl+t"]}]},
+        ['a chord lists each key separately: send "keys": ["ctrl", "t"]'],
+    ),
+    (
+        "zero-scroll",
+        {"actions": [{"kind": "scroll", "frame_id": "screen", "x": 1, "y": 1, "delta_y": 0}]},
+        ["scroll requires a non-zero delta", "delta_y > 0 scrolls up and < 0 scrolls down"],
+    ),
+    (
+        "finish-behind-wait",
+        {
+            "actions": [
+                {"kind": "wait", "duration_ms": 500},
+                {"kind": "finish", "status": "infeasible", "reason": "placeholder"},
+            ]
+        },
+        ["must be the only action in their batch", "send the finish alone"],
     ),
     (
         "cmd-is-ambiguous",
@@ -1374,3 +1420,37 @@ async def test_a_misplaced_field_refusal_shows_the_corrected_form(
         assert phrase in text, (name, text)
     assert "observation_id" not in text, name
     assert 'use "meta" instead' not in text, name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["\n", " "])
+async def test_whitespace_type_now_runs(text: str) -> None:
+    """Measured refused on 2026-10-28; a newline or a space is a real keystroke."""
+
+    pending = _observation(2, frames=(_frame("screen"),))
+    offline = _Offline(pending)
+    result = await offline.call({"actions": [{"kind": "type", "text": text}]})
+
+    assert not result.is_error
+    assert [batch.actions[0].text for batch in offline.execute.batches] == [text]
+
+
+@pytest.mark.asyncio
+async def test_a_misspelled_key_is_not_answered_as_text() -> None:
+    """The type repair is only for a name NO key is near: ``pagedwn`` is a typo."""
+
+    offline = _Offline(_observation(2, frames=(_frame("screen"),)))
+    result = await offline.call({"actions": [{"kind": "key", "keys": ["pagedwn"]}]})
+
+    text = result.content[0].text  # type: ignore[union-attr]
+    assert result.is_error
+    assert 'use "pagedown" instead' in text
+    assert '"type" action' not in text
+
+
+def test_the_description_states_the_chord_and_scroll_sign() -> None:
+    """The two facts the schema cannot carry, kept short (cache prefix)."""
+
+    assert "ONE chord pressed together" in ACTION_TOOL_DESCRIPTION
+    assert "delta_y > 0 is up, < 0 is down" in ACTION_TOOL_DESCRIPTION
+    assert len(ACTION_TOOL_DESCRIPTION) < 300

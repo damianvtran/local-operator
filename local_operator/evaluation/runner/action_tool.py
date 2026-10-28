@@ -89,9 +89,23 @@ ACTION_TOOL_NAME = "apply_actions"
 #: What the function tells the model it is for. Deliberately short: this rides
 #: in the request's cache prefix on every call of every episode, and the action
 #: vocabulary itself is the schema's job, not prose's.
+#:
+#: The second sentence is the exception, and it carries the two facts the schema
+#: CANNOT state: a JSON array reads as a sequence, so nothing in ``keys:
+#: string[]`` says the keys go down together, and a signed integer says nothing
+#: about which way is up (pyautogui wheel clicks: positive is UP, the opposite
+#: of screen y). Measured 2026-10-28 on the session arm: 3 refusals typing text
+#: through ``keys`` (plus 101 ACCEPTED letter-by-letter chords in the same
+#: episode) and 4 zero-delta scrolls -- and all 3 accepted delta_y > 0 scrolls
+#: were meant as "down" (two then read "scroll didn't move"). Here rather than
+#: as field descriptions: this one string is what both the loop tool and the
+#: session arm's MCP tool (``action_server``) offer, while a field description
+#: would also enter ``ActionSurface.schema()``, the sealed tool-schema identity.
 ACTION_TOOL_DESCRIPTION = (
     "Apply one action batch to the observation you were just shown, and receive "
-    "the state that results. Send exactly one call per turn."
+    "the state that results. Send exactly one call per turn. A key action's keys "
+    "are ONE chord pressed together (enter text with a type action); scroll "
+    "delta_y > 0 is up, < 0 is down."
 )
 
 #: The fields the BODY owns rather than the model. Removed from every projected

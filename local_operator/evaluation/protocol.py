@@ -19,7 +19,7 @@ import json
 import math
 import re
 import string
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from copy import deepcopy
 from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
@@ -434,7 +434,14 @@ class DragAction(_FrameAction):
 
 class TypeAction(_Action):
     kind: Literal["type"] = "type"
-    text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
+    # Non-empty, but deliberately NOT "non-blank". ``text`` is keyboard input,
+    # not a user-facing label like ``finish.reason``: a lone space, a tab or a
+    # newline (``pyautogui.typewrite("\n")`` presses Return) is a real keystroke
+    # with one meaning. The old ``\S`` pattern refused exactly those -- in the
+    # 2026-10-28 session-arm evidence ``{"text": "\n"}`` and ``{"text": " "}``
+    # each cost a corrective turn. The EMPTY string stays refused: it types
+    # nothing, and the measured case was a model misfiring the kind it meant.
+    text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
 
 
 #: The named keys ``KeyAction`` accepts, case-insensitively. Public because
@@ -542,6 +549,61 @@ KEY_ALIASES: Mapping[str, str] = MappingProxyType(
 )
 
 
+#: The keys that make a chord a SHORTCUT rather than several keys at once.
+_MODIFIER_KEYS = frozenset({"CTRL", "ALT", "SHIFT", "META"})
+
+
+def canonical_key(key: str) -> str | None:
+    """The canonical key one spelling names, or ``None`` when it names none.
+
+    The ONE normalisation ``keys`` is validated with, public so the refusal
+    hints (``provider_client._unknown_key_hint``) can ask whether each part of
+    a refused ``"ctrl+t"`` is a key without re-stating the vocabulary.
+    """
+
+    if key == " ":
+        # A literal space names the space bar and nothing else. It is the one
+        # printable character ``_PRINTABLE_KEYS`` (string.punctuation) leaves
+        # out, so ``["e", "c", "h", "o", " ", "A"]`` was refused for the space
+        # rather than for what it was (typing in a chord). Not a ``KEY_ALIASES``
+        # entry: that table holds multi-character spellings only.
+        return "SPACE"
+    candidate = key.upper() if len(key) > 1 else key
+    candidate = KEY_ALIASES.get(candidate, candidate)
+    if candidate in NAMED_KEYS or candidate in _PRINTABLE_KEYS:
+        return candidate
+    return None
+
+
+def _chord_as_typed_text(keys: Sequence[str]) -> str | None:
+    """The text a chord spells when it is really an attempt to TYPE, else ``None``.
+
+    WHY REFUSE IT. ``keys`` is ONE chord: every key goes down together. Two or
+    more plain characters with no modifier are not a shortcut any desktop binds
+    -- the 2026-10-28 session-arm evidence is a model spelling ``echo A`` and a
+    whole heredoc letter by letter, eight keys per chord. That "works" only by
+    accident (X11 emits each key-down in order), and lossily: the compiler
+    presses single characters lower-cased, so ``A`` arrived as ``a``, and a
+    repeated letter is refused as a duplicate key. A ``type`` action carries the
+    same text exactly, so the refusal names that action, built from these keys.
+
+    NOT auto-converted: "press these together" and "type these" are different
+    actions, and the model has to say which. Scoped to the unambiguous shape --
+    no modifier, and every key a single printable character or the space bar --
+    so ``["shift", "a"]``, ``["ctrl", "alt", "t"]`` and named-key chords such as
+    ``["up", "left"]`` are untouched. The text is at most 8 printable ASCII
+    characters (the chord bound), so quoting it in the rule is bounded.
+    """
+
+    if len(keys) < 2 or any(key in _MODIFIER_KEYS for key in keys):
+        return None
+    if not all(key == "SPACE" or key in _PRINTABLE_KEYS for key in keys):
+        return None
+    if all(key == "SPACE" for key in keys):
+        return None
+    return "".join(" " if key == "SPACE" else key for key in keys)
+
+
 class _KeyChordAction(_Action):
     keys: tuple[str, ...] = Field(min_length=1, max_length=8)
 
@@ -555,13 +617,36 @@ class _KeyChordAction(_Action):
     def _known_unique_keys(cls, keys: tuple[str, ...]) -> tuple[str, ...]:
         normalized: list[str] = []
         for key in keys:
-            candidate = key.upper() if len(key) > 1 else key
-            candidate = KEY_ALIASES.get(candidate, candidate)
-            if candidate not in NAMED_KEYS and candidate not in _PRINTABLE_KEYS:
+            candidate = canonical_key(key)
+            if candidate is None:
                 raise ValueError(f"unknown key: {key!r}")
             normalized.append(candidate)
+        # Checked BEFORE duplicates: a spelled-out word with a repeated letter
+        # (``["m", "p", ".", "s", "c", "m"]``) is a typing attempt, and naming
+        # the duplicate would send the model to fix the wrong thing.
+        typed = _chord_as_typed_text(normalized)
+        if typed is not None:
+            raise ValueError(
+                "keys in one action are pressed together as one chord, not typed in "
+                f'order; to type this text send {{"kind": "type", "text": {json.dumps(typed)}}}'
+            )
         if len(normalized) != len(set(normalized)):
-            raise ValueError("a key chord cannot contain duplicate keys")
+            # The prefix is the rule's stable anchor; the tail is the repair.
+            # ``["Page_Up", "Page_Up"]`` means "press it twice", which is two
+            # actions -- said with the model's own key, from the canonical
+            # vocabulary, so no unbounded model text reaches the sentence.
+            if len(set(normalized)) == 1:
+                name = normalized[0].lower() if len(normalized[0]) > 1 else normalized[0]
+                repair = (
+                    f"to press {name!r} {len(normalized)} times send {len(normalized)} "
+                    f'separate actions, each {{"kind": "key", "keys": [{json.dumps(name)}]}}'
+                )
+            else:
+                repair = "a key pressed again in sequence goes in its own key action"
+            raise ValueError(
+                f"a key chord cannot contain duplicate keys: its keys are pressed "
+                f"together, so {repair}"
+            )
         return tuple(normalized)
 
 
@@ -600,7 +685,18 @@ class ScrollAction(_FrameAction):
     @model_validator(mode="after")
     def _requires_motion(self) -> Self:
         if self.delta_x == 0 and self.delta_y == 0:
-            raise ValueError("scroll requires a non-zero delta")
+            # Kept a refusal: an all-zero scroll is a no-op whose direction the
+            # harness cannot infer. Of the 4 measured (2026-10-28), 2 were a
+            # misfired click ("I keep sending scroll/type") and 2 stated no
+            # direction at all -- neither is something to execute. The tail states
+            # the sign convention the only compiler implements -- pyautogui's
+            # wheel clicks, positive delta_y = UP (X11 button 4) -- because
+            # nothing else in the contract does.
+            raise ValueError(
+                "scroll requires a non-zero delta: deltas are mouse-wheel clicks, "
+                'delta_y > 0 scrolls up and < 0 scrolls down (e.g. "delta_y": -5), '
+                "delta_x > 0 scrolls right and < 0 left"
+            )
         return self
 
 
@@ -680,7 +776,15 @@ class ActionBatch(ProtocolModel):
             any(isinstance(action, self._TERMINAL_TYPES) for action in self.actions)
             and len(self.actions) != 1
         ):
-            raise ValueError("finish and ask_user must be the only action in their batch")
+            # Kept a refusal, never "drop the leading waits": both measured
+            # ``[wait, finish]`` batches were an episode's FIRST call with
+            # ``reason: "placeholder"``, and both models then did the task.
+            # Accepting the lone finish would have ended both at step 0.
+            raise ValueError(
+                "finish and ask_user must be the only action in their batch: nothing "
+                "ran. To end the episode send the finish alone; to keep working send "
+                "the other actions without it"
+            )
         return self
 
     def validate_for(self, observation: Observation) -> None:

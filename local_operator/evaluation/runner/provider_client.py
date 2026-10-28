@@ -43,7 +43,12 @@ from local_operator.evaluation.action_surface import (
 )
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
+from local_operator.evaluation.protocol import (
+    ActionBatch,
+    FinishAction,
+    Observation,
+    canonical_key,
+)
 from local_operator.evaluation.runner.completion import finish_claim
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
@@ -1364,7 +1369,17 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
     if sent and is_quotable_key(sent):
         parts.append(f"{sent!r} is not an accepted key name")
         meanings = [key for key in _AMBIGUOUS_KEY_NAMES.get(sent.casefold(), ()) if key in named]
-        if len(meanings) == 2:
+        chord = _joined_chord(sent)
+        if chord is not None:
+            # ``"ctrl+t"`` is a chord written as one string. Answered BEFORE
+            # the near-match, which used to say 'use "ctrl" instead' (measured
+            # 2026-10-28) -- a real key, and the wrong repair. Not split
+            # silently: a key named ``+`` exists, so the string is the model's
+            # to restate, and the example is built from its own parts.
+            parts.append(
+                f'a chord lists each key separately: send "keys": {json.dumps(chord)}'
+            )
+        elif len(meanings) == 2:
             parts.append(
                 f"it names no single key: use {json.dumps(meanings[0].lower())} for the "
                 "application shortcut modifier (Ctrl+A, Ctrl+C on Linux and Windows), "
@@ -1374,6 +1389,15 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
             nearest = _near_match(sent.upper(), sorted(named))
             if nearest is not None:
                 parts.append(f"use {json.dumps(nearest.lower())} instead")
+            elif len(sent) > 1:
+                # No key is near it, so it is most likely text (``"cat"``,
+                # ``"comp.scm"`` in the 2026-10-28 evidence) -- but it may be an
+                # unsupported key name (``"Next"``, ``"Control_R"``), so the
+                # repair is CONDITIONAL and never applied for the model.
+                parts.append(
+                    f'if you meant to type this text, use a "type" action: '
+                    f'{{"kind": "type", "text": {json.dumps(sent)}}}'
+                )
     else:
         parts.append("The reply used an unknown key name")
     parts.append(
@@ -1382,6 +1406,20 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
         "case-insensitive, and a single printable character is accepted as itself"
     )
     return ". ".join(parts)
+
+
+def _joined_chord(sent: str) -> list[str] | None:
+    """The chord a ``+``-joined key string spells, when every part is a key.
+
+    Validated through ``protocol.canonical_key`` -- the one normalisation the
+    validator uses -- so the suggestion can never name a key that would be
+    refused. Parts are echoed in the model's own spelling (already accepted).
+    """
+
+    parts = sent.split("+")
+    if len(parts) < 2 or any(not part or canonical_key(part) is None for part in parts):
+        return None
+    return [part.lower() if len(part) > 1 else part for part in parts]
 
 
 def _coordinate_bounds(observation: Observation) -> str:
