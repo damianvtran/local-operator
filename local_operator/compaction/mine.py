@@ -116,8 +116,11 @@ CARRY_IDENTIFIER_ITEMS = 64
 CARRY_ASK_ITEMS = 60
 CARRY_DECISION_ITEMS = 40
 
-#: Per-item truncation: an ask is carried as its own substance, not the whole
-#: pasted blob that followed it.
+#: Deprecated per-item caps. Do NOT truncate an item before writing it to the
+#: carry: the carry survives as an ordinary source line, so its truncated tail is
+#: mined as a NEW mid-word ask on a later pass. Item and whole-carry budgets
+#: bound retention by dropping oldest items instead of splitting surviving ones.
+#: Kept for compatibility with callers/tests that import the names.
 ASK_ITEM_CHARS = 240
 DECISION_ITEM_CHARS = 220
 
@@ -342,9 +345,9 @@ def mine_carry(text: str) -> Carry:
         if role == "user":
             collapsed = " ".join(line.split())
             if collapsed:
-                asks.append(collapsed[:ASK_ITEM_CHARS])
+                asks.append(collapsed)
         elif role == "assistant" and _DECISION_CUE.search(line):
-            decisions.append(" ".join(line.split())[:DECISION_ITEM_CHARS])
+            decisions.append(" ".join(line.split()))
 
     # Identifiers in FIRST-SEEN order, not by frequency: merge keeps the newest
     # rows of every tier uniformly (see ``merge_carry``), and a frequency ranking

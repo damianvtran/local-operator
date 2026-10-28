@@ -266,6 +266,69 @@ def test_a_headerless_leading_span_is_not_attributed_to_the_assistant():
     assert carry.asks == ["ship it today"]
 
 
+def test_chained_archives_keep_their_middle_unwrapped_and_mine_whole_asks():
+    """Review round 4 M1': ``Archive.text`` is the next pass's SOURCE, not a page
+    dump. Threading ``previous_text``/``previous_carry`` as ``Session`` does must
+    not reintroduce 175-column fragments from the second pass onward."""
+    from local_operator.compaction.snapcompact import (
+        _middle_pages,
+        _paginate,
+        compact_to_archive,
+        resolve_shape,
+    )
+    from local_operator.harness.types import Message
+
+    previous_text = None
+    previous_carry = None
+    for pass_number in range(3):
+        messages = []
+        for item in range(80):
+            messages.append(
+                Message.user(
+                    "please verify the billing migration and rollout coordination "
+                    f"with every dashboard owner before the release item {item}"
+                )
+            )
+            messages.append(Message.assistant("working through the request " + "x" * 600))
+        archive = compact_to_archive(
+            messages,
+            "anthropic",
+            "claude-opus-4-8",
+            previous_text,
+            max_frames=2,
+            context_window=400_000,
+            previous_carry=previous_carry,
+        )
+        # The replay gate re-derives EXACTLY the pages its frames were rendered
+        # from, even though the stored middle is now the unwrapped source.
+        shape = resolve_shape("anthropic", "claude-opus-4-8")
+        if archive.frames:
+            assert _middle_pages(archive) == _paginate(
+                archive.text[len(archive.text_head) : len(archive.text) - len(archive.text_tail)],
+                shape,
+            )
+        assert all(
+            ask.startswith("please verify") for ask in parse_carry(archive.carry).asks
+        ), parse_carry(archive.carry).asks[:3]
+        if archive.frames:
+            middle = archive.text[
+                len(archive.text_head) : len(archive.text) - len(archive.text_tail)
+            ]
+            # No hard-wrapped storage: a long source line stays intact across passes.
+            assert any(len(line) > shape.chars_per_line for line in middle.splitlines())
+        previous_text, previous_carry = archive.text, archive.carry
+
+
+def test_carry_truncation_does_not_create_a_new_ask_on_the_next_pass():
+    """A carry item must not be clipped in place: its clipped tail otherwise
+    looks like a new operator ask when the archive's source is mined again."""
+    ask = ("please " + "verify the release gate " * 40).strip()
+    first = mine_carry(f"[User]\n{ask}")
+    assert first.asks == [ask]
+    second = mine_carry(render_carry(first))
+    assert second.asks == []
+
+
 def test_a_long_operator_ask_on_a_dropped_page_is_mined_whole():
     """QA round 3 Q11: pages are hard-wrapped at the frame width; the carry must be
     mined from the unwrapped source, or one long ask becomes mid-word fragments.

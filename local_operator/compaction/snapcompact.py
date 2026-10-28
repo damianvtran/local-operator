@@ -767,6 +767,26 @@ def _unwrapped_prefix(text: str, pages: list[str], cols: int) -> str:
     return "\n".join(out)
 
 
+def _unwrapped_suffix(text: str, pages: list[str], cols: int) -> str:
+    """The source lines of ``text`` that the trailing ``pages`` were wrapped from.
+
+    The page run must be the END of ``_paginate(text, …)`` (the kept middle).
+    Wrap boundaries can split a source line; counting wrapped segments back from
+    the end keeps that line whole. The previous pass's edges are not included:
+    their caller already stores those separately.
+    """
+    wrapped = sum(page.count("\n") + 1 for page in pages)
+    if not wrapped:
+        return ""
+    out: list[str] = []
+    for line in reversed(text.split("\n")):
+        if wrapped <= 0:
+            break
+        out.append(line)
+        wrapped -= max(1, -(-len(line) // cols))
+    return "\n".join(reversed(out))
+
+
 def _paginate(text: str, shape: Shape) -> list[str]:
     """Split ``text`` into frame pages, breaking on line boundaries.
 
@@ -1000,10 +1020,14 @@ def compact_to_archive(
     page_digests = [_page_digest(page) for page in pages]
 
     frames = [render_frame(page, shape) for page in pages]
-    # Pages carry no trailing newline; joining without one glues the last
-    # line of page N onto the first of page N+1, and Archive.text is the
-    # source re-rendered on every later pass, so the corruption compounds.
-    kept_middle = "\n".join(pages)
+    # Archive.text is the SOURCE re-rendered on the next pass, not a display
+    # rendering: store its middle unwrapped. Storing the page join here fed the
+    # 175-column layout back through _unwrapped_prefix on the following pass,
+    # re-fragmenting long asks from pass 2 onward (review round 4, M1').
+    # _middle_pages re-paginates this exact source, which reproduces the very
+    # page strings above: wrapping is idempotent and pagination preserves lines.
+    # Text replays keep the wrapped pages so their bytes still match the PNGs.
+    kept_middle = _unwrapped_suffix(image_text, pages, shape.chars_per_line)
     return Archive(
         frames=frames,
         text=text_head + kept_middle + text_tail,
