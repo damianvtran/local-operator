@@ -1928,7 +1928,10 @@ class ActionBridge:
             # window after it, so without this check the same step would report
             # the guard's code -- two readers deriving two terminal reasons for
             # one stop, and the design asks readers to tell the two apart by
-            # ``terminal_reason`` alone. No verdict here: the next call hits the
+            # ``terminal_reason`` alone. The parity is PER-COUNTER, not numeric
+            # identity: the bridge counts admitted output epochs while the runner
+            # counts executed batches, so neither counter should be "aligned" to
+            # the other. No verdict here: the next call hits the
             # budget admission below, and the driver names ``max-steps``.
             return None
         self._progress_turns.append(EpisodeTurn(observation=decided_on, batch=batch))
@@ -2908,7 +2911,13 @@ async def run_session_episode(
     #: ending -- including the two failure paths -- carries the same value, and
     #: so a pre-flight refusal states the policy it refused under rather than
     #: going silently blank. See ``SessionArmOutcome.progress_guards``.
-    policy_stamp = describe_progress_policy(progress_guards)
+    try:
+        policy_stamp = describe_progress_policy(progress_guards)
+    except TypeError:
+        # An undescribable guard is not a runnable policy, so there is no truthful
+        # stamp to write. Defer to ActionBridge's admission check: its SessionArmError
+        # travels the arm's established recorded-failure path instead of escaping here.
+        policy_stamp = {}
     # Record-level failures that are not the sink's own storage failures (an
     # event-fold error, a write into a closed sink). Declared before the try so
     # the failure path can report them too.

@@ -4600,6 +4600,78 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.diagnostic is not None and "4 times" in outcome.diagnostic
         assert len(calls) == 5  # the graceful stop: no 6th root request
         assert '"progress_stop"' in text or "action_progress_stop" in text
+        stamped, rows = self._policy_stamp_from_record(outcome)
+        assert stamped == outcome.progress_guards == {
+            "on": True,
+            "guards": [
+                {"code": "repeated-batch", "threshold": 4},
+                {"code": "no-change", "threshold": 6},
+                {"code": "ask-loop", "threshold": 3},
+            ],
+        }
+        assert len(rows) == 1
+        assert rows[0]["on"] is True and rows[0]["guards"] == stamped["guards"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_episode_still_carries_the_policy_stamp(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exception construction seals the same policy as a normal ending."""
+
+        import local_operator.evaluation.session_arm as session_arm_module
+        from local_operator.evaluation.runner.guards import progress_guards
+
+        async def fail_open(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            raise RuntimeError("synthetic session open failure")
+
+        monkeypatch.setattr(session_arm_module, "open_episode_session", fail_open)
+        _calls, outcome, _text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=5,
+            progress_guards=progress_guards(),
+        )
+        assert outcome.status == "failed"
+        assert outcome.terminal_reason == "runtime-error"
+        stamped, rows = self._policy_stamp_from_record(outcome)
+        assert stamped == outcome.progress_guards
+        assert stamped["on"] is True
+        assert stamped["guards"] == [
+            {"code": "repeated-batch", "threshold": 4},
+            {"code": "no-change", "threshold": 6},
+            {"code": "ask-loop", "threshold": 3},
+        ]
+        assert len(rows) == 1
+        assert rows[0]["on"] is True and rows[0]["guards"] == stamped["guards"]
+
+    @pytest.mark.asyncio
+    async def test_an_undescribable_guard_is_a_recorded_session_arm_refusal(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A programmatic bad guard gets the arm's outcome, never a bare TypeError."""
+
+        from local_operator.evaluation.runner.guards import BudgetCapGuard
+
+        _calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=5,
+            progress_guards=(BudgetCapGuard(),),
+        )
+        assert outcome.status == "failed"
+        assert outcome.terminal_reason == "session-arm"
+        assert outcome.diagnostic is not None
+        assert "SessionArmError" in outcome.diagnostic
+        assert "cannot feed cost or budget counters" in outcome.diagnostic
+        assert "BudgetCapGuard" in outcome.diagnostic
+        assert len(outcome.diagnostic) <= 500
+        sealed = json.loads((outcome.record_root / "outcome.json").read_text(encoding="utf-8"))
+        assert sealed["status"] == "failed"
+        assert sealed["terminal_reason"] == "session-arm"
+        assert "SessionArmError" in text
 
     @pytest.mark.asyncio
     async def test_without_the_policy_the_frozen_repeat_runs_to_the_budget(

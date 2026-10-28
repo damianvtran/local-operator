@@ -508,8 +508,10 @@ async with open_session(spec, roots=roots) as session:
   (a refusal ran nothing); a re-bind clears it (the lost read-back breaks the
   batch→next-screen chain). Budget/cost guards are refused at build: the
   bridge cannot feed their counters. Off by default, so an existing session
-  arm is unchanged and the manifest stamps ``progress_guards`` either way --
-  turning it on is a protocol change for comparison purposes, the same class
+  arm is unchanged. The reply arm's manifest stamps ``progress_guards`` either
+  way; the session arm builds no manifest, so its own ``outcome.json`` field and
+  ``events.jsonl`` row carry that stamp instead. Turning it on is a protocol
+  change for comparison purposes, the same class
   as ``--no-completion-gate``. Pinned by ``test_session_arm_progress.py`` and
   the real-stack cases in ``TestTheStreamCompletedStopBoundary``.
 - **Episode tool confinement (landed 2026-09-28).** A session opened by the
