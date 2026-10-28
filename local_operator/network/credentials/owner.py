@@ -72,7 +72,7 @@ import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
@@ -80,6 +80,8 @@ from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.messages import render_repair_notice
 from local_operator.network.credentials.placement import PlacementDocument
 from local_operator.network.credentials.types import (
+    QUOTA_REASON_HOLDER_EXCLUDED,
+    QUOTA_REASON_POOL_DEPLETED,
     BrokerError,
     CredentialPlacementEntry,
     CredentialRef,
@@ -93,6 +95,9 @@ from local_operator.network.credentials.types import (
     peer_int,
     synthetic_credential_id,
 )
+
+if TYPE_CHECKING:  # the store is imported lazily (_auth_store_instance)
+    from local_operator.providers.auth_store import QuotaEligibility
 
 logger = logging.getLogger("local_operator.network.credentials.owner")
 
@@ -733,6 +738,9 @@ class MeshCredentialBroker:
                 outcome.code,
                 outcome.message,
                 retry_after_ms=outcome.retry_after_ms,
+                # The arm marker must survive the re-shaping into the wire reply, or
+                # the borrower falls back to the 0-remainder rule (#3108 m1).
+                reason=outcome.reason,
             )
         grant: Grant = outcome
         # Recheck the actual requester after the asynchronous/coalesced result;
@@ -899,6 +907,7 @@ class MeshCredentialBroker:
                         f"every lendable login for {provider!r} was excluded by the holder, "
                         "which saw them rate-limited; nothing was lent"
                     ),
+                    reason=QUOTA_REASON_HOLDER_EXCLUDED,
                 )
         if access is None:
             # THE EMPTY ANSWER IS SPLIT BY ITS CAUSE (audit Q5 #9). ``quota_blocked``
@@ -929,6 +938,9 @@ class MeshCredentialBroker:
                     owner_device=self.self_device,
                     owner_device_name=self.self_device_name,
                     retry_after_ms=blocked_ms,
+                    # The OWNER's state, not the holder's exclusion: marked so a
+                    # borrower never renders its own cooldowns for it (#3108 m1).
+                    reason=QUOTA_REASON_POOL_DEPLETED,
                     message=(
                         f"every login for {provider!r} is rate-limited on this device "
                         + (
@@ -2124,7 +2136,7 @@ class MeshCredentialBroker:
 
     def _quota_eligibility(
         self, provider: str, model_id: str, excluded_ids: tuple[int, ...] = ()
-    ) -> Any:
+    ) -> QuotaEligibility | None:
         """The store's quota eligibility for ``provider``, or ``None`` when unreadable.
 
         The producer ``quota_blocked`` never had (audit Q5 #9), read only when the
@@ -2216,6 +2228,7 @@ class MeshCredentialBroker:
         message: str,
         *,
         retry_after_ms: int = 0,
+        reason: str = "",
     ) -> dict[str, Any]:
         """One refusal, audited on the owner and shaped as §3.2's failure reply."""
         error = BrokerError(
@@ -2225,6 +2238,7 @@ class MeshCredentialBroker:
             owner_device_name=self.self_device_name,
             retry_after_ms=retry_after_ms,
             message="",
+            reason=reason,
         )
         # The peer gets the CODE and the owner's own words; the SENTENCE the operator
         # reads is rendered where the operator is (``client.py`` →

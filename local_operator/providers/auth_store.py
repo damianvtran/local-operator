@@ -4176,9 +4176,21 @@ class AuthStore:
         holder's approval scope, its own resting rows): they were never
         candidates, so they neither explain nor contradict the empty answer.
         Read-only: nothing is blocked, demoted, pinned or written.
+
+        THE SAME ROW SOURCE AS THE PICK (#3108 review n1): a local provider resolves
+        only its ACTIVE endpoint row (``_usable_key_rows``), so that is the row read
+        here; reading every stored row would explain the empty pick from rows the
+        pick never considered.
         """
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS, resolve_base_url
+
         hidden = set(exclude_credential_ids or ())
-        rows = [row for row in self.list_credentials(provider) if row.id not in hidden]
+        if provider in LOCAL_PROVIDER_IDS:
+            selected = self.active_local_credential(provider, resolve_base_url(provider))
+            candidates = [selected] if selected is not None else []
+        else:
+            candidates = self.list_credentials(provider)
+        rows = [row for row in candidates if row.id not in hidden]
         # The storage spelling, as ``_selection_order`` hands the selector: the
         # usage cache is keyed by it, so an alias would read every row as unknown.
         storage = self._storage_id(provider)
