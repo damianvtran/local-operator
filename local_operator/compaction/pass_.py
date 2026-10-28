@@ -229,8 +229,11 @@ async def run_compaction_pass(
         try:
             from . import snapcompact
 
+            # previous_text is the marker's archive; do not also serialize its
+            # rendered replay pages into this pass (lift XOR keep, QA r5 Q16).
+            _, archive_span = split_leading_marker(to_summarize)
             archive = snapcompact.compact_to_archive(
-                to_summarize,
+                archive_span,
                 model.provider,
                 model.model_id,
                 _previous_archive_text(to_summarize),

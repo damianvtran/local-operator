@@ -26,7 +26,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -997,6 +997,16 @@ CREATE TABLE IF NOT EXISTS journal_prune(at REAL NOT NULL,origin TEXT NOT NULL,
 CREATE INDEX IF NOT EXISTS journal_prune_at ON journal_prune(at);
 """
 
+#: B5 recall telemetry. NOT in ``_SCHEMA``: created on the first recorded read, so
+#: a store that never records one pays no pages for it (the byte cap is enforced
+#: in pages, and a fixed schema cost moves every store toward it). ``WITHOUT
+#: ROWID`` keeps it ONE b-tree — a rowid table with a TEXT primary key is two (the
+#: table plus its autoindex). Local only: never in ``ops``, never exported/synced.
+_RECALL_STATS_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS recall_stats(entity TEXT PRIMARY KEY,"
+    "last_at REAL NOT NULL,n INTEGER NOT NULL) WITHOUT ROWID"
+)
+
 
 #: The relief sentence and its command hint for a near-cap scope, shared by the
 #: write warning and `lop memory status`. ONE function because the two surfaces
@@ -1453,6 +1463,13 @@ class MemoryStore:
         db.execute("DELETE FROM current WHERE entity_id=?", (entity,))
         db.execute("DELETE FROM associations WHERE entity=?", (entity,))
         if any(op["kind"] == "tombstone" for op in ops):
+            # Recall telemetry for a dead id is noise. A LOCAL delete (the side
+            # table is never journalled); absent on a store that never recorded a
+            # read, which SQLite reports as an error that aborts nothing here.
+            try:
+                db.execute("DELETE FROM recall_stats WHERE entity=?", (entity,))
+            except sqlite3.OperationalError:
+                pass
             # Forgotten IDs are permanently dead. Bodies in old puts are removed
             # too; keeping their hash and ancestry still permits convergence.
             for op in ops:
@@ -3822,6 +3839,130 @@ class MemoryStore:
                 if len(result) >= min(limit, 3 if suggest else limit):
                     break
             return result
+
+    #: Recall-telemetry dedup window. Several reads of one fact inside one turn are
+    #: one recall: a turn that searches, then shows, then re-searches the same fact
+    #: is one use of it, and counting three would bias the next round's ranking
+    #: (bm25 x recency x importance) toward chatty turns. CLASS-level because the
+    #: tool path builds a fresh ``MemoryStore`` per call (``store_for``); keyed by
+    #: (database, session) so sessions hosted in one process never share a window.
+    #: Each key keeps its last ``_RECALL_TURNS_KEPT`` turns rather than one,
+    #: because agent reads (keyed by the tool turn) and suggestion renders (keyed by
+    #: the user entry) interleave inside one turn and must not reset each other.
+    #: At most ``_RECALL_KEYS_KEPT`` (database, session) keys are held, oldest
+    #: dropped first, so a long-lived host process does not grow one per session.
+    _recall_turns: dict[tuple[str, str], dict[str, set[str]]] = {}
+    _RECALL_TURNS_KEPT = 4
+    _RECALL_KEYS_KEPT = 256
+    #: Lock wait for the telemetry write, in milliseconds. The write is best-effort
+    #: and runs on the agent's read path, so it must never queue behind a writer:
+    #: under ``busy_timeout=5000`` a held write lock (a capture pass's eviction
+    #: drain, sync apply, journal compaction) stalled a plain ``show`` for 5.17 s
+    #: (review round 1, M4). A lost bump is acceptable; a stalled read is not.
+    _RECALL_BUSY_MS = 25
+
+    def begin_recall_turn(self, turn: str) -> None:
+        """Name the turn the next :meth:`note_recall` calls on THIS instance belong to.
+
+        Callers pass the identity the host already mints per turn: the tool context's
+        ``send_turn_id`` (rebuilt each attention turn) and, for suggestion renders, the
+        latest user entry id. An instance that never names a turn uses the "" window.
+        """
+        self._recall_turn = turn
+
+    def _recall_window(self) -> set[str]:
+        key = (str(self.path), self.identity.session_id)
+        windows = MemoryStore._recall_turns.pop(key, {})
+        # Re-inserted so dict order is recency order for the key bound below.
+        MemoryStore._recall_turns[key] = windows
+        while len(MemoryStore._recall_turns) > self._RECALL_KEYS_KEPT:
+            MemoryStore._recall_turns.pop(next(iter(MemoryStore._recall_turns)))
+        turn = getattr(self, "_recall_turn", "")
+        if turn not in windows:
+            windows[turn] = set()
+            while len(windows) > self._RECALL_TURNS_KEPT:
+                windows.pop(next(iter(windows)))
+        return windows[turn]
+
+    def note_recall(self, entities: Iterable[str]) -> None:
+        """B5 recall telemetry: bump ``recall_stats(entity, last_at, n)``, once per turn.
+
+        WHY: there is no recall signal today, so the design measured "was this fact
+        ever used" from a transcript grep (212 of 7,883 captured IDs). The next round
+        ranks and expires candidates on real reads, which needs this table first.
+
+        WHO calls it: the AGENT read tool and the rendered suggestion block only —
+        never ``show``/``search`` themselves, which also serve ``lop memory`` and the
+        CLI edit path. A human inspecting memory is not the agent recalling it, and
+        counting those reads would bias the "never recalled" signal (review m1).
+
+        Constraints: LOCAL ONLY — a plain side table never written to ``ops``, never
+        exported to a session log and never synced, so it is no protocol change and
+        carries no fact content (an entity id, a timestamp and a counter). NEVER
+        BLOCKING: a dedicated connection waits at most ``_RECALL_BUSY_MS`` for the
+        write lock and otherwise drops the bump. The entities are marked seen either
+        way, so a turn that lost its bump does not retry (and wait) on every read.
+        """
+        seen = self._recall_window()
+        fresh = [e for e in dict.fromkeys(entities) if e not in seen]
+        if not fresh:
+            return
+        seen.update(fresh)
+        if not self.path.exists():
+            return
+        try:
+            # Not ``connection()``: that one waits up to 5 s for a lock and re-runs
+            # the whole schema script. The page cap is restated here because it is
+            # a per-connection pragma, and this connection must honour it too.
+            db = sqlite3.connect(self.path, timeout=self._RECALL_BUSY_MS / 1000)
+        except sqlite3.Error:
+            return
+        try:
+            db.execute(f"PRAGMA busy_timeout={self._RECALL_BUSY_MS}")
+            db.execute(f"PRAGMA max_page_count={MAX_DB_BYTES // CAP_PAGE_SIZE}")
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(_RECALL_STATS_SCHEMA)
+            now = time.time()
+            db.executemany(
+                "INSERT INTO recall_stats VALUES (?,?,1) ON CONFLICT(entity) DO UPDATE SET "
+                "last_at=excluded.last_at, n=recall_stats.n+1",
+                [(entity, now) for entity in fresh],
+            )
+            db.commit()
+        except sqlite3.Error:
+            return
+        finally:
+            db.close()
+
+    def recall_summary(self) -> dict[str, Any]:
+        """Aggregate recall telemetry for ``lop memory status --json``; never per-fact rows.
+
+        ``recalled`` counts LIVE facts with at least one recorded read, against
+        ``live`` facts in total, split by origin (captured candidate vs stated);
+        ``reads`` is the summed counter. Rows for forgotten entities stay in the side
+        table (it is never pruned by a forget) but are not counted here.
+        """
+        empty = {"live": 0, "recalled": 0, "reads": 0, "captured_recalled": 0}
+        if not self.path.exists():
+            return empty
+        with self.connection() as db:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recall_stats'"
+            ).fetchone():
+                live = db.execute("SELECT count(*) FROM current").fetchone()[0]
+                return dict(empty, live=int(live))
+            row = db.execute(
+                "SELECT count(*), count(r.entity), coalesce(sum(r.n),0), "
+                "coalesce(sum(r.entity IS NOT NULL AND "
+                "json_extract(c.fact,'$.source.author')='deterministic-capture'),0) "
+                "FROM current c LEFT JOIN recall_stats r ON r.entity=c.entity_id"
+            ).fetchone()
+        return {
+            "live": int(row[0]),
+            "recalled": int(row[1]),
+            "reads": int(row[2]),
+            "captured_recalled": int(row[3]),
+        }
 
 
 def parse_url(url: str) -> tuple[str | None, str | None, dict[str, str]]:

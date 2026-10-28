@@ -32,7 +32,7 @@ from local_operator.memory import (
     format_bytes,
     quota_relief,
 )
-from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
+from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, capture_status, policy
 from local_operator.memory_duplicates import duplicates
 from local_operator.paths import config_dir
 
@@ -327,6 +327,10 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
             ),
         },
         "usage": store.inventory(),
+        # Value-free aggregates only: B2's capture budget (evictions are the one
+        # automatic forget, so they must be visible) and B5's recall telemetry.
+        "capture": capture_status(store),
+        "recall": store.recall_summary(),
         "limits": (
             "Shape guards are heuristic: they catch recognized sensitive patterns, not every "
             "secret. Unrecognized secrets can still be stored and journaled — keep values in "

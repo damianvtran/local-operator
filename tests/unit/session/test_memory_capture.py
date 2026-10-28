@@ -181,10 +181,10 @@ def test_a_carry_line_whose_fact_dump_is_refused_does_not_take_the_pass(store):
         "- Asks: The mask is **label-dependent**. `key: <value>`, `token: <value>`, "
         "`secret: <value>` and `key=<value>` are masked; `name: <value>`, "
         "`id: <value>` and the bare value print unchanged.\n"
-        "- Asks: keep the launch plan\n"
+        "- Asks: keep the launch plan on the staged rollout schedule\n"
     )
     rows = carry_rows(carry)
-    assert [row["body"] for row in rows] == ["keep the launch plan"]
+    assert [row["body"] for row in rows] == ["keep the launch plan on the staged rollout schedule"]
 
 
 def test_carry_identifiers_are_context_only_and_never_standalone():
@@ -192,11 +192,15 @@ def test_carry_identifiers_are_context_only_and_never_standalone():
 
     assert carry_rows("- Identifiers: /src/only.py\n", locators=True) == []
     assert carry_rows("- Identifiers: /src/only.py\n") == []
-    with_memory = "- Asks: keep the plan\n- Identifiers: /src/detail.py\n"
-    assert [row["body"] for row in carry_rows(with_memory)] == ["keep the plan"]
+    with_memory = (
+        "- Asks: keep the plan for the staged rollout in place\n- Identifiers: /src/detail.py\n"
+    )
+    assert [row["body"] for row in carry_rows(with_memory)] == [
+        "keep the plan for the staged rollout in place"
+    ]
     rows = carry_rows(with_memory, locators=True)
     assert len(rows) == 1 and rows[0]["tags"] == ["ask"]
-    assert rows[0]["body"].startswith("keep the plan")
+    assert rows[0]["body"].startswith("keep the plan for the staged rollout in place")
     assert "/src/detail.py" in rows[0]["body"]
 
 
@@ -440,7 +444,8 @@ def test_carry_rows_never_overshoots_the_context_body_cap():
     segment = "/src/" + "/".join(["dir"] * 65) + "/proof"
     carry = (
         "- Asks: "
-        + "x" * 280
+        # Prose, not one 280-char token: the carry arm's debris floor counts words.
+        + ("keep the rollout plan " * 13)[:280]
         + "\n"
         + "".join(f"- Identifiers: {segment}{n}.md\n" for n in range(3))
     )
@@ -1275,7 +1280,10 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
     # Restart: a fresh store handle over the same disk state still retrieves.
     reopened = MemoryStore(root, MemoryIdentity(f"chain-{strategy}", "", "main"), directory)
     assert reopened.show("session", explicit["id"])["fact"]["body"] == "Decision: ship Friday"
-    assert reopened.search("chain0")
+    # The CURRENT progress line is what survives: `Progress` is a state tag, one head
+    # per session revised in place (memory round B2 rule 3), so pass 0's
+    # `chain0` line is superseded by pass 2's rather than kept beside it.
+    assert reopened.search("chain2")
     assert before >= 9
     print("CHAIN", strategy, "markers", len(markers), "captured", len(reopened.search("docs")))
 
@@ -1552,7 +1560,7 @@ async def test_carry_rows_survive_a_budget_stop(store, monkeypatch):
         "budget-carry",
         task,
         "",
-        carry="- Asks: keep the launch plan",
+        carry="- Asks: keep the launch plan on the staged rollout schedule",
     )
     assert (terminal, watermark(store, "budget-carry")) == ("ok", ("ok", 1))
     assert _detail(store, "budget-carry").reason == "timeout"

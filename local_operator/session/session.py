@@ -25641,9 +25641,16 @@ class Session:
                 # and tokenized for the model that will actually receive the
                 # replay, which during a fallback is the fallback.
                 effective = self.effective_model
+                # Lift the leading rendered marker OUT of the span. Snapcompact
+                # already folds that same archive through previous_text below;
+                # serializing the marker as [User] also mined its hard-wrapped
+                # replay pages as fresh operator asks (QA round 5, Q16). This is
+                # the snapcompact half of the lift-XOR-keep rule used below for
+                # context-full, and by compaction.pass_ for both strategies.
+                _, archive_span = compaction_api.split_leading_marker(to_summarize)
                 archive = await asyncio.to_thread(
                     snapcompact.compact_to_archive,
-                    to_summarize,
+                    archive_span,
                     effective.provider,
                     effective.model_id,
                     self._previous_archive_text(),
