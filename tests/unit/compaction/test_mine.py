@@ -125,6 +125,42 @@ def test_injected_deliveries_mine_no_asks_through_the_real_render_path():
     assert "#4242" in carry.identifiers
 
 
+def test_a_queued_ask_answer_stays_an_operator_ask_through_the_real_path():
+    """Review round 2 m1 / QA Q8: the ``answer:`` lines are the operator's words.
+
+    The ask_response envelope is harness text and stays ``[Injected]``; only the
+    typed answers are restated under ``[User]``. Placeholders are not words.
+    """
+    from local_operator.asks.render import response_text
+    from local_operator.harness.types import CustomMessage, Message
+
+    record = {
+        "status": "answered",
+        "id": "a1",
+        "questions": [
+            {"id": "purge", "question": "Should I drop the staging tables?", "options": []},
+            {"id": "skip", "question": "Anything else?", "options": []},
+        ],
+        "answers": {"purge": ["keep them but also migrate the billing table to v2 before friday"]},
+    }
+    messages = [
+        Message.user("please clean up staging"),
+        CustomMessage(
+            custom_type="ask_response",
+            attribution="system",
+            details={"text": response_text(record)},
+        ),
+        Message.user("then ship"),
+    ]
+    serialized = _real_path(messages)
+    assert serialized.count(INJECTED_HEADER) == 1
+    assert mine_carry(serialized).asks == [
+        "please clean up staging",
+        "keep them but also migrate the billing table to v2 before friday",
+        "then ship",
+    ]
+
+
 @pytest.mark.parametrize(
     "turn,asks",
     [

@@ -56,7 +56,7 @@ from local_operator.harness.types import (
 )
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
-from .cutpoint import is_rendered_injection
+from .cutpoint import OPERATOR_ANSWER_KEY, is_rendered_injection
 from .mine import (
     CARRY_FRESH_TOKEN_ALLOWANCE,
     CARRY_TOKEN_BUDGET,
@@ -590,8 +590,24 @@ def serialize_for_snapcompact(messages: Sequence[Message]) -> str:
                 # transcript 66 of 72 captured asks were injected text. A distinct
                 # header keeps them readable in the archive while ``mine_carry``
                 # maps it to a role that mines no asks.
-                header = INJECTED_HEADER if is_rendered_injection(message) else "[User]"
-                blocks.append(f"{header}\n{text}")
+                if not is_rendered_injection(message):
+                    blocks.append(f"[User]\n{text}")
+                    continue
+                blocks.append(f"{INJECTED_HEADER}\n{text}")
+                # A queued ask's answer is injected, but its ``answer:`` lines are
+                # the operator's typed words: re-state them under ``[User]`` so the
+                # miner keeps them as asks (review round 2 m1, QA Q8). Placeholders
+                # (``(not answered)``, ``(image attached …)``) are not words.
+                payload = message.provider_payload or {}
+                if payload.get(OPERATOR_ANSWER_KEY):
+                    answers = [
+                        line.strip()[len("answer:") :].strip()
+                        for line in text.splitlines()
+                        if line.strip().startswith("answer:")
+                    ]
+                    answers = [a for a in answers if a and not a.startswith("(")]
+                    if answers:
+                        blocks.append("[User]\n" + "\n".join(answers))
         elif message.role == "assistant":
             parts: list[str] = []
             text = _content_text(message)

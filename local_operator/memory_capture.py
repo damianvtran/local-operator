@@ -20,7 +20,7 @@ import re
 import time
 from bisect import bisect_right
 from pathlib import Path
-from typing import Any, Iterable, Iterator, NamedTuple
+from typing import Any, Callable, Iterable, Iterator, NamedTuple
 
 from local_operator.memory import (
     MAX_REVISIONS,
@@ -289,7 +289,13 @@ def import_capture_disabled(session_dir: str | Path | None) -> bool:
     return isinstance(manifest, dict) and manifest.get("capture_memory") is False
 
 
-def carry_rows(carry: str, *, limit: int = 12, locators: bool = False) -> CaptureRows:
+def carry_rows(
+    carry: str,
+    *,
+    limit: int = 12,
+    locators: bool = False,
+    stored: Callable[[dict[str, Any]], bool] | None = None,
+) -> CaptureRows:
     """Memory candidates from an archive's carry digest.
 
     WHY the carry, when ``extract`` already scans a locator set: the scan reads
@@ -319,6 +325,22 @@ def carry_rows(carry: str, *, limit: int = 12, locators: bool = False) -> Captur
     on the first ask/decision the carry also retained. A carry that is nothing
     but identifiers yields ZERO facts.
 
+    SELECTION (QA round 2, Q7). The carry is cumulative: every pass re-offers every
+    ask and decision earlier passes already mined. Taking it oldest-first meant the
+    12 slots went to the same earliest asks on every pass (they dedup into rows the
+    store already holds), so 18 of 25 operator turns on a real transcript were
+    never captured and no decision ever got a slot. Instead:
+
+    - NEWEST first, because the newest material is what a resumed session lacks;
+    - a candidate ``stored`` says the store already holds (or forgot) is passed
+      over WITHOUT charging ``limit`` — re-offering it only refreshes a row;
+    - decisions get up to a THIRD of ``limit`` before asks fill the rest, and slots
+      one kind cannot use flow to the other, so asks cannot starve decisions.
+      A third, not a half: on that transcript (6 passes) half left 5 operator
+      turns uncaptured (20/25, a burst of asks pushed out by later passes), a
+      third gave 24/25 with 15 decisions, a quarter 25/25 with 13. Asks are the
+      operator's own words, so they keep the larger share.
+
     Returns :class:`CaptureRows` so an admission refusal (the debris rule above
     all: a mis-attributed tool call is exactly what an old carry holds) is
     COUNTED in ``skipped`` like ``extract``'s, rather than silently dropped.
@@ -331,14 +353,15 @@ def carry_rows(carry: str, *, limit: int = 12, locators: bool = False) -> Captur
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     skipped = 0
-    for tag, items in (
-        ("ask", parsed.asks),
-        ("decision", parsed.decisions),
-    ):
-        for item in items:
-            if len(rows) >= limit:
-                break
-            body = " ".join(item.split())[:280]
+    pending = {"ask": list(reversed(parsed.asks)), "decision": list(reversed(parsed.decisions))}
+
+    def take(tag: str, quota: int) -> None:
+        """Admit up to ``quota`` more rows of ``tag``, newest first, lazily."""
+        nonlocal skipped
+        items = pending[tag]
+        taken = 0
+        while items and taken < quota and len(rows) < limit:
+            body = " ".join(items.pop(0).split())[:280]
             if (
                 not body
                 or body in seen
@@ -360,7 +383,15 @@ def carry_rows(carry: str, *, limit: int = 12, locators: bool = False) -> Captur
                 # unguardable candidate skips, the rest of the pass still lands.
                 skipped += 1
                 continue
-            rows.append({"title": body[:100], "body": body, "tags": [tag]})
+            row = {"title": body[:100], "body": body, "tags": [tag]}
+            if stored is not None and stored(row):
+                continue  # already captured (or forgotten): costs no slot
+            rows.append(row)
+            taken += 1
+
+    take("decision", limit // 3)
+    take("ask", limit - len(rows))
+    take("decision", limit - len(rows))
     if locators and rows and parsed.identifiers:
         # Identifiers are supporting detail, not facts. They are attached to the
         # first retained ask/decision and never emitted as their own row; a carry
@@ -1231,6 +1262,8 @@ def _state_entity(store: MemoryStore, db: Any, tag: str) -> tuple[str, tuple[str
         ops = following
     entity = entity_for(generation)
     if any(op["kind"] == "tombstone" for op in ops):
+        # May be generation 4097 when the walk stopped at the cap; unreachable in
+        # practice (4096 x MAX_REVISIONS passes), and still a valid fresh entity.
         return entity_for(generation + 1), None
     if len(ops) < MAX_REVISIONS:
         return entity, None
@@ -1683,6 +1716,28 @@ def persist(
 _CARRY_ROW_RESERVE = 12
 
 
+def _carry_arm(store: MemoryStore, carry: str, locators: bool) -> CaptureRows:
+    """``carry_rows`` with ``stored`` answered from this session's journal.
+
+    A candidate is "stored" when its capture entity has ANY op — a live row (a
+    re-offer would only refresh it) or a tombstone (``persist`` would skip it, so a
+    slot spent on it is wasted). One read connection for the whole selection, off
+    the event loop. The entity is resolved exactly as ``persist`` resolves it
+    (:func:`_fact_entity`, legacy id first), so the two cannot disagree.
+    """
+    if not carry:
+        return CaptureRows()
+    if not store.path.exists():
+        return carry_rows(carry, locators=locators)
+    with store.connection() as db:
+
+        def stored(row: dict[str, Any]) -> bool:
+            key = _dump([_normalized(row["body"]), row["tags"]])
+            return bool(store._ops(db, _fact_entity(store, db, key, row)))
+
+        return carry_rows(carry, locators=locators, stored=stored)
+
+
 async def finish(
     store: MemoryStore,
     marker_id: str,
@@ -1716,7 +1771,7 @@ async def finish(
         # the summary already did (QA round 1, Q3).
         summary_state = {row["tags"][0] for row in semantic_rows if row["tags"][0] in _STATE_TAGS}
         rows = semantic_rows + [row for row in scan_rows if not set(row["tags"]) & summary_state]
-        carry_arm = carry_rows(carry, locators=locators) if carry else CaptureRows()
+        carry_arm = await asyncio.to_thread(_carry_arm, store, carry, locators)
         skipped += carry_arm.skipped
         # The carry is the pass's MARQUEE retention, so it gets its own bounded
         # reserve inside the shared cap instead of sitting behind a locator scan
@@ -1740,7 +1795,7 @@ async def finish(
         # exactly when the budget is tight lost the highest-value rows (review round
         # 1, MINOR 1). A zero-row stop still lands ``failed``/``timeout`` inside
         # ``persist``.
-        carry_arm = carry_rows(carry, locators=locators) if carry else CaptureRows()
+        carry_arm = await asyncio.to_thread(_carry_arm, store, carry, locators)
         reserved = min(len(carry_arm), _CARRY_ROW_RESERVE)
         scan_keep = partial.rows[: 52 - reserved] if reserved else partial.rows[:52]
         rows = (scan_keep + carry_arm[:_CARRY_ROW_RESERVE])[:52]

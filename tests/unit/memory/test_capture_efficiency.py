@@ -362,6 +362,53 @@ def test_an_evicted_candidate_is_a_replicating_tombstone(store, monkeypatch):
     assert ops[0]["op_id"] in (store.session_dir / SESSION_EXPORT_NAME).read_text()
 
 
+def test_the_carry_arm_reaches_new_material_across_passes(store):
+    """QA round 2 Q7: a cumulative carry must not re-offer the same 12 asks forever.
+
+    Each pass's carry holds every earlier ask, oldest first. Oldest-first selection
+    re-picked the stored ones and never reached later turns; decisions never got a
+    slot at all.
+    """
+    from local_operator.compaction.mine import Carry, render_carry
+
+    asks: list[str] = []
+    decisions: list[str] = []
+    for n in range(4):
+        asks += [f"please migrate billing table number {n}-{k} to the v2 schema" for k in range(8)]
+        decisions += [
+            f"we will keep the legacy reader for table {n} until friday" for _ in range(1)
+        ]
+        carry = render_carry(Carry(asks=list(asks), decisions=list(decisions)))
+        persist(
+            store, f"p{n}", memory_capture._carry_arm(store, carry, False), "ok", committed_at=n
+        )
+    bodies = {f["body"] for f in _live(store, "ask")}
+    assert all(
+        f"please migrate billing table number {n}-7 to the v2 schema" in bodies for n in range(4)
+    )
+    assert len(_live(store, "ask")) == 32  # every ask, across passes
+    assert len(_live(store, "decision")) == 4  # decisions were never starved
+
+
+def test_decisions_keep_a_share_of_a_full_pass():
+    from local_operator.compaction.mine import Carry, render_carry
+
+    carry = render_carry(
+        Carry(
+            asks=[f"please migrate billing table number {k} to the v2 schema" for k in range(20)],
+            decisions=[
+                f"we will keep the legacy reader for table {k} until friday" for k in range(20)
+            ],
+        )
+    )
+    rows = carry_rows(carry)
+    tags = [r["tags"][0] for r in rows]
+    assert (tags.count("decision"), tags.count("ask")) == (4, 8)
+    # Newest first within each kind.
+    assert rows[0]["body"].endswith("table 19 until friday")
+    assert any(r["body"] == "please migrate billing table number 19 to the v2 schema" for r in rows)
+
+
 # --- B5 recall telemetry ---------------------------------------------------
 
 
@@ -417,28 +464,47 @@ def test_human_store_reads_are_not_recalls(store):
     assert _stats(store) == {}
 
 
-def test_a_recall_write_never_waits_on_a_held_write_lock(store):
-    """Review round 1 M4: telemetry must not stall a read behind a writer."""
+def test_a_recall_write_never_waits_on_a_held_write_lock(store, monkeypatch):
+    """Review round 1 M4: telemetry must not stall a read behind a writer.
+
+    Asserted structurally (AGENTS.md "Prefer a structural invariant"), not as a
+    wall-clock bound that a loaded host or a cold import inflates (QA Q9): the
+    connection is opened with the short telemetry timeout, the bump is dropped
+    rather than queued, and a same-turn re-read does not try the write again.
+    The only timing left is a CATASTROPHE bound, far under the 5 s store timeout
+    the old write waited on.
+    """
     import sqlite3
     import time
 
+    from local_operator import memory as memory_module
+
     fact = store.put("session", {"title": "Launch rule", "body": "Launch windows close at noon."})
-    holder = sqlite3.connect(store.path, timeout=0)
+    _tool_read(store, f"memory://session/{fact['id']}", "warm-up")  # imports, schema
+    opened: list[float] = []
+    real_connect = sqlite3.connect
+
+    def counting_connect(path, *args, **kwargs):
+        opened.append(kwargs.get("timeout", args[0] if args else 5.0))
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(memory_module.sqlite3, "connect", counting_connect)
+    holder = real_connect(store.path, timeout=0)
     holder.execute("BEGIN IMMEDIATE")
     try:
         started = time.perf_counter()
         _tool_read(store, f"memory://session/{fact['id']}", "locked-turn")
-        elapsed = time.perf_counter() - started
-        # The same entity read again in the same turn does not retry the write.
-        started = time.perf_counter()
+        locked = time.perf_counter() - started
+        telemetry = [t for t in opened if t < 1]
         _tool_read(store, f"memory://session/{fact['id']}", "locked-turn")
-        again = time.perf_counter() - started
+        retried = [t for t in opened if t < 1]
     finally:
         holder.rollback()
         holder.close()
-    print(f"locked read {elapsed * 1000:.1f} ms, repeat {again * 1000:.1f} ms")
-    assert elapsed < 0.1 and again < 0.1
-    assert _stats(store) == {}  # the bump was dropped, not queued
+    assert telemetry == [MemoryStore._RECALL_BUSY_MS / 1000]  # one short-timeout attempt
+    assert retried == telemetry  # same turn: marked seen, not retried
+    assert _stats(store) == {fact["id"]: 1}  # warm-up counted; the locked bump dropped
+    assert locked < 2.0, locked  # catastrophe bound only; the old write waited 5 s
 
 
 def test_a_forgotten_fact_leaves_no_recall_row(store):

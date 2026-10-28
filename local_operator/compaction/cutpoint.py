@@ -96,6 +96,14 @@ PreservedTurn = dict[str, "str | int"]
 #: instead of inferring it from what it currently looks like.
 RENDERED_INJECTION_KEY = "harness_injected"
 
+#: ``provider_payload`` flag beside :data:`RENDERED_INJECTION_KEY` on the ONE
+#: injected row whose body carries the operator's own words: a queued ask's
+#: answer (``ask_response``). The envelope ("The user answered:", the echoed
+#: question) is harness text, but each ``  answer: …`` line is what the operator
+#: typed. Compaction's carry miner reads this flag so those lines stay operator
+#: asks while the rest of the row stays injected (review round 2 m1, QA Q8).
+OPERATOR_ANSWER_KEY = "operator_answer"
+
 #: Id of the synthetic turn that reports an elision. Stable rather than
 #: count-suffixed: the count is carried STRUCTURALLY beside the block (see
 #: :class:`CappedPreservedTurns` and the ``preserved_turns_dropped`` payload

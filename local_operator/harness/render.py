@@ -32,7 +32,10 @@ from __future__ import annotations
 
 from typing import TypeGuard
 
-from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+from local_operator.compaction.cutpoint import (
+    OPERATOR_ANSWER_KEY,
+    RENDERED_INJECTION_KEY,
+)
 
 # Imported under the name the renderer body used at its old home, so the move
 # stays byte-identical rather than renaming a call while relocating it.
@@ -294,13 +297,15 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # ride the row as a top-level ``content`` list -- the one place the
             # transcript externalises media -- and become the image blocks of the
             # same user turn here, after the text that points at them.
-            out.append(
-                _injected_user_message(
-                    message.details.get("text", ""),
-                    message.id,
-                    _ask_response_images(message),
-                )
+            answer = _injected_user_message(
+                message.details.get("text", ""),
+                message.id,
+                _ask_response_images(message),
             )
+            # Still injected (the envelope is harness text), but its ``answer:``
+            # lines are the operator's words: see ``OPERATOR_ANSWER_KEY``.
+            answer.provider_payload = {**(answer.provider_payload or {}), OPERATOR_ANSWER_KEY: True}
+            out.append(answer)
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the
             # difference is the whole reason the row exists: without it the
