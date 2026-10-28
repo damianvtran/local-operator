@@ -9,18 +9,21 @@ refactor that keeps the pixels but loses the rule fails here.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from rich.cells import cell_len
+from textual.worker import WorkerState
 
 from local_operator.notifications import items as inbox
 from local_operator.notifications.store import NotificationStore
 from local_operator.tui import notifications_attention as attention
 from local_operator.tui import notifications_model as model
 from local_operator.tui import notifications_render as render
+from tests.unit.tui.conftest import BOOT_DEADLOCK_GUARD_S
 
 S1, S2, S3, S4, S5 = (f"{n:012x}" for n in range(0xA1, 0xA6))
 
@@ -366,15 +369,30 @@ async def test_the_sidebar_note_counts_the_badge_and_hides_when_unknown(
         await _settle(pilot)
         painted: list[int] = []
 
-        class Sidebar:
-            def set_notifications_total(self, total: int) -> None:
-                painted.append(total)
+        # Record on the REAL sidebar rather than swapping in a stand-in object.
+        # The app keeps handling messages while this test body runs, and on the
+        # way out of `run_test`: a queued `WelcomeView` resize runs
+        # `_sync_boot_layout` -> `_boot_lane_width`, which reads
+        # `self._session_sidebar.styles.width`. A bare stand-in had no `styles`,
+        # so a resize landing after the swap raised `AttributeError` (CI run
+        # 40555547851). Production never holds anything but a mounted
+        # `SessionSidebar` there, so the stand-in was the defect, not the read.
+        # Record, then CALL THROUGH (review R3), so the sidebar's own clamp and
+        # store are exercised rather than stubbed out.
+        sidebar = app._session_sidebar
+        original = sidebar.set_notifications_total
 
-        monkeypatch.setattr(app, "_session_sidebar", Sidebar(), raising=False)
+        def record(total: int) -> None:
+            painted.append(total)
+            original(total)
+
+        monkeypatch.setattr(sidebar, "set_notifications_total", record)
         app._paint_notifications_total({"unread_count": 2, "waiting_unread_count": 1})
         assert painted == [3], "the badge's own figure"
+        assert sidebar._notifications_total == 3
         app._paint_notifications_total(None)
         assert painted == [3, 0], "an unreadable store paints nothing, not a stale count"
+        assert sidebar._notifications_total == 0
 
 
 @pytest.mark.asyncio
@@ -398,13 +416,13 @@ async def test_the_wide_pane_takes_the_keys_and_esc_returns_them(
     async with app.run_test(size=(140, 32)) as pilot:
         await _settle(pilot)
         app._open_notifications_view()
-        await _settle(pilot, 12)
+        await _page_idle(app, pilot)
         view = _page(app)
         assert view.wide, "the wide layout is the one under test"
         await pilot.press("enter")
-        await _settle(pilot, 10)
+        await _page_idle(app, pilot)
         await pilot.press("enter")  # second ↵: hand the keys to the pane
-        await _settle(pilot, 8)
+        await _page_idle(app, pilot)
         assert view._detail_focus is True
         # D2 superseded the round-1 rule that this row narrowed to `esc` alone:
         # the pane keeps acting on its item, so the row must NAME those keys.
@@ -436,24 +454,23 @@ async def test_a_tall_detail_pane_scrolls_under_the_keyboard(tmp_path: Path, mon
     async with app.run_test(size=(140, 32)) as pilot:
         await _settle(pilot)
         app._open_notifications_view()
-        await _settle(pilot, 14)
+        await _page_idle(app, pilot)
         view = _page(app)
         assert view.wide
         rows = [str(row["id"]) for row in view.rows]
         view._move_to(rows.index(item.item_id))
-        await _settle(pilot, 8)
+        await _page_idle(app, pilot)
         await pilot.press("enter")
         # The payload arrives on its own worker: wait for the REAL body, or the
         # pane is measured against the short placeholder and the numbers lie.
-        for _ in range(30):
-            await _settle(pilot, 2)
-            if view._detail.virtual_size.height > view._detail.size.height:
-                break
+        # (A 30-turn poll on the geometry used to stand here; it was the same
+        # fixed-turn bet as `_settle`, merely a longer one.)
+        await _page_idle(app, pilot)
         outer = view._detail.size.height
         virtual = view._detail.virtual_size.height
         assert virtual > outer, (outer, virtual)
         await pilot.press("enter")  # second ↵: the keys move to the pane
-        await _settle(pilot, 6)
+        await _page_idle(app, pilot)
         assert view._detail_focus is True
         cursor_after_open = str(view.current["id"]) if view.current else ""
         start = view._detail.scroll_offset.y
@@ -942,6 +959,136 @@ async def _settle(pilot, ticks: int = 6) -> None:
         await asyncio.sleep(0.03)
 
 
+async def _page_idle(app, pilot) -> None:
+    """Block until the notifications page has no read, write or arm in flight.
+
+    WHY. Every gesture that touches the store runs in a page worker that hops to
+    a THREAD: opening the page (``_load``), opening a row (``_read_detail``, then
+    the mark-read write), ``e``/``y``/``z`` (``_write``/``_run_undo``) and the
+    confirms ``A``/``E``/``/notifications read`` (``_arm_mark_all``,
+    ``_arm_dismiss_session``). Cursor moves in the wide layout schedule the
+    detail read behind a ``DETAIL_DEBOUNCE_S`` timer first. ``_settle``'s fixed
+    count of turns is a bet that the thread wins in time; on a loaded runner it
+    loses, and the test reads a page that has not caught up (``assert
+    view.confirming``, ``undo_live`` false, an unscrollable pane). Each worker
+    can start another (a write's ``reload``; the ``read`` form arming its confirm
+    after the first load), so this waits until the page is quiet, not just until
+    the workers that existed on entry are done: the same rule as
+    ``await_session_boot`` for the boot worker. The closing ``_settle`` lets the
+    painted result lay out. The deadline is a backstop for a wedged worker, not
+    the assertion.
+    """
+    # POLLED, NEVER AWAITED WITH A TIMEOUT (review R1). ``asyncio.wait_for``
+    # over ``workers.wait_for_complete`` cancels the inner gather on timeout, the
+    # cancel reaches each worker's own task, and Textual's ``wait_for_complete``
+    # swallows the ``CancelledError``: the wedged worker came back CANCELLED, the
+    # next pass saw nothing pending, and the helper returned success, with the
+    # write under test silently killed. Reading worker states touches nothing,
+    # so a hang stays a hang until the deadline names it.
+    started = time.monotonic()
+    deadline_s = BOOT_DEADLOCK_GUARD_S
+    seen: dict[int, Any] = {}
+    while True:
+        await pilot.pause()
+        view = app._notifications_view
+        assert view is not None, "/notifications did not mount the page"
+        page_workers = [w for w in app.workers if w.node is view]
+        seen.update((id(w), w) for w in page_workers)
+        # Textual drops a worker from ``app.workers`` once it ends, so its end
+        # state is read off the workers this helper has already seen.
+        for worker in seen.values():
+            if worker.state == WorkerState.ERROR:
+                pytest.fail(
+                    f"page worker {worker.name!r} ({worker.group}) raised: {worker.error!r}"
+                )
+            # ``reload`` runs ``exclusive=True``, so a newer read cancelling an
+            # older ``notifications-load`` is the page working (review R2: that
+            # is the ONLY cancel tolerated). The page never cancels a write, a
+            # detail read or an arm, so one ending CANCELLED means something
+            # killed the action under test and an assertion after it is vacuous.
+            if worker.state == WorkerState.CANCELLED and worker.group != "notifications-load":
+                pytest.fail(
+                    f"page worker {worker.name!r} ({worker.group}) was cancelled; "
+                    "an assertion after it would pass vacuously"
+                )
+        pending = [w for w in page_workers if not w.is_finished]
+        # A Timer exposes no public "has it fired" signal; its task is the only
+        # one, and a one-shot timer's task finishes once its callback has run.
+        # Coupled to textual's private ``Timer._task`` (8.2.8, review R4).
+        timer = view._detail_timer
+        task = getattr(timer, "_task", None)
+        debouncing = task is not None and not task.done()
+        if view.is_mounted and view.snapshot is not None and not pending and not debouncing:
+            break
+        elapsed = time.monotonic() - started
+        if elapsed >= deadline_s:
+            stuck = ", ".join(f"{w.name!r} group={w.group} state={w.state.name}" for w in pending)
+            pytest.fail(
+                f"the notifications page never went quiet after {elapsed:.1f}s: "
+                f"workers [{stuck or 'none'}], debouncing={debouncing}, "
+                f"mounted={view.is_mounted}, loaded={view.snapshot is not None}"
+            )
+        # Mount, spawns and the debounce are message-pump and timer events with
+        # no awaitable handle, and a worker's own handle cannot be awaited with a
+        # timeout without cancelling it (above): yield, then re-check.
+        await asyncio.sleep(0.02)
+    await _settle(pilot)
+
+
+@pytest.mark.asyncio
+async def test_page_idle_fails_loudly_naming_a_wedged_worker(tmp_path: Path, monkeypatch) -> None:
+    """Review R1: the helper's backstop must FAIL on a hang, never pass it.
+
+    The first ``_page_idle`` awaited the workers under ``asyncio.wait_for``; on
+    timeout that cancelled the wedged worker, Textual swallowed the cancel, and
+    the next pass found nothing pending and returned success. Every assertion
+    after a hang then read a page whose action had been killed. Here a write is
+    held on an event past a shortened guard: the helper must fail within it and
+    name the worker, and the worker must still be alive (not cancelled) after.
+    """
+    import threading
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed(tmp_path, 3)
+    release = threading.Event()
+    real_write = model.write
+
+    def wedged_write(*args: Any, **kwargs: Any) -> Any:
+        # Bounded so a failing assertion below cannot leak a thread forever.
+        release.wait(30)
+        return real_write(*args, **kwargs)
+
+    app = _app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        app._cmd_notifications_page("", app._system_notice)
+        await _page_idle(app, pilot)
+        view = _page(app)
+        monkeypatch.setattr(model, "write", wedged_write)
+        try:
+            await pilot.press("e")
+            started = time.monotonic()
+            # Shortened only around the wedge, so a slow first open is not the hang.
+            with monkeypatch.context() as guard:
+                guard.setattr(sys.modules[__name__], "BOOT_DEADLOCK_GUARD_S", 1.0)
+                with pytest.raises(pytest.fail.Exception) as failure:
+                    await _page_idle(app, pilot)
+            elapsed = time.monotonic() - started
+            message = str(failure.value)
+            assert "never went quiet" in message, message
+            assert "'_write'" in message and "state=RUNNING" in message, message
+            assert elapsed < 10.0, f"the 1 s guard took {elapsed:.1f}s to fire"
+            writes = [w for w in app.workers if w.node is view and w.name == "_write"]
+            assert writes and all(not w.is_finished for w in writes), (
+                "the helper cancelled the wedged worker instead of leaving it to the test",
+                writes,
+            )
+        finally:
+            release.set()
+        await _page_idle(app, pilot)
+        assert view.undo_live, "released, the write completes normally"
+
+
 @pytest.mark.asyncio
 async def test_opening_the_page_reads_nothing_and_mark_all_asks_first(
     tmp_path: Path, monkeypatch
@@ -952,21 +1099,27 @@ async def test_opening_the_page_reads_nothing_and_mark_all_asks_first(
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         view = _page(app)
         assert len(view.rows) == 3
         assert store.counts()[0] == 3, "opening the page is not reading"
         await pilot.press("A")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         assert view.confirming
         await pilot.press("n")
         await _settle(pilot)
         assert store.counts()[0] == 3
-        await pilot.press("A", "y")
-        await _settle(pilot, 10)
+        # Two presses, not `press("A", "y")`: `A` arms its confirm from a worker
+        # (``_arm_mark_all`` enumerates the scope on a thread), so a `y` sent in
+        # the same burst lands before there is a confirm to answer.
+        await pilot.press("A")
+        await _page_idle(app, pilot)
+        assert view.confirming
+        await pilot.press("y")
+        await _page_idle(app, pilot)
         assert store.counts()[0] == 0
         await pilot.press("z")
-        await _settle(pilot, 10)
+        await _page_idle(app, pilot)
         assert store.counts()[0] == 3, "z undoes the mark inside the window"
 
 
@@ -980,7 +1133,7 @@ async def test_notifications_read_opens_the_page_with_the_confirm_armed(
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("read", app._system_notice)
-        await _settle(pilot, 10)
+        await _page_idle(app, pilot)
         view = _page(app)
         assert view.confirming
         assert store.counts()[0] == 2, "the typed form asks before it writes"
@@ -996,11 +1149,11 @@ async def test_e_on_an_open_ask_never_dismisses_it(tmp_path: Path, monkeypatch) 
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         view = _page(app)
         assert view.current and view.current["source"] == "ask"
         await pilot.press("e")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         assert "answer" in view.notice.lower()
         assert log.read_bytes() == before
 
@@ -1020,20 +1173,20 @@ async def test_open_pins_its_row_in_wide_mode_too(tmp_path: Path, monkeypatch) -
     async with app.run_test(size=(140, 40)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         view = _page(app)
         assert view.wide, "140 columns is the split layout"
         await pilot.press("down")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         second = view.current
         assert second is not None
         await pilot.press("enter")
-        await _settle(pilot, 10)
+        await _page_idle(app, pilot)
         assert view.detail_row is not None
         assert view.detail_row["id"] == second["id"], "the opened row stays in the pane"
         # Browsing releases the pin: the pane follows the cursor again.
         await pilot.press("down")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         assert view.detail_row is not None
         assert view.detail_row["id"] == view.current["id"]
 
@@ -1045,7 +1198,7 @@ async def test_esc_leaves_and_restores_the_transcript(tmp_path: Path, monkeypatc
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         assert not app._transcript_view().display
         await pilot.press("escape")
         await _settle(pilot)
@@ -1077,11 +1230,11 @@ async def test_the_narrow_detail_keeps_its_row_and_offers_unread_after_opening(
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         view = _page(app)
         opened = view.current
         await pilot.press("enter")
-        await _settle(pilot, 12)
+        await _page_idle(app, pilot)
         assert view.view_mode == "detail"
         assert view.detail_row is not None and view.detail_row["id"] == opened["id"]
         assert _row(store, opened["id"])["read_rev"] == 1
@@ -1257,7 +1410,7 @@ async def test_the_combined_receipt_wraps_instead_of_clipping(
         async with app.run_test(size=(80, 24)) as pilot:
             await _settle(pilot)
             app._cmd_notifications_page("", app._system_notice)
-            await _settle(pilot)
+            await _page_idle(app, pilot)
             view = _page(app)
             view.notice = receipt
             view._paint()
@@ -1329,11 +1482,11 @@ async def test_the_undo_key_outranks_every_hint_the_eighty_column_row_drops(
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         view = _page(app)
 
         await pilot.press("e")
-        await _settle(pilot, 10)
+        await _page_idle(app, pilot)
         assert view.undo_live, "the dismissal did not open an undo window"
         assert "z" in [key for key, _label in view._hint_labels()], "the label was not offered"
         assert "z undo" in view._hints.render().plain, view._hints.render().plain
@@ -1341,10 +1494,10 @@ async def test_the_undo_key_outranks_every_hint_the_eighty_column_row_drops(
         # The whole-conversation gesture, which is the one the finding called
         # most destructive: `E` then `y`, then the same footer rule.
         await pilot.press("E")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         assert view.confirming
         await pilot.press("y")
-        await _settle(pilot, 10)
+        await _page_idle(app, pilot)
         assert view.undo_live, "the bulk dismissal did not open an undo window"
         painted = view._hints.render().plain
         assert "z undo" in painted, painted
@@ -1365,7 +1518,7 @@ async def test_switching_language_repaints_the_open_page(tmp_path: Path, monkeyp
     async with app.run_test(size=(80, 24)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         view = _page(app)
         before = view._title.render().plain
         assert before, "the page paints a title"
@@ -1399,16 +1552,16 @@ async def test_the_focused_pane_names_the_gestures_that_still_fire(
     async with app.run_test(size=(140, 32)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         view = _page(app)
         assert view.wide
 
         # `enter` opens (and pins) the row; the SECOND `enter` on the row the
         # pane already shows hands it the keys (DT3).
         await pilot.press("enter")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         await pilot.press("enter")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         assert view._detail_focus
         painted = view._hints.render().plain
         for key in ("o", "a", "e", "E", "u", "esc"):
@@ -1419,6 +1572,18 @@ async def test_the_focused_pane_names_the_gestures_that_still_fire(
         # The marker survives scrolling: the edge column does not scroll.
         # pgdn is the pane's own key (DT3), so the scroll is driven the way the
         # operator drives it rather than by writing the offset.
+        #
+        # The pane is only taller than its box once the detail READ has landed:
+        # until then it paints the row's one-line fallback, `scroll_relative`
+        # clamps to 0, and the presses are silently spent. That read is a
+        # thread hop inside a worker, so a fixed count of `_settle` turns lost
+        # it on a loaded runner (CI jobs 122475722774, 122526528742). The
+        # `_page_idle` above waited on it; assert the premise rather than assume it.
+        assert view._detail.max_scroll_y > 0, (
+            "the detail read landed but the pane is not scrollable",
+            view._detail.virtual_size,
+            view._detail.size,
+        )
         for _ in range(4):
             await pilot.press("pagedown")
         await _settle(pilot)
@@ -1516,15 +1681,15 @@ async def test_the_focused_pane_names_the_undo_it_can_still_take(
     async with app.run_test(size=(160, 40)) as pilot:
         await _settle(pilot)
         app._cmd_notifications_page("", app._system_notice)
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         view = _page(app)
         await pilot.press("enter")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         await pilot.press("enter")
-        await _settle(pilot)
+        await _page_idle(app, pilot)
         assert view._detail_focus
         await pilot.press("e")
-        await _settle(pilot, 10)
+        await _page_idle(app, pilot)
         assert view.undo_live, "the dismissal did not open an undo window"
         painted = view._hints.render().plain
         assert "z undo" in painted, painted

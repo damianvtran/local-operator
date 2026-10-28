@@ -40,6 +40,7 @@ from local_operator.session.runtime.serving import (
     AskUnavailableError,
     ServingSessionHandle,
 )
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 
 
 class FakeSession:
@@ -305,28 +306,12 @@ def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeS
 
 
 def _skill_payload(typed: str) -> str:
-    """The persisted form of a ``$skill`` invocation: what a CLIENT sent.
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    Built from the REAL ``Skill`` and the REAL renderer, the way the fold-parity
-    test does it: a hand-spelled tag would pin a payload shape the product never
-    produces, and it is the payload's own ``invocation`` attribute that the fix
-    reads back. Expansion is the client's duty (a desktop renders it in
-    ``local-operator-ui``'s ``skill-invocation.ts``), which is why the harness is
-    handed this and never the typed line.
+    Old transcripts never migrate, so the reader stays and this pins its input;
+    ``legacy_skill_payload`` reproduces the deleted writer's escaping.
     """
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
-
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    return legacy_skill_payload(typed)
 
 
 def test_default_conversation_name_is_empty_not_a_placeholder() -> None:
@@ -662,6 +647,51 @@ async def test_concurrent_gate_answers_have_one_authoritative_winner() -> None:
     assert sum(isinstance(result, ValueError) for result in results) == 1
     assert sum(isinstance(result, str) for result in results) == 1
     assert request_id not in handle._pending_futures
+
+
+@pytest.mark.asyncio
+async def test_a_signal_exit_refuses_parked_and_later_gates() -> None:
+    """M1 on #3028: once a signal commits the exit, no gate parks on a person.
+
+    A parked approval is denied (``False``, the stop/timeout answer) and the
+    count says so; a gate opened afterwards answers at once instead of parking
+    a fresh card that would hold the drain open again; an ask answers ``None``.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "Allow?"))
+    await asyncio.sleep(0)
+    assert handle.is_busy() is True
+
+    assert handle.refuse_gates_for_exit() == 1
+    assert await asyncio.wait_for(parked, timeout=2) is False
+    assert handle.is_busy() is False
+
+    assert await asyncio.wait_for(handle._approval_gate("bash", "again"), timeout=1) is False
+    assert handle._pending_futures == {}
+    question = SimpleNamespace(id="q1", question="Proceed?", options=[], secret=False)
+    assert await asyncio.wait_for(handle._ask_gate([question]), timeout=1) is None
+
+
+@pytest.mark.asyncio
+async def test_a_signal_between_two_questions_does_not_park_the_second() -> None:
+    """m1 (agent review round 2 on #3028): the exit flag is re-read per question.
+
+    q1 is answered in the same tick the exit is committed; the refusal finds
+    nothing parked (q1's future is already settled), so a single entry check
+    let q2 park after the refusal. The loop now stops and returns what it has.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    q1 = SimpleNamespace(id="q1", question="First?", options=[], secret=False)
+    q2 = SimpleNamespace(id="q2", question="Second?", options=[], secret=False)
+    asked = asyncio.ensure_future(handle._ask_gate([q1, q2]))
+    await asyncio.sleep(0)
+    (future,) = list(handle._pending_futures.values())
+    future.set_result({"q1": ["yes"]})
+    assert handle.refuse_gates_for_exit() == 0
+    answer = await asyncio.wait_for(asked, timeout=1)
+    assert answer == {"q1": ["yes"]}, answer
+    assert handle._pending_futures == {}
+    assert handle.is_busy() is False
 
 
 @pytest.mark.asyncio
@@ -1593,6 +1623,22 @@ async def test_attach_seeds_streaming_from_flag_for_mid_turn_subscriber() -> Non
     assert handle._fold.projection.streaming is True
 
 
+def test_a_committed_departure_ignores_the_warm_window() -> None:
+    """#3028 node control (c): an idle signalled runtime must leave, not wait 120 s.
+
+    Residency keeps a runtime warm for an imminent wake; a signal drain is not
+    residency. The warm-window term therefore stops holding once ``_draining``
+    is latched, so the turn boundary ends the runtime and its successor owns
+    the next occurrence.
+    """
+    handle, _ = make_handle()
+    handle.next_wake_due_at = lambda: 0  # type: ignore[method-assign]
+    handle._draining = False
+    assert handle.may_refresh() == "wake due within the warm window"
+    handle._draining = True
+    assert handle.may_refresh() == ""
+
+
 # --- next_wake_due_at: the reaper's warmth signal ----------------------------
 
 
@@ -2220,7 +2266,7 @@ async def test_a_chosen_effort_is_applied_with_the_model_on_this_owner(
         lambda spec, explicit=False, **kw: applied.append((spec, explicit)),
         raising=False,
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     await handle.set_model_effort("deepseek", "deepseek-flash", "max")
     await handle.set_model("deepseek", "deepseek-flash")
@@ -2263,7 +2309,7 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
     monkeypatch.setattr(
         session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     chosen = build_model_spec("deepseek", "deepseek-flash").model_copy(
         update={"reasoning_effort": "max"}
@@ -2323,7 +2369,7 @@ async def test_a_pair_only_switch_keeps_the_fast_dial(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     fast = build_model_spec("anthropic", "claude-opus-5").model_copy(update={"fast_mode": True})
     assert fast.supports_fast_mode, "the registry must sell this tier"
@@ -2360,7 +2406,7 @@ async def test_a_level_less_switch_carries_the_choice_not_the_clamp(
         session.model = spec
 
     monkeypatch.setattr(session, "set_model", _apply, raising=False)
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     session.model = build_model_spec("anthropic", "claude-opus-5").model_copy(
         update={"reasoning_effort": "max"}
@@ -2455,7 +2501,7 @@ async def test_a_level_this_model_cannot_express_is_clamped_not_refused(
     monkeypatch.setattr(
         session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     await handle.set_model_effort("deepseek", "deepseek-flash", "xhigh")
 
@@ -3186,7 +3232,7 @@ async def test_the_wire_op_refuses_a_decision_only_provider(
     monkeypatch.setattr(
         session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     with pytest.raises(ValueError) as refused:
         # MIXED CASE, deliberately: the wire takes the frame's strings verbatim, so the
@@ -3882,6 +3928,10 @@ async def test_the_serve_side_publishes_the_access_claim_at_open_and_on_switch(
     assert (opened.state, opened.provider, opened.label) == ("signed_out", "radient", "Radient")
 
     await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    # The reply does not wait for the claim (PR #3053 R1-1): it follows in the
+    # background publish the switch scheduled.
+    assert handle._model_access_publish is not None
+    await handle._model_access_publish
     switched = session._frontend_state_store.state.model_access
     assert switched is not None
     assert (switched.state, switched.provider, switched.label) == (

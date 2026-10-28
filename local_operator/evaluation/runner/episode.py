@@ -622,6 +622,50 @@ def _canary_values_outside_own_roots(
     return tuple(value for value in values if not _is_own_location(value))
 
 
+def _canary_values_outside_own_identity(
+    values: Iterable[str], identity: Iterable[str]
+) -> tuple[str, ...]:
+    """Resolved values minus those the episode's own route identity contains.
+
+    WHY THIS EXISTS (the measured failure, 2026-10-27). The OSWorld rig's
+    sealed INFRA refs join the secret channel (see
+    ``_canary_values_outside_own_roots``), and one of them is the scoring
+    judge's PROVIDER NAME -- a non-secret configuration word. When the episode
+    itself was routed through that same provider, the value equalled
+    ``requested_route.provider_id`` and was a substring of ``route_id``; every
+    ``model_request`` event carries ``requested_route``, so the writer refused
+    the FIRST request event (operation ``append:model_request``) before any
+    model response was recorded, and the episode was abandoned as
+    ``evidence-evidencefailure`` (run ``canary4-main20-task_002``). A route
+    with a different provider passed the same observation untouched, which is
+    why the refusal looked route-dependent.
+
+    WHAT THIS GIVES UP, AND WHY THAT IS SOUND. A dropped value is no longer a
+    canary ANYWHERE in the bundle, not only in the route fields: whatever ref it
+    came from -- a configuration word or a credential that happens to equal or
+    sit inside the route identity -- an artifact or event carrying it is no
+    longer refused. That is no new exposure. The manifest seals
+    ``requested_route`` unscanned (the writer canaries events and artifacts,
+    never the manifest) when the bundle is created, BEFORE the first event, so
+    such a value was already in the bundle in plaintext before this rule
+    existed; a canary for it could only refuse the run's own bookkeeping, never
+    keep the value out. The match is the same plaintext substring test
+    ``RedactionSet.assert_clear`` applies, so the drop is limited to exactly the
+    values the identity itself carries.
+
+    THE RULE, SCOPED. Only a value CONTAINED IN an identity string is dropped.
+    A value that merely contains one (an API key prefixed with the provider
+    name, say) stays a canary, as does every value unrelated to the route; those
+    are the credentials this rule leaves fully protected.
+    """
+
+    # ASSUMES served == requested route (fallback_policy=forbid); enabling fallback must revisit.
+    own = tuple(item for item in identity if item)
+    if not own:
+        return tuple(values)
+    return tuple(value for value in values if not any(value in item for item in own))
+
+
 class EpisodeRunner:
     """Drives one episode from launch to a sealed or abandoned bundle."""
 
@@ -793,15 +837,23 @@ class EpisodeRunner:
         # could carry.
         self._resolved_secrets = self._secrets.resolve([ref.name for ref in self._spec.secret_refs])
         if self._resolved_secrets:
+            # Two scoped exclusions, each a value the bundle carries by
+            # construction and so cannot prove a leak: the episode's own
+            # locations, and its own sealed route identity. Every other
+            # resolved value still widens the set (see both helpers).
+            route = self._spec.requested_route
             self._redactions = self._redactions.with_values(
-                _canary_values_outside_own_roots(
-                    (secret.value for secret in self._resolved_secrets),
-                    (
-                        self._config.evidence_root,
-                        self._config.artifact_root,
-                        self._config.rescue_root,
-                        self._selector.workspace,
+                _canary_values_outside_own_identity(
+                    _canary_values_outside_own_roots(
+                        (secret.value for secret in self._resolved_secrets),
+                        (
+                            self._config.evidence_root,
+                            self._config.artifact_root,
+                            self._config.rescue_root,
+                            self._selector.workspace,
+                        ),
                     ),
+                    (route.provider_id, route.route_id, route.model_id),
                 )
             )
 

@@ -455,6 +455,10 @@ SUBAGENT_ROSTER_CUSTOM_TYPE = _roster_sidecar.SUBAGENT_ROSTER_CUSTOM_TYPE
 SUBAGENT_ROSTER_SIDECAR = _roster_sidecar.SUBAGENT_ROSTER_SIDECAR
 _SUBAGENT_ROSTER_VERSION = _roster_sidecar.SUBAGENT_ROSTER_VERSION
 _SUBAGENT_SUMMARY_CHARS = 500
+#: The Librarian's duty-session tools when her packaged seed cannot be read
+#: (#3028, review round 2 m2): the seed 1.1.0 list, every entry read-tier.
+#: Kept equal to the seed by ``test_librarian_tool_surface``.
+_LIBRARIAN_FALLBACK_TOOLS: tuple[str, ...] = ("library", "read", "glob", "grep", "todo")
 
 #: The build THIS PROCESS loaded, read once and memoised. Compared against the
 #: install on disk by ``update.classify_import_failure``, which is the only way
@@ -5249,6 +5253,9 @@ class Session:
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
+        # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
+        # below must see the whole inventory it narrows.
+        self._declare_librarian_inventory()
         # The session, not an OperatorApp, owns state that must survive a second
         # frontend joining. Constructed after every durable source above has
         # restored so the first snapshot is already authoritative.
@@ -7112,7 +7119,7 @@ class Session:
                 if callable(withdraw):
                     withdraw()
                 self._journal_knobs_if_selection_changed(previous, model, previous_choice)
-                self.refresh_frontend_state()
+                self._refresh_frontend_model_selection()
                 # The label moved even though the pair did not (the pin came
                 # off), so the baked tier descriptions are stale for the same
                 # reason they are on a genuine switch — see the call on that
@@ -7149,7 +7156,7 @@ class Session:
                 if refreshed is not None:
                     self._active_fallback = refreshed
             self._journal_knobs_if_selection_changed(previous, model, previous_choice)
-            self.refresh_frontend_state()
+            self._refresh_frontend_model_selection()
             return
         # A genuine model change is a SELECTION, and selections outlive the
         # process: journal it so `--resume` comes back on this model instead
@@ -7214,7 +7221,7 @@ class Session:
         # turn (see journal_model_switch). No ``reason``: the head already reads
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
-        self.refresh_frontend_state()
+        self._refresh_frontend_model_selection()
         # The tier tools bake the session's model label into their schema text
         # at BUILD time (``describe_effort_tiers``), while a sentinel tier
         # resolves to ``self.model`` at LAUNCH. Without this the two drift the
@@ -13239,7 +13246,7 @@ class Session:
         """
         self._on_mcp_startup_settled = sink
 
-    def refresh_tools(self, tools: Sequence[AgentTool]) -> bool:
+    def refresh_tools(self, tools: Sequence[AgentTool], *, republish: bool = True) -> bool:
         """Replace the full tool inventory mid-session.
 
         THE committed hook for MCP ``set_on_tools_changed`` (orchestrator
@@ -13266,11 +13273,16 @@ class Session:
         whole point: MCP tools are discovered lazily, so filtering only the
         construction-time builtins would leave the declaration unenforced on
         exactly the surface an embedder declares it for.
+
+        ``republish=False`` skips the canonical frontend refresh for a caller
+        that publishes its own (``_rebuild_effort_tier_tools``, a model edge):
+        that refresh rescans the whole roster and reads nothing from the tool
+        list, so on a switch it was pure cost on the session loop.
         """
         self._tools = self._filter_declared(tools)
         self._context.tools = self._tools
         self._refresh_tool_roster()
-        if hasattr(self, "_frontend_state_store"):
+        if republish and hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
         return self._published_tools is None
 
@@ -17229,6 +17241,21 @@ class Session:
         store = getattr(self, "_frontend_state_store", None)
         if store is not None:
             store.refresh_from_session(self)
+
+    def _refresh_frontend_model_selection(self) -> None:
+        """Publish a model/effort switch to the canonical frontend state, in O(1).
+
+        ``set_model``'s publish. It used to be :meth:`refresh_frontend_state`,
+        whose full rescan rebuilds every job row: on a long manager with a large
+        roster that made a switch's cost on the session loop grow with the
+        roster, and the desktop's 20 s request deadline expired on exactly those
+        sessions. Only the selection fields move on a switch; the scheduled
+        roster/jobs refreshes keep the rest current. Same guard as the full
+        refresh: the store does not exist yet during construction.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_model_selection(self)
 
     def refresh_frontend_usage(self) -> None:
         """Refresh restored usage without scanning transcript/jobs/tool schemas.
@@ -27437,6 +27464,63 @@ class Session:
 
     # -- librarian engine attachment ----------------------------------------
 
+    def _declare_librarian_inventory(self) -> None:
+        """Bound the Librarian's DUTY session to her role's ``tools:`` list.
+
+        WHY THIS EXISTS. A role's ``tools:`` list is ENFORCED only where a host
+        declares it — ``lop exec --profile``/the SDK (``exec_startup``) and a
+        delegated child (``harness.subagent``). Her duty session is neither: the
+        wake supervisor opens it as a plain runtime and the attachment restore
+        only RECORDS the list (:attr:`attached_profile_tools`). So her seed's
+        empty ``tools:`` meant every tool, and on a headless worker under
+        ``tool_approval_mode: ask`` one write-tier call from an unattended pass
+        parked on an approval nobody could answer — holding the session busy
+        for a day and blocking every mesh update meanwhile.
+
+        THE RULE. On her duty session only (``_librarian_duty``, set from
+        ``librarian/state.json`` — never a session that merely ran ``/agent
+        librarian``), declare her role's list as the inventory. An installed
+        row that declares no list (a row installed before seed 1.1.0, the only
+        shape a pre-allow-list row can have) falls back to the PACKAGED seed's
+        list: an unattended pass must not run with everything because the row
+        predates the boundary. ``unattended=False``: the declaration narrows
+        reach but approves nothing — every tool on her list is read-tier, so a
+        pass has nothing to gate on, and anything an operator adds to her row
+        is still asked about. One-way for the session's life
+        (:meth:`set_tool_inventory`), which is what an unattended scope should
+        be. Best-effort: a failure leaves today's behaviour, never a broken
+        session.
+        """
+        if not getattr(self, "_librarian_duty", False):
+            return
+        # GATED ON THE DUTY FLAG ALONE (agent review round 1 on #3028, m1): the
+        # attachment is NOT the identity. ``_restore_attachment`` can leave it
+        # unresolved (``ProfileRegistryUnavailable``: empty agent name), and
+        # returning early then let her unattended pass run with every tool —
+        # fail-open on exactly the path this method closes. The attached row's
+        # list is used only when the attachment really is hers; anything else
+        # falls back to the packaged seed's list.
+        attached_is_hers = (self._goal_state.agent_name or "").strip().casefold() == "librarian"
+        try:
+            names: tuple[str, ...] = tuple(self._attached_profile_tools) if attached_is_hers else ()
+            if not names:
+                from local_operator.agent_profiles import load_seed
+
+                seed = load_seed("librarian")
+                names = tuple(seed.tools or ()) if seed is not None else ()
+            if not names:
+                # FAIL CLOSED (agent review round 2 on #3028, m2): an unreadable
+                # packaged seed must not leave her unattended pass with every
+                # tool. The literal is the 1.1.0 read-tier list.
+                names = _LIBRARIAN_FALLBACK_TOOLS
+            self.set_tool_inventory(list(names), unattended=False)
+        except Exception:  # noqa: BLE001 — never a reason her session fails to open
+            logger.debug("librarian: could not declare her tool inventory", exc_info=True)
+            try:
+                self.set_tool_inventory(list(_LIBRARIAN_FALLBACK_TOOLS), unattended=False)
+            except Exception:  # noqa: BLE001 — the same contract, one rung down
+                logger.debug("librarian: fallback inventory failed too", exc_info=True)
+
     def _librarian_is_hers(self) -> bool:
         """Whether THIS session is the one ``librarian/state.json`` names.
 
@@ -30693,7 +30777,14 @@ class Session:
             return
         if not rebuilt:
             return
-        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
+        # ``republish=False``: nothing in the canonical frontend state is
+        # derived from the tool list (``refresh_from_session`` never reads it),
+        # so the full republish ``refresh_tools`` runs by default would publish
+        # nothing new. On a model switch it was the second roster-sized pass a
+        # single ``/model`` paid on the session loop (see
+        # ``FrontendStateStore.refresh_model_selection``); ``set_model``
+        # publishes the selection itself.
+        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools], republish=False)
 
     def _on_configured_model_changed(
         self, values: Mapping[str, Any], *, local: bool, changed: frozenset[str]

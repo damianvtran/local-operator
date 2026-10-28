@@ -288,10 +288,15 @@ def test_a_busy_member_answers_busy_and_nothing_is_touched(
     empty, and the session's record — the transcript's live half — is intact and
     still busy. TEETH: with ``busy_sessions`` neutralised the same ask attempts
     the install, so the busy gate is what held it.
+
+    The gate belongs to the IN-PLACE shape (a rewrite of the tree a running
+    turn imports from), so this cell pins a member without the generation
+    layout; the generation shape's proceed-and-name answer is its own cell.
     """
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
     _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: False)
     # The channel check runs BEFORE the idle gate (RU §3's order), so this cell
     # must get past it without touching the network to reach the busy answer.
     monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
@@ -325,6 +330,108 @@ def test_a_busy_member_answers_busy_and_nothing_is_touched(
     monkeypatch.setattr(meshupdate, "busy_sessions", lambda root: (0, ""))
     meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert calls == ["0.99.0"], "the recorder did not fire with the gate removed"
+
+
+def test_a_busy_generation_member_updates_and_names_what_it_left_behind(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The generation layout takes no busy gate (INSTALL_TRANSACTIONS.md, "Admission").
+
+    The measured case: a wake-spawned Librarian parked on an approval nobody
+    can answer kept a headless worker ``busy`` for a day and refused every
+    rolling update. On generation layout the pass installs, the parked record
+    is untouched (same pid, still busy, still pending), and the receipt NAMES
+    it — in prose and in ``left_busy`` — because that is the operator's only
+    sign a session is still on the old build.
+    """
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    _grant(server_a, record, server_b.identity.device_id)
+    state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    calls: list[str] = []
+
+    def _install(version: str, *, runner: Any = None) -> str:
+        calls.append(version)
+        state["current"] = version
+        return meshupdate.METHOD_GENERATION
+
+    monkeypatch.setattr(meshupdate, "install_build", _install)
+    _stub_pass(monkeypatch, outcomes=(_Outcome("busy", "p4rk-cell-0001"),))
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="daemon",
+            session_id="p4rk-cell-0001",
+            conversation_name="Librarian",
+            cwd=str(server_a.root),
+            model_label="test/mock",
+            control_port=1,
+            control_key="k" * 32,
+            busy=True,
+            pending="approval",
+            started=True,
+        ),
+        server_a.root,
+    )
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+    assert detail["state"] == "done", detail
+    assert calls == ["0.99.0"], "a busy generation member must still install"
+    message = detail["message"]
+    assert "1 busy session(s) stay on 0.0.1 until they settle" in message, message
+    assert "Librarian (p4rk-cell-0001, waiting for approval)" in message, message
+    # Q2 (QA round 1): the ORIGIN's answer — what `lop network update <peer>
+    # --json` prints and what the rollout driver records — carries the ids too.
+    assert detail["left_busy"] == [
+        {"session_id": "p4rk-cell-0001", "name": "Librarian", "pending": "approval"}
+    ], detail
+    rows = registry.scan(server_a.root, reap=False, check_zombie=False)
+    live = [r for r, _s in rows if r.session_id == "p4rk-cell-0001"]
+    assert live and live[0].busy is True and live[0].pending == "approval", rows
+    assert live[0].pid == os.getpid()
+
+
+def test_the_receipt_carries_the_left_busy_ids_for_a_json_reader(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """``left_busy`` is the structured twin of the prose clause (member side)."""
+    server_a, server_b, record = _rig(devices, monkeypatch)
+    state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
+    monkeypatch.setattr(
+        meshupdate,
+        "install_build",
+        lambda version, *, runner=None: state.update(current=version)
+        or meshupdate.METHOD_GENERATION,
+    )
+    _stub_pass(monkeypatch, outcomes=())
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="daemon",
+            session_id="p4rk-cell-0002",
+            conversation_name="",
+            cwd=str(server_a.root),
+            model_label="test/mock",
+            control_port=1,
+            control_key="k" * 32,
+            busy=True,
+            started=True,
+        ),
+        server_a.root,
+    )
+    receipt = meshupdate._execute_validated(  # noqa: SLF001 — the receipt's own shape
+        server_a,
+        None,
+        meshupdate.UpdateTarget(version="0.99.0", source_ref=""),
+        rollout="",
+        runner=None,
+    )
+    assert receipt["state"] == "done", receipt
+    assert receipt["left_busy"] == [
+        {"session_id": "p4rk-cell-0002", "name": "", "pending": ""}
+    ], receipt
+    assert "unnamed session (p4rk-cell-0002)" in receipt["reason"], receipt
 
 
 def test_an_editable_member_refuses_the_standing_path(
@@ -517,10 +624,13 @@ def test_the_pass_waits_for_the_turn_then_updates_and_the_transcript_survives(
     the pass installs and answers ``done``, the sweep's outcome rides the
     receipt, and the session's own files are BYTE-IDENTICAL across both asks:
     the drain waited for the turn; it never cut one.
+
+    In-place shape (see the busy cell above): the drain is that shape's.
     """
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
     state = _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: False)
     monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
     calls: list[str] = []
 
@@ -1293,10 +1403,15 @@ def test_the_tail_degrades_when_the_slow_budget_is_nearly_spent(
 def test_an_unreadable_registry_refuses_rather_than_installing(
     devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """A failed read is "cannot prove idle", not "idle" — never-force, not best-effort."""
+    """A failed read is "cannot prove idle", not "idle" — never-force, not best-effort.
+
+    In-place shape: that is where the read gates an install (generation layout
+    only NAMES busy sessions, and says so when it cannot read them).
+    """
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
     _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: False)
     monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
     calls = _record_installs(monkeypatch)
 
@@ -1383,11 +1498,14 @@ def test_the_channel_check_precedes_the_idle_gate(
     reorder left 18/18 green before this pin existed).
 
     CONTROL: with the target servable the same busy member answers ``busy``,
-    so the cell pins the ORDER and not merely the refusal.
+    so the cell pins the ORDER and not merely the refusal. The idle gate is
+    the in-place shape's (generation layout takes none), so the member is
+    pinned to that shape.
     """
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
     _concrete_member(monkeypatch, current="0.0.1")
+    monkeypatch.setattr(meshupdate, "generation_layout_supported", lambda: False)
     calls = _record_installs(monkeypatch)
     busy_calls: list[int] = []
 

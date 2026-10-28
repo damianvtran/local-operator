@@ -202,6 +202,18 @@ def render_systemd(config_dir: Path) -> str:
         # the one the wake was armed in. The quoting rule lives in
         # ``supervisors`` because the tunnel arm was already spelling it.
         exec_start=f"{supervisors.quoted(str(image))} -m local_operator.wakes.supervisor",
+        # THE RELAY'S CHOICE, FOR THE RELAY'S REASON (see the ``kill_mode``
+        # comment in ``supervisors.render_systemd_unit``): the session runtimes
+        # this supervisor starts are detached (``start_new_session``) but stay
+        # in its CGROUP, so systemd's default ``control-group`` made every stop
+        # or restart of this unit SIGTERM every wake-spawned session and
+        # SIGKILL it 90 s later — shorter than the runtime's own signal drain
+        # (``SIGNAL_DRAIN_S``), so honest turns were cut, not only parked ones
+        # (agent review round 1 on #3028, M2). Under ``process`` only the
+        # supervisor itself is stopped; sessions end through their own verbs.
+        # An installed unit picks this up on the next ``install`` (the rewrite
+        # below compares the rendered text and reloads the manager).
+        kill_mode="process",
         post_lines=[
             f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir}')}",
             *supervisors.output_redirect_lines(log_path(config_dir)),
@@ -1072,6 +1084,22 @@ def uninstall() -> InstallOutcome:
     if refusal is not None:
         return InstallOutcome(installed=False, reason=refusal)
     if kind == supervisors.SYSTEMCTL:
+        # With KillMode=process, `disable --now` signals only the supervisor.
+        # Its finally sweep normally forwards SIGTERM, but an unresponsive or
+        # already-dead supervisor cannot. Sweep the same ownership record here
+        # so removal never leaves a wake-owned runtime behind. The shared-label
+        # guard above has already established that this is the store the unit
+        # serves; a scratch/rig root is refused before reaching this code.
+        from local_operator.wakes.owned_runtimes import sweep
+
+        # SAME ownership record as the supervisor's own stop: the marker its
+        # spawns carry in their environment. `any_owner` is right here because
+        # the supervisor being removed may be dead and unable to name its own
+        # token; the sweep is still scoped to THIS store, so no other install's
+        # runtimes can be reached, and every candidate is re-identified by exact
+        # pid, argv, root and session at signal time.
+        swept = sweep(ambient_config_dir(), any_owner=True, why="uninstall")
+        logger.info("wake supervisor: uninstall signalled %d owned runtime(s)", len(swept))
         unit = supervisors.systemd_unit_path(SYSTEMD_UNIT)
         timer = supervisors.systemd_unit_path(SYSTEMD_TIMER)
         if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):

@@ -418,6 +418,29 @@ def _approval_projection() -> SessionProjection:
         "production bucket and invalidates the CDN cache.",
     )
     projection.pending_count = 1
+    # THE USAGE METER A REAL RUNTIME PUBLISHES (QA round 3, O1). Without it the
+    # composer's footer kept two rows and the above-composer slot looked roomier
+    # at 320x440 than it is on a live session: QA measured a 20.6 px slot with
+    # usage (s4, s6) against 65 px without (s2). Same fields as the glance row.
+    projection.cumulative_parent_cost = 2.47
+    projection.child_costs = {}
+    projection.cost_knowledge = "exact"
+    projection.context_tokens = 61_800
+    projection.context_window = 200_000
+    projection.context_is_estimate = False
+    projection.usage = {"input_tokens": 61_800, "output_tokens": 4_120}
+    return projection
+
+
+def _crowded_projection(queued: bool = False) -> SessionProjection:
+    """The worst short-footer case: a long model name, usage, and optional queue."""
+    projection = _approval_projection()
+    projection.session_id = "5c01c0ffee01" if not queued else "5c01c0ffee02"
+    projection.conversation_name = "Crowded composer" + (" with queue" if queued else "")
+    projection.model_label = "Claude Opus 5.5 with an unusually long model name"
+    projection.queued_count = 2 if queued else 0
+    projection.pending = None
+    projection.pending_count = 0
     return projection
 
 
@@ -526,6 +549,8 @@ def _live_rows() -> list[tuple[SessionProjection, int, bool]]:
     return [
         (_showcase_projection(), 1, False),
         (_approval_projection(), 0, False),
+        (_crowded_projection(), 0, False),
+        (_crowded_projection(queued=True), 0, False),
         (_ask_only_projection(), 0, False),
         (
             _plain_projection(
@@ -708,6 +733,19 @@ def _substitute_readers() -> None:
     See the module doc: the ROUTES stay real; only what they read changes."""
     import local_operator.mobile.daemon as daemon_module
 
+    # The mic's capability is a fixture input, not a new product default.
+    if os.environ.get("LOP_SHOWCASE_MIC") == "1":
+        import local_operator.mobile.stt as stt_module
+
+        async def stt_availability() -> dict[str, object]:
+            return {
+                "available": True,
+                "path": "/fixture/stt",
+                "reason": "fixture",
+            }
+
+        # The daemon awaits this reader, exactly like the real STT capability.
+        stt_module.stt_availability = stt_availability
     ranked = json.loads(
         (
             Path(__file__).resolve().parents[1]

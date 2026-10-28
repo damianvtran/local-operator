@@ -126,6 +126,7 @@ from local_operator.session.open_frame import (
     OPEN_FRAME_SNAPSHOT_BUDGET_S,
     align_page,
     build_frame,
+    late_index_stop,
     page_seq_bounds,
     paintable,
     served_bytes,
@@ -4127,6 +4128,11 @@ class DesktopSessionBridge:
         cursor_missing = False
         cursor = before_id
         index: Any = None
+        # Per attempt: (rows prepended, that page's ``has_more``), so a late index
+        # can replay where the index-backed read stops (``late_index_stop``).
+        page_rows: list[tuple[int, bool]] = []
+        index_at_first_page = False
+        tail_read = before_id is None and through_id is None and around_id is None
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4170,6 +4176,7 @@ class DesktopSessionBridge:
             if not rows:
                 break
             collected = rows + collected
+            page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
             kept, reached = align_page(collected, limit, supplements=supplements)
@@ -4200,6 +4207,7 @@ class DesktopSessionBridge:
                 and around_id is None
             ):
                 index = await self._frame_index(deadline)
+                index_at_first_page = index is not None
             if (
                 index is not None
                 and len(paintable_rows) >= limit
@@ -4226,6 +4234,22 @@ class DesktopSessionBridge:
                 break
         if index is None:
             index = await self._frame_index(deadline)
+            if tail_read and not index_at_first_page:
+                # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
+                # carries the same rule): the facts will say ``ready``, so the rows
+                # must be the ones the index-backed read serves, not the blind
+                # hunt's overshoot the next read takes away.
+                stop = late_index_stop(
+                    [rows for rows, _more in page_rows],
+                    collected,
+                    index=index,
+                    limit=limit,
+                    supplements=supplements,
+                )
+                if stop is not None and stop < len(page_rows):
+                    collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
+                    has_more = page_rows[stop - 1][1]
+                    order_pages = order_pages[:stop]
         # THE CUT IS APPLIED ONCE, HERE, AND IT IS THE CONTRACT ITSELF: at least
         # ``limit`` paintable rows, starting at a user row when one is in reach,
         # and exactly ``limit`` rows with ``head_reached=False`` when none is. A
@@ -4317,8 +4341,9 @@ class DesktopSessionBridge:
         The refresh task is REGISTERED either way, which makes that follow-up
         read cheap. During a desktop events open the index module's paint hold
         postpones a cold full scan that cannot fit its existing first-paint
-        budget until the snapshot has been written; a deferred task is not
-        awaited here (it cannot finish while this request owns the hold). With
+        budget until the snapshot has been written; a deferred task -- or a
+        running one paused for that same hold -- is not awaited here (it cannot
+        finish while this request owns the hold). With
         no hold -- standalone history, TUI or mobile -- scheduling is unchanged.
         """
         from local_operator.session import transcript_index as index_module
@@ -4334,11 +4359,13 @@ class DesktopSessionBridge:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
-        if index_module.refresh_deferred(self.root, self.session_id):
+        if index_module.refresh_paused_for_paint(self.root, self.session_id):
             # A cold, unpayable scan waiting on the paint hold this very open
-            # owns (``transcript_index``'s "The paint hold"): it cannot start
-            # until the snapshot is written, so waiting here would spend the
-            # budget idle for the same ``building`` answer.
+            # owns (``transcript_index``'s "The paint hold"), or one already
+            # running that pauses for that hold ("ITS OWN OPEN TOO" -- the warm
+            # re-open of a conversation still being indexed): either way it
+            # cannot land before the snapshot is written, so waiting here would
+            # spend the budget idle for the same ``building`` answer.
             return None
         done, _pending = await asyncio.wait({task}, timeout=remaining)
         if task not in done:

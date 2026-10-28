@@ -334,6 +334,19 @@ The Librarian is Aida's twin, not a new scheduler.
   and `conventions`. It is available to every agent; the Librarian seed tells
   it how to use the write ops. The Librarian is the only agent expected to run
   unattended.
+- Her duty session's tools (seed 1.1.0, #3028) are bounded to her seed's
+  read-tier allow-list: `library, read, glob, grep, todo`. The list is enforced
+  on her duty session itself (`Session._declare_librarian_inventory`), so a
+  pass under `tool_approval_mode: ask` has nothing to park on. She has no
+  `web_search`/`web_fetch`: her pass is local metadata only, and staying off
+  the network shrinks what an unanswerable pass can reach. She no longer
+  messages Aida; a question goes in her pass receipt. **Narrowing note:** an
+  installed Librarian row with no `tools:` list (every row from before 1.1.0,
+  including one an operator left empty to mean "all tools") now gets the
+  packaged list on her duty session. There is no "all tools" spelling for
+  her duty session; add the extra tools to her row's `tools:` list, and any
+  write-tier tool added that way is still asked about. `/agent librarian` on
+  any other session is unaffected.
 - The tool records `source: librarian` and confidence; user edits set
   `source: user`, and a user field is never overwritten by an agent unless
   `locked` is false and the user explicitly asks.

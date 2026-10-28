@@ -9873,6 +9873,24 @@ def _scan_for_disk(content: str) -> _FileScan:
     return scan
 
 
+def _exact_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
+    """Every EXACT occurrence of ``old_text``, overlapping ones included.
+
+    Overlapping on purpose: ``str.count`` counts non-overlapping matches, so
+    ``"- x\n- x"`` in ``"- x\n- x\n- x\n"`` reads as unique while it matches at
+    two offsets, and an edit anchored on it could land on the wrong one. Pass 1
+    of :func:`_match_windows`, and the whole match rule of the configuration
+    run's skill ``edit`` (``desktop_skill_writes.edit_files``), which has no
+    tolerant fallback -- one definition of "occurs exactly once" for both.
+    """
+    windows: list[tuple[int, int, str]] = []
+    start = content.find(old_text)
+    while start != -1:
+        windows.append((start, start + len(old_text), old_text))
+        start = content.find(old_text, start + 1)
+    return windows
+
+
 def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
     """``(start, end, matched_text)`` windows where ``old_text`` occurs.
 
@@ -9895,11 +9913,7 @@ def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
     other on a generated corpus. The snapshot's index comes from ``_scan_for``
     so it is shared with the not-found diagnostics of the same edit call.
     """
-    windows: list[tuple[int, int, str]] = []
-    start = content.find(old_text)
-    while start != -1:
-        windows.append((start, start + len(old_text), old_text))
-        start = content.find(old_text, start + 1)
+    windows = _exact_windows(content, old_text)
     if windows:
         return windows
 

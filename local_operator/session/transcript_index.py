@@ -2990,11 +2990,21 @@ def hold_paint(config_dir: str | Path, session_id: str) -> Callable[[], None]:
 # earlier than ``hold_paint``.
 #
 # THE RULE. A background refresh pauses at row boundaries (and before the cache
-# read and the naming merge + document write) while a paint hold younger than
-# :data:`_YIELD_HOLD_STALE_S` is live for a session OTHER than its own,
-# sleeping in short slices that release the GIL. Its own session's hold never
-# pauses it: an open that waits on its own refresh would otherwise wait on
-# itself.
+# read and the naming merge + document write) while any paint hold younger than
+# :data:`_YIELD_HOLD_STALE_S` is live -- its own session's included -- sleeping
+# in short slices that release the GIL.
+#
+# ITS OWN OPEN TOO (own-open-yield, 2026-10-28). #3026 exempted the scan's own
+# session, reasoning that an open waiting on its own refresh would wait on
+# itself. The only own-refresh waiter is ``checkpoints_view``'s
+# ``_FIRST_PAINT_WAIT_S`` wait, and it is spent only on a PAYABLE scan, which
+# the rule below never pauses; an unpayable open answers ``building`` without
+# awaiting the scan. So the exemption prevented no cycle, and it put the cost
+# #3026 removed from the switch opens onto the WARM RE-OPEN: re-opening a
+# conversation whose cold scan was still running shared the GIL with that scan
+# (desktop legacy warm-after-miss 12 ms on v0.90.19, 447-664 ms medians after
+# #3026; bisect in conversation-first-paint/BISECT-warm-after-miss). Cost: that
+# conversation's ``ready`` lands up to the pause later, as for any other open.
 #
 # ONLY UNPAYABLE SCANS YIELD (review round 1, MAJOR-2). ``checkpoints_view``
 # awaits a refresh it starts for up to ``_FIRST_PAINT_WAIT_S`` when the scan is
@@ -3050,13 +3060,21 @@ _YIELD_TO: contextvars.ContextVar[Callable[[], None] | None] = contextvars.Conte
 def _yield_to_other_opens(
     own: tuple[str, str], config_dir: str | Path, session_id: str
 ) -> Callable[[], None]:
-    """The ``yield_to`` callable for one background refresh of ``own``."""
+    """The ``yield_to`` callable for one background refresh of ``own``.
+
+    ``own`` is unused since the own-session exemption went ("ITS OWN OPEN TOO");
+    the signature is kept so callers and tests that name the refresh's key stay
+    unchanged.
+    """
     spent = 0.0
     #: ``None`` until another hold is first seen; then whether this scan may yield.
     unpayable: bool | None = None
 
-    def another_open_is_young() -> bool:
-        return _young_hold_besides(own)
+    def an_open_is_young() -> bool:
+        # ``None``, not ``own``: the scan's own warm re-open must win too (see
+        # "ITS OWN OPEN TOO"); ``may_yield`` is what keeps a payable scan, the
+        # one ``checkpoints_view`` awaits, from ever pausing for it.
+        return _young_hold_besides(None)
 
     def may_yield() -> bool:
         nonlocal unpayable
@@ -3076,7 +3094,7 @@ def _yield_to_other_opens(
 
     def pause() -> None:
         nonlocal spent
-        while spent < _YIELD_BUDGET_S and another_open_is_young() and may_yield():
+        while spent < _YIELD_BUDGET_S and an_open_is_young() and may_yield():
             # Measured, not counted: on a loaded host a 2 ms sleep can overrun
             # several-fold, and the budget is a wall-clock promise.
             started = time.monotonic()
@@ -3107,12 +3125,12 @@ def yield_to_any_open() -> Callable[[], None]:
     of the 51.7 MB journal it was scanning (miss shape, 301 ms median; with this
     pause, spike ``libyield``, 166 ms).
 
-    THE SAME RULE, MINUS TWO EXEMPTIONS. Same slice, same cumulative
+    THE SAME RULE, MINUS THE PAYABLE EXEMPTION. Same slice, same cumulative
     :data:`_YIELD_BUDGET_S` per returned pause (one indexer batch), same
-    :data:`_YIELD_HOLD_STALE_S` cap on a leaked hold. The two exemptions of the
-    refresh rule do not apply, deliberately: "own conversation" -- nothing on
-    the paint path awaits the library scan, so the open of the very journal
-    being scanned must win too (that is the measured case); "payable" -- no
+    :data:`_YIELD_HOLD_STALE_S` cap on a leaked hold, and -- like the refresh
+    rule since "ITS OWN OPEN TOO" -- the open of the very journal being scanned
+    wins as well (that is the measured case). The refresh rule's "payable"
+    exemption does not apply, deliberately: no
     caller holds a budget on this thread's progress (the request-path ledger
     reads never install a pause, and a lock they lose to a paused batch answers
     from the last published scan, its documented non-blocking behaviour).
@@ -3138,6 +3156,44 @@ def refresh_deferred(config_dir: str | Path, session_id: str) -> bool:
     snapshot budget idle.
     """
     return _key(config_dir, session_id) in _DEFERRED
+
+
+def refresh_paused_for_paint(config_dir: str | Path, session_id: str) -> bool:
+    """Whether awaiting this session's refresh from inside its own open is futile.
+
+    :func:`refresh_deferred`, plus the case "ITS OWN OPEN TOO" created: a refresh
+    ALREADY RUNNING when the same conversation is re-opened. Its scan pauses for
+    as long as this open's paint hold is young, so it cannot land inside the
+    snapshot budget, and the open frame's ``asyncio.wait`` would idle the whole
+    remaining budget for the same ``building`` answer -- measured on a real
+    ``lop serve`` as 112-119 ms of the 120 ms budget, the bulk of what the warm
+    re-open still cost once the scan stopped taking its GIL.
+
+    Mirrors the pause's own predicate, so the two cannot disagree: a live hold
+    for this key younger than :data:`_YIELD_HOLD_STALE_S`, and a scan that
+    :func:`scan_payable_in_budget` says no first-paint wait could have paid for
+    (a payable scan never pauses, and waiting on it still pays). Loop thread; two
+    ``stat`` calls, and only while this session holds a paint.
+    """
+    if refresh_deferred(config_dir, session_id):
+        return True
+    key = _key(config_dir, session_id)
+    since = _PAINT_HOLD_SINCE.get(key)
+    if since is None or time.monotonic() - since > _YIELD_HOLD_STALE_S:
+        return False
+    entry = _IN_FLIGHT.get(key)
+    if entry is None or entry[0] is not asyncio.get_running_loop() or entry[1].done():
+        return False
+    journal = _stat_or_none(_journal_path(config_dir, session_id))
+    if journal is None:
+        return False
+    has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+    return not scan_payable_in_budget(
+        journal.st_size,
+        has_previous=has_previous,
+        rederive_bytes=rederive,
+        wait_s=_FIRST_PAINT_WAIT_S,
+    )
 
 
 def _defer_for_paint(config_dir: str | Path, session_id: str) -> asyncio.Event | None:

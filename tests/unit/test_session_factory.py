@@ -1546,7 +1546,7 @@ class FakeSessionShell(Session):
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
-    def refresh_tools(self, tools) -> bool:
+    def refresh_tools(self, tools, *, republish: bool = True) -> bool:
         """Swap the inventory and report it as reaching the next model call.
 
         The real ``Session`` publishes its tools array once per turn, so its
@@ -7755,7 +7755,7 @@ async def test_create_session_applies_the_configuration_run_shape(
     # birth_off_loop_before_first_journal`` uses.
     assert isinstance(session, Session)
     try:
-        assert {tool.name for tool in session._tools} == {"agent", "team"}
+        assert {tool.name for tool in session._tools} == {"agent", "team", "skill"}
         assert session.__dict__["_declared_tool_ops"] == {
             name: frozenset(values) for name, values in AGENTS_CONFIG_TOOL_OPS.items()
         }
@@ -7798,10 +7798,130 @@ async def test_the_runtime_child_of_a_run_boots_declared(
         assert {tool.name for tool in session._tools} == {
             "agent",
             "team",
+            "skill",
         }, "a run's runtime child must boot bounded, not with the full builtin inventory"
         assert session._goal_state.run_brief == AGENTS_CONFIG_PREAMBLE
     finally:
         await handle._session.dispose()
+
+
+def _result_text(result: Any) -> str:
+    """The text of a tool result's first block (every ``skill`` result is text)."""
+    from local_operator.harness.types import TextContent
+
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
+
+
+def _skill_md(name: str, body: str = "body\n") -> str:
+    return f"---\nname: {name}\ndescription: {name} skill.\n---\n{body}"
+
+
+@pytest.mark.asyncio
+async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
+    run_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL ``skill`` tool, resolved from the run's own inventory, writes.
+
+    Not a stub ``_op_tool``: the absence of a real-tool test inside a run is what
+    hid the agent/team scoping gap, so this one drives the tool the factory merged
+    in, through the op-scope wrapper the declaration installed, against the
+    profile root the factory resolved. A one-file update must keep the reference
+    file (the patch overlay), and the declaration's op scope must refuse an op the
+    run was not given.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.server.utils import desktop_skill_writes as writes
+    from local_operator.session.session import Session
+
+    writes.create(
+        run_root,
+        "demo",
+        files=[
+            {"path": "SKILL.md", "content": _skill_md("demo")},
+            {"path": "references/notes.md", "content": "keep me\n"},
+        ],
+    )
+    run_id = "abcdef654321"
+    _configuration_run_dir(run_root, run_id)
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True, resume=run_id),
+        ConfigManager(run_root),
+        AgentRegistry(run_root),
+    )
+    assert isinstance(session, Session)
+    try:
+        skill = next(tool for tool in session._tools if tool.name == "skill")
+        context = session._build_tool_context()
+        assert context.memory_config_dir == str(run_root)
+        assert skill.parameters["properties"]["op"]["enum"] == [
+            "list",
+            "show",
+            "create",
+            "update",
+            "edit",
+        ]
+        shown = await skill.execute("c1", {"op": "show", "name": "demo"}, None, None, context)
+        text = _result_text(shown)
+        assert not shown.is_error, text
+        fingerprint = next(
+            line.split()[1] for line in text.splitlines() if line.startswith("fingerprint:")
+        )
+        assert "references/notes.md" in text
+        updated = await skill.execute(
+            "c2",
+            {
+                "op": "update",
+                "name": "demo",
+                "expected_fingerprint": fingerprint,
+                "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Troubleshooting\n")}],
+            },
+            None,
+            None,
+            context,
+        )
+        assert not updated.is_error, _result_text(updated)
+        folder = run_root / "skills" / "demo"
+        assert "Troubleshooting" in (folder / "SKILL.md").read_text()
+        assert (folder / "references" / "notes.md").read_text() == "keep me\n"
+        refused = await skill.execute("c3", {"op": "delete", "name": "demo"}, None, None, context)
+        assert refused.is_error
+        assert folder.is_dir()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_session_has_no_skill_tool(
+    run_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control for the test above: same factory, no run marker, no tool.
+
+    And the merge cannot smuggle it into a declared session that does not name it:
+    the shape's ``_merge_capability_tools(("skill",))`` filters through the
+    declaration, so a run declared WITHOUT ``skill`` stays without it.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session.session import Session
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(run_root),
+        AgentRegistry(run_root),
+    )
+    assert isinstance(session, Session)
+    try:
+        names = [tool.name for tool in session._tools]
+        assert "skill" not in names and "agent" in names
+        session.set_tool_inventory(("agent", "team"))
+        session._merge_capability_tools(("skill",))
+        assert "skill" not in {tool.name for tool in session._tools}
+    finally:
+        await session.dispose()
 
 
 # -- delegated-session sweeps on the store-maintenance thread -----------------
@@ -7966,3 +8086,219 @@ async def test_factory_records_the_guidance_its_prompt_injected(
         assert built._build_tool_context().injected_guidance == expected
     finally:
         await session.dispose()
+
+
+# --- configuration runs author the ACCOUNT catalogue (F0) ------------------------
+
+
+def _seed_config_run(
+    config_dir: Path, session_id: str, *, damaged_marker: bool = False, stamp_origin: bool = True
+) -> Path:
+    """A session directory the desktop ``create`` with ``purpose`` would leave.
+
+    The origin stamp FIRST, then the marker, in the create path's own order
+    (``desktop_sessions.persist``). ``damaged_marker`` leaves the origin as the
+    only witness, the fail-closed case ``is_config_run_dir`` must still answer;
+    ``stamp_origin=False`` leaves the marker as the only one, so each witness is
+    proved on its own rather than only beside the other.
+    A transcript line because ``--resume`` resolves a session by its activity file.
+    """
+    import json
+
+    from local_operator.resume import ORIGIN_AGENT_CONFIG, mark_session_origin
+    from local_operator.session.retention import (
+        AGENTS_CONFIG_PURPOSE,
+        DESKTOP_PURPOSE_KEY,
+    )
+
+    directory = config_dir / "sessions" / session_id
+    directory.mkdir(parents=True)
+    if stamp_origin:
+        mark_session_origin(directory, ORIGIN_AGENT_CONFIG)
+    marker = (
+        "{ not json"
+        if damaged_marker
+        else json.dumps(
+            {"version": 1, "cwd": str(config_dir), DESKTOP_PURPOSE_KEY: AGENTS_CONFIG_PURPOSE}
+        )
+    )
+    (directory / "desktop.json").write_text(marker, encoding="utf-8")
+    (directory / "transcript.jsonl").write_text(
+        json.dumps({"id": "e1", "type": "user", "content": "add a reviewer"}) + "\n",
+        encoding="utf-8",
+    )
+    return directory
+
+
+async def _run_tool(session: Session, tool_name: str, **args: Any) -> Any:
+    """Call the session's REAL tool through the session's own per-turn context.
+
+    Deliberately not the stub ``_op_tool`` of ``test_agents_config_run.py``: the
+    defect these tests pin lived in what the real ``agent``/``team`` tools do with
+    the registries the factory handed them, which a stub never consults.
+    """
+    tool = next(tool for tool in session._tools if tool.name == tool_name)
+    return await tool.execute("tc", args, None, None, session._build_tool_context())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("damaged_marker", "stamp_origin"),
+    [(False, True), (True, True), (False, False)],
+    ids=["both-witnesses", "origin-only", "marker-only"],
+)
+async def test_a_config_run_writes_agents_and_teams_to_the_account(
+    tmp_config_dir: Path, damaged_marker: bool, stamp_origin: bool
+) -> None:
+    """The Agents page's composer must change what the Agents page lists.
+
+    LOH-9 S2 scoped every session's registries to its conversation, the
+    configuration run included, so inside a run an account ``update`` was refused
+    (no host installs a durable-write consent seam) and a ``create`` landed in
+    ``<run>/roles``, which ``/v1/desktop/profiles`` never reads. Driven through the
+    real factory and the real tools; the account side is read the way the desktop
+    routes read it (``desktop_profiles.registries``: plain registries over the root)
+    and projected through the same catalogue functions.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.types import ToolContext
+    from local_operator.server.utils.desktop_profiles import (
+        profile_catalogue,
+        team_catalogue,
+    )
+    from local_operator.teams import TeamEditFields, TeamRegistry
+    from local_operator.tools.agent_tool import execute_agent
+
+    # The account role is authored the way the page's own save path leaves it:
+    # through the tool on a PLAIN registry, which is the account store.
+    seeded = await execute_agent(
+        "seed",
+        {
+            "op": "create",
+            "name": "acct-reviewer",
+            "description": "Reviews before merge",
+            "instructions": "Review.",
+        },
+        None,
+        None,
+        ToolContext(cwd=".", agent_registry=AgentRegistry(tmp_config_dir)),
+    )
+    assert not seeded.is_error, seeded.text
+    TeamRegistry(tmp_config_dir).create_team(
+        TeamEditFields(name="acct-team", description="before", manager="manager")
+    )
+    session_id = "c0f1a2b3c4d5"
+    run_dir = _seed_config_run(
+        tmp_config_dir, session_id, damaged_marker=damaged_marker, stamp_origin=stamp_origin
+    )
+
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True, resume=session_id),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        assert session._transcript.directory == run_dir
+        # ``skill`` is the run's third declared tool (#3055); it writes through the
+        # skill storage, not the registries this test is about.
+        assert {tool.name for tool in session._tools} == {"agent", "team", "skill"}
+        # Every call runs before anything is asserted, so a regression reports
+        # all four outcomes at once (on the defect: the updates refused for want
+        # of a consent seam, the creates filed "in this conversation").
+        results = {
+            "agent update": await _run_tool(
+                session,
+                "agent",
+                op="update",
+                name="acct-reviewer",
+                description="revised by the run",
+            ),
+            "agent create": await _run_tool(
+                session,
+                "agent",
+                op="create",
+                name="run-author",
+                description="Created by the configuration run",
+                instructions="Do the thing.",
+            ),
+            "team update": await _run_tool(
+                session, "team", op="update", name="acct-team", description="after"
+            ),
+            "team create": await _run_tool(
+                session, "team", op="create", name="run-team", description="new", manager="manager"
+            ),
+        }
+        outcomes = {op: (result.is_error, result.text) for op, result in results.items()}
+        assert all(
+            not failed and "in your account" in text for failed, text in outcomes.values()
+        ), outcomes
+        assert getattr(session.agent_registry, "scope_dir", None) is None
+        assert getattr(session.team_registry, "scope_dir", None) is None
+    finally:
+        await session.dispose()
+
+    profiles = {row["name"]: row for row in profile_catalogue(AgentRegistry(tmp_config_dir))}
+    assert "run-author" in profiles, "a run's create must reach the account catalogue"
+    assert profiles["acct-reviewer"]["description"] == "revised by the run"
+    teams = {row["name"]: row for row in team_catalogue(TeamRegistry(tmp_config_dir))}
+    assert "run-team" in teams, "a run's team create must reach the account catalogue"
+    assert teams["acct-team"]["description"] == "after"
+    assert not (run_dir / "roles").exists(), "nothing may be filed in the run's dead store"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_session_stays_conversation_scoped(tmp_config_dir: Path) -> None:
+    """Negative control for the configuration-run exemption.
+
+    The exemption keys on the run's durable witnesses, so a session with neither
+    keeps LOH-9's scoping: its registries carry a ``scope_dir`` and a tool
+    ``create`` with no ``scope`` is filed in the conversation, out of the account.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.server.utils.desktop_profiles import profile_catalogue
+
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        roles = session._transcript.directory / "roles"
+        assert getattr(session.agent_registry, "scope_dir", None) == roles
+        assert getattr(session.team_registry, "scope_dir", None) is not None
+        created = await _run_tool(
+            session,
+            "agent",
+            op="create",
+            name="chat-only",
+            description="Created in an ordinary conversation",
+            instructions="Do the thing.",
+        )
+        assert not created.is_error, created.text
+        assert "in this conversation" in created.text
+    finally:
+        await session.dispose()
+    assert "chat-only" not in {
+        row["name"] for row in profile_catalogue(AgentRegistry(tmp_config_dir))
+    }
+
+
+def test_is_config_run_dir_reads_either_witness(tmp_path: Path) -> None:
+    """One predicate for the scoping and the shape: marker OR origin, else False."""
+    from local_operator.session_factory import is_config_run_dir
+
+    assert is_config_run_dir(_seed_config_run(tmp_path, "a")) is True
+    assert is_config_run_dir(_seed_config_run(tmp_path, "b", damaged_marker=True)) is True
+    assert is_config_run_dir(_seed_config_run(tmp_path, "m", stamp_origin=False)) is True
+    plain = tmp_path / "sessions" / "c"
+    plain.mkdir(parents=True)
+    assert is_config_run_dir(plain) is False
+    assert is_config_run_dir(tmp_path / "sessions" / "missing") is False

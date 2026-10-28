@@ -34,6 +34,23 @@
 @source "../../scripts/*.mjs";
 
 /*
+ * `short-column:` — THE KEYBOARD-OPEN LAYOUT, read off the VISIBLE height.
+ *
+ * Applies under an element carrying `data-short`, which the session view sets
+ * on its pinned column from the same `visualViewport` handler that pins it
+ * (`screens/session-view.tsx`, threshold `SHORT_COLUMN_PX` in lib/column.ts).
+ *
+ * WHY NOT `@media (max-height: …)` (review round 1 on #3030, R1-1). A media
+ * query reads the LAYOUT viewport, and `index.html` sets no
+ * `interactive-widget`, so on iOS Safari and Chrome for Android 108+ a virtual
+ * keyboard shrinks only the VISUAL viewport: the media query never fired when
+ * a real keyboard opened, only in a rig that shrinks the whole iframe. The
+ * column is already pinned to `visualViewport.height` for exactly this reason
+ * (lib/column.ts), so the compact footer keys off that one number too.
+ */
+@custom-variant short-column (&:where([data-short] *));
+
+/*
  * The single token source for the phone web client.
  *
  * Colour comes in as `var(--lo-*)`, defined per theme in themes.generated.css

@@ -8555,6 +8555,23 @@ def _cmd_update(args: argparse.Namespace) -> int:
     if state == "done":
         lines.append(f"{label} updated to {version}" + (f" (via {method})" if method else ""))
         lines.append("the device installs it in its own tree and switches over atomically")
+        left_busy = [item for item in payload.get("left_busy") or [] if isinstance(item, dict)]
+        if left_busy:
+            # The operator who ASKED must see what the update did not wait for
+            # (QA round 1 on #3028, Q2/Q3): a generation-layout member moves on
+            # while a busy or approval-parked session keeps its old build, and
+            # the member's own sentence was not printed on this path at all.
+            named = "; ".join(
+                f"{item.get('name') or 'unnamed session'} ({item.get('session_id', '')}"
+                + (f", waiting for {item['pending']}" if item.get("pending") else "")
+                + ")"
+                for item in left_busy[:3]
+            )
+            more = f" and {len(left_busy) - 3} more" if len(left_busy) > 3 else ""
+            lines.append(
+                f"{len(left_busy)} busy session(s) there stay on their old build until "
+                f"they settle: {named}{more}"
+            )
     elif state == "already_on_target":
         lines.append(f"{label} is already on {version or 'the target build'}; nothing to do")
     elif state == "ahead_of_target":

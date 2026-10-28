@@ -1,29 +1,27 @@
-"""Manual ``$name`` skill invocation: parsing, the money guard, rendering."""
+"""Inline ``$name`` invocation: the plan, the block grammar and replay.
+
+Two properties carry the feature and are asserted separately, because they can
+regress independently: which skills a message attaches (the trigger plus the
+block's idempotence rules) and what the persisted payload means when a resumed
+session replays it (the block is stripped; the typed text survives verbatim).
+"""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
+from local_operator.references import expand_references
+from local_operator.sigils import SKILL_BLOCK_PREAMBLE, skill_block_spans
 from local_operator.skills.discovery import Skill
 from local_operator.skills.invoke import (
-    parse_invocation,
-    render_invocation,
+    plan_attachments,
+    render_skill_block,
+    skill_block_names,
     typed_line_of,
 )
-
-
-def _resolved(text: str, skills: dict[str, Skill]):
-    """Parse and assert a match, so a regression fails HERE and stays typed.
-
-    ``parse_invocation`` is deliberately ``Optional`` — "this is prose" is half
-    its job — so the positive-path tests would otherwise each need their own
-    ``assert is not None`` before touching a field.
-    """
-    result = parse_invocation(text, skills)
-    assert result is not None, f"expected {text!r} to resolve to a skill"
-    return result
 
 
 def _skill(name: str, *, hide: bool = False) -> Skill:
@@ -46,133 +44,159 @@ def skills() -> dict[str, Skill]:
     }
 
 
-class TestParseInvocation:
-    def test_bare_name_resolves_with_empty_request(self, skills):
-        result = parse_invocation("$research", skills)
-        assert result is not None
-        assert result.skill.name == "research"
-        assert result.request == ""
-        assert result.token == "$research"
+def _names(planned) -> list[str]:
+    return [attachment.skill.name for attachment in planned]
 
-    def test_name_and_request_splits_on_the_token(self, skills):
-        result = parse_invocation("$research fix the login bug", skills)
-        assert result is not None
-        assert result.skill.name == "research"
-        assert result.request == "fix the login bug"
 
-    def test_hyphenated_and_underscored_names_resolve(self, skills):
-        assert _resolved("$code-review this MR", skills).skill.name == "code-review"
-        assert _resolved("$secret_audit", skills).skill.name == "secret_audit"
+class TestPlanAttachments:
+    """Which skills a message fires, in order, deduped, blocks excluded."""
+
+    def test_mid_sentence_and_multiple_skills_keep_text_order(self, skills):
+        planned = plan_attachments("first $code-review then $research please", skills)
+        assert _names(planned) == ["code-review", "research"]
+        assert [a.mention.text for a in planned] == ["$code-review", "$research"]
+
+    def test_a_repeated_name_is_deduped_by_resolved_name(self, skills):
+        planned = plan_attachments("$research and $Research again", skills)
+        assert _names(planned) == ["research"]
+
+    def test_a_leading_token_keeps_case_insensitive_resolution(self, skills):
+        """`$RESEARCH` was a valid leading invocation before inline matching."""
+        assert _names(plan_attachments("$RESEARCH fix it", skills)) == ["research"]
+
+    def test_an_inline_uppercase_token_does_not_fire(self, skills):
+        """No lowercase evidence, so it reads as an environment variable."""
+        assert plan_attachments("echo $RESEARCH now", skills) == []
 
     def test_hidden_skills_are_invocable(self, skills):
         """`hide` suppresses semantic ROUTING; naming it is the explicit case."""
-        result = parse_invocation("$secret_audit check the repo", skills)
-        assert result is not None
-        assert result.skill.hide is True
+        planned = plan_attachments("$secret_audit check the repo", skills)
+        assert _names(planned) == ["secret_audit"]
+        assert planned[0].skill.hide is True
 
-    def test_case_insensitive_but_resolves_the_discovery_name(self, skills):
-        result = parse_invocation("$Research look into this", skills)
-        assert result is not None
-        assert result.skill.name == "research"
-        assert result.request == "look into this"
+    def test_trailing_punctuation_is_trimmed_from_the_span(self, skills):
+        planned = plan_attachments("use $research. then report", skills)
+        assert _names(planned) == ["research"]
+        assert planned[0].mention.text == "$research"
 
-    def test_leading_whitespace_is_tolerated(self, skills):
-        assert _resolved("  $research go", skills).skill.name == "research"
+    def test_a_mention_inside_a_rendered_block_is_ignored(self, skills):
+        """Second-pass safety: the prose token outside the block fires once."""
+        block = render_skill_block([("research", "Read primary sources.")])
+        payload = "go $research\n\n" + block
+        assert plan_attachments(payload, skills) == []
 
+    def test_a_quoted_name_in_a_forwarded_block_does_not_hide_the_real_one(self, skills):
+        """The dedupe must not see a token the block owns.
 
-class TestNotAnInvocation:
-    """The vocabulary is the guard: anything that is not a skill name is prose."""
+        Deduping before the in-block filter let a body quoting ``$research``
+        claim the name, so the real ``$research`` after the block attached
+        nothing (round 1, m1).
+        """
+        block = render_skill_block([("other", "this body mentions $research in prose")])
+        payload = "forwarded:\n\n" + block + "\n\nnow please $research"
+        planned = plan_attachments(payload, skills)
+        assert _names(planned) == ["research"]
+        assert planned[0].mention.start > payload.index("</operator-skills>")
 
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "$100 for the redesign",
-            "$5/unit at scale",
-            "$PATH is not set",
-            "$",
-            "$ research",
-            "$unknown-skill do the thing",
-            "please run $research later",
-            "cost is $research",
-            "",
-            "   ",
-            "just a normal message",
-            "/research",
-        ],
-    )
-    def test_returns_none(self, skills, text):
-        assert parse_invocation(text, skills) is None
+    def test_a_name_already_in_a_block_is_not_attached_again(self, skills):
+        block = render_skill_block([("research", "Read primary sources.")])
+        payload = "go $research\n\n" + block + "\n\nand $research again"
+        assert plan_attachments(payload, skills) == []
 
-    def test_money_amount_never_matches_even_with_numeric_skill(self, skills):
-        """A numeric-named skill still cannot capture a currency amount."""
-        assert parse_invocation("$100 for the redesign", skills) is None
-
-    def test_trailing_punctuation_ends_the_token(self, skills):
-        result = parse_invocation("$research, then report", skills)
-        assert result is not None
-        assert result.skill.name == "research"
-        assert result.request == ", then report"
-
-    def test_empty_vocabulary_matches_nothing(self):
-        assert parse_invocation("$research go", {}) is None
+    def test_empty_vocabulary_plans_nothing(self):
+        assert plan_attachments("$research go", {}) == []
 
 
-class TestTypedLineRoundTrip:
-    """The payload carries the typed line, so REPLAY can repaint the row.
+class TestRenderSkillBlock:
+    def test_every_body_reaches_the_model_under_its_name(self, skills):
+        rendered = render_skill_block(
+            [("research", "# Research\nDo it well."), ("code-review", "Check the diff.")]
+        )
+        assert rendered.startswith("<operator-skills>\n\n" + SKILL_BLOCK_PREAMBLE)
+        assert '<skill name="research">' in rendered
+        assert "# Research\nDo it well." in rendered
+        assert '<skill name="code-review">' in rendered
+        assert rendered.endswith("</operator-skills>")
 
-    A persisted user message IS the payload. Without this, resuming a session
-    showed the whole SKILL.md body as the user's row and titled the thread
-    after it (the picker names a session from its first user turn).
-    """
+    def test_body_markers_are_defused_with_a_zero_width_space(self):
+        rendered = render_skill_block(
+            [("x", "quotes <operator-skills> and </operator-skills> in prose")]
+        )
+        assert len(skill_block_spans(rendered)) == 1
+        assert "\u200b" in rendered
+        # The literal sequences the scanner matches are gone from the BODY.
+        body = rendered[rendered.index('<skill name="x">') : rendered.index("</skill>")]
+        assert "<operator-skills>" not in body
+        assert "</operator-skills>" not in body
 
-    def test_round_trips_the_typed_line(self, skills):
-        invocation = _resolved("$research fix the login bug", skills)
-        rendered = render_invocation(invocation, "body")
-        assert typed_line_of(rendered) == "$research fix the login bug"
+    def test_the_names_are_read_from_element_heads_only(self):
+        rendered = render_skill_block([("x", 'a body quoting <skill name="fake"> here')])
+        assert skill_block_names(rendered) == ["x"]
+
+
+class TestSkillBlockSpans:
+    def test_a_complete_block_is_one_span(self):
+        payload = "text\n\n" + render_skill_block([("x", "body")])
+        spans = skill_block_spans(payload)
+        assert len(spans) == 1
+        start, end = spans[0]
+        assert payload[start:end].startswith("<operator-skills>")
+        assert payload[start:end].endswith("</operator-skills>")
+
+    def test_a_marker_quoted_in_prose_is_not_a_block(self):
+        assert skill_block_spans("why does <operator-skills> appear here?") == []
+
+    def test_an_unclosed_opener_does_not_swallow_the_next_block(self):
+        real = render_skill_block([("x", "AAAA")])
+        forged = (
+            "truncated opener\n\n<operator-skills>\n\n" "MIDDLE PROSE THE OPERATOR TYPED\n\n" + real
+        )
+        spans = skill_block_spans(forged)
+        assert len(spans) == 1
+        start, _end = spans[0]
+        assert start == forged.index(real)
+        assert "MIDDLE PROSE" not in forged[start:]
+
+    def test_every_block_reports(self):
+        payload = (
+            render_skill_block([("x", "AAAA")])
+            + "\n\nmiddle\n\n"
+            + render_skill_block([("y", "BBBB")])
+        )
+        assert len(skill_block_spans(payload)) == 2
+
+
+class TestLegacyPayloadReplay:
+    """Old transcripts carry the typed line in ``invocation=``; they still work."""
+
+    @staticmethod
+    def _legacy(typed: str, body: str = "body") -> str:
+        return (
+            "The user invoked the `research` skill directly. Follow it for this request.\n"
+            f'<skill name="research" invocation="{typed}">\n{body}\n</skill>'
+        )
+
+    def test_round_trips_the_typed_line(self):
+        assert typed_line_of(self._legacy("$research fix it")) == "$research fix it"
 
     def test_returns_none_for_ordinary_text(self):
         assert typed_line_of("just a normal message") is None
         assert typed_line_of("") is None
 
-    @pytest.mark.parametrize(
-        "draft",
-        [
-            '$research handle "quoted" input',
-            "$research compare <a> & <b>",
-            "$research line one\nline two",
-            '$research 100% & <tags> "all" at once',
-        ],
-    )
-    def test_escaping_survives_hostile_drafts(self, skills, draft):
-        """The attribute must not be breakable by what the user types."""
-        invocation = _resolved(draft, skills)
-        rendered = render_invocation(invocation, "body")
-        assert typed_line_of(rendered) == draft
-
-    def test_body_that_looks_like_the_tag_does_not_confuse_it(self, skills):
-        """A skill DOCUMENTING this feature must not hijack the read-back."""
-        invocation = _resolved("$research go", skills)
-        rendered = render_invocation(
-            invocation, 'Write <skill name="x" invocation="$fake other"> to invoke.'
+    def test_body_that_looks_like_the_tag_does_not_confuse_it(self):
+        payload = self._legacy(
+            "$research go", 'Write <skill name="x" invocation="$fake other"> to invoke.'
         )
-        assert typed_line_of(rendered) == "$research go"
+        assert typed_line_of(payload) == "$research go"
 
 
-class TestRenderInvocation:
-    def test_body_and_request_both_reach_the_model(self, skills):
-        invocation = _resolved("$research fix the login bug", skills)
-        rendered = render_invocation(invocation, "# Research\nDo it well.")
-        assert "Do it well." in rendered
-        assert "fix the login bug" in rendered
-        assert 'name="research"' in rendered
-        assert "</skill>" in rendered
-
-    def test_bare_invocation_carries_no_invented_request(self, skills):
-        invocation = _resolved("$research", skills)
-        rendered = render_invocation(invocation, "# Research\nDo it well.")
-        assert rendered.rstrip().endswith("</skill>")
-
-    def test_names_the_skill_in_the_imperative(self, skills):
-        invocation = _resolved("$code-review this MR", skills)
-        rendered = render_invocation(invocation, "body")
-        assert "`code-review`" in rendered
+class TestReferenceExpansionSkipsSkillBodies:
+    def test_an_at_path_inside_a_skill_body_is_not_read(self, tmp_path: Path):
+        """A body's ``@path`` is prose the skill documents, not a reference."""
+        (tmp_path / "notes.txt").write_text("FILE_BODY\n", encoding="utf-8")
+        block = render_skill_block([("research", "see @notes.txt for details")])
+        payload = "go $research\n\n" + block
+        result = asyncio.run(expand_references(payload, str(tmp_path)))
+        assert result.sent == payload
+        assert "FILE_BODY" not in result.sent
+        assert result.notices == []

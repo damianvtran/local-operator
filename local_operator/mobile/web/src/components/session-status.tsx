@@ -98,7 +98,19 @@ function isTextEntry(target: EventTarget | null): boolean {
 	);
 }
 
-export function SessionStatus({ projection, compact = false, detail = false }: { projection: SessionProjection; compact?: boolean; detail?: boolean }) {
+/**
+ * The reading's facts, derived ONCE for every consumer (review R3-2/R3-6).
+ *
+ * `SessionStatus` renders from this; the composer folds `label` into its
+ * footer fit's input key (the text is what decides the reading's width, so a
+ * subagent-spend or context-only change must re-fit even when `usage` did not
+ * move); and the session header gates its ⋮ `Spend & context` row on `hasRow`
+ * (the meter renders, and the spend sheet has content, exactly when it is
+ * true — a resumed session with durable context and spend but no usage
+ * receipt yet still has a reading). A second derivation in any of those
+ * places is how they would drift apart.
+ */
+export function meterFacts(projection: SessionProjection) {
 	// THE PUBLISHED OBJECT WINS when the runtime has one: its `total_micro`
 	// already spans this session's inference, its channels AND its children,
 	// computed in one backend place — so the row renders that figure rather
@@ -109,7 +121,6 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 		? { text: published.text }
 		: { text: sessionSpend(projection, projection.usage).text };
 	const context = contextReading(projection);
-	const estimateMarker = contextEstimateMarker(context);
 	// The drill-down (PR-2's chips): shown only when the published object
 	// exists and has something to say — named rows, an honest remainder count,
 	// or the untracked disclosure. An old daemon sends no object and the panel
@@ -119,7 +130,16 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 		breakdown !== null &&
 		(breakdown.chips.length > 0 || breakdown.hiddenCount > 0 || breakdown.untrackedNotice);
 	const hasReading = Boolean(spend.text || context.spelling);
-	const hasRow = hasReading || hasBreakdown;
+	/* The compact composer reading's two spellings: the full pair, and the ONE
+	   whole figure it compacts to (context %, else spend). */
+	const label = [context.spelling?.split("/")[0], spend.text].filter(Boolean).join(" · ");
+	const shortReading = context.spelling?.split("/")[0] || spend.text;
+	return { spend, context, breakdown, hasBreakdown: Boolean(hasBreakdown), hasRow: hasReading || Boolean(hasBreakdown), label, shortReading };
+}
+
+export function SessionStatus({ projection, compact = false, detail = false, mode = "auto", short = false }: { projection: SessionProjection; compact?: boolean; detail?: boolean; mode?: "auto" | "full" | "short" | "hidden"; short?: boolean }) {
+	const { spend, context, breakdown, hasBreakdown, hasRow, label, shortReading } = meterFacts(projection);
+	const estimateMarker = contextEstimateMarker(context);
 	/* The disclosure is user state, not wire state: the runtime never says
 	   whether a reader has opened the chips, and the next projection must not
 	   re-open what they closed. */
@@ -170,7 +190,9 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 		   truncation point does not move as the numbers change, and it never
 		   shrinks: the model label beside it is the elastic element, because a
 		   truncated NAME stays truthful while a truncated AMOUNT does not. */
-		const label = [context.spelling?.split("/")[0], spend.text].filter(Boolean).join(" · ");
+		/* The composer passes its measured level explicitly. The full pair stays in
+		   the accessible name and in the sheet; explicit modes do not inspect global
+		   DOM, so a viewport flip and the reading change in the same React commit. */
 		return <>
 			<button type="button" onClick={() => setExpanded(true)}
 				aria-label={messageRuntime.t("relay.chrome.composer.spend_label", { label })}
@@ -180,7 +202,18 @@ export function SessionStatus({ projection, compact = false, detail = false }: {
 				   `pe-[7px]` moves the TEXT 7 px in from the composer's 8 px padding, so
 				   the reading's right edge lands at 15 px like the field's left inset.
 				   The slot's own outer edge still lines up with the stop/send discs. */
-				className="flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap pe-[7px] text-meta tabular-nums text-ink-dim active:text-ink">{label}</button>
+				data-foot="reading"
+				data-foot-form={mode === "full" || mode === "short" ? mode : short ? "short" : "full"}
+				className={cn(
+					"flex min-h-11 w-24 shrink-0 items-center justify-end whitespace-nowrap pe-[7px] text-meta tabular-nums text-ink-dim active:text-ink",
+					"min-w-11 max-w-full short-column:w-auto",
+					mode === "hidden" && "hidden",
+				)}>
+				{/* Literal class strings: Tailwind only emits the utilities it finds
+				    spelled out in source. */}
+				<span className={cn(mode === "full" ? "inline" : mode === "short" || mode === "hidden" ? "hidden" : "short-column:hidden")}>{label}</span>
+				<span aria-hidden className={cn(mode === "full" ? "hidden" : mode === "short" ? "inline" : mode === "hidden" ? "hidden" : "hidden short-column:inline")}>{shortReading}</span>
+			</button>
 			<Sheet open={expanded} onClose={() => setExpanded(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
 				<SessionStatus projection={projection} detail />
 			</Sheet>

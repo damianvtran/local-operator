@@ -1265,7 +1265,16 @@ def _env_details(cwd: str | None = None, session_id: str = "") -> str:
 #: named -- and that is deliberate on the product's side too: no desktop op and no
 #: page control deletes a profile or a team today, so a conversational delete
 #: would be the first delete in the product.
-AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team")
+#:
+#: ``skill`` is the run's skill editor (``tools/skill_tool.py``). Unlike the other
+#: two it is NOT a default tool: the factory never builds it, so naming it here is
+#: only half of reaching it -- :func:`apply_config_run_shape` merges it in after
+#: the declaration is set. ``edit`` is its anchored-replacement op (a long file
+#: reaches the run in pages, so it is changed by exact replacements, never
+#: rewritten whole). Its ops stop at create/update/edit for the same reason
+#: ``team_delete`` is unnamed, and it has no publish/pull op for the reason
+#: ``agent sync`` is excluded.
+AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team", "skill")
 
 #: The ops of :data:`AGENTS_CONFIG_TOOLS` a configuration run may reach, per tool
 #: name. Every declared tool is listed: an omission would mean "every op this
@@ -1274,6 +1283,7 @@ AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team")
 AGENTS_CONFIG_TOOL_OPS: dict[str, tuple[str, ...]] = {
     "agent": ("list", "show", "search", "install", "create", "update"),
     "team": ("list", "show", "create", "update"),
+    "skill": ("list", "show", "create", "update", "edit"),
 }
 
 #: The preamble injected as the run's ``<configuration-run>`` system block.
@@ -1291,9 +1301,9 @@ AGENTS_CONFIG_TOOL_OPS: dict[str, tuple[str, ...]] = {
 #: is nevertheless ENFORCED by the inventory and not by these sentences -- a
 #: prompt is a statement, and the declaration is the mechanism.
 AGENTS_CONFIG_PREAMBLE = """This session is a CONFIGURATION RUN: the operator started it from the
-Agents page to author reusable agents and teams by conversation. It is not their
-conversation with you -- they watch this run on that page, and nothing here
-reaches any other chat.
+Agents page to author reusable agents, teams and skills by conversation. It is
+not their conversation with you -- they watch this run on that page, and nothing
+here reaches any other chat.
 
 What you do here: find, create and update agent profiles and teams with the
 `agent` and `team` tools, then say plainly what you changed.
@@ -1301,12 +1311,59 @@ What you do here: find, create and update agent profiles and teams with the
 What you cannot do here, and must not promise: reset or sync an agent profile
 (`agent reset` / `agent sync` overwrite instructions the operator wrote or fetch
 from the hub with their credentials), delete a team, run shell commands, or read
-and write files. Those tools are genuinely unreachable in this session, not
-merely discouraged -- if a call is refused, say so and offer the manual path
+and write arbitrary files. Those tools are genuinely unreachable in this session,
+not merely discouraged -- if a call is refused, say so and offer the manual path
 instead of retrying.
+
+Do not pass `scope`; everything you write is saved to the operator's account.
+
+You can also revise the operator's own skills with the `skill` tool. `show` a
+skill before you change it and pass the `expected_fingerprint` it returned.
+`show` returns one page of a file; follow its MORE line until you have read every
+part you change. Change text with `edit` (exact `old_text` copied from `show`,
+unique in the file); `update` replaces or removes only short whole files, and
+files you do not name are kept. Never write `[redacted]`: it masks text hidden
+from you. Built-in, external and project skills are read-only here: say so and
+point the operator to Copy to my skills on the Skills tab; never create a
+same-named copy. Edit only the skill the operator's message names unless they ask
+for more. You cannot publish, pull or delete skills: say what you changed and
+leave publishing to the operator.
 
 Prefer the smallest change that answers the request, and prefer reporting what
 you did over asking permission you cannot be given."""
+
+
+def is_config_run_dir(session_dir: Path) -> bool:
+    """Whether ``session_dir`` is a CONFIGURATION RUN, by its two durable witnesses.
+
+    A purpose marker of ``agents-config`` OR an origin of ``agent-config``: either
+    one is enough, which is what makes every reader FAIL CLOSED on a damaged
+    marker (see :func:`apply_config_run_shape` for why the origin is the second
+    witness rather than a fallback). ONE predicate for both halves of the run's
+    boundary the composition root applies -- the registry scoping in ``_prepare``
+    and the tool declaration after construction -- because two copies of the
+    test would let a run be bounded by one and not the other.
+
+    NOT read by the viewer: ``session/attached.py``'s lazy registries still wrap
+    a run's registries in the conversation scope. That is deliberately left
+    alone and harmless: the run's own registries are unscoped, so ``<run>/roles``
+    is never written and the scoped view equals the account view, while the
+    page's own writes name ``scope='global'``. Routing the viewer through this
+    predicate is a viewer change with its own surface (``/agent`` and ``/team`` on
+    a cold session), not part of this fix.
+
+    Reads two small sidecars and never raises: both readers are tolerant by
+    contract, and an ordinary session (neither record) answers ``False``.
+    """
+    from local_operator.resume import ORIGIN_AGENT_CONFIG, session_origin
+    from local_operator.session.retention import (
+        AGENTS_CONFIG_PURPOSE,
+        read_desktop_purpose,
+    )
+
+    if read_desktop_purpose(session_dir) == AGENTS_CONFIG_PURPOSE:
+        return True
+    return session_origin(session_dir) == ORIGIN_AGENT_CONFIG
 
 
 def apply_config_run_shape(session: Any) -> bool:
@@ -1343,17 +1400,15 @@ def apply_config_run_shape(session: Any) -> bool:
     directory = getattr(getattr(session, "transcript", None), "directory", None)
     if not directory:
         return False
-    from local_operator.resume import ORIGIN_AGENT_CONFIG, session_origin
     from local_operator.session.retention import (
         AGENTS_CONFIG_PURPOSE,
         read_desktop_purpose,
     )
 
     session_dir = Path(directory)
-    recorded = read_desktop_purpose(session_dir)
-    if recorded != AGENTS_CONFIG_PURPOSE:
-        if session_origin(session_dir) != ORIGIN_AGENT_CONFIG:
-            return False
+    if not is_config_run_dir(session_dir):
+        return False
+    if read_desktop_purpose(session_dir) != AGENTS_CONFIG_PURPOSE:
         # The origin says run, the marker does not carry (or no longer parses to)
         # the purpose. Shapes the run anyway, and says so: the alternative is the
         # fail-OPEN direction, where the same damage silently hands the run the
@@ -1365,6 +1420,12 @@ def apply_config_run_shape(session: Any) -> bool:
         )
     session.set_run_preamble(AGENTS_CONFIG_PREAMBLE)
     session.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops=AGENTS_CONFIG_TOOL_OPS)
+    # `skill` is opt-in (absent from DEFAULT_TOOL_NAMES), so the factory built
+    # none to keep: build it NOW, after the declaration, through the one merge
+    # that re-filters by name and op scope -- so it can never enter a session
+    # whose declaration does not name it. A name subset, so this cannot rescue
+    # any other capability tool the declaration already dropped.
+    session._merge_capability_tools(("skill",))
     return True
 
 
@@ -4754,9 +4815,24 @@ async def _prepare(
     # conversation scope. Writes still delegate to the global store in S1.
     # Teams are scoped beside their creation below, because that registry is
     # built later and may legitimately be None.
+    #
+    # EXCEPT A CONFIGURATION RUN. Its whole job is to author the operator's
+    # ACCOUNT catalogue from the Agents page, which reads an unscoped registry
+    # (``desktop_profiles``), so a scoped run refuses every account ``update``
+    # (no host installs ``authorize_durable_write``, so the durable-write consent
+    # answers ``no_seam``) and files every ``create`` in ``<run>/roles``, a store
+    # no picker ever reads. The run's conversation scope is a dead store: it is
+    # hidden from every list and has no ``task`` tool, so no child inherits it.
+    # Its authority is the one it had before LOH-9 S2 scoped every session: the
+    # operator's own typed request, the server-owned op-scoped declaration
+    # (``AGENTS_CONFIG_TOOL_OPS``: no reset, sync or delete) and the page's settle
+    # summary. Decided from the same two witnesses that shape the run, so the
+    # registries and the declaration can never disagree about what it is.
     from local_operator.profile_scope import scope_agent_registry
 
-    agent_registry = scope_agent_registry(agent_registry, transcript_dir)
+    config_run = is_config_run_dir(transcript_dir)
+    if not config_run:
+        agent_registry = scope_agent_registry(agent_registry, transcript_dir)
 
     # --- tools + lazy knowledge (streams A and C) --------------------------
     from local_operator.harness.types import ToolContext
@@ -4857,11 +4933,14 @@ async def _prepare(
             file=sys.stderr,
         )
     else:
-        # LOH-9: teams are conversation-scoped too. A None registry keeps the
-        # existing degrade-one-feature behaviour (the tool is not advertised).
+        # LOH-9: teams are conversation-scoped too -- except in a configuration
+        # run, for the reason given at ``scope_agent_registry`` above. A None
+        # registry keeps the existing degrade-one-feature behaviour (the tool is
+        # not advertised).
         from local_operator.profile_scope import scope_team_registry
 
-        team_registry = scope_team_registry(team_registry, transcript_dir)
+        if not config_run:
+            team_registry = scope_team_registry(team_registry, transcript_dir)
     # The projects registry gets the same degrade-one-feature handling, for the
     # same reason: a store the user may never have touched must not take down
     # the whole boot. `ProjectRegistry` construction is read-only (it creates

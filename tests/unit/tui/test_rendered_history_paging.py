@@ -667,8 +667,8 @@ async def test_busy_upward_burst_earns_only_one_pending_page(monkeypatch) -> Non
     monkeypatch.setattr(
         OperatorApp,
         "_start_resume_fill",
-        lambda self, *, target=None: (
-            original_start(self, target=target) if target is not None else None
+        lambda self, *, target=None, attempt=0: (
+            original_start(self, target=target, attempt=attempt) if target is not None else None
         ),
     )
     session = FakeSession()

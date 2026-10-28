@@ -272,7 +272,7 @@ def _serving(monkeypatch):
         session.model_label = session.effective_model_label = f"{spec.provider}/{spec.model_id}"
 
     monkeypatch.setattr(session, "set_model", set_model, raising=False)
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
     monkeypatch.setattr(peer_model, "provider_usable_here", lambda _p: True)
     cards: list[tuple[str, dict[str, Any]]] = []
 

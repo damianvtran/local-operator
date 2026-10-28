@@ -22,7 +22,8 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { setSessionPin } from "../api";
 import { AskDock } from "../components/ask-dock";
 import { AsksSheet } from "../components/asks-sheet";
@@ -30,6 +31,7 @@ import { ModelSheet } from "../components/model-sheet";
 import { Composer, ComposerFrame } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
 import { SessionMenu } from "../components/session-menu";
+import { SessionStatus, meterFacts } from "../components/session-status";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
@@ -41,7 +43,7 @@ import { AboveComposerStack } from "../components/above-composer";
 import { Sheet } from "../components/ui/sheet";
 import { Chip } from "../components/ui/chip";
 import { cn } from "../lib/cn";
-import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR } from "../lib/column";
+import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR, SHORT_COLUMN_PX } from "../lib/column";
 import { navigate, parseHash } from "../router";
 import { consumePendingFocus } from "../lib/pending-focus";
 import { pinRefusalText } from "../lib/pin-refusal";
@@ -111,14 +113,23 @@ function Header({
 	projection,
 	sessionId,
 	connected,
+	ended,
 	gateOpen,
 	setGateOpen,
+	onOpenSpend,
+	fitLevel,
 }: {
 	projection: SessionProjection;
 	sessionId: string;
 	connected: boolean;
+	/** The screen's one `sessionHealth(...) === "ended"` (review R3-5): the
+	    composer reads the same value, so the dot and the message box can never
+	    disagree about whether a send reopens the session. */
+	ended: boolean;
 	gateOpen: boolean;
 	setGateOpen: (open: boolean) => void;
+	onOpenSpend: () => void;
+	fitLevel: number;
 }) {
 	const [menuOpen, setMenuOpen] = useState(false);
 	/* THE HEALTH SHEET AND THE ONE RESUME PATH, held here (UX round 1, U3) so the
@@ -126,7 +137,6 @@ function Header({
 	   of `useResume`: the menu runs it, then opens the health sheet, which is
 	   where its acceptance line or refusal is painted. */
 	const [healthOpen, setHealthOpen] = useState(false);
-	const ended = sessionHealth(projection, connected) === "ended";
 	const resume = useResume(sessionId, ended);
 	/* The opener the menu's sheet returns focus to. Held here because the ⋮
 	   button lives here and the sheet is the only consumer that needs it. */
@@ -280,6 +290,19 @@ function Header({
 				pinned={pinned}
 				onTogglePin={() => togglePin()}
 				onOpenApprovals={() => setGateOpen(true)}
+				onOpenSpend={onOpenSpend}
+				/* WHAT THE FOOTER MOVED OUT, offered here (design D9 / D8, manager
+				   decision option A). The spend row exists when the meter is hidden
+				   (L2+) AND has a reading to open — keyed on the reading's own facts,
+				   not on `usage`: a resumed session restores durable context and
+				   spend before its first receipt (R3-2b). The queued line exists
+				   only at L4, where the whole count could not fit the row. The menu
+				   LATCHES both on open: opening it takes focus off the field, which
+				   closes the keyboard and refits the footer, and a row that vanished
+				   under the reader's finger is the jitter D9 ruled out. */
+				showSpend={fitLevel >= 2 && meterFacts(projection).hasRow}
+				queuedCount={projection.queued_count}
+				showQueued={fitLevel >= 4 && projection.queued_count > 0}
 				onResume={ended ? () => {
 					void resume.resume();
 					setHealthOpen(true);
@@ -538,6 +561,19 @@ export function SessionScreen({
 		if (decision === "open") openAsksByPolicy();
 	});
 	const rootRef = useRef<HTMLDivElement>(null);
+	/* The short layout and the footer's fit are ONE rendering decision. Keeping
+	   this only as a DOM attribute let CSS flip before React had fitted its facts
+	   row, painting one clipped frame on keyboard changes. Initialising from the
+	   visual viewport, and rendering `data-short` from this state on BOTH roots
+	   (the reserved frame's and the live column's — QA Q1 found the reserve
+	   without it painting the 154 px two-line composer, then jumping 44 px when
+	   the projection landed), makes a cold short or landscape load compact on
+	   its first paint. */
+	const [short, setShort] = useState(() =>
+		typeof window !== "undefined" && (window.visualViewport?.height ?? Infinity) <= SHORT_COLUMN_PX,
+	);
+	const [fitLevel, setFitLevel] = useState(0);
+	const [spendOpen, setSpendOpen] = useState(false);
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
 	/* THE LIST STREAM TOO, so the header's ☆/★ reflects the shared pin
 	   authoritatively rather than optimistically forever (review round 1, MINOR 1).
@@ -559,11 +595,11 @@ export function SessionScreen({
 
 	/* Keep the composer above the iOS keyboard: pin the layout column to
 	   the visual viewport's height and offset while the keyboard is open. */
-	useEffect(() => {
+	useLayoutEffect(() => {
 		const vv = window.visualViewport;
 		const el = rootRef.current;
 		if (!vv || !el) return;
-		const sync = () => {
+		const sync = (event?: Event) => {
 			/* Height + top, never transform: a transform on this column
 			   creates a containing block that traps `position: fixed`
 			   sheets (slash, model, effort) and clips them to a sliver. */
@@ -586,6 +622,11 @@ export function SessionScreen({
 			   box this column is pinned to. */
 			el.style.setProperty(COLUMN_HEIGHT_VAR, `${vv.height}px`);
 			el.style.setProperty(COLUMN_TOP_VAR, `${vv.offsetTop}px`);
+			/* React owns data-short so this and the fit level commit together. */
+			/* Later native events must commit before paint. During this layout
+			   pass React already owns the flush; calling it here would warn. */
+			if (event) flushSync(() => setShort(vv.height <= SHORT_COLUMN_PX));
+			else setShort(vv.height <= SHORT_COLUMN_PX);
 		};
 		sync();
 		vv.addEventListener("resize", sync);
@@ -630,6 +671,7 @@ export function SessionScreen({
 		return (
 			<div
 				ref={rootRef}
+				data-short={short ? "" : undefined}
 				className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 			>
 				<div className="relative">
@@ -667,6 +709,12 @@ export function SessionScreen({
 	   prompt this device just sent makes the column non-empty the instant it
 	   leaves the composer, and hiding its row behind "no messages yet" would put
 	   the placeholder in front of the very message that proves the send worked. */
+	/* THE SCREEN'S ONE "ENDED" (review round 3, R3-5): derived once here and
+	   handed to the header and the composer, so the header's ⋮ Resume, the
+	   message box's placeholder and its failure copy cannot drift apart. The
+	   dot and health sheet still derive their own labels; this is the shared
+	   ended action state, not a second health rule. */
+	const ended = sessionHealth(projection, connected) === "ended";
 	const needsApproval = blocking?.kind === "approval";
 	/* The pending card's identity: its React key (one remount per question of
 	   a multi-part ask) and the slot's `restOn`, so a new decision is
@@ -731,6 +779,7 @@ export function SessionScreen({
 	return (
 		<div
 			ref={rootRef}
+			data-short={short ? "" : undefined}
 			className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 		>
 			{jobId ? (
@@ -741,7 +790,7 @@ export function SessionScreen({
 					connected={connected}
 				/>
 			) : <>
-			<Header projection={projection} sessionId={sessionId} connected={connected} gateOpen={gateOpen} setGateOpen={setGateOpen} />
+			<Header projection={projection} sessionId={sessionId} connected={connected} ended={ended} gateOpen={gateOpen} setGateOpen={setGateOpen} onOpenSpend={() => setSpendOpen(true)} fitLevel={fitLevel} />
 			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll
 				   area reads as "did it break?"; this placeholder says the
@@ -872,8 +921,13 @@ export function SessionScreen({
 				onCloseEffort={() => setEffortOpen(false)}
 				autoFocus={autoFocusComposer}
 				/* ONE "ended", the header dot's (review round 2, R2-2 = U7). */
-				ended={sessionHealth(projection, connected) === "ended"}
+				ended={ended}
+				short={short}
+				onFitLevel={setFitLevel}
 			/>
+			<Sheet open={spendOpen} onClose={() => setSpendOpen(false)} title={messageRuntime.t("relay.chrome.spend.title")}>
+				<SessionStatus projection={projection} detail />
+			</Sheet>
 
 			<ModelSheet
 				open={modelsOpen}

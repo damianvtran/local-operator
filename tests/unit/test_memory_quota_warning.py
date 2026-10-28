@@ -120,11 +120,12 @@ def test_guidance_is_scope_aware(store, monkeypatch):
     # A session->session move is refused, so session advice must not recommend it.
     assert "move work-state facts to session" not in session_warning
     assert "forget" in session_warning
-    # A global crossing recommends the move to session, which IS available there.
+    # A global crossing recommends triage back to source sessions: an agent cannot
+    # know WHICH ids to `move`, and triage previews them.
     monkeypatch.setattr(memory, "GLOBAL_TOKENS", 400)
     global_warnings = _fill(store, "global", 400, 86)
     assert global_warnings, "the global crossing should warn"
-    assert "--to session" in global_warnings[-1]["warning"]
+    assert "lop memory triage --scope global" in global_warnings[-1]["warning"]
 
 
 def test_cli_edit_and_forget_receipts_carry_quota(store, monkeypatch):
@@ -192,7 +193,7 @@ def test_status_output_shows_headroom_percent_and_the_move_hint(store, monkeypat
     assert not failed
     human = render_human(text, failed)
     assert "Quota:" in human and "left" in human and "%" in human
-    assert "global" in human and "lop memory move" in human
+    assert "global" in human and "lop memory triage --scope global" in human
 
 
 def test_the_memory_tool_result_carries_quota_and_the_crossing_warning(tmp_path, monkeypatch):
@@ -263,9 +264,9 @@ def test_status_mixed_near_caps_advise_each_scope_separately(store, monkeypatch)
     lines = render_human(text, failed).splitlines()
     global_at = next(i for i, line in enumerate(lines) if "Near cap: global" in line)
     session_at = next(i for i, line in enumerate(lines) if "Near cap: session" in line)
-    # Each scope gets its own advice, and only the global block offers the move;
+    # Each scope gets its own advice, and only the global block offers triage;
     # the session block's command is the forget ticket.
     global_block, session_block = lines[global_at:session_at], lines[session_at:]
-    assert any("--to session" in line for line in global_block)
-    assert not any("--to session" in line for line in session_block)
+    assert any("triage --scope global" in line for line in global_block)
+    assert not any("triage" in line or "--to session" in line for line in session_block)
     assert any("forget" in line for line in session_block)

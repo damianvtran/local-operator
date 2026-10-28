@@ -151,19 +151,32 @@ async def test_agent_name_rides_an_active_write():
     client = _make_client(_recording(sent))
 
     await client.put_settings(
-        state="active", consent_version="v1", agent_name="Aida", endpoint=None
+        state="active",
+        consent_version="v1",
+        agent_name="Aida",
+        endpoint=None,
+        expected_account_id="acc_1",
+        tenant_id="tnt_1",
     )
 
-    assert sent == [{"state": "active", "consent_version": "v1", "agent_name": "Aida"}]
+    assert sent == [
+        {"state": "active", "tenant_id": "tnt_1", "consent_version": "v1", "agent_name": "Aida"}
+    ]
 
 
 async def test_no_agent_name_keeps_the_pre_field_body():
     sent: list[dict[str, Any]] = []
     client = _make_client(_recording(sent))
 
-    await client.put_settings(state="active", consent_version="v1", endpoint=None)
+    await client.put_settings(
+        state="active",
+        consent_version="v1",
+        endpoint=None,
+        expected_account_id="acc_1",
+        tenant_id="tnt_1",
+    )
 
-    assert sent == [{"state": "active", "consent_version": "v1"}]
+    assert sent == [{"state": "active", "tenant_id": "tnt_1", "consent_version": "v1"}]
 
 
 @pytest.mark.parametrize("bundled", ["paused", "disabled"])
@@ -236,7 +249,13 @@ async def test_another_validation_refusal_is_not_retried():
     client = _make_client(handler)
     with pytest.raises(BridgeRefusal):
         await client.put_settings(
-            state="active", consent_version="v1", label="Ben", agent_name="Aida", endpoint=None
+            state="active",
+            consent_version="v1",
+            label="Ben",
+            agent_name="Aida",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
     assert len(sent) == 1
 

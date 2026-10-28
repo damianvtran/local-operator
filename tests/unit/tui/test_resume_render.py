@@ -957,8 +957,8 @@ async def test_an_unreachable_head_never_says_scroll_up_to_load(monkeypatch) -> 
     monkeypatch.setattr(
         OperatorApp,
         "_start_resume_fill",
-        lambda self, *, target=None: (
-            original_start(self, target=target) if target is not None else None
+        lambda self, *, target=None, attempt=0: (
+            original_start(self, target=target, attempt=attempt) if target is not None else None
         ),
     )
     session = FakeSession()
@@ -1016,8 +1016,8 @@ async def test_the_head_notice_stops_saying_unreachable_once_it_is_reachable(mon
     monkeypatch.setattr(
         OperatorApp,
         "_start_resume_fill",
-        lambda self, *, target=None: (
-            original_start(self, target=target) if target is not None else None
+        lambda self, *, target=None, attempt=0: (
+            original_start(self, target=target, attempt=attempt) if target is not None else None
         ),
     )
     session = FakeSession()
@@ -1297,8 +1297,8 @@ async def test_the_head_notice_tracks_content_growth_without_a_resize(monkeypatc
     monkeypatch.setattr(
         OperatorApp,
         "_start_resume_fill",
-        lambda self, *, target=None: (
-            original_start(self, target=target) if target is not None else None
+        lambda self, *, target=None, attempt=0: (
+            original_start(self, target=target, attempt=attempt) if target is not None else None
         ),
     )
     session = FakeSession()
@@ -1351,8 +1351,8 @@ async def test_the_head_notice_stops_being_a_control_once_it_is_inert(monkeypatc
     monkeypatch.setattr(
         OperatorApp,
         "_start_resume_fill",
-        lambda self, *, target=None: (
-            original_start(self, target=target) if target is not None else None
+        lambda self, *, target=None, attempt=0: (
+            original_start(self, target=target, attempt=attempt) if target is not None else None
         ),
     )
     session = FakeSession()
@@ -1419,8 +1419,8 @@ async def test_exhausting_the_focused_notice_lands_focus_on_the_visible_transcri
     monkeypatch.setattr(
         OperatorApp,
         "_start_resume_fill",
-        lambda self, *, target=None: (
-            original_start(self, target=target) if target is not None else None
+        lambda self, *, target=None, attempt=0: (
+            original_start(self, target=target, attempt=attempt) if target is not None else None
         ),
     )
     session = FakeSession()
@@ -1514,6 +1514,10 @@ async def test_a_raising_fill_does_not_leave_the_pessimistic_copy_suppressed() -
         # that normally arm it.
         unscrollable = SimpleNamespace(
             parent=app,
+            # A laid-out, shown view: the fill stands down while the transcript
+            # cannot be laid out (M1), so the double has to report the state the
+            # branch under examination is reached from.
+            display=True,
             container_size=SimpleNamespace(height=40),
             size=SimpleNamespace(height=40),
             virtual_size=SimpleNamespace(height=10),

@@ -173,8 +173,6 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
 from local_operator.session.frontend_state import CostKnowledge
-
-# Shared loop semantics stay import-light for detached owners.
 from local_operator.session.goal_loop import (
     _BOTCHED_COUNT_RE,
     DEFAULT_LOOP_ITERATIONS,
@@ -187,6 +185,9 @@ from local_operator.session.goal_loop import (
     MAX_LOOP_JUDGE_FAILURES,
     _parse_loop_verdict,
 )
+
+# Shared loop semantics stay import-light for detached owners.
+from local_operator.session.mcp_status import RestoredMcpStartupOutcome
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_PROGRESS_S,
@@ -398,7 +399,11 @@ from local_operator.tui.widgets.ask_queue import (
     ask_rows,
 )
 from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.command_picker import CommandPicker
+from local_operator.tui.widgets.command_picker import (
+    CommandPicker,
+    SkillScanRegion,
+    skill_scan_region,
+)
 from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
@@ -1532,6 +1537,26 @@ def _skill_body_has_content(body: str | None) -> TypeGuard[str]:
     return bool(text.strip())
 
 
+class _SkillExpansion(NamedTuple):
+    """What an inline `$skill` submit sends, split so the ROW stays the user's.
+
+    ``text`` is the message verbatim with collapsed pastes expanded, and it is
+    BOTH the row and the prefix of the payload. ``block`` is the tail block
+    carrying one body per name in ``skills`` (text order), or ``""`` when
+    nothing attached. ``payload`` is what the model receives, and the row is
+    recovered from it by stripping the block — which is what makes the live and
+    replayed rows agree by construction rather than by two branches agreeing.
+    """
+
+    text: str
+    skills: tuple[str, ...]
+    block: str
+
+    @property
+    def payload(self) -> str:
+        return f"{self.text}\n\n{self.block}" if self.block else self.text
+
+
 #: Transport wording that means THE RUNTIME IS GONE, as opposed to a refusal
 #: the session itself produced. Matched on the transport's own phrases rather
 #: than on the exception type: `ConnectionError` also carries the graceful
@@ -2011,6 +2036,42 @@ RESUME_PAGE_TRIGGER_ROWS = 4
 #: Hidden-only pages still advance through yielded bursts until real content
 #: fills the reserve, the cursor stops advancing, or the reader takes over.
 RESUME_FILL_MAX_PAGES = 16
+# ...and the TOTAL a single reveal may mount, across every burst. The
+# per-burst cap alone bounded nothing: reaching it re-armed the fill, which
+# restarted the attempt counter at zero, so a view whose scroll never reaches
+# the goal kept mounting until the pending head emptied — one warm legacy
+# revisit mounted 20,200 blocks (the whole 27,003-message history) before
+# settling to 38. Four bursts is far more than any viewport needs (the
+# reserve is one screenful, ~2-3 pages) while still bounding the worst case.
+RESUME_FILL_TOTAL_PAGES = RESUME_FILL_MAX_PAGES * 4
+
+#: How many older pages a single REVEAL may mount synchronously, while the
+#: incoming view is still parked and the reader is looking at the outgoing one.
+#: `_prefill_resume_before_reveal` loops to the same goal the deferred fill
+#: would have reached one page per painted frame.
+#:
+#: This is a backstop, not the real bound — `RESUME_PREFILL_BUDGET_S` is. A page
+#: here is ~24 messages, so eight pages cover a 70-row reserve several times
+#: over; the passes that matter are the ones whose blocks author no height (a
+#: collapsed tool run, hidden rows), where a loop can spend passes without the
+#: ruler moving. Past this many, the reserve is the deferred fill's to finish:
+#: a view that cannot be filled in eight pages has a geometry problem, and
+#: spending the first frame on it is worse than showing the rows it has.
+RESUME_PREFILL_MAX_PAGES = 8
+
+#: Wall-clock budget for that same synchronous burst, in seconds.
+#:
+#: The page count bounds passes; this bounds what a pass COSTS. Projection is
+#: linear in the page's message count and each page is followed by a real
+#: layout pass, so a pathological conversation (huge tool payloads, deep wraps)
+#: can make even two pages expensive. 200 ms is roughly the first-paint budget
+#: the whole reveal lives in, so the pre-fill may never own more than all of it:
+#: past this the view is shown with what it has and the deferred fill tops it up
+#: through the ordinary route (measured cost of the loop at the bench size,
+#: 160x48: 11-16 ms, so this ceiling is ~15x the observed work — a very large
+#: terminal pays more, measured 48-81 ms at 300x200 where the reserve needs four
+#: pages, review round 1, n1).
+RESUME_PREFILL_BUDGET_S = 0.2
 
 #: The row that stands in for the un-rendered head of a resumed conversation.
 #: It exists because the failure mode of a display bound is a user believing
@@ -5879,6 +5940,10 @@ class OperatorApp(App[None]):
         #: reads as the notice changing its mind (review round 2, R6).
         self._resume_fill_active = False
         self._resume_fill_serial = 0
+        #: The view a fill stood down on because it could not be laid out.
+        #: Held so the extent hook can re-arm the reserve once the view is
+        #: on screen again — standing down is only safe if showing it resumes.
+        self._resume_fill_deferred_view: Any = None
         #: SINGLE-FLIGHT guard for the deferred page check: while set, a check
         #: is already scheduled and `_transcript_scrolled` must not queue a
         #: second. See that method for why unbounded requeues were a cascade.
@@ -9800,7 +9865,7 @@ class OperatorApp(App[None]):
         if isinstance(snapshot, AsideSnapshot) and panel is not None:
             source.aside_open = True
             source.aside_generation = snapshot.generation
-            editor.set_allows_shell(False)
+            editor.set_aside_owns(True)
             editor.placeholder = ASIDE_PLACEHOLDER
             editor.set_commands([])
             editor.set_records_history(False)
@@ -9810,7 +9875,7 @@ class OperatorApp(App[None]):
             self._sync_aside_fork_hint()
         else:
             source.aside_open = False
-            editor.set_allows_shell(True)
+            editor.set_aside_owns(False)
             editor.set_shell_mode(source.draft.shell_mode)
             editor.placeholder = self._composer_placeholder_for(editor)
             editor.set_commands(self._offered_commands())
@@ -12923,9 +12988,22 @@ class OperatorApp(App[None]):
             forked=bool(getattr(session, "wears_inherited_title", False)),
         )
         self._wire_mcp_status(session)
-        self._report_mcp_startup(session)
         if replay_history:
             self._render_resumed_history(session)
+        # AFTER the replay, for the SAME load-bearing reason
+        # ``_report_attachment_restore`` documents four lines below: a durable
+        # failure row is a fact about THIS conversation's last runtime, so it
+        # belongs at its end, directly above the composer. Raised before the
+        # replay — where this call used to sit — it became block 0 of N and the
+        # replayed history was appended after it, which put the rows thousands of
+        # lines above the reader on any resumed conversation that had an outcome
+        # to report. A cold open now ALWAYS has one (the checkpoint's outcome is
+        # restored by ``_restore_cold_details``), so the ordering is what makes
+        # the reveal's rows the ones the reader is looking at rather than the
+        # ones they have to scroll back for. Costs nothing on an empty
+        # transcript: the replay no-ops there, so the boot splash is untouched
+        # and the row lands under it.
+        self._report_mcp_startup(session)
         # AFTER the replay, and the order is load-bearing (D1). A stale
         # attachment is by definition only reachable on a session that ALREADY
         # RAN, so this notice always lands on a transcript with history. Raised
@@ -14683,6 +14761,30 @@ class OperatorApp(App[None]):
         for a socket before showing anything is the one thing worse than a
         shuffle.
 
+        ONE PAGE WAS NOT ENOUGH, and the reason a loop was rejected here before
+        is gone. The old note measured a mounted page as unmeasurable from this
+        section (51 -> 75 blocks with `scroll_y` unmoved) — but that was
+        measured BEFORE this method started laying the page out itself, and the
+        D1 blank-frame fix is what changed it: `_refresh_layout` now runs here on
+        every pass, which is exactly the step that lets each mounted block
+        author its real height, that carries a tail follower to the new extent,
+        and therefore makes `scroll_y` a reading rather than a constant. Without
+        that call a loop measures a ruler that cannot move, which is what the
+        old measurement saw.
+
+        With it, the goal is reachable before the reveal, and it has to be:
+        a page mounted AFTER the reveal does not merely arrive late —
+        `insert_blocks`'s follower branch re-pins the tail (`if following_tail:
+        self._scroll_to_tail()`), so it drags the visible rows up by its own
+        height. Measured on the bench's legacy shape: 20 lines, twice.
+
+        BOTH BOUNDS ARE REAL. `RESUME_PREFILL_MAX_PAGES` bounds passes and
+        `RESUME_PREFILL_BUDGET_S` bounds what those passes may cost, checked per
+        pass so a slow projection cannot spend the whole first paint here. A
+        burst that hits either bound ends where the old code ended every time:
+        the deferred fill finishes the reserve through the ordinary route, one
+        page per settled frame.
+
         NOTHING HERE MAY RAISE INTO `PreparationInvalidated`. That retry path
         (`session_navigation._prepare_and_commit`) releases the prepared widgets
         and re-prepares, and it is reached by the invalidation check ABOVE this
@@ -14694,130 +14796,125 @@ class OperatorApp(App[None]):
         change.
         """
         view = self._transcript_view()
-        viewport = view.container_size.height or view.size.height
-        # ONE PAGE, NOT A LOOP TO THE GOAL. A page mounted here cannot be
-        # measured here: `insert_blocks` schedules the settle that lets each
-        # block author its real height, and that needs refresh hops this
-        # synchronous section does not have. Measured at 100x100: the transcript
-        # grew 51 -> 75 blocks while `scroll_y`, `max_scroll_y` and
-        # `virtual_size.height` all stayed exactly where they started, so a loop
-        # here is measuring a ruler that cannot move and every extra iteration
-        # is a page mounted blind. It also left the paging lease HELD on exit —
-        # `_mount_older_resume_page` releases it from that same deferred settle
-        # — which made the ordinary fill stand down against a gate the commit
-        # had taken and never returned.
+        # LOOP TO THE GOAL THE DEFERRED FILL WOULD STOP AT, not to a page count.
+        # `_resume_fill_goal_met` IS the fill's own predicate, so the two cannot
+        # disagree about when the reserve is done — a loop one row stingier than
+        # the fill would hand it a page to mount into the revealed view, which is
+        # the shift this method exists to prevent.
         #
-        # One page is what this can honestly do: it is the page that closes the
-        # under-fill the reveal would otherwise show (21 blocks against a
-        # 27-row viewport), it is the page whose absence caused the visible
-        # 14 -> 62 scroll jump, and the `_start_resume_fill` below still reaches
-        # the real goal by the settling route that owns it.
-        if not viewport and self._resume_pending_head and not self._resume_paging:
-            # A FIRST-VISIT (`display_only`) presentation is mounted without the
-            # in-prepare layout round trip -- `_prepare_sidebar_session` skips it
-            # deliberately so a first saved view reveals its real rows without
-            # paying an extra frame first. The consequence here is that the view
-            # has no measured viewport yet, and a fill with no geometry to
-            # measure against would mount pages blindly. Resolve the geometry
-            # instead of giving up on it: this is the same layout pass the next
-            # frame would run, pulled forward, and it is SYNCHRONOUS -- no await
-            # is introduced between the navigation's final identity check and
-            # this commit (`session_navigation._prepare_and_commit`).
-            #
-            # Paint suppressed for the same reason as the settle below, and it
-            # is the same defect: this layout runs with the transcript revealed
-            # and the composer still holding the OUTGOING draft's rows, so the
-            # frame it would paint shows 21 mounted blocks and NONE of them in
-            # view (design round 1, D1, cold/draft2 f001 at dock 7 / editor 3
-            # against a settled 5 / 1). The layout is needed -- it is what gives
-            # this first-visit view a measurable viewport -- but its
-            # intermediate arrangement must not reach the screen.
-            screen = self.screen
-            paint = screen._compositor_refresh
-            screen._compositor_refresh = _suppress_intermediate_paint
-            try:
-                screen._refresh_layout()
-            finally:
-                screen._compositor_refresh = paint
-            viewport = view.container_size.height or view.size.height
-        if not viewport or self._resume_paging or not self._resume_pending_head:
-            # Nothing locally pending, or a fetch already owns the gate. The
-            # scheduled fill below still runs and reaches the same goal by the
-            # ordinary route.
+        # A HIDDEN VIEW HAS NO GOAL TO MEASURE, and the burst must stand down for
+        # the same reason the deferred fill does (`not view.display or not
+        # view.size.height` there). `container_size` keeps the last height it had
+        # while nothing lays the view out, so `scroll_y` never moves however many
+        # pages are mounted and every pass reads as progress: measured at 8 pages
+        # blind, `scroll_y` stuck at 29, before the page cap ended it (review
+        # round 1, m2). Only `display` is tested here, not `size`: a first visit
+        # legitimately has no size yet, and that case is the layout below.
+        if not view.display or self._resume_paging or not self._resume_pending_head:
+            # Hidden, nothing locally pending, or a fetch already owns the gate.
+            # The scheduled fill below still runs and reaches the same goal — or
+            # stands down and remembers the view — by the ordinary route.
+            self._start_resume_fill()
+            return
+        # READ THE REAL VIEWPORT BEFORE THE FIRST CHECK — every burst, not only
+        # a first visit. `container_size` at entry is the last layout this view
+        # had, which is neither the height it is about to be given nor the height
+        # its rows measure once laid out: 44 rows at 160x70 against 61. A
+        # conversation whose reserve sits between those two readings is already
+        # "done" by the stale number, so a loop that trusted it exits with
+        # nothing mounted and hands the deferred fill a page to mount into the
+        # REVEALED view — the re-pin shift this method exists to remove, measured
+        # at 38 blocks in the first frame and 62 settled (review round 1, M1;
+        # the band is ordinary two-paragraph replies).
+        #
+        # The pass is SYNCHRONOUS -- no await may be introduced between the
+        # navigation's final identity check and this commit
+        # (`session_navigation._prepare_and_commit`). It is also the pass that
+        # corrects the viewport of a FIRST-VISIT (`display_only`)
+        # presentation: `_prepare_sidebar_session` skips the in-prepare layout
+        # round trip deliberately, so a first saved view reveals its real rows
+        # without paying an extra frame first, and arrives here unmeasured.
+        # Paint suppressed for the same reason as the settle in the loop, and it
+        # is the same defect: this layout runs with the transcript revealed and
+        # the composer still holding the OUTGOING draft's rows, so the frame it
+        # would paint shows 21 mounted blocks and NONE of them in view (design
+        # round 1, D1, cold/draft2 f001 at dock 7 / editor 3 against a settled
+        # 5 / 1). The layout is needed — it is the measurement — but its
+        # intermediate arrangement must not reach the screen.
+        screen = self.screen
+        paint = screen._compositor_refresh
+        screen._compositor_refresh = _suppress_intermediate_paint
+        try:
+            screen._refresh_layout()
+        finally:
+            screen._compositor_refresh = paint
+        viewport = view.container_size.height or view.size.height
+        if not view.size.height:
+            # `container_size` survives hiding, the widget's own size does not: a
+            # view under an ancestor that is not laid out keeps a stale
+            # `container_size` while measuring (0, 0), so the guard above cannot
+            # see it and every pass would read the same stale height. Measured at
+            # eight blind pages with `scroll_y` pinned at 0.0, ended only by the
+            # page cap (review round 2, m4 — latent today; production hides this
+            # view itself at every call site, but the rule must not depend on
+            # that). This is the same second clause the deferred fill stands down
+            # on, and it is checked AFTER the layout, deliberately: a first visit
+            # has no size UNTIL that pass, so checking it before would dead-end
+            # the very case the pass exists for.
+            self._start_resume_fill()
+            return
+        if not viewport:
+            # Still nothing to measure against, so a fill here would be blind.
             self._start_resume_fill()
             return
         self._resume_fill_active = True
         self._resume_fill_serial += 1
-        chained = False
+        mounted = 0
+        # ONE TRANSACTION FOR THE WHOLE BURST, for the reason
+        # `_fetch_older_display_page` holds one across a network page: the gate
+        # must never be briefly free between two pages that belong to the same
+        # answer. A mount that opened its own lease would find this one still
+        # held on the second pass — `_acquire_paging_lease` refuses rather than
+        # queues — and return without mounting, so the loop would mount one page
+        # and then spin against an unchanged ruler until its budget expired.
+        lease: _PagingLease | None = None
         try:
-            notice = self._resume_head_notice
-            prefix = (
-                notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
-            )
-            if view.scroll_y < viewport + prefix:
-                # CHAIN THE ORDINARY FILL TO THIS PAGE'S SETTLE, rather than
-                # scheduling it beside one. `_mount_older_resume_page` holds the
-                # single-flight paging lease until the settle callback
-                # `insert_blocks` schedules releases it, and
-                # `_fill_resume_attempt` stands down immediately while that gate
-                # is held. So a fill started independently of this page raced it
-                # and lost -- it saw `_resume_paging` true, returned, and the
-                # goal was never reached: `test_real_sidebar_projection_runs_
-                # rendered_fill` measured the view stranded at `scroll_y=0`
-                # against a 91-row viewport. Handing the continuation to
-                # `on_settled` is the seam that method documents for exactly
-                # this, and it is why the `finally` below only starts a fill
-                # when no page was mounted here.
-                self._mount_older_resume_page(on_settled=self._start_resume_fill)
-                # ONLY NOW is the deferred fill genuinely chained. Setting this
-                # BEFORE the mount meant a raising mount was swallowed by the
-                # `except` with `chained` already True, so the `finally` skipped
-                # the very fallback the docstring promises -- reproduced at 18
-                # blocks / scroll_y 15 against 42 / 63 normal. `_mount_older_
-                # resume_page` restores `_resume_pending_head` and releases the
-                # paging lease before re-raising, so the deferred fill that then
-                # starts runs against clean state.
-                chained = True
-                # SETTLE THE GEOMETRY THIS PAGE JUST CHANGED before the view is
-                # handed to the readiness gate. A mounted block authors its real
-                # height during a layout pass, so without this the view is
-                # revealed with its tail block not yet in the compositor's
-                # painted map -- which the gate reads as NOT READY and pays a
-                # recovery relayout for. Measured: 12 TAIL_BLOCK refusals across
-                # 4 cold switches without this call, 0 with it. Synchronous, for
-                # the same reason as above: this commit may not await.
-                #
-                # THE LAYOUT IS WANTED HERE; THE PAINT IS NOT. `_refresh_layout`
-                # ends in `_compositor_refresh()`, which calls `App._display`
-                # straight away -- so this settle PAINTED a frame of its own,
-                # mid-commit, and that frame is a half-arranged one: the
-                # transcript has already been revealed and tail-scrolled, while
-                # the composer still occupies the OUTGOING draft's rows (dock 7
-                # / editor 3 against the incoming draft's final 5 / 1). Content
-                # drawn against a box that is about to shrink lands outside the
-                # viewport, so the frame showed an EMPTY conversation -- design
-                # round 1, D1, reproduced at `blocks_mounted=46,
-                # blocks_in_view=0, scroll_y=84=max` immediately before a
-                # settled `82`. On a warm switch that was the FIRST painted
-                # frame, i.e. the fastest switch opened on a blank screen, and
-                # at 80x24 the whole screen blanked. It also produced the
-                # `84 -> 82` scroll excursion (D4) and showed the incoming
-                # draft inside the outgoing-sized box (D2).
-                #
-                # Suppressing just the paint keeps every reason this call is
-                # here -- the mounted page still authors its height, the gate
-                # still gets a complete painted map from the NEXT real frame --
-                # while the user never sees the intermediate arrangement.
-                # Measured across warm/cold/draft2 at 120x36 and 80x24: blank
-                # frames 1-3 -> 0 in every arm, painted frames 12 -> 9 (cold)
-                # and 11 -> 8 (draft2), the scroll excursion collapses to a
-                # single settled position, and gate refusals stay 0.
-                #
-                # `_compositor_refresh` rather than `App.batch_update()`: the
-                # batch defers this paint to a `call_later`, which still paints
-                # the same stale arrangement one turn later (measured: blanks
-                # unchanged at `[0]`). The frame must not exist at all, not
-                # arrive late.
+            deadline = time.monotonic() + RESUME_PREFILL_BUDGET_S
+            # THE BUDGET IS CHECKED AGAINST THE LAST PASS'S COST, not only against
+            # the clock at the top of the pass. A pass that starts at 199 ms runs
+            # its whole projection plus layout, so a bare `now < deadline` let a
+            # 200 ms budget spend 333 ms over two 150 ms pages (review round 1,
+            # m1). Predicting the next pass from the previous one errs toward
+            # stopping early, which is the safe direction: an unfinished reserve
+            # is the deferred fill's, a late first frame is nobody's.
+            pass_cost = 0.0
+            while (
+                mounted < RESUME_PREFILL_MAX_PAGES
+                and time.monotonic() + pass_cost < deadline
+                and self._resume_pending_head
+                and not self._resume_fill_goal_met(view, viewport=viewport)
+            ):
+                started = time.monotonic()
+                if lease is None:
+                    # Defensive, and today unreachable for the same reason the
+                    # deferred fill's acquire is: `_resume_paging` IS this
+                    # lookup's answer and the guard above returned on it, with no
+                    # await in between. Kept so a future yield here cannot turn
+                    # into a page mounted through somebody else's lease.
+                    lease = self._acquire_paging_lease(self._interaction)
+                    if lease is None:
+                        break
+                self._mount_older_resume_page(lease=lease)
+                mounted += 1
+                # LAYOUT IS ALSO WHAT THE REVEAL CONTRACT NEEDS, not just the
+                # loop's next reading: a mounted block authors its real height
+                # during a layout pass, and a view revealed with its tail block
+                # missing from the compositor's painted map is read by the
+                # readiness gate as NOT READY — measured at 12 TAIL_BLOCK
+                # refusals across 4 cold switches without this call, 0 with it.
+                # Paint suppressed because the intermediate offsets this
+                # produces are not states the reader may see; the outgoing view
+                # is the one on screen.
                 screen = self.screen
                 paint = screen._compositor_refresh
                 screen._compositor_refresh = _suppress_intermediate_paint
@@ -14825,24 +14922,42 @@ class OperatorApp(App[None]):
                     screen._refresh_layout()
                 finally:
                     screen._compositor_refresh = paint
+                viewport = view.container_size.height or view.size.height
+                pass_cost = time.monotonic() - started
         except Exception:
             # See the docstring: a projection failure must degrade to the
             # deferred fill, never propagate into the invalidation retry.
             logger.debug("pre-reveal resume fill failed; deferring", exc_info=True)
         finally:
-            # Start the ordinary fill only when no page was mounted above; when
-            # one was, it is chained to that page's settle instead (see there),
-            # so the two can never race for the same paging lease.
-            # That fill re-measures against real laid-out geometry, tops up
-            # anything this synchronous pass could not reach (a page behind a
-            # network fetch), and settles `_resume_fill_active` and the head
-            # notice through the one path that owns them. When the goal is
-            # already met its first attempt exits immediately, which is the
-            # normal case after this pre-fill.
-            if not chained:
-                self._start_resume_fill()
+            # THE BURST'S LEASE IS THE COMMIT'S TO RETURN. Each mount hands its
+            # release to the settle `insert_blocks` schedules, two refresh hops
+            # away — far too late for the fill started below, which would stand
+            # down against a gate the commit had taken and not yet returned. That
+            # is exactly what stranded the old one-page form: the lease it took
+            # was released from a callback it had already returned past. Released
+            # inline, the pages' own deferred `release_gate` calls find the lease
+            # gone and return, and the fill below runs against clean state.
+            #
+            # WHAT THOSE RETURNS SKIP is the per-page tail of `release_gate`:
+            # `_reconcile_head_notice()` and `_transcript_scrolled(None)`. For a
+            # burst page the replacement is the fill started below — its
+            # goal-met exit reconciles the notice from the geometry this burst
+            # produced, and it is the only path that settles `_resume_fill_active`
+            # (review round 1, m3). Anything that changes that exit has to keep
+            # those two calls, or burst pages lose them silently.
+            self._release_paging_lease(lease)
+            # START THE ORDINARY FILL ALWAYS, including when the loop reached the
+            # goal. Its first attempt re-measures laid-out geometry, finds the
+            # goal met, exits immediately, and that exit is the one path that
+            # reconciles the head notice and settles `_resume_fill_active` — so
+            # the deferred fill finding nothing to do is a property of the shared
+            # predicate, not a second code path that has to be kept in step. A
+            # goal it could NOT reach here (a budget stop, or a page that needs a
+            # network fetch) is picked up by the same call: the fill tops the
+            # view up on the next paint, which is the pre-existing behaviour.
+            self._start_resume_fill()
 
-    def _start_resume_fill(self, *, target: float | None = None) -> None:
+    def _start_resume_fill(self, *, target: float | None = None, attempt: int = 0) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
 
         Raw-event tail bounds are deliberately cheap first paint, not geometry:
@@ -14870,7 +14985,7 @@ class OperatorApp(App[None]):
                 self._reconcile_head_notice()
                 return
             if self._resume_fill_active:
-                self._fill_resume_until_scrollable(target=target)
+                self._fill_resume_until_scrollable(attempt, target=target)
 
         if not view.call_after_refresh(start):
             # SAME UNKEPT PROMISE as the insert seam, one screen away: the
@@ -14908,6 +15023,31 @@ class OperatorApp(App[None]):
             self._release_resume_tail_hold()
             raise
 
+    def _resume_fill_goal_met(
+        self, view: TranscriptView, *, viewport: int, target: float | None = None
+    ) -> bool:
+        """Has this resume reserved its viewport above the reader yet?
+
+        ONE RULE, TWO CALLERS, on purpose. The deferred fill asks this to decide
+        whether to mount another page, and `_prefill_resume_before_reveal` asks
+        it whether to mount one more BEFORE the view is ever shown. They have to
+        agree exactly: a prefill that stopped even slightly short would hand the
+        deferred fill work to do on the frame after reveal, and since a fill's
+        page re-pins the tail, that is not a late arrival — it is a jump the
+        reader sees. Two hand-kept copies of this arithmetic is how they drifted
+        apart in the first place.
+
+        `scroll_y` is a scroll OFFSET, so at the tail this compares the content
+        mounted above the viewport against one viewport plus the head notice —
+        the notice's own rows are loader chrome, not historical content, and at
+        exact-fit sizes it used to supply the last row of the promised reserve
+        itself. `target` outranks the reserve for an anchored restore, where the
+        goal is a position rather than a viewport.
+        """
+        notice = self._resume_head_notice
+        prefix = notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
+        return view.scroll_y >= max(viewport + prefix, target or 0)
+
     def _fill_resume_attempt(self, _attempt: int, *, target: float | None = None) -> None:
         """Reserve one real viewport above the reader, progressively and bounded.
 
@@ -14919,13 +15059,32 @@ class OperatorApp(App[None]):
         finished. Only exhaustion, non-advancing cursors or user input stop it.
         """
         view = self._transcript_view()
+        if not view.display or not view.size.height:
+            # A VIEW THAT CANNOT BE LAID OUT HAS NO GOAL TO MEASURE. Its
+            # `container_size` keeps the last real height, but nothing lays it
+            # out while it is hidden, so `scroll_y` stays 0 and `virtual_size`
+            # does not move however many blocks are mounted — while
+            # `settled()` measures progress by the pending head, which always
+            # shrinks. Every page therefore reads as progress, the goal is
+            # never reached, and the fill runs blind until the head empties:
+            # 1,123 pages / 20,254 blocks on the legacy fixture, invisible, and
+            # returned to the reader on reveal (review round 1, M1 — the
+            # subagent view, org chart, settings and file viewer all hide the
+            # transcript). Standing down here PREVENTS the chain;
+            # `RESUME_FILL_TOTAL_PAGES` stays as the backstop. Showing the view
+            # lays it out, which fires the extent hook that re-arms this.
+            self._resume_fill_active = False
+            self._resume_fill_deferred_view = view
+            self._release_resume_tail_hold()
+            self._reconcile_head_notice()
+            return
         viewport = view.container_size.height or view.size.height
-        notice = self._resume_head_notice
-        prefix = notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
-        # Loader chrome is not historical content. At exact-fit sizes it used
-        # to supply the last row of the promised one-viewport reserve itself.
-        goal = max(viewport + prefix, target or 0)
-        if view.parent is None or not viewport or self._resume_paging or view.scroll_y >= goal:
+        if (
+            view.parent is None
+            or not viewport
+            or self._resume_paging
+            or self._resume_fill_goal_met(view, viewport=viewport, target=target)
+        ):
             self._resume_fill_active = False
             # The window stops growing HERE, so the render's own tail hold ends
             # with it (F3). Every other exit from the fill releases it too.
@@ -14954,11 +15113,21 @@ class OperatorApp(App[None]):
                 if not progressed:
                     self._resume_fill_active = False
                     self._reconcile_head_notice()
+                elif _attempt + 1 >= RESUME_FILL_TOTAL_PAGES:
+                    # The total budget, not the burst cap, is what ends a chain.
+                    # Pages past the viewport are the reader's to ask for; the
+                    # fill must not keep mounting them while a view refuses to
+                    # scroll (see RESUME_FILL_TOTAL_PAGES).
+                    self._resume_fill_active = False
+                    self._release_resume_tail_hold()
+                    self._reconcile_head_notice()
                 elif _attempt + 1 >= RESUME_FILL_MAX_PAGES:
                     # A long hidden prefix is not a reason to strand the
                     # reader. Yield an additional idle frame between bursts;
                     # _start_resume_fill fences the new callback to this view.
-                    self._start_resume_fill(target=target)
+                    # The RUNNING count is carried in, so the burst boundary
+                    # cannot be mistaken for the end of the budget.
+                    self._start_resume_fill(target=target, attempt=_attempt + 1)
                 else:
                     self._fill_resume_until_scrollable(_attempt + 1, target=target)
 
@@ -15968,6 +16137,13 @@ class OperatorApp(App[None]):
         copy already matches (R8), so a window drag pays two integer
         comparisons per frame rather than a rebuild and a spacing pass.
         """
+        deferred, self._resume_fill_deferred_view = self._resume_fill_deferred_view, None
+        if deferred is not None and deferred is self._transcript:
+            # The reserve a hidden fill declined to mount is still owed. Shown
+            # and laid out is exactly the state it needs, and this hook is the
+            # one place told about every geometry change.
+            if deferred.display and deferred.size.height and not self._resume_paging:
+                self._start_resume_fill()
         if self._resume_head_notice is None:
             return
         self._reconcile_head_notice()
@@ -20882,15 +21058,14 @@ class OperatorApp(App[None]):
         ``resolve_markers`` orders images by where the citation sits and a
         payload spliced in ahead of one would move it.
 
-        A ``$skill`` LEADING the argument expands here, through the same
-        ``_expand_invocation`` the bare-prompt path uses. The argument is its
-        OWN string, whose offset 0 is exactly where the user's ``$`` sits, so
-        the anchored parser needs no change to serve ``/team backend $research
-        fix the login bug`` — and the money/shell guards it gets from anchoring
-        (``$100``, a non-leading ``$research``) keep holding here unaltered.
-        Calling that method rather than re-resolving a body locally is what
-        keeps ONE answer to "what does an invocation expand to": the paste
-        splice into the request alone, the empty-body warning and the
+        A ``$skill`` ANYWHERE in the argument expands here, through the same
+        ``_expand_invocation`` the bare-prompt path uses: ``/team backend
+        $research fix the login bug`` and ``/team backend fix it $research`` are
+        the same gesture the composer already honours. The argument is its OWN
+        string, so the trigger scans exactly the text the user addressed to the
+        model and nothing before it. Calling that method rather than
+        re-resolving a body locally keeps ONE answer to "what does an invocation
+        expand to": the paste splice, the per-skill notices and the
         never-raises contract all live inside it.
         """
         images = resolve_markers(request, attachments or {})
@@ -20911,11 +21086,17 @@ class OperatorApp(App[None]):
         # expansion lands after — and it puts a human approval gate in a task
         # nothing awaits. If this ever needs TUI-side notices, the fix is making
         # this method async as its own refactor, not a task launched from here.
-        sent = self._expand_invocation(request, attachments)
-        # `row` mirrors `on_editor_submitted`: an invocation keeps the TYPED
-        # argument as its row (the body belongs in the payload, never the
-        # ledger), everything else shows the paste-expanded text.
-        row = request if sent is not None else expand_pastes(request, attachments or {})
+        # The surface's own scan region: the request tail is the whole string
+        # here, and its first token is leading — the ink computes the same
+        # region from the slash line (`skill_scan_region`), so `/team backend
+        # $RESEARCH` inks what submit fires.
+        region = skill_scan_region(request, argument=True)
+        expansion = self._expand_invocation(request, attachments, region=region)
+        # `row` mirrors `on_editor_submitted`: the argument with its pastes
+        # expanded, whether or not a skill attached. The body rides the payload
+        # only, and replay strips the block.
+        row = expansion.text if expansion is not None else expand_pastes(request, attachments or {})
+        sent = expansion.payload if expansion is not None else None
         # `typed=` keeps the naming split: the chip line names the thread, the
         # payload is what the model is sent.
         self._submit_prompt(row, images, attachments, sent=sent, typed=request)
@@ -22510,6 +22691,15 @@ class OperatorApp(App[None]):
         outcome = getattr(session, "mcp_startup", None)
         if outcome is None:
             return
+        # WHETHER THIS OUTCOME IS NEWS OR HISTORY — provenance, not connection
+        # state. `is_cold` answered the wrong question: the owner's first live
+        # snapshot is installed while the facade is still mid-bind
+        # (`_finish_sync` runs after an await), so a genuinely LIVE round read as
+        # cold, was labelled "last session", and its new failures were never
+        # announced (review round 2, MAJOR-2). The durable checkpoint's outcome
+        # arrives as ``RestoredMcpStartupOutcome``; every owner or in-process
+        # round is the base class, so the type IS the provenance.
+        restored = isinstance(outcome, RestoredMcpStartupOutcome)
         toast = self.query_one(Toast)
         payload = format_mcp_startup(outcome, max_cells=toast.content_cells)
         if payload is None:
@@ -22586,28 +22776,47 @@ class OperatorApp(App[None]):
                 # semantic lamp colour `format_mcp_startup` derived through the
                 # band's own rule.
                 before = toast.generation
-                toast.show(text, duration_ms=duration_ms, owner=MCP_STARTUP_TOAST_OWNER)
+                # A RESTORED round does not interrupt (review round 1,
+                # MINOR-1). The toast is this app's "this just happened"
+                # surface — it is one-shot, it takes the single courtesy slot,
+                # and on a cold open it announced yesterday's dead servers as
+                # breaking news even when no runtime would ever engage. Its
+                # content is already on screen as a durable row, worded as
+                # history; the interruption is what adds nothing. Nothing is
+                # recorded as told either, so the first LIVE round announcing
+                # the same servers still gets its card.
+                if not restored:
+                    toast.show(text, duration_ms=duration_ms, owner=MCP_STARTUP_TOAST_OWNER)
                 if toast.generation != before and toast.display:
                     announce = _McpAnnounce(sentence, toast.generation)
                     self._last_mcp_announce = announce
                     self._announced_mcp_startup[session_key] = announce
         if not outcome.failures:
             return
-        # No "server" in the wording: one failure key is ``discovery`` (the
-        # config layer itself), and "MCP server discovery failed" would name a
-        # server that does not exist. ``/mcp`` is named on the durable line
-        # because it is the standing answer and this is the surface with room to
-        # point at it — except when the failure text is already a ``/mcp``
-        # command, where the pointer is skipped instead of doubling the dash
-        # (design review D5).
         for name, error in sorted(outcome.failures.items()):
             notice_key = (session_key, name, str(error))
+            # ONE resolution of the column for this notice, used by the
+            # composition, the fold hint and the fit record below (see there).
+            column = self._mcp_notice_painted_column()
+            # THE LEDGER SAYS THIS SESSION ALREADY RECORDED THIS FAILURE, so this
+            # outcome CONFIRMS a row rather than reporting one, and the row is
+            # left EXACTLY AS PAINTED. It is not restated into the present tense:
+            # that edit frees thirteen cells (" last session"), and whenever it
+            # crosses a fold boundary the row changes height and the adaptive
+            # gap rule flips the next row's spacing — measured at 62, 90 and 110
+            # columns, the transcript lost two rows (review round 2, MAJOR-1).
+            # The history label stays true ("failed last session"), and the live
+            # news has its own surfaces: the toast and the status band, neither
+            # of which reflows the transcript.
+            #
+            # The KEY is consulted before the view, deliberately: a failure
+            # another session recorded is this session's to write (two
+            # conversations in one process legitimately show the same server),
+            # and a view that was rebuilt holds no rows at all — that gap is
+            # ``deferred`` in round 1's notes.
             if notice_key in self._mcp_failure_notices:
                 continue
             self._mcp_failure_notices.add(notice_key)
-            # ONE resolution of the column for this notice, used by both the
-            # composition and the fit record below (see there).
-            column = self._mcp_notice_painted_column()
             # The pointer is appended ONLY when the line does not already name
             # ``/mcp`` itself. The auth requirement leads with its own
             # ``/mcp reauth`` command, so appending "— /mcp for details" gave the
@@ -22618,9 +22827,18 @@ class OperatorApp(App[None]):
             # rather than an instruction; when the text is already the command,
             # the reader has the answer. WHICH form it takes is now a budget
             # question as well — see :meth:`_mcp_notice_line`.
+            # `fold_width=column` is the SAME resolution the sentence was
+            # fitted to, handed over because a notice wraps itself when it is
+            # built: without it the rows are authored at the 80-column fallback
+            # and paint at the wrong height for one frame, which the adaptive
+            # spacing rule turns into a blank line above every row and then takes
+            # back (QA round 1, Q1).
             block = self._system_notice_block(
-                self._mcp_notice_line(name, str(error), budget=NoticeBlock.body_budget(column)),
+                self._mcp_notice_line(
+                    name, str(error), budget=NoticeBlock.body_budget(column), restored=restored
+                ),
                 "error",
+                fold_width=column,
             )
             # What the ladder needs to re-run if the column moves, carried ON the
             # block — see ``NoticeBlock.mcp_failure_fit`` for why it is not a side
@@ -22629,9 +22847,39 @@ class OperatorApp(App[None]):
             # built let the two describe different columns if anything moved
             # between the calls (review round 4, R4-1).
             block.mcp_failure_fit = (name, str(error), column)
+            block.mcp_failure_history = restored
 
-    def _mcp_notice_line(self, name: str, error: str, *, budget: int | None = None) -> str:
+    def _mcp_failure_row(self, name: str, error: str) -> NoticeBlock | None:
+        """The row already on screen for ``(name, error)``, if there is one.
+
+        Identity comes from ``NoticeBlock.mcp_failure_fit``, which every MCP
+        failure row carries — the same field ``_refit_mcp_failure_notices`` reads
+        to re-run its ladder. Asking the VIEW rather than remembering the widget
+        is what keeps this honest across a rebuild: a view that was swapped out
+        holds no rows, and one that was built carries its own. Restricts to the
+        current transcript for the same reason every other removal does — another
+        conversation's rows are not this one's to restate.
+        """
+        for block in self._transcript_view().query(".notice-block"):
+            if not isinstance(block, NoticeBlock):
+                continue
+            fit = block.mcp_failure_fit
+            if fit is not None and fit[0] == name and fit[1] == error:
+                return block
+        return None
+
+    def _mcp_notice_line(
+        self, name: str, error: str, *, budget: int | None = None, restored: bool = False
+    ) -> str:
         """``MCP <name> failed: <error>`` plus its signpost, fitted to the column.
+
+        ``restored`` states the fact about the PREVIOUS runtime instead —
+        ``MCP <name> failed last session: <error>`` — because a checkpoint's
+        failure is not a claim about now. The same server can already be healthy
+        in the round that lands a moment later, and the unqualified sentence then
+        contradicts the live toast on the same screen (QA round 1, Q2). The tense
+        is part of the composed HEAD, so the signpost ladder and the width budget
+        run over it unchanged: one ladder, one budget, two voices.
 
         The pointer is the standing answer to "where do I read this properly?"
         and the one part of the line that must never be SPLIT: a wrapped
@@ -22674,7 +22922,11 @@ class OperatorApp(App[None]):
         """
         from rich.cells import cell_len
 
-        head = f"MCP {name} failed: {error}"
+        head = (
+            f"MCP {name} failed last session: {error}"
+            if restored
+            else f"MCP {name} failed: {error}"
+        )
         if "/mcp" in error:
             # The failure text is already the command (the auth family), so the
             # signpost would double the dash and spend cells saying it twice.
@@ -22685,7 +22937,11 @@ class OperatorApp(App[None]):
                 return head + pointer
         trimmed_error = _drop_trailing_parenthetical(error)
         if trimmed_error != error:
-            trimmed = f"MCP {name} failed: {trimmed_error}"
+            trimmed = (
+                f"MCP {name} failed last session: {trimmed_error}"
+                if restored
+                else f"MCP {name} failed: {trimmed_error}"
+            )
             if cell_len(trimmed + _MCP_NOTICE_POINTER_SHORT) <= budget:
                 return trimmed + _MCP_NOTICE_POINTER_SHORT
         return head
@@ -22802,8 +23058,16 @@ class OperatorApp(App[None]):
             if fit is None or fit[2] <= column:
                 continue
             name, error, _ = fit
+            # The TENSE travels with the row: re-fitting a projected "failed last
+            # session" line to a narrower column must not quietly turn it into a
+            # claim about now (QA round 1, Q2).
             block.restate(
-                self._mcp_notice_line(name, error, budget=NoticeBlock.body_budget(column)),
+                self._mcp_notice_line(
+                    name,
+                    error,
+                    budget=NoticeBlock.body_budget(column),
+                    restored=block.mcp_failure_history,
+                ),
                 "error",
             )
             block.mcp_failure_fit = (name, error, column)
@@ -25601,27 +25865,16 @@ class OperatorApp(App[None]):
         # fix, if it is ever wanted, is moving this expansion into a worker —
         # which disturbs the submit ORDERING this docstring calls load-bearing
         # and so deserves its own change, not a line in this one.
-        sent = self._expand_invocation(text, message.attachments)
-        # An INVOCATION keeps the typed line as its row; everything else shows
-        # the expanded text (design §2.5).
-        #
-        # §2.5's `text == sent` rule bought replay consistency for ordinary
-        # prompts, and it does not reach this path: `$skill` already has a
-        # display/sent split — `sent` is the rendered body, the row is the typed
-        # line, and `harness.rows.typed_line_of` exists to keep a resumed row
-        # from becoming
-        # the whole SKILL.md. Expanding the row here made live and REPLAY
-        # disagree for the paste case alone, because `render_invocation` records
-        # the typed line in the payload's `invocation=` attribute and replay
-        # repaints from that (review round 2, MAJOR-2).
-        #
-        # The attribute is deliberately NOT expanded to close it from the other
-        # side: it travels inside the payload the model receives, so a payload
-        # carrying the paste in both the request and the attribute would send it
-        # TWICE, on every turn of that message's life, to fix a transcript row.
-        # Showing the typed line instead makes paste and non-paste `$skill`
-        # behave identically and makes the two rows agree by construction.
-        row = text if sent is not None else expand_pastes(text, message.attachments)
+        expansion = self._expand_invocation(text, message.attachments)
+        # ONE row for both paths: the message with its collapsed pastes
+        # expanded. An attached skill adds a tail block to the PAYLOAD only, and
+        # `harness.rows.user_row_text` strips that block on replay — so live and
+        # resumed rows agree by construction, and the old `row = text if sent`
+        # branch (which existed only to keep an invocation's row off its body)
+        # is gone. The `typed=` split stays for the paste case: image labels and
+        # a failed-send hand-back must read the chip line, not the expanded log.
+        row = expansion.text if expansion is not None else expand_pastes(text, message.attachments)
+        sent = expansion.payload if expansion is not None else None
         source = self._interaction
         source.turn.submitted_draft = SessionDraft(
             text=message.text, attachments=dict(message.attachments)
@@ -34472,10 +34725,10 @@ class OperatorApp(App[None]):
 
         ``sent`` splits what the transcript SHOWS from what the model RECEIVES,
         for the one case where they legitimately differ: a ``$skill`` manual
-        invocation, whose row must stay the short line the user typed while the
-        model gets that line with the SKILL.md body prepended. ``None`` — every
-        other caller — means the two are the same string, which is the property
-        the echo registry depends on everywhere else.
+        invocation, whose row is the line the user typed while the model gets
+        that line with the skill bodies appended in an ``<operator-skills>`` tail
+        block. ``None`` — every other caller — means the two are the same string,
+        which is the property the echo registry depends on everywhere else.
 
         Everything DOWNSTREAM of the row takes ``sent``: the steer queue, the
         compaction hold, and the turn itself, because those are the paths whose
@@ -42563,7 +42816,9 @@ class OperatorApp(App[None]):
         """
         self._system_notice_block(body, kind)
 
-    def _system_notice_block(self, body: str, kind: NoticeKind = "info") -> NoticeBlock:
+    def _system_notice_block(
+        self, body: str, kind: NoticeKind = "info", *, fold_width: int = 0
+    ) -> NoticeBlock:
         """The same notice, handing back the block it created.
 
         One caller needs the block — the MCP failure notices re-run their signpost
@@ -42571,8 +42826,19 @@ class OperatorApp(App[None]):
         (``_refit_mcp_failure_notices``) — and that caller is a method on this app,
         so it calls this directly rather than widening the notice callback's type
         for every closure that produces nothing (review round 4, R4-5).
+
+        ``fold_width`` is the column this notice is ABOUT TO BE PAINTED IN, and
+        it has to come from the caller that resolved it: a notice wraps itself
+        when it is built, so a block authored without it folds at the 80-column
+        fallback and its ROW COUNT is pinned until ``on_resize`` lands a frame
+        later. That is not cosmetic here — the adaptive spacing rule asks whether
+        either neighbour ``spans_multiple_rows()``, so one frame of
+        narrow-authored rows puts a blank line above every one of them and the
+        next frame takes those rows (and the transcript's height) back. QA round
+        1, Q1 measured it on the real fixture: nine rows at ``[2,1,2,2,1,1,1,2,2]``
+        with ``gap-above`` on all of them, then all 1 row with one gap.
         """
-        block = NoticeBlock(body, kind)
+        block = NoticeBlock(body, kind, fold_width=fold_width)
         # While the boot CARD is up the notice is part of a centred composition;
         # below the card threshold the input is a full-width bar and the spine is
         # the axis everything shares. `_append_block` recomputes the boot layout
@@ -45443,7 +45709,17 @@ class OperatorApp(App[None]):
             # The session's model just moved, so the published access claim must
             # move with it: a typed `/model provider/id` is exactly the route
             # that can land on a provider this host has no credential for.
-            self._publish_model_access(session)
+            # OFF the Textual thread: the claim's credential read is a SQLite
+            # scan on the keystroke the user is waiting on (PR #3053, the same
+            # move the serving host makes for its own switch). This removes ONE
+            # of the two store reads on this keystroke, not both: the access
+            # note just below (``_model_access_note`` -> ``view_rows``) still
+            # scans on the UI thread, deliberately. Its answer is INLINE in the
+            # receipt line (`` · <provider> <state>``) printed in this same
+            # call, so taking it off-thread would split the receipt into a
+            # later second notice -- a user-visible receipt change this PR does
+            # not make (review round 2, R2-2).
+            self._publish_model_access_off_thread(session)
         suffix, warning = ("", None) if write_only else self._model_access_note(provider)
         if _rehome:
             # ONE STATEMENT OF THE MOVE (design round 1, D1). Everything below is
@@ -47557,6 +47833,47 @@ class OperatorApp(App[None]):
             )
         except Exception:
             logger.debug("model access publication failed", exc_info=True)
+
+    def _publish_model_access_off_thread(self, session: Any) -> None:
+        """:meth:`_publish_model_access` with the credential read on a worker thread.
+
+        WHY. A switch is the one edge where the user is watching the band, and
+        the claim's read (``usable_providers``, one SQLite scan) ran on the
+        Textual thread inside ``/model``. The read moves to a thread; the store
+        write comes back to the app loop, which owns the store.
+
+        STALE-RESULT GUARD, the same one the serving host applies
+        (``ServingSessionHandle._publish_model_access_off_loop``): the answer
+        is applied only if the session and its selector are still the ones it
+        was computed for, so a slow read cannot overwrite a newer switch's
+        claim. Equality of the selector, not identity of the switch, is the
+        invariant: the claim is a function of the selector and the store alone.
+
+        Falls back to the synchronous form when no app loop is running (a
+        reduced host), and never raises, like it.
+        """
+        store = getattr(session, "_frontend_state_store", None) if session is not None else None
+        if store is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._publish_model_access(session)
+            return
+        selector = self._current_selector()
+
+        async def publish() -> None:
+            try:
+                from local_operator.session.frontend_state import model_access_claim
+
+                usable = await asyncio.to_thread(self._usable_providers)
+                if self._session is not session or self._current_selector() != selector:
+                    return
+                store.refresh_model_access(model_access_claim(selector, usable))
+            except Exception:  # noqa: BLE001 — additive state never fails its edge
+                logger.debug("model access publication failed", exc_info=True)
+
+        self.run_worker(publish(), group="model-access-publish", exit_on_error=False)
 
     def _publish_model_catalogue(self, session: Any) -> None:
         """Push the owner's offerable models into canonical state (D3).
@@ -50968,7 +51285,10 @@ class OperatorApp(App[None]):
         # the character. Returned in `_close_aside`. BEFORE the aside
         # placeholder: leaving bang-mode restores the resting invitation,
         # which would overwrite `Ask the aside…` if this ran after.
-        editor.set_allows_shell(False)
+        # Bang-mode AND the skill expansion go off together: the aside's
+        # submit returns before both, so a `$name` in a question is literal
+        # text — say so in the ink too.
+        editor.set_aside_owns(True)
         editor.placeholder = ASIDE_PLACEHOLDER
         # The command list is borrowed too, and returned in `_close_aside`.
         # `on_editor_submitted` routes a slash-shaped line to the aside as a
@@ -51093,7 +51413,7 @@ class OperatorApp(App[None]):
         self._aside_draft = None
         self._aside_draft_images = {}
         editor = self._editor()
-        editor.set_allows_shell(True)
+        editor.set_aside_owns(False)
         # The stashed draft comes back into the mode it was typed in: a
         # half-typed `!` command returned to a composer that silently left
         # bang-mode would send the command to the model on the next Enter.
@@ -55850,9 +56170,9 @@ class OperatorApp(App[None]):
     def _discovered_skills(self) -> dict[str, Skill]:
         """Discovered skills by name, rescanned only when the tree changed.
 
-        Read on EVERY submit to decide whether a leading ``$`` is an
-        invocation, so a bare rescan here would put a 17-25 ms filesystem walk
-        on the keystroke path. A ``roots_fingerprint`` probe (~0.29 ms) gates
+        Read on EVERY submit to decide whether a ``$name`` is an invocation,
+        so a bare rescan here would put a 17-25 ms filesystem walk on the
+        keystroke path. A ``roots_fingerprint`` probe (~0.29 ms) gates
         it instead: the walk runs only when a ``SKILL.md`` was added or edited.
 
         It used to cache for the whole session, justified by the rule that a
@@ -55993,80 +56313,91 @@ class OperatorApp(App[None]):
         return result.sent
 
     def _expand_invocation(
-        self, text: str, attachments: Mapping[int, Marked] | None = None
-    ) -> str | None:
-        """Expand a leading ``$skill``, splicing pastes into the REQUEST only.
+        self,
+        text: str,
+        attachments: Mapping[int, Marked] | None = None,
+        *,
+        region: SkillScanRegion | None = None,
+    ) -> _SkillExpansion | None:
+        """Attach the skill bodies this message names, or ``None`` for prose.
 
-        ``None`` means "not an invocation, send the text unchanged" — the
-        answer for ordinary prose, for ``$100``, and for any ``$word`` that is
-        not a discovered skill name. The body is read through the SAME
-        ``skill://`` resolver the ``read`` tool uses, so a manual invocation
-        and an agent-initiated read return byte-identical content, reference
-        listing included.
+        ``None`` means "nothing fired, send the text unchanged" — the answer for
+        ordinary prose, for ``$100``, and for any ``$name`` that is not a
+        discovered skill. The trigger itself is
+        :func:`local_operator.sigils.skill_mentions`, called through
+        :func:`local_operator.skills.invoke.plan_attachments`, so this method and
+        the composer's ink cannot disagree about which token fires.
 
-        A body that cannot be read is not a silent failure: the notice says so
-        and the raw text goes through untouched, because swallowing the user's
-        request would be the worse half of the trade.
+        **The scan reads the TYPED text**, with collapsed pastes still chips;
+        the payloads are spliced into the whole message afterwards. Both halves
+        matter:
 
-        **The ORDER is the whole point** (design §2.6). ``parse_invocation``
-        reads the TYPED text — the chip line, pastes still collapsed — and the
-        payloads go in afterwards, into ``invocation.request`` alone. Two
-        consequences, both wanted:
+        - A collapsed paste stays inert. Expanding first would let a pasted
+          document that merely quotes ``$research`` attach a skill nobody asked
+          for — the reason the old parser read the typed line too.
+        - Expansion never reaches a SKILL.md body, because the bodies are read
+          after the splice and appended as their own block.
 
-        - A draft that STARTS with ``[Paste #1, …]`` is not an invocation, and
-          must not become one. Expanding first and parsing after would let a
-          pasted document whose first line reads ``$research …`` fire a skill
-          nobody asked for.
-        - Expansion never reaches the SKILL.md body. That is the mirror of the
-          image defect ``on_compaction_ended`` records (a ``[Image #N]`` inside
-          a body shifted the citation positions and sent the attachments in the
-          wrong order): scoping the splice to the request closes the same hole
-          by construction rather than by hoping bodies never contain
-          ``[Paste #N]``.
+        THE NOTICES ARE PER SKILL and the message always sends. An empty body or
+        an unreadable one is named, and the remaining skills still attach; when
+        none attach the text goes as written. Swallowing the request would be the
+        worse half of the trade (``_expand_references`` strikes the same
+        bargain). Both sentences are the ones this method has always used,
+        unchanged, now that a message can carry more than one skill.
 
-        ``SkillInvocation`` is a ``NamedTuple``, so the request is swapped with
-        ``_replace`` and every other field — ``typed`` above all, which is what
-        replay repaints the user's row from — rides through untouched. The
-        ``invocation=`` attribute ``typed`` feeds therefore keeps the CHIP, and
-        must: it travels INSIDE the payload the model receives, so expanding it
-        would send the paste twice on every turn of that message's life, to fix
-        a transcript row (review round 2, MAJOR-2). The live row is put back on
-        the typed line instead, which is what makes it agree with replay.
+        A body is read through the SAME ``skill://`` resolver the ``read`` tool
+        uses, so a manual invocation and an agent-initiated read return
+        byte-identical content, reference listing included.
 
-        ``attachments`` is optional because a caller with no composer map behind
-        it still has a well-defined answer: nothing resolves, and the text goes
-        through as written.
+        ``region`` is the SURFACE gate computed by
+        :func:`command_picker.skill_scan_region` — the argument tail for a
+        `/team`-style command, the whole text otherwise. The main submit path
+        does not pass one because its own control flow has already established
+        that this is a plain prompt; the argument path passes the region it was
+        handed, so the ink and the expansion read the same slice.
         """
         skills = self._discovered_skills()
         if not skills:
             return None
         try:
-            from local_operator.skills.invoke import parse_invocation, render_invocation
-            from local_operator.skills.protocol import resolve_skill_url
-
-            invocation = parse_invocation(text, skills)
-            if invocation is None:
-                return None
-            invocation = invocation._replace(
-                request=expand_pastes(invocation.request, attachments or {})
+            from local_operator.skills.invoke import (
+                plan_attachments,
+                render_skill_block,
             )
-            body = resolve_skill_url(f"skill://{invocation.skill.name}", skills)
-            if not _skill_body_has_content(body):
-                # NOT a silent fall-through. Returning None here sends the raw
-                # `$research fix it` line as prose while the row on screen
-                # still reads like an invocation, so the user believes the
-                # skill fired and the model never saw it. An empty SKILL.md is
-                # the realistic cause (a stub someone has not written yet).
-                self._notice(
-                    f"skill `{invocation.skill.name}` has an empty body — sending your "
-                    "message as written",
-                    "warning",
-                )
-                return None
-            return render_invocation(invocation, body)
-        except Exception as exc:
+            from local_operator.skills.protocol import resolve_skill_url
+        except Exception as exc:  # noqa: BLE001 — send prose rather than nothing
             self._notice(f"could not load skill: {exc}", "warning")
             return None
+        segment = text if region is None else text[region.start : region.end]
+        planned = plan_attachments(segment, skills)
+        if not planned:
+            return None
+        entries: list[tuple[str, str]] = []
+        for attachment in planned:
+            name = attachment.skill.name
+            try:
+                body = resolve_skill_url(f"skill://{name}", skills)
+            except Exception as exc:  # noqa: BLE001 — one skill, not the message
+                self._notice(f"could not load skill: {exc}", "warning")
+                continue
+            if not _skill_body_has_content(body):
+                # NOT a silent fall-through. Skipping this body while sending
+                # the rest is right; skipping it in silence is not, because the
+                # row on screen reads like an invocation and the user would
+                # believe the skill fired.
+                self._notice(
+                    f"skill `{name}` has an empty body — sending your message as written",
+                    "warning",
+                )
+                continue
+            entries.append((name, body))
+        if not entries:
+            return None
+        return _SkillExpansion(
+            text=expand_pastes(text, attachments or {}),
+            skills=tuple(name for name, _ in entries),
+            block=render_skill_block(entries),
+        )
 
     def _skills_block(self) -> RichBlock | None:
         """Graceful introspection of the skills stream (exception-safe).
