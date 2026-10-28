@@ -917,10 +917,19 @@ def _stop_task(config_dir: Path) -> ServiceOutcome | None:
     a word it does not know). Failing on that alone made Turn off and ``receiver
     remove`` fail permanently on a non-English Windows whose receiver was idle —
     the "cannot turn it off" state this command exists to prevent. The decision
-    is therefore made on EVIDENCE, in this order: a positively idle task needs no
-    ``/End``; a failed ``/End`` is re-checked, and the connector's own singleton
-    lock (language-independent) decides whether anything is still running. Only
-    a receiver that is provably still alive fails the stop.
+    is therefore made on EVIDENCE, in this order: a positively idle
+    task needs no ``/End``; a failed ``/End`` is re-checked, and a POSITIVELY
+    RUNNING task fails the stop outright; only an UNREADABLE status falls back to
+    the connector's own singleton lock (language-independent).
+
+    The lock probe's residual, stated here rather than discovered later: it cannot
+    distinguish "no receiver" from "a receiver that has not yet taken the lock"
+    (one waiting for its first owner resolution, ``__main__``). Trusting it is
+    still the right call for the unreadable case — the alternative reinstates a
+    permanent Turn-off failure on every non-English Windows — and it takes three
+    conditions at once to be wrong: an unrecognised status word, a failed
+    ``/End``, and a receiver parked before its lock. The ``running is True``
+    verdict above is what keeps the ordinary case exact.
     """
 
     registered, running, detail = supervisors.task_state(task_name(), runner=_schtasks)
