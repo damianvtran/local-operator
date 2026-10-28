@@ -10020,6 +10020,98 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 -- nor does failing to schedule it
             logger.debug("viewer watch signal could not be scheduled", exc_info=True)
 
+    def _reconcile_retained_history(
+        self, incoming: SessionPresentation, history: list[Any]
+    ) -> bool:
+        """Bring a retained view up to ``history`` by identity; False if it cannot.
+
+        Called from the commit when the session reports more messages than the
+        view was prepared from. That count gap is two different things, and
+        only the ids can tell them apart:
+
+        - rows APPENDED after the newest row the view knows — a turn that
+          finished while the conversation was parked. They are new, below the
+          tail, and painted now, exactly as the old slice did;
+        - rows OLDER than the oldest row the view knows — the canonical history
+          an excerpt never held (the saved-preview facade's 120-message window,
+          later replaced by the full journal on the same facade). They are not
+          new and must never be painted below the tail; they join the front of
+          ``_resume_pending_head``, where the scroll-up pages and the resume
+          fill already reach them one bounded page at a time, with the
+          reader's anchor held by the ordinary page insert.
+
+        "Knows" is mounted OR pending: the pending head and tail are part of the
+        view's window even though they are not painted yet, and treating them
+        as unknown would queue those rows twice. A view windowed around a saved
+        anchor (``_resume_pending_tail`` non-empty) is not AT the tail, so its
+        appended rows join the end of that pending tail for the forward pages
+        rather than being painted below the anchor's window.
+
+        Returns False — the caller then re-projects one screenful from scratch
+        — when the view cannot be reconciled in place: no known row is in the
+        window at all (a different history), more rows were appended than a
+        screenful (the retained tail is no longer anywhere near the tail, and
+        painting them all is the unbounded synchronous projection this exists
+        to prevent), or older rows surfaced on a view that never deferred any
+        and so carries no head notice to page them from.
+        """
+        pending_ids = {
+            str(getattr(message, "id", ""))
+            for message in (*self._resume_pending_head, *self._resume_pending_tail)
+            if getattr(message, "id", None)
+        }
+        known = self._resume_mounted_ids | pending_ids
+        positions = [
+            index
+            for index, message in enumerate(history)
+            if getattr(message, "id", None) and str(message.id) in known
+        ]
+        if not positions:
+            return False
+        appended = history[positions[-1] + 1 :]
+        if len(appended) > _viewport_message_budget(self.size.height):
+            return False
+        older = history[: positions[0]]
+        if older and self._resume_head_notice is None:
+            return False
+        if older:
+            self._resume_pending_head = older + self._resume_pending_head
+            # Pair the deferred calls with their results the way a fetched
+            # older page does (`_fetch_older_display_page`): a page projects
+            # its tool calls against `_resume_results`, not against the rows
+            # it happens to carry.
+            for message in older:
+                if getattr(message, "role", "") == "tool" and getattr(
+                    message, "tool_call_id", None
+                ):
+                    self._resume_results[message.tool_call_id] = message
+        if appended and self._resume_pending_tail:
+            self._resume_pending_tail = self._resume_pending_tail + appended
+        elif appended:
+            self._project_settled_rows(appended)
+        return True
+
+    def _reproject_retained_view(self, incoming: SessionPresentation, history: list[Any]) -> None:
+        """Discard a retained view and project one screenful of ``history`` afresh.
+
+        The bounded fallback for a retained view that no longer matches its
+        session (a compaction/recovery rewrote rows, or
+        `_reconcile_retained_history` could not reconcile it in place). The
+        ordinary /clear hook is bypassed because it would settle this source's
+        gates; everything older than the screenful is left in the pending head
+        for the scroll-up pages.
+        """
+        incoming.replay.view.set_on_clear(None)
+        incoming.replay.view.clear_blocks()
+        incoming.replay.view.set_on_clear(self._on_transcript_cleared)
+        self._resume_pending_head = []
+        self._resume_pending_tail = []
+        self._resume_results = {}
+        self._resume_mounted_ids.clear()
+        self._resume_head_notice = None
+        self._resume_tail_notice = None
+        self._project_settled_rows(history, bound=_viewport_message_budget(self.size.height))
+
     def _commit_sidebar_session(
         self,
         session_id: str,
@@ -10273,23 +10365,25 @@ class OperatorApp(App[None]):
             history = session.display_history_window()
             total = session.history_message_count
             if total > incoming.history_size:
-                self._project_settled_rows(history[-(total - incoming.history_size) :])
+                # NOT `history[-(total - history_size):]`. That slice reads the
+                # count difference as "rows appended since the view was
+                # prepared", and the count is the wrong unit whenever the
+                # facade's notion of its history changed shape in between: a
+                # view prepared on the saved-preview facade records the
+                # 120-message excerpt, and the same facade later binds the full
+                # journal. Measured on the recheck rig (TUI-RECHECK.md,
+                # attr-main-1/3): history_size 120 against 27,001 messages, a
+                # "delta" of 26,881 that held ALL 51 mounted rows and ended on
+                # the row the view already showed last — projected
+                # synchronously, 20,148 blocks, 25-30 s before the first frame,
+                # and painted below the tail. The retained view's own ids are
+                # the only honest reference, so the reconciliation is by them.
+                if not self._reconcile_retained_history(incoming, history):
+                    self._reproject_retained_view(incoming, history)
             elif total < incoming.history_size:
                 # A compaction/recovery changed the snapshot while its widgets
-                # were preparing. Reconcile the viewport without invoking the
-                # ordinary /clear hook, which would settle this source's gates.
-                incoming.replay.view.set_on_clear(None)
-                incoming.replay.view.clear_blocks()
-                incoming.replay.view.set_on_clear(self._on_transcript_cleared)
-                self._resume_pending_head = []
-                self._resume_pending_tail = []
-                self._resume_results = {}
-                self._resume_mounted_ids.clear()
-                self._resume_head_notice = None
-                self._resume_tail_notice = None
-                self._project_settled_rows(
-                    history, bound=_viewport_message_budget(self.size.height)
-                )
+                # were preparing.
+                self._reproject_retained_view(incoming, history)
             if incoming.needs_live_projection and self._controller is not None:
                 self._controller.restore_live_projection(
                     session.frontend_state, self._resume_mounted_ids, set(self._resume_results)
