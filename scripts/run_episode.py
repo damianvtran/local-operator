@@ -1200,11 +1200,11 @@ async def _run_session_arm(
     MUST: MCP discovery is cwd-scoped).
     """
 
+    from local_operator.evaluation.runner.guards import progress_guards
     from local_operator.evaluation.session_arm import EPISODE_TOOL_SURFACE
     from local_operator.evaluation.session_arm import (
         _outcome_json as _session_outcome_json,
     )
-    from local_operator.evaluation.runner.guards import progress_guards
     from local_operator.evaluation.session_arm import run_session_episode
 
     # SOURCE-PIN PREFLIGHT (blueprint §4), BEFORE any launch or allocation:
@@ -1316,7 +1316,7 @@ async def _run_session_arm(
         # stated residual holes.
         confinement_root=world,
         owner_status=owner_status,
-        progress_guards=progress_guards() if args.progress_guards else None,
+        progress_guards=progress_guards() if getattr(args, "progress_guards", False) else None,
     )
     if owner_status is not None:
         # The TERMINAL phase is written only here, after the outcome exists
@@ -1886,7 +1886,9 @@ async def run(
     except (ValueError, argparse.ArgumentTypeError) as error:
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
-    if args.progress_guards and args.engagement != "session":
+    # ``getattr``: programmatic callers hand in a hand-built Namespace (the
+    # owned-process tests do), and an absent flag means the default, off.
+    if getattr(args, "progress_guards", False) and args.engagement != "session":
         # The reply arm ALWAYS runs these guards (``default_guards``); accepting
         # the flag there would read as a switch it does not have.
         print("--progress-guards applies only to --engagement session", file=sys.stderr)
@@ -2045,7 +2047,8 @@ async def run(
             # the completion gate it changes how an episode can END, so a score
             # must carry it; the reply arm always runs them. Stamped
             # unconditionally for the same lost-stamp reason.
-            "progress_guards": bool(args.progress_guards) or args.engagement != "session",
+            "progress_guards": bool(getattr(args, "progress_guards", False))
+            or args.engagement != "session",
             # The effort the decisions were made at, beside the route they were
             # made on. A score is not comparable across effort levels, and the
             # published numbers this run is read against are at maximum effort,

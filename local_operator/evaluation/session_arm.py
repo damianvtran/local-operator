@@ -3143,9 +3143,7 @@ async def run_session_episode(
                 # stopping call's result still pairs before the cancel is read.
                 progress_stop_sent = True
                 if handle is not None:
-                    handle.session.request_graceful_cancel(
-                        bridge.end_diagnostic or "no progress"
-                    )
+                    handle.session.request_graceful_cancel(bridge.end_diagnostic or "no progress")
             # CLOSE GUEST ADMISSION AT THE BUDGET, not one decision later
             # (blueprint §3): the moment the tool result that consumed the Nth
             # admitted output epoch is PAIRED into the transcript, request the

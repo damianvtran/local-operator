@@ -41,10 +41,7 @@ from local_operator.evaluation.runner.guards import (
     RepeatedBatchGuard,
     progress_guards,
 )
-from local_operator.evaluation.session_arm import (
-    PROGRESS_STOP_ACK,
-    ActionBridge,
-)
+from local_operator.evaluation.session_arm import PROGRESS_STOP_ACK, ActionBridge
 from local_operator.harness.types import TextContent
 from tests.unit.evaluation.runner.conftest import build_spec
 
@@ -110,8 +107,8 @@ class _World:
 
 def _bridge(
     tmp_path: Path, world: _World, *, guards: Any = None, max_steps: int = 60
-) -> tuple[ActionBridge, list[tuple[str, dict[str, Any]]]]:
-    records: list[tuple[str, dict[str, Any]]] = []
+) -> tuple[ActionBridge, list[tuple[str, Any]]]:
+    records: list[tuple[str, Any]] = []
     bridge = ActionBridge(
         endpoint=tmp_path / "b.sock",
         surface=ActionSurface(),

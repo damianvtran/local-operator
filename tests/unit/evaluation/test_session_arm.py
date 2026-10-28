@@ -4399,9 +4399,7 @@ class TestTheStreamCompletedStopBoundary:
                 if sequence == 0:
                     return draft
                 fixed = draft.model_copy(update={"text": "frozen", "observation_id": "p"})
-                return fixed.model_copy(
-                    update={"observation_id": observation_content_id(fixed)}
-                )
+                return fixed.model_copy(update={"observation_id": observation_content_id(fixed)})
 
             monkeypatch.setattr(runner_fakes, "observation", frozen_observation)
         original = clients_mod.client_for_spec
@@ -4548,7 +4546,10 @@ class TestTheStreamCompletedStopBoundary:
         assert text.count("tool_execution_end") == 2  # both paired
 
     #: The task030 shape on the REAL stack: one no-op chord per turn, forever.
-    _NOOP_CALL = ("mcp__episode_actions_apply_actions", {"actions": [{"kind": "key", "keys": ["ctrl", "l"]}]})
+    _NOOP_CALL = (
+        "mcp__episode_actions_apply_actions",
+        {"actions": [{"kind": "key", "keys": ["ctrl", "l"]}]},
+    )
 
     @pytest.mark.asyncio
     async def test_progress_guards_stop_a_frozen_repeat_on_the_real_stack(
