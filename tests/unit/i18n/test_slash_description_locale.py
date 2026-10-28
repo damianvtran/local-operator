@@ -113,8 +113,9 @@ def test_the_registry_refreshes_in_place_when_the_locale_moves() -> None:
         assert SLASH_COMMANDS is registry
         assert _spec("help").description == HELP_FR
         # The message stayed put; only the rendered sentence moved.
-        assert _spec("help").description_message is not None
-        assert _spec("help").description_message.code.endswith("help")
+        moved = _spec("help").description_message
+        assert moved is not None
+        assert moved.code == "wire.slash.help"
     finally:
         set_active_locale("en")
     assert _spec("help").description == HELP_EN
