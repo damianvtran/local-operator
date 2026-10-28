@@ -125,8 +125,9 @@ def decide_cache_ttl(
     ``main_min_context_tokens`` is ``providers.anthropic.cache_ttl_1h_min_context_tokens``:
     the API-key / overage main-thread size threshold. Its ``0`` is the global
     "no 1h" switch: it turns the subscription main thread's 1h off AND the
-    subagent after-long-call rule below, so an operator who set it before
-    either existed does not start paying 2x writes. ``subagent_min_context_tokens``
+    subagent after-long-call rule below (an explicit subagent size opt-in
+    still applies), so an operator who set it before either existed does not
+    start paying 2x writes. ``subagent_min_context_tokens``
     is ``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens``, the
     subagent SIZE gate only (0 = no size opt-in; it does not switch off the
     after-long-call rule). ``context_size`` is called only when a size gate

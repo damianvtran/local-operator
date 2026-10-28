@@ -821,7 +821,8 @@ DEFAULT_CONFIG = Config(
             # AND the subagent after-long-call rule (a subscription subagent
             # moves to 1h after one of its turns streamed >= 240 s, because
             # that call outlived its own 5m prefix; see
-            # `SUBAGENT_LONG_CALL_1H_THRESHOLD_S`).
+            # `SUBAGENT_LONG_CALL_1H_THRESHOLD_S`). An explicit subagent size
+            # opt-in (the key below) still applies.
             #
             # `providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`:
             # the same size gate for DELEGATED turns (subagents), on any
