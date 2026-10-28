@@ -735,8 +735,13 @@ def test_cli_install_is_the_shared_sync_and_never_enrols(linux, capsys, monkeypa
     code = tb_cli.main(_cli(["team-bridge", "receiver", "install"]))
     out = capsys.readouterr().out
     assert code == 1
-    assert "nothing was installed" in out and "/login radient" in out
-    assert "team_bridge.enabled true" in out
+    # The way forward is the APP, not a terminal (round 4: consent is UI-only),
+    # so the hint names the app and then this group's own readiness check. The
+    # old copy told the user to run a terminal consent command, which no longer
+    # exists.
+    assert "nothing was installed" in out
+    assert "enable Agent messages" in out and "lop team-bridge setup" in out
+    assert "/login radient" not in out
     assert not _unit(home).exists() and fake.calls == []
     assert Store(root).active_owner_readonly() is None, "install enrolled silently"
 
