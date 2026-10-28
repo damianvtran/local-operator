@@ -235,12 +235,38 @@ jobs:
             exit 1
           fi
 
+      # PYPI'S 10 GB PROJECT CAP. 0.90.17 cost ~59 MB on PyPI (two ~20 MB wheels
+      # plus a ~19 MB sdist) and v0.90.18/19 were refused with `400 Project size
+      # too large`. Two cuts, both here so every downstream job sees the final shape:
+      # the wheel's comments are stripped (verified AST- and line-identical, fails
+      # closed), and the sdist leaves the PyPI artifact for the GitHub Release —
+      # nothing installs it from PyPI (the updater, the desktop app and the install
+      # scripts take wheels only). The bundle/extension checks above ran on the
+      # unslimmed wheel; slimming touches only *.py members, and smoke_wheel and
+      # keyagent-macos below consume the slim wheel.
+      - name: Slim the wheel and split off the sdist
+        if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
+        run: |
+          set -euo pipefail
+          python scripts/slim_wheel.py dist/local_operator-*-py3-none-any.whl
+          mkdir -p sdist
+          mv dist/*.tar.gz sdist/
+          python scripts/check_dist_size.py --wheels-only dist/
+
       - name: Upload distributions
         if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
         uses: actions/upload-artifact@v7
         with:
           name: release-dists
           path: dist/
+
+      - name: Upload the sdist for the GitHub Release
+        if: ${{ steps.tag-check.outputs.skip_build == 'false' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-sdist
+          path: sdist/*.tar.gz
+          if-no-files-found: error
 
   # Gate the EXACT artifact that will be uploaded: install the release wheel in
   # a throwaway venv per interpreter, import the server app from the installed
@@ -606,13 +632,22 @@ jobs:
                   )
           print(f"{path}: bundle present, helper mode 755, universal2 {archs}")
           PY
+          # The same per-wheel budget as the pure wheel (PyPI's project cap; see
+          # scripts/check_dist_size.py). This wheel is the slim pure wheel plus the
+          # helper bundle, so it is the one that crosses the line first.
+          # --wheels-only here and in release-build, not in pypi-publish: these are
+          # the two artifacts the publisher downloads, and the publisher runs no
+          # repository code (see the note on its steps).
+          mkdir -p "$RUNNER_TEMP/macos-dist"
+          cp "$MACOS_WHEEL" "$RUNNER_TEMP/macos-dist/"
+          python3 scripts/check_dist_size.py --wheels-only "$RUNNER_TEMP/macos-dist"
 
       - name: Upload the macOS distribution
         uses: actions/upload-artifact@v7
         with:
           # A separate artefact from the pure one, and only the macOS wheel in it:
-          # `release-dists` already carries the sdist, and re-uploading it would
-          # publish the same file twice.
+          # `release-dists` already carries the pure wheel, and re-uploading it
+          # would publish the same file twice.
           name: release-dists-macos
           path: dist/local_operator-*-py3-none-macosx_*.whl
 
@@ -689,6 +724,12 @@ jobs:
       name: pypi
 
     steps:
+      # NO CHECKOUT AND NO REPOSITORY CODE IN THIS JOB, on purpose: it is the only
+      # one holding `id-token: write` and the `pypi` environment, and PyPA advises
+      # keeping the trusted-publishing job to download + upload
+      # (pypa/gh-action-pypi-publish#237). The budget and wheels-only checks run
+      # upstream on the same artifacts (release-build, keyagent-macos); the shell
+      # check below re-asserts the final shape with nothing but coreutils.
       - name: Retrieve release distributions
         uses: actions/download-artifact@v8
         with:
@@ -701,12 +742,30 @@ jobs:
           name: release-dists-macos
           path: dist/
 
+      # The last gate before an irreversible upload: exactly what PyPI will store
+      # is two wheels (pure + macOS) and NO sdist — it lives on the GitHub Release
+      # (`sdist-release`), off the 10 GB project quota. Any non-dotfile that is not
+      # a wheel fails, not only *.tar.gz, matching check_dist_size.py --wheels-only.
+      - name: Assert the upload is exactly two wheels
+        run: |
+          set -euo pipefail
+          ls -l dist/
+          others="$(find dist -maxdepth 1 -type f ! -name '.*' ! -name '*.whl')"
+          if [ -n "$others" ]; then
+            echo "::error::refusing to upload non-wheel files to PyPI: $others"
+            exit 1
+          fi
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 2 || {
+            echo "::error::expected exactly two wheels (pure + macOS) in dist/"
+            exit 1
+          }
+
       - name: Publish release distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
           # PEP 740 attestations, for every platform rather than only for macOS
-          # users who need the key agent: the pure wheel and the sdist get one
+          # users who need the key agent: the pure wheel gets one
           # too, so `pip`/`uv` users on Linux and Windows can audit where their
           # bytes came from.
           #
@@ -731,6 +790,36 @@ jobs:
           # astral-sh/uv#9122), so this is audit evidence rather than an
           # install-time guarantee — stated plainly rather than implied.
           attestations: true
+
+  # THE SDIST LIVES ON THE GITHUB RELEASE, NOT ON PYPI. PyPI's 10 GB project cap
+  # was reached at ~59 MB per release (v0.90.18/19 refused), and the ~19 MB sdist
+  # was a third of that while nothing installs it from PyPI: the updater, the
+  # desktop app and scripts/install.{sh,ps1} take wheels, the Dockerfile builds
+  # from the tree. Attaching it here keeps the full-source, comment-intact
+  # distribution auditable and buildable from the Release, off the PyPI quota.
+  #
+  # Gated like every publisher (tests/unit/test_publish_workflow.py): a manual
+  # dispatch has no Release to attach to. It does NOT wait for pypi-publish: the
+  # source archive is valid whether or not the upload succeeds.
+  sdist-release:
+    needs: [release-build]
+    if: ${{ github.event_name == 'release' && needs.release-build.result == 'success' && needs.release-build.outputs.skip_build == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # upload the sdist as a release asset
+    steps:
+      - name: Retrieve the sdist
+        uses: actions/download-artifact@v8
+        with:
+          name: release-sdist
+          path: sdist/
+
+      - name: Attach the sdist to the GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: sdist/*.tar.gz
+          fail_on_unmatched_files: true
 
   # The upload is irreversible, so this is the ALERT rather than a gate: it runs
   # only after `pypi-publish` succeeded, installs the release from the real
