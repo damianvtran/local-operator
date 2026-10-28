@@ -13,7 +13,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from local_operator.network import approvals, identity, onboard_approvals, store
 from local_operator.network.credentials import consent, finite_journal, placement
@@ -23,9 +23,44 @@ OP = "credential_finite_share"
 STEP = "credential_finite_share"
 
 
+#: The EXACT payload key set a finite share carries, and the exact top-level ``what`` keys.
+#: ONE definition read by both :func:`disclosure` and :func:`_apply` (#3070 review r3,
+#: R3-1): disclosure used to read only the fields it names, so an approver signed a digest
+#: covering an extra, never-shown field that apply refused only afterwards.
+_FIELDS = frozenset(
+    {
+        "owner_device",
+        "network_id",
+        "recipient_device",
+        "public_key_fingerprint",
+        "key",
+        "scope",
+        "denies",
+        "policy_revision",
+        "guard",
+    }
+)
+_WHAT = frozenset({OP, "anchor"})
+
+
 def intent(record: dict[str, Any]) -> dict[str, Any] | None:
     what = record.get("what")
     return what.get(OP) if isinstance(what, dict) and isinstance(what.get(OP), dict) else None
+
+
+def exact_shape(record: Mapping[str, Any]) -> bool:
+    """True only for the EXACT shape this flow mints: ``what`` is ``{OP, "anchor"}`` and
+    the payload carries exactly :data:`_FIELDS`.
+
+    The ONE key-set predicate behind :func:`disclosure`, :func:`_apply` and the generic
+    approvers' refusal (``approval_ops.finite_generic_refusal``), so none of them can
+    accept a record another would refuse. Values are validated by each consumer.
+    """
+    what = record.get("what")
+    data = intent(dict(record))
+    return (
+        data is not None and isinstance(what, dict) and set(what) == _WHAT and set(data) == _FIELDS
+    )
 
 
 def _recipient_label(record: dict[str, Any], data: dict[str, Any]) -> str:
@@ -78,6 +113,12 @@ def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
     data = intent(record)
     if data is None:
         return None
+    # Never sign what this build cannot state. The signature binds the WHOLE record, so a
+    # field the disclosure does not show -- an extra payload key, or a sibling of the op
+    # under ``what`` -- would be signed blind. Same key sets as _apply, so the two cannot
+    # disagree about which records are describable.
+    if not exact_shape(record):
+        consent.refuse("finite_disclosure_invalid")
     try:
         for name in ("owner_device", "network_id", "recipient_device"):
             store.safe_component(data[name])
@@ -606,33 +647,11 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None)
             "Request a new exact finite-share approval; no install or connection ran.",
         )
     data = intent(source)
-    if data is None or set(source.get("what", {})) != {OP, "anchor"}:
+    if data is None or set(source.get("what", {})) != _WHAT:
         consent.refuse("finite_intent_missing")
-    consent._exact(
-        data,
-        {
-            "owner_device",
-            "network_id",
-            "recipient_device",
-            "public_key_fingerprint",
-            "key",
-            "scope",
-            "denies",
-            "policy_revision",
-            "guard",
-        },
-        {
-            "owner_device",
-            "network_id",
-            "recipient_device",
-            "public_key_fingerprint",
-            "key",
-            "scope",
-            "denies",
-            "policy_revision",
-            "guard",
-        },
-    )
+    # The SAME key sets disclosure() refuses on (exact_shape): apply can never accept a
+    # payload the approver was not shown, nor disclosure state one apply would reject.
+    consent._exact(data, set(_FIELDS), set(_FIELDS))
     for field in ("owner_device", "network_id", "recipient_device", "key", "scope"):
         if data[field] != expected.get(field):
             consent.refuse("finite_subject_mismatch")

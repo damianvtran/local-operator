@@ -335,7 +335,10 @@ def finite_generic_refusal(record: Mapping[str, Any], approval_id: str) -> MeshR
     what = record.get("what")
     if not isinstance(what, dict) or _finite.OP not in what:
         return None
-    if _finite.intent(dict(record)) is None or set(what) != {_finite.OP, "anchor"}:
+    # ``exact_shape`` is the predicate disclosure and apply share (#3070 r3, R3-1): an extra
+    # payload field is as undisclosable as an extra ``what`` key, so it is refused here too
+    # rather than sent to a CLI that would then refuse it with a different answer.
+    if not _finite.exact_shape(record):
         return MeshRefusal(
             "finite_disclosure_invalid",
             "The finite-share request is not the exact typed shape this build can "
