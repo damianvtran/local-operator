@@ -56,11 +56,30 @@ account; a replacement account cannot inherit a retry.
 
 This capability covers create, send/retry, join, read/notification policy,
 consent, admit, archive/unarchive, member add/remove and leave. It does not
-claim to protect the existing GET/list/body read surfaces. Threads and reactions
-are absent from this base runtime. Feature PRs #2757 and #2760 must independently
-adopt the same captured-owner and explicit-target contract for their mutations
-before claiming compatible coverage; the capability is not an automatic guard
-on a future endpoint.
+claim to protect the existing GET/list/body read surfaces. The capability is
+not an automatic guard on a future endpoint.
+
+## Threads and reactions: REQUIRED receipts
+
+`team_bridge_threads: 1` and `team_bridge_reactions: 1` advertise the thread
+read and the human reaction routes, and each key PROMISES the same atomic
+captured-owner guard. Unlike the optional receipt above, these routes REQUIRE it:
+no shipped renderer called them before the guard existed (the desktop UI held
+both surfaces closed for exactly this reason), so there is no legacy caller to
+stay compatible with, and an optional guard regresses the first time a caller
+forgets it.
+
+| Desktop operation | Receipt location | Capability |
+| --- | --- | --- |
+| GET conversations/{id}/messages/{message}/replies | Query | `team_bridge_threads` |
+| POST conversations/{id}/messages with `thread_root_id` (reply) | JSON object (optional, as above) | `team_bridge_threads` |
+| PUT conversations/{id}/messages/{message}/reactions/{emoji} | JSON object | `team_bridge_reactions` |
+| DELETE conversations/{id}/messages/{message}/reactions/{emoji} | Query | `team_bridge_reactions` |
+
+An absent, blank, repeated or malformed `expected_account_id` or `tenant_id`
+on the replies read or either reaction route is refused (422) before any
+messaging-service request; a mismatched owner is `409 account_mismatch`, also
+with no request. A new renderer still sends the receipt on threaded sends.
 
 ## Validation boundaries
 

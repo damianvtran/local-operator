@@ -415,10 +415,34 @@ def static_feature_flags() -> dict[str, Any]:
         # (including retry), join/read+notify/consent/admit, archive/unarchive,
         # member add/remove and leave. New renderers require this capability AND
         # supply expected_account_id + explicit target tenant_id on every write.
-        # Legacy omission remains compatible. Threads/reactions are not present
-        # in this runtime: feature branches must adopt the same guard before
-        # advertising their mutations alongside this capability.
+        # Legacy omission remains compatible on THESE routes. The thread and
+        # reaction routes are covered by their own keys below, where the receipt
+        # is REQUIRED rather than optional.
         "team_bridge_conversation_owner_guard": 1,
+        # THREADS: `GET .../conversations/{id}/messages/{message_id}/replies`
+        # (read one thread) plus `thread_root_id` on the guarded send above.
+        # The replies read REQUIRES the captured-owner receipt
+        # (`expected_account_id` + explicit `tenant_id`), compared atomically
+        # against the exact dispatch bearer, and answers `409 account_mismatch`
+        # when the machine has since signed in as someone else: a thread read
+        # (or a delayed retry of one) started as account A can never answer B's
+        # thread. The UI held threads closed until this guard existed
+        # (`TEAM_BRIDGE_THREADS_SHIPPED_IN_THIS_BUILD`, the #1304 cache/retry
+        # isolation defects), so this key PROMISES the guard, not only the
+        # route: never advertise it on a build whose replies read accepts a
+        # receipt-less call. `test_conversation_owner_guard.py` pins that pair.
+        # Its own key by the `radient_org` rule: a renderer that does not see it
+        # mounts no thread affordance and sends no thread request.
+        "team_bridge_threads": 1,
+        # REACTIONS: `PUT`/`DELETE .../messages/{message_id}/reactions/{emoji}`,
+        # the signed-in HUMAN's reaction only (no actor endpoint on this plane).
+        # Both REQUIRE the captured-owner receipt (PUT in the body, DELETE in
+        # the query) under the same atomic compare and the same coded refusal.
+        # Same promise as threads: this key means "reaction routes exist AND
+        # they refuse an unguarded or mismatched call", never route presence
+        # alone, because the UI's reaction hold was lifted on exactly that
+        # condition. A renderer that does not see it shows no reaction controls.
+        "team_bridge_reactions": 1,
         # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
         # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
         # #221, where the signed-in owner reads every conversation their own
