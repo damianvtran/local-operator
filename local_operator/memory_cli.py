@@ -305,6 +305,8 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
     # A receipt stores the stable device id; the name is resolved here, at the one
     # place both the human renderer and `--json` read, so a failing peer is a
     # machine an operator can recognise rather than an opaque 32-hex token.
+    from local_operator.memory_maintenance import last_auto_pass
+
     peers = peer_status(root)
     for peer in peers:
         peer["name"] = _device_name(str(peer.get("device") or ""), root)
@@ -331,6 +333,9 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
         # automatic forget, so they must be visible) and B5's recall telemetry.
         "capture": capture_status(store),
         "recall": store.recall_summary(),
+        # JSON-only for now: the newest UNATTENDED compaction, so an operator
+        # can confirm the automatic pass is running (`lop memory status --json`).
+        "maintenance": {"last_auto_pass": last_auto_pass(root)},
         "limits": (
             "Shape guards are heuristic: they catch recognized sensitive patterns, not every "
             "secret. Unrecognized secrets can still be stored and journaled — keep values in "

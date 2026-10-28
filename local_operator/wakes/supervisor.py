@@ -185,6 +185,13 @@ RESIDENCY_SWEEP_INTERVAL_S = 300.0
 #: never keep the supervisor resident.
 TRIGGER_EVAL_INTERVAL_S = 300.0
 
+#: How often the supervisor reads the memory maintenance gate (see
+#: :class:`_MemoryMaintenanceSeat`). The pass itself runs at most every 6 h
+#: (``memory_maintenance.PASS_INTERVAL_S``); between runs a tick is one stamp
+#: read, so an hour keeps that negligible while a store that crossed a
+#: threshold is compacted within the hour once its interval has passed.
+MEMORY_MAINTENANCE_INTERVAL_S = 3600.0
+
 #: How often the machine memory pass runs (see :class:`_MachineMemorySweep`).
 #:
 #: WHY NOT THE RESIDENCY CADENCE (300 s): that pass forks two external tools and
@@ -1951,6 +1958,83 @@ class _Sweeper:
         return launched
 
 
+class _MemoryMaintenanceSeat:
+    """The memory store's maintenance pass's seat: cadence and detached task only.
+
+    The pass lives in :mod:`local_operator.memory_maintenance` (journal
+    compaction plus capture expiry). It is seated HERE beside
+    :class:`_MachineMemorySweep` because this is the one long-lived process
+    beside every runtime: a ``journal_plan`` loads every op (measured +212 MB
+    RSS), which is fine once per machine and not fine once per session.
+
+    **IT DOES NOT BOUND THE SLEEP**, for :class:`_TriggerSweep`'s reason: the possibility of a
+    compaction must never keep the supervisor resident. Each session runtime offers the same pass
+    once at boot for the hours this process is retired (one-shot commands deliberately do not). The
+    pass gates itself (6 h interval, cross-process lock), so this cadence only decides how often the
+    cheap gate is read.
+
+    **THE PASS IS DETACHED, ON A WORKER THREAD**, and bounded by its own 60 s
+    timeout; a pass already in flight is left alone and a failing one is a
+    warning, never a crash path for the wake loop.
+    """
+
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = config_dir
+        #: ``None`` until the first pass, so a fresh supervisor reads the gate at once.
+        self.next_at: float | None = None
+        self._task: "asyncio.Task[Any] | None" = None
+
+    def seconds_until(self, now: float | None = None) -> float:
+        moment = time.monotonic() if now is None else now
+        if self.next_at is None:
+            return 0.0
+        return max(0.0, self.next_at - moment)
+
+    def due(self, now: float | None = None) -> bool:
+        return self.seconds_until(now) <= 0.0
+
+    def kick(self) -> None:
+        """Start a pass if one is due, WITHOUT holding this loop for it."""
+        if self._task is not None and not self._task.done():
+            return
+        if not self.due():
+            return
+        self.next_at = time.monotonic() + MEMORY_MAINTENANCE_INTERVAL_S
+        self._task = asyncio.ensure_future(asyncio.to_thread(self.sweep))
+        self._task.add_done_callback(self._finished)
+
+    def sweep(self) -> dict[str, Any]:
+        """One gated pass. Blocking; the import is deferred like the other seats'."""
+        from local_operator.memory_maintenance import run_pass
+
+        return run_pass(self.config_dir)
+
+    def _finished(self, task: "asyncio.Task[Any]") -> None:
+        """Log a finished pass. Never raises out of a done-callback."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("the memory maintenance pass failed", exc_info=error)
+            return
+        report = task.result()
+        status = report.get("status") if isinstance(report, dict) else None
+        (logger.info if status in ("ran", "timeout", "failed") else logger.debug)(
+            "memory maintenance: %s", report
+        )
+
+    async def shutdown(self) -> None:
+        """Drop an in-flight pass on the way out.
+
+        Cancelling stops the LOOP waiting; it does not stop the worker thread,
+        which runs to completion and commits (Python cannot interrupt a thread
+        inside SQLite) while holding the pass's lock. Only if the process exits
+        first does SQLite roll back its open transaction.
+        """
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+
+
 class _TriggerSweep:
     """The trigger pass's seat: the throttle, the detached task, nothing else.
 
@@ -2459,6 +2543,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     triggers_seat = _TriggerSweep(config_dir)
     residency = _ResidencySweep(config_dir)
     memory_sweep = _MachineMemorySweep(config_dir)
+    store_maintenance = _MemoryMaintenanceSeat(config_dir)
     rescue_seat = _RescueSweep(config_dir)
     primary_error: BaseException | None = None
     try:
@@ -2591,6 +2676,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # operator — so it is rate-limited by its own cooldown and silent
             # while the machine is healthy.
             memory_sweep.kick()
+            # THE MEMORY STORE'S MAINTENANCE PASS RIDES HERE TOO: it compacts the
+            # memory journal and expires captured candidates (see
+            # :class:`_MemoryMaintenanceSeat`). Unattended and gated by its own
+            # 6 h interval and lock, so nothing here waits on it, and it does not
+            # bound the sleep below.
+            store_maintenance.kick()
             # THE RESCUE PASS RIDES THE SAME POSITION, for a third reason: it
             # SPAWNS a runtime for a session whose last one died involuntarily,
             # and spawning is not wake work — nothing this iteration read is
@@ -2625,7 +2716,14 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
         cleanup_errors: list[BaseException] = []
         # Every seat is joined even when a sibling cleanup fails. Keep both the
         # actual primary and cleanup errors; never convert fail-stop to success.
-        for seat in (residency, memory_sweep, rescue_seat, triggers_seat, sweeper):
+        for seat in (
+            residency,
+            memory_sweep,
+            store_maintenance,
+            rescue_seat,
+            triggers_seat,
+            sweeper,
+        ):
             try:
                 await seat.shutdown()
             except BaseException as cleanup_error:

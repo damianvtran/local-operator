@@ -5572,6 +5572,21 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # as well; the answer would be "no control surface", and this path's
     # behaviour on a dead socket is what it always was.
     await runtime.wait_until_published()
+    # THE MEMORY STORE'S MAINTENANCE IS OFFERED HERE, once per runtime, after the
+    # record is published so it never sits inside the window a viewer waits on.
+    # A runtime is the long-lived host a one-shot command is not: the pass (plan
+    # +212 MB, up to 60 s) finishes here instead of being killed at exit, which
+    # is why ``lop exec``/``lop memory status`` do not offer it (PR #3057 QA
+    # round 1, Q1/Q2). The wake supervisor is the primary seat; this covers the
+    # hours it is retired. The pass gates itself (6 h interval, cross-process
+    # lock), so most runtime starts cost one stamp read on a daemon thread.
+    try:
+        from local_operator.memory_maintenance import start_background
+        from local_operator.paths import config_dir as _memory_config_dir
+
+        start_background(_memory_config_dir())
+    except Exception:  # noqa: BLE001 — housekeeping never fails a runtime boot
+        logger.debug("memory maintenance offer could not start", exc_info=True)
 
     # `SIGUSR1` is POSIX-only, so the debug dump is installed only where the
     # constant exists — an unguarded `signal.SIGUSR1` is an AttributeError that
