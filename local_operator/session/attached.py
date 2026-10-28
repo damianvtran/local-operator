@@ -1076,6 +1076,104 @@ class _DeferredHistory:
         self.selection = selection
 
 
+#: The state fields a SAVED conversation may paint from a stored row. A
+#: WHITELIST, deliberately, and the opposite of the field-by-field clearing this
+#: started as: a blacklist silently admits every field a later release adds, and
+#: the two that slipped past the first cut were a `paused` job surviving a
+#: ``{"running", "queued"}`` filter while its siblings were dropped, and
+#: ``asks_open``/``asks_truncated`` surviving after ``asks`` was cleared (review
+#: round 1, R3). Everything not named here is reset to its declared default, so a
+#: field added tomorrow is excluded until someone opts it in.
+_SAVED_FACT_FIELDS = frozenset(
+    {
+        # Who and where the conversation is.
+        "session_id",
+        "cwd",
+        "conversation_title",
+        "conversation_title_forked",
+        "conversation_title_user_set",
+        # Which model answers, and the dials that chose it.
+        "selected_model",
+        "effective_model",
+        "active_agent",
+        "active_team",
+        "effective_identity",
+        # What it has spent and how full its window is — the checkpoint's own
+        # turn-end copy, all of it historical.
+        "last_usage",
+        "usage_components",
+        "context_tokens",
+        "context_is_estimate",
+        "context_window",
+        "context_breakdown",
+        "cumulative_parent_cost",
+        "child_costs",
+        "subagent_cost",
+        "subagent_cost_knowledge",
+        "cost_knowledge",
+        "spend_channels",
+        "current_turn_accrued_cost",
+        "active_duration_s",
+        # The plan, the settled roster, the schedules and the tool roster.
+        "todos",
+        "jobs",
+        "wakes",
+        "monitors",
+        "mcp_servers",
+        "mcp_startup",
+        "loop",
+        "slash_capabilities",
+        "model_catalogue",
+        "model_catalogue_truncated",
+        "goal",
+        "goal_status",
+    }
+)
+
+#: Job states a stored row may carry. A child the previous runtime left RUNNING is
+#: not evidence that anything runs now, and ``paused``/``queued`` are that
+#: runtime's live scheduling facts, so only settled rows cross.
+_SAVED_JOB_STATES = frozenset({"completed", "failed", "cancelled", "interrupted", "restored"})
+
+
+def _saved_facts_only(state: Any, session_id: str) -> dict[str, Any]:
+    """The update dict that turns a stored row into a display snapshot.
+
+    Built by walking the model's OWN fields, so it is exhaustive by construction
+    rather than by a list someone remembered to extend: every field outside
+    :data:`_SAVED_FACT_FIELDS` goes back to its declared default, which is what
+    clears the turn indicator, the live-activity clock, the steering queue, the
+    attention receipt, the peer display records, the ask queue AND its
+    ``asks_open``/``asks_truncated`` counters, the pending gate and the live tool
+    ledger in one place. ``epoch``/``sequence`` are re-stamped so this snapshot can
+    never be mistaken for the runtime that wrote the row, and a fork's inherited
+    identity is folded in exactly as the runtime's own restore folds it
+    (``_inherited_identity_fixups``).
+
+    ``jobs`` survives the walk only through :data:`_SAVED_JOB_STATES`, so the dock's
+    subagent panel cannot claim a child is running before the owner binds.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        _inherited_identity_fixups,
+    )
+
+    update: dict[str, Any] = {"epoch": f"saved-facts-{session_id}", "sequence": 0}
+    for name, field in FrontendSessionState.model_fields.items():
+        if name in _SAVED_FACT_FIELDS or name in {"epoch", "sequence"}:
+            # `epoch`/`sequence` have no default — they are re-stamped above,
+            # never restored, which is the whole point of them.
+            continue
+        update[name] = field.get_default(call_default_factory=True)
+    update.update(_inherited_identity_fixups(state, session_id))
+    update["jobs"] = [
+        job
+        for job in getattr(state, "jobs", [])
+        if str(getattr(job, "status", "")) in _SAVED_JOB_STATES
+    ]
+    return update
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -1897,48 +1995,24 @@ class AttachedSession:
         the bound frame has 26, then trimmed the history it had painted).
 
         So the caller hands over the newest state the journal — or this process's
-        last bound frame — already holds, and this installs its DISPLAY facts.
-        Everything that would assert LIVE AUTHORITY or a live side effect is
-        cleared here rather than trusted from a row a previous runtime wrote:
-        the turn is not running, nothing is queued for steering, no gate is
-        pending, no child is running and no attention receipt stands. ``epoch``
-        is re-stamped, so this is a display snapshot and never a claim to be the
-        runtime that wrote the row; the owner's own install replaces it wholesale
-        on the bind. A state naming a DIFFERENT session (a fork's inherited row)
-        keeps its durable facts and takes this session's identity, exactly as the
-        runtime's own restore does (``_inherited_identity_fixups``).
+        last bound frame — already holds, and this installs its DISPLAY facts
+        only: :func:`_saved_facts_only` rebuilds the snapshot from a WHITELIST of
+        durable fields and resets every other field of the model to its declared
+        default. That is what clears live authority — the turn indicator, the
+        activity clock, the steering queue, the gate, the ask queue and its
+        counters, the attention receipt and every child that is not settled — and
+        it does so exhaustively rather than by a list of names that would silently
+        admit the next live field someone adds. ``epoch``/``sequence`` are
+        re-stamped, so this can never be read as the runtime that wrote the row;
+        the owner's own install replaces it wholesale on the bind. A state naming
+        a DIFFERENT session (a fork's inherited row) keeps its durable facts and
+        takes this session's identity, exactly as the runtime's own restore does
+        (``_inherited_identity_fixups``).
 
         Never raises: a cosmetic install must not be able to fail an open.
         """
-        from local_operator.session.frontend_state import _inherited_identity_fixups
-
         try:
-            shown = state.model_copy(
-                update={
-                    "epoch": f"saved-facts-{self._session_id}",
-                    "sequence": 0,
-                    "streaming": False,
-                    "activity_started_at": None,
-                    "activity_phase": "",
-                    "activity_phase_started_at": None,
-                    "live_tool_started_at": {},
-                    "live_events": [],
-                    "queued_steering": [],
-                    "attention": {},
-                    "peer_cycle_display": None,
-                    "asks": None,
-                    "pending_gate": None,
-                    "jobs": [
-                        job
-                        for job in getattr(state, "jobs", [])
-                        # NEVER a child claiming LIVE execution: a stored row
-                        # cannot vouch that something is running now. Settled
-                        # rows (completed, failed) are durable display facts.
-                        if str(getattr(job, "status", "")) not in {"running", "queued"}
-                    ],
-                    **_inherited_identity_fixups(state, self._session_id),
-                }
-            )
+            shown = state.model_copy(update=_saved_facts_only(state, self._session_id))
             self._install_frontend(shown)
         except Exception:  # noqa: BLE001 — a cosmetic install never fails an open
             logger.debug("saved facts not installed on the preview facade", exc_info=True)

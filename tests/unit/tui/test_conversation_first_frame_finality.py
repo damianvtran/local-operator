@@ -24,7 +24,10 @@ a production predicate agreeing with itself.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+from rich.cells import cell_len
 from unittest.mock import patch
 
 import pytest
@@ -209,8 +212,8 @@ def _segments(row: str) -> list[tuple[int, str]]:
     return [(m.start(), m.group()) for m in re.finditer(r"\S+", row)]
 
 
-def _frames(width: int) -> tuple[str, str, str]:
-    """``(last_known, bound, starting)`` rows of one band at ``width``."""
+def _frames(width: int) -> tuple[str, str]:
+    """``(last_known, bound)`` rows of one band at ``width``, same facts."""
     status = _band(width)
     status.update(connection="Saved excerpt · Connecting…")
     status.set_connecting(True)
@@ -219,55 +222,102 @@ def _frames(width: int) -> tuple[str, str, str]:
     status.update(connection="")
     status.set_connecting(False)
     status.set_last_known(False)
-    bound = status.render_text(width).plain
-    status.set_starting(True)
-    starting = status.render_text(width).plain
-    return first, bound, starting
+    return first, status.render_text(width).plain
 
 
-@pytest.mark.parametrize("width", [60, 80, 90, 100, 120, 156, 200])
-def test_the_last_known_slot_costs_exactly_what_a_bring_up_costs(width: int, monkeypatch) -> None:
-    """D2 constraint (2): no worse than the indicator an ordinary bring-up shows.
+@pytest.mark.parametrize("width", [60, 80, 90, 100, 120, 156, 160, 200])
+def test_every_non_slot_segment_sits_where_the_bound_frame_puts_it(width: int) -> None:
+    """Design round 1, D2 + review round 1, R5, as one arithmetic assertion.
 
-    The bar the operator set for the connecting slot: whatever the bind moves,
-    it must be no more than what the band already moves when ``starting…``
-    clears today. Pinned as the strongest form of that: at EVERY width the
-    last-known row is the ``starting…`` row with only the caption swapped — the
-    same ladder rungs shed, the same title cut, every column identical — so the
-    bind reproduces the existing bring-up transition and nothing beyond it.
+    The liveness slot is reserved in BOTH frames (`_LIVENESS_SLOT_CELLS`), so
+    the last-known row and the bound row must agree cell for cell outside the
+    slot itself: same segments, same columns, same title cut, same right-group
+    figures — which is what stops the bind re-laying out facts that did not
+    change. Reserved in one frame only, the 80-column cell moved the context
+    figure 12 cells and the title's cut grew 16 -> 28.
     """
+    first, bound = _frames(width)
+    # The caption rides the gap ONLY where the bound row was not going to use
+    # those cells (`_LIVENESS_SLOT_CELLS`): reserving them in every frame would
+    # shed a figure on every band forever, which the three suites that assert the
+    # name and its siblings keep every spare cell forbid. Where it does not fit,
+    # the hollow glyph and the ink carry the state and the geometry is still
+    # identical — which is the property this test exists for.
+    has_caption = "connecting…" in first
+    assert has_caption or width <= 120, (width, first)
+    # The hollow model glyph is the SECOND sanctioned difference (the marker),
+    # one cell in place of the solid twin, so normalise it before comparing.
+    first = first.replace("◇", "◆", 1)
+    slot_at = first.index("connecting…") if has_caption else len(first)
+    slot_end = slot_at + len("connecting…") if has_caption else len(first)
+
+    def segments(row: str) -> list[tuple[int, str]]:
+        """Non-space runs with their column, the slot's own run removed."""
+        out = []
+        for match in re.finditer(r"\S+", row):
+            start = match.start()
+            if slot_at <= start < slot_end:
+                continue
+            out.append((start if start < slot_at else start - (slot_end - slot_at), match.group()))
+        return out
+
+    assert segments(first) == segments(bound), (first, bound)
+    # Identical INK (every non-space character, the slot's own word aside) at
+    # identical positions: no segment was shed in one frame and kept in the
+    # other, and the title's cut is the same number of cells — which is what
+    # pins every right-group column.
+    assert "".join(first.split()).replace("connecting…", "") == "".join(bound.split()), (
+        first,
+        bound,
+    )
+    # And the total width is the same, so the row still fits its one-row box.
+    assert cell_len(first.rstrip()) == cell_len(bound.rstrip())
+    assert has_caption or width <= 120
+
+
+def test_the_last_known_row_is_marked_and_clears_the_contrast_floor(monkeypatch) -> None:
+    """Design round 1, D1: AA-clear ink, and a marker that colour cannot carry.
+
+    `dim` measured 4.18:1 on the dark band ground and 3.46:1 on the light one —
+    under the 4.5:1 floor this codebase re-solves tokens for — so every seeded
+    value takes `muted` (measured 7.93:1 / 6.58:1 in the same table and
+    re-derived here from the theme module). And because the BOUND frame already
+    paints `◷ 12h52m` in `dim`, the ink cannot say "unconfirmed" on its own, so
+    the model glyph swaps to the hollow twin: one cell, so nothing moves.
+    """
+    from local_operator.tui import theme as theme_mod
+
     monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
-    first, _bound, starting = _frames(width)
-    assert "Saved excerpt" not in first, "the stored facts were withheld"
-    # Shimmer off: `starting…` draws its glyph (it always spells out), the
-    # last-known caption draws none, so the slot is `⣾ starting…` (11 cells)
-    # against `connecting…` (11 cells). Swapping one for the other must give
-    # the identical row.
-    glyph_starting = next(part for part in starting.split(" › ") if "starting…" in part)
-    slot_starting = glyph_starting.split("    ")[0]
-    assert first.replace("connecting…", slot_starting, 1) == starting, (first, starting)
+    first, bound = _frames(160)
+    assert "connecting…" in first, first
+    assert first.startswith("◇ "), first
+    assert bound.startswith("◆ "), bound
+    assert first.index("◇") == bound.index("◆"), "the marker must not move the row"
 
+    def ratio(fg: str, bg: str) -> float:
+        def lum(value: str) -> float:
+            value = value.lstrip("#")
+            parts = [int(value[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+            lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in parts]
+            return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
 
-@pytest.mark.parametrize("width", [156, 160, 200])
-def test_where_the_slot_fits_the_bind_moves_only_the_slot_and_the_title_cut(width: int) -> None:
-    """D2 constraint (3): at widths where nothing is shed for the slot.
+        high, low = sorted((lum(fg), lum(bg)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
 
-    Every left-group segment and every right-group figure sits at the same
-    column with the same text in the last-known and the bound frame; the only
-    differences are the slot itself and how many title cells the right group
-    gets. (Below these widths the slot sheds a rung exactly as ``starting…``
-    does — the test above.) 160 is the capture rig's terminal.
-    """
-    first, bound, _starting = _frames(width)
-    slot_at = first.index("connecting…")
-    assert [s for s in _segments(first) if s[0] < slot_at - 2] == [
-        s for s in _segments(bound) if s[0] < slot_at - 2
-    ], (first, bound)
-
-    def right(row: str) -> list[str]:
-        return [part.strip() for part in row.split("    ")[-1].split("‹")[:-1]]
-
-    assert right(first) == right(bound), (first, bound)
+    theme_mod.set_theme("dark")
+    dark = ratio(theme_mod.semantic_color("muted"), theme_mod.semantic_color("surface"))
+    theme_mod.set_theme("light")
+    light = ratio(theme_mod.semantic_color("muted"), theme_mod.semantic_color("surface"))
+    theme_mod.set_theme("dark")
+    assert dark >= 4.5 and light >= 4.5, (dark, light)
+    # And the ink the last-known row actually uses is that one, not `dim`.
+    status = _band(160)
+    status.update(connection="Saved excerpt · Connecting…", model_label="test/model")
+    status.set_last_known(True)
+    row = status.render_text(160)
+    inks = {str(span.style.color) for span in row.spans if span.style and span.style.color}
+    dim_ink = str(theme_mod.semantic_color("dim"))
+    assert dim_ink not in inks, ("a last-known value is still painted dim", inks)
 
 
 def test_last_known_never_shows_live_authority() -> None:
@@ -545,3 +595,202 @@ async def test_the_connect_refresh_keeps_a_group_the_reader_opened() -> None:
     assert shown_after, "the refresh formed no groups"
     for key, facts in shown_after.items():
         assert shown_before.get(key) == facts, (key, shown_before.get(key), facts)
+
+
+# -- live authority never comes from a stored row (review round 1, R1 + R3) -----------
+
+
+def _authority_rich_state(session_id: str) -> FrontendSessionState:
+    """A stored row carrying every live-authority field a saved open must drop."""
+    from local_operator.session.frontend_state import (
+        JobState,
+        PendingAskState,
+        PendingGateState,
+        TodoPhaseState,
+    )
+
+    return FrontendSessionState(
+        session_id=session_id,
+        epoch="previous-runtime",
+        sequence=99,
+        selected_model=FrontendModelSpec(provider="openrouter", model_id="deepseek/x"),
+        effective_model=FrontendModelSpec(provider="openrouter", model_id="deepseek/x"),
+        cumulative_parent_cost=4.5,
+        context_tokens=1000,
+        context_window=200_000,
+        conversation_title="A stored title",
+        # -- everything below is LIVE authority the saved frame must never assert
+        streaming=True,
+        activity_started_at=1234.5,
+        activity_phase="tool",
+        live_tool_started_at={"call-1": 99.0},
+        live_events=[{"kind": "tool_start"}],
+        queued_steering=[{"text": "queued"}],
+        attention={"completion_token": "tok", "anchor_id": "a1"},
+        peer_cycle_display={"records": [{"x": 1}]},
+        asks=[
+            PendingAskState.model_validate(
+                {"ask_id": "q1", "question": "?", "options": [], "status": "open"}
+            )
+        ],
+        asks_open=1,
+        asks_truncated=False,
+        pending_gate=PendingGateState.model_validate(
+            {"kind": "approval", "request_id": "g1", "title": "Run it?"}
+        ),
+        jobs=[
+            JobState(id="running-child", type="task", status="running", label="live"),
+            JobState(id="paused-child", type="task", status="paused", label="held"),
+            JobState(id="queued-child", type="task", status="queued", label="waiting"),
+            JobState(id="settled-child", type="task", status="completed", label="done"),
+        ],
+        todos=[TodoPhaseState.model_validate({"name": "Todos", "items": [{"text": "step"}]})],
+    )
+
+
+def _saved_snapshot(session_id: str = "saved-open") -> FrontendSessionState:
+    from local_operator.session.attached import _saved_facts_only
+
+    state = _authority_rich_state(session_id)
+    return state.model_copy(update=_saved_facts_only(state, session_id))
+
+
+def test_a_saved_open_asserts_no_live_authority() -> None:
+    """R1: deleting a clearing line must fail THIS test, not 19 others.
+
+    The first cut of `install_saved_facts` cleared live fields one by one and no
+    test noticed when `"streaming": False` or `"attention": {}` was removed. The
+    filter is now a whitelist walk over the model's own fields, so this asserts
+    the CONSEQUENCE for every live field the row can carry — including the two
+    that slipped past a blacklist (`asks_open`/`asks_truncated`, and a `paused`
+    child) — rather than sampling two of them.
+    """
+    shown = _saved_snapshot()
+    # The turn is not running and nothing is on screen from the old runtime.
+    assert shown.streaming is False
+    assert shown.activity_started_at is None
+    assert shown.activity_phase == ""
+    assert shown.live_tool_started_at == {}
+    assert shown.live_events == []
+    assert shown.queued_steering == []
+    assert shown.attention == {}
+    assert shown.peer_cycle_display is None
+    # No gate, no ask queue, and no ask COUNTERS standing in for one.
+    assert shown.pending_gate is None
+    assert shown.asks is None
+    assert shown.asks_open in (None, 0)
+    assert shown.asks_truncated in (None, False)
+    # The roster keeps settled children only: running, queued and paused are
+    # live scheduling facts of the runtime that wrote the row.
+    assert [job.id for job in shown.jobs] == ["settled-child"]
+    # And the durable facts it exists to paint are all still here.
+    assert shown.conversation_title == "A stored title"
+    assert shown.cumulative_parent_cost == 4.5
+    assert shown.context_tokens == 1000
+    assert [phase.name for phase in shown.todos] == ["Todos"]
+    assert shown.epoch == "saved-facts-saved-open" and shown.sequence == 0
+
+
+def test_the_whitelist_is_what_excludes_a_field_nobody_listed(monkeypatch) -> None:
+    """A field added tomorrow is excluded until someone opts it in.
+
+    The property the whitelist buys, asserted directly: clearing is driven by
+    `FrontendSessionState.model_fields`, so a field that is neither whitelisted
+    nor cleared by name still comes back as its declared default.
+    """
+    from local_operator.session import attached as attached_mod
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    for name in ("streaming", "attention", "asks_open", "pending_gate"):
+        assert name not in attached_mod._SAVED_FACT_FIELDS
+    shown = _saved_snapshot()
+    for name, field in FrontendSessionState.model_fields.items():
+        if name in attached_mod._SAVED_FACT_FIELDS:
+            continue
+        default = field.get_default(call_default_factory=True)
+        assert getattr(shown, name) == default or name in {
+            "epoch",
+            "sequence",
+            "jobs",
+            "session_id",
+        }, (
+            f"{name} kept a stored value it was not whitelisted for",
+            getattr(shown, name),
+            default,
+        )
+
+
+@pytest.mark.asyncio
+async def test_enter_on_a_focused_group_bar_expands_it() -> None:
+    """The real-app expand route QA needs (their `enter` left `groups_open = 0`).
+
+    `QuietGroupBlock` is a focus stop with `Binding("enter", "activate")`, but
+    Enter only reaches it when the BAR has focus — with the composer focused the
+    same key sends a message instead, which is what a rig that presses `enter`
+    without focusing first will measure. So the route is: focus the bar, then
+    press Enter (a click on the bar is the mouse equivalent, `on_click` ->
+    `activate`).
+    """
+    from local_operator.tui.widgets.transcript import QuietGroupBlock
+
+    target = _grouped_conversation("focus-session")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home-session")))
+    with (
+        patch("local_operator.session.attached.AttachedSession", SidebarRemote),
+        patch("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8),
+    ):
+        async with app.run_test(size=(160, 48)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+            await _switch_bound(app, pilot, target)
+            for _ in range(30):
+                await pilot.pause()
+            bars = [b for b in app._transcript_view().blocks() if isinstance(b, QuietGroupBlock)]
+            assert bars and not bars[-1].expanded
+            bars[-1].focus()
+            await pilot.pause()
+            assert app.focused is bars[-1], "the bar did not take focus"
+            await pilot.press("enter")
+            for _ in range(6):
+                await pilot.pause()
+            assert bars[-1].expanded, "enter on the focused bar did not expand it"
+
+
+@pytest.mark.asyncio
+async def test_an_anchored_view_takes_older_rows_instead_of_reprojecting() -> None:
+    """Q2: a saved anchor mid-history must not be thrown away by the bind.
+
+    `_reconcile_retained_history` declined whenever older rows surfaced and the
+    view carried no head notice — but a view windowed around a saved anchor has
+    deferred rows FORWARD (`_resume_pending_tail`), which is the case its own
+    docstring excludes ("never deferred any"). The refusal re-projected from
+    scratch, one frame after the reader saw the mounted window: measured by QA as
+    80 blocks/scroll 221 -> 51/61 with 24 rendered lines moved. Asserted on the
+    predicate itself, both directions, so the relaxation cannot silently widen.
+    """
+    target = _planned_conversation("anchored-session", 60, todos=2)
+    app = OperatorApp(lambda: _factory(SidebarRemote("home-session")))
+    with (
+        patch("local_operator.session.attached.AttachedSession", SidebarRemote),
+        patch("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8),
+    ):
+        async with app.run_test(size=(160, 48)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+            await _switch_bound(app, pilot, target)
+            for _ in range(30):
+                await pilot.pause()
+            history = list(app._session.display_history_window())
+            older = [_message("user", "an older row the window did not hold")]
+            older[0].id = "older-row"
+            # A view anchored mid-history: rows deferred FORWARD, no head notice.
+            app._resume_pending_tail = [history[-1]]
+            app._resume_head_notice = None
+            assert app._reconcile_retained_history([*older, *history]) is True
+            # Same rows, but nothing deferred anywhere: still a refusal, which is
+            # the case the decline exists for. The head buffer the call above
+            # filled is cleared first, or those rows count as known and `older`
+            # comes back empty for the wrong reason.
+            app._resume_pending_head = []
+            app._resume_pending_tail = []
+            assert app._reconcile_retained_history([*older, *history]) is False

@@ -10136,7 +10136,17 @@ class OperatorApp(App[None]):
         if len(appended) > _viewport_message_budget(self.size.height):
             return False
         older = history[: positions[0]]
-        if older and self._resume_head_notice is None:
+        # A view that deferred rows FORWARD (a saved anchor mid-history, pages
+        # still to come below it) is the one case where older rows can be taken on
+        # the chin: they join the head buffer and the existing scroll-up pages
+        # reach them, exactly as they do for a view that already carries the head
+        # notice. Declining here re-projected from scratch and threw away the
+        # reader's mounted window one frame after they saw it — measured on the
+        # bench's eligible fixture as 80 blocks/scroll 221 -> 51/61, 24 rendered
+        # lines moved (QA round 1, Q2). The clause this replaces was written as
+        # "never deferred any", which is literally `pending_tail` empty; testing
+        # only the notice made it fire on the anchored view that HAD deferred.
+        if older and self._resume_head_notice is None and not self._resume_pending_tail:
             return False
         if older:
             self._resume_pending_head = older + self._resume_pending_head
@@ -10957,15 +10967,16 @@ class OperatorApp(App[None]):
         So for exactly the ordinary connecting state — not a verdict (failed,
         stopped, answer-the-question), which keeps its whole-row sentence — the
         band is put in its last-known mode: the ordinary ladder row, every value
-        in the dim ink, and the connecting word in the indicator slot. The
-        VALUES are the facade's own state, which
-        `AttachedSession.install_saved_facts` has already filled with the same
-        durable facts the bound frame will paint, so widths and truncation match
-        it by construction rather than by a second copy of the mapping. Live
-        authority never comes from that row: it is cleared on install
-        (``streaming``, the gate, the queues, the child roster, the attention
-        receipt). The bind's own snapshot then replaces all of it, and the mode
-        clears on the same call with ``connecting`` False.
+        in the AA-clear `muted` ink with the hollow model glyph, and the
+        connecting word in the reserved liveness slot. This method paints NO
+        facts of its own: the values are the facade's own state, which
+        `AttachedSession.install_saved_facts` filled at lease time with the same
+        durable facts the bound frame paints, so widths and truncation agree by
+        construction rather than by a second copy of the mapping. What that
+        install cleared, and what therefore cannot reach the band from here, is
+        live authority — see its docstring, which is the one place the field list
+        lives. The bind's own snapshot replaces all of it, and the mode clears on
+        the same call with ``connecting`` False.
 
         A conversation with no stored state (a legacy journal with no
         checkpoint, never bound here) keeps the whole-row connecting sentence:
@@ -10973,10 +10984,19 @@ class OperatorApp(App[None]):
         """
         if self._status is None:
             return
+        # THE GATE READS THE FACADE'S OWN STATE, and must: the values on screen
+        # are that object's, and a memo consulted here could say "last-known" over
+        # a row painted from something else. `install_saved_facts` is what makes
+        # the facade's state durable, at lease time, before any of this runs.
         stored = None
         if connecting and source.display_only and not source.connection_error:
-            session_id = str(getattr(source.session, "session_id", "") or "")
-            stored = self._last_known_states.get(session_id) if session_id else None
+            stored = getattr(source.session, "frontend_state", None)
+            if stored is not None and not getattr(stored, "effective_model", None):
+                # No model in the row means the install never ran (a journal with
+                # no checkpoint, or one the byte scan cannot spell): the facade
+                # still holds its empty placeholder, so the whole-row connecting
+                # sentence is the honest frame.
+                stored = None
         if stored is None:
             self._status.set_last_known(False)
             return
@@ -10989,13 +11009,14 @@ class OperatorApp(App[None]):
         # model, effort, cwd, context, cost, title, team/agent, MCP roster —
         # are what is left.
         self._status.set_last_known(True)
-        # The dock panels (todo/subagent) read the session's own state, which
-        # `AttachedSession.install_saved_facts` has already given the durable
-        # facts — but the band sync runs from a revision gate, and the facade's
-        # revision for a stored row can equal the one already painted. Ask once
-        # explicitly so the dock is the bound frame's height at first paint and
-        # the transcript viewport never shrinks under it afterwards.
-        self._refresh_band()
+        # NO `_refresh_band()` HERE. The dock's height is settled by the adopt
+        # that ran BEFORE the reveal (`_apply_frontend_state` refreshes the band
+        # from the same stored state `install_saved_facts` installed, so the todo
+        # panel is up for the first frame), and a second settle from a post-paint
+        # callback is a layout the user can watch: QA's review round 1 measured a
+        # one-row shift of the whole transcript in a warm cell 100 ms after first
+        # paint. Anything this method changed in the band would also be a change
+        # the reader's eye has to follow for facts that did not change.
 
     def _gate_card_is_answerable(self, source: SessionInteraction) -> bool:
         """Whether an ANSWERABLE card is on screen for ``source``'s live gate.

@@ -300,6 +300,34 @@ FORK_PENDING_TEXT = "forking \u00b7 esc"
 NAME_CELLS = 40
 NAME_CELLS_FLOOR = 18
 
+#: Cells the row keeps free between its two groups for the LIVENESS SLOT — the
+#: ``connecting…`` caption a saved conversation paints while its owner binds.
+#:
+#: The most the last-known caption may occupy in the gap between the two groups.
+#:
+#: The caption rides the gap for one reason: spent anywhere else it competes with
+#: the row's own figures, and the two rows then disagree. The first cut appended
+#: it to the left group, so the shadow frame was fitted with 13 fewer cells than
+#: the bound frame and the two shed DIFFERENT segments — measured at 80 columns on
+#: the fixture: `▂ 17.1%/1.0M` 12 cells to the right of where the bound frame puts
+#: it, the cost segment absent, the title's cut 16 instead of 28 (design round 1
+#: D2). Reserving the width in every frame fixes that and charges every frame for
+#: it, which the band's width budget cannot afford (`_walk`'s own note on the
+#: name's trade, and the three suites that assert the name and its siblings keep
+#: every spare cell). So the fit is computed ONCE, identically for both frames,
+#: and the caption is painted only into gap the bound frame was not going to use
+#: — `_compose`'s condition. Where the row is too full for it (`< 80` columns with
+#: a title), the hollow model glyph and the `muted` ink still say "stored, not
+#: live"; where there is room, the sentence is there in full.
+_LIVENESS_SLOT_CELLS = 13
+
+#: The model glyph while the row is LAST-KNOWN: the hollow twin of
+#: :data:`ICON_MODEL`. One cell, so swapping it moves nothing, and it is the
+#: marker that says "stored facts, not a live reading" without colour — the bound
+#: frame paints several of its own values in the same ink, so ink alone cannot
+#: carry that meaning (design round 1, D1).
+ICON_MODEL_LAST_KNOWN = "◇"
+
 #: Cap on the displayed active-agent / active-team NAME (U2). A BOUNDED rung,
 #: unlike ``cwd``: profile and team names are curated identifiers, not paths, so
 #: 20 cells shows every packaged and typical operator name whole
@@ -2063,7 +2091,7 @@ class StatusLine:
             # SHIPPED — the rungs the walk tried on the way are attempts, and
             # so is a whole walk the restart threw away.
             self._dropped = dropped
-            return self._compose(left, right, width, dim)
+            return self._compose(left, right, width, dim, slot=self._liveness_slot(muted))
 
         # Even the irreducible row overflows. Truncate the model label rather
         # than shedding it (D7): `deepse…` still answers which model is
@@ -2482,8 +2510,21 @@ class StatusLine:
         # frame paints for the same data, so the bind changes ink, not layout.
         last_known = getattr(self, "_last_known", False)
         if last_known:
+            # LAST-KNOWN INK (design round 1, D1). Every value takes `muted`,
+            # 7.93:1 on the dark band ground and 6.58:1 on the light one, both
+            # over the 4.5:1 AA floor — `dim` measured 4.18:1 and 3.46:1 and was
+            # rejected. Colour only: the text is the bound frame's, so no segment
+            # moves. The MARKER is what says "not confirmed", not the ink: the
+            # bound frame paints its own `◷ 12h52m` in `dim`, so a reader cannot
+            # infer the state from a shade, and the hollow model glyph is a
+            # one-cell swap that shifts nothing.
             parts = [
-                (icon, text.plain if isinstance(text, Text) else text, dim, None)
+                (
+                    ICON_MODEL_LAST_KNOWN if icon == ICON_MODEL else icon,
+                    text.plain if isinstance(text, Text) else text,
+                    muted,
+                    None,
+                )
                 for icon, text, _style, _icon_style in parts
             ]
         left = Text()
@@ -2504,40 +2545,12 @@ class StatusLine:
         # new attribute directly turned three of those into AttributeErrors —
         # a widget's renderer must tolerate the reduced hosts its own suite
         # builds, the same way the fork/subagent fields here already do.
-        if last_known:
-            # The connection state, demoted from a whole-row takeover to the
-            # working-indicator slot `starting…` uses, so the stored segments
-            # stay where the bound frame paints them (TUI-FINALITY-DESIGN D2).
-            #
-            # THE FOOTPRINT IS CAPPED AT `starting…`'s — its glyph, a space and
-            # its caption — measured per locale from the catalogue, because the
-            # bar for this slot is "no more title than an ordinary bring-up
-            # costs" (manager decision on D2). In English the glyph does not
-            # fit beside `connecting…` (13 cells against 11), so the caption
-            # stands alone and still; a locale whose caption is short enough
-            # gets the glyph back. Static rather than animated is the honest
-            # trade here: this state lasts until the bind on a healthy switch,
-            # and the longer re-dial dwell the glyph was added for
-            # (`set_connecting`) is a VERDICT row, not a last-known one — it
-            # still takes the whole-row form with its spinner.
-            #
-            # The caption is the catalogued `tui.status.model.connecting`
-            # word — the one the splash already uses for the same state — so
-            # this slot needs no new copy in any locale.
-            caption = _t(tui_status.model_connecting())
-            budget = 2 + cell_len(_t(tui_status.band_starting()))
-            if parts:
-                left.append(f" {_SEP_LEFT} ", style=seam)
-            glyph = getattr(self, "_connecting", False) and 2 + cell_len(caption) <= budget
-            if glyph:
-                from local_operator.tui.shimmer import shimmer_enabled
-
-                glyph = shimmer_enabled()
-            if glyph:
-                left.append(_SPINNER_FRAMES[self._spinner_index], style=muted)
-                left.append(" ", style=dim)
-                budget -= 2
-            left.append(truncate_cells(caption, budget), style=muted)
+        # THE LIVE ACTIVITY INDICATORS ARE SUPPRESSED WHILE LAST-KNOWN, and the
+        # slot carries the state instead. `streaming`/`starting` are live
+        # authority: the app clears them on install, and this makes the renderer
+        # agree even if a caller passes them anyway — a saved conversation must
+        # never paint a spinner for a turn nothing is running (review round 1, R1).
+        if getattr(self, "_last_known", False):
             return left
         if getattr(self, "_starting", False):
             # Before the runtime exists there is nothing to report but the
@@ -2808,7 +2821,33 @@ class StatusLine:
             right.append(text, style=dim if getattr(self, "_last_known", False) else style)
         return right
 
-    def _compose(self, left: Text, right: Text, width: int, dim: Style) -> Text:
+    def _liveness_slot(self, muted: Style) -> Text | None:
+        """The row's LIVENESS SLOT content, or ``None`` when the slot is idle.
+
+        The slot is reserved in every frame (``_LIVENESS_SLOT_CELLS``); this
+        decides what fills it. Today that is only the last-known caption, which
+        says the facts beside it are stored ones and that an owner is being
+        dialled. It carries the catalogued ``tui.status.model.connecting`` word —
+        the one the splash already uses for the same state — so no locale needs
+        new copy.
+
+        The caption takes `muted`, the same step as the values it qualifies, so
+        it cannot become the row's brightest element (design round 1, D1 measured
+        the older cut with the caption at `muted` and every value at `dim`: the
+        state word out-shouted the model, context and cost figures it was
+        qualifying). The glyph is deliberately absent: this state outlasts a
+        healthy switch only until the bind, and a spinner inside a fixed slot
+        would have to animate while the row it sits in is static.
+        """
+        if not getattr(self, "_last_known", False):
+            return None
+        return Text(
+            truncate_cells(_t(tui_status.model_connecting()), _LIVENESS_SLOT_CELLS), style=muted
+        )
+
+    def _compose(
+        self, left: Text, right: Text, width: int, dim: Style, *, slot: Text | None = None
+    ) -> Text:
         """Left group, filler, right group — right-aligned to the band edge.
 
         With no right group there is nothing to align and nothing to separate, so
@@ -2828,6 +2867,20 @@ class StatusLine:
         if not right.plain:
             return left
         gap = max(_MIN_GROUP_GAP, width - cell_len(left.plain) - cell_len(right.plain))
+        if slot is not None and slot.plain and gap > cell_len(slot.plain) + 2:
+            # The liveness slot is painted INTO the reserved gap it already owns,
+            # so it cannot move either group: the left group ends where the
+            # bound frame ends it and the right group starts where the bound
+            # frame starts it. Two cells of air keep it off the left group's last
+            # segment, and the rest of the gap stays filler.
+            filled = gap - (cell_len(slot.plain) + 2)
+            row = Text()
+            row.append_text(left)
+            row.append(" " * 2, style=dim)
+            row.append_text(slot)
+            row.append(" " * filled, style=dim)
+            row.append_text(right)
+            return row
         row = Text()
         row.append_text(left)
         row.append(" " * gap, style=dim)
