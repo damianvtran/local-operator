@@ -558,13 +558,41 @@ async def test_a_self_contained_confined_checkout_still_reads(tmp_path):
     result = await execute_read_public_copy(
         "ok", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=context
     )
-    unavailable = sandbox_unavailable_reason()
-    if unavailable is not None:
-        assert result.is_error, result.text
-        assert "cannot enforce that boundary" in result.text, result.text
-        assert unavailable in result.text, result.text
+    if sandbox_unavailable_reason() is not None:
+        # R3-2: assert the STRUCTURED refusal, not the prose a swallowed
+        # PermissionError used to produce.
+        body = _refusal_body(result)
+        assert body["code"] == "public_copy_confinement_unavailable"
+        assert body["reason"] == "host_cannot_confine_git"
+        assert body["confinement_root"] == str(root)
         return
     assert not result.is_error, result.text
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_cannot_confine_refuses_with_a_code(tmp_path, monkeypatch):
+    """R3-1: the confinement refusal is its own refusal, not a read failure.
+
+    The predicate is patched rather than the host changed, so this runs the
+    sandbox-less branch on any platform: ``ToolConfinement.wrap`` asks
+    ``confinement.sandbox_unavailable_reason`` at call time, so the reader takes
+    exactly the path a linux shard takes.
+    """
+    from local_operator.tools import confinement as confinement_module
+
+    monkeypatch.setattr(
+        confinement_module, "sandbox_unavailable_reason", lambda: "no kernel sandbox here"
+    )
+    root = _ui_repo(tmp_path)
+    context = _context(root, tmp_path).model_copy(update={"confinement_root": str(root)})
+    result = await execute_read_public_copy(
+        "ok", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=context
+    )
+    body = _refusal_body(result)
+    assert body["code"] == "public_copy_confinement_unavailable", body
+    assert body["reason"] == "host_cannot_confine_git", body
+    assert body["confinement_root"] == str(root), body
+    assert "could not read the committed copy" not in result.text, result.text
 
 
 @pytest.mark.asyncio

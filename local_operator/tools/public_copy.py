@@ -167,8 +167,8 @@ class ReadPublicCopyParams(BaseModel):
     repo_root: str | None = Field(
         default=None,
         description=(
-            "Exact checkout or worktree root; GitHub origin is damianvtran/local-operator "
-            "or damianvtran/local-operator-ui; default cwd. Read-only; grants no access."
+            "Exact checkout/worktree root; GitHub origin is damianvtran/local-operator or "
+            "damianvtran/local-operator-ui. Never moves the session; grants no access."
         ),
     )
     key: str | None = Field(
@@ -189,6 +189,25 @@ _FAMILY_GLOBS: dict[str, list[str]] = {
 #: Line one of the legacy "run it from a checkout" refusal; the structured hint
 #: below is appended to it only when the caller did not pass ``repo_root``.
 _NOT_A_CHECKOUT = "the workspace is not a git checkout"
+
+
+class _ConfinementRefusal(Exception):
+    """A confinement refusal that must not be re-read as an unreadable copy.
+
+    WHY ITS OWN TYPE. ``_git`` raises this from inside a ``try`` whose
+    ``except (OSError, subprocess.SubprocessError)`` exists to report an
+    unreadable copy, and ``PermissionError`` IS an ``OSError``: the structured
+    confinement refusal used to be swallowed there and re-emitted as
+    "could not read the committed copy of <path> (<refusal>)" -- a doubled
+    message with no code and no repair fields (review R3-1). Carrying the body
+    on a type outside that handler keeps the fail-closed behaviour identical
+    (still refuse, still never run Git unwrapped) while letting the caller
+    answer with the code the other refusals use.
+    """
+
+    def __init__(self, body: dict[str, Any]) -> None:
+        self.body = body
+        super().__init__(str(body.get("code", "public_copy_confinement_unavailable")))
 
 
 def _next_step(**fields: Any) -> dict[str, Any]:
@@ -553,7 +572,17 @@ def _committed_public_copy(
         if confinement is not None:
             wrapped = confinement.wrap(argv)
             if wrapped is None:
-                raise PermissionError(confinement.spawn_refusal())
+                # Fields only: ``execute_read_public_copy`` wraps a dict refusal
+                # through ``_next_step``, so prose here would bypass the
+                # "prose lives in the schema" rule the other refusals follow.
+                raise _ConfinementRefusal(
+                    {
+                        "code": "public_copy_confinement_unavailable",
+                        "reason": "host_cannot_confine_git",
+                        "confinement_root": str(confinement.root),
+                        "fix": "read from an unconfined session or a host with a kernel sandbox",
+                    }
+                )
             argv = wrapped
         # A caller's Git environment must not redirect -C to another index,
         # object store or worktree. Reads also must not invoke configured diff
@@ -707,6 +736,8 @@ def _committed_public_copy(
                 },
             )
         return blob.stdout, provenance, None
+    except _ConfinementRefusal as exc:
+        return b"", {}, exc.body
     except (OSError, subprocess.SubprocessError) as exc:
         return b"", {}, f"could not read the committed copy of {relative} ({exc})"
 
