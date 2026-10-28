@@ -909,8 +909,20 @@ class MeshCredentialBroker:
             # heals on its own. When EVERY row this provider has is blocked for the
             # requested model, that block is the reason, and the remainder travels
             # with the code so the borrower waits the real time instead of guessing.
-            blocked_ms = self._quota_remaining_ms(provider, model_id)
-            if blocked_ms:
+            #
+            # AND THE USAGE GATE, NOT ONLY THE SQL BLOCK (2026-10-28 follow-up): the
+            # selector also drops rows whose cached usage reads ``depleted``, so once
+            # one block timer lapsed while the evidence still said spent, a fully
+            # spent pool answered ``no_local_credential`` and sent the borrower to
+            # re-login. The verdict now comes from the store's own eligibility read,
+            # over the same rows this resolve could pick (the holder's exclusions are
+            # not candidates), so the broker carries no quota policy of its own. An
+            # ``unknown`` usage verdict is not a limit, so mixed or unread evidence
+            # still answers ``no_local_credential``; a remainder travels only when
+            # every row's reopening is proven, otherwise the code goes alone.
+            quota = self._quota_eligibility(provider, model_id, excluded_ids)
+            if quota is not None and quota.all_quota_limited:
+                blocked_ms = quota.retry_after_ms
                 return BrokerError(
                     code="quota_blocked",
                     key=key,
@@ -919,7 +931,11 @@ class MeshCredentialBroker:
                     retry_after_ms=blocked_ms,
                     message=(
                         f"every login for {provider!r} is rate-limited on this device "
-                        f"for another {max(1, blocked_ms // 1000)} s"
+                        + (
+                            f"for another {max(1, blocked_ms // 1000)} s"
+                            if blocked_ms
+                            else "until its usage window resets"
+                        )
                     ),
                 )
             return BrokerError(
@@ -2106,26 +2122,24 @@ class MeshCredentialBroker:
             return reported_id if reported_id in ids else None
         return ids[0] if ids else None
 
-    def _quota_remaining_ms(self, provider: str, model_id: str) -> int:
-        """How long every row for ``provider`` is quota-blocked for ``model_id``, ms.
+    def _quota_eligibility(
+        self, provider: str, model_id: str, excluded_ids: tuple[int, ...] = ()
+    ) -> Any:
+        """The store's quota eligibility for ``provider``, or ``None`` when unreadable.
 
         The producer ``quota_blocked`` never had (audit Q5 #9), read only when the
-        owner's own cascade came back EMPTY and only when EVERY row the provider has
-        is blocked for the requested model — the exact reason ``_usable_key_rows``
-        could not offer one. A row that is still servable means the empty answer has
-        another cause, and the caller keeps ``no_local_credential``. The earliest
-        unblock is the wait worth reporting: it is when something can be served
-        again, whatever happened to the other rows.
+        owner's own cascade came back EMPTY. The judgement — which rows a live block
+        or spent usage keeps out, and when the earliest one is PROVEN to reopen — is
+        ``AuthStore.quota_eligibility``'s, made from the same evidence the selection
+        applies; this only asks. An unreadable store explains nothing, and the caller
+        keeps ``no_local_credential``.
         """
         try:
-            store = self._auth_store_instance()
-            rows = store.list_credentials(provider)
-            waits = [int(store.blocked_remaining_ms(row.id, provider, model_id)) for row in rows]
+            return self._auth_store_instance().quota_eligibility(
+                provider, model_id, exclude_credential_ids=excluded_ids
+            )
         except Exception:  # noqa: BLE001 — an unreadable store explains nothing
-            return 0
-        if not waits:
-            return 0
-        return min(waits) if all(wait > 0 for wait in waits) else 0
+            return None
 
     def _row_stamps(self, provider: str) -> dict[int, int]:
         """``{credential_id: updated_at}`` for a provider, to observe a refresh.

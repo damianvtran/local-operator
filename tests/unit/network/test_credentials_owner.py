@@ -2087,3 +2087,131 @@ def test_a_borrow_reaching_a_closed_broker_is_refused_as_unavailable(owner: Any)
     detail = _ask_grant(owner, BORROWER_DEVICE)
     assert detail["code"] == "unavailable", detail
     assert "shutting down" in str(detail.get("message") or ""), detail
+
+
+# ---------------------------------------------------------------------------
+# Usage-depleted pools with no live SQL block (2026-10-28 remote quota follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _usage_reports(owner: Any, monkeypatch: pytest.MonkeyPatch, used: dict[int, Any]) -> None:
+    """Pin each row's cached usage report (the selector's own seam), by row id.
+
+    ``used`` maps a row id to its shared 5-hour utilisation, or ``None`` for a row
+    with no usable evidence. The reset is 20 minutes ahead and the report is fresh,
+    so a 100% row is ``depleted`` with a PROVEN reopening — the node-2 shape at
+    18:23Z with every SQL timer lapsed.
+    """
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    now = int(time.time() * 1000)
+
+    def _report(row: Any, provider: str) -> Any:
+        fraction = used.get(row.id)
+        if fraction is None:
+            return None
+        return UsageReport(
+            STUB_PROVIDER,
+            fetched_at=now - 1_000,
+            limits=[
+                UsageLimit(
+                    id="synthetic:5h",
+                    label="5h",
+                    window="5 hour",
+                    shared=True,
+                    amount=UsageAmount(used_fraction=fraction),
+                    resets_at_ms=now + 20 * 60_000,
+                )
+            ],
+        )
+
+    monkeypatch.setattr(owner.auth, "_cached_usage_report", _report)
+
+
+def _no_sql_blocks(owner: Any) -> int:
+    return int(
+        owner.auth._conn.execute(
+            "SELECT COUNT(*) FROM auth_credential_blocks WHERE blocked_until_ms > ?",
+            (int(time.time() * 1000),),
+        ).fetchone()[0]
+    )
+
+
+def test_a_usage_depleted_pool_with_no_live_block_says_quota_blocked(
+    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAILING FIRST: enabled, unexpired OAuth rows, NO live SQL block, all usage spent.
+
+    The selector drops every row as ``depleted`` from fresh shared-5h 100% evidence,
+    so the owner's resolve is empty. The empty answer used to be explained from the
+    SQL blocks alone — none live — and the borrower was told ``no_local_credential``
+    with a re-login remedy. The same selector's verdicts now name the cause, with
+    the PROVEN reopening as the wait. Nothing is written: no block, no policy row.
+    """
+    second = _second_row(owner)
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: 1.0})
+    assert _no_sql_blocks(owner) == 0
+
+    refused = _ask_grant(owner, BORROWER_DEVICE)
+
+    assert refused["code"] == "quota_blocked", refused
+    assert 18 * 60_000 < int(refused["retry_after_ms"]) <= 20 * 60_000, refused
+    assert "usage window" not in str(refused.get("message") or ""), refused
+    assert _no_sql_blocks(owner) == 0, "the diagnosis must not write a block"
+
+
+def test_a_mixed_pool_keeps_serving_and_unknown_evidence_never_fabricates_a_block(
+    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Controls: a usable row still wins; an unknown verdict is not a quota limit."""
+    second = _second_row(owner)
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: 0.1})
+    served = _ask_grant(owner, BORROWER_DEVICE)
+    assert served["kind"] == "grant", served
+
+    # One depleted row, one with no usable evidence: the selector fails open on
+    # unknown, so the unknown row still serves and no quota claim is made.
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: None})
+    eligibility = owner.auth.quota_eligibility(STUB_PROVIDER, "stub-model")
+    assert not eligibility.all_quota_limited, eligibility
+    assert eligibility.retry_after_ms == 0
+    unknown_served = _ask_grant(owner, BORROWER_DEVICE, session="sess-unknown")
+    assert unknown_served["kind"] == "grant", unknown_served
+
+
+def test_a_depleted_pool_whose_reopening_is_unproven_says_quota_blocked_without_a_time(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spent usage whose reset nobody stated: the code is honest, no wait is invented."""
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    now = int(time.time() * 1000)
+    spent = UsageReport(
+        STUB_PROVIDER,
+        fetched_at=now - 1_000,
+        limits=[
+            UsageLimit(
+                id="synthetic:5h",
+                label="5h",
+                window="5 hour",
+                shared=True,
+                amount=UsageAmount(used_fraction=1.0),
+            )
+        ],
+    )
+    monkeypatch.setattr(owner.auth, "_cached_usage_report", lambda row, provider: spent)
+    refused = _ask_grant(owner, BORROWER_DEVICE)
+    assert refused["code"] == "quota_blocked", refused
+    assert not refused.get("retry_after_ms"), refused
+    assert "until its usage window resets" in str(refused.get("message") or ""), refused
+
+
+def test_no_login_at_all_still_says_no_local_credential(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The true no-login control: an empty pool is not a quota pool."""
+    owner.auth.delete_credential(owner.row.id)
+    assert owner.auth.list_credentials(STUB_PROVIDER) == []
+    assert not owner.auth.quota_eligibility(STUB_PROVIDER, "stub-model").all_quota_limited
+    refused = _ask_grant(owner, BORROWER_DEVICE)
+    assert refused["code"] == "no_local_credential", refused

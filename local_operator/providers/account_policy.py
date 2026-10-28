@@ -67,6 +67,15 @@ class ResetCandidate:
     state: Literal["healthy", "reserve", "depleted", "unknown"] = "unknown"
     weekly_ms: int | None = None
     five_hour_ms: int | None = None
+    #: When a ``depleted`` verdict stops holding, epoch ms — set ONLY when a FRESH
+    #: report proves it: the LATEST reset among the windows that are themselves
+    #: depleted (every one of them must reopen, so the earliest would be a guess
+    #: an account can still refuse). ``None`` for every other state, for a stale
+    #: report (usage may have grown since, so its resets are a lower bound) and
+    #: for a depleted window with no stated reset. Read by the mesh broker's
+    #: ``quota_blocked`` remainder (``AuthStore.quota_eligibility``); never by
+    #: ranking, which keeps ordering on the two reset fields above.
+    reopens_at_ms: int | None = None
 
 
 def _finite_number(value: object) -> TypeGuard[int | float]:
@@ -154,7 +163,43 @@ def reset_candidate(
         health.state,
         min(weekly) if weekly else None,
         min(short) if short else None,
+        (
+            _proven_reopening(safe_report, current, model_id, reserve_percent, now_ms)
+            if health.state == "depleted"
+            else None
+        ),
     )
+
+
+def _proven_reopening(
+    report: UsageReport,
+    current: Sequence[Any],
+    model_id: str,
+    reserve_percent: float,
+    now_ms: int,
+) -> int | None:
+    """The latest reset among the individually depleted windows, or ``None``.
+
+    Each window is judged by the SAME reduction the verdict used
+    (:func:`usage_health` over that one window), so this adds no second idea of
+    "spent". A depleted window with no finite future reset makes the reopening
+    unknowable, and so does a verdict no single window explains: both answer
+    ``None`` rather than a time nobody stated.
+    """
+    from local_operator.providers.usage import usage_health
+
+    deadlines: list[int] = []
+    for limit in current:
+        alone = replace(report, limits=[limit])
+        if usage_health(alone, model_id, reserve_percent=reserve_percent, now_ms=now_ms).state != (
+            "depleted"
+        ):
+            continue
+        deadline = limit.resets_at_ms
+        if not _finite_number(deadline) or deadline <= now_ms:
+            return None
+        deadlines.append(int(deadline))
+    return max(deadlines) if deadlines else None
 
 
 def _spread(
