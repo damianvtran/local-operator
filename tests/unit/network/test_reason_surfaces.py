@@ -451,6 +451,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "classifier input (both dialects' codes, compared against the producers' "
         "constants); the row's sentence is rendered by the glossing renderers",
     ),
+    # The default-model frame (PR #2923): ``model_credential_row`` wraps the verdict
+    # chain's OWN sentence for the NOT_SHARED / NO_CREDENTIAL arms in the clause that
+    # names the peer's default and the create refusal. That ``detail`` is composed in
+    # ``_model_credential_verdict`` in this module (never a peer's token -- the token
+    # rides ``code``, which the frame checks and leaves alone), so a gloss would map a
+    # sentence, not a token; it is nested verbatim and rendered by
+    # ``render_check_lines`` like every other row.
+    ("local_operator/network/readiness.py", "model_credential_row", "detail"): (
+        1,
+        "nests the verdict chain's own composed sentence in the default-model frame; "
+        "the machine token stays in `code`",
+    ),
     (
         "local_operator/network/readiness.py",
         "render_check_lines",
