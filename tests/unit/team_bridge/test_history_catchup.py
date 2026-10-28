@@ -154,17 +154,79 @@ async def test_reject_alone_refreshes_authoritative_status(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_age_and_invalid_timestamp_never_fetch_body(tmp_path, monkeypatch):
+async def test_age_and_unknown_timestamp_skip_without_stopping_the_page(tmp_path, monkeypatch):
+    # Age is PER CANDIDATE (module docstring): an old row and a row whose timestamp
+    # cannot establish age are both excluded, and the eligible row after them is
+    # still attempted. A page-wide hold here is how a single malformed row used to
+    # freeze every later message behind it.
     page = {"messages": [_row(3), _row(2), _row(1, age=catchup.CATCHUP_AGE_S + 1)]}
     page["messages"][1]["created_at"] = "missing timezone"
     runtime = _runtime(tmp_path, page)
-    handler = AsyncMock()
+    handler = AsyncMock(return_value={"action": "admitted", "message_id": "bcmsg"})
     monkeypatch.setattr(catchup, "handle_conversation_available", handler)
     answer = await _read(runtime, page)
     assert answer["catchup"]["age_skipped"] == 1
-    assert answer["catchup"]["code"] == "invalid_age"
+    assert answer["catchup"]["age_unknown"] == 1
+    assert answer["catchup"]["confirmed"] == 1
+    assert [call.args[1].conversation_seq for call in handler.await_args_list] == [3]
+    assert runtime.client.conversation_messages.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_future_timestamp_is_skipped_not_a_page_wide_hold(tmp_path, monkeypatch):
+    # Hub/host clock disagreement is not evidence that a message is new, and it
+    # must not pin the page: the future-dated row is excluded, the older eligible
+    # row is still attempted.
+    page = {"messages": [_row(2, age=-3600), _row(1)]}
+    runtime = _runtime(tmp_path, page)
+    handler = AsyncMock(return_value={"action": "rejected", "message_id": "bcmsg"})
+    monkeypatch.setattr(catchup, "handle_conversation_available", handler)
+    answer = await _read(runtime, page)
+    assert answer["catchup"]["age_unknown"] == 1
+    assert answer["catchup"]["rejected"] == 1
+    assert [call.args[1].conversation_seq for call in handler.await_args_list] == [1]
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_handler_is_resolved_by_server_status(tmp_path, monkeypatch):
+    # THE LIVENESS CASE (review 2026-10-28): a retry-after-verdict hold is not a
+    # verdict. The hub's own status for the message id decides, so a text-only
+    # allow already recorded can never pin the cursor forever.
+    page = {"messages": [_row(1)]}
+    runtime = _runtime(tmp_path, page)
+    handler = AsyncMock(return_value={"action": "hold", "code": "admission_unverified"})
+    monkeypatch.setattr(catchup, "handle_conversation_available", handler)
+    admitted = {"messages": [{**_row(1, status="admitted"), "body": "screened body"}]}
+    runtime.client.conversation_messages = AsyncMock(return_value=admitted)
+    answer = await _read(runtime, page)
+    assert answer["catchup"]["confirmed"] == 1
+    assert answer["catchup"]["refreshed"] is True
+    assert answer["messages"][0]["body"] == "screened body"
+    # The confirmed message is behind the cursor: the next identical read asks the
+    # handler about nothing and the hub is not re-read for it.
+    handler.reset_mock()
+    runtime.client.conversation_messages = AsyncMock(return_value=admitted)
+    again = await _read(runtime, page)
     handler.assert_not_called()
-    runtime.client.current_access.assert_not_called()
+    assert again["messages"][0]["body"] is None
+
+
+@pytest.mark.asyncio
+async def test_server_authority_hold_keeps_the_cursor(tmp_path, monkeypatch):
+    # Still not_screened at the hub: a genuine hold, and the cursor must stop BEFORE
+    # the row so the next read retries it instead of skipping it.
+    page = {"messages": [_row(1)]}
+    runtime = _runtime(tmp_path, page)
+    handler = AsyncMock(return_value={"action": "hold", "code": "admission_held"})
+    monkeypatch.setattr(catchup, "handle_conversation_available", handler)
+    runtime.client.conversation_messages = AsyncMock(return_value=copy.deepcopy(page))
+    answer = await _read(runtime, page)
+    assert answer["catchup"]["state"] == "held"
+    assert answer["catchup"]["code"] == "admission_held"
+    assert answer["catchup"]["confirmed"] == 0
+    handler.reset_mock()
+    await _read(runtime, page)
+    assert [call.args[1].conversation_seq for call in handler.await_args_list] == [1]
 
 
 @pytest.mark.asyncio

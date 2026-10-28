@@ -4,6 +4,21 @@ The server's explicit ``not_screened`` status is the sole eligibility signal:
 absence means own/pre-join/old-server metadata, never permission to fetch a body.
 Only confirmed hub verdicts advance the contentless page cursor. A held oldest
 candidate deliberately blocks later candidates so another read can resume it.
+
+CONFIRMATION IS THE SERVER'S, not the handler's action word (review, 2026-10-28).
+The shared handler can also answer a HOLD for a candidate whose verdict the hub
+ALREADY holds — the retry-after-verdict branch has no image route to prove a
+text-only allow and reports ``admission_unverified``. Trusting that hold would pin
+the cursor forever: every later read re-attempts the same candidate and the page
+never advances. So when an attempt is not confirmed, this reads the requested page
+ONCE and takes ``agent_delivery_status`` as the verdict: ``admitted``/``rejected``
+confirm, ``not_screened`` is a genuine hold. That keeps the hub authoritative for
+the verdict while never trusting a local receipt or a uniform 404 as proof.
+
+AGE IS PER CANDIDATE, never page-wide. A skipped row (older than the window, or a
+timestamp that cannot establish age) stays ``not_screened``, is excluded from this
+run, and is never counted as confirmed; only a malformed page-wide sequence holds
+the whole page, because that is structural rather than a property of one message.
 """
 
 from __future__ import annotations
@@ -104,14 +119,23 @@ async def catch_up_history_page(
         async with asyncio.timeout(CATCHUP_TIMEOUT_S):
             cursor = store.history_catchup_cursor(runtime.owner, channel_id, page_window)
             access = None
+            #: message id -> the SERVER's status, read at most once per run. Only
+            #: populated after an attempt the handler could not confirm.
+            server_status: dict[str, Any] | None = None
             for row in candidates:
                 seq = row["seq"]
                 if seq <= cursor:
                     continue
                 created = _created_at(row)
                 if created is None or created > now:
-                    summary.update(state="held", code="invalid_age")
-                    break
+                    # Neither an absent nor a future timestamp establishes age, and
+                    # age is what bounds this recovery. Future-dating means the hub
+                    # and this host disagree about the clock, which is not evidence
+                    # the message is new. Excluded, never a page-wide stall: the row
+                    # stays visibly `not_screened` and an operator can still read it
+                    # through its own delivery.
+                    summary["age_unknown"] = summary.get("age_unknown", 0) + 1
+                    continue
                 if now - created > CATCHUP_AGE_S:
                     summary["age_skipped"] = summary.get("age_skipped", 0) + 1
                     continue
@@ -134,18 +158,44 @@ async def catch_up_history_page(
                     auth_store=runtime.client._auth_store(), access=access,
                     wire=runtime.client, admission_only=True,
                 )
-                if outcome.get("action") not in ("admitted", "rejected"):
-                    # Handler codes may incorporate a remote refusal. Keep
-                    # this summary closed rather than reflecting arbitrary
-                    # server/provider text into the reading agent's context.
+                # Handler codes may incorporate a remote refusal. This summary stays
+                # closed rather than reflecting arbitrary server/provider text into
+                # the reading agent's context.
+                verdict = outcome.get("action")
+                if verdict not in ("admitted", "rejected") and server_status is None:
+                    # Ask the hub before believing a hold (module docstring): a
+                    # TEXT-only allow already recorded for these bytes has no image
+                    # route to prove it, and that hold is not a verdict.
+                    fresh = await runtime.client.conversation_messages(
+                        channel_id, tenant_id=runtime.tenant_id, limit=limit,
+                        before_seq=before_seq, after_seq=after_seq,
+                        endpoint_id=runtime.owner.endpoint_id,
+                    )
+                    if not isinstance(fresh, dict) or not isinstance(fresh.get("messages"), list):
+                        raise ValueError("invalid history page")
+                    page = _masked_page(fresh)
+                    summary["refreshed"] = True
+                    server_status = {
+                        str(fresh_row.get("id")): fresh_row.get("agent_delivery_status")
+                        for fresh_row in page["messages"]
+                        if isinstance(fresh_row, dict)
+                    }
+                    outcome = {"action": server_status.get(str(row.get("id")))}
+                    verdict = outcome["action"]
+                if verdict not in ("admitted", "rejected"):
+                    # A genuine hold: the hub still has no verdict. Stop BEFORE this
+                    # row so the next identical read retries it rather than skipping
+                    # it, and stop attempting later candidates that sort after it.
                     summary.update(state="held", code="admission_held")
                     break
+                if verdict == "rejected":
+                    summary["rejected"] = summary.get("rejected", 0) + 1
                 # Count before the durable write: if the owner moves at this
                 # boundary, the verdict still happened and needs a fresh read.
                 summary["confirmed"] += 1
                 store.advance_history_catchup_cursor(runtime.owner, channel_id, page_window, seq)
                 cursor = seq
-            if summary["confirmed"]:
+            if summary["confirmed"] and server_status is None:
                 # Rejected status is server authority too. Neither a local
                 # receipt nor handler result may manufacture page bodies/status.
                 fresh = await runtime.client.conversation_messages(

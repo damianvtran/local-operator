@@ -864,6 +864,10 @@ async def handle_conversation_available(
                 # Only the context-route image check proves a hub admission.
                 # A local receipt or a uniform 404 is not a confirmed verdict;
                 # leave this page's cursor in place rather than invent status.
+                # A feed-delivery caller keeps this as a hold. A history catch-up
+                # caller resolves it by asking the hub for the message's own status
+                # (history_catchup), which is the authority in both cases — this
+                # answer is never upgraded to "admitted" from a local receipt.
                 if recovery == "images_admitted":
                     terminal = True
                     return {"action": "admitted", "message_id": message_id}
