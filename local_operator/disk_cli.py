@@ -19,9 +19,11 @@ THE SHAPE OF THE COMMAND
     because a command that guessed a scope under disk pressure is the incident
     this command exists to prevent.
 
-EXIT CODES: 0 success (including a dry run and "nothing to reclaim"); 1 some
-previewed item failed or was skipped at removal time; 2 usage error, refused
-category, or the confirmation was declined / unavailable.
+EXIT CODES, in precedence order: 2 usage error, a refused category (a dry run
+that REFUSES a requested category also exits 2, so a script cannot mistake a
+half-answered preview for a full one), or the confirmation declined/unavailable;
+else 1 some previewed item failed or was skipped at removal time, or a receipt
+update failed; else 0 (including a clean dry run and "nothing to reclaim").
 """
 
 from __future__ import annotations
@@ -300,6 +302,10 @@ def reclaim_command(args: argparse.Namespace) -> int:
     payload = result.payload
     payload["confirmed"] = True
     payload["confirmation"] = "--yes" if yes else "typed"
+    # Even JSON callers get a visible warning on stderr; stdout remains one
+    # receipt document, and the warning also survives in that document.
+    for warning in payload.get("receipt_warnings") or []:
+        _err(f"warning: {warning}")
     if json_mode:
         _emit_json(payload)
     else:

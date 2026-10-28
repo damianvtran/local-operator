@@ -175,7 +175,8 @@ def test_modified_tracked_file_is_kept(fx: Fx) -> None:
     assert by_path(plan_for(fx), wt).code == "dirty"
 
 
-def test_ignored_files_do_not_make_a_tree_dirty(fx: Fx) -> None:
+def test_ignored_files_keep_the_tree_as_ignored_content_not_dirty(fx: Fx) -> None:
+    """Superseded contract (R1-1): ignored files are not "dirty" but DO keep it."""
     wt = fx.worktree("ignored", push=False, commit=False)
     (fx.primary / ".gitignore").write_text("build/\n")
     git(fx.primary, "add", "-A")
@@ -185,7 +186,8 @@ def test_ignored_files_do_not_make_a_tree_dirty(fx: Fx) -> None:
     (wt / "build").mkdir()
     (wt / "build" / "x.o").write_text("junk")
     fx.idle(wt)
-    assert by_path(plan_for(fx), wt).action == dp.ACTION_RECLAIM
+    item = by_path(plan_for(fx), wt)
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "ignored-content")
 
 
 def test_unpushed_commit_is_kept(fx: Fx) -> None:
@@ -524,6 +526,225 @@ def test_removal_uses_no_force_flag_and_no_direct_deleter() -> None:
             assert name not in banned, f"direct deleter call: {name}"
             unlinks += name == "unlink"
     assert unlinks == 1
+
+
+# -- remediation round 1 (review R1-1 .. R1-9) --------------------------------
+
+
+def test_ignored_env_file_keeps_the_worktree_and_survives_apply(fx: Fx) -> None:
+    """R1-1: a gitignored `.env` exists ONLY in the worktree directory."""
+    wt = fx.worktree("envy")
+    (wt / ".gitignore").write_text(".env\n")
+    git(wt, "add", ".gitignore")
+    git(wt, "commit", "-qm", "ignore")
+    git(wt, "push", "-q", "origin", "envy")
+    (wt / ".env").write_text("SECRET=1\n")
+    fx.idle(wt)
+    plan = plan_for(fx)
+    item = by_path(plan, wt)
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "ignored-content"), item.reason
+    assert ".env" in item.reason and item.hint
+    result = dp.apply(plan, fx.cfg)
+    assert result.exit_code == 0 and (wt / ".env").read_text() == "SECRET=1\n"
+
+
+def test_ignored_nested_repo_with_unpushed_commit_is_kept(fx: Fx) -> None:
+    """R1-1's reproduced loss: an ignored nested repo holding an unpushed commit."""
+    wt = fx.worktree("outer")
+    (wt / ".gitignore").write_text("tmp/\n")
+    git(wt, "add", ".gitignore")
+    git(wt, "commit", "-qm", "ignore")
+    git(wt, "push", "-q", "origin", "outer")
+    nested = wt / "tmp" / "scratchrepo"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "important.txt").write_text("irreplaceable")
+    git(nested, "add", "-A")
+    git(nested, "commit", "-qm", "never pushed")
+    fx.idle(wt)
+    plan = plan_for(fx)
+    assert by_path(plan, wt).code == "ignored-content"
+    dp.apply(plan, fx.cfg)
+    assert (nested / "important.txt").read_text() == "irreplaceable"
+
+
+def test_ignored_build_output_is_not_carved_out(fx: Fx) -> None:
+    """No vocabulary exception: even a `node_modules`-shaped ignored dir keeps it."""
+    wt = fx.worktree("built")
+    (wt / ".gitignore").write_text("node_modules/\n")
+    git(wt, "add", ".gitignore")
+    git(wt, "commit", "-qm", "ignore")
+    git(wt, "push", "-q", "origin", "built")
+    (wt / "node_modules").mkdir()
+    (wt / "node_modules" / "x.js").write_text("x")
+    fx.idle(wt)
+    assert by_path(plan_for(fx), wt).code == "ignored-content"
+
+
+def test_untracked_nested_repo_is_kept_not_reclaimed(fx: Fx) -> None:
+    wt = fx.worktree("nest")
+    nested = wt / "vendored"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "f").write_text("f")
+    fx.idle(wt)
+    assert by_path(plan_for(fx), wt).code in ("dirty", "ignored-content")
+
+
+def test_duplicate_and_overlapping_repo_args_collapse_to_one_item(fx: Fx) -> None:
+    """R1-2: P, P and a linked worktree of P are ONE repository."""
+    wt = fx.worktree("dup")
+    other = fx.worktree("dup2")
+    fx.idle(wt)
+    fx.idle(other)
+    sel = dp.Selection(repos=(str(fx.primary), str(fx.primary), str(other)))
+    plan = dp.plan(sel, fx.cfg)
+    assert [i.path for i in plan.items].count(os.path.realpath(wt)) == 1
+    assert len({i.id for i in plan.items}) == len(plan.items)
+    result = dp.apply(plan, fx.cfg)
+    assert result.exit_code == 0 and result.payload["status"] == "complete"
+    assert not wt.exists() and not other.exists()
+
+
+def test_go_clean_ignores_goflags_modcache(
+    gocache: Path, fx_cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-3: `GOFLAGS=-modcache` must not widen `go clean -cache`."""
+    modcache = tmp_path / "modcache"
+    modcache.mkdir()
+    (modcache / "keep.txt").write_text("module cache")
+    monkeypatch.setenv("GOFLAGS", "-modcache")
+    monkeypatch.setenv("GOMODCACHE", str(modcache))
+    plan = dp.plan(dp.Selection(go_build_cache=True), fx_cfg)
+    item = next(i for i in plan.items if i.category == dp.CATEGORY_GO_CACHE)
+    assert item.action == dp.ACTION_RECLAIM, item.reason
+    assert dp.apply(plan, fx_cfg).exit_code == 0
+    assert (modcache / "keep.txt").read_text() == "module cache"
+
+
+def test_go_clean_environment_is_explicit() -> None:
+    env = dp._go_env(resolve=False, gocache="/x/cache")
+    assert env["GOFLAGS"] == "" and env["GOENV"] == "off" and env["GOCACHE"] == "/x/cache"
+    assert set(env) <= set(dp._GO_ENV_PASSTHROUGH) | {"GOTOOLCHAIN", "GOFLAGS", "GOENV", "GOCACHE"}
+
+
+def test_idle_floor_is_enforced_below_the_cli(fx: Fx) -> None:
+    """R1-4: a direct caller cannot ask for less than the floor."""
+    with pytest.raises(ValueError, match="at least 60"):
+        dp.Selection(repos=(str(fx.primary),), min_idle_minutes=1)
+    with pytest.raises(ValueError, match="at least 60"):
+        dp.build_repo_context(str(fx.primary), now=time.time(), min_idle_minutes=5, cwds=[])
+    selection = dp.Selection()
+    plan = dp.plan(selection, fx.cfg)
+    selection.min_idle_minutes = 1
+    with pytest.raises(ValueError, match="at least 60"):
+        dp.plan(selection, fx.cfg)
+    with pytest.raises(ValueError, match="at least 60"):
+        dp.apply(plan, fx.cfg)
+    assert not (fx.cfg / dp.RECEIPT_DIRNAME).exists()
+
+
+def test_refused_category_outranks_an_item_failure(fx: Fx, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1-5: exit 2 (refusal) is not masked by exit 1 (an item failed)."""
+    wt = fx.worktree("failing")
+    fx.idle(wt)
+    monkeypatch.setattr(dp, "remove_worktree", lambda item: "git refused")
+    sel = dp.Selection(repos=(str(fx.primary), str(fx.root / "not-a-repo")))
+    result = dp.apply(dp.plan(sel, fx.cfg), fx.cfg)
+    assert result.payload["status"] == "partial" and result.exit_code == 2
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_a_failed_receipt_checkpoint_is_surfaced(
+    fx: Fx, monkeypatch: pytest.MonkeyPatch, capsys: Any, json_mode: bool
+) -> None:
+    """R1-5: a mid-run receipt write failure is recorded and fails the exit code."""
+    wt = fx.worktree("ckpt")
+    fx.idle(wt)
+    plan = plan_for(fx)
+    real = dp.write_receipt_atomic
+    calls = {"n": 0}
+
+    def flaky(path: Path, payload: dict[str, Any]) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:  # the first checkpoint after the intent write
+            raise OSError("disk full")
+        real(path, payload)
+
+    monkeypatch.setattr(dp, "write_receipt_atomic", flaky)
+    assert plan.reclaimable
+    code = reclaim_command(_args(str(fx.primary), apply=True, yes=True, json=json_mode))
+    captured = capsys.readouterr()
+    assert not wt.exists() and code == 1
+    assert "warning: receipt checkpoint failed (disk full)" in captured.err
+    receipts = list((fx.cfg / dp.RECEIPT_DIRNAME).glob("*.json"))
+    payload = json.loads(receipts[0].read_text())
+    assert payload["status"] == "partial"
+    assert any("disk full" in w for w in payload["receipt_warnings"])
+    if json_mode:
+        assert json.loads(captured.out)["receipt_warnings"] == payload["receipt_warnings"]
+
+
+def test_a_moved_head_has_its_own_keep_code(fx: Fx) -> None:
+    """R1-7: not `recent`, whose hint talks about the idle window."""
+    wt = fx.worktree("moved")
+    fx.idle(wt)
+    item = by_path(plan_for(fx), wt)
+    (wt / "late.txt").write_text("late")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "late")
+    git(wt, "push", "-q", "origin", "moved")
+    fx.idle(wt)
+    fresh = dp.revalidate_worktree(item, min_idle_minutes=60)
+    assert fresh.action == dp.ACTION_KEEP and fresh.code == "head-moved"
+    assert "idle window" not in fresh.hint
+
+
+def test_dry_run_with_a_refused_category_exits_2(fx: Fx, capsys: Any) -> None:
+    """R1-8: documented behaviour — a half-answered preview is not exit 0."""
+    assert reclaim_command(_args(str(fx.root / "not-a-repo"))) == 2
+    capsys.readouterr()
+
+
+def test_mid_rebase_worktree_is_kept(fx: Fx) -> None:
+    """R1-9: clean tree, detached HEAD, `rebase-merge/` in the gitdir."""
+    wt = fx.worktree("rebasing")
+    # Stop a REAL rebase at an exec step: no conflicts or dirty files, yet its
+    # todo/state is private to the worktree admin directory and must survive.
+    stopped = subprocess.run(
+        ["git", "-C", str(wt), "rebase", "--exec", "false", "HEAD~1"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert stopped.returncode != 0, stopped.stderr
+    admin = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    assert (admin / "rebase-merge").is_dir()
+    assert not git(wt, "status", "--porcelain", "--untracked-files=all", "--ignored")
+    assert git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+    fx.idle(wt)
+    plan = plan_for(fx)
+    item = by_path(plan, wt)
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "operation-in-progress")
+    assert dp.apply(plan, fx.cfg).exit_code == 0
+    assert wt.exists() and (admin / "rebase-merge").is_dir()
+
+
+def test_process_cwds_parses_a_real_lsof_stream(tmp_path: Path) -> None:
+    """R1-9: the REAL `lsof -F pn` output, not only its failure path."""
+    if not shutil.which("lsof"):
+        pytest.skip("lsof is not installed")
+    child = subprocess.Popen(["sleep", "30"], cwd=tmp_path)
+    try:
+        time.sleep(0.3)
+        rows = _REAL_PROCESS_CWDS()
+    finally:
+        child.kill()
+        child.wait()
+    assert rows is not None
+    pairs = dict(rows)
+    assert pairs[os.getpid()] == os.path.realpath(os.getcwd())
+    assert pairs[child.pid] == os.path.realpath(tmp_path)
 
 
 # -- usage -------------------------------------------------------------------

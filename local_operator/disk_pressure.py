@@ -117,6 +117,17 @@ OUTCOME_REMOVED = "removed"
 OUTCOME_SKIPPED = "skipped"
 OUTCOME_FAILED = "failed"
 
+#: Entries in a worktree's gitdir that mean a multi-step git operation is
+#: half-done (the state is NOT in the commit graph).
+_OPERATION_MARKERS = (
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+)
+
 #: Keep codes -> the owner's next step. The CLI groups kept rows by code so the
 #: owner can act on a whole class at once.
 KEEP_HINTS: dict[str, str] = {
@@ -131,7 +142,15 @@ KEEP_HINTS: dict[str, str] = {
     "cwd": "this process runs inside it (or it is the --repo you named)",
     "in-use": "a process has its working directory inside it; stop that process first",
     "in-use-unknown": "lsof could not establish which processes use it; rerun where lsof works",
-    "recent": "touched within the idle window; rerun later or raise nothing — it is active",
+    "recent": "touched within the idle window; it is active — rerun after it has been quiet",
+    "head-moved": "HEAD changed between the preview and removal; re-preview to see the new state",
+    "ignored-content": (
+        "gitignored files (e.g. .env, a nested repo) exist only in this directory and would "
+        "be deleted with it; move or delete them deliberately, then rerun"
+    ),
+    "operation-in-progress": (
+        "a rebase/merge/cherry-pick/revert/bisect is in progress; finish or abort it, then rerun"
+    ),
     "idle-unproven": "too large or unreadable to prove idle within the walk bound",
     "dirty": "commit, stash or discard the changes (`git -C <path> status`) then rerun",
     "unpushed": "push the HEAD commit (or merge it) so a remote ref contains it, then rerun",
@@ -189,6 +208,18 @@ class Selection:
     scratchpads: bool = False
     min_idle_minutes: int = DEFAULT_MIN_IDLE_MINUTES
     force: bool = False
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Re-check mutable selections at every public planning/apply boundary."""
+        # The floor lives where the predicate runs, not only in the CLI: this
+        # module is the sanctioned entry point other callers are told to use, so
+        # a Selection that asks for less than the floor cannot even be built.
+        problem = validate_min_idle(self.min_idle_minutes)
+        if problem:
+            raise ValueError(problem)
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -265,6 +296,9 @@ class Walk:
     recent: bool = False
     #: An entry could not be stat-ed/listed: the mtime is unproven.
     error: str = ""
+    #: ``.git`` entries (file or directory) found BELOW the root: a nested
+    #: repository or submodule whose history lives only inside this tree.
+    nested_git: list[str] = field(default_factory=list)
 
 
 def walk_allocated(
@@ -314,6 +348,8 @@ def walk_allocated(
                 result.truncated = True
                 return result
             result.entries += 1
+            if not first and entry.name == ".git" and len(result.nested_git) < 5:
+                result.nested_git.append(entry.path)
             try:
                 st = entry.stat(follow_symlinks=False)
             except OSError as exc:
@@ -506,6 +542,11 @@ def build_repo_context(
     The path must be a git working tree (or its linked worktree) the operator
     named explicitly; ``--repo`` is never defaulted or discovered.
     """
+    problem = validate_min_idle(min_idle_minutes)
+    if problem:
+        # Second line of defence behind ``Selection``: the predicate itself
+        # refuses a window under the floor, whoever built the context.
+        raise ValueError(problem)
     repo = os.path.realpath(os.path.expanduser(repo_arg))
     if not os.path.isdir(repo):
         raise GitUnavailable(f"{repo_arg}: not a directory")
@@ -562,8 +603,8 @@ def assess_worktree(ctx: RepoContext, reg: Registration) -> Item:
     6. idle >= the window, from the newest of {gitdir HEAD, index, logs/HEAD} and
        a bounded walk of the working tree (``.git`` skipped); an unreached bound
        or unreadable entry => keep
-    7. clean: ``status --porcelain --untracked-files=all`` empty (ignored files
-       do not count — git's own ``worktree remove`` deletes them)
+    7. clean: ``status --porcelain --untracked-files=all --ignored`` empty;
+       ignored content, nested git entries and in-progress operations KEEP it
     8. HEAD is contained in a remote-tracking ref ("pushed") — reported as
        "merged" when that ref is the remote trunk. A checked-out branch must
        still sit at HEAD. Refs are as last fetched; no network is used.
@@ -678,24 +719,67 @@ def _assess(ctx: RepoContext, reg: Registration, path: str) -> Item:
             "idle-unproven",
             f"more than {WALK_MAX_ENTRIES} entries; idle time unproven",
         )
+    nested_git = list(walk.nested_git)
     newest = max(newest_admin, walk.newest_mtime_ns)
     idle_s = ctx.now - newest / 1e9
 
-    # CLEAN. Not `--ignored`: ignored files are exactly what `worktree remove`
-    # may delete without --force, and what a build tree is made of.
+    # A rebase/merge/cherry-pick/revert/bisect in progress leaves a clean-looking
+    # tree whose real state (the todo list, the half-applied commit) lives only in
+    # the gitdir that `worktree remove` deletes with it.
+    for marker in _OPERATION_MARKERS:
+        if os.path.lexists(os.path.join(gitdir_real, marker)):
+            return _keep(
+                ctx, path, "operation-in-progress", f"git operation in progress ({marker})"
+            )
+
+    # CLEAN, WITH `--ignored`. `git worktree remove` (no --force) will happily
+    # delete ignored files, and removal destroys NOTHING but working-tree contents
+    # (branch refs and objects stay in the shared repository) — so the ignored
+    # files are exactly the part of the tree this command could lose for good: a
+    # `.env`, a local config, a nested repository with unpushed commits under an
+    # ignored `tmp/`. Ignored content therefore KEEPS the worktree. There is no
+    # build-cache vocabulary carve-out on purpose: a carve-out is a second
+    # classification to keep correct, and the operator can delete a cache dir
+    # deliberately in seconds; losing a secret cannot be undone.
     status = _run_git(
-        path, "status", "--porcelain", "--untracked-files=all", timeout=HEAVY_TIMEOUT_S
+        path,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignored",
+        timeout=HEAVY_TIMEOUT_S,
     )
     if status.returncode != 0:
         return _keep(ctx, path, "uninspectable", "git status failed")
-    if status.stdout.strip():
-        lines = status.stdout.splitlines()
+    lines = [line for line in status.stdout.splitlines() if line.strip()]
+    changed = [line for line in lines if not line.startswith("!! ")]
+    ignored = [line[3:] for line in lines if line.startswith("!! ")]
+    if changed:
         return _keep(
             ctx,
             path,
             "dirty",
-            f"{len(lines)} uncommitted/untracked change(s)",
-            dirty_paths=len(lines),
+            f"{len(changed)} uncommitted/untracked change(s)",
+            dirty_paths=len(changed),
+        )
+    if ignored:
+        shown = ", ".join(ignored[:5]) + (" …" if len(ignored) > 5 else "")
+        return _keep(
+            ctx,
+            path,
+            "ignored-content",
+            f"{len(ignored)} gitignored entr{'y' if len(ignored) == 1 else 'ies'} "
+            f"would be deleted with it: {shown}",
+            ignored_entries=ignored[:20],
+        )
+    if nested_git:
+        return _keep(
+            ctx,
+            path,
+            "ignored-content",
+            "contains a nested git repository/submodule whose history lives only here: "
+            + ", ".join(os.path.relpath(g, path) for g in nested_git[:3]),
+            nested_git=nested_git[:5],
         )
 
     # PUSHED / MERGED.
@@ -814,7 +898,7 @@ def revalidate_worktree(item: Item, *, min_idle_minutes: int) -> Item:
                 return dataclasses.replace(
                     fresh,
                     action=ACTION_KEEP,
-                    code="recent",
+                    code="head-moved",
                     reason="HEAD changed since the preview",
                 )
             return fresh
@@ -847,6 +931,38 @@ def remove_worktree(item: Item) -> str | None:
 # --------------------------------------------------------------------------
 
 
+#: Variables a Go invocation here may inherit. EVERYTHING else is dropped:
+#: ``GOFLAGS`` in particular can widen ``go clean -cache`` (``-modcache`` also
+#: deletes the module cache — reproduced in review R1-3), and ``GOENV`` /
+#: ``go env -w`` files can inject the same flags. Home and temp locations are
+#: needed for Go to find its own defaults.
+_GO_ENV_PASSTHROUGH = ("PATH", "HOME", "USER", "TMPDIR", "LOCALAPPDATA", "APPDATA")
+
+
+def _go_env(*, resolve: bool, gocache: str | None = None) -> dict[str, str]:
+    """An explicit, minimal environment for a Go subprocess.
+
+    ``resolve=True`` (for ``go env GOCACHE``) additionally forwards the variables
+    that decide WHERE Go looks for its cache and ``go env -w`` file, because the
+    answer must be the cache the operator's ``go build`` really uses.
+    ``resolve=False`` (for ``go clean -cache``) sets ``GOENV=off`` so no config
+    file can add flags, clears ``GOFLAGS`` and pins ``GOCACHE`` to the validated
+    path. ``GOTOOLCHAIN=local`` stops Go from fetching a toolchain to run.
+    """
+    env = {k: os.environ[k] for k in _GO_ENV_PASSTHROUGH if k in os.environ}
+    env["GOTOOLCHAIN"] = "local"
+    env["GOFLAGS"] = ""
+    if resolve:
+        for key in ("GOENV", "GOCACHE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "GOROOT"):
+            if key in os.environ:
+                env[key] = os.environ[key]
+    else:
+        env["GOENV"] = "off"
+        if gocache is not None:
+            env["GOCACHE"] = gocache
+    return env
+
+
 def resolve_go_cache() -> tuple[str | None, str]:
     """``(validated_path, "")`` or ``(None, refusal_reason)``.
 
@@ -868,6 +984,7 @@ def resolve_go_cache() -> tuple[str | None, str]:
             text=True,
             timeout=QUICK_TIMEOUT_S,
             check=False,
+            env=_go_env(resolve=True),
             cwd=tempfile.gettempdir(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -951,8 +1068,7 @@ def clean_go_cache(item: Item) -> str | None:
     go = shutil.which("go")
     if not go:
         return "go is not on PATH"
-    env = dict(os.environ)
-    env["GOCACHE"] = path
+    env = _go_env(resolve=False, gocache=path)
     try:
         done = subprocess.run(  # noqa: S603 — fixed argv, no shell
             [go, "clean", "-cache"],
@@ -1149,19 +1265,29 @@ def disk_readings(paths: Iterable[str]) -> list[dict[str, Any]]:
 
 def plan(selection: Selection, config_root: Path, *, now: float | None = None) -> Plan:
     """Build the preview. Reads and measures; removes nothing; never raises on a candidate."""
+    selection.validate()
     moment = time.time() if now is None else now
     result = Plan(selection=selection, now=moment)
     result.probe_paths.append(os.fspath(config_root))
     if selection.repos:
         cwds = process_cwds()
+        # ONE repository however it is spelled: `--repo P --repo P` or a linked
+        # worktree of P both resolve to the same shared git dir. Enumerating it
+        # twice would double-count bytes and make apply report the second copy
+        # of an already-removed worktree as a failure (a false exit 1).
+        seen_common: set[str] = set()
         for repo_arg in selection.repos:
             try:
-                items = plan_worktrees(
+                ctx = build_repo_context(
                     repo_arg,
                     now=moment,
                     min_idle_minutes=selection.min_idle_minutes,
                     cwds=cwds,
                 )
+                if ctx.common_dir in seen_common:
+                    continue
+                seen_common.add(ctx.common_dir)
+                items = [assess_worktree(ctx, reg) for reg in ctx.registrations]
             except GitUnavailable as exc:
                 # A --repo that is not a repository (or git itself is broken) is
                 # a whole-repo refusal: nothing under it is enumerated, nothing
@@ -1288,10 +1414,13 @@ def apply(
     after reading and finalise. An unexpected exception on an item keeps it
     (``failed``) and the loop continues.
 
-    Exit codes: 0 everything previewed was removed (or there was nothing to
-    remove and no category was refused); 1 any previewed item was skipped or
-    failed; 2 a category was refused outright (reported, nothing there touched).
+    Exit codes, in precedence order: 2 a category was refused outright (reported,
+    nothing there touched) or the intent receipt could not be written; else 1 any
+    previewed item was skipped or failed, or a receipt update failed; else 0.
     """
+    # A caller may change Selection after preview. Reject before even writing
+    # an intent, not only when a worktree happens to reach revalidation.
+    plan_.selection.validate()
     started = time.time()
     path = config_root / RECEIPT_DIRNAME / f"{utc_stamp(started)}-{os.getpid()}.json"
     before = disk_readings(plan_.probe_paths)
@@ -1321,10 +1450,14 @@ def apply(
         payload["error"] = f"could not write the intent receipt ({exc}); nothing was removed"
         return ApplyResult(payload, None, 2)
 
+    receipt_warnings: list[str] = []
+
     def checkpoint(status: str = "in-progress") -> None:
-        # A receipt update failing mid-run must not abort removal bookkeeping
-        # silently: it is re-raised only at finalisation, where it is reported.
-        with contextlib.suppress(OSError):
+        # A failed mid-run receipt write must not stop removal bookkeeping, but it
+        # must not be silent either: the file on disk is now OLDER than reality,
+        # so the failure is recorded, surfaced by the CLI and turns the exit code
+        # into a failure.
+        try:
             write_receipt_atomic(
                 path,
                 _receipt_payload(
@@ -1337,6 +1470,8 @@ def apply(
                     finished_at=None,
                 ),
             )
+        except OSError as exc:
+            receipt_warnings.append(f"receipt checkpoint failed ({exc}); the file may be stale")
 
     # Worktrees and Go cache are per-item; scratchpads are one batched,
     # confinement-by-name pass.
@@ -1384,6 +1519,7 @@ def apply(
         for i in plan_.items
         if i.action == ACTION_RECLAIM
     )
+    failed = failed or bool(receipt_warnings)
     status = "partial" if failed else "complete"
     finished = time.time()
     payload = _receipt_payload(
@@ -1396,10 +1532,16 @@ def apply(
         finished_at=finished,
     )
     payload["receipt_path"] = os.fspath(path)
+    if receipt_warnings:
+        payload["receipt_warnings"] = receipt_warnings
+        failed = True
     try:
         write_receipt_atomic(path, payload)
     except OSError as exc:
         payload["error"] = f"could not finalise the receipt ({exc})"
         failed = True
-    code = 1 if failed else (2 if plan_.refusals else 0)
+    # PRECEDENCE: a refused category (2) outranks item failures (1), which
+    # outrank success (0). A script that sees 2 knows part of what it asked for
+    # was refused outright even when something else also went wrong.
+    code = 2 if plan_.refusals else (1 if failed else 0)
     return ApplyResult(payload, path, code)
