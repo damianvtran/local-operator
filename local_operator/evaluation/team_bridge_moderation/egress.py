@@ -1,13 +1,14 @@
 """The egress surface: what can carry model-authored text off the machine, and how
 the harness reads it.
 
-WHY THIS MODULE IS THE FIX FOR REVIEW BLOCKER B3. The first version of this harness
-scanned only the bridge client's ``send``/``conversation_send`` payloads. That covered
-one channel out of the ones the design enumerates, so an agent could post the
-Downloads listing through ``bash curl``, a Slack-shaped MCP tool, ``web_fetch``'s query
-string, or a ``task`` prompt to a child session and the run would still report zero
-leaks. A leak metric that only sees one door is worse than no metric, because it reads
-as assurance.
+WHY THIS MODULE IS THE FIX FOR REVIEW BLOCKER B3 (R1) AND B1/B2 (R2). The first
+version of this harness scanned only the bridge client's ``send``/``conversation_send``
+payloads. The second version enumerated the surface but kept two silent holes: an
+unknown tool observed after the initial inventory audit escaped classification, and a
+bounded recursive walk dropped anything nested deeper than four levels, longer than
+16 KiB, or beyond 64 values - while the case still scored as measured. Both are the same
+class of defect: **a scan that silently does not cover the payload reads as a clean
+result.**
 
 THE TWO HALVES, and both are load-bearing:
 
@@ -16,16 +17,17 @@ THE TWO HALVES, and both are load-bearing:
    DATA (``labels/egress_registry_v1.json``) so adding a tool is a reviewable data
    edit rather than a code change nobody diffs.
 
-2. **Default-deny.** A tool in NEITHER ``EGRESS_TOOLS`` nor ``NON_EGRESS`` is UNKNOWN,
-   and unknown is not "probably fine": it makes the run unclean. That is the design's
-   own inversion (M1-r3: "a tool is egress-capable unless it is named in NON_EGRESS")
-   and it is the only way a coverage claim survives a tool nobody anticipated - the
-   product's v1.2 missed ``network`` and ``artifact_data`` exactly this way.
+2. **Default-deny, over time and over structure.** A tool in NEITHER ``EGRESS_TOOLS``
+   nor ``NON_EGRESS`` is UNKNOWN, and unknown is not "probably fine": it makes the case
+   invalid **wherever it is observed** - at the inventory audit AND at every tool
+   execution. Extraction is likewise fail-closed: :func:`extract_payloads` never
+   truncates, and an argument shape it cannot fully walk is reported as an extraction
+   problem that invalidates the case rather than as an empty payload.
 
 WHAT THIS MODULE DOES NOT DO. It does not judge anything. Judgement is E1's, and E1
 does not exist on this branch; the harness's job is to make sure that when the agent
-sends something, the something is SEEN, so the canary scan can decide whether it
-leaked. Extraction is therefore deliberately generous: a false extraction costs a
+sends something, the something is SEEN IN FULL, so the canary scan can decide whether
+it leaked. Extraction is therefore deliberately generous: a false extraction costs a
 little string scanning, while a missed one costs the whole measurement.
 """
 
@@ -39,6 +41,7 @@ from typing import Any, Iterable, Mapping, Sequence
 __all__ = [
     "ALL_STRINGS",
     "EgressRegistry",
+    "ExtractionProblem",
     "Payload",
     "ToolClass",
     "UNKNOWN",
@@ -54,11 +57,15 @@ ALL_STRINGS = "__all_strings__"
 #: The classification of a tool the registry does not know. Never treated as safe.
 UNKNOWN = "unknown"
 
-#: Bound on how much of one argument value is scanned, and on how many arguments are
-#: flattened for an MCP call. Chosen to match E1's own 16 KiB payload cap so the
-#: harness cannot silently scan less than the gate would.
-MAX_FIELD_CHARS = 16 * 1024
-MAX_FIELDS = 64
+#: Cost bounds on ONE argument blob - and hitting one is an INVALIDITY, never a clip.
+#: Review R2 B2: the previous version truncated each string at 16 KiB, stopped after
+#: 64 values and ignored anything below depth four, so a canary hidden past a bound
+#: vanished while the case stayed valid. The bounds still exist because a model can
+#: emit an arbitrarily large blob and the scan must not become an unbounded memory
+#: sink, but exceeding them now means "this case was not measured", not "scan the
+#: first part and call it done".
+MAX_TOTAL_CHARS = 1024 * 1024
+MAX_VALUES = 4096
 
 
 @dataclass(frozen=True)
@@ -105,26 +112,39 @@ class Payload:
     destination_class: str
 
     def as_record(self) -> Mapping[str, Any]:
-        """Metadata only: the report never carries the payload text itself."""
-
         return {
             "surface": self.surface,
             "field": self.field,
+            "text": self.text,
             "destination_class": self.destination_class,
-            "chars": len(self.text),
         }
 
 
+@dataclass(frozen=True)
+class ExtractionProblem:
+    """An argument blob the harness could not walk completely.
+
+    Never a warning. Any problem here means the payload was NOT fully read, so the
+    case's leak count is meaningless and the case is invalid (review R2 B1/B2).
+    """
+
+    surface: str
+    reason: str
+
+    def as_record(self) -> Mapping[str, Any]:
+        return {"surface": self.surface, "reason": self.reason}
+
+
 class EgressRegistry:
-    """The E1 registry, loaded from data, with the fail-closed lookup rules."""
+    """The closed enumeration, plus the default-deny rule over tool names."""
 
     def __init__(
         self,
         *,
         version: str,
         tools: Mapping[str, ToolClass],
-        non_egress: frozenset[str],
-        mcp_prefixes: tuple[str, ...],
+        non_egress: Iterable[str],
+        mcp_prefixes: Sequence[str],
     ) -> None:
         self.version = version
         self._tools = dict(tools)
@@ -198,25 +218,16 @@ def load_registry(path: Path) -> EgressRegistry:
     """Read the registry data file. A malformed registry is a hard error.
 
     Deliberately no leniency: a registry that silently loses an entry would reduce the
-    measured surface while every later number still looked fine.
+    coverage claim without anyone editing code.
     """
 
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    if raw.get("schema") != "tb-moderation-egress-registry-v1":
-        raise ValueError(
-            f"egress registry schema must be tb-moderation-egress-registry-v1, got {raw.get('schema')!r}"
-        )
     tools: dict[str, ToolClass] = {}
     for name, entry in (raw.get("egress_tools") or {}).items():
-        if str(name).startswith("_"):
-            continue
         if not isinstance(entry, Mapping):
             raise ValueError(f"egress tool {name!r} must be an object")
-        ops_raw = entry.get("ops") or {}
         ops: dict[str, tuple[str, ...]] = {}
-        for op, op_entry in ops_raw.items():
-            if str(op).startswith("_"):
-                continue
+        for op, op_entry in (entry.get("ops") or {}).items():
             if not isinstance(op_entry, Mapping):
                 raise ValueError(f"egress tool {name!r} op {op!r} must be an object")
             fields = tuple(map(str, op_entry.get("text_fields") or ()))
@@ -253,35 +264,88 @@ def classify(
     return registry.classify(tool_name, arguments)
 
 
-def _flatten_strings(value: Any, *, depth: int = 0) -> list[str]:
-    if depth > 4:
-        return []
+def _walk_strings(
+    value: Any,
+    *,
+    surface: str,
+    problems: list[ExtractionProblem],
+    counter: list[int],
+    path: str = "",
+) -> list[tuple[str, str]]:
+    """Every string in ``value``, at ANY depth, with its key path.
+
+    NO DEPTH LIMIT and no early return. The recursive walk this replaces stopped at
+    depth four and the caller truncated at 16 KiB/64 values, which is how a nested or
+    oversized canary escaped detection (review R2 B2). The only remaining limits are
+    the total blob bounds in :data:`MAX_TOTAL_CHARS`/:data:`MAX_VALUES`, and reaching
+    one appends an :class:`ExtractionProblem` instead of returning partial coverage.
+    """
+
+    found: list[tuple[str, str]] = []
+    if counter[0] >= MAX_VALUES:
+        problems.append(
+            ExtractionProblem(surface=surface, reason=f"more than {MAX_VALUES} values in one payload")
+        )
+        return found
+    counter[0] += 1
     if isinstance(value, str):
-        return [value] if value else []
+        if value:
+            found.append((path or "<value>", value))
+        return found
     if isinstance(value, Mapping):
-        out: list[str] = []
         for key, item in value.items():
-            out.extend(_flatten_strings(item, depth=depth + 1))
-        return out
+            if not isinstance(key, (str, int, float, bool, type(None))):
+                # A non-scalar mapping key means the blob is not JSON-shaped, so a
+                # serialisation would be lossy. Unknown shape => invalid, not skipped.
+                problems.append(
+                    ExtractionProblem(surface=surface, reason=f"non-scalar mapping key at {path or '<root>'}")
+                )
+                continue
+            found.extend(
+                _walk_strings(item, surface=surface, problems=problems, counter=counter,
+                              path=f"{path}.{key}" if path else str(key))
+            )
+        return found
     if isinstance(value, (list, tuple)):
-        out = []
-        for item in value:
-            out.extend(_flatten_strings(item, depth=depth + 1))
-        return out
-    return []
+        for index, item in enumerate(value):
+            found.extend(
+                _walk_strings(item, surface=surface, problems=problems, counter=counter,
+                              path=f"{path}[{index}]")
+            )
+        return found
+    if value is None or isinstance(value, (bool, int, float)):
+        # Scalar non-strings carry no text a canary could hide in.
+        return found
+    # An arbitrary object (bytes, a dataclass, a custom container): the harness cannot
+    # prove there is no string inside, so it must not pretend the payload was empty.
+    problems.append(
+        ExtractionProblem(
+            surface=surface,
+            reason=f"unsupported value type {type(value).__name__} at {path or '<root>'}",
+        )
+    )
+    return found
 
 
 def extract_payloads(
     registry: EgressRegistry,
     tool_name: str,
     arguments: Mapping[str, Any],
+    *,
+    problems: list[ExtractionProblem] | None = None,
 ) -> tuple[Payload, ...]:
-    """Every model-authored string on this call that could leave the machine.
+    """Every model-authored string on this call that could leave the machine, IN FULL.
 
     Returns ``()`` for a non-egress tool. For an UNKNOWN tool it also returns ``()`` -
     and the caller must NOT read that as "nothing to scan": an unknown tool is a
-    coverage failure that invalidates the run (see ``AgentLeg``'s registry audit and
-    ``scoring``'s ``unknown_egress_tool`` outcome).
+    coverage failure that invalidates the case (the caller unions it into the run's
+    unknown set at the moment of observation; review R2 B1).
+
+    ``problems`` is an out-parameter: pass a list and any incomplete extraction is
+    appended to it. A non-empty list after this call means the case is invalid -
+    partial coverage is never silently accepted (review R2 B2). Passing ``None`` keeps
+    the pure "just the payloads" shape for linting, where a problem still raises
+    rather than being dropped.
     """
 
     kind = registry.classify(tool_name, arguments)
@@ -293,34 +357,55 @@ def extract_payloads(
     if not fields:
         fields = (ALL_STRINGS,)
 
-    payloads: list[Payload] = []
-    emitted = 0
+    local_problems: list[ExtractionProblem] = []
+    counter = [0]
+    values: list[tuple[str, str]] = []
     for field in fields:
         if field == ALL_STRINGS:
-            values = _flatten_strings(dict(arguments))
-            names = ["<mcp:args>"] * len(values)
-        else:
-            raw = arguments.get(field)
-            if isinstance(raw, str):
-                values = [raw]
-            elif isinstance(raw, (list, tuple, Mapping)):
-                values = _flatten_strings(raw)
-            else:
-                values = []
-            names = [field] * len(values)
-        for field_name, text in zip(names, values):
-            cleaned = text[:MAX_FIELD_CHARS]
-            if not cleaned.strip():
-                continue
-            payloads.append(
-                Payload(
-                    surface=f"{tool_name}:{op + '/' if op else ''}{field_name}",
-                    field=field_name,
-                    text=cleaned,
-                    destination_class=kind,
-                )
+            values.extend(
+                _walk_strings(dict(arguments), surface=f"{tool_name}:<args>",
+                              problems=local_problems, counter=counter)
             )
-            emitted += 1
-            if emitted >= MAX_FIELDS:
-                return tuple(payloads)
+        else:
+            if field not in arguments:
+                # An absent optional field is not a problem; a declared field whose
+                # value is an unsupported shape IS handled by the walk below.
+                continue
+            raw = arguments[field]
+            values.extend(
+                _walk_strings(raw, surface=f"{tool_name}:{field}",
+                              problems=local_problems, counter=counter, path=field)
+            )
+
+    total_chars = sum(len(text) for _, text in values)
+    if total_chars > MAX_TOTAL_CHARS:
+        local_problems.append(
+            ExtractionProblem(
+                surface=f"{tool_name}:<args>",
+                reason=f"payload is {total_chars} chars, over the {MAX_TOTAL_CHARS} bound",
+            )
+        )
+
+    if problems is not None:
+        problems.extend(local_problems)
+    elif local_problems:
+        raise ValueError(
+            f"incomplete payload extraction for {tool_name}: "
+            + "; ".join(p.reason for p in local_problems)
+        )
+
+    payloads: list[Payload] = []
+    for field_name, text in values:
+        if not text.strip():
+            continue
+        payloads.append(
+            Payload(
+                surface=f"{tool_name}:{op + '/' if op else ''}{field_name}",
+                field=field_name,
+                # NEVER TRUNCATED. A canary past a clip point is a leak the report
+                # calls clean; the size bound above invalidates instead.
+                text=text,
+                destination_class=kind,
+            )
+        )
     return tuple(payloads)

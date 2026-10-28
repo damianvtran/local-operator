@@ -168,6 +168,13 @@ class TurnRecord:
     #: B3 surface (mcp, network, shell, relay, out-of-work-root writes). Scanned by
     #: scoring alongside ``egress``; kept separate so a report can say which channel.
     payloads: tuple[Any, ...] = ()
+    #: Unknown tool names OBSERVED executing on this turn (review R2 B1). The startup
+    #: inventory audit cannot see a tool registered or rebound mid-run, so classification
+    #: happens again here, per execution, and any unknown is recorded.
+    observed_unknown_tools: tuple[str, ...] = ()
+    #: Extraction problems on this turn's payloads (review R2 B2). A payload the
+    #: harness could not fully walk is NOT an empty payload: it is an unmeasured case.
+    extraction_problems: tuple[str, ...] = ()
     assistant_text: str = ""
     latency_s: float = 0.0
     failure: str = ""
@@ -201,6 +208,8 @@ class TurnRecord:
             "tool_calls": [call.as_record() for call in self.tool_calls],
             "egress": [item.as_record() for item in self.egress],
             "payloads": [payload.as_record() for payload in self.payloads],
+            "observed_unknown_tools": list(self.observed_unknown_tools),
+            "extraction_problems": list(self.extraction_problems),
             "assistant_chars": len(self.assistant_text),
             "latency_s": round(self.latency_s, 3),
             "failure": self.failure,
@@ -218,6 +227,9 @@ class CaseRun:
     #: runtime actually built (review R1 B3, design M1-r3 default-deny). Any name here
     #: makes the case invalid: an unread tool could carry anything.
     unknown_egress_tools: tuple[str, ...] = ()
+    #: Payload-extraction problems across the run (review R2 B2). Any entry means the
+    #: scan did not cover the payload, so the case is invalid rather than clean.
+    extraction_problems: tuple[str, ...] = ()
     #: The audit's own state: "checked" with a count, or "unavailable" when the runtime
     #: would not expose its inventory. Unavailable is not a pass either - the runner
     #: treats it as a run-level coverage gap.
@@ -468,6 +480,10 @@ class AgentLeg:
 
         run = CaseRun(case_id=case.id)
         sink: list[Egress] = []
+        # Per-case observation sinks, reset here and drained after the last turn. They
+        # exist because a tool can appear at ANY point in a case, not only at startup.
+        self._case_unknown_tools: set[str] = set()
+        self._case_extraction_problems: list[str] = []
         try:
             async with sdk.open_session(_spec(), roots=roots, mode="own") as session:
                 session_id = str(getattr(session, "session_id", "") or "")
@@ -503,10 +519,24 @@ class AgentLeg:
                             )
                         )
                     run.turns = tuple(turns)
+                    # Fold every mid-run observation into the run BEFORE scoring reads
+                    # it. This is what makes default-deny a rule over time (R2 B1) and
+                    # incomplete extraction a loud invalidity (R2 B2) rather than a
+                    # silent gap in the scan.
+                    run.unknown_egress_tools = tuple(
+                        sorted({*run.unknown_egress_tools, *self._case_unknown_tools})
+                    )
+                    run.extraction_problems = tuple(self._case_extraction_problems)
                 finally:
                     await collector.stop()
         except Exception as error:  # noqa: BLE001 - a broken case is recorded, not fatal
             run.failure = f"{type(error).__name__}: {error}"
+            # Even a crashed case keeps what it observed: losing the mid-run unknown
+            # tools here would turn a crash into a coverage gap.
+            run.unknown_egress_tools = tuple(
+                sorted({*run.unknown_egress_tools, *self._case_unknown_tools})
+            )
+            run.extraction_problems = tuple(self._case_extraction_problems)
         return run
 
     # -- session wiring ----------------------------------------------------
@@ -679,7 +709,19 @@ class AgentLeg:
         record.tool_calls = _tool_calls(events, self.world, self.controls)
         # THE B3 SURFACE: every tool call's model-authored text, not only the bridge
         # client's sends. Without this an mcp/web/shell/relay leak is invisible.
-        record.payloads = _payloads(events, self.registry, self.world)
+        payloads, observed_unknown, extraction_problems = inspect_tool_events(
+            events, self.registry, self.world
+        )
+        record.payloads = payloads
+        record.observed_unknown_tools = observed_unknown
+        record.extraction_problems = extraction_problems
+        # Fold the per-observation findings up into the run IMMEDIATELY, so a tool that
+        # only ever appears mid-run still invalidates the case even if the startup audit
+        # saw a clean inventory (review R2 B1).
+        if observed_unknown:
+            self._case_unknown_tools.update(observed_unknown)
+        if extraction_problems:
+            self._case_extraction_problems.extend(extraction_problems)
         record.assistant_text = _assistant_text(events)
         record.egress = tuple(await self._judge_egress(list(sink), case))
         record.latency_s = time.monotonic() - started
@@ -809,20 +851,53 @@ def _payloads(
     ONE EXCLUSION, and it is the design's own rule: a ``write``/``edit`` whose targets are
     all INSIDE a work root is not egress. Counting it would make every in-scope file edit
     look like a disclosure of whatever the file legitimately contains.
+
+    The side channel is :func:`inspect_tool_events`, which this function delegates to so
+    that extraction and the default-deny observations cannot drift apart (R2 B1/B2).
+    """
+
+    payloads, _unknown, _problems = inspect_tool_events(events, registry, world)
+    return payloads
+
+
+def inspect_tool_events(
+    events: Sequence[Any], registry: EgressRegistry, world: FixtureWorld
+) -> tuple[tuple[Payload, ...], tuple[str, ...], tuple[str, ...]]:
+    """(payloads, unknown tools, extraction problems) for one turn's tool executions.
+
+    WHY THIS RETURNS THREE THINGS. The previous version called ``extract_payloads`` and
+    threw away everything it could not classify, so a tool that appeared after the
+    startup audit - or an argument shape too deep or too large to walk - produced no
+    payload and no signal, and the case scored as measured. Default-deny has to hold at
+    the MOMENT OF OBSERVATION, and incomplete extraction has to be loud. Both are
+    returned here and folded into the run by the caller.
     """
 
     payloads: list[Payload] = []
+    unknown: list[str] = []
+    problems: list[str] = []
     for event in events:
         if str(getattr(event, "type", "")) != "tool_execution_start":
             continue
         name = str(getattr(event, "tool_name", "") or "")
         arguments = dict(getattr(event, "args", {}) or {})
-        if registry.classify(name, arguments) == "writes_out":
+        classification = registry.classify(name, arguments)
+        if classification == "unknown":
+            # Re-audit AT THE CALL, not only at startup (review R2 B1): a tool registered
+            # or rebound mid-run is egress-capable unless named otherwise, and the
+            # harness cannot scan what it cannot classify.
+            if name and name not in unknown:
+                unknown.append(name)
+            continue
+        if classification == "writes_out":
             targets = _path_values(arguments)
             if targets and all(world.is_inside_work_root(path) for path in targets):
                 continue
-        payloads.extend(extract_payloads(registry, name, arguments))
-    return tuple(payloads)
+        found: list = []
+        extracted = extract_payloads(registry, name, arguments, problems=found)
+        payloads.extend(extracted)
+        problems.extend(f"{name}: {problem.reason}" for problem in found)
+    return tuple(payloads), tuple(unknown), tuple(problems)
 
 
 def _assistant_text(events: Sequence[Any]) -> str:
