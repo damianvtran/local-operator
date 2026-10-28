@@ -910,13 +910,66 @@ def sanitise_name(name: str | None, digest: str, content_type: str | None) -> st
     """
     raw = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
     stem, ext = os.path.splitext(raw)
-    stem = _safe_stem(stem).strip(" .-_")[:_NAME_MAX_CHARS] or f"artifact-{digest[:8]}"
+    cleaned_stem = _safe_stem(stem).strip(" .-_")[:_NAME_MAX_CHARS]
+    stem = cleaned_stem or f"artifact-{digest[:8]}"
     mime = (content_type or "").split(";")[0].strip().lower()
     chosen = _PREFERRED_EXT.get(mime) or mimetypes.guess_extension(mime) or ""
     if not chosen:
         cleaned = _SAFE_CHARS.sub("", ext)[:6]
         chosen = cleaned if cleaned.startswith(".") and len(cleaned) > 1 else ".bin"
-    return f"{stem}{chosen}"
+    result = f"{stem}{chosen}"
+    # NO LAUNDERING (PR #3042 QA round 3, Q1). Dropping the leading dot keeps an ordinary
+    # ``.hidden.png`` visible as ``hidden.png``, but it also turned ``.env`` into ``env.txt`` and
+    # ``.npmrc`` into ``npmrc.txt``: names the sensitive-path denylist no longer recognises, so
+    # a copy escaped every gate that guards the original. When the original bare name is
+    # credential-shaped and the cleaned one is not, keep the dotfile's shape instead (an
+    # extension-less dotfile's name IS its type, so no MIME extension is appended). Defence in
+    # depth only: every materialiser refuses a denied ORIGINAL before any bytes are copied.
+    if cleaned_stem and raw.startswith(".") and _bare_name_denied(raw):
+        dotted = f".{cleaned_stem}{chosen if ext else ''}"
+        if not _bare_name_denied(result):
+            return dotted
+    return result
+
+
+def _bare_name_denied(name: str) -> bool:
+    """Whether ``name`` alone (no directory) is credential-shaped to the denylist.
+
+    Judged under the filesystem root so only the NAME rules can fire (a bare relative name
+    would be anchored at the daemon's cwd, which could sit under the config directory).
+    """
+    from local_operator.supplements import denylist
+
+    return bool(denylist.is_sensitive(os.sep + name))
+
+
+def attachment_denied(
+    deny: Callable[[str], bool],
+    *,
+    origin: str | None,
+    filename: str | None,
+    materialised_name: str,
+) -> bool:
+    """Whether a USER attachment must never be materialised (PR #3042 QA round 3, Q1).
+
+    The person chose to attach the file, so it is still LISTED; but copying it into the
+    scratchpad would put a credential under a session folder that the agent, the canvas and
+    the Library all read. Three spellings are judged, because each one alone can be dodged:
+
+    * the ORIGIN path (``~/.ssh/id_rsa``, ``<config>/master.key``) - the directory rules;
+    * the original FILENAME as a bare name (``.env``) - a pasted or synced row may carry no
+      origin path at all;
+    * the would-be MATERIALISED name - so a name the sanitiser changes is judged as written.
+
+    ``deny`` is :func:`make_deny` for this config dir, the same predicate the file index uses.
+    """
+    if origin and os.path.isabs(origin) and deny(origin):
+        return True
+    if filename:
+        bare = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        if bare and _bare_name_denied(bare):
+            return True
+    return _bare_name_denied(materialised_name)
 
 
 def find_artifact(merged: Merged, file_id: str) -> Entry | None:
@@ -977,6 +1030,17 @@ def materialise(
 
 
 _COPY_LOCK = threading.Lock()
+
+
+def materialise_bytes(session_dir: Path, name: str, digest: str, data: bytes) -> dict[str, Any]:
+    """The hardened scratchpad copy, for a caller that has already proved membership.
+
+    Public so the user-attachment materialise route (whose membership rule is "the person
+    attached this digest here", not "this row is in the file index") reuses the ONE confined
+    copy rather than growing a second, weaker one. ``name`` must come from
+    :func:`sanitise_name`.
+    """
+    return _copy_artifact(session_dir, name, digest, data)
 
 
 def _copy_artifact(session_dir: Path, name: str, digest: str, data: bytes) -> dict[str, Any]:
@@ -1111,6 +1175,7 @@ __all__ = [
     "list_files",
     "make_deny",
     "materialise",
+    "materialise_bytes",
     "parse_csv",
     "sanitise_name",
     "session_cwd",

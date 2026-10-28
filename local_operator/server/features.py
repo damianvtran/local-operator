@@ -970,6 +970,16 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the feature's first contract revision; new row fields are additive and do not
         # bump it.
         "session_files": 1,
+        # THE USER-ATTACHMENT INVENTORY: `GET /v1/desktop/sessions/{id}/user-attachments`,
+        # every document and picture the PERSON attached to the conversation, scanned from the
+        # whole journal (`session/user_attachments.py`). Its OWN key rather than a bump of
+        # `session_files`: that index is the agent's OUTPUT and its key promises nothing about
+        # inputs, so a backend with `session_files` but not this route must be recognisable.
+        # ADDITIVE: an older renderer never calls it. ABSENT MEANS the canvas builds its
+        # Attachments section from the history rows it has loaded and must not call the route
+        # (it would 404) - nor present that partial list as complete.
+        # `1` is the first contract revision; item fields are additive and do not bump it.
+        "session_attachments": 1,
         # The global, cross-conversation Library: list/detail/metadata/tags/
         # content. Its OWN key rather than a bump of `session_files`: the
         # surfaces (desktop sidebar, TUI /library, phone web, Expo) are new
