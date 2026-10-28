@@ -703,26 +703,38 @@ def _login_phrase(label: str, provider: str, owner: str) -> str:
     return f"the {provider} login on {owner}"
 
 
-def render_binding_notice_repeat(text: str, seen: int) -> str:
-    """``text`` with a quiet repetition marker — the operator-facing row ONLY.
+def render_binding_notice_repeat(text: str, *, seen: int, accounts: int = 1) -> str:
+    """``text`` with a quiet count of the rows it stands for — the operator row ONLY.
 
-    WHY (design round 1, D2): a run of identical notices is ONE row now, so a
-    reader could not tell a single change from a run of forty, and a fold that
-    hides its own arithmetic is a quieter version of the flood it replaced. The
-    count says how many rows folded into this one.
+    WHY (design round 1, D2, and the manager's group fold): a run of identical
+    notices paints as ONE row now, so a reader could not tell a single change
+    from a run of forty, and a fold that hides its own arithmetic is a quieter
+    version of the flood it replaced.
 
-    WHAT IT DOES NOT SAY: "N account changes". In the live incident behind
-    #3098 the rows in such a run were the SAME account reported over and over —
-    a subagent's resolve misattributed to its parent — so the count is a VOLUME
-    fact about the recording, never a claim that each row was a real switch.
-    That distinction is why the marker is a bare multiplier rather than a
-    sentence: there is nothing honest to say about the rows beyond how many
-    there were.
+    TWO counts, because they are two facts. ``seen`` is how many rows folded in.
+    ``accounts`` is how many distinct store rows the run named, and it is the
+    honesty that makes the fold safe: two accounts CAN render one sentence (the
+    label is a bounded rendering), and a run that covered both says so instead of
+    silently reporting one. A run naming one account, or naming none (an older
+    row with no ``credential_id``), prints the bare multiplier.
+
+    WHAT IT STILL DOES NOT SAY: "N account changes". The rows behind a run are the
+    recording's own repetitions — one account re-announced, or the resolves of a
+    subagent misattributed to its parent — so ``seen`` is a volume fact, and
+    ``accounts`` is the disclosure of what that volume contained.
+
+    WHY THIS SPELLING: at 100 columns a notice row has ~90 cells of text and this
+    sentence is already 76 of them, so the marker has ~12 to spend. ``· 2
+    accounts`` costs 12; ``alternating between 2 accounts`` costs 31 and pushes
+    the row onto a second line for no extra truth. Measured in the rendered
+    100x30 frame, not estimated.
 
     It lives HERE, beside the sentence it annotates, because this module is the
     credential copy home; the fold in ``tui/session_presentation.py`` calls it
     rather than spelling a marker of its own.
     """
+    if accounts > 1:
+        return f"{text}  \u00d7{seen} \u00b7 {accounts} accounts"
     return f"{text}  \u00d7{seen}"
 
 

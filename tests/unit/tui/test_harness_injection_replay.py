@@ -478,16 +478,14 @@ async def test_a_legacy_flood_of_binding_notices_folds_to_one_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_notices_naming_two_accounts_paint_separately() -> None:
-    """Two credential ids, one sentence: each notice paints, never folded.
+async def test_a_run_spanning_two_accounts_folds_to_one_row_that_names_both() -> None:
+    """One row for a real alternation, and it SAYS the run covered two accounts.
 
     The live flood's rows alternated two store ids with an identical sentence.
-    Round 1 (D1) made the row's own ``credential_id`` the fold identity — it is
-    the only non-reversible, restart-stable thing that separates two accounts —
-    so these cannot be collapsed, and that is deliberate: presentation must not
-    guess that two account ids are one account. What stops the flood is the
-    journal side (the parent-scoped serve sink in #3098's first commit); this
-    cell pins that the fold will not "help" by merging real identities.
+    Folding per credential id painted the wall back; folding on the sentence
+    alone would hide a genuine second account. The run therefore folds on what a
+    reader sees (sentence + provenance) and carries the SET of ids it covered, so
+    one row replaces the wall and ``· 2 accounts`` states what the wall was.
     """
     from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
     from local_operator.harness.types import CustomMessage
@@ -519,51 +517,7 @@ async def test_notices_naming_two_accounts_paint_separately() -> None:
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock)
         ]
-    assert notices == [same] * 20 + [named], notices
-    # No run was collapsed, so no count marker appears either.
-    assert not any("\u00d7" in text for text in notices), notices
-
-
-@pytest.mark.asyncio
-async def test_notices_naming_different_accounts_never_fold_into_one_row() -> None:
-    """One sentence, two credential ids: BOTH paint.
-
-    Round 1, D1. The fold compares the row's own ``credential_id`` — the account
-    identity the row carries — never the bounded sentence: a sentence is a
-    rendering, and comparing renderings is what let a genuine change disappear
-    behind an elision collision. The sentences here are deliberately EQUAL:
-    exactly that shape, and it must not collapse.
-    """
-    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
-    from local_operator.harness.types import CustomMessage
-    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
-
-    sentence = "[session credential] This session is now using aaaa\u20261111 on my-mac."
-
-    def _notice(credential_id: int) -> CustomMessage:
-        return CustomMessage(
-            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
-            attribution="system",
-            details={
-                "text": sentence,
-                "provider": "stub",
-                "owner_device": "d_local",
-                "credential_id": credential_id,
-            },
-        )
-
-    session = FakeSession()
-    session._history = [_notice(104), _notice(125)]
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await await_session_boot(app)
-        await pilot.pause()
-        notices = [
-            block._text
-            for block in app.query_one(TranscriptView).blocks()
-            if isinstance(block, NoticeBlock)
-        ]
-    assert notices == [sentence, sentence], notices
+    assert notices == [f"{same}  \u00d720 \u00b7 2 accounts", named], notices
 
 
 @pytest.mark.asyncio
@@ -608,6 +562,7 @@ async def test_a_collapsed_run_states_how_many_notices_it_stands_for() -> None:
             if isinstance(block, NoticeBlock)
         ]
     assert len(notices) == 1, notices
+    # ONE account in the run, so no accounts clause: the bare multiplier.
     assert notices[0] == f"{sentence}  \u00d73", notices
     # The count is the ROW's, not a second notice: nothing else was painted.
     assert "3 account" not in notices[0]
