@@ -56,6 +56,7 @@ __all__ = [
     "NoChangeGuard",
     "RepeatedBatchGuard",
     "default_guards",
+    "progress_guards",
 ]
 
 
@@ -504,7 +505,23 @@ def default_guards(config: Any) -> tuple[EpisodeGuard, ...]:
     return (
         BudgetCapGuard(),
         CostRateGuard(max_cycle_cost_micros=max_cycle),
-        RepeatedBatchGuard(),
-        NoChangeGuard(),
-        AskLoopGuard(),
+        *progress_guards(),
     )
+
+
+#: The guard types that read ONLY ``GuardInput.recent_turns``. A caller that can
+#: state the turns but not the runner's cost, cycle and budget counters (the
+#: session arm's ``ActionBridge``) may run exactly these: a budget or cost guard
+#: fed placeholder zeros would never fire and would read as enforced.
+TURN_WINDOW_GUARD_TYPES: tuple[type, ...] = (RepeatedBatchGuard, NoChangeGuard, AskLoopGuard)
+
+
+def progress_guards() -> tuple[EpisodeGuard, ...]:
+    """The no-progress guards, with the runner's own default thresholds.
+
+    One definition for both engagements: :func:`default_guards` builds its
+    floundering half from here, and the session arm's opt-in policy uses the
+    same call, so a threshold change lands on both arms in the same commit.
+    """
+
+    return (RepeatedBatchGuard(), NoChangeGuard(), AskLoopGuard())
