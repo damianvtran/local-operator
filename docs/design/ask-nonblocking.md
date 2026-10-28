@@ -962,7 +962,8 @@ A dedicated case, because the composer rule is a *behavioural* claim that stills
   the user left it (placeholder never swapped, draft kept in the buffer, text never moved); (6) the minimized bar is absent
   at zero asks and shows head + count at 3.
 - **Frames:** minimized bar (1 and 3 asks), expanded with the `Other` row closed and open
-  (landed for the desktop with UI #892; other surfaces once their `Other` PR lands), and the
+  (landed for the desktop with UI #892 and the relay web; the native app's `Other` PR is
+  still pending), and the
   list/sidebar outstanding-asks state — **light and dark** where the surface has
   both, at phone size for web/app. Before/after against `origin/main`.
 - **No wire assertions:** R7 is client-local interaction state and changes nothing in §4 —

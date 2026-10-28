@@ -5932,116 +5932,116 @@
     {
       "locale": "fr",
       "namespace": "relay.asks",
-      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
       "translator": {
         "agent": "i18n-translator",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28"
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
         "result": "passed",
-        "findings": 0
+        "findings": 1
       },
       "status": "passed",
-      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Autre', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+      "note": "6 changed keys reviewed. cold_wait is now the terse 'démarrage de la session — jusqu’à ~30 s' (EN 'bringing the session up — this can take up to ~30 s'); error.read_timeout 'le délai de lecture a expiré' is now idiomatic; sheet.title_waiting/-_lapsed/-_plain and sheet.loading use the section noun 'demandes' while keeping the question count word inside the plural, so the header no longer reads 'questions · N questions'. MINOR (non-gating): the timed-out state word is still not shared on every surface — status.timed_out and card.timed_out_badge say 'Délai dépassé' while the changed sheet.title_lapsed (and the unchanged dock.timed_out) say 'hors délai'; align both to the 'délai dépassé' family. Round-1 NITs on unchanged keys remain (gate.notice_ask 'sur ask'; session_gone_reopen 'la session du terminal'; moved_on 'a été remplacée'). 1 MINOR, 3 NITs; PASS. CORRECTED 2026-10-25: the MINOR above was CLOSED after this attestation by d3a4b5adc9 - all four keys now read the 'délai dépassé' family, so the 'hors délai' quoted in this note describes pre-fix bytes and no longer exists at the attested head. The row's hashes were re-attested separately; only this prose was stale, and a note that describes a fixed finding as open is the same defect as one that asserts a consistency that does not exist. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
     },
     {
       "locale": "es",
       "namespace": "relay.asks",
-      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
       "translator": {
         "agent": "i18n-translator",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28"
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Otro', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+      "note": "9 changed keys reviewed. title_* now use 'consultas' as the section noun (distinct from 'preguntas'); dock.timed_out uses 'con el tiempo agotado', the same agotar family as the status line and badge, closing the round-1 one-state-word finding; kind_approval/kind_secret are now noun labels ('aprobación necesaria'/'secreto solicitado') matching kind_question; read_timeout is 'se agotó el tiempo de lectura'; gate.body uses 'retiene' (holds), not 'detiene'. All changed plurals render correctly at 0/1/2/5/1e6, including 'de preguntas' for many. 0 new findings. Round-1 NIT on the unchanged gate.unpaired_middle ('primero' placement) remains. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
     },
     {
       "locale": "hi",
       "namespace": "relay.asks",
-      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
       "translator": {
         "agent": "i18n-translator",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28"
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'अन्य', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings. The auditor confirmed `अन्य` as the standard register and the usual picker label."
+      "note": "7 changed keys reviewed. title_* use 'पूछताछ' as the section noun (distinct from सवाल; the loading line agrees feminine 'पढ़ी जा रही है'); duration.less_than_minute/minutes/hours are unclipped ('<1 मिनट', '{count} मिनट', one घंटा / other घंटे) and the new plural renders 1→घंटा and 2/5/47→घंटे; the hours arm is 1-47, and 0→घंटा would match the hi guide's one-covers-0/1 rule anyway. 0 new findings. Round-1 minors on unchanged keys remain: status.expired 'समाप्त' and status.timed_out 'समय समाप्त' are near-identical adjacent state words; card.secret_notice(-persisted) use the adjective 'गुप्त' as a bare noun label. Round-1 NITs: lapsed_body habitual vs progressive; gate.body terse. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
     },
     {
       "locale": "ru",
       "namespace": "relay.asks",
-      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
       "translator": {
         "agent": "i18n-translator",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28"
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Другое', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+      "note": "7 changed keys reviewed. status.dismissed is now 'Скрыто', matching card.dismiss 'скрыть' and no longer collapsing into skip's 'пропустить'; status.expired 'Устарел' agrees with вопрос and is distinct from timed_out; title_* use 'запросы'; dock.timed_out and title_lapsed now use 'время истекло', matching status.timed_out and the badge, so the old expired-flavoured 'просрочен' is gone. All four plural branches render correctly at 0/1/2/5/21/22/1e6. 0 new findings. Round-1 MINOR on the unchanged status.queued remains (about 370px against the 314px card budget, wraps); NITs on approve/deny register and held_shut clipping remain. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
     },
     {
       "locale": "vi",
       "namespace": "relay.asks",
-      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
       "translator": {
         "agent": "i18n-translator",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28"
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Khác', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+      "note": "7 changed keys reviewed. status.late is now 'Đã trả lời muộn', matching the 'Đã …' settled receipts; status.dismissed is 'Đã đóng', matching card.dismiss 'đóng' and no longer reusing skip's 'bỏ qua'; title_* use 'yêu cầu' as the section noun (distinct from 'câu hỏi'); dock.timed_out and title_lapsed use 'hết thời gian' while status.expired keeps 'hết hạn', closing the round-1 FAIL-1 expired/timed-out confusion. status.queued_deadline_passed keeps 'đã hết hạn' for a passed deadline, which is the deadline expiring rather than the ask timing out — correct. Plurals are other-only per the vi guide and render correctly. 0 new findings. This row restores vi to shipped: the branch carries relay.asks, so without it vi is un-shipped by the carried-namespace gate. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
     },
     {
       "locale": "ur",
       "namespace": "relay.asks",
-      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
       "translator": {
         "agent": "i18n-translator",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28"
+        "model": "unrecorded (not disclosed in 8ad70ccf12)",
+        "date": "2026-10-20"
       },
       "auditor": {
         "agent": "i18n-auditor",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-20",
         "result": "passed",
         "findings": 0
       },
       "status": "passed",
-      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'دیگر', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings. The auditor confirmed `دیگر` as natural Urdu, not a Hindi-ised form."
+      "note": "5 changed keys reviewed (no prior ur ledger row existed). title_* use 'درخواستیں' as the section noun (distinct from سوالات; the loading line agrees feminine plural 'پڑھی جا رہی ہیں'); duration.hours is now one/other and renders 1→'1 گھنٹہ', 2/5/47→'N گھنٹے', fixing the round-1 FAIL. All five plural keys render correctly, including sheet.title_waiting 1→'1 سوال' and dock.timed_out 1→'1 سوال کا وقت ختم'. The plural is only admissible because arguments_match now permits en number->plural; the copy itself is correct and uses the full ur category set (one/other), so it does not depend on the loose edge of that rule. 0 new findings. ur carries only relay.asks, so this passed row makes the locale eligible to ship with English fallback elsewhere. PASS. Round-2 re-audit (source d6041075) of the changed keys after d2f1cca; all 77 keys re-checked mechanically, unchanged copy carried from the round-1 audit. Mechanical: key set/order vs en, ICU parse, argument names/order/kinds (number->plural permitted by arguments_match), NFC, no bidi controls — clean; plural selectors validated against the locale table and renders checked. Auditor deepseek/deepseek-flash, the same model family as the round-1 auditor (fresh worktree/session, so not an independent model); translator model unrecorded in 8ad70ccf12."
     },
     {
       "locale": "fr",
@@ -6179,21 +6179,21 @@
     {
       "locale": "zh-CN",
       "namespace": "relay.asks",
-      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
       "translator": {
         "agent": "i18n-translator",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28"
+        "model": "unrecorded (not disclosed in 3bd709c0f4)",
+        "date": "2026-10-20"
       },
       "auditor": {
-        "agent": "i18n-auditor",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-10-28",
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
         "result": "passed",
-        "findings": 0
+        "findings": 4
       },
       "status": "passed",
-      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = '其他', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings. The value is identical to the repo's own `tui.library.category_other` precedent."
+      "note": "Restored byte-identically from 3bd709c0f4 after the hold that deleted it was lifted; 77/77 keys, 0 placeholder mismatches, 4 plural keys all other-only with a rendering '#', no bidi controls, no English leakage except the intentional mode token 'ask'. Scope audit of the gate labels it carries: '继续询问（ask）' / '无需询问直接运行（auto）' / '在所有会话中无需询问直接运行（default auto）' — the session-only vs all-sessions distinction survives and 'run without asking' keeps its risk. Dispositions of the five findings left to this round: (1) sheet.title_plain '提问' — MINOR and the same defect class the other six locales were fixed for on 2026-10-20 (their rows record 'demandes'/'consultas'/'पूछताछ'/'запросы'/'yêu cầu'/'درخواستیں' as section nouns 'distinct from' the question word); 提问 is the question-asking verb, so the sheet that also holds approvals and secrets is named with the question word. Not major: rows inside carry their own kind labels and the dock badge is unchanged, so no approval is granted or missed because of it; recommend '请求' (already used in card.request_needs_answer) in the next copy pass. (2) pending.kind_approval '需要审批' / kind_secret '需要机密信息' — MINOR. 需要审批 is accurate and is the vocabulary gate.body/notice_auto already use, and the verbal form is not a zh-only deviation (ru 'требуется одобрение', vi 'cần phê duyệt' are verbal too); the weak point is '机密信息' for a secret value, since zh has no recorded credentials/secret rendering (glossary §2 note 6 leaves the zh cell '—') — the card's masked field and card.secret_notice carry the meaning. (3) card.decline and pending.deny both '拒绝' — MINOR. They never co-occur (decline sits beside 'send answer' on the ask card, deny beside 'approve' on the approval card) and five of seven locales collapse them identically (fr 'refuser', hi 'अस्वीकार करें', vi 'từ chối', ur 'انکار کریں'); the English pair is a register distinction, not a functional one, and both refuse. (4) gate.unpaired_after '模式从不需要配对。' — MINOR. It extends the bold 'ask' label with 模式 (necessary in Chinese) but joins without a connective; rendered it reads '将审批保持在 ask 模式从不需要配对。' — understandable, slightly run-on, no meaning loss. (5) sheet.loading '……' — REJECTED, not a defect: the zh style guide mandates '…… (two marks)' and 62 other zh catalogue strings already use it (tui.library.loading, relay.session.past.loading, mobile.setup.checking), while the six single-'…' strings are all inside comma-separated Latin lists; the sidecar's 'The ellipsis is U+2026' pins the character class, not a count. Additional NIT found here: dock.waiting/dock.timed_out/title_waiting write '# 个…' with a space while title_lapsed writes '{count}个…' without one — pick one convention. 4 MINOR + 1 NIT, 0 blocker, 0 major, so this row attests; minors do not force another round but should ride the next zh copy pass. Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded in 3bd709c0f4, the wave commit these bytes were restored from. Round-1 audit of restored bytes, not a carried re-audit. Evidence: i18n/audits/evidence/zh-CN/relay.asks/zha25a1/record.json — bundle written after the audit (the session captured no command log; the record states that absence and carries a labelled mechanical replay at the audited revision)."
     },
     {
       "locale": "es",
@@ -7748,6 +7748,139 @@
       },
       "status": "passed",
       "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Autre', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Otro', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'अन्य', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings. The auditor confirmed `अन्य` as the standard register and the usual picker label."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Другое', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'Khác', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = 'دیگر', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings. The auditor confirmed `دیگر` as natural Urdu, not a Hindi-ised form."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = '其他', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings. The value is identical to the repo's own `tui.library.category_other` precedent."
     }
 ,
     {

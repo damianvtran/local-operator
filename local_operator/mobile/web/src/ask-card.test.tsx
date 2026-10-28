@@ -600,12 +600,46 @@ describe("AskCard", () => {
 			expect(send().disabled).toBe(false);
 		});
 
-		it("holds a multi-select open too, even beside a ticked option", () => {
+		it("does not grey send on a multi-select that already has a tick, and drops the blank marker", async () => {
+			/* Deliberately not the desktop's rule: here a tick IS a complete answer. */
 			renderCard(ask({ questions: [question({ multi: true })] }));
 			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
 			expect(send().disabled).toBe(false);
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes"] }));
+		});
+
+		it("still holds a multi-select open when the open Other is its only entry", () => {
+			renderCard(ask({ questions: [question({ multi: true })] }));
 			fireEvent.click(otherRow());
 			expect(send().disabled).toBe(true);
+		});
+
+		it("puts the 'choose any' hint above the option rows, not after the Other field", () => {
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			const hint = screen.getByText("choose any that apply");
+			const first = screen.getByRole("button", { name: /^yes$/ });
+			expect(
+				hint.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING,
+			).toBeTruthy();
+		});
+
+		it("dismisses the keyboard on Enter without submitting, and leaves an IME's Enter alone", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			const field = screen.getByRole("textbox", { name: "ship the fix?" }) as HTMLInputElement;
+			typeOther("half a thought");
+			expect(document.activeElement).toBe(field);
+
+			fireEvent.keyDown(field, { key: "Enter", isComposing: true });
+			expect(document.activeElement).toBe(field);
+
+			fireEvent.keyDown(field, { key: "Enter" });
+			expect(document.activeElement).not.toBe(field);
+			expect(sendCommand).not.toHaveBeenCalled();
+			expect(field.value).toBe("half a thought");
 		});
 
 		it("survives an unmount open and empty, without taking focus, and still sends no blank", async () => {
@@ -618,7 +652,6 @@ describe("AskCard", () => {
 			expect(document.activeElement).not.toBe(screen.getByRole("textbox"));
 			expect(send().disabled).toBe(true);
 			typeOther("back again");
-			first.unmount();
 			cleanup();
 			renderCard(ask());
 			expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("back again");
@@ -650,6 +683,32 @@ describe("AskCard", () => {
 			renderCard(ask({ questions: [question({ options: [] })] }));
 			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
 			expect(screen.getByPlaceholderText("your answer")).toBeTruthy();
+		});
+
+		it("is withheld on a secret question that has options", () => {
+			renderCard(ask({ questions: [question({ secret: true })] }));
+			expect(screen.getByRole("button", { name: /^yes$/ })).toBeTruthy();
+			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
+		});
+
+		it("receipts a mixed multi answer with ' · ' between the option and the typed text", () => {
+			renderCard(
+				ask({
+					status: "answered",
+					delivered: true,
+					questions: [
+						question({
+							multi: true,
+							options: [
+								{ label: "yes", description: "ship it" },
+								{ label: "no", description: "" },
+							],
+						}),
+					],
+					answers: { q1: ["yes", "typed, with a comma"] },
+				}),
+			);
+			expect(screen.getByText("yes — ship it · typed, with a comma")).toBeTruthy();
 		});
 
 		it("is disabled while the answer is in flight", async () => {

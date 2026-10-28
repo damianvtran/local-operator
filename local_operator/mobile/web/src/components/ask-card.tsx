@@ -128,8 +128,10 @@ function contextLine(row: PendingAsk): string | null {
  *  apart when the refusal comes FROM THE WIRE, which this branch never does.
  *  The sentence itself is `relay.asks.card.gone`. */
 
-/** The wire's own cap on one string in `answers`. The `Other` field stops there
-    rather than letting the daemon refuse a longer paste after the tap. */
+/** Not a wire cap: the daemon stores whatever string it is given. 32768 is the
+    bound the desktop client's answer schema uses, and the phone matches it so the
+    same typed answer is accepted on both surfaces and a runaway paste stops at the
+    field rather than after the tap. */
 const ANSWER_MAX_CHARS = 32768;
 
 /** The card's own record of its `Other` row: whether it is the selected one, and
@@ -273,6 +275,12 @@ function QuestionField({
 
 	return (
 		<div className="flex flex-col gap-2">
+			{/* Describes the option list, so it sits with it, above the rows. */}
+			{multi ? (
+				<span className="text-meta text-ink-dim">
+					{messageRuntime.t("relay.asks.card.choose_any")}
+				</span>
+			) : null}
 			{options.map((option, index) => {
 				const on = chosen.has(option.label);
 				/* THE RECOMMENDATION IS AN INDEX, not a flag (see `AskQuestion`): the
@@ -369,7 +377,7 @@ function QuestionField({
 							}
 						}}
 						className={cn(
-							"flex min-h-11 items-baseline gap-2 rounded-sm border-s-2 border-s-accent px-3 py-2 text-start",
+							"flex min-h-11 items-center gap-2 rounded-sm border-s-2 border-s-accent px-3 py-2 text-start",
 							other.open ? "bg-accent-wash" : "bg-surface active:bg-accent-wash",
 							"disabled:opacity-50",
 						)}
@@ -390,6 +398,14 @@ function QuestionField({
 							value={other.text}
 							maxLength={ANSWER_MAX_CHARS}
 							onChange={(event) => writeOther({ open: true, text: event.target.value })}
+							onKeyDown={(event) => {
+								/* A single-line field: Enter neither submits nor inserts anything,
+								   it only dismisses the keyboard. An IME confirming a composition
+								   also sends Enter, which must reach the IME untouched. */
+								if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+								event.preventDefault();
+								event.currentTarget.blur();
+							}}
 							disabled={disabled}
 							aria-label={question.question}
 							placeholder={messageRuntime.t("relay.asks.card.placeholder_answer")}
@@ -397,11 +413,6 @@ function QuestionField({
 						/>
 					) : null}
 				</>
-			) : null}
-			{multi ? (
-				<span className="text-meta text-ink-dim">
-					{messageRuntime.t("relay.asks.card.choose_any")}
-				</span>
 			) : null}
 		</div>
 	);
@@ -548,10 +559,12 @@ export function AskCard({
 	const filled = (id: string): boolean => {
 		if (skipped.has(id)) return true;
 		const cell = draft.answers[id] ?? [];
-		/* AN OPEN, EMPTY `Other` HOLDS THE QUESTION OPEN even beside ticked
-		   options: the user pressed a row that promises a field to type in, and
-		   sending without it would drop what they were about to say. */
-		if (cell.some(isOtherPending)) return false;
+		/* DELIBERATELY NOT THE DESKTOP'S RULE. The desktop holds a question open
+		   while ANY entry is the blank `Other` marker; here a tick IS a complete
+		   answer, so an open-but-empty `Other` beside one does not grey send. The
+		   blank marker is dropped by `answerValues` on submit. On a single-select
+		   the marker is the cell's only entry, which is blank, so it still holds
+		   the question open. */
 		return cell.some((value) => value.trim() !== "");
 	};
 	const complete = open_questions.length > 0 && open_questions.every((q) => filled(String(q.id)));
