@@ -58,11 +58,11 @@ def _kimi_spec() -> ModelSpec:
 
     ``k3.1-pro`` has no registry twin — it is a DYNAMIC row — so the fallback
     is the same :data:`unknown_model_info` the catalogue path supplies for an
-    unshipped id (``supports_images=False``, no ladder). That matters for the
-    assertion below: with a permissive hand-built fallback the image assertion
-    would pass even on the pre-fix tree, because ``build_model_spec`` defaults
-    an unstated capability to ``True``. With the real fallback, a parse that
-    reads nothing leaves ``supports_images`` at ``False`` — the defect.
+    unshipped id (no ladder, and ``supports_images=None`` — "unknown", which
+    ``build_model_spec`` resolves to ``True``). The LADDER assertion below is
+    the one that discriminates the parse defect; the image assertion pins the
+    end state, and the "silence is not a denial" half of it is pinned in
+    ``tests/unit/session/test_image_capability_unknown.py``.
     """
     row = discovery._row_from_openai_entry(_KIMI_LISTING_ENTRY, "kimi")
     assert row is not None
@@ -122,8 +122,8 @@ def test_the_image_part_survives_body_construction() -> None:
 
     Kept as a chain assertion for the wire shape the body builder emits
     (a real ``image_url`` data URI, not a bare text part); the capability GATE
-    is pinned by ``_kimi_spec``'s spec assertion above, which uses the real
-    ``unknown_model_info`` fallback and fails pre-fix.
+    is pinned by ``_kimi_spec``'s spec assertion above and by
+    ``tests/unit/session/test_image_capability_unknown.py``.
     """
     body = _body(_kimi_spec())
 
